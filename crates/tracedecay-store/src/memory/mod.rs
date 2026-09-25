@@ -89,7 +89,7 @@ use queries::MAX_LINEAGE_LIMIT;
 #[cfg(test)]
 use tracedecay_domain::{
     DomainError, FactAssertionV1, FactLineageEventKindV1, FactLineageEventV1, RetrievalAnchorId,
-    RetrievalAnchorRecordV2,
+    RetrievalAnchorRecord,
 };
 #[cfg(test)]
 use write::{MAX_FACT_WRITE_BATCH_EVENTS, MAX_FACT_WRITE_BATCH_NEW_ANCHORS};

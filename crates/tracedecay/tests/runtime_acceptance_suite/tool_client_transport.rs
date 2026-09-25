@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 use crate::common::{canonical_existing_path, tracedecay_command_with_home};
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tracedecay_daemon_identity::authority::DaemonAuthority;
+use tracedecay_daemon_protocol::{DaemonAuthPreface, DaemonEndpoint};
 
 const LOCAL_TIMEOUT: Duration = Duration::from_secs(5);
 const CHILD_TIMEOUT: Duration = Duration::from_secs(8);
@@ -124,6 +126,12 @@ where
     let script = Arc::new(script);
     let server = std::thread::spawn(move || {
         let _ = std::fs::remove_file(&socket);
+        let authority = DaemonAuthority::acquire(
+            socket.parent().expect("socket parent"),
+            &DaemonEndpoint::Unix(socket.clone()),
+            env!("CARGO_PKG_VERSION"),
+        )
+        .expect("seed fake daemon authority");
         let listener = UnixListener::bind(&socket).expect("bind fake daemon");
         listener
             .set_nonblocking(true)
@@ -147,6 +155,13 @@ where
                         .expect("set write timeout");
                     let mut reader =
                         BufReader::new(stream.try_clone().expect("clone fake daemon stream"));
+                    let mut preface = String::new();
+                    reader.read_line(&mut preface).expect("read auth preface");
+                    assert!(
+                        DaemonAuthPreface::from_line(preface.trim())
+                            .expect("decode auth preface")
+                            .authenticate(authority.auth_token())
+                    );
                     let mut handshake = String::new();
                     reader.read_line(&mut handshake).expect("read handshake");
                     serde_json::from_str::<Value>(handshake.trim()).expect("decode handshake");

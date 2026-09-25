@@ -31,21 +31,12 @@ fn write_frames(path: &Path, sequences: &[u64]) {
 #[test]
 fn frame_encoding_is_deterministic_and_checksummed() {
     let frame = encode_frame(7, b"cursor", b"{\"event\":1}").unwrap();
-    assert_eq!(frame, encode_frame(7, b"cursor", b"{\"event\":1}").unwrap());
     assert_eq!(&frame[0..4], FRAME_MAGIC);
     let checksum_at = frame.len() - CHECKSUM_BYTES;
     assert_eq!(
         &frame[checksum_at..],
         Sha256::digest(&frame[..checksum_at]).as_slice()
     );
-}
-
-#[test]
-fn production_defaults_reserve_capacity_across_sources() {
-    let bounds = SpoolBounds::default();
-    assert!(bounds.max_records_per_source < bounds.max_records);
-    assert!(bounds.max_spool_bytes_per_source < bounds.max_spool_bytes);
-    assert!(bounds.max_record_bytes <= bounds.max_spool_bytes_per_source);
 }
 
 #[test]

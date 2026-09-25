@@ -1,5 +1,8 @@
 #![cfg(feature = "test-transport")]
 
+mod callers_coverage;
+mod typescript_module_resolution;
+
 use crate::support::*;
 use serde_json::{Value, json};
 use std::fs;
@@ -20,66 +23,36 @@ impl GraphQueryFixture {
     }
 }
 
-struct GraphQueryProjectRoot(std::path::PathBuf);
-
-impl GraphQueryProjectRoot {
-    fn path(&self) -> &std::path::Path {
-        &self.0
-    }
-}
-
 async fn graph_query_fixture_with_sources(
     write_sources: impl FnOnce(&std::path::Path),
-) -> (GraphQueryFixture, GraphQueryProjectRoot) {
+) -> GraphQueryFixture {
     let production = production_composition_fixture_with_sources(write_sources).await;
     let server = production
         .harness
         .server(&production.project_root)
         .expect("production graph-query server");
     warm_code_index_search(&server, "helper").await;
-    let project_root = GraphQueryProjectRoot(production.project_root.clone());
-    (GraphQueryFixture { production }, project_root)
+    GraphQueryFixture { production }
 }
 
-async fn production_graph_query_fixture() -> (GraphQueryFixture, GraphQueryProjectRoot) {
+async fn production_graph_query_fixture() -> GraphQueryFixture {
     let production = production_composition_fixture().await;
     let server = production
         .harness
         .server(&production.project_root)
         .expect("production graph-query server");
     warm_code_index_search(&server, "helper").await;
-    let project_root = GraphQueryProjectRoot(production.project_root.clone());
-    (GraphQueryFixture { production }, project_root)
+    GraphQueryFixture { production }
 }
 
-async fn production_empty_graph_query_fixture() -> (GraphQueryFixture, (), GraphQueryProjectRoot) {
-    let (fixture, root) = graph_query_fixture_with_sources(|project| {
-        fs::write(project.join("README.md"), "# Empty graph fixture\n").unwrap();
-    })
-    .await;
-    (fixture, (), root)
-}
-
-async fn production_function_vs_field_fixture() -> (GraphQueryFixture, GraphQueryProjectRoot) {
+async fn production_empty_graph_query_fixture() -> GraphQueryFixture {
     graph_query_fixture_with_sources(|project| {
-        fs::create_dir_all(project.join("src")).unwrap();
-        fs::write(
-            project.join("src/lib.rs"),
-            r#"pub struct Solvers {
-    pub gmres: u32,
-}
-
-pub fn gmres(x: u32) -> u32 {
-    x + 1
-}
-"#,
-        )
-        .unwrap();
+        fs::write(project.join("README.md"), "# Empty graph fixture\n").unwrap();
     })
     .await
 }
 
-async fn production_signature_metadata_fixture() -> (GraphQueryFixture, GraphQueryProjectRoot) {
+async fn production_signature_metadata_fixture() -> GraphQueryFixture {
     graph_query_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
         fs::write(
@@ -171,7 +144,7 @@ async fn graph_node_id(fixture: &GraphQueryFixture, name: &str) -> String {
 
 #[tokio::test]
 async fn rust_wrapper_callees_follow_declared_sibling_module_imports() {
-    let (fixture, _root) = graph_query_fixture_with_sources(|project| {
+    let fixture = graph_query_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
         fs::write(
             project.join("src/lib.rs"),
@@ -202,20 +175,11 @@ async fn rust_wrapper_callees_follow_declared_sibling_module_imports() {
     let wrapper = graph_node_id(&fixture, "execute_source_edit").await;
     let result = call_production_tool(
         &fixture,
-        "tracedecay_code_callees",
+        "tracedecay_callees",
         json!({
             "node_id": wrapper,
             "maximum_depth": 1,
             "resolve_trait_dispatch": false,
-            "scope": {
-                "generation": tracedecay_contracts::UNPINNED_LATEST_GENERATION_SENTINEL,
-                "path_prefix": Value::Null,
-            },
-            "meta": {
-                "projection": "evidence",
-                "order": "source_position",
-                "cursor": Value::Null,
-            },
             "format": "json",
         }),
         None,
@@ -326,7 +290,7 @@ async fn search_limit_above_retrieval_budget_serves_full_candidate_set() {
 
 #[tokio::test]
 async fn test_grep_literal_hit_is_enriched_with_symbol() {
-    let (cg, _dir) = production_graph_query_fixture().await;
+    let cg = production_graph_query_fixture().await;
     // `format!("Hello, {}!", name)` lives inside `format_greeting` in utils.rs.
     let result = call_production_tool(
         &cg,
@@ -346,11 +310,11 @@ async fn test_grep_literal_hit_is_enriched_with_symbol() {
         .unwrap_or_else(|| panic!("expected a hit in src/utils.rs: {payload}"));
     assert!(hit["text"].as_str().unwrap().contains("Hello, {}!"));
     // Graph enrichment: the hit resolves to its enclosing symbol + node id so
-    // the natural next call is `tracedecay_body`.
+    // the natural next call is `tracedecay_source_body`.
     assert_eq!(hit["symbol"].as_str(), Some("format_greeting"));
     assert!(
         hit["node_id"].as_str().is_some_and(|id| !id.is_empty()),
-        "hit should carry a node_id for tracedecay_body: {payload}"
+        "hit should carry a node_id for tracedecay_source_body: {payload}"
     );
     assert!(
         result.value["content"]
@@ -365,7 +329,7 @@ async fn test_grep_literal_hit_is_enriched_with_symbol() {
 
 #[tokio::test]
 async fn test_grep_regex_hit() {
-    let (cg, _dir) = production_graph_query_fixture().await;
+    let cg = production_graph_query_fixture().await;
     // Regex: a `pub fn` declaration returning `String`.
     let result = call_production_tool(
         &cg,
@@ -388,7 +352,7 @@ async fn test_grep_regex_hit() {
 
 #[tokio::test]
 async fn test_grep_no_match_reports_empty() {
-    let (cg, _dir) = production_graph_query_fixture().await;
+    let cg = production_graph_query_fixture().await;
     let result = call_production_tool(
         &cg,
         "tracedecay_grep",
@@ -406,7 +370,7 @@ async fn test_grep_no_match_reports_empty() {
 
 #[tokio::test]
 async fn test_grep_respects_gitignore() {
-    let (cg, _dir) = production_graph_query_fixture().await;
+    let cg = production_graph_query_fixture().await;
     let root = cg.project_root().to_path_buf();
     fs::write(root.join(".gitignore"), "ignored_dir/\n").unwrap();
     fs::create_dir_all(root.join("ignored_dir")).unwrap();
@@ -445,7 +409,7 @@ async fn test_grep_respects_gitignore() {
 
 #[tokio::test]
 async fn test_grep_skips_binary_files() {
-    let (cg, _dir) = production_graph_query_fixture().await;
+    let cg = production_graph_query_fixture().await;
     let root = cg.project_root().to_path_buf();
     // A NUL byte makes this file "binary"; the matching text must not surface.
     fs::write(root.join("blob.bin"), b"BINARY_MARKER\0BINARY_MARKER").unwrap();
@@ -476,7 +440,7 @@ async fn test_grep_skips_binary_files() {
 
 #[tokio::test]
 async fn test_grep_prunes_generated_trees_unless_path_glob_selects_one() {
-    let (cg, _dir) = production_graph_query_fixture().await;
+    let cg = production_graph_query_fixture().await;
     let root = cg.project_root().to_path_buf();
     fs::create_dir_all(root.join("dist")).unwrap();
     fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
@@ -535,7 +499,7 @@ async fn test_grep_prunes_generated_trees_unless_path_glob_selects_one() {
 
 #[tokio::test]
 async fn test_grep_basename_glob_reaches_nested_generated_file() {
-    let (cg, _dir) = production_graph_query_fixture().await;
+    let cg = production_graph_query_fixture().await;
     let root = cg.project_root().to_path_buf();
     fs::create_dir_all(root.join("dist/nested")).unwrap();
     fs::write(
@@ -567,7 +531,7 @@ async fn test_grep_basename_glob_reaches_nested_generated_file() {
 
 #[tokio::test]
 async fn test_ast_grep_search_respects_public_path_glob() {
-    let (cg, _dir) = production_graph_query_fixture().await;
+    let cg = production_graph_query_fixture().await;
     let root = cg.project_root().to_path_buf();
     fs::write(
         root.join("src/outside_scope.rs"),
@@ -606,7 +570,7 @@ async fn test_ast_grep_search_respects_public_path_glob() {
 
 #[tokio::test]
 async fn test_grep_enforces_max_results_cap() {
-    let (cg, _dir) = production_graph_query_fixture().await;
+    let cg = production_graph_query_fixture().await;
     let root = cg.project_root().to_path_buf();
     let mut body = String::new();
     for _ in 0..10 {
@@ -637,7 +601,7 @@ async fn test_grep_enforces_max_results_cap() {
 
 #[tokio::test]
 async fn test_grep_case_sensitivity() {
-    let (cg, _dir) = production_graph_query_fixture().await;
+    let cg = production_graph_query_fixture().await;
     let root = cg.project_root().to_path_buf();
     fs::write(root.join("case.txt"), "MixedCaseToken here\n").unwrap();
 
@@ -680,7 +644,7 @@ async fn test_grep_case_sensitivity() {
 
 #[tokio::test]
 async fn test_grep_context_lines() {
-    let (cg, _dir) = production_graph_query_fixture().await;
+    let cg = production_graph_query_fixture().await;
     let root = cg.project_root().to_path_buf();
     fs::write(
         root.join("ctx.txt"),
@@ -710,7 +674,7 @@ async fn test_grep_context_lines() {
 
 #[tokio::test]
 async fn test_grep_missing_pattern_errors() {
-    let (cg, _dir) = production_graph_query_fixture().await;
+    let cg = production_graph_query_fixture().await;
     let err = call_production_tool(&cg, "tracedecay_grep", json!({}), None, None)
         .await
         .unwrap_err();
@@ -722,7 +686,7 @@ async fn test_grep_missing_pattern_errors() {
 
 #[tokio::test]
 async fn test_node_existing() {
-    let (cg, _dir) = production_graph_query_fixture().await;
+    let cg = production_graph_query_fixture().await;
     let node_id = graph_node_id(&cg, "helper").await;
     let result = call_production_tool(
         &cg,
@@ -754,7 +718,7 @@ async fn test_node_existing() {
 
 #[tokio::test]
 async fn signature_search_and_derives_use_extracted_metadata() {
-    let (fixture, _root) = production_signature_metadata_fixture().await;
+    let fixture = production_signature_metadata_fixture().await;
     let async_node = graph_node_id(&fixture, "fetch_value").await;
     let sync_node = graph_node_id(&fixture, "cached_value").await;
 
@@ -801,7 +765,7 @@ async fn signature_search_and_derives_use_extracted_metadata() {
         let result = call_production_tool(
             &fixture,
             "tracedecay_signature_search",
-            json!({"async": want_async, "format": "json"}),
+            json!({"is_async": want_async, "format": "json"}),
             None,
             None,
         )
@@ -809,7 +773,10 @@ async fn signature_search_and_derives_use_extracted_metadata() {
         .expect("signature search");
         let payload: Value = serde_json::from_str(extract_text(&result.value))
             .expect("signature-search response JSON");
-        let matches = payload["matches"].as_array().expect("signature matches");
+        let matches = payload
+            .pointer("/outcome/value/payload/items")
+            .and_then(Value::as_array)
+            .expect("signature matches");
         assert_eq!(matches.len(), 1, "unexpected matches: {payload}");
         assert_eq!(matches[0]["name"], expected_name);
         assert_eq!(matches[0]["is_async"], want_async);
@@ -850,7 +817,7 @@ async fn signature_search_and_derives_use_extracted_metadata() {
 
 #[tokio::test]
 async fn test_node_not_found() {
-    let (cg, _env, _dir) = production_empty_graph_query_fixture().await;
+    let cg = production_empty_graph_query_fixture().await;
     let result = call_production_tool(
         &cg,
         "tracedecay_node",
@@ -869,45 +836,8 @@ async fn test_node_not_found() {
 }
 
 #[tokio::test]
-async fn test_files_no_filter() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(&cg, "tracedecay_files", json!({}), None, None)
-        .await
-        .unwrap();
-    let text = extract_text(&result.value);
-    assert!(!text.is_empty(), "files listing should not be empty");
-    assert!(text.starts_with("## Files"), "should have Files header");
-    assert!(
-        text.contains("**indexed files:**"),
-        "should include indexed files field"
-    );
-    assert!(
-        text.contains("```text"),
-        "should render compact tree/list block"
-    );
-    assert!(!text.contains("|"), "files markdown should not use tables");
-}
-
-#[tokio::test]
-async fn test_files_flat_format() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_files",
-        json!({"layout": "flat"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(!text.is_empty());
-    assert!(text.contains("bytes"), "flat format should show byte sizes");
-}
-
-#[tokio::test]
 async fn test_files_json_format_with_grouped_layout() {
-    let (cg, _dir) = production_graph_query_fixture().await;
+    let cg = production_graph_query_fixture().await;
     let json_result = call_production_tool(
         &cg,
         "tracedecay_files",
@@ -923,26 +853,6 @@ async fn test_files_json_format_with_grouped_layout() {
         file["path"].as_str() == Some("src/main.rs")
             && file["symbols"].as_i64().unwrap_or_default() >= 1
     }));
-}
-
-#[tokio::test]
-async fn test_affected() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_affected",
-        json!({"files": ["src/utils.rs"]}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(
-        text.contains("affected_tests"),
-        "should have affected_tests key"
-    );
-    assert!(text.contains("count"), "should have count key");
 }
 
 #[cfg(feature = "test-transport")]
@@ -1237,7 +1147,7 @@ async fn test_module_api() {
 
 #[tokio::test]
 async fn name_first_lexical_search_discloses_preferred_symbol_route() {
-    let (cg, _dir) = production_graph_query_fixture().await;
+    let cg = production_graph_query_fixture().await;
     let search = call_production_tool(
         &cg,
         "tracedecay_search",
@@ -1283,7 +1193,7 @@ async fn redundancy_reports_ranked_repository_exact_families_with_bounded_pages(
         let four = persist(three);
         finish(four, input, one, two, three);
     ";
-    let (fixture, _root) = graph_query_fixture_with_sources(|project| {
+    let fixture = graph_query_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
         for (path, name) in [
             ("src/large_a.rs", "large_a"),
@@ -1441,7 +1351,7 @@ async fn redundancy_pull_request_scope_shares_one_budget_and_resumes_changed_fam
         let four = persist(three);
         finish(four, input, one, two, three);
     ";
-    let (fixture, _root) = graph_query_fixture_with_sources(|project| {
+    let fixture = graph_query_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
         for (path, name, body) in [
             ("src/changed.rs", "changed", large_body),
@@ -1670,7 +1580,7 @@ async fn redundancy_pull_request_scope_shares_one_budget_and_resumes_changed_fam
 
 #[tokio::test]
 async fn analytics_tools_return_their_canonical_envelope_keys() {
-    let (cg, _dir) = production_graph_query_fixture().await;
+    let cg = production_graph_query_fixture().await;
     let cases: &[(&str, Value, &[&str])] = &[
         (
             "tracedecay_rank",
@@ -1720,7 +1630,7 @@ async fn analytics_tools_return_their_canonical_envelope_keys() {
 
 #[tokio::test]
 async fn test_rank_invalid_direction() {
-    let (cg, _env, _dir) = production_empty_graph_query_fixture().await;
+    let cg = production_empty_graph_query_fixture().await;
     let result = call_production_tool(
         &cg,
         "tracedecay_rank",
@@ -1744,7 +1654,7 @@ async fn test_rank_invalid_direction() {
 
 #[tokio::test]
 async fn test_unknown_tool() {
-    let (cg, _env, _dir) = production_empty_graph_query_fixture().await;
+    let cg = production_empty_graph_query_fixture().await;
     let result = call_production_tool(&cg, "tracedecay_unknown", json!({}), None, None).await;
     match result {
         Err(err) => {
@@ -1761,7 +1671,7 @@ async fn test_unknown_tool() {
 
 #[tokio::test]
 async fn test_distribution_with_path_filter() {
-    let (cg, _dir) = production_graph_query_fixture().await;
+    let cg = production_graph_query_fixture().await;
     let result = call_production_tool(
         &cg,
         "tracedecay_distribution",
@@ -1781,36 +1691,8 @@ async fn test_distribution_with_path_filter() {
 }
 
 #[tokio::test]
-async fn test_files_grouped_format() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_files",
-        json!({"layout": "grouped"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(!text.is_empty());
-    assert!(
-        text.contains("indexed files"),
-        "grouped format should have 'indexed files' header"
-    );
-    assert!(
-        text.contains("**layout:** grouped"),
-        "grouped format should report grouped layout"
-    );
-    assert!(
-        text.contains("```text") && text.contains("src/"),
-        "grouped format should show compact tree/list block"
-    );
-}
-
-#[tokio::test]
 async fn test_complexity_response_fields() {
-    let (cg, _dir) = production_graph_query_fixture().await;
+    let cg = production_graph_query_fixture().await;
     let result = call_production_tool(&cg, "tracedecay_complexity", json!({}), None, None)
         .await
         .unwrap();
@@ -1846,7 +1728,7 @@ async fn test_complexity_response_fields() {
 
 #[tokio::test]
 async fn doc_coverage_distinguishes_documented_and_undocumented_enum_variants() {
-    let (cg, _dir) = graph_query_fixture_with_sources(|project| {
+    let cg = graph_query_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
         fs::write(
             project.join("src/lib.rs"),
@@ -1937,7 +1819,7 @@ async fn doc_coverage_census(fixture: &GraphQueryFixture, args: Value) -> Value 
 
 #[tokio::test]
 async fn doc_coverage_lists_undocumented_public_symbols_and_honors_path_and_limit() {
-    let (fixture, _root) = graph_query_fixture_with_sources(|project| {
+    let fixture = graph_query_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
         // Item lines are the declaration line, not the doc comment above it.
         fs::write(
@@ -2091,7 +1973,7 @@ async fn doc_coverage_lists_undocumented_public_symbols_and_honors_path_and_limi
 
 #[tokio::test]
 async fn test_files_public_path_filters() {
-    let (cg, _dir) = production_graph_query_fixture().await;
+    let cg = production_graph_query_fixture().await;
     let result = call_production_tool(&cg, "tracedecay_files", json!({"path": "src"}), None, None)
         .await
         .unwrap();
@@ -2103,22 +1985,40 @@ async fn test_files_public_path_filters() {
     assert!(text.contains("main.rs"), "should include src/main.rs");
 }
 
+/// Name-to-body is an exact symbol lookup followed by `tracedecay_source_body`
+/// on the returned node ID.
+#[cfg(feature = "test-transport")]
 #[tokio::test]
-async fn test_body_returns_full_function_source() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_body",
-        json!({"symbol": "format_greeting"}),
-        None,
-        None,
+async fn source_body_returns_full_function_source_for_exact_lookup() {
+    let fixture = production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    wait_for_current_graph(&server).await;
+    let lookup = handle_real_server_tool_call(
+        &server,
+        "tracedecay_find_exact_symbol",
+        json!({"name": "format_greeting"}),
     )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    let output: Value = serde_json::from_str(text).unwrap();
-    assert_eq!(output["match_count"].as_u64().unwrap(), 1);
-    let m = &output["matches"][0];
+    .await;
+    let lookup: Value = serde_json::from_str(extract_real_server_text(&lookup)).unwrap();
+    let node_id = lookup["matches"][0]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("exact lookup must return a node id: {lookup}"));
+    let result = handle_real_server_tool_call(
+        &server,
+        "tracedecay_source_body",
+        json!({"node_id": node_id}),
+    )
+    .await;
+    let payload: Value = serde_json::from_str(extract_real_server_text(&result)).unwrap();
+    assert_eq!(
+        payload["outcome"]["outcome"],
+        json!("evidence"),
+        "{payload}"
+    );
+    let m = &payload["outcome"]["value"]["payload"];
     let body = m["body"].as_str().unwrap();
     assert!(
         body.contains("fn format_greeting"),
@@ -2144,7 +2044,7 @@ async fn test_body_returns_full_function_source() {
         "end_line should not precede start_line"
     );
     let file_rel = m["file"].as_str().unwrap();
-    let file_abs = _dir.path().join(file_rel);
+    let file_abs = fixture.project_root.join(file_rel);
     let source = std::fs::read_to_string(&file_abs).unwrap();
     let lines: Vec<&str> = source.lines().collect();
     let end_line_text = lines
@@ -2155,25 +2055,7 @@ async fn test_body_returns_full_function_source() {
         end_line_text.trim_end().ends_with('}'),
         "end_line ({end_line}) should point at the closing brace; line text: {end_line_text:?}"
     );
-}
-
-#[tokio::test]
-async fn test_body_unknown_symbol() {
-    let (cg, _env, _dir) = production_empty_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_body",
-        json!({"symbol": "no_such_symbol_anywhere"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(
-        text.contains("No symbol named"),
-        "should report no match, got: {text}"
-    );
+    fixture.harness.shutdown().await;
 }
 
 /// Occurrence ids hash the fixture's temporary git directory, so they change
@@ -2220,7 +2102,7 @@ async fn qualified_name_rows(fixture: &GraphQueryFixture, qualified_name: &str) 
 
 #[tokio::test]
 async fn tracedecay_by_qualified_name_returns_the_symbol_at_that_exact_name() {
-    let (fixture, _root) = production_graph_query_fixture().await;
+    let fixture = production_graph_query_fixture().await;
 
     let helper = qualified_name_rows(&fixture, "src/utils.rs::helper").await;
     let greeting = qualified_name_rows(&fixture, "src/utils.rs::format_greeting").await;
@@ -2298,7 +2180,7 @@ async fn tracedecay_by_qualified_name_returns_the_symbol_at_that_exact_name() {
 
 #[tokio::test]
 async fn tracedecay_by_qualified_name_returns_every_symbol_sharing_that_name() {
-    let (fixture, _root) = graph_query_fixture_with_sources(|project| {
+    let fixture = graph_query_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
         fs::write(
             project.join("src/lib.rs"),
@@ -2333,32 +2215,4 @@ async fn tracedecay_by_qualified_name_returns_every_symbol_sharing_that_name() {
         ]
     );
     shutdown_graph_fixture(fixture).await;
-}
-
-#[tokio::test]
-async fn body_prefers_function_over_field_with_same_name() {
-    let (cg, _dir) = production_function_vs_field_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_body",
-        json!({"symbol": "gmres"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    let output: Value = serde_json::from_str(text).unwrap();
-    let matches = output["matches"].as_array().unwrap();
-    let first = &matches[0];
-    assert_eq!(
-        first["kind"].as_str(),
-        Some("function"),
-        "first match should be the function definition, got {first}"
-    );
-    let body = first["body"].as_str().unwrap();
-    assert!(
-        body.contains("pub fn gmres"),
-        "body should be the function source, got: {body}"
-    );
 }

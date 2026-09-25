@@ -3,10 +3,10 @@ use thiserror::Error;
 use tracedecay_domain::UtcMicros;
 
 use crate::{
-    HookContractError, HookEventEnvelopeV2, HookHostV1, MAX_SPOOL_BYTES_PER_HOST,
-    MAX_SPOOL_BYTES_PER_SESSION, MAX_SPOOL_RECORDS_PER_HOST, MAX_SPOOL_RECORDS_PER_SESSION,
-    NativeContextScoutLifecycleV1,
+    HookContractError, HookEventEnvelopeV2, MAX_SPOOL_BYTES_PER_HOST, MAX_SPOOL_BYTES_PER_SESSION,
+    MAX_SPOOL_RECORDS_PER_HOST, MAX_SPOOL_RECORDS_PER_SESSION, NativeContextScoutLifecycleV1,
 };
+use tracedecay_domain::NativeHostIdentityV1;
 
 use super::{FRAME_CHECKSUM_BYTES, FRAME_HEADER_BYTES, FRAME_LENGTH_BYTES};
 
@@ -54,13 +54,13 @@ impl HookSpoolLimitsV1 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookSpoolConfigV1 {
-    pub host: HookHostV1,
+    pub host: NativeHostIdentityV1,
     pub limits: HookSpoolLimitsV1,
     pub writer_lease_micros: i64,
 }
 
 impl HookSpoolConfigV1 {
-    pub const fn stock(host: HookHostV1) -> Self {
+    pub const fn stock(host: NativeHostIdentityV1) -> Self {
         Self {
             host,
             limits: HookSpoolLimitsV1::stock(),

@@ -17,21 +17,19 @@ use zeroize::Zeroizing;
 use crate::relations::{
     SessionRelationError, SessionRelationGraphStore, SessionRelationScope, SummarySourceVisitKind,
 };
-use crate::support::{
-    derive_projection, record_hydration_emitted_bytes, record_hydration_verified_bytes,
-};
+use crate::support::{record_hydration_emitted_bytes, record_hydration_verified_bytes};
 use tracedecay_lcm::payload::{
     PayloadStreamError, VerifiedPayloadStream, open_verified_payload_stream,
 };
 use tracedecay_lcm::{LcmStorageKind, raw};
+use tracedecay_store::{derive_canonical_projection, message_metadata_with_envelope};
+use tracedecay_temporal_query::execution::ExecutionControl;
 use tracedecay_temporal_query::hydration::{
     HydrationAuthorization, HydrationDenial, HydrationError, HydrationFuture, HydrationGrant,
     HydrationSink, TemporalHydrationPort,
 };
-use tracedecay_temporal_query::ports::{
-    ExecutionControl, TemporalExecutionSnapshot, TemporalPortError, TemporalRetrievalScope,
-    TemporalSourceAccess,
-};
+use tracedecay_temporal_query::ports::{TemporalPortError, TemporalRetrievalScope};
+use tracedecay_temporal_query::snapshot::{TemporalExecutionSnapshot, TemporalSourceAccess};
 
 use super::operations::CanonicalPublicationManifest;
 use super::sql::TemporalSqlRead;
@@ -42,6 +40,18 @@ const MAX_SUMMARY_SOURCE_RELATIONS: usize = 256;
 /// Window a file-backed payload is proven through; emission uses the grant's
 /// chunk size instead, so neither pass holds more than one window.
 const PAYLOAD_PROOF_WINDOW_BYTES: usize = 64 * 1024;
+/// The occurrence's source observation envelope. Message rows store only the
+/// metadata the envelope lacks, so the record's full metadata joins it back.
+/// Stored message metadata without the raw authority's ingest-protection
+/// receipts, which are storage bookkeeping rather than message metadata.
+const SERVED_MESSAGE_METADATA_COLUMN: &str = "CASE WHEN json_valid(message.metadata_json)
+      THEN NULLIF(json_remove(message.metadata_json, '$.ingest_protection'), '{}')
+      ELSE message.metadata_json END";
+
+const OCCURRENCE_ENVELOPE_COLUMN: &str =
+    "(SELECT json_extract(observation.observation_json, '$.payload')
+   FROM observations AS observation
+   WHERE observation.observation_id = occurrence.source_observation_id)";
 
 mod external;
 use external::resolve_external_manifest;
@@ -497,16 +507,18 @@ pub(super) async fn session_message_from_hydrated_bytes(
                 return Err(HydrationError::Unavailable);
             }
             read.query(
-                "SELECT occurrence.message_id, occurrence.role,
+                &format!(
+                    "SELECT occurrence.message_id, occurrence.role,
                         occurrence.projection_output_ordinal,
                         source.provider, occurrence.session_id,
                         message.timestamp, message.kind, message.model,
                         message.tool_names, message.source_path, message.source_offset,
-                        message.metadata_json, message.role, message.session_id
+                        {SERVED_MESSAGE_METADATA_COLUMN}, message.role, message.session_id,
+                        {OCCURRENCE_ENVELOPE_COLUMN}
                  FROM session_occurrences AS occurrence
                  JOIN sessions AS source
                    ON source.session_id = occurrence.session_id
-                 LEFT JOIN session_messages AS message
+                 LEFT JOIN lcm_raw_messages AS message
                    ON message.provider = source.provider
                   AND message.message_id = occurrence.message_id
                   AND message.session_id = occurrence.session_id
@@ -516,7 +528,8 @@ pub(super) async fn session_message_from_hydrated_bytes(
                    AND source.project_key = ?4
                    AND source.provider = ?5
                  ORDER BY occurrence.occurrence_id
-                 LIMIT 2",
+                 LIMIT 2"
+                ),
                 params![
                     session_id.as_str(),
                     generation,
@@ -529,12 +542,14 @@ pub(super) async fn session_message_from_hydrated_bytes(
         }
         TemporalRetrievalScope::AllSessionsInAuthorizedRoot => {
             read.query(
-                "SELECT occurrence.message_id, occurrence.role,
+                &format!(
+                    "SELECT occurrence.message_id, occurrence.role,
                         occurrence.projection_output_ordinal,
                         source.provider, occurrence.session_id,
                         message.timestamp, message.kind, message.model,
                         message.tool_names, message.source_path, message.source_offset,
-                        message.metadata_json, message.role, message.session_id
+                        {SERVED_MESSAGE_METADATA_COLUMN}, message.role, message.session_id,
+                        {OCCURRENCE_ENVELOPE_COLUMN}
                  FROM session_occurrences AS occurrence
                  JOIN session_temporal_generations AS generation
                    ON generation.session_id = occurrence.session_id
@@ -542,7 +557,7 @@ pub(super) async fn session_message_from_hydrated_bytes(
                   AND generation.state = 'active'
                  JOIN sessions AS source
                    ON source.session_id = occurrence.session_id
-                 LEFT JOIN session_messages AS message
+                 LEFT JOIN lcm_raw_messages AS message
                    ON message.provider = source.provider
                   AND message.message_id = occurrence.message_id
                   AND message.session_id = occurrence.session_id
@@ -551,7 +566,8 @@ pub(super) async fn session_message_from_hydrated_bytes(
                    AND occurrence.session_id = ?3
                    AND source.provider = ?4
                  ORDER BY occurrence.session_id, occurrence.occurrence_id
-                 LIMIT 2",
+                 LIMIT 2"
+                ),
                 params![
                     anchor_id.as_str(),
                     project_key,
@@ -579,9 +595,20 @@ pub(super) async fn session_message_from_hydrated_bytes(
     let tool_names = row.get(8).ok();
     let source_path = row.get(9).ok();
     let source_offset = row.get(10).ok();
-    let metadata_json = row.get(11).ok();
+    let stored_metadata: Option<String> = row.get(11).ok();
     let compatibility_role: Option<String> = row.get(12).ok();
     let compatibility_session: Option<String> = row.get(13).ok();
+    let envelope: Option<String> = row.get(14).ok();
+    let metadata_json = match (&compatibility_role, envelope) {
+        (Some(_), Some(envelope)) => Some(
+            message_metadata_with_envelope(
+                stored_metadata.as_deref(),
+                &serde_json::from_str(&envelope).map_err(hydration_failure)?,
+            )
+            .map_err(hydration_failure)?,
+        ),
+        _ => stored_metadata,
+    };
     if compatibility_role
         .as_deref()
         .is_some_and(|compatibility_role| compatibility_role != role)
@@ -615,7 +642,7 @@ fn canonical_projected_message(
     output_ordinal: i64,
 ) -> Option<SessionMessageRecord> {
     let output_ordinal = u32::try_from(output_ordinal).ok()?;
-    let projection = derive_projection(observation).ok()?;
+    let projection = derive_canonical_projection(observation).ok()?;
     projection
         .messages()
         .find(|output| {
@@ -875,7 +902,7 @@ async fn resolve_current(
         Ok(anchor) => anchor,
         Err(_) => {
             return Ok(HydrationResolution::Unavailable(
-                HydrationStateV1::UnverifiableLegacy,
+                HydrationStateV1::Unverifiable,
             ));
         }
     };
@@ -884,7 +911,7 @@ async fn resolve_current(
         || serde_json::to_string(anchor.owner()).ok().as_deref() != Some(owner_json.as_str())
     {
         return Ok(HydrationResolution::Unavailable(
-            HydrationStateV1::UnverifiableLegacy,
+            HydrationStateV1::Unverifiable,
         ));
     }
     if anchor.authorization().validate().is_err()
@@ -932,7 +959,7 @@ async fn resolve_current(
         return Ok(resolution);
     }
     Ok(HydrationResolution::Unavailable(
-        HydrationStateV1::UnverifiableLegacy,
+        HydrationStateV1::Unverifiable,
     ))
 }
 
@@ -1021,7 +1048,7 @@ async fn resolve_occurrence(
             .any(|observation_id| observation_id.as_str() == source_observation_id)
     {
         return Ok(Some(HydrationResolution::Unavailable(
-            HydrationStateV1::UnverifiableLegacy,
+            HydrationStateV1::Unverifiable,
         )));
     }
     if let Some(state) = participant_access_state(snapshot, &session_id, &provider) {
@@ -1134,14 +1161,14 @@ async fn resolve_summary(
     }
     if publication_json.is_empty() {
         return Ok(Some(HydrationResolution::Unavailable(
-            HydrationStateV1::UnverifiableLegacy,
+            HydrationStateV1::Unverifiable,
         )));
     }
     let manifest: CanonicalPublicationManifest = match serde_json::from_str(&publication_json) {
         Ok(manifest) => manifest,
         Err(_) => {
             return Ok(Some(HydrationResolution::Unavailable(
-                HydrationStateV1::UnverifiableLegacy,
+                HydrationStateV1::Unverifiable,
             )));
         }
     };
@@ -1376,7 +1403,6 @@ fn source_access_hydration_state(access: TemporalSourceAccess) -> Option<Hydrati
         TemporalSourceAccess::RetentionWithheld => Some(HydrationStateV1::RetentionExpired),
         TemporalSourceAccess::Deleted => Some(HydrationStateV1::Deleted),
         TemporalSourceAccess::Redacted => Some(HydrationStateV1::Redacted),
-        TemporalSourceAccess::LegacyUnauthorized => Some(HydrationStateV1::Unauthorized),
     }
 }
 
@@ -1458,16 +1484,17 @@ mod tests {
     };
     use tracedecay_store::{
         AnchoredObservationWrite, ObservationStore, ObservationWrite,
-        build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+        build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
     };
 
     use super::*;
     use tracedecay_global_db::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+    use tracedecay_temporal_query::execution::{BindingDigest, ExecutionLimits};
     use tracedecay_temporal_query::ports::{
-        BindingDigest, ExecutionLimits, KernelVersions, TemporalAuthorizedRoot, TemporalPortError,
-        TemporalSnapshotRequest, TemporalWatermarks,
+        TemporalAuthorizedRoot, TemporalPortError, TemporalSnapshotRequest,
     };
     use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+    use tracedecay_temporal_query::snapshot::{KernelVersions, TemporalWatermarks};
 
     struct RegisteredHydrationRead {
         read: DatabaseEngineReadSnapshot,
@@ -1628,11 +1655,10 @@ mod tests {
                     session_id, generation, occurrence_id, source_observation_id,
                     source_provider, projection_output_ordinal, retrieval_anchor_id,
                     message_id, role, knowledge_at, valid_time_json, evidence_json,
-                    sanitized_content_digest, sanitized_content_bytes,
-                    snippet_text, index_text
+                    sanitized_content_digest, sanitized_content_bytes, index_text
                  ) VALUES (
                     ?1, 1, 'occurrence-1', ?2, ?3, 0, ?4, ?5,
-                    'assistant', 1, '{\"kind\":\"unknown\"}', '{}', ?6, ?7, ?8, ?8
+                    'assistant', 1, '{\"kind\":\"unknown\"}', '{}', ?6, ?7, ?8
                  )",
                 params![
                     session_id,
@@ -1726,11 +1752,10 @@ mod tests {
                 &writer,
                 "INSERT INTO lcm_raw_messages (
                     provider, message_id, session_id, role, ordinal, timestamp,
-                    content, content_hash, storage_kind, payload_ref,
-                    snippet_text, index_text, legacy_source, legacy_truncated
+                    content, content_hash, storage_kind, payload_ref
                  ) VALUES (
                     ?1, 'message-1', 'session-2', 'assistant', 1, 1,
-                    ?2, ?3, 'inline', NULL, ?2, ?2, 0, 0
+                    ?2, ?3, 'inline', NULL
                  )",
                 params![
                     provider,
@@ -1746,11 +1771,10 @@ mod tests {
                     session_id, generation, occurrence_id, source_observation_id,
                     source_provider, projection_output_ordinal, retrieval_anchor_id,
                     message_id, role, knowledge_at, valid_time_json, evidence_json,
-                    sanitized_content_digest, sanitized_content_bytes,
-                    snippet_text, index_text
+                    sanitized_content_digest, sanitized_content_bytes, index_text
                  ) VALUES (
                     'session-2', 1, 'occurrence-1', ?1, ?2, 0, ?3, 'message-1',
-                    'assistant', 1, '{\"kind\":\"unknown\"}', '{}', ?4, ?5, ?6, ?6
+                    'assistant', 1, '{\"kind\":\"unknown\"}', '{}', ?4, ?5, ?6
                  )",
                 params![
                     observation.observation_id().as_str(),
@@ -1842,10 +1866,10 @@ mod tests {
                 "INSERT INTO lcm_raw_messages (
                     provider, message_id, session_id, role, ordinal, timestamp,
                     content, content_hash, storage_kind, payload_ref,
-                    snippet_text, index_text, legacy_source, legacy_truncated
+                    placeholder_text
                  ) VALUES (
                     ?1, 'message-1', 'session-1', 'assistant', 1, 1,
-                    NULL, ?2, 'external', ?3, ?4, ?4, 0, 0
+                    NULL, ?2, 'external', ?3, ?4
                  )",
                 params![
                     provider,
@@ -1892,11 +1916,12 @@ mod tests {
             Executor::execute(
                 &writer,
                 "INSERT INTO session_summary_nodes (
-                    summary_id, session_id, summary_anchor_id, summary_text,
-                    index_text, source_horizon_json, publication_json, created_at
+                    summary_id, session_id, provider, conversation_id, depth,
+                    summary_anchor_id, summary_text, summary_hash, summary_token_count,
+                    source_token_count, source_horizon_json, publication_json, created_at
                  ) VALUES (
-                    'summary-authority', 'session-1', ?1, 'authority',
-                    'authority', '{}', ?2, 1
+                    'summary-authority', 'session-1', 'test', 'session-1', 0, ?1,
+                    'authority', 'hash', 1, 1, '{}', ?2, 1
                  )",
                 params![authority_anchor.anchor_id().as_str(), authority_publication],
             )
@@ -1921,13 +1946,11 @@ mod tests {
                     session_id, generation, occurrence_id, source_observation_id,
                     source_provider, projection_output_ordinal, retrieval_anchor_id,
                     message_id, role, knowledge_at, valid_time_json, evidence_json,
-                    sanitized_content_digest, sanitized_content_bytes,
-                    snippet_text, index_text
+                    sanitized_content_digest, sanitized_content_bytes, index_text
                  ) VALUES (
                     'session-1', 1, 'occurrence-1', ?1, ?2, 0, ?3, 'message-1',
                     'assistant', 1, '{\"kind\":\"unknown\"}', '{}',
-                    ?4, ?5,
-                    'non-empty occurrence payload', 'non-empty occurrence payload'
+                    ?4, ?5, 'non-empty occurrence payload'
                  )",
                 {
                     let canonical =
@@ -1978,9 +2001,11 @@ mod tests {
             Executor::execute(
                 &writer,
                 "INSERT INTO session_summary_nodes (
-                    summary_id, session_id, summary_anchor_id, summary_text,
-                    index_text, source_horizon_json, publication_json, created_at
-                 ) VALUES ('summary-1', 'session-1', ?1, ?2, ?2, '{}', ?3, 1)",
+                    summary_id, session_id, provider, conversation_id, depth,
+                    summary_anchor_id, summary_text, summary_hash, summary_token_count,
+                    source_token_count, source_horizon_json, publication_json, created_at
+                 ) VALUES ('summary-1', 'session-1', 'test', 'session-1', 0, ?1, ?2, 'hash',
+                           1, 1, '{}', ?3, 1)",
                 params![
                     summary_anchor.anchor_id().as_str(),
                     summary_payload,
@@ -2413,7 +2438,7 @@ mod tests {
         let authorization =
             build_observation_resolution_authorization_v1(write.observation(), "snapshot-test")
                 .expect("authorization");
-        let anchor = build_observation_retrieval_anchor_v2(
+        let anchor = build_observation_retrieval_anchor(
             write.observation(),
             projection.clone(),
             UtcMicros(1),
@@ -2538,7 +2563,7 @@ mod tests {
             matches!(
                 authorization,
                 Ok(HydrationAuthorization::Denied(ref denial))
-                    if denial.state() == HydrationStateV1::UnverifiableLegacy
+                    if denial.state() == HydrationStateV1::Unverifiable
             ),
             "{authorization:?}"
         );
@@ -2572,12 +2597,10 @@ mod tests {
                 .expect("registered profile writer"),
             "INSERT INTO lcm_raw_messages (
                 provider, message_id, session_id, role, ordinal, timestamp,
-                content, content_hash, storage_kind, payload_ref,
-                snippet_text, index_text, legacy_source, legacy_truncated
+                content, content_hash, storage_kind, payload_ref
              ) VALUES (
                 ?1, 'message-1', 'session-1', 'assistant', 1, 1,
-                'raw-content-canary', 'invalid-content-hash', 'inline', NULL,
-                'raw-content-canary', 'raw-content-canary', 0, 0
+                'raw-content-canary', 'invalid-content-hash', 'inline', NULL
              )",
             [provider],
         )
@@ -2732,7 +2755,7 @@ mod tests {
                 .authorize(&snapshot, occurrence_anchor.anchor_id())
                 .await,
             Ok(HydrationAuthorization::Denied(ref denial))
-                if denial.state() == HydrationStateV1::UnverifiableLegacy
+                if denial.state() == HydrationStateV1::Unverifiable
         ));
         let mut denied_output = Vec::new();
         assert_eq!(
@@ -2755,9 +2778,9 @@ mod tests {
 
     /// An occurrence whose `message_id` was projected from the stable record id
     /// (because the canonical envelope carries no `relations.message_id`) must
-    /// hydrate; refusing it as `UnverifiableLegacy` drops real
+    /// hydrate; refusing it as `Unverifiable` drops real
     /// `lcm_grep`/`lcm_expand` matches into
-    /// `omissions: reason=unverifiable_legacy`.
+    /// `omissions: reason=unverifiable`.
     #[tokio::test]
     async fn occurrence_keyed_on_stable_record_id_resolves_when_relations_message_id_absent() {
         let dir = tempdir().expect("temporary directory");

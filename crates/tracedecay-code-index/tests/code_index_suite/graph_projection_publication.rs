@@ -23,7 +23,7 @@ use crate::{
     production_orchestration::{
         ActiveControl, ApplyingProjectionSink, SharedPublicationStore, config, request_with_source,
     },
-    support::id,
+    support::{PartitionedSealV1, id},
 };
 
 const IMPORT_SOURCE: &str = concat!(
@@ -274,9 +274,7 @@ fn sealed_generation_replay_rebuilds_identical_import_manifest_and_digest() {
     let generation = published_import_generation();
     let revision = current_projector_revision();
     let original = projection_manifest(&generation, &revision);
-    let sealed = generation.encode_sealed().expect("generation seals");
-    let restored = CodeIndexPublishedGenerationV1::decode_sealed(&sealed)
-        .expect("sealed import generation restores");
+    let restored = PartitionedSealV1::of(&generation).restored();
     assert_eq!(restored.imports(), generation.imports());
 
     let replayed = projection_manifest(&restored, &revision);

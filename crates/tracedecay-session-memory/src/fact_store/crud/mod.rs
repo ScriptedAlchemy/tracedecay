@@ -1,6 +1,4 @@
 //! Canonical fact CRUD, commit, feedback, and automatic fact application.
-//!
-//! Re-exports below preserve every `crud::*` path used outside this module.
 
 use sha2::{Digest, Sha256};
 use tracedecay_domain::LocatorDigest;

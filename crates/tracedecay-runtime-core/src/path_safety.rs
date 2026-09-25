@@ -94,6 +94,14 @@ pub fn canonical_root_identity(path: &Path) -> PathBuf {
     plain_host_path(&canonicalize_path_or_existing_parent(path))
 }
 
+/// [`canonical_root_identity`] for a path that must exist: a missing path is
+/// the [`std::fs::canonicalize`] error instead of a name resolved through its
+/// deepest existing ancestor.
+pub fn canonical_existing_identity(path: &Path) -> io::Result<PathBuf> {
+    path.canonicalize()
+        .map(|canonical| plain_host_path(&canonical))
+}
+
 /// Rewrites a Windows extended-length (`\\?\`) *disk* path to its ordinary
 /// form, so it can be handed to a tool that does not understand the verbatim
 /// prefix.

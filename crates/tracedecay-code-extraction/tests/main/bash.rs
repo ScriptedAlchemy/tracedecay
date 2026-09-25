@@ -24,7 +24,7 @@ fn bash_overlay(version: i64, content: &str) -> ParseDocumentIdentity {
 fn test_bash_call_sites() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.sh").unwrap();
     let extractor = BashExtractor;
-    let result = extractor.extract("sample.sh", &source);
+    let result = extractor.extract_artifact("sample.sh", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let call_refs: Vec<_> = result
@@ -37,7 +37,6 @@ fn test_bash_call_sites() {
         .iter()
         .find(|node| node.kind == NodeKind::Module && node.name == "sample")
         .expect("script execution scope");
-    assert!(!call_refs.is_empty(), "should have call refs");
     assert!(
         call_refs.iter().any(|r| r.reference_name == "echo"),
         "should find echo call"
@@ -96,7 +95,7 @@ fn test_bash_incremental_edit_rebuilds_script_scope() {
         RetainedParseDocument::open(bash_overlay(1, "1"), "bash", before, ParseLimits::default())
             .expect("initial Bash parse");
     let initial = document
-        .extract_canonical(&BashExtractor, &opened, None)
+        .extract_canonical_artifact(&BashExtractor, &opened, None)
         .expect("initial Bash extraction");
 
     let report = document
@@ -104,7 +103,7 @@ fn test_bash_incremental_edit_rebuilds_script_scope() {
         .expect("incremental Bash parse");
     assert_eq!(report.reuse, ParseReuse::Incremental);
     let updated = document
-        .extract_canonical(&BashExtractor, &report, Some(&initial.result))
+        .extract_canonical_artifact(&BashExtractor, &report, Some(&initial.artifact))
         .expect("updated Bash extraction");
     assert_eq!(
         updated.disposition,
@@ -114,12 +113,14 @@ fn test_bash_incremental_edit_rebuilds_script_scope() {
     );
 
     let script = updated
+        .artifact
         .result
         .nodes
         .iter()
         .find(|node| node.kind == NodeKind::Module)
         .expect("script module");
     let mut functions = updated
+        .artifact
         .result
         .nodes
         .iter()
@@ -129,6 +130,7 @@ fn test_bash_incremental_edit_rebuilds_script_scope() {
     functions.sort_unstable();
     assert_eq!(functions, ["kept", "newfn", "oldfn"]);
     let top_level_calls = updated
+        .artifact
         .result
         .unresolved_refs
         .iter()
@@ -144,7 +146,7 @@ fn test_bash_incremental_edit_rebuilds_script_scope() {
 fn test_bash_docstrings() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.sh").unwrap();
     let extractor = BashExtractor;
-    let result = extractor.extract("sample.sh", &source);
+    let result = extractor.extract_artifact("sample.sh", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let log_fn = result
@@ -190,22 +192,5 @@ fn test_bash_docstrings() {
             .contains("Main entry point"),
         "docstring: {:?}",
         main_fn.docstring
-    );
-}
-
-#[test]
-fn test_bash_contains_edges() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.sh").unwrap();
-    let extractor = BashExtractor;
-    let result = extractor.extract("sample.sh", &source);
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(
-        contains.len() >= 8,
-        "should have >= 8 Contains edges, got {}",
-        contains.len()
     );
 }

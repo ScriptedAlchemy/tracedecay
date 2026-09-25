@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use tracedecay::mcp::McpServer;
 
 const UNPUBLISHED_CODE: &str = "application.diagnostics.unsupported";
-const UNPUBLISHED_MESSAGE: &str = "No diagnostic producer is configured for this scope.";
+const UNPUBLISHED_MESSAGE: &str = "No diagnostic producer is configured for this project: it has no tsconfig.json, so no compiler runs automatically. Run the project's own build or type check and publish its output with tracedecay_diagnose (`cargo_output`), then read again.";
 
 #[tokio::test]
 async fn diagnostics_call_refuses_bad_arguments_and_reports_unpublished_reads() {
@@ -101,17 +101,34 @@ async fn diagnostics_call_refuses_bad_arguments_and_reports_unpublished_reads() 
         "each diagnostics call mints its own request id"
     );
     assert_eq!(
-        workspace["problem"]["code"], indexed_file["problem"]["code"],
+        workspace["structuredContent"]["problem"]["code"],
+        indexed_file["structuredContent"]["problem"]["code"],
         "a file read with no published generation uses the same authority state as the workspace"
     );
 
     assert_eq!(markdown["isError"], json!(true), "{markdown}");
-    assert_eq!(markdown["problem"]["kind"], "unsupported");
-    assert_eq!(markdown["problem"]["code"], UNPUBLISHED_CODE);
-    assert_eq!(markdown["problem"]["message"], UNPUBLISHED_MESSAGE);
-    assert_eq!(markdown["problem"]["retry"], "never");
-    assert_eq!(markdown["problem"]["retryable"], json!(false));
-    assert_eq!(markdown["problem"]["legal_actions"], json!([]));
+    assert_eq!(
+        markdown["structuredContent"]["problem"]["kind"],
+        "unsupported"
+    );
+    assert_eq!(
+        markdown["structuredContent"]["problem"]["code"],
+        UNPUBLISHED_CODE
+    );
+    assert_eq!(
+        markdown["structuredContent"]["problem"]["message"],
+        UNPUBLISHED_MESSAGE
+    );
+    assert_eq!(markdown["structuredContent"]["problem"]["retry"], "never");
+    assert_eq!(
+        markdown["structuredContent"]["problem"]["retryable"],
+        json!(false)
+    );
+    assert_eq!(
+        markdown["structuredContent"]["problem"]["legal_actions"],
+        json!(["correct_request"]),
+        "a project without an automatic producer is routed to tracedecay_diagnose"
+    );
     let markdown_text = extract_real_server_text(&markdown);
     assert!(
         markdown_text.starts_with(
@@ -130,20 +147,25 @@ async fn diagnostics_call_refuses_bad_arguments_and_reports_unpublished_reads() 
     assert!(markdown_text.contains("\n- Owning layer: `application`"));
     assert!(markdown_text.contains("\n- Terminality: `pre_admission`"));
     assert!(
-        markdown_text.contains("\n- Message: No diagnostic producer is configured for this scope.")
+        markdown_text.contains(
+            "\n- Message: No diagnostic producer is configured for this project: it has no tsconfig.json, so no compiler runs automatically. Run the project's own build or type check and publish its output with tracedecay\\_diagnose (\\`cargo\\_output\\`), then read again."
+        ),
+        "{markdown_text}"
     );
     assert!(markdown_text.contains("\n- Retryable: `false`"));
     assert!(markdown_text.contains("\n- Retry: `never`"));
     assert!(markdown_text.contains("\n- Retry scope: `none`"));
     assert!(markdown_text.contains("\n- Retry after: `none`"));
-    assert!(markdown_text.contains("\n- Legal actions: `none`"));
+    assert!(markdown_text.contains("\n- Legal actions: `correct_request`"));
     assert!(markdown_text.contains("\n- Coverage: `not_available`"));
     assert!(
         !markdown_text.contains("findings_cleared"),
         "an unpublished read must not render as a clean empty page: {markdown_text}"
     );
     assert_ne!(
-        markdown["problem"]["request_id"].as_str().unwrap(),
+        markdown["structuredContent"]["problem"]["request_id"]
+            .as_str()
+            .unwrap(),
         workspace_id,
         "the markdown presentation is a separate call"
     );
@@ -178,7 +200,10 @@ fn assert_unpublished_json(label: &str, result: &Value) {
     let text = extract_real_server_text(result);
     let payload: Value = serde_json::from_str(text)
         .unwrap_or_else(|error| panic!("{label} text was not JSON ({error}): {text}"));
-    assert_eq!(result["problem"], payload["problem"], "{label}: {result}");
+    assert_eq!(
+        result["structuredContent"]["problem"], payload["problem"],
+        "{label}: {result}"
+    );
     assert!(
         payload.get("outcome").is_none(),
         "{label} must not be an evidence page: {payload}"
@@ -233,7 +258,7 @@ fn assert_unpublished_json(label: &str, result: &Value) {
     );
     assert_eq!(
         payload["problem"]["legal_actions"],
-        json!([]),
+        json!(["correct_request"]),
         "{label}: {payload}"
     );
     assert_eq!(
@@ -270,7 +295,7 @@ fn assert_unpublished_json(label: &str, result: &Value) {
 }
 
 fn request_id(result: &Value) -> &str {
-    result["problem"]["request_id"]
+    result["structuredContent"]["problem"]["request_id"]
         .as_str()
         .expect("diagnostics problem request id")
 }

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::baseline::HookTelemetryReadiness;
 use tracedecay_runtime_core::timeutil::nearest_rank;
-use tracedecay_sessions::runtime::claude_observation::ClaudeObservationIngestStats;
+use tracedecay_sessions::runtime::hosts::claude_observation::ClaudeObservationIngestStats;
 use tracedecay_sessions::runtime::shared::TranscriptIngestStats;
 
 pub(super) const PROVIDER_PARSE_SCOPE: &str = "native_provider_format_decode";

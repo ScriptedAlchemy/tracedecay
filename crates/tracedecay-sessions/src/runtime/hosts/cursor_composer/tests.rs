@@ -772,10 +772,10 @@ fn composer_discovery_and_durable_id_batch_use_indexed_bounds() {
     connection
         .execute_batch(
             "CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);
-             CREATE TABLE session_messages (
+             CREATE TABLE lcm_raw_messages (
                  provider TEXT NOT NULL,
                  message_id TEXT NOT NULL,
-                 PRIMARY KEY(provider, message_id)
+                 UNIQUE(provider, message_id)
              );",
         )
         .unwrap();
@@ -809,11 +809,11 @@ fn composer_discovery_and_durable_id_batch_use_indexed_bounds() {
         message_plan
             .iter()
             .all(|detail| !detail.contains("SCAN messages")),
-        "durable message-id batches must not scan session_messages: {message_plan:?}"
+        "durable message-id batches must not scan lcm_raw_messages: {message_plan:?}"
     );
     connection
         .execute_batch(
-            "INSERT INTO session_messages(provider, message_id)
+            "INSERT INTO lcm_raw_messages(provider, message_id)
                  VALUES ('cursor', 'comp:b2'), ('codex', 'comp:b1');",
         )
         .unwrap();

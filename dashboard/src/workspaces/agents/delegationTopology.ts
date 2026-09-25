@@ -2,6 +2,7 @@ import type {
   AnalyticsSubagentNodeV1,
   AnalyticsSubagentTreePayloadV1,
 } from '../../contracts/generated.ts';
+import { usageCoverage, type UsageCoverage } from './sessionUsage.tsx';
 import { subagentLabel } from './subagentTree.ts';
 
 /**
@@ -134,6 +135,8 @@ export interface DelegationTopologyModel {
   readonly maxDescendants: number;
   /** Bundles of top sessions the reader opened; they hang off no parent mark. */
   readonly openedTopBundles: readonly OpenedBundle[];
+  /** Whether the provider-usage read behind every node's `usage` completed. */
+  readonly usageCoverage: UsageCoverage;
 }
 
 export function markId(node: AnalyticsSubagentNodeV1): string {
@@ -455,6 +458,7 @@ export function layoutDelegationTopology(
     bundledSessions,
     maxDescendants,
     openedTopBundles,
+    usageCoverage: usageCoverage(payload),
   };
 }
 
@@ -508,9 +512,6 @@ export const TOPOLOGY_GEOMETRY = {
   rowPitch: 40,
   padX: 88,
   padY: 36,
-  minRadius: 5,
-  maxRadius: 12,
-  sourceRadius: 16,
   /** Room the last column's labels need to the right of their marks. */
   labelRoom: 168,
   /** Widest a column may stretch when the aperture has width to spare. */
@@ -557,29 +558,6 @@ export function fieldSize(
   };
 }
 
-/**
- * Mark radius from what the reading measured: sessions beneath it, on a log
- * band against the widest fan-out drawn. A generation-0 root reads as the
- * source and takes the source radius; a bundle is sized by the sessions it
- * folds so an unopened group is never smaller than the sessions it hides.
- */
-export function markRadius(mark: TopologyMark, maxDescendants: number): number {
-  const { minRadius, maxRadius, sourceRadius } = TOPOLOGY_GEOMETRY;
-  if (mark.kind === 'bundle') {
-    return Math.min(maxRadius, minRadius + Math.log1p(mark.sessions) * 2);
-  }
-  if (
-    mark.generation === 0 &&
-    mark.node.link === 'root' &&
-    (mark.drawnChildren > 0 || mark.foldedDescendants > 0)
-  ) {
-    return sourceRadius;
-  }
-  if (maxDescendants <= 0 || mark.node.descendants <= 0) return minRadius;
-  const fraction = Math.log1p(mark.node.descendants) / Math.log1p(maxDescendants);
-  return minRadius + (maxRadius - minRadius) * Math.max(0, Math.min(1, fraction));
-}
-
 /** Cubic path from one mark's trailing edge to the next mark's leading edge,
  * bending at the midpoint column so parallel delegations read as a fan. */
 export function edgePath(
@@ -609,6 +587,24 @@ export function neighbourhood(
   }
   for (const edge of model.edges) {
     if (edge.from === id) keep.add(edge.to);
+  }
+  return keep;
+}
+
+/** A mark and every drawn mark beneath it: what a selection lifts. */
+export function subtree(model: DelegationTopologyModel, id: string): ReadonlySet<string> {
+  const children = new Map<string, string[]>();
+  for (const mark of model.marks) {
+    if (mark.parentId === null) continue;
+    const bucket = children.get(mark.parentId);
+    if (bucket) bucket.push(mark.id);
+    else children.set(mark.parentId, [mark.id]);
+  }
+  const keep = new Set<string>();
+  const queue = model.marks.some((mark) => mark.id === id) ? [id] : [];
+  for (let cursor = queue.shift(); cursor !== undefined; cursor = queue.shift()) {
+    keep.add(cursor);
+    queue.push(...(children.get(cursor) ?? []));
   }
   return keep;
 }

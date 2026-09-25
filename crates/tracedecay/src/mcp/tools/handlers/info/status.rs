@@ -11,10 +11,8 @@ use tracedecay_code_index_runtime::code_index_scheduler::{
 #[hotpath::measure(label = "mcp.info.admin_sync.total")]
 pub(crate) async fn handle_admin_sync(
     cg: &TraceDecay,
-    args: Value,
     reconcile_sink: Option<&crate::mcp::server::CodeIndexReconcileSink>,
 ) -> Result<ToolResult> {
-    let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
     let project_root = cg.project_root().to_path_buf();
     let reconcile_sink = reconcile_sink.ok_or_else(|| {
         TraceDecayError::project_route(
@@ -44,7 +42,6 @@ pub(crate) async fn handle_admin_sync(
         }
     };
     let output = json!({
-        "requested_mode": if force { "force" } else { "refresh" },
         "reconcile_scope": "authoritative_project",
         "status": status,
         "project_root": cg.project_root(),

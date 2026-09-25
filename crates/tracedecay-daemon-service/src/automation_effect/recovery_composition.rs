@@ -22,8 +22,7 @@ pub async fn reconcile_reserved_automation_effects_for_project(
     dashboard_root: &Path,
     cancellation: &CancellationSignal,
 ) -> Result<AutomationEffectRecoveryReport> {
-    let preparation =
-        prepare_reserved_automation_effect_recovery(dashboard_root, cancellation).await?;
+    let preparation = prepare_reserved_automation_effect_recovery(dashboard_root).await?;
     let preparation = match preparation {
         AutomationEffectRecoveryPreparation::Complete(report) => return Ok(report),
         AutomationEffectRecoveryPreparation::Pending(preparation) => preparation,

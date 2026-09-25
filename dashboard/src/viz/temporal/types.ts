@@ -81,7 +81,8 @@ export type JourneyEventKind =
   | 'message_other'
   | 'tool_call'
   | 'spawn'
-  | 'commit';
+  | 'commit'
+  | 'file_edit';
 
 export const JOURNEY_EVENT_KINDS: readonly JourneyEventKind[] = [
   'session_start',
@@ -92,6 +93,7 @@ export const JOURNEY_EVENT_KINDS: readonly JourneyEventKind[] = [
   'tool_call',
   'spawn',
   'commit',
+  'file_edit',
 ];
 
 /** One drawable record on a lane. */
@@ -113,6 +115,8 @@ export interface JourneyEvent {
   readonly detail: string | null;
   /** The source record's own identifier: message id, commit SHA, child lane id. */
   readonly ref: string;
+  /** For a file edit, the loaded tool-call event recorded in the same second. */
+  readonly linkedEventId?: string;
 }
 
 export type JourneyRelationKind = 'spawn' | 'handoff' | 'rejoin' | 'result';
@@ -128,14 +132,19 @@ export interface JourneyRelation {
   readonly grade: EvidenceGrade;
   /** The stated basis, e.g. `parent_session_id · parent_tool_use_id toolu_01`. */
   readonly basis: string;
+  /** The parent-lane event the relation leaves from: the loaded tool call
+   * whose tool-use id the child recorded. */
+  readonly fromEventId?: string;
 }
 
 export type JourneyGapKind =
   | 'parent_outside_page'
   | 'parent_cycle'
+  | 'parentage_conflict'
   | 'parentage_unavailable'
   | 'extent_unknown'
   | 'undated_events'
+  | 'edit_time_unrecorded'
   | 'handoff_unavailable';
 
 /** Something Loom cannot prove, kept spatially visible and selectable. */
@@ -315,7 +324,8 @@ export type ScenePathKind =
   | 'handoff'
   | 'rejoin'
   | 'result'
-  | 'sequence';
+  | 'sequence'
+  | 'edit_link';
 
 /** A curve. `controls` is `[x0,y0,cx0,cy0,cx1,cy1,x1,y1]` for a cubic, or
  * `[x0,y0,x1,y1]` for a straight segment. */
@@ -459,6 +469,7 @@ export interface TemporalSceneModel {
   readonly minimap: SceneMinimap;
   readonly cursor: SceneCursor | null;
   readonly counts: SceneCounts;
-  /** True when the dense threshold made roots start collapsed. */
-  readonly denseDefault: boolean;
+  /** On a dense page, the hierarchy depth whose branches start bundled;
+   * null when the page is under the dense threshold. */
+  readonly denseDepth: number | null;
 }

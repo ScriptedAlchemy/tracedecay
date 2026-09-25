@@ -3,7 +3,7 @@ use tracedecay_domain::{ClineTranscriptStream, ObservationSourceCursorV1, Provid
 use tracedecay_global_db::ParseOffset;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::SessionProvider;
-use tracedecay_sessions::runtime::cline_like::ClineLikeSource;
+use tracedecay_sessions::runtime::hosts::cline_like::ClineLikeSource;
 use tracedecay_sessions::runtime::source::{StoredCursor, TranscriptIngestError, TranscriptSource};
 #[cfg(not(windows))]
 use tracedecay_store::ObservationProjectionStore;

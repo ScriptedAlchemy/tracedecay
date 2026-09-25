@@ -5,7 +5,9 @@
 
 mod pca;
 
-use serde_json::{Value, json};
+use schemars::JsonSchema;
+use serde::Serialize;
+use serde_json::Value;
 use tracedecay_session_memory::memory::encoding::{HolographicEncoder, HolographicEncodingError};
 use tracedecay_store::FactReadControl;
 
@@ -129,6 +131,56 @@ fn round_bin_edge(edge: f64) -> f64 {
     (edge * 1e9).round() / 1e9
 }
 
+/// One fixed-width similarity histogram bin.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct MemoryScoreBinV1 {
+    pub start: f64,
+    pub end: f64,
+    pub count: u64,
+}
+
+/// Similarity score distribution over every finite scored pair. Every
+/// statistic is `None` when no finite pair was scored, never zero.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct MemoryScoreDistributionV1 {
+    pub bin_count: usize,
+    pub total_pairs: u64,
+    pub min_score: Option<f64>,
+    pub max_score: Option<f64>,
+    pub average_score: Option<f64>,
+    pub bins: Vec<MemoryScoreBinV1>,
+}
+
+impl MemoryScoreDistributionV1 {
+    fn observed(
+        min: f64,
+        max: f64,
+        total_pairs: u64,
+        sum: f64,
+        bins: Vec<MemoryScoreBinV1>,
+    ) -> Self {
+        Self {
+            bin_count: bins.len(),
+            total_pairs,
+            min_score: Some(min),
+            max_score: Some(max),
+            average_score: Some(sum / total_pairs as f64),
+            bins,
+        }
+    }
+}
+
+pub fn empty_score_distribution() -> MemoryScoreDistributionV1 {
+    MemoryScoreDistributionV1 {
+        bin_count: 0,
+        total_pairs: 0,
+        min_score: None,
+        max_score: None,
+        average_score: None,
+        bins: Vec::new(),
+    }
+}
+
 /// Fixed-width histogram over the observed `[min_score, max_score]` range of
 /// the computed pairs (adaptive, not a fixed `[-1, 1]` window, real HRR data
 /// clusters tightly and a fixed window collapses into one bin). A degenerate
@@ -136,30 +188,17 @@ fn round_bin_edge(edge: f64) -> f64 {
 ///
 /// Two passes over the slice, no intermediate allocation: at n = 2000 facts
 /// the input is ~2M pairs, and a per-request copy would be ~16 MB.
-pub fn empty_score_distribution() -> Value {
-    json!({
-        "min": Value::Null,
-        "max": Value::Null,
-        "bin_count": 0,
-        "total_pairs": 0,
-        "min_score": Value::Null,
-        "max_score": Value::Null,
-        "average_score": Value::Null,
-        "bins": [],
-    })
-}
-
 pub fn score_distribution(
     scored: &[(f64, usize, usize)],
     read_control: &FactReadControl,
-) -> Result<Value, MemoryAnalysisError> {
+) -> Result<MemoryScoreDistributionV1, MemoryAnalysisError> {
     if read_control.interrupted() {
         return Err(MemoryAnalysisError::Interrupted);
     }
     let mut min_seen = f64::INFINITY;
     let mut max_seen = f64::NEG_INFINITY;
     let mut sum = 0.0_f64;
-    let mut total_pairs = 0_i64;
+    let mut total_pairs = 0_u64;
     for (score, _, _) in scored {
         if read_control.interrupted() {
             return Err(MemoryAnalysisError::Interrupted);
@@ -179,19 +218,20 @@ pub fn score_distribution(
 
     let range = max_seen - min_seen;
     if range <= 0.0 {
-        return Ok(json!({
-            "min": min_seen,
-            "max": max_seen,
-            "bin_count": 1,
-            "total_pairs": total_pairs,
-            "min_score": min_seen,
-            "max_score": max_seen,
-            "average_score": sum / total_pairs as f64,
-            "bins": [{ "start": min_seen, "end": max_seen, "count": total_pairs }],
-        }));
+        return Ok(MemoryScoreDistributionV1::observed(
+            min_seen,
+            max_seen,
+            total_pairs,
+            sum,
+            vec![MemoryScoreBinV1 {
+                start: min_seen,
+                end: max_seen,
+                count: total_pairs,
+            }],
+        ));
     }
 
-    let mut counts = vec![0_i64; SIMILARITY_DISTRIBUTION_BINS];
+    let mut counts = vec![0_u64; SIMILARITY_DISTRIBUTION_BINS];
     for (score, _, _) in scored {
         if read_control.interrupted() {
             return Err(MemoryAnalysisError::Interrupted);
@@ -222,28 +262,23 @@ pub fn score_distribution(
             round_bin_edge(min_seen + idx as f64 * width)
         }
     };
-    let bins: Vec<Value> = counts
+    let bins = counts
         .into_iter()
         .enumerate()
-        .map(|(idx, count)| {
-            json!({
-                "start": edge(idx),
-                "end": edge(idx + 1),
-                "count": count,
-            })
+        .map(|(idx, count)| MemoryScoreBinV1 {
+            start: edge(idx),
+            end: edge(idx + 1),
+            count,
         })
         .collect();
 
-    Ok(json!({
-        "min": min_seen,
-        "max": max_seen,
-        "bin_count": SIMILARITY_DISTRIBUTION_BINS,
-        "total_pairs": total_pairs,
-        "min_score": min_seen,
-        "max_score": max_seen,
-        "average_score": sum / total_pairs as f64,
-        "bins": bins,
-    }))
+    Ok(MemoryScoreDistributionV1::observed(
+        min_seen,
+        max_seen,
+        total_pairs,
+        sum,
+        bins,
+    ))
 }
 
 /// One retained similarity pair with its lexical-overlap analysis, computed
@@ -256,9 +291,6 @@ pub struct ScoredPair {
     /// Indices into [`SimilarityComputation::facts`].
     pub a: usize,
     pub b: usize,
-    /// Lexical-overlap payload keys merged into the pair JSON
-    /// (`token_overlap`, `overlap_coefficient`, `shared_tokens`, …).
-    pub overlap: Value,
     pub classification: &'static str,
 }
 
@@ -283,12 +315,11 @@ impl ScoredPair {
             .get("content")
             .and_then(Value::as_str)
             .ok_or(MemoryAnalysisError::MissingFactContent { index: b })?;
-        let (overlap, token_overlap, overlap_coefficient) = lexical_overlap(a_content, b_content);
+        let (_, token_overlap, overlap_coefficient) = lexical_overlap(a_content, b_content);
         Ok(Self {
             similarity,
             a,
             b,
-            overlap,
             classification: similarity_classification(
                 similarity,
                 token_overlap,
@@ -318,7 +349,7 @@ pub struct SimilarityComputation {
     pub total_pairs: i64,
     /// [`score_distribution`] over all scored pairs, precomputed so requests
     /// never re-bin the full pair set.
-    pub distribution: Value,
+    pub distribution: MemoryScoreDistributionV1,
 }
 
 /// Finalizes a similarity computation from the full scored pair set:
@@ -366,6 +397,7 @@ pub fn build_similarity_computation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::sync::Arc;
     use tracedecay_domain::{
         FactId, FactIdentityMaterialV1, FactIdentitySourceV1, FactOwnerV1, ProvenanceId,
@@ -451,23 +483,18 @@ mod tests {
         let scored = vec![(0.75, 0, 1), (0.0, 0, 2), (-0.25, 1, 2)];
         let distribution = score_distribution(&scored, &read_control())
             .expect("distribution must not be interrupted");
-        assert_eq!(distribution["min"], -0.25);
-        assert_eq!(distribution["max"], 0.75);
-        assert_eq!(distribution["bin_count"], 20);
-        let bins = distribution["bins"]
-            .as_array()
-            .unwrap_or_else(|| panic!("expected distribution bins"));
+        assert_eq!(distribution.min_score, Some(-0.25));
+        assert_eq!(distribution.max_score, Some(0.75));
+        assert_eq!(distribution.bin_count, 20);
+        let bins = &distribution.bins;
         assert_eq!(bins.len(), 20);
-        assert_eq!(bins[0]["start"], -0.25);
-        assert_eq!(bins[19]["end"], 0.75);
-        assert_eq!(bins[0]["count"], 1, "min score lands in the first bin");
-        assert_eq!(bins[19]["count"], 1, "max score lands in the last bin");
+        assert_eq!(bins[0].start, -0.25);
+        assert_eq!(bins[19].end, 0.75);
+        assert_eq!(bins[0].count, 1, "min score lands in the first bin");
+        assert_eq!(bins[19].count, 1, "max score lands in the last bin");
         // Bin edges must be clean values, not float-accumulation noise.
         for bin in bins {
-            for key in ["start", "end"] {
-                let edge = bin[key]
-                    .as_f64()
-                    .unwrap_or_else(|| panic!("expected numeric bin edge"));
+            for edge in [bin.start, bin.end] {
                 let rounded = (edge * 1e9).round() / 1e9;
                 assert!(
                     (edge - rounded).abs() < 1e-12,
@@ -482,15 +509,13 @@ mod tests {
         let scored = vec![(0.5, 0, 1), (0.5, 0, 2), (0.5, 1, 2)];
         let distribution = score_distribution(&scored, &read_control())
             .expect("distribution must not be interrupted");
-        assert_eq!(distribution["bin_count"], 1);
-        assert_eq!(distribution["total_pairs"], 3);
-        let bins = distribution["bins"]
-            .as_array()
-            .unwrap_or_else(|| panic!("expected distribution bins"));
+        assert_eq!(distribution.bin_count, 1);
+        assert_eq!(distribution.total_pairs, 3);
+        let bins = &distribution.bins;
         assert_eq!(bins.len(), 1);
-        assert_eq!(bins[0]["start"], 0.5);
-        assert_eq!(bins[0]["end"], 0.5);
-        assert_eq!(bins[0]["count"], 3);
+        assert_eq!(bins[0].start, 0.5);
+        assert_eq!(bins[0].end, 0.5);
+        assert_eq!(bins[0].count, 3);
     }
 
     #[test]
@@ -539,7 +564,7 @@ mod tests {
 
         assert_eq!(computation.pairs.len(), cap);
         assert_eq!(computation.total_pairs, candidate_pairs as i64);
-        assert_eq!(computation.distribution["total_pairs"], candidate_pairs);
+        assert_eq!(computation.distribution.total_pairs, candidate_pairs as u64);
         assert!(
             computation
                 .pairs

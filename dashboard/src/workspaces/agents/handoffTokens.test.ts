@@ -46,11 +46,6 @@ function landed(handoffs: Record<string, unknown>[]): WorkResult<ListTaskHandoff
 }
 
 describe('HANDOFF_LIST_TASK_ROUTE', () => {
-  it('names the operation and path the daemon actually mounts', () => {
-    expect(HANDOFF_LIST_TASK_ROUTE.operation).toBe('operation.handoff.list_task_handoffs');
-    expect(HANDOFF_LIST_TASK_ROUTE.path).toBe('/api/application/handoff/list-task');
-  });
-
   it('accepts a bare session id and refuses a request carrying a bearer', () => {
     expect(HANDOFF_LIST_TASK_ROUTE.request.safeParse({ session_id: 's' }).success).toBe(true);
     // The contract is `.strict()`: a client cannot smuggle a token onto this

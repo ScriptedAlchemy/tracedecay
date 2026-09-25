@@ -23,8 +23,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub(crate) use serde_json::{Value, json};
 pub(crate) use tempfile::tempdir;
 
-pub(crate) use tracedecay::project::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
-pub(crate) use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 pub(crate) use tracedecay_automation_runtime::automation::automatic_facts::{
     AutomaticFactState, list_automatic_fact_receipts, load_automatic_fact_receipt,
     record_session_automatic_facts,
@@ -55,6 +53,9 @@ pub(crate) use tracedecay_automation_runtime::automation::{
 };
 pub(crate) use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{ProjectId, SessionId, TemporalCoverageCountsV1};
+pub(crate) use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
+pub(crate) use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+pub(crate) use tracedecay_runtime_core::tracedecay::current_timestamp;
 pub(crate) use tracedecay_sessions::admission::HostAdmissionScope;
 pub(crate) use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
@@ -439,6 +440,10 @@ impl AgentTaskBackend for JsonBackend {
             output_tokens: Some(20),
         })
     }
+
+    fn executable(&self) -> Option<&std::path::Path> {
+        None
+    }
 }
 
 pub(crate) struct SessionJsonBackend {
@@ -492,6 +497,10 @@ impl AgentTaskBackend for SequentialJsonBackend {
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
+    }
+
+    fn executable(&self) -> Option<&std::path::Path> {
+        None
     }
 }
 
@@ -602,6 +611,10 @@ impl AgentTaskBackend for SkillJsonBackend {
             output_tokens: Some(20),
         })
     }
+
+    fn executable(&self) -> Option<&std::path::Path> {
+        None
+    }
 }
 
 impl SkillTextBackend {
@@ -664,6 +677,10 @@ impl AgentTaskBackend for InspectSkillWriterUsageBackend {
             output_tokens: Some(20),
         })
     }
+
+    fn executable(&self) -> Option<&std::path::Path> {
+        None
+    }
 }
 
 impl AgentTaskBackend for InspectSkillWriterUnderusedBackend {
@@ -713,6 +730,10 @@ impl AgentTaskBackend for InspectSkillWriterUnderusedBackend {
             output_tokens: Some(20),
         })
     }
+
+    fn executable(&self) -> Option<&std::path::Path> {
+        None
+    }
 }
 
 pub(crate) use crate::common::EnvVarGuard;
@@ -747,6 +768,10 @@ impl AgentTaskBackend for FailingBackend {
         assert_eq!(request.task, self.task);
         Err(tracedecay_automation::backend::AgentTaskError::from_backend_message(self.message))
     }
+
+    fn executable(&self) -> Option<&std::path::Path> {
+        None
+    }
 }
 
 impl AgentTaskBackend for SkillTextBackend {
@@ -767,6 +792,10 @@ impl AgentTaskBackend for SkillTextBackend {
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
+    }
+
+    fn executable(&self) -> Option<&std::path::Path> {
+        None
     }
 }
 
@@ -812,6 +841,10 @@ impl AgentTaskBackend for MalformedTextBackend {
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
+    }
+
+    fn executable(&self) -> Option<&std::path::Path> {
+        None
     }
 }
 
@@ -867,6 +900,10 @@ impl AgentTaskBackend for SessionJsonBackend {
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
+    }
+
+    fn executable(&self) -> Option<&std::path::Path> {
+        None
     }
 }
 
@@ -939,6 +976,10 @@ impl AgentTaskBackend for CombinedJsonBackend {
             output_tokens: Some(20),
         })
     }
+
+    fn executable(&self) -> Option<&std::path::Path> {
+        None
+    }
 }
 
 pub(crate) struct InspectSessionEvidenceBackend;
@@ -993,6 +1034,10 @@ impl AgentTaskBackend for InspectSessionEvidenceBackend {
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
+    }
+
+    fn executable(&self) -> Option<&std::path::Path> {
+        None
     }
 }
 
@@ -1067,6 +1112,10 @@ impl AgentTaskBackend for SessionReplayEvidenceBackend {
             output_tokens: Some(20),
         })
     }
+
+    fn executable(&self) -> Option<&std::path::Path> {
+        None
+    }
 }
 
 /// Asserts the skill writer received session-replay evidence (with no
@@ -1125,6 +1174,10 @@ impl AgentTaskBackend for SkillWriterReplayEvidenceBackend {
             input_tokens: Some(10),
             output_tokens: Some(20),
         })
+    }
+
+    fn executable(&self) -> Option<&std::path::Path> {
+        None
     }
 }
 
@@ -1302,6 +1355,7 @@ pub(crate) fn scheduler_record_for(
         backend_attempt_count: 0,
         backend_attempts: Vec::new(),
         fallback_status: None,
+        session_evidence_budget_stage: None,
         report_ref: None,
         artifacts: Vec::new(),
         started_at: (completed_at - 1).to_string(),

@@ -89,7 +89,7 @@ export function ProviderLedgerTable({
         tabIndex={0}
         onMouseLeave={() => onInspect(null)}
       >
-        <table className="w-full min-w-[720px] border-collapse text-2xs" data-provider-ledger>
+        <table className="w-full min-w-[720px] border-collapse text-sm" data-provider-ledger>
           <thead>
             <tr className="border-b border-edge-subtle">
               <Th align="left">provider</Th>
@@ -154,7 +154,7 @@ export function ProviderLedgerTable({
           </tfoot>
         </table>
       </div>
-      <p className="text-3xs leading-relaxed text-text-muted" data-ledger-coverage>
+      <p className="text-sm leading-relaxed text-text-muted" data-ledger-coverage>
         {ledger.usageEvents === 0
           ? 'The total has no denominator: no usage events were observed in this range.'
           : ledger.complete

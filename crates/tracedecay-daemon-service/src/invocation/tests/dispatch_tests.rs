@@ -70,7 +70,7 @@ fn only_explicit_protocol_frames_select_the_invocation_route() {
 async fn lsp_gateway_control_terminates_before_owner_lookup() {
     let service = DaemonInvocationService::default();
     let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
-    let now = current_micros();
+    let now = now_micros();
     let requests = [
         (
             DaemonInvocationRequest::lsp_open(
@@ -232,6 +232,7 @@ fn callable_code_validation_accepts_only_matching_operation_request_pairs() {
                     surface_operation: *operation,
                     request: request(*request_case),
                     page: page.clone(),
+                    resolved_scope: None,
                     observed_at: UtcMicros(30),
                     deadline: deadline.clone(),
                     cancellation: cancellation.clone(),

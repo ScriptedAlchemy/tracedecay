@@ -13,11 +13,10 @@ use tracedecay_domain::{
 };
 use tracedecay_lcm::contracts::LcmRetrievalOutcome;
 use tracedecay_temporal_query::ports::{
-    TemporalCandidateFilterV1, TemporalCandidatePopulationCount, TemporalMessageTypeFilterV1,
-    TemporalSessionScopeFilterV1,
+    TemporalCandidateFilterV1, TemporalMessageTypeFilterV1, TemporalSessionScopeFilterV1,
 };
+use tracedecay_temporal_query::snapshot::TemporalCandidatePopulationCount;
 
-use tracedecay_global_db::WorkflowScopeFilter;
 use tracedecay_lcm::{
     LcmContentSlice, LcmDescribeResponse, LcmDescribeTarget, LcmExpandResponse, LcmExpandTarget,
 };
@@ -25,6 +24,7 @@ use tracedecay_session_memory::session::{
     SessionDataFreshness, SessionRetrievalBudgetAccountingV1, SessionRetrievalBudgetStageV1,
     SessionTemporalQuery,
 };
+use tracedecay_sessions::WorkflowScopeFilter;
 use tracedecay_sessions::runtime::git_correlation::GitScopeFilter;
 use tracedecay_sessions::runtime::{
     SessionMessageSearchResult, SessionMessageType, SessionSearchScope, SessionSearchTimeRange,

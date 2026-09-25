@@ -11,7 +11,6 @@ import {
   type DoctorFindingsPayloadV1,
   type ExecutionTopologyMetricsV1,
   type ObservatoryReadModelV1,
-  type StorageFindingsPayloadV1,
   type StorageTelemetryPayloadV1,
 } from '../../contracts/generated.ts';
 import { doctorFindingsQueryKey, fetchDoctorFindings } from '../../data/query/doctor.ts';
@@ -54,7 +53,7 @@ export interface ObservatoryReads {
   scopeKey: string;
   telemetry: EvidenceRead<StorageTelemetryPayloadV1>;
   freshness: EvidenceRead<CodeIndexFreshnessPayloadV1>;
-  findings: EvidenceRead<StorageFindingsPayloadV1>;
+  findings: EvidenceRead<DoctorFindingsPayloadV1>;
   doctor: EvidenceRead<DoctorFindingsPayloadV1>;
   observatory: EvidenceRead<ObservatoryReadModelV1>;
   diagnostics: EvidenceRead<AnalyticsDiagnosticsPayloadV1>;

@@ -78,7 +78,7 @@ fn collect_segments(path: &Path) -> Vec<ReflogSegment> {
 #[test]
 fn absent_head_reflog_is_a_sealed_single_segment() {
     let fixture = fixture();
-    let repository = gix::discover(fixture.path()).unwrap();
+    let repository = tracedecay_runtime_core::git_open::discover(fixture.path()).unwrap();
     let head = repository.head().unwrap().log_iter();
     let relative = head.store.namespace.as_ref().map_or_else(
         || head.name.to_path().to_owned(),
@@ -118,7 +118,7 @@ fn reverse_reader_accepts_large_record_but_rejects_unbounded_record() {
 #[test]
 fn truncated_reflog_is_permanent_unsupported_framing() {
     let fixture = fixture();
-    let repository = gix::discover(fixture.path()).unwrap();
+    let repository = tracedecay_runtime_core::git_open::discover(fixture.path()).unwrap();
     let head = repository.head().unwrap().log_iter();
     let relative = head.store.namespace.as_ref().map_or_else(
         || head.name.to_path().to_owned(),
@@ -160,7 +160,7 @@ fn sealed_graph_ignores_later_head_drift_and_keeps_nonmonotonic_parent_time() {
     std::fs::write(fixture.path().join("tracked"), "child").unwrap();
     git(fixture.path(), &["add", "tracked"]);
     git_with_dates(fixture.path(), &["commit", "-m", "child"], 100);
-    let repository = gix::discover(fixture.path()).unwrap();
+    let repository = tracedecay_runtime_core::git_open::discover(fixture.path()).unwrap();
     let tip = repository.head_id().unwrap().detach().to_hex().to_string();
     let source = initialize_reflog_cursor(fixture.path(), 250, &control()).unwrap();
     std::fs::write(fixture.path().join("tracked"), "later head").unwrap();
@@ -233,7 +233,7 @@ fn detached_remote_revision_and_short_oid_are_unattributed() {
                 &["update-ref", "refs/remotes/origin/topic", "HEAD"],
             );
         }
-        let repository = gix::discover(fixture.path()).unwrap();
+        let repository = tracedecay_runtime_core::git_open::discover(fixture.path()).unwrap();
         let short = repository.head_id().unwrap().detach().to_hex().to_string()[..8].to_owned();
         let target = if target == "SHORT_OID" {
             short.as_str()
@@ -257,7 +257,7 @@ fn non_utf8_local_ref_is_sealed_without_fabricated_branch_text() {
     use std::os::unix::ffi::OsStrExt as _;
 
     let fixture = fixture();
-    let expected_oid = gix::discover(fixture.path())
+    let expected_oid = tracedecay_runtime_core::git_open::discover(fixture.path())
         .unwrap()
         .head_id()
         .unwrap()

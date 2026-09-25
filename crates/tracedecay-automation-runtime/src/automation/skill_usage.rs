@@ -13,7 +13,6 @@ mod overlap;
 mod recommendations;
 mod store;
 
-pub use crate::ports::session_store::AnalyticsEventRecord;
 pub use analytics::analytics_import_key_for_request;
 pub use analytics::ingest_analytics_events;
 pub use analytics::ingest_project_analytics_events;
@@ -23,8 +22,6 @@ pub use overlap::{
     skill_overlap_candidates,
 };
 pub use recommendations::{skill_improvement_recommendations, stale_skill_recommendations};
-
-const SKILL_USAGE_LEDGER_FILENAME: &str = "skill_usage.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -187,12 +184,6 @@ impl SkillUsageRecord {
             }
         }
     }
-}
-
-pub fn skill_usage_ledger_path(profile_root: &Path) -> PathBuf {
-    profile_root
-        .join("agent_managed")
-        .join(SKILL_USAGE_LEDGER_FILENAME)
 }
 
 pub fn skill_usage_record_path(profile_root: &Path, skill_id: &str) -> PathBuf {
@@ -425,9 +416,8 @@ mod tests {
             after.records["skill-b"].view_count, 1,
             "skill B's last-view must survive skill A's write"
         );
-        assert!(
-            !super::skill_usage_ledger_path(root.path()).exists(),
-            "independent skills must not share skill_usage.json"
-        );
+        for skill in ["skill-a", "skill-b"] {
+            assert!(super::skill_usage_record_path(root.path(), skill).is_file());
+        }
     }
 }

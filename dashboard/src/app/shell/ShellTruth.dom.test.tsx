@@ -401,8 +401,8 @@ describe('shared shell truthfulness', () => {
     render(queryWrapper(<DoctorInspector />));
 
     await waitFor(() => {
-      expect(requested.some((url) => url.includes('/storage/findings'))).toBe(true);
-      expect(requested.some((url) => url.includes('/doctor/findings'))).toBe(true);
+      expect(requested.some((url) => url.endsWith('/doctor/findings?family=storage'))).toBe(true);
+      expect(requested.some((url) => url.endsWith('/doctor/findings'))).toBe(true);
     });
     const unscoped = requested.filter((url) => !url.startsWith('/api/projects/proj-real/'));
     expect(unscoped).toEqual([]);

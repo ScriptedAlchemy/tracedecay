@@ -842,7 +842,7 @@ impl DaemonConfigurationRuntimeRegistrar {
             selection,
         )
         .map_err(tracedecay_configuration::map_profile_worker_configuration_error)?;
-        let observed_at = current_micros();
+        let observed_at = now_micros();
         let authority = registered
             .grants
             .issue_direct(
@@ -931,7 +931,7 @@ impl DaemonConfigurationRuntimeRegistrar {
             }
         })?;
         runtime
-            .record_runtime_activation(Some(current.revision_id().clone()), None, current_micros())
+            .record_runtime_activation(Some(current.revision_id().clone()), None, now_micros())
             .await
             .map_err(|error| TraceDecayError::Config {
                 message: format!("configuration runtime activation could not be recorded: {error}"),

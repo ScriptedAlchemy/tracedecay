@@ -4,9 +4,8 @@ use std::time::Duration;
 
 use tracedecay_contracts::{
     ApplicationContractError, ApplicationOperation, ApplicationProblem, ApplicationProblemKind,
-    AuthorityReceipt, CallableCodeAuthorizationAdmission, CallableCodeAuthorizationFuture,
-    CallableCodeAuthorizationPort, RequestAdmission, RequestContext, ResolvedScope, RetryDirective,
-    SafeDiagnostic,
+    AuthorityReceipt, CallableCodeAuthorizationFuture, CallableCodeAuthorizationPort,
+    RequestAdmission, RequestContext, ResolvedScope, RetryDirective, SafeDiagnostic,
 };
 use tracedecay_domain::{ActorId, ComponentVersion, UtcMicros};
 
@@ -347,22 +346,15 @@ impl CallableCodeAuthorizationPort for DaemonCallableCodeAuthorization {
         context: &'a RequestContext,
         operation: &'a ApplicationOperation,
         observed_at: UtcMicros,
-    ) -> CallableCodeAuthorizationFuture<
-        'a,
-        Result<CallableCodeAuthorizationAdmission, ApplicationProblem>,
-    > {
-        Box::pin(async move {
-            self.route_receipt(context, operation, observed_at)
-                .await
-                .map(CallableCodeAuthorizationAdmission::Routed)
-        })
+    ) -> CallableCodeAuthorizationFuture<'a, Result<AuthorityReceipt, ApplicationProblem>> {
+        Box::pin(self.route_receipt(context, operation, observed_at))
     }
 
     fn recheck_publication<'a>(
         &'a self,
         context: &'a RequestContext,
         operation: &'a ApplicationOperation,
-        admission: &'a CallableCodeAuthorizationAdmission,
+        admission: &'a AuthorityReceipt,
         observed_at: UtcMicros,
     ) -> CallableCodeAuthorizationFuture<'a, Result<AuthorityReceipt, ApplicationProblem>> {
         Box::pin(async move {
@@ -390,12 +382,9 @@ impl DaemonCallableCodeAuthorization {
         &self,
         context: &RequestContext,
         operation: &ApplicationOperation,
-        admission: &CallableCodeAuthorizationAdmission,
+        admission: &AuthorityReceipt,
         observed_at: UtcMicros,
     ) -> Result<AuthorityReceipt, ApplicationProblem> {
-        let CallableCodeAuthorizationAdmission::Routed(admission) = admission else {
-            return Err(concealed());
-        };
         let current = self.route_receipt(context, operation, observed_at).await?;
         if admission.grant_id != current.grant_id
             || admission.grant_revision != current.grant_revision

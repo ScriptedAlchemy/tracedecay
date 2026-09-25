@@ -102,16 +102,8 @@ async fn concurrent_mcp_clients_converge_through_one_project_scheduler() {
     .unwrap();
 
     let (queued1, queued2) = tokio::join!(
-        crate::support::handle_real_server_tool_call(
-            &server1,
-            "tracedecay_admin_sync",
-            json!({"force": true}),
-        ),
-        crate::support::handle_real_server_tool_call(
-            &server2,
-            "tracedecay_admin_sync",
-            json!({"force": true}),
-        ),
+        crate::support::handle_real_server_tool_call(&server1, "tracedecay_admin_sync", json!({})),
+        crate::support::handle_real_server_tool_call(&server2, "tracedecay_admin_sync", json!({})),
     );
     assert_eq!(tool_payload(&queued1)["status"], "queued");
     assert_eq!(tool_payload(&queued2)["status"], "queued");

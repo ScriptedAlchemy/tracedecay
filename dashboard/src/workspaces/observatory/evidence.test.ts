@@ -3,7 +3,7 @@ import type {
   CodeIndexFreshnessPayloadV1,
   DashboardDomainStateV1,
   DashboardEnvelopeV1,
-  StorageFindingsPayloadV1,
+  DoctorFindingsPayloadV1,
   StorageTelemetryPayloadV1,
 } from '../../contracts/generated.ts';
 import {
@@ -248,10 +248,10 @@ describe('summaries', () => {
   });
 
   it('counts real producers as findings coverage and grades a served zero-findings report as empty', () => {
-    const payload: StorageFindingsPayloadV1 = {
+    const payload: DoctorFindingsPayloadV1 = {
       entries: [],
       family_filter: 'storage',
-      kind_statuses: [
+      storage_kind_statuses: [
         { kind: 'over_budget_store', state: 'real', reason: 'measured', observed_entries: 0 },
         { kind: 'orphan_store', state: 'partial', reason: 'one store unreadable', observed_entries: 0 },
       ],

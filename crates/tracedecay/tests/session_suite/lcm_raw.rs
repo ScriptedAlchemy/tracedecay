@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_lcm::{LcmCompressionRequest, LcmSummarizerMode};
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::SessionMessageRecord;
 use tracedecay_sessions::runtime::source::{
@@ -173,16 +173,14 @@ async fn transcript_ingest_preserves_lossless_raw_content() {
     assert_eq!(stats.sessions_upserted, 1);
     assert_eq!(stats.messages_upserted, 1);
 
-    let compatibility = db
+    let stored = db
         .session_message_for_test(HostAdmissionScope::Profile, "fake", "fake-message-1")
         .await
         .unwrap()
-        .expect("compatibility message should exist");
-    assert!(compatibility.text.chars().count() <= tracedecay_lcm::MAX_DERIVED_TEXT_CHARS);
-    assert!(
-        compatibility
-            .text
-            .contains(tracedecay_lcm::DERIVED_TRUNCATION_MARKER)
+        .expect("session message should exist");
+    assert_eq!(
+        stored.text, content,
+        "the session row is the one lossless copy"
     );
 
     let raw = db
@@ -191,8 +189,6 @@ async fn transcript_ingest_preserves_lossless_raw_content() {
         .expect("raw message should exist");
     assert_eq!(raw.content, content);
     assert!(raw.content.ends_with("::lossless-tail"));
-    assert!(!raw.legacy_source);
-    assert!(!raw.legacy_truncated);
 }
 
 #[tokio::test]

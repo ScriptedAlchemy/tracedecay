@@ -29,10 +29,10 @@ hotpath.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
-tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
-tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
-tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
+tracedecay-api = { path = "../tracedecay-api" }
+tracedecay-contracts = { path = "../tracedecay-contracts" }
+tracedecay-domain = { path = "../tracedecay-domain" }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 
 # `build.rs` renders `src/operations.rs` from the canonical registry through
 # `src/codegen.rs`. These mirror the runtime dependencies the descriptors are
@@ -42,8 +42,8 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.
 # `hotpath*` features above forward the selected backend onto (see there).
 hotpath.workspace = true
 serde_json = "1"
-tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
-tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
+tracedecay-contracts = { path = "../tracedecay-contracts" }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 
 [dev-dependencies]
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

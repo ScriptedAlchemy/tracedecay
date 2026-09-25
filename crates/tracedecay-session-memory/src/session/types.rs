@@ -13,9 +13,10 @@ pub use tracedecay_sessions::{
 };
 
 use crate::context::{
-    CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, RequestBudgets,
-    ResolvedSessionIdentity, SessionOwner, session_application_grant_digest,
+    CapabilityDigest, ConfigurationDigest, PolicyDigest, RequestBudgets, ResolvedSessionIdentity,
+    SessionOwner, session_application_grant_digest,
 };
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 /// Typed authority for the already-resolved session store/root.
 ///
@@ -661,10 +662,10 @@ mod tests {
 
     use super::*;
     use crate::context::{
-        BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest,
-        ProfileId, RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId,
-        SessionStoreId,
+        BranchId, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId, RequestBudgets,
+        ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
     };
+    use tracedecay_runtime_core::cancellation::CancellationToken;
 
     const DIGEST: [u8; 32] = [0xa5; 32];
 

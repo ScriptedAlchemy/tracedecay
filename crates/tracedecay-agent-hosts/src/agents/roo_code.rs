@@ -13,9 +13,8 @@ use tracedecay_domain::errors::Result;
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
-    McpDoctorLabels, McpUninstallPolicy, config_backup_path, doctor_check_mcp_registration,
-    install_mcp_server_entry, load_json_file, mcp_servers_registration_state,
-    uninstall_mcp_server_entry,
+    McpDoctorLabels, McpUninstallPolicy, doctor_check_mcp_registration, install_mcp_server_entry,
+    load_json_file, mcp_servers_registration_state, uninstall_mcp_server_entry,
 };
 
 pub struct RooCodeIntegration;
@@ -67,8 +66,7 @@ impl AgentIntegration for RooCodeIntegration {
         home: &Path,
     ) -> Vec<PathBuf> {
         if components == [super::host_bundle::HostComponentV1::ContextMcp] {
-            let path = roo_settings_path(home);
-            vec![path.clone(), config_backup_path(&path)]
+            vec![roo_settings_path(home)]
         } else {
             Vec::new()
         }

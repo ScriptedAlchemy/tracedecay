@@ -4,10 +4,10 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay_runtime_core::path_safety::{plain_git_args, plain_host_path};
 
-use crate::config::PinnedUserDataDir;
 use crate::mcp::server::McpServerConstructionContext;
-use crate::project::TraceDecay;
-use crate::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_project::config::PinnedUserDataDir;
+use tracedecay_project::project::TraceDecay;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 
 pub(super) fn git(root: &Path, args: &[&str]) {
     let output = std::process::Command::new(
@@ -35,7 +35,7 @@ impl WriterTestFixtureAuthority {
         self.runtime
             .open_project_graph_for_test(
                 project_root,
-                crate::project::TraceDecayOpenOptions {
+                tracedecay_project::project::TraceDecayOpenOptions {
                     profile_root: Some(self.runtime.profile_root_for_test().to_path_buf()),
                     global_db_path: None,
                 },

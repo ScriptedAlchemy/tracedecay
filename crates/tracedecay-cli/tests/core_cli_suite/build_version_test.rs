@@ -11,7 +11,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use tracedecay::version::PACKAGE_VERSION;
+use tracedecay_project::version::PACKAGE_VERSION;
 
 /// The version `tracedecay --version` reports, with the `tracedecay ` prefix
 /// clap prints stripped off.

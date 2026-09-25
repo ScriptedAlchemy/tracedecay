@@ -1,11 +1,5 @@
-import {
-  tallied,
-  talliedFactReceipts,
-  type AutomaticFactReceipt,
-  type JobRow,
-  type RunRow,
-  type SkillRow,
-} from '../../data/query/automation.ts';
+import type { AutomaticFactReceipt, AutomationJob, AutomationRunRowV1, ManagedSkill } from '../../contracts/generated.ts';
+import { tallied, talliedFactReceipts } from '../../data/query/automation.ts';
 import { Panel } from '../../ui/instrument.tsx';
 import { Absent, Cell, InspectRow, LedgerTable, ToneWord } from './LedgerTable.tsx';
 import {
@@ -37,14 +31,14 @@ interface InspectProps {
 
 function PartialNotice({ reason }: { reason: string }) {
   return (
-    <p role="status" className="border-b border-edge-subtle px-3 py-1.5 text-2xs leading-relaxed text-text-secondary">
+    <p role="status" className="border-b border-edge-subtle px-3 py-1.5 text-body leading-relaxed text-text-secondary">
       Showing a partial list: {reason}.
     </p>
   );
 }
 
 function EmptyNotice({ children }: { children: string }) {
-  return <p className="px-3 py-3 text-2xs text-text-muted">{children}</p>;
+  return <p className="px-3 py-3 text-body text-text-muted">{children}</p>;
 }
 
 /* ---- user jobs ---------------------------------------------------------- */
@@ -55,10 +49,10 @@ export function UserJobsLedger({
   runs,
   ...inspect
 }: {
-  jobs: readonly JobRow[];
+  jobs: readonly AutomationJob[];
   count: number;
   /** Loaded ledger rows, or null while that read is blocked. */
-  runs: readonly RunRow[] | null;
+  runs: readonly AutomationRunRowV1[] | null;
 } & InspectProps) {
   const reading = tallied(jobs, count, 'jobs');
   return (
@@ -86,8 +80,8 @@ export function UserJobsLedger({
                 onSelect={() => inspect.onSelect(identity)}
                 identity={
                   <span className="flex min-w-0 flex-col gap-0.5">
-                    <span className="truncate text-2xs text-text-primary">{job.name}</span>
-                    <span className="td-value truncate text-3xs text-text-muted">{jobTaskKey(job.id)}</span>
+                    <span className="truncate text-body text-text-primary">{job.name}</span>
+                    <span className="td-value truncate text-xs text-text-muted">{jobTaskKey(job.id)}</span>
                   </span>
                 }
               >
@@ -126,7 +120,7 @@ function Stamp({ stamp }: { stamp: string }) {
 
 /* ---- managed skills ----------------------------------------------------- */
 
-export function SkillsLedger({ skills, count }: { skills: readonly SkillRow[]; count: number }) {
+export function SkillsLedger({ skills, count }: { skills: readonly ManagedSkill[]; count: number }) {
   const reading = tallied(skills, count, 'managed skills');
   return (
     <Panel legend="Skills · managed" elevation="well" bodyClassName="p-0">
@@ -141,10 +135,10 @@ export function SkillsLedger({ skills, count }: { skills: readonly SkillRow[]; c
               <tr key={meta.id} className="border-b border-edge-subtle last:border-b-0" data-testid={`skill-row-${meta.id}`}>
                 <Cell className="py-2">
                   <span className="flex min-w-0 flex-col gap-0.5">
-                    <span className="truncate text-2xs text-text-primary">{meta.title}</span>
-                    <span className="td-value truncate text-3xs text-text-muted">
+                    <span className="truncate text-body text-text-primary">{meta.title}</span>
+                    <span className="td-value truncate text-xs text-text-muted">
                       {meta.id}
-                      {meta.category ? ` · ${meta.category}` : ''}
+                      {` · ${meta.category}`}
                     </span>
                   </span>
                 </Cell>
@@ -152,23 +146,19 @@ export function SkillsLedger({ skills, count }: { skills: readonly SkillRow[]; c
                   <ToneWord tone={skillStateTone(meta.state)} word={meta.state} />
                 </Cell>
                 <Cell>
-                  {meta.provenance ? (
-                    <span className="flex min-w-0 flex-col gap-0.5">
-                      <span className="td-value text-2xs text-text-secondary">{meta.provenance.source.replaceAll('_', ' ')}</span>
-                      <span className="truncate text-3xs text-text-muted">
-                        {meta.provenance.actor}
-                        {meta.provenance.run_id ? ` · ${meta.provenance.run_id}` : ''}
-                      </span>
+                  <span className="flex min-w-0 flex-col gap-0.5">
+                    <span className="td-value text-sm text-text-secondary">{meta.provenance.source.replaceAll('_', ' ')}</span>
+                    <span className="truncate text-sm text-text-muted">
+                      {meta.provenance.actor}
+                      {meta.provenance.run_id ? ` · ${meta.provenance.run_id}` : ''}
                     </span>
-                  ) : (
-                    <Absent>not served</Absent>
-                  )}
+                  </span>
                 </Cell>
                 <Cell>
-                  {meta.targets && meta.targets.length > 0 ? (
-                    <span className="td-value text-3xs text-text-secondary">{meta.targets.join(' · ')}</span>
+                  {meta.targets.length > 0 ? (
+                    <span className="td-value text-xs text-text-secondary">{meta.targets.join(' · ')}</span>
                   ) : (
-                    <Absent>not served</Absent>
+                    <Absent>no install targets</Absent>
                   )}
                 </Cell>
               </tr>
@@ -218,10 +208,10 @@ export function FactOutcomesLedger({
                 onSelect={() => inspect.onSelect(identity)}
                 identity={
                   <span className="flex min-w-0 flex-col gap-0.5">
-                    <span className="td-value text-2xs text-text-primary">
+                    <span className="td-value text-sm text-text-primary">
                       {formatUtc(Math.floor(receipt.recorded_at_micros / 1_000_000))}
                     </span>
-                    <span className="td-value truncate text-3xs text-text-muted">{receipt.apply_id}</span>
+                    <span className="td-value truncate text-xs text-text-muted">{receipt.apply_id}</span>
                   </span>
                 }
               >
@@ -233,17 +223,17 @@ export function FactOutcomesLedger({
                 </Cell>
                 <Cell className="max-w-[28rem]">
                   {content !== undefined ? (
-                    <span className="line-clamp-2 break-words text-2xs text-text-secondary">{content}</span>
+                    <span className="line-clamp-2 break-words text-body text-text-secondary">{content}</span>
                   ) : (
                     <Absent>receipt carries no fact text</Absent>
                   )}
                   {receipt.quarantine_reason ? (
-                    <span className="block truncate text-3xs text-state-error">quarantine: {receipt.quarantine_reason}</span>
+                    <span className="block truncate text-sm text-state-error">quarantine: {receipt.quarantine_reason}</span>
                   ) : null}
                 </Cell>
                 <Cell numeric>
                   {receipt.evidence_hash ? (
-                    <span className="text-3xs">{receipt.evidence_hash.slice(0, 16)}</span>
+                    <span className="text-sm">{receipt.evidence_hash.slice(0, 16)}</span>
                   ) : (
                     <Absent>none</Absent>
                   )}

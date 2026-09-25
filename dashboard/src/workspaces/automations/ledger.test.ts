@@ -3,8 +3,9 @@ import { describe, expect, it } from 'vitest';
 import type {
   AutomationSchedulerStatusV1,
   AutomationTaskStatusV1,
+  AutomationRunLedgerRecord,
+  AutomationRunRowV1,
 } from '../../contracts/generated.ts';
-import type { RunRow } from '../../data/query/automation.ts';
 import {
   dueSummary,
   epochSeconds,
@@ -18,7 +19,6 @@ import {
   latestRunForTask,
   ledgerWindow,
   observedSchedulerActivity,
-  readLastSchedulerRun,
   receiptsByRun,
   runStatusTone,
   runTiming,
@@ -26,7 +26,24 @@ import {
   schedulerReading,
 } from './ledger.ts';
 
-function run(overrides: Partial<RunRow> & { run_id: string }): RunRow {
+function ledgerRecord(
+  overrides: Pick<AutomationRunLedgerRecord, 'run_id' | 'status' | 'started_at' | 'completed_at'>,
+): AutomationRunLedgerRecord {
+  return {
+    schema_version: 2,
+    trigger: 'scheduler',
+    task: 'memory_curator',
+    backend: 'codex_app_server',
+    reviewed_count: 0,
+    accepted_count: 0,
+    rejected_count: 0,
+    skipped_count: 0,
+    backend_attempt_count: 1,
+    ...overrides,
+  };
+}
+
+function run(overrides: Partial<AutomationRunRowV1> & { run_id: string }): AutomationRunRowV1 {
   return {
     task: 'memory_curator',
     task_key: 'memory_curator',
@@ -85,8 +102,6 @@ describe('runTiming', () => {
       kind: 'open',
       startedAt: 1_754_000_000,
     });
-    // An unrecognised status word is not known to be terminal either.
-    expect(runTiming(run({ run_id: 'a', status: 'settling' })).kind).toBe('open');
   });
 
   it('names inverted and unparseable stamps instead of inventing a duration', () => {
@@ -110,7 +125,6 @@ describe('typed tones', () => {
     expect(runStatusTone('skipped').kind).toBe('cancelled');
     expect(runStatusTone('skipped').pattern).toBe('dashed');
     expect(runStatusTone('queued').kind).toBe('loading');
-    expect(runStatusTone('completed').kind).toBe('unknown');
   });
 
   it('never upgrades a non-verified integrity verdict', () => {
@@ -118,7 +132,6 @@ describe('typed tones', () => {
     expect(integrityTone('ledger_publication_mismatch').kind).toBe('error');
     expect(integrityTone('publication_unavailable').kind).toBe('cancelled');
     expect(integrityTone('verification_failed').kind).toBe('partial');
-    expect(integrityTone('probably_fine').kind).toBe('unknown');
   });
 });
 
@@ -152,22 +165,6 @@ describe('schedulerReading', () => {
 });
 
 describe('scheduler task readings', () => {
-  it('distinguishes no last run from an unreadable one', () => {
-    expect(readLastSchedulerRun(null)).toEqual({ kind: 'none' });
-    expect(readLastSchedulerRun(undefined)).toEqual({ kind: 'none' });
-    expect(readLastSchedulerRun({ run_id: 'r' })).toEqual({ kind: 'unreadable' });
-    expect(
-      readLastSchedulerRun({
-        run_id: 'r',
-        status: 'failed',
-        started_at: '1',
-        completed_at: '2',
-        error: 'boom',
-        artifacts: [],
-      }),
-    ).toMatchObject({ kind: 'run', run: { run_id: 'r', status: 'failed' } });
-  });
-
   it('reports the newest readable scheduler completion across tasks', () => {
     const tasks: AutomationTaskStatusV1[] = [
       { task: 'memory_curator', due: false, skip_reason: null, last_scheduler_run: null },
@@ -175,13 +172,13 @@ describe('scheduler task readings', () => {
         task: 'session_reflector',
         due: true,
         skip_reason: null,
-        last_scheduler_run: { run_id: 'old', status: 'succeeded', started_at: '10', completed_at: '20' },
+        last_scheduler_run: ledgerRecord({ run_id: 'old', status: 'succeeded', started_at: '10', completed_at: '20' }),
       },
       {
         task: 'skill_writer',
         due: false,
         skip_reason: 'scheduler_cooldown_active',
-        last_scheduler_run: { run_id: 'new', status: 'failed', started_at: '30', completed_at: '40' },
+        last_scheduler_run: ledgerRecord({ run_id: 'new', status: 'failed', started_at: '30', completed_at: '40' }),
       },
     ];
     expect(observedSchedulerActivity(tasks)).toEqual({
@@ -200,13 +197,13 @@ describe('ledgerWindow', () => {
       run({ run_id: 'a', status: 'succeeded', started_at: '300' }),
       run({ run_id: 'b', status: 'failed', started_at: '200' }),
       run({ run_id: 'c', status: 'running', started_at: '100', completed_at: '' }),
-      run({ run_id: 'd', status: 'weird', started_at: 'x' }),
+      run({ run_id: 'd', status: 'skipped', started_at: 'x' }),
     ];
     const window = ledgerWindow({ complete: false, rows, reason: 'older ledger records were outside this page' });
     expect(window.loaded).toBe(4);
     expect(window.bounded).toBe(true);
     expect(window.boundedReason).toMatch(/outside this page/);
-    expect(window.tally).toEqual({ queued: 0, running: 1, succeeded: 1, failed: 1, skipped: 0, other: 1 });
+    expect(window.tally).toEqual({ queued: 0, running: 1, succeeded: 1, failed: 1, skipped: 1 });
     expect(window.oldestStart).toBe(100);
     expect(window.newestStart).toBe(300);
   });
@@ -226,7 +223,15 @@ describe('exact-identity joins', () => {
       apply_id,
       run_id,
       state,
-      add_fact_request: { content: 'fact' },
+      add_fact_request: {
+        content: 'fact',
+        category: 'general' as const,
+        source_label: null,
+        tags: [],
+        entities: [],
+        trust: null,
+        metadata: {},
+      },
       recorded_at_micros: 1,
     });
     const byRun = receiptsByRun([

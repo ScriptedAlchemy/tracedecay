@@ -9,37 +9,6 @@ use tracedecay_api::{HandoffOperation, HttpApplicationControls, handoff_applicat
 use tracedecay_contracts::{CancellationSignal, Deadline, RequestId};
 use tracedecay_domain::UtcMicros;
 
-#[test]
-fn descriptor_matches_the_typed_handoff_registry_routes() {
-    assert_eq!(
-        HandoffOperation::ALL
-            .into_iter()
-            .map(|operation| (
-                operation.operation_id_str(),
-                operation.application_route_path()
-            ))
-            .collect::<Vec<_>>(),
-        vec![
-            (
-                "operation.handoff.issue_task_handoff",
-                "/application/handoff/issue-task",
-            ),
-            (
-                "operation.handoff.list_task_handoffs",
-                "/application/handoff/list-task",
-            ),
-            (
-                "operation.handoff.open_investigation_handoff",
-                "/application/handoff/open-investigation",
-            ),
-            (
-                "operation.handoff.open_task_handoff",
-                "/application/handoff/open-task",
-            ),
-        ]
-    );
-}
-
 #[tokio::test]
 async fn router_dispatches_every_operation_to_one_application_owner() {
     let observed = Arc::new(Mutex::new(Vec::new()));

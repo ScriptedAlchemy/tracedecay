@@ -2,7 +2,6 @@
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_capture::cursor::{
     cursor_observation_identity, cursor_projected_message_id,
     normalize_cursor_observation_with_message_id,
@@ -15,12 +14,13 @@ use tracedecay_domain::{
     RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
     SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
 };
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::observation::ObservationIdentityCollisionDispositionV1;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationStore, ObservationStoreError,
     ObservationWrite, build_observation_resolution_authorization_v1,
-    build_observation_retrieval_anchor_v2,
+    build_observation_retrieval_anchor,
 };
 
 fn receipt(receipt_id: &str, payload: &Value) -> SanitizationReceiptV1 {
@@ -97,7 +97,7 @@ fn anchored_write(
         ProjectionGenerationId::new("projection.cursor-identity-fallback.v1").unwrap();
     let authorization =
         build_observation_resolution_authorization_v1(write.observation(), "cursor").unwrap();
-    let anchor = build_observation_retrieval_anchor_v2(
+    let anchor = build_observation_retrieval_anchor(
         write.observation(),
         projection_generation.clone(),
         UtcMicros(1),

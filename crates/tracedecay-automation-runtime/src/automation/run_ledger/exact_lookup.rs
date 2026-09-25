@@ -5,6 +5,7 @@ use std::path::Path;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
 use tracedecay_domain::ManifestDigest;
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 
@@ -61,6 +62,7 @@ const RECORD_KEYS: &[&str] = &[
     "rejected_count",
     "skipped_count",
     "error",
+    "session_evidence_budget_stage",
     "error_classification",
     "error_retryable",
     "backend_attempt_count",
@@ -96,8 +98,8 @@ pub(super) struct RunLedgerRowProjection {
     pub(super) trigger: AutomationTrigger,
     pub(super) task: AgentTaskKind,
     pub(super) task_key: Option<String>,
-    /// True when the row's `error` field is an exact or stage-specific
-    /// session-evidence budget-exhausted label. The projection compares while
+    /// True when the row's `error` field is exactly the session-evidence
+    /// budget-exhausted token. The projection compares while
     /// streaming instead of capturing the field: failed runs carry
     /// arbitrarily long backend error messages that must not be bounded or
     /// allocated here.
@@ -1029,6 +1031,7 @@ struct RecordFields {
     rejected_count: bool,
     skipped_count: bool,
     error: bool,
+    session_evidence_budget_stage: bool,
     error_classification: bool,
     error_retryable: bool,
     backend_attempt_count: bool,
@@ -1068,6 +1071,7 @@ impl RecordFields {
             "rejected_count" => &mut self.rejected_count,
             "skipped_count" => &mut self.skipped_count,
             "error" => &mut self.error,
+            "session_evidence_budget_stage" => &mut self.session_evidence_budget_stage,
             "error_classification" => &mut self.error_classification,
             "error_retryable" => &mut self.error_retryable,
             "backend_attempt_count" => &mut self.backend_attempt_count,
@@ -1150,36 +1154,15 @@ struct ArtifactFields {
     created_at: bool,
 }
 
-#[derive(Clone, Copy)]
-enum StringMatchMode {
-    Exact,
-    ExactOrUnderscoreSuffix,
-}
-
-fn compare_decoded_bytes_with_match_mode(
+fn compare_decoded_bytes(
     expected: &[u8],
     compared: &mut usize,
     matches: &mut bool,
     decoded: &[u8],
-    mode: StringMatchMode,
 ) {
-    if *matches && *compared < expected.len() {
-        let end = compared.saturating_add(decoded.len());
-        let matched_len = expected.len().saturating_sub(*compared).min(decoded.len());
-        *matches = expected.get(*compared..(*compared + matched_len)) == decoded.get(..matched_len);
-        if *matches && end > expected.len() {
-            *matches = match mode {
-                StringMatchMode::Exact => false,
-                StringMatchMode::ExactOrUnderscoreSuffix => decoded.get(matched_len) == Some(&b'_'),
-            };
-        }
-    } else if *matches && *compared == expected.len() && !decoded.is_empty() {
-        *matches = match mode {
-            StringMatchMode::Exact => false,
-            StringMatchMode::ExactOrUnderscoreSuffix => decoded.first() == Some(&b'_'),
-        };
-    }
-    *compared = compared.saturating_add(decoded.len());
+    let end = compared.saturating_add(decoded.len());
+    *matches = *matches && expected.get(*compared..end) == Some(decoded);
+    *compared = end;
 }
 
 impl ArtifactFields {
@@ -1320,7 +1303,7 @@ impl<'a> JsonRangeReader<'a> {
                         self.skip_literal(b"null")?;
                         false
                     } else {
-                        self.read_string_equals_or_has_underscore_suffix(
+                        self.read_string_equals(
                             tracedecay_automation::evidence_budget::SESSION_EVIDENCE_BUDGET_EXHAUSTED,
                         )?
                     };
@@ -1433,6 +1416,8 @@ impl<'a> JsonRangeReader<'a> {
                     "automation failure classification",
                     parse_failure_class,
                 ),
+                "session_evidence_budget_stage" => reader
+                    .validate_optional_enum("session evidence budget stage", parse_budget_stage),
                 "backend_attempts" => reader.validate_retry_attempts(2),
                 "artifacts" => reader.validate_artifacts(2),
                 "completed_at_micros" => reader.validate_optional_i64("completion timestamp"),
@@ -2007,14 +1992,6 @@ impl<'a> JsonRangeReader<'a> {
     }
 
     fn read_string_equals(&mut self, expected: &str) -> Result<bool> {
-        self.read_string_matches(expected, StringMatchMode::Exact)
-    }
-
-    fn read_string_equals_or_has_underscore_suffix(&mut self, expected: &str) -> Result<bool> {
-        self.read_string_matches(expected, StringMatchMode::ExactOrUnderscoreSuffix)
-    }
-
-    fn read_string_matches(&mut self, expected: &str, mode: StringMatchMode) -> Result<bool> {
         self.expect_byte(b'"', "expected JSON string")?;
         let expected = expected.as_bytes();
         let mut compared = 0_usize;
@@ -2025,10 +2002,7 @@ impl<'a> JsonRangeReader<'a> {
                 .ok_or_else(|| config_error("unexpected EOF in JSON string"))?;
             match byte {
                 b'"' => {
-                    return Ok(matches
-                        && compared >= expected.len()
-                        && (!matches!(mode, StringMatchMode::Exact)
-                            || compared == expected.len()));
+                    return Ok(matches && compared == expected.len());
                 }
                 b'\\' => {
                     let escaped = self
@@ -2036,67 +2010,35 @@ impl<'a> JsonRangeReader<'a> {
                         .ok_or_else(|| config_error("unexpected EOF in JSON escape"))?;
                     match escaped {
                         b'"' | b'\\' | b'/' => {
-                            compare_decoded_bytes_with_match_mode(
+                            compare_decoded_bytes(
                                 expected,
                                 &mut compared,
                                 &mut matches,
                                 &[escaped],
-                                mode,
                             );
                         }
-                        b'b' => compare_decoded_bytes_with_match_mode(
-                            expected,
-                            &mut compared,
-                            &mut matches,
-                            &[8],
-                            mode,
-                        ),
+                        b'b' => compare_decoded_bytes(expected, &mut compared, &mut matches, &[8]),
                         b'f' => {
-                            compare_decoded_bytes_with_match_mode(
-                                expected,
-                                &mut compared,
-                                &mut matches,
-                                &[12],
-                                mode,
-                            );
+                            compare_decoded_bytes(expected, &mut compared, &mut matches, &[12]);
                         }
                         b'n' => {
-                            compare_decoded_bytes_with_match_mode(
-                                expected,
-                                &mut compared,
-                                &mut matches,
-                                b"\n",
-                                mode,
-                            );
+                            compare_decoded_bytes(expected, &mut compared, &mut matches, b"\n");
                         }
                         b'r' => {
-                            compare_decoded_bytes_with_match_mode(
-                                expected,
-                                &mut compared,
-                                &mut matches,
-                                b"\r",
-                                mode,
-                            );
+                            compare_decoded_bytes(expected, &mut compared, &mut matches, b"\r");
                         }
                         b't' => {
-                            compare_decoded_bytes_with_match_mode(
-                                expected,
-                                &mut compared,
-                                &mut matches,
-                                b"\t",
-                                mode,
-                            );
+                            compare_decoded_bytes(expected, &mut compared, &mut matches, b"\t");
                         }
                         b'u' => {
                             let scalar = self.read_unicode_escape()?;
                             let mut encoded = [0_u8; 4];
                             let encoded = scalar.encode_utf8(&mut encoded);
-                            compare_decoded_bytes_with_match_mode(
+                            compare_decoded_bytes(
                                 expected,
                                 &mut compared,
                                 &mut matches,
                                 encoded.as_bytes(),
-                                mode,
                             );
                         }
                         _ => return self.fail("invalid JSON string escape"),
@@ -2104,24 +2046,17 @@ impl<'a> JsonRangeReader<'a> {
                 }
                 0x00..=0x1f => return self.fail("unescaped control byte in JSON string"),
                 0x20..=0x7f => {
-                    compare_decoded_bytes_with_match_mode(
-                        expected,
-                        &mut compared,
-                        &mut matches,
-                        &[byte],
-                        mode,
-                    );
+                    compare_decoded_bytes(expected, &mut compared, &mut matches, &[byte]);
                 }
                 _ => {
                     let scalar = self.read_utf8_scalar(byte)?;
                     let mut encoded = [0_u8; 4];
                     let encoded = scalar.encode_utf8(&mut encoded);
-                    compare_decoded_bytes_with_match_mode(
+                    compare_decoded_bytes(
                         expected,
                         &mut compared,
                         &mut matches,
                         encoded.as_bytes(),
-                        mode,
                     );
                 }
             }
@@ -2433,6 +2368,13 @@ fn parse_task(value: &str) -> Option<AgentTaskKind> {
     }
 }
 
+fn parse_budget_stage(value: &str) -> Option<SessionRetrievalBudgetStageV1> {
+    serde::Deserialize::deserialize(
+        serde::de::value::StrDeserializer::<serde::de::value::Error>::new(value),
+    )
+    .ok()
+}
+
 fn parse_failure_class(value: &str) -> Option<()> {
     matches!(
         value,
@@ -2522,18 +2464,14 @@ mod tests {
     }
 
     #[test]
-    fn reads_legacy_row_without_fabricating_completion_precision() {
+    fn rejects_schema_v1_rfc3339_row() {
         let line = "{\"schema_version\":1,\"run_id\":\"target\",\"trigger\":\"manual_cli\",\
                     \"task\":\"memory_curator\",\"backend\":\"codex_app_server\",\"status\":\"succeeded\",\
                     \"accepted_count\":0,\"rejected_count\":0,\"started_at\":\"1970-01-01T00:00:01Z\",\
                     \"completed_at\":\"1970-01-01T00:00:02Z\"}";
         let (_temp, path) = write_ledger(&[line.to_owned()]);
 
-        let record = read_exact_run_record_bounded(&path, "target")
-            .expect("bounded read")
-            .expect("legacy record");
-
-        assert_eq!(record.completed_at_micros, None);
+        assert!(read_exact_run_record_bounded(&path, "target").is_err());
     }
 
     #[test]

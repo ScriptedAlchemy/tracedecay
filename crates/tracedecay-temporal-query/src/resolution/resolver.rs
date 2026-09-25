@@ -5,7 +5,8 @@ use tracedecay_domain::{
     TemporalAssertionKindV1, TemporalModeV1, TemporalValidityV1,
 };
 
-use super::super::ports::{ExecutionControl, TemporalPortError};
+use super::super::execution::ExecutionControl;
+use super::super::ports::TemporalPortError;
 use super::types::{
     ResolutionAssertion, ResolutionCheckpoint, ResolutionLineageEdge, ResolutionLineageEdgeKind,
     ResolutionOccurrence, ResolvedOccurrence, TemporalResolution,

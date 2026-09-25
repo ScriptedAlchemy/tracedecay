@@ -17,7 +17,6 @@ use crate::lease::{
 };
 use crate::limits::{
     MAX_NATIVE_GENERATION_STAGE_LIVE_BYTES, MAX_NATIVE_GENERATION_STAGE_MUTATIONS,
-    MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES, MAX_VERIFIED_GENERATION_BATCH_MUTATIONS,
 };
 use crate::projection::graph_properties_live_bytes;
 use crate::recovery::{
@@ -187,7 +186,6 @@ struct GenerationStagePlan<'a> {
     expected: &'a GraphRecoveredGenerationDigestV1,
     context: &'a GenerationStageContext,
     pages: &'a [GenerationStagePage],
-    adopt_legacy_partial: bool,
     restaging_sealed_only: bool,
 }
 
@@ -630,13 +628,6 @@ impl GraphDb {
         let pages = generation_stage_pages(&manifest)?;
         context.replay_every_page = self
             .generation_stage_release_interrupted(&identity, expected, &context, &pages, check)?;
-        let adopt_legacy_partial = self.has_exact_legacy_stage_prefix(
-            &manifest,
-            &identity,
-            expected,
-            &context,
-            pages.first(),
-        )?;
         #[cfg(feature = "hotpath")]
         {
             let generation_bytes = pages.iter().map(GenerationStagePage::live_bytes).sum();
@@ -651,7 +642,6 @@ impl GraphDb {
             expected,
             context: &context,
             pages: &pages,
-            adopt_legacy_partial,
             restaging_sealed_only,
         };
         match Arc::try_unwrap(manifest) {
@@ -783,7 +773,6 @@ impl GraphDb {
             expected,
             context,
             pages,
-            adopt_legacy_partial,
             restaging_sealed_only,
         } = plan;
         let mut prepared_next = None;
@@ -791,13 +780,7 @@ impl GraphDb {
             check()?;
             let first_page_blocked = !restaging_sealed_only
                 && index == 0
-                && self.generation_stage_first_page_blocked_without_legacy(
-                    identity,
-                    expected,
-                    context,
-                    page,
-                    adopt_legacy_partial,
-                )?;
+                && self.generation_stage_first_page_blocked(identity, expected, context, page)?;
             let current = if first_page_blocked {
                 None
             } else {
@@ -838,7 +821,6 @@ impl GraphDb {
                     context,
                     index.checked_sub(1).and_then(|prior| pages.get(prior)),
                     page,
-                    adopt_legacy_partial && index == 0,
                     current,
                     check,
                 )?;
@@ -877,7 +859,6 @@ impl GraphDb {
             expected,
             context,
             pages,
-            adopt_legacy_partial,
             restaging_sealed_only,
         } = plan;
         let mut rows = OwnedGenerationStageRows::new(entities, relations);
@@ -885,13 +866,7 @@ impl GraphDb {
             return rows.finish();
         };
         let first_page_blocked = !restaging_sealed_only
-            && self.generation_stage_first_page_blocked_without_legacy(
-                identity,
-                expected,
-                context,
-                first_page,
-                adopt_legacy_partial,
-            )?;
+            && self.generation_stage_first_page_blocked(identity, expected, context, first_page)?;
         let first_rows = rows.take_page(first_page)?;
         let mut current = if first_page_blocked
             || self
@@ -954,7 +929,6 @@ impl GraphDb {
                     context,
                     index.checked_sub(1).and_then(|prior| pages.get(prior)),
                     page,
-                    adopt_legacy_partial && index == 0,
                     current.take(),
                     check,
                 )?;
@@ -986,24 +960,24 @@ impl GraphDb {
         construct_generation_stage_page(manifest, identity, context, page, check).map(Some)
     }
 
-    fn generation_stage_first_page_blocked_without_legacy(
+    fn generation_stage_first_page_blocked(
         &self,
         identity: &GraphGenerationManifestIdentity,
         expected: &GraphRecoveredGenerationDigestV1,
         context: &GenerationStageContext,
         page: &GenerationStagePage,
-        adopt_legacy_partial: bool,
     ) -> Result<bool, GraphDbError> {
         let guard = self.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        let Some(existing) = latest_projection(
+        if latest_projection(
             database,
             &context.physical_namespace,
             &identity.projection.projection,
         )?
-        else {
+        .is_none()
+        {
             return Ok(false);
-        };
+        }
         // A durable receipt that binds this exact identity, recovered digest
         // and page says the leftover projection commit is this generation's
         // own: the rows behind it were released after its sealed artifact
@@ -1012,14 +986,9 @@ impl GraphDb {
         // same conclusion inside the batch (`reuse_receipt`), so the
         // pre-flight decision has to agree with it or the page it refuses to
         // prepare is a page the batch then demands.
-        if Self::generation_stage_page_receipt_binds(database, identity, expected, context, page)? {
-            return Ok(false);
-        }
-        let exact_incomplete_legacy = adopt_legacy_partial
-            && existing.commit.source_generation == identity.source_generation
-            && existing.commit.watermark == identity.watermark
-            && existing.commit.generation_dependency_digest.is_none();
-        Ok(!exact_incomplete_legacy)
+        Ok(!Self::generation_stage_page_receipt_binds(
+            database, identity, expected, context, page,
+        )?)
     }
 
     /// Whether a durable receipt for `page` already binds this exact manifest
@@ -1083,33 +1052,6 @@ impl GraphDb {
         })
     }
 
-    #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "graph_db.generation.page_apply", impl_type = "GraphDb")]
-    fn apply_generation_stage_page_with_context(
-        &self,
-        manifest: &GraphGenerationManifest,
-        identity: &GraphGenerationManifestIdentity,
-        expected: &GraphRecoveredGenerationDigestV1,
-        context: &GenerationStageContext,
-        predecessor: Option<&GenerationStagePage>,
-        page: &GenerationStagePage,
-        adopt_legacy_partial: bool,
-        check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<GraphCommit, GraphDbError> {
-        self.apply_prepared_generation_stage_page(
-            Some(manifest),
-            identity,
-            expected,
-            context,
-            predecessor,
-            page,
-            adopt_legacy_partial,
-            None,
-            check,
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
     #[hotpath::measure(
         label = "graph_db.generation.page_apply_prepared",
@@ -1123,7 +1065,6 @@ impl GraphDb {
         context: &GenerationStageContext,
         predecessor: Option<&GenerationStagePage>,
         page: &GenerationStagePage,
-        adopt_legacy_partial: bool,
         prepared: Option<PreparedGenerationStagePage>,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphCommit, GraphDbError> {
@@ -1185,26 +1126,19 @@ impl GraphDb {
                             "graph generation stage predecessor rows are absent",
                         ));
                     }
-                } else if let Some(existing) = latest_projection(
-                    database,
-                    &context.physical_namespace,
-                    &identity.projection.projection,
-                )? && !reuse_receipt
+                } else if !reuse_receipt
+                    && latest_projection(
+                        database,
+                        &context.physical_namespace,
+                        &identity.projection.projection,
+                    )?
+                    .is_some()
                 {
-                    // A finalized generation always carries its dependency
-                    // digest. Only an exact unfinished legacy stage may let
-                    // the wider first page replace its old prefix.
-                    let exact_incomplete_legacy = adopt_legacy_partial
-                        && existing.commit.source_generation == identity.source_generation
-                        && existing.commit.watermark == identity.watermark
-                        && existing.commit.generation_dependency_digest.is_none();
-                    if !exact_incomplete_legacy {
-                        return Err(self.sealed_write_refusal(&context.locator).unwrap_or(
-                            GraphDbError::conflict(
-                                "generation_runtime.apply_generation_stage_page_with_context",
-                            ),
-                        ));
-                    }
+                    return Err(self.sealed_write_refusal(&context.locator).unwrap_or(
+                        GraphDbError::conflict(
+                            "generation_runtime.apply_generation_stage_page_with_context",
+                        ),
+                    ));
                 }
                 let (batch, endpoint_namespaces, digest) = match prepared {
                     Some(prepared) => (
@@ -1244,49 +1178,6 @@ impl GraphDb {
             },
             |_database, commit, ()| Ok(commit),
         )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn has_exact_legacy_stage_prefix(
-        &self,
-        manifest: &GraphGenerationManifest,
-        identity: &GraphGenerationManifestIdentity,
-        expected: &GraphRecoveredGenerationDigestV1,
-        context: &GenerationStageContext,
-        native_first: Option<&GenerationStagePage>,
-    ) -> Result<bool, GraphDbError> {
-        let legacy_first = first_generation_stage_page_with_limits(
-            manifest,
-            MAX_VERIFIED_GENERATION_BATCH_MUTATIONS,
-            MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES,
-        )?;
-        let Some(legacy_first) = legacy_first.as_ref() else {
-            return Ok(false);
-        };
-        if native_first == Some(legacy_first) {
-            return Ok(false);
-        }
-        // The legacy receipt binds the exact manifest identity, recovered
-        // digest, page range, and live-byte count. Its presence is the durable
-        // proof that replacing the obsolete prefix does not adopt foreign rows.
-        let (legacy_key, legacy_input) =
-            generation_stage_page_receipt(identity, expected, legacy_first)?;
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        let Some(existing) =
-            crate::state::publication(database, &context.physical_namespace, &legacy_key)?
-        else {
-            return Ok(false);
-        };
-        if existing.input_digest != legacy_input
-            || existing.commit.source_generation != identity.source_generation
-            || existing.commit.watermark != identity.watermark
-        {
-            return Err(GraphDbError::conflict(
-                "generation_runtime.has_exact_legacy_stage_prefix",
-            ));
-        }
-        Ok(true)
     }
 
     /// Binds the dependency metadata in one empty batch, after every page
@@ -2526,40 +2417,6 @@ fn generation_stage_pages_with_limits(
         maximum_live_bytes,
     )?;
     Ok(pages)
-}
-
-fn first_generation_stage_page_with_limits(
-    manifest: &GraphGenerationManifest,
-    maximum_mutations: usize,
-    maximum_live_bytes: usize,
-) -> Result<Option<GenerationStagePage>, GraphDbError> {
-    let mut pages = Vec::with_capacity(2);
-    if manifest.entities.is_empty() {
-        append_generation_stage_pages_with_limits(
-            &mut pages,
-            GenerationStagePageKind::Relations,
-            manifest
-                .relations
-                .len()
-                .min(maximum_mutations.saturating_add(1)),
-            |index| generation_relation_live_bytes(&manifest.relations[index]),
-            maximum_mutations,
-            maximum_live_bytes,
-        )?;
-    } else {
-        append_generation_stage_pages_with_limits(
-            &mut pages,
-            GenerationStagePageKind::Entities,
-            manifest
-                .entities
-                .len()
-                .min(maximum_mutations.saturating_add(1)),
-            |index| generation_entity_live_bytes(&manifest.entities[index]),
-            maximum_mutations,
-            maximum_live_bytes,
-        )?;
-    }
-    Ok(pages.into_iter().next())
 }
 
 fn generation_entity_live_bytes(entity: &crate::GraphEntity) -> Result<usize, GraphDbError> {
@@ -3884,7 +3741,6 @@ mod tests {
                     expected: &sealed,
                     context: &context,
                     pages: &pages,
-                    adopt_legacy_partial: false,
                     restaging_sealed_only: false,
                 },
                 &|| Ok(()),
@@ -4022,115 +3878,6 @@ mod tests {
             "partial resume, boundary yield, and re-seat must perform one reopen"
         );
         second_owner.close().unwrap();
-    }
-
-    #[test]
-    fn wider_native_stage_adopts_an_exact_legacy_partial_receipt() {
-        let mut manifest = large_manifest("legacy-page-resume");
-        manifest.entities.extend((5_000..9_000).map(|index| {
-            GraphEntity::new(
-                GraphEntityId::new(format!("entity:{index:05}")).unwrap(),
-                BTreeSet::new(),
-                BTreeMap::new(),
-            )
-            .unwrap()
-        }));
-        let sealed = sealed_digest(&manifest);
-        let temp = TempDir::new().unwrap();
-        let (owner, database) = persistent_database(&temp);
-        let legacy_pages = super::generation_stage_pages_with_limits(
-            &manifest,
-            MAX_VERIFIED_GENERATION_BATCH_MUTATIONS,
-            crate::MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES,
-        )
-        .unwrap();
-        assert_eq!(legacy_pages.len(), 3);
-        assert_eq!(legacy_pages[0].range, 0..4_096);
-        assert_eq!(legacy_pages[1].range, 4_096..8_192);
-        assert_eq!(
-            super::first_generation_stage_page_with_limits(
-                &manifest,
-                MAX_VERIFIED_GENERATION_BATCH_MUTATIONS,
-                crate::MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES,
-            )
-            .unwrap(),
-            Some(legacy_pages[0].clone()),
-            "the bounded compatibility probe must reproduce the legacy first receipt"
-        );
-        let context = super::GenerationStageContext {
-            locator: GenerationLocator::new(
-                manifest.projection.clone(),
-                manifest.generation.clone(),
-            ),
-            physical_namespace: manifest.identity().physical_namespace().unwrap(),
-            dependency_namespaces: database
-                .require_exact_dependencies(&manifest.identity())
-                .unwrap(),
-            dependency_digest: manifest.dependency_closure_digest(&|| Ok(())).unwrap(),
-            replay_every_page: false,
-        };
-        for (index, legacy_page) in legacy_pages.iter().take(2).enumerate() {
-            database
-                .apply_generation_stage_page_with_context(
-                    &manifest,
-                    &manifest.identity(),
-                    &sealed,
-                    &context,
-                    index
-                        .checked_sub(1)
-                        .and_then(|prior| legacy_pages.get(prior)),
-                    legacy_page,
-                    false,
-                    &|| Ok(()),
-                )
-                .unwrap();
-        }
-
-        let mut divergent = manifest.clone();
-        divergent.source_generation = SourceGeneration::new("source-divergent").unwrap();
-        let divergent_sealed = sealed_digest(&divergent);
-        reset_batch_canonicalizations();
-        assert!(
-            matches!(
-                database.apply_generation_unverified_with_digest_observed(
-                    arc_manifest(&divergent),
-                    &divergent_sealed,
-                    &|| Ok(())
-                ),
-                Err(GraphDbError::Conflict { .. })
-            ),
-            "a legacy prefix may be replaced only by its exact source authority"
-        );
-        assert_eq!(
-            batch_canonicalizations(),
-            0,
-            "a divergent legacy migration must fail before writing"
-        );
-
-        reset_batch_canonicalizations();
-        let outcome = database
-            .apply_generation_unverified_with_digest_observed(
-                arc_manifest(&manifest),
-                &sealed,
-                &|| Ok(()),
-            )
-            .expect("an exact legacy partial stage must migrate to the wider page layout");
-        assert!(matches!(outcome, GenerationStageOutcome::Applied(_)));
-        assert_eq!(
-            batch_canonicalizations(),
-            2,
-            "migration must write one wide data page and one final metadata bind"
-        );
-        let (_, recovered) = database
-            .reopen_and_verify_existing_generation(
-                &manifest.identity(),
-                &sealed,
-                manifest.row_counts(),
-                &|| Ok(()),
-            )
-            .unwrap();
-        assert_eq!(recovered, sealed);
-        owner.close().unwrap();
     }
 
     #[test]

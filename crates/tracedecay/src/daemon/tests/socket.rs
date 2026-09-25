@@ -18,6 +18,9 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 const HALF_CLOSE_ROUND_TRIP_BOUND: std::time::Duration = std::time::Duration::from_secs(20);
 
 #[cfg(unix)]
+const LSP_TEST_TOKEN: &str = "lsp-test-token";
+
+#[cfg(unix)]
 fn future_lsp_deadline(after: std::time::Duration) -> tracedecay_contracts::Deadline {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -59,10 +62,10 @@ fn lsp_test_invocation(
         client_instance_id: client_instance_id.to_owned(),
         tool_list_changed_capable: false,
         catalog_version: String::new(),
-        moved_store_adoption: crate::project::MovedStoreAdoption::Never,
+        moved_store_adoption: tracedecay_project::project::MovedStoreAdoption::Never,
     };
     tracedecay_daemon_protocol::DaemonInvocationClient::new(
-        tracedecay_daemon_protocol::DaemonConnection::new(endpoint, None),
+        tracedecay_daemon_protocol::DaemonConnection::new(endpoint, LSP_TEST_TOKEN.to_owned()),
         handshake,
     )
 }
@@ -157,11 +160,7 @@ async fn dropping_lsp_client_closes_transport_without_spawning_detach() {
         let stream = listener.accept().await.expect("accept client");
         let (reader, mut writer) = stream.into_split();
         let mut lines = tokio::io::BufReader::new(reader).lines();
-        lines
-            .next_line()
-            .await
-            .expect("read handshake")
-            .expect("handshake");
+        super::read_authenticated_handshake(&mut lines, LSP_TEST_TOKEN).await;
         let open: Value = serde_json::from_str(
             &lines
                 .next_line()
@@ -230,11 +229,7 @@ async fn lsp_gateway_open_carries_control_and_returns_typed_deadline() {
         let stream = listener.accept().await.expect("accept client");
         let (reader, _writer) = stream.into_split();
         let mut lines = tokio::io::BufReader::new(reader).lines();
-        lines
-            .next_line()
-            .await
-            .expect("read handshake")
-            .expect("handshake");
+        super::read_authenticated_handshake(&mut lines, LSP_TEST_TOKEN).await;
         let open: Value = serde_json::from_str(
             &lines
                 .next_line()
@@ -286,11 +281,7 @@ async fn lsp_gateway_open_returns_typed_cancellation() {
         let stream = listener.accept().await.expect("accept client");
         let (reader, _writer) = stream.into_split();
         let mut lines = tokio::io::BufReader::new(reader).lines();
-        lines
-            .next_line()
-            .await
-            .expect("read handshake")
-            .expect("handshake");
+        super::read_authenticated_handshake(&mut lines, LSP_TEST_TOKEN).await;
         lines
             .next_line()
             .await
@@ -342,11 +333,7 @@ async fn lsp_gateway_open_returns_typed_unavailable_when_daemon_disconnects() {
         let stream = listener.accept().await.expect("accept client");
         let (reader, _writer) = stream.into_split();
         let mut lines = tokio::io::BufReader::new(reader).lines();
-        lines
-            .next_line()
-            .await
-            .expect("read handshake")
-            .expect("handshake");
+        super::read_authenticated_handshake(&mut lines, LSP_TEST_TOKEN).await;
         lines
             .next_line()
             .await
@@ -390,11 +377,7 @@ async fn stdio_bridge_session_reconnects_on_a_fresh_socket_and_resumes_frames() 
         let first = listener.accept().await.expect("accept first connection");
         let (reader, mut writer) = first.into_split();
         let mut lines = tokio::io::BufReader::new(reader).lines();
-        lines
-            .next_line()
-            .await
-            .expect("read first handshake")
-            .expect("first handshake");
+        super::read_authenticated_handshake(&mut lines, LSP_TEST_TOKEN).await;
         let open: Value = serde_json::from_str(
             &lines
                 .next_line()
@@ -437,11 +420,7 @@ async fn stdio_bridge_session_reconnects_on_a_fresh_socket_and_resumes_frames() 
         let second = listener.accept().await.expect("accept fresh connection");
         let (reader, mut writer) = second.into_split();
         let mut lines = tokio::io::BufReader::new(reader).lines();
-        lines
-            .next_line()
-            .await
-            .expect("read second handshake")
-            .expect("second handshake");
+        super::read_authenticated_handshake(&mut lines, LSP_TEST_TOKEN).await;
         let reconnect: Value = serde_json::from_str(
             &lines
                 .next_line()
@@ -570,10 +549,10 @@ async fn stdio_bridge_session_reconnects_on_a_fresh_socket_and_resumes_frames() 
         client_instance_id: "client.reconnect-test".to_owned(),
         tool_list_changed_capable: false,
         catalog_version: String::new(),
-        moved_store_adoption: crate::project::MovedStoreAdoption::Never,
+        moved_store_adoption: tracedecay_project::project::MovedStoreAdoption::Never,
     };
     let invocation = tracedecay_daemon_protocol::DaemonInvocationClient::new(
-        tracedecay_daemon_protocol::DaemonConnection::new(endpoint, None),
+        tracedecay_daemon_protocol::DaemonConnection::new(endpoint, LSP_TEST_TOKEN.to_owned()),
         handshake,
     );
     let (deadline, cancellation) = active_lsp_control("cancel.lsp.reconnect-open");
@@ -670,9 +649,12 @@ async fn socket_client_requires_user_storage_scope_without_project() {
     prewarm_test_profile_runtime(&engine.store_administration).await;
 
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
-    let server_task = tokio::spawn(Box::pin(super::super::serve_socket_client(server, engine)));
+    let server_task = tokio::spawn(Box::pin(super::serve_authenticated_test_client(
+        server, engine,
+    )));
 
     let (reader, mut writer) = client.into_split();
+    super::write_test_auth_preface(&mut writer).await;
     let handshake = DaemonHandshake {
         client_identity,
         ..test_handshake_defaults()
@@ -744,8 +726,11 @@ async fn projectless_project_list_reads_the_empty_profile_registry() {
     );
 
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
-    let server_task = tokio::spawn(Box::pin(super::super::serve_socket_client(server, engine)));
+    let server_task = tokio::spawn(Box::pin(super::serve_authenticated_test_client(
+        server, engine,
+    )));
     let (reader, mut writer) = client.into_split();
+    super::write_test_auth_preface(&mut writer).await;
     let handshake = DaemonHandshake {
         client_identity,
         ..test_handshake_defaults()
@@ -818,8 +803,11 @@ async fn projectless_tools_list_advertises_registry_tools() {
     );
 
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
-    let server_task = tokio::spawn(Box::pin(super::super::serve_socket_client(server, engine)));
+    let server_task = tokio::spawn(Box::pin(super::serve_authenticated_test_client(
+        server, engine,
+    )));
     let (reader, mut writer) = client.into_split();
+    super::write_test_auth_preface(&mut writer).await;
     let handshake = DaemonHandshake {
         client_identity,
         ..test_handshake_defaults()
@@ -942,9 +930,12 @@ async fn user_session_read_bypasses_unregistered_project_route() {
     std::fs::create_dir_all(&unregistered_project).expect("unregistered project directory");
 
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
-    let server_task = tokio::spawn(Box::pin(super::super::serve_socket_client(server, engine)));
+    let server_task = tokio::spawn(Box::pin(super::serve_authenticated_test_client(
+        server, engine,
+    )));
 
     let (reader, mut writer) = client.into_split();
+    super::write_test_auth_preface(&mut writer).await;
     let handshake = DaemonHandshake {
         project_path: Some(unregistered_project),
         client_identity,
@@ -1017,9 +1008,12 @@ async fn socket_client_routes_multiple_closed_invocations_without_falling_back_t
     );
     prewarm_test_profile_runtime(&engine.store_administration).await;
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
-    let server_task = tokio::spawn(Box::pin(super::super::serve_socket_client(server, engine)));
+    let server_task = tokio::spawn(Box::pin(super::serve_authenticated_test_client(
+        server, engine,
+    )));
 
     let (reader, mut writer) = client.into_split();
+    super::write_test_auth_preface(&mut writer).await;
     let handshake = DaemonHandshake {
         client_identity,
         ..test_handshake_defaults()
@@ -1151,8 +1145,11 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
 
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
     let engine_for_test = engine.clone();
-    let server_task = tokio::spawn(Box::pin(super::super::serve_socket_client(server, engine)));
+    let server_task = tokio::spawn(Box::pin(super::serve_authenticated_test_client(
+        server, engine,
+    )));
     let (reader, mut writer) = client.into_split();
+    super::write_test_auth_preface(&mut writer).await;
     writer
         .write_all(handshake.to_line().expect("handshake").as_bytes())
         .await
@@ -1583,12 +1580,12 @@ async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias()
         .expect("linked project registry context present");
     assert_eq!(
         context.project.canonical_root,
-        crate::test_support::host_admission::HostAdmissionTestRuntimeV1::canonical_project_key(
+        tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::canonical_project_key(
             &primary
         )
     );
     assert!(context.aliases.iter().any(|alias| {
         alias.alias_path
-            == crate::test_support::host_admission::HostAdmissionTestRuntimeV1::canonical_project_key(&linked)
+            == tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::canonical_project_key(&linked)
     }));
 }

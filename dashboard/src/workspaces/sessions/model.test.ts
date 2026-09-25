@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { LoomSessionRowV1, LoomTemporalPayloadV1 } from '../../contracts/generated.ts';
 import {
-  DEFAULT_VIEW_STATE,
   bucketKeyFor,
   bucketStart,
   commitEvidence,
@@ -33,8 +32,9 @@ function row(over: Partial<LoomSessionRowV1> = {}): LoomSessionRowV1 {
 
 describe('view state round trip', () => {
   it('reads defaults from an empty URL and writes defaults as absence', () => {
-    expect(readViewState(new URLSearchParams())).toEqual(DEFAULT_VIEW_STATE);
-    const written = writeViewState(new URLSearchParams('scope=p1&scopeLabel=P1'), DEFAULT_VIEW_STATE);
+    const defaults = readViewState(new URLSearchParams());
+    expect(defaults).toEqual({ selection: null, page: 1, rows: 25, bucket: 'day', window: 400 });
+    const written = writeViewState(new URLSearchParams('scope=p1&scopeLabel=P1'), defaults);
     expect(written.toString()).toBe('scope=p1&scopeLabel=P1');
   });
 

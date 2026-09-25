@@ -20,6 +20,7 @@ use tracedecay_private_fs::capability_dir::{
 #[cfg(windows)]
 use tracedecay_private_fs::windows_file;
 
+use super::file_quarantine::mutation_failed;
 use super::{
     CodeGenerationRetentionErrorV1, SCOPE_RETENTION_QUARANTINE_DIRECTORY, StrandedCodeIndexScopeV1,
     is_code_index_scope_hash, storage,
@@ -198,7 +199,7 @@ impl ScopeQuarantineAuthority {
                         }
                         return Err(mutation_failed(
                             "scope quarantine rename",
-                            &scope.scope_hash,
+                            &scope_target(&scope.scope_hash),
                             &error,
                         ));
                     }
@@ -270,7 +271,11 @@ impl ScopeQuarantineAuthority {
                         OsStr::new(&scope.scope_hash),
                     )
                     .map_err(|error| {
-                        mutation_failed("scope rollback rename", &scope.scope_hash, &error)
+                        mutation_failed(
+                            "scope rollback rename",
+                            &scope_target(&scope.scope_hash),
+                            &error,
+                        )
                     })?;
                     let (_, restored) = open_child_directory(&self.store, &scope.scope_hash)?
                         .ok_or_else(|| unsafe_state("scope rollback did not restore its source"))?;
@@ -323,7 +328,11 @@ impl ScopeQuarantineAuthority {
                     return Err(identity_changed(&scope.scope_hash, "before unlink"));
                 }
                 remove_open_dir_all_nofollow(staged, &mut || Ok(())).map_err(|error| {
-                    mutation_failed("scope quarantine unlink", &scope.scope_hash, &error)
+                    mutation_failed(
+                        "scope quarantine unlink",
+                        &scope_target(&scope.scope_hash),
+                        &error,
+                    )
                 })?;
                 if let Some(stage) = self.stage.as_ref() {
                     sync_directory(stage).map_err(storage)?;
@@ -393,9 +402,13 @@ impl ScopeQuarantineAuthority {
         // The stage is the one directory a peer daemon is most likely to be
         // holding open on Windows, and that refusal reads identically to a
         // corrupt store unless it names itself.
-        stage
-            .remove_open_dir()
-            .map_err(|error| mutation_failed("scope stage unlink", &self.receipt_digest, &error))?;
+        stage.remove_open_dir().map_err(|error| {
+            mutation_failed(
+                "scope stage unlink",
+                &format!("stage '{}'", self.receipt_digest),
+                &error,
+            )
+        })?;
         if let Some(quarantine) = self.quarantine.as_ref() {
             sync_directory(quarantine).map_err(storage)?;
         }
@@ -542,26 +555,8 @@ fn validate_digest(receipt_digest: &str) -> Result<(), CodeGenerationRetentionEr
     }
 }
 
-/// Names the destructive step, its exact target scope, and the native error
-/// the platform reported.
-///
-/// These three renames and the recursive unlink are the steps another owner's
-/// live handle can refuse: Windows answers a held directory with
-/// `ERROR_SHARING_VIOLATION` (32) or `ERROR_ACCESS_DENIED` (5) and Unix with
-/// `EACCES`/`EBUSY`. Collapsing that into a bare storage string erases both
-/// which mutation was refused and the code an operator would use to find the
-/// holder, so the failure reads identically to a corrupt store.
-fn mutation_failed(
-    operation: &str,
-    scope_hash: &str,
-    error: &io::Error,
-) -> CodeGenerationRetentionErrorV1 {
-    let native = error
-        .raw_os_error()
-        .map_or_else(|| "none".to_owned(), |code| code.to_string());
-    storage(format!(
-        "{operation} for scope '{scope_hash}' failed (native error {native}): {error}"
-    ))
+fn scope_target(scope_hash: &str) -> String {
+    format!("scope '{scope_hash}'")
 }
 
 fn identity_changed(scope_hash: &str, boundary: &str) -> CodeGenerationRetentionErrorV1 {
@@ -630,41 +625,6 @@ mod tests {
         assert_eq!(
             std::fs::read(stage.join(SCOPE_HASH).join("payload")).expect("quarantined payload"),
             b"owned"
-        );
-    }
-
-    /// The Windows codes a live handle produces cannot be raised on this host,
-    /// but the surfacing that has to carry them is platform-independent.
-    #[test]
-    fn a_refused_mutation_names_its_operation_scope_and_native_code() {
-        for (code, native) in [(32, "32"), (5, "5")] {
-            let error = mutation_failed(
-                "scope quarantine unlink",
-                SCOPE_HASH,
-                &io::Error::from_raw_os_error(code),
-            );
-            let CodeGenerationRetentionErrorV1::Storage(message) = &error else {
-                panic!("a refused mutation is a storage failure, got {error:?}");
-            };
-            assert!(message.contains("scope quarantine unlink"), "{message}");
-            assert!(message.contains(SCOPE_HASH), "{message}");
-            assert!(
-                message.contains(&format!("native error {native}")),
-                "a held-target code must reach the operator verbatim, got {message}"
-            );
-        }
-
-        let without_code = mutation_failed(
-            "scope rollback rename",
-            SCOPE_HASH,
-            &io::Error::other("no native code"),
-        );
-        let CodeGenerationRetentionErrorV1::Storage(message) = &without_code else {
-            panic!("a refused mutation is a storage failure, got {without_code:?}");
-        };
-        assert!(
-            message.contains("native error none"),
-            "an error with no platform code must say so rather than invent one, got {message}"
         );
     }
 

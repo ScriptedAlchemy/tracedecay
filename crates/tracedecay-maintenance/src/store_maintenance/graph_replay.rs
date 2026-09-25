@@ -133,7 +133,7 @@ pub async fn reconcile_graph_replay_releases(
     lease: &ProjectStoreMaintenanceLeaseV1,
     store_root: &Path,
     observations: &crate::telemetry::StoreTelemetrySamplingRegistry,
-    cancellation: &tracedecay_session_memory::context::CancellationToken,
+    cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
 ) -> ReconcileOutcome {
     let Some(project_id) = lease.store_layout().identity.project_id.as_ref() else {
         log_code_generation_retention_degraded(

@@ -15,9 +15,10 @@ use tracedecay_lcm::{
     LcmCompressionRequest, LcmCompressionResponse, LcmError, LcmGcConfig, LcmPreflightRequest,
     LcmPreflightResponse, LcmStatus, LcmSummarizerMode,
 };
+use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_session_memory::context::{
-    CancellationToken, RequestInterruption, application_observed_at,
-    application_request_interruption, run_application_request_interruptible,
+    RequestInterruption, application_observed_at, application_request_interruption,
+    run_application_request_interruptible,
 };
 use tracedecay_session_memory::session::lcm::{
     LcmAuthorityFuture, LcmAuthorityInvocation, LcmAuthorityOperation, LcmAuthorityOutcome,
@@ -27,6 +28,7 @@ use tracedecay_session_memory::session::lcm::{
 };
 
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 mod mount;
 mod receipt;
@@ -95,8 +97,12 @@ impl LcmDaemonStore for RegisteredLcmDaemonStore {
 
     fn doctor(&self, _query: LcmDoctorQuery) -> StoreFuture<'_, serde_json::Value> {
         Box::pin(async move {
-            serde_json::to_value(self.database.session_temporal_doctor_health().await)
-                .map_err(|error| LcmError::Db(error.to_string()))
+            serde_json::to_value(
+                SessionTemporalAccess::new(&*self.database)
+                    .session_temporal_doctor_health()
+                    .await,
+            )
+            .map_err(|error| LcmError::Db(error.to_string()))
         })
     }
 }

@@ -105,11 +105,7 @@ fn assert_identity(opened: &OpenedCheckout, payload: &Value) {
         json!(data_root.display().to_string()),
         "{payload}"
     );
-    assert_eq!(
-        payload["storage"]["config_path"],
-        json!(data_root.join("config.json").display().to_string()),
-        "{payload}"
-    );
+    assert!(payload["storage"].get("config_path").is_none(), "{payload}");
     assert_eq!(
         payload["storage"]["graph_db_path"],
         json!(graph_db.display().to_string()),

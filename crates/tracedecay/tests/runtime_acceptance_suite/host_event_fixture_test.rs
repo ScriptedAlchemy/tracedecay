@@ -4,7 +4,6 @@ use std::process::{Command, Output, Stdio};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, DurableObservationV1,
@@ -20,14 +19,15 @@ use tracedecay_domain::{
     canonical_sha256,
 };
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
-use tracedecay_privacy::{ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1};
+use tracedecay_privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::{
     HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus,
 };
 use tracedecay_sessions::observation::{CaptureObservationRequest, ObservationCancellation};
 use tracedecay_sessions::runtime::source::TranscriptSource;
 use tracedecay_sessions::runtime::source::try_stream_new_jsonl_raw_strict_with_resume;
-use tracedecay_sessions::runtime::{claude, codex, cursor, hermes};
+use tracedecay_sessions::runtime::{hosts::claude, hosts::codex, hosts::cursor, hosts::hermes};
 use tracedecay_store::ObservationReplayRequest;
 use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
 
@@ -81,7 +81,7 @@ async fn native_host_event_fixtures_execute_provider_admission_paths() {
     }
     let _home = EnvVarGuard::set("HOME", &home);
     let _userprofile = EnvVarGuard::set("USERPROFILE", &home);
-    let _data_dir = EnvVarGuard::set(tracedecay::config::USER_DATA_DIR_ENV, &data_root);
+    let _data_dir = EnvVarGuard::set(tracedecay_project::config::USER_DATA_DIR_ENV, &data_root);
     let boundary_project = initialize_boundary_project(&home);
     let _daemon = spawn_tracedecay_daemon(&home);
     crate::common::initialize_tracedecay_cli_project(&home, &boundary_project);
@@ -660,20 +660,21 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
         }
         "kiro" => {
             write_kiro_native_fixture(home, &project);
-            let source = tracedecay_sessions::runtime::kiro::KiroSource::with_home(home);
+            let source = tracedecay_sessions::runtime::hosts::kiro::KiroSource::with_home(home);
             assert_eq!(source.transcript_paths(&project).len(), 1, "Kiro discovery");
-            let capture = tracedecay_sessions::runtime::kiro::capture_kiro_snapshot_observations(
-                &facade,
-                &source,
-                &project,
-                ObservationScopeV1::Project {
-                    project_id: project_id.clone(),
-                },
-                None,
-                &ObservationCancellation::default(),
-            )
-            .await
-            .unwrap();
+            let capture =
+                tracedecay_sessions::runtime::hosts::kiro::capture_kiro_snapshot_observations(
+                    &facade,
+                    &source,
+                    &project,
+                    ObservationScopeV1::Project {
+                        project_id: project_id.clone(),
+                    },
+                    None,
+                    &ObservationCancellation::default(),
+                )
+                .await
+                .unwrap();
             assert!(
                 capture.stats.messages_upserted > 0,
                 "Kiro native fixture must admit observations"
@@ -720,7 +721,7 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
             &expected_scope,
             "{provider} provider usage must retain the exact admitted scope"
         );
-        tracedecay_sessions::runtime::claude_observation::drain_projection_queue(
+        tracedecay_sessions::runtime::hosts::claude_observation::drain_projection_queue(
             &facade,
             &expected_scope,
             &ObservationCancellation::default(),
@@ -2352,28 +2353,13 @@ async fn canonical_and_linked_worktree_events_share_retained_project_authority()
         .unwrap()
         .unwrap();
     assert_eq!(
-        first_source_commit.source_frontier().binding(),
-        advanced_source_commit.source_frontier().binding()
+        first_source_commit.binding(),
+        advanced_source_commit.binding()
     );
-    assert_eq!(
-        first_source_commit
-            .source_frontier()
-            .partitions()
-            .values()
-            .next()
-            .unwrap()
-            .sequence(),
-        1
-    );
-    assert_eq!(
-        advanced_source_commit
-            .source_frontier()
-            .partitions()
-            .values()
-            .next()
-            .unwrap()
-            .sequence(),
-        2
+    assert_ne!(
+        first_source_commit.receipt_digest(),
+        advanced_source_commit.receipt_digest(),
+        "each source commit keeps its own replay identity after being superseded"
     );
     let exact_replay = facade.capture(repeated_source_request()).await;
     assert_eq!(exact_replay.status, HostAdmissionStatus::ExactDuplicate);
@@ -2509,7 +2495,7 @@ fn host_capture_request_in_scope_with_expected_cursor(
                 }],
                 CanonicalObservationEvidenceV1::new(ordering_domain, range),
             )
-            .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
         })
         .unwrap();
     let source = ObservationSourceIdentityV1::for_provider(

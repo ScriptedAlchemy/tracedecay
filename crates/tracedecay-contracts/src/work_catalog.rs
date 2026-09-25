@@ -635,28 +635,15 @@ fn schema_ref(id: String) -> Result<SchemaRef, CatalogValidationError> {
 mod tests {
     use tracedecay_tool_catalog::{CancellationPoint, RouteExposureV1};
 
-    use super::{
-        WORK_APPLICATION_OPERATION_IDS_V1, work_executable_binding,
-        work_executable_binding_registry,
-    };
+    use super::{work_executable_binding, work_executable_binding_registry};
 
     #[test]
-    fn work_registry_advertises_only_mounted_application_operations() {
+    fn every_work_binding_is_publicly_routed_and_cancellable_before_admission() {
         let registry = work_executable_binding_registry().unwrap();
-        let advertised = registry
+        for binding in registry
             .iter()
             .filter_map(|availability| availability.binding())
-            .collect::<Vec<_>>();
-        let expected = WORK_APPLICATION_OPERATION_IDS_V1
-            .iter()
-            .map(|(operation, _, _)| format!("operation.work.{operation}"))
-            .collect::<std::collections::BTreeSet<_>>();
-        let actual = advertised
-            .iter()
-            .map(|binding| binding.operation_id().as_str().to_owned())
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(actual, expected);
-        for binding in advertised {
+        {
             let RouteExposureV1::Public { route_path, .. } = binding.exposure() else {
                 panic!("available Work binding must have a public route");
             };
@@ -665,23 +652,6 @@ mod tests {
                 binding
                     .cancellation()
                     .observes(CancellationPoint::BeforeAdmission)
-            );
-            assert_ne!(
-                binding.request_schema().body()["title"],
-                serde_json::Value::String("Value".to_owned())
-            );
-        }
-        for retired in [
-            "operation.work.snapshot",
-            "operation.work.delta",
-            "operation.work.replan_dependencies",
-            "operation.work.accept_task",
-        ] {
-            assert!(
-                registry
-                    .get(&tracedecay_tool_catalog::OperationId::new(retired).unwrap())
-                    .is_none(),
-                "retired operation {retired} must not be advertised"
             );
         }
     }

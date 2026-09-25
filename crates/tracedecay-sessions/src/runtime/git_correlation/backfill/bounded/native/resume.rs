@@ -166,8 +166,8 @@ pub(in super::super) fn capture_unborn_source(
     control: &BoundedGitControl,
 ) -> Result<Option<UnbornSource>, BoundedBackfillInterruption> {
     control.check()?;
-    let repository =
-        gix::discover(project_path).map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    let repository = tracedecay_runtime_core::git_open::discover(project_path)
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     let head = capture_head(&repository)?;
     if head.target.is_some() {
         return Ok(None);
@@ -225,8 +225,8 @@ pub(in super::super) fn initialize_reflog_cursor(
     control: &BoundedGitControl,
 ) -> Result<ReflogCursor, BoundedBackfillInterruption> {
     control.check()?;
-    let repository =
-        gix::discover(project_path).map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    let repository = tracedecay_runtime_core::git_open::discover(project_path)
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     let repository_seal = capture_repository_seal(&repository)?;
     let head = capture_head(&repository)?;
     let state = super::head_state(&head)?;
@@ -289,8 +289,8 @@ pub(in super::super) fn scan_reflog_chunk(
     control: &BoundedGitControl,
 ) -> Result<ReflogChunk, BoundedBackfillInterruption> {
     control.check()?;
-    let repository =
-        gix::discover(project_path).map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    let repository = tracedecay_runtime_core::git_open::discover(project_path)
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     verify_source(&repository, &cursor)?;
     let mut consulted_refs = decode_ref_seal(&cursor.consulted_refs)?;
     let mut state: HeadState = cursor.state.clone().into();
@@ -409,8 +409,8 @@ pub(in super::super) fn scan_reflog_verification_chunk(
     control: &BoundedGitControl,
 ) -> Result<ReflogVerificationChunk, BoundedBackfillInterruption> {
     control.check()?;
-    let repository =
-        gix::discover(project_path).map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    let repository = tracedecay_runtime_core::git_open::discover(project_path)
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     verify_source(&repository, source)?;
     if cursor.byte_offset < target_byte_offset {
         return Err(BoundedBackfillInterruption::SourceUnavailable);
@@ -474,8 +474,8 @@ pub(in super::super) fn scan_graph_chunk(
     if remaining_examined_nodes == 0 || remaining_examined_bytes == 0 {
         return Err(BoundedBackfillInterruption::HistoryTraversalBudgetReached);
     }
-    let mut repository =
-        gix::discover(project_path).map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    let mut repository = tracedecay_runtime_core::git_open::discover(project_path)
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     repository.object_cache_size_if_unset(4 * 1024 * 1024);
     verify_repository_identity(&repository, repository_seal)?;
     let mut carry = pending
@@ -864,8 +864,8 @@ pub(in super::super) fn verify_reflog_source(
     control: &BoundedGitControl,
 ) -> Result<(), BoundedBackfillInterruption> {
     control.check()?;
-    let repository =
-        gix::discover(project_path).map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    let repository = tracedecay_runtime_core::git_open::discover(project_path)
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     verify_source(&repository, cursor)?;
     control.check()
 }

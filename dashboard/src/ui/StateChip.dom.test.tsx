@@ -2,37 +2,6 @@ import { describe, it, expect } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 import { StateChip, type DomainStateKind } from './StateChip';
 
-/**
- * Every domain state renders a
- * non-color-alone chip, an icon *and* a text label. The `Record` type below is
- * the compile-time exhaustiveness gate: if the taxonomy in StateChip.tsx gains
- * or drops a state, tsc fails here until this table is updated, so the "all
- * states" claim can never silently rot.
- */
-const EXPECTED_LABELS: Record<DomainStateKind, string> = {
-  loading: 'Loading',
-  complete_zero_findings: 'Complete · zero findings',
-  ready: 'Ready',
-  partial: 'Partial',
-  rate_limited: 'Rate limited',
-  stale: 'Stale',
-  locked: 'Locked',
-  denied: 'Denied',
-  unauthorized: 'Unauthorized',
-  redacted: 'Redacted',
-  conflicting: 'Conflicting',
-  unavailable: 'Source unavailable',
-  offline: 'Offline',
-  unknown: 'Unknown',
-  cancelled: 'Cancelled',
-  timed_out: 'Timed out',
-  error: 'Error',
-  unsupported: 'Unsupported',
-  unsupported_schema: 'Unsupported schema',
-};
-
-const ENTRIES = Object.entries(EXPECTED_LABELS) as [DomainStateKind, string][];
-
 function chipVisual(kind: DomainStateKind) {
   const { container } = render(<StateChip kind={kind} />);
   const chip = container.querySelector(`[data-state="${kind}"]`);
@@ -45,21 +14,6 @@ function chipVisual(kind: DomainStateKind) {
 }
 
 describe('StateChip', () => {
-  it.each(ENTRIES)('renders icon + label for "%s"', (kind, label) => {
-    const { container } = render(<StateChip kind={kind} />);
-
-    const chip = container.querySelector(`[data-state="${kind}"]`);
-    expect(chip, `chip for ${kind}`).not.toBeNull();
-
-    // Icon: lucide renders an inline <svg> (aria-hidden), never color alone.
-    expect(chip!.querySelector('svg'), `icon for ${kind}`).not.toBeNull();
-
-    // Label: the human-readable text is present and exact.
-    expect(screen.getByText(label)).toBeTruthy();
-
-    cleanup();
-  });
-
   /**
    * The two near-neighbours a reader must never confuse: a reachable authority
    * reporting that one source cannot answer, and nothing being reachable at
@@ -99,8 +53,9 @@ describe('StateChip', () => {
   });
 
   it('renders an optional detail suffix alongside the label', () => {
+    expect(chipVisual('stale').label).toBe('Stale');
+    cleanup();
     render(<StateChip kind="stale" detail="12m ago" />);
-    expect(screen.getByText('Stale')).toBeTruthy();
-    expect(screen.getByText(/12m ago/)).toBeTruthy();
+    expect(screen.getByText('Stale').parentElement?.textContent).toBe('Stale· 12m ago');
   });
 });

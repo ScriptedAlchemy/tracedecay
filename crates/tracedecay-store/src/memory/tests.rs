@@ -1,15 +1,14 @@
 use serde_json::json;
 use tracedecay_domain::{
-    AccessPolicyDigest, ActorId, AnchorDurabilityClass, AnchorLineageRefV2,
-    AnchorProvenanceRelationV2, AnchorSourceGenerationV2, CapabilityId, ComponentVersion,
-    CoverageReportV1, EntityId, EntityKind, EntityRef, EvidenceClass, FactAssertionKindV1,
-    FactCategoryV1, FactCurationActionV1, FactEvidenceRefV1, FactEvidenceRelationV1,
-    FactIdentityMaterialV1, FactIdentitySourceV1, ObservationScopeV1, PayloadReferenceV1,
-    PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectionGenerationId, ProvenanceId,
-    ResolutionAuthorizationV1, RetentionClass, RetrievalAnchorRecordV2Parts,
-    RetrievalAnchorTargetV2, SanitizationReceiptId, SanitizationReceiptRefV1,
-    SanitizationReceiptV1, SanitizerDispositionV1, ScopeResolutionId, SensitivityV1,
-    VectorWatermark,
+    AccessPolicyDigest, ActorId, AnchorDurabilityClass, AnchorLineageRef, AnchorProvenanceRelation,
+    AnchorSourceGeneration, CapabilityId, ComponentVersion, CoverageReportV1, EntityId, EntityKind,
+    EntityRef, EvidenceClass, FactAssertionKindV1, FactCategoryV1, FactCurationActionV1,
+    FactEvidenceRefV1, FactEvidenceRelationV1, FactIdentityMaterialV1, FactIdentitySourceV1,
+    ObservationScopeV1, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest, PrivacyDomainId,
+    ProjectionGenerationId, ProvenanceId, ResolutionAuthorizationV1, RetentionClass,
+    RetrievalAnchorRecordParts, RetrievalAnchorTarget, SanitizationReceiptId,
+    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, ScopeResolutionId,
+    SensitivityV1, VectorWatermark,
 };
 
 use super::*;
@@ -179,13 +178,13 @@ fn projected_fact(
     .unwrap()
 }
 
-fn anchor(entity_id: &str, source_anchors: Vec<AnchorLineageRefV2>) -> RetrievalAnchorRecordV2 {
+fn anchor(entity_id: &str, source_anchors: Vec<AnchorLineageRef>) -> RetrievalAnchorRecord {
     const DIGEST_A: &str =
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const DIGEST_B: &str =
         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
-        target: RetrievalAnchorTargetV2::Entity(EntityRef {
+    RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
+        target: RetrievalAnchorTarget::Entity(EntityRef {
             id: EntityId::new(entity_id).unwrap(),
             kind: EntityKind::Document,
         }),
@@ -194,7 +193,7 @@ fn anchor(entity_id: &str, source_anchors: Vec<AnchorLineageRefV2>) -> Retrieval
         occurred_at: None,
         ingested_at: UtcMicros(1),
         evidence_class: EvidenceClass::Observed,
-        source_generation: AnchorSourceGenerationV2::Unknown,
+        source_generation: AnchorSourceGeneration::Unknown,
         projection_generation: ProjectionGenerationId::new("projection.fixture").unwrap(),
         projection_watermark: VectorWatermark::default(),
         coverage: CoverageReportV1::default(),
@@ -214,9 +213,9 @@ fn anchor(entity_id: &str, source_anchors: Vec<AnchorLineageRefV2>) -> Retrieval
     .unwrap()
 }
 
-fn anchor_source(anchor_id: RetrievalAnchorId) -> AnchorLineageRefV2 {
-    AnchorLineageRefV2::new(
-        AnchorProvenanceRelationV2::DerivedFrom,
+fn anchor_source(anchor_id: RetrievalAnchorId) -> AnchorLineageRef {
+    AnchorLineageRef::new(
+        AnchorProvenanceRelation::DerivedFrom,
         anchor_id,
         ObservationScopeV1::Profile,
     )

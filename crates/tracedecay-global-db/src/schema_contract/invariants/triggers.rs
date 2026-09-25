@@ -1,6 +1,8 @@
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use std::collections::HashMap;
 
-use crate::{global_db_operation_error, global_db_operation_message};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor};
+
+use crate::global_db_operation_error;
 
 use super::{OPERATION, normalize_trigger_sql};
 
@@ -54,6 +56,25 @@ const RECEIPT_IMMUTABILITY: &[Trigger] = &[
     },
 ];
 
+/// Only advances the durable cursor strictly supersedes may be deleted: the
+/// row supporting the current frontier and rows beyond it stay immutable.
+pub(crate) const SOURCE_CURSOR_ADVANCE_DELETE_GUARD_SQL: &str =
+    "CREATE TRIGGER source_cursor_advances_immutable_delete_v1
+            BEFORE DELETE ON source_cursor_advances
+            WHEN NOT EXISTS (
+                SELECT 1 FROM source_cursors AS cursor
+                WHERE cursor.source_json = OLD.source_json
+                  AND cursor.scope_json = OLD.scope_json
+                  AND (json_extract(cursor.cursor_json, '$.generation')
+                          IS NOT json_extract(OLD.coverage_json, '$.generation')
+                    OR (COALESCE(json_extract(cursor.cursor_json, '$.ordering_domain'), 'file_bytes')
+                          = json_extract(OLD.coverage_json, '$.ordering_domain')
+                      AND json_extract(cursor.cursor_json, '$.byte_offset')
+                          > json_extract(OLD.coverage_json, '$.range.end')))
+            ) BEGIN
+                SELECT RAISE(ABORT, 'source cursor advances are immutable');
+            END";
+
 const SOURCE_CURSOR_ADVANCE_IMMUTABILITY: &[Trigger] = &[
     Trigger {
         name: "source_cursor_advances_immutable_update_v1",
@@ -66,10 +87,7 @@ const SOURCE_CURSOR_ADVANCE_IMMUTABILITY: &[Trigger] = &[
     Trigger {
         name: "source_cursor_advances_immutable_delete_v1",
         table: "source_cursor_advances",
-        create_sql: "CREATE TRIGGER source_cursor_advances_immutable_delete_v1
-            BEFORE DELETE ON source_cursor_advances BEGIN
-                SELECT RAISE(ABORT, 'source cursor advances are immutable');
-            END",
+        create_sql: SOURCE_CURSOR_ADVANCE_DELETE_GUARD_SQL,
     },
 ];
 
@@ -199,38 +217,10 @@ const PROJECTION_AUDIT_INVALIDATION: &[Trigger] = &[
                 WHERE audit_name = 'observation-authority';
             END",
     },
-    Trigger {
-        name: "projection_output_audit_invalidate_update_v1",
-        table: "session_messages",
-        create_sql: "CREATE TRIGGER projection_output_audit_invalidate_update_v1
-            AFTER UPDATE ON session_messages
-            WHEN EXISTS (
-                SELECT 1 FROM observation_projection_provenance
-                WHERE output_provider = OLD.provider
-                  AND output_message_id = OLD.message_id
-            ) BEGIN
-                DELETE FROM authority_audit_checkpoints
-                WHERE audit_name = 'observation-authority';
-            END",
-    },
-    Trigger {
-        name: "projection_output_audit_invalidate_delete_v1",
-        table: "session_messages",
-        create_sql: "CREATE TRIGGER projection_output_audit_invalidate_delete_v1
-            AFTER DELETE ON session_messages
-            WHEN EXISTS (
-                SELECT 1 FROM observation_projection_provenance
-                WHERE output_provider = OLD.provider
-                  AND output_message_id = OLD.message_id
-            ) BEGIN
-                DELETE FROM authority_audit_checkpoints
-                WHERE audit_name = 'observation-authority';
-            END",
-    },
-    // The message-row triggers above do not see the LCM raw twin. A twin can
-    // drift (content, session identity) while the message row and the current
-    // provenance digest stay put, and the trusted checkpoint would then skip
-    // it forever. Invalidate on the same ownership predicate.
+    // Message rows live in `lcm_raw_messages`. A row can drift (content,
+    // session identity) while the current provenance digest stays put, and
+    // the trusted checkpoint would then skip it forever. Invalidate on the
+    // ownership predicate.
     Trigger {
         name: "projection_raw_audit_invalidate_update_v1",
         table: "lcm_raw_messages",
@@ -1202,8 +1192,8 @@ const SESSION_TEMPORAL_FTS: &[Trigger] = &[
         table: "session_occurrences",
         create_sql: "CREATE TRIGGER session_occurrences_fts_insert_v1
             AFTER INSERT ON session_occurrences BEGIN
-                INSERT INTO session_occurrences_fts(rowid, index_text, snippet_text)
-                VALUES (NEW.rowid, NEW.index_text, NEW.snippet_text);
+                INSERT INTO session_occurrences_fts(rowid, index_text)
+                VALUES (NEW.rowid, NEW.index_text);
             END",
     },
     Trigger {
@@ -1211,23 +1201,19 @@ const SESSION_TEMPORAL_FTS: &[Trigger] = &[
         table: "session_occurrences",
         create_sql: "CREATE TRIGGER session_occurrences_fts_delete_v1
             AFTER DELETE ON session_occurrences BEGIN
-                INSERT INTO session_occurrences_fts(
-                    session_occurrences_fts, rowid, index_text, snippet_text
-                )
-                VALUES ('delete', OLD.rowid, OLD.index_text, OLD.snippet_text);
+                INSERT INTO session_occurrences_fts(session_occurrences_fts, rowid, index_text)
+                VALUES ('delete', OLD.rowid, OLD.index_text);
             END",
     },
     Trigger {
         name: "session_occurrences_fts_update_v1",
         table: "session_occurrences",
         create_sql: "CREATE TRIGGER session_occurrences_fts_update_v1
-            AFTER UPDATE OF index_text, snippet_text ON session_occurrences BEGIN
-                INSERT INTO session_occurrences_fts(
-                    session_occurrences_fts, rowid, index_text, snippet_text
-                )
-                VALUES ('delete', OLD.rowid, OLD.index_text, OLD.snippet_text);
-                INSERT INTO session_occurrences_fts(rowid, index_text, snippet_text)
-                VALUES (NEW.rowid, NEW.index_text, NEW.snippet_text);
+            AFTER UPDATE OF index_text ON session_occurrences BEGIN
+                INSERT INTO session_occurrences_fts(session_occurrences_fts, rowid, index_text)
+                VALUES ('delete', OLD.rowid, OLD.index_text);
+                INSERT INTO session_occurrences_fts(rowid, index_text)
+                VALUES (NEW.rowid, NEW.index_text);
             END",
     },
     Trigger {
@@ -1235,8 +1221,8 @@ const SESSION_TEMPORAL_FTS: &[Trigger] = &[
         table: "session_summary_nodes",
         create_sql: "CREATE TRIGGER session_summary_nodes_fts_insert_v1
             AFTER INSERT ON session_summary_nodes BEGIN
-                INSERT INTO session_summary_nodes_fts(rowid, summary_text, index_text)
-                VALUES (NEW.rowid, NEW.summary_text, NEW.index_text);
+                INSERT INTO session_summary_nodes_fts(rowid, summary_text)
+                VALUES (NEW.rowid, NEW.summary_text);
             END",
     },
     Trigger {
@@ -1245,22 +1231,22 @@ const SESSION_TEMPORAL_FTS: &[Trigger] = &[
         create_sql: "CREATE TRIGGER session_summary_nodes_fts_delete_v1
             AFTER DELETE ON session_summary_nodes BEGIN
                 INSERT INTO session_summary_nodes_fts(
-                    session_summary_nodes_fts, rowid, summary_text, index_text
+                    session_summary_nodes_fts, rowid, summary_text
                 )
-                VALUES ('delete', OLD.rowid, OLD.summary_text, OLD.index_text);
+                VALUES ('delete', OLD.rowid, OLD.summary_text);
             END",
     },
     Trigger {
         name: "session_summary_nodes_fts_update_v1",
         table: "session_summary_nodes",
         create_sql: "CREATE TRIGGER session_summary_nodes_fts_update_v1
-            AFTER UPDATE OF summary_text, index_text ON session_summary_nodes BEGIN
+            AFTER UPDATE OF summary_text ON session_summary_nodes BEGIN
                 INSERT INTO session_summary_nodes_fts(
-                    session_summary_nodes_fts, rowid, summary_text, index_text
+                    session_summary_nodes_fts, rowid, summary_text
                 )
-                VALUES ('delete', OLD.rowid, OLD.summary_text, OLD.index_text);
-                INSERT INTO session_summary_nodes_fts(rowid, summary_text, index_text)
-                VALUES (NEW.rowid, NEW.summary_text, NEW.index_text);
+                VALUES ('delete', OLD.rowid, OLD.summary_text);
+                INSERT INTO session_summary_nodes_fts(rowid, summary_text)
+                VALUES (NEW.rowid, NEW.summary_text);
             END",
     },
 ];
@@ -1605,36 +1591,6 @@ pub(in crate::schema_contract) const INVARIANTS: &[Invariant] = &[
     },
 ];
 
-/// CREATE-trigger statements for every authority invariant trigger installed
-/// on one of the given tables. The scoped observation reset restores the
-/// triggers that dropped with their tables through this single authority, so
-/// it can never install a trigger shape the contract validator would refuse.
-pub(crate) fn invariant_trigger_sql_for_tables(tables: &[&str]) -> Vec<&'static str> {
-    INVARIANTS
-        .iter()
-        .flat_map(|invariant| invariant.triggers)
-        .filter(|trigger| {
-            tables
-                .iter()
-                .any(|table| table.eq_ignore_ascii_case(trigger.table))
-        })
-        .map(|trigger| trigger.create_sql)
-        .collect()
-}
-
-pub(crate) fn invariant_trigger_names_for_tables(tables: &[&str]) -> Vec<&'static str> {
-    INVARIANTS
-        .iter()
-        .flat_map(|invariant| invariant.triggers)
-        .filter(|trigger| {
-            tables
-                .iter()
-                .any(|table| table.eq_ignore_ascii_case(trigger.table))
-        })
-        .map(|trigger| trigger.name)
-        .collect()
-}
-
 pub(super) async fn replace_trigger(
     conn: &impl Executor,
     trigger: &Trigger,
@@ -1654,164 +1610,43 @@ pub(super) async fn replace_trigger(
 pub(super) async fn trigger_contracts_intact(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<bool> {
-    for invariant in INVARIANTS {
-        for trigger in invariant.triggers {
-            if !trigger_matches(conn, trigger).await? {
-                return Ok(false);
-            }
-        }
-    }
-    Ok(true)
-}
-
-/// One authority trigger body a session-temporal v3 store carries in the shape
-/// that shipped rather than the current one.
-///
-/// Every release that persisted schema marker 3, v0.1.0-beta.25 through
-/// v0.1.0-beta.37, the newest tag, published one identical 81-trigger
-/// authority inventory (the exact SQL lives in
-/// `tests/fixtures/session-temporal-released-v3-triggers.sql`). No trigger name
-/// changed, so a v3 store differs from the current contract in exactly these
-/// bodies and matches it everywhere else. Each released body is reconstructed
-/// from the current contract so every trigger keeps one definition; a fragment
-/// that is not present exactly once is a typed error, never a store admitted or
-/// refused against a body nobody published.
-struct ReleasedV3TriggerDrift {
-    trigger: &'static str,
-    current: &'static str,
-    released: &'static str,
-}
-
-/// Triggers added after the v3 inventory. A released store is admitted on the
-/// published bodies, then schema convergence installs these and the missing
-/// contract forces the exhaustive repair pass. Requiring them at admission
-/// would reset every beta.25–beta.37 profile.
-const POST_RELEASED_V3_TRIGGERS: &[&str] = &[
-    "projection_raw_audit_invalidate_update_v1",
-    "projection_raw_audit_invalidate_delete_v1",
-];
-
-const RELEASED_V3_TRIGGER_DRIFT: &[ReleasedV3TriggerDrift] = &[
-    ReleasedV3TriggerDrift {
-        trigger: "session_refresh_progress_insert_guard_v1",
-        current: "AND NEW.committed_records = receipt.committed_item_count",
-        released: "AND NEW.committed_records =
-                                receipt.occurrence_count
-                                + receipt.copy_count
-                                + receipt.assertion_count",
-    },
-    ReleasedV3TriggerDrift {
-        trigger: "projection_output_audit_invalidate_update_v1",
-        current: "WHERE output_provider = OLD.provider",
-        released: "WHERE projector_version = 'claude-session-message-v4'
-                  AND output_provider = OLD.provider",
-    },
-    ReleasedV3TriggerDrift {
-        trigger: "projection_output_audit_invalidate_delete_v1",
-        current: "WHERE output_provider = OLD.provider",
-        released: "WHERE projector_version = 'claude-session-message-v4'
-                  AND output_provider = OLD.provider",
-    },
-];
-
-/// The released-v3 body of every drifted authority trigger, keyed by name.
-fn released_v3_trigger_contracts() -> tracedecay_domain::errors::Result<Vec<(&'static str, String)>>
-{
-    RELEASED_V3_TRIGGER_DRIFT
-        .iter()
-        .map(|drift| {
-            let Some(trigger) = INVARIANTS
-                .iter()
-                .flat_map(|invariant| invariant.triggers)
-                .find(|trigger| trigger.name == drift.trigger)
-            else {
-                return Err(global_db_operation_message(
-                    OPERATION,
-                    format!(
-                        "released v3 trigger '{}' is not a defined authority invariant trigger",
-                        drift.trigger
-                    ),
-                ));
-            };
-            if trigger.create_sql.matches(drift.current).count() != 1 {
-                return Err(global_db_operation_message(
-                    OPERATION,
-                    format!(
-                        "released v3 '{}' trigger contract is unavailable",
-                        drift.trigger
-                    ),
-                ));
-            }
-            Ok((
-                drift.trigger,
-                trigger
-                    .create_sql
-                    .replacen(drift.current, drift.released, 1),
-            ))
-        })
-        .collect()
-}
-
-#[hotpath::measure(
-    future = true,
-    label = "global_db.schema_contract.triggers.released_v3_intact"
-)]
-pub async fn released_v3_invariant_triggers_intact(
-    conn: &impl QueryExecutor,
-) -> tracedecay_domain::errors::Result<bool> {
-    let released = released_v3_trigger_contracts()?;
-    for invariant in INVARIANTS {
-        for trigger in invariant.triggers {
-            if POST_RELEASED_V3_TRIGGERS.contains(&trigger.name) {
-                continue;
-            }
-            let expected = released
-                .iter()
-                .find(|(name, _)| *name == trigger.name)
-                .map_or(trigger.create_sql, |(_, sql)| sql.as_str());
-            if !trigger_matches_sql(conn, trigger, expected).await? {
-                return Ok(false);
-            }
-        }
-    }
-    Ok(true)
-}
-
-async fn trigger_matches(
-    conn: &impl QueryExecutor,
-    trigger: &Trigger,
-) -> tracedecay_domain::errors::Result<bool> {
-    trigger_matches_sql(conn, trigger, trigger.create_sql).await
-}
-
-async fn trigger_matches_sql(
-    conn: &impl QueryExecutor,
-    trigger: &Trigger,
-    expected_sql: &str,
-) -> tracedecay_domain::errors::Result<bool> {
+    // SQLite trigger names are unique under ASCII case folding, which is what
+    // `COLLATE NOCASE` and `to_ascii_lowercase` both apply.
     let mut rows = conn
         .query(
-            "SELECT tbl_name, sql FROM sqlite_master
-             WHERE type = 'trigger' AND name = ?1 COLLATE NOCASE",
-            params![trigger.name],
+            "SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'trigger'",
+            (),
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let Some(row) = rows
+    let mut actual = HashMap::new();
+    while let Some(row) = rows
         .next()
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?
-    else {
-        return Ok(false);
-    };
-    let table = row
-        .get::<String>(0)
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let sql = row
-        .get::<String>(1)
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    Ok(table.eq_ignore_ascii_case(trigger.table)
-        && normalize_trigger_sql(&sql) == normalize_trigger_sql(expected_sql))
+    {
+        let name = row
+            .get::<String>(0)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let table = row
+            .get::<String>(1)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let sql = row
+            .get::<String>(2)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        actual.insert(name.to_ascii_lowercase(), (table, sql));
+    }
+    Ok(INVARIANTS
+        .iter()
+        .flat_map(|invariant| invariant.triggers)
+        .all(|trigger| {
+            actual
+                .get(&trigger.name.to_ascii_lowercase())
+                .is_some_and(|(table, sql)| {
+                    table.eq_ignore_ascii_case(trigger.table)
+                        && normalize_trigger_sql(sql) == normalize_trigger_sql(trigger.create_sql)
+                })
+        }))
 }
 
 #[cfg(test)]
@@ -1828,6 +1663,44 @@ mod tests {
          INSERT INTO store_instances
          (store_id, project_id, store_kind, storage_mode, store_relpath, created_at)
          VALUES ('store_one', 'project_one', 'sessions', 'central', 'sessions', 1);";
+
+    /// A dropped guard and a same-name guard with a weakened body both break
+    /// the contract; reinstalling restores enforcement, and an intact
+    /// contract is reported as such without being rewritten.
+    #[tokio::test]
+    async fn damaged_guard_triggers_are_detected_and_reinstalled() {
+        let harness = RegisteredGlobalDbHarness::open("damaged-guard-triggers").await;
+        let transaction = harness
+            .registered
+            .begin_write_transaction()
+            .await
+            .expect("begin guard fixture transaction");
+        assert!(super::trigger_contracts_intact(&transaction).await.unwrap());
+
+        transaction
+            .execute_batch(
+                "DROP TRIGGER observations_immutable_delete;
+                 DROP TRIGGER observations_immutable_update;
+                 CREATE TRIGGER observations_immutable_update
+                     BEFORE UPDATE ON observations BEGIN SELECT 1; END;",
+            )
+            .await
+            .expect("damage guard triggers");
+        assert!(!super::trigger_contracts_intact(&transaction).await.unwrap());
+
+        assert!(
+            !super::super::ensure_authority_invariant_schema(&transaction)
+                .await
+                .unwrap(),
+            "reinstall must report the contract it found broken"
+        );
+        assert!(super::trigger_contracts_intact(&transaction).await.unwrap());
+        assert!(
+            super::super::ensure_authority_invariant_schema(&transaction)
+                .await
+                .unwrap()
+        );
+    }
 
     /// A store row carries the only binding between a physical store and the
     /// project that owns it. Letting `project_id` move would silently hand one

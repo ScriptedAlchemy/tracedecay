@@ -246,7 +246,7 @@ export function DataRow({
       aria-pressed={selected ?? false}
       style={{ height: height != null ? `${height}px` : 'var(--row-height-data)' }}
       className={cn(
-        'relative flex w-full gap-3 border-b border-edge-subtle pl-3 pr-3 text-left text-xs',
+        'relative flex w-full gap-3 border-b border-edge-subtle pl-3 pr-3 text-left text-sm',
         align === 'start' ? 'items-start pt-2' : 'items-center',
         'hover:bg-surface-1 focus-visible:bg-surface-1',
         // Lists in this archetype pin a `ListCaption` at `top-0`, so a row
@@ -285,7 +285,7 @@ export function ListCaption({
   return (
     <p
       className={cn(
-        'sticky top-0 z-10 flex items-center gap-2 border-b border-edge-subtle bg-surface-0/95 px-4 py-2 text-2xs text-text-muted backdrop-blur',
+        'sticky top-0 z-10 flex items-center gap-2 border-b border-edge-subtle bg-surface-0/95 px-4 py-2 text-sm text-text-muted backdrop-blur',
         className,
       )}
     >
@@ -401,7 +401,7 @@ export function KeyValueTree({ value, depth = 0 }: { value: unknown; depth?: num
   if (typeof value !== 'object') {
     const text = String(value);
     return (
-      <span className="td-value break-words text-2xs text-text-secondary">
+      <span className="td-value break-words text-sm text-text-secondary">
         {withPathBreaks(text)}
       </span>
     );
@@ -419,13 +419,13 @@ export function KeyValueTree({ value, depth = 0 }: { value: unknown; depth?: num
         {value.slice(0, 60).map((v, i) => (
           <span
             key={i}
-            className="td-value break-words rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-2 px-1.5 py-0.5 text-2xs text-text-secondary"
+            className="td-value break-words rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-2 px-1.5 py-0.5 text-sm text-text-secondary"
           >
             {v === null || v === undefined ? '—' : withPathBreaks(String(v))}
           </span>
         ))}
         {value.length > 60 ? (
-          <span className="text-2xs text-text-muted">… {value.length - 60} more</span>
+          <span className="text-sm text-text-muted">… {value.length - 60} more</span>
         ) : null}
       </div>
     );
@@ -447,7 +447,7 @@ export function KeyValueTree({ value, depth = 0 }: { value: unknown; depth?: num
           // line. Capping the reservation at one track holds however deep the
           // payload nests and however narrow the container is.
           className={cn(
-            'grid gap-x-2 gap-y-0.5 border-b border-edge-subtle/60 py-1 text-2xs last:border-b-0',
+            'grid gap-x-2 gap-y-0.5 border-b border-edge-subtle/60 py-1 text-sm last:border-b-0',
             depth === 0
               ? 'grid-cols-1 sm:grid-cols-[minmax(5rem,9rem)_1fr] sm:gap-y-0'
               : 'grid-cols-1',
@@ -462,7 +462,7 @@ export function KeyValueTree({ value, depth = 0 }: { value: unknown; depth?: num
         </div>
       ))}
       {entries.length > 60 ? (
-        <span className="text-2xs text-text-muted">… {entries.length - 60} more</span>
+        <span className="text-sm text-text-muted">… {entries.length - 60} more</span>
       ) : null}
     </dl>
   );

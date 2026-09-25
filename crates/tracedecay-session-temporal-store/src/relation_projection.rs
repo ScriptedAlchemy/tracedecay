@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use tracedecay_domain::{
-    AgentInstanceId, AnchorProvenanceRelationV2, CanonicalObservationEnvelopeV1, CopyProofV1,
+    AgentInstanceId, AnchorProvenanceRelation, CanonicalObservationEnvelopeV1, CopyProofV1,
     DurableObservationV1, MessageId, MessageOccurrenceIdV1, RetrievalAnchorId,
     RetrievalAnchorRecord, SessionId, SessionProjectionGenerationV1, TemporalValidityV1, ThreadId,
     UtcMicros,
@@ -873,7 +873,7 @@ async fn reconstruct_occurrences(
             copied_from_anchor_ids: anchor
                 .source_anchors()
                 .iter()
-                .filter(|source| source.relation() == AnchorProvenanceRelationV2::CopiedFrom)
+                .filter(|source| source.relation() == AnchorProvenanceRelation::CopiedFrom)
                 .map(|source| source.anchor_id().clone())
                 .collect(),
             thread_id: row

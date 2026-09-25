@@ -17,7 +17,7 @@
       "tracedecay_search"
     ],
     "acceptable": [
-      "tracedecay_body",
+      "tracedecay_source_body",
       "tracedecay_grep",
       "Read"
     ],

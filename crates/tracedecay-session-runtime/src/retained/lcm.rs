@@ -9,7 +9,7 @@ use tracedecay_contracts::retained_surfaces::{
     LcmDoctorResultV1, LcmExpandQueryRequestV1, LcmExpandRequestV1, LcmGrepRequestV1,
     LcmLifecycleStatusV1, LcmLoadSessionRequestV1, LcmPayloadCoverageStateV1, LcmPayloadCoverageV1,
     LcmPayloadGcStatusV1, LcmPayloadStatusV1, LcmRedactionStatusV1, LcmStatusRequestV1,
-    LcmStatusResultV1, LcmStatusV1, LcmStoreStatusV1, LcmStoreTokenCoverageV1, LcmTemporalModeV1,
+    LcmStatusResultV1, LcmStatusV1, LcmStoreStatusV1, LcmStoreTokenCoverageV1,
     MessageRelationshipScopeV1, MessageTypeFilterV1, RetainedOutcomeStatusV1,
     RetainedSurfaceOperation, RetainedSurfaceResultV1, RetainedTimeFilterV1,
     RetrievalWorkerStatusV1,
@@ -19,7 +19,7 @@ use tracedecay_contracts::{
     RetainedLcmRequestV1, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
     RetainedSurfaceExecutionFutureV1,
 };
-use tracedecay_domain::{SessionId, TemporalModeV1, UtcMicros};
+use tracedecay_domain::SessionId;
 use tracedecay_lcm::LcmStatus;
 use tracedecay_lcm::types::LcmPayloadCoverageState;
 use tracedecay_session_memory::session::lcm::{
@@ -841,7 +841,6 @@ fn lcm_status(value: LcmStatus) -> LcmStatusV1 {
         redaction: LcmRedactionStatusV1 {
             enabled: value.redaction.enabled,
             lossy_records: value.redaction.lossy_records,
-            legacy_truncated_count: value.redaction.legacy_truncated_count,
         },
     }
 }
@@ -976,25 +975,6 @@ pub(super) fn unsigned_i64(
         .map(i64::try_from)
         .transpose()
         .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)
-}
-
-pub(super) fn temporal_mode(
-    mode: Option<LcmTemporalModeV1>,
-    as_of: Option<u64>,
-    default: TemporalModeV1,
-) -> Result<TemporalModeV1, RetainedSurfaceExecutionErrorV1> {
-    match mode {
-        None => Ok(default),
-        Some(LcmTemporalModeV1::Current) => Ok(TemporalModeV1::Current),
-        Some(LcmTemporalModeV1::Evolution) => Ok(TemporalModeV1::Evolution),
-        Some(LcmTemporalModeV1::Forensic) => Ok(TemporalModeV1::Forensic),
-        Some(LcmTemporalModeV1::AsOf) => Ok(TemporalModeV1::AsOf {
-            cutoff: UtcMicros(
-                i64::try_from(as_of.ok_or(RetainedSurfaceExecutionErrorV1::InvalidRequest)?)
-                    .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?,
-            ),
-        }),
-    }
 }
 
 pub(super) fn relationship_scope(value: Option<MessageRelationshipScopeV1>) -> SessionSearchScope {

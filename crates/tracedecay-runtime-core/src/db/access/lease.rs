@@ -25,35 +25,6 @@ pub(super) fn exact_scoped_runtime_role(
     }
 }
 
-pub(super) fn scoped_runtime_role(
-    identity: &DatabaseIdentity,
-    intent: &str,
-) -> Result<Option<DatabaseAuthorityRole>> {
-    if !identity.allows_ambient_profile_scope {
-        return Ok(None);
-    }
-    let maintenance = MAINTENANCE_SCOPES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let daemon = DAEMON_SCOPES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    fallback_scoped_runtime_role(maintenance.len(), daemon.len())
-        .map_err(|message| access_error(intent, &identity.profile_root, message))
-}
-
-pub(super) fn fallback_scoped_runtime_role(
-    maintenance_count: usize,
-    daemon_count: usize,
-) -> std::result::Result<Option<DatabaseAuthorityRole>, &'static str> {
-    match (maintenance_count, daemon_count) {
-        (1, 0) => Ok(Some(DatabaseAuthorityRole::Maintenance)),
-        (0, 1) => Ok(Some(DatabaseAuthorityRole::Daemon)),
-        (0, 0) => Ok(None),
-        _ => Err("database path is ambiguous across active profile authorities"),
-    }
-}
-
 pub fn enter_daemon_database_scope(
     profile_root: &Path,
     election_epoch: u64,

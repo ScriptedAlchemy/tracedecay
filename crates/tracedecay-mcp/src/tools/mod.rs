@@ -6,6 +6,7 @@ pub mod dispatch;
 pub mod dispatch_ceiling;
 pub mod render;
 pub mod renderers;
+pub mod response_trailers;
 
 use serde_json::Value;
 use std::fmt::Write as _;
@@ -35,6 +36,9 @@ pub struct ToolResult {
     /// populate analytics `failure_reason` without re-deriving it from
     /// rendered response text.
     failure_message: Option<String>,
+    /// Set once the shared renderer accounted this result, so the transport
+    /// persists those figures instead of appending a second footer.
+    token_accounting: Option<response_trailers::ToolTokenAccounting>,
 }
 
 impl ToolResult {
@@ -45,6 +49,7 @@ impl ToolResult {
             internal_analytics: None,
             semantic_error: None,
             failure_message: None,
+            token_accounting: None,
         }
     }
 
@@ -84,6 +89,18 @@ impl ToolResult {
     /// The handler-provided failure reason, if one was set.
     pub fn failure_message(&self) -> Option<&str> {
         self.failure_message.as_deref()
+    }
+
+    pub(crate) fn set_token_accounting(
+        &mut self,
+        accounting: response_trailers::ToolTokenAccounting,
+    ) {
+        self.token_accounting = Some(accounting);
+    }
+
+    /// The figures the shared renderer accounted, if it did.
+    pub fn token_accounting(&self) -> Option<response_trailers::ToolTokenAccounting> {
+        self.token_accounting
     }
 }
 
@@ -564,8 +581,8 @@ mod tests {
         let definition = tracedecay_mcp_catalog::get_tool_definitions()
             .expect("tool definitions")
             .into_iter()
-            .find(|definition| definition.name == "tracedecay_code_implementations")
-            .expect("code_implementations is advertised");
+            .find(|definition| definition.name == "tracedecay_implementations")
+            .expect("implementations is advertised");
 
         let help = render_tool_cli_help(&definition);
         let example = help

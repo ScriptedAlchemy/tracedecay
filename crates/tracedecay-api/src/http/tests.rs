@@ -74,7 +74,7 @@ fn git_read_operation_parser_is_exact_and_read_only() {
         assert_eq!(parse_git_read_operation(route), Some(operation));
         assert_eq!(
             http_application_owner_kind(operation),
-            HttpApplicationOwnerKind::Git
+            Some(HttpApplicationOwnerKind::Git)
         );
         assert_eq!(operation.as_str(), format!("git_{route}"));
     }
@@ -101,7 +101,7 @@ fn feedback_read_operation_parser_is_exact_and_separately_owned() {
         assert_eq!(parse_feedback_read_operation(route), Some(operation));
         assert_eq!(
             http_application_owner_kind(operation),
-            HttpApplicationOwnerKind::Feedback
+            Some(HttpApplicationOwnerKind::Feedback)
         );
         assert_eq!(operation.as_str(), format!("feedback_{route}"));
     }
@@ -181,7 +181,7 @@ fn callable_code_operation_parser_is_exact_and_separately_owned() {
     ] {
         assert_eq!(parse_callable_code_operation(name), Some(operation));
         assert_eq!(operation.as_str(), name);
-        assert_eq!(http_application_owner_kind(operation), owner);
+        assert_eq!(http_application_owner_kind(operation), Some(owner));
     }
     for rejected in [
         "",
@@ -253,7 +253,7 @@ fn configuration_operation_parser_is_exact_and_closed() {
         );
         assert_eq!(
             http_application_owner_kind(operation),
-            super::HttpApplicationOwnerKind::Configuration
+            Some(super::HttpApplicationOwnerKind::Configuration)
         );
     }
     for rejected in [
@@ -312,7 +312,7 @@ fn context_scout_operation_parser_is_exact_and_backend_only() {
         );
         assert_eq!(
             http_application_owner_kind(operation),
-            HttpApplicationOwnerKind::ContextScout
+            Some(HttpApplicationOwnerKind::ContextScout)
         );
     }
     assert_eq!(parse_context_scout_operation("context_scout"), None);
@@ -348,15 +348,15 @@ fn canonical_operation_authority_covers_all_surface_names_and_git_mutations() {
     );
     assert_eq!(
         http_application_owner_kind(ApplicationSurfaceOperation::ObservatoryRead),
-        HttpApplicationOwnerKind::Observatory
+        Some(HttpApplicationOwnerKind::Observatory)
     );
     assert_eq!(
         http_application_owner_kind(ApplicationSurfaceOperation::GitPreview),
-        HttpApplicationOwnerKind::Git
+        Some(HttpApplicationOwnerKind::Git)
     );
     assert_eq!(
         http_application_owner_kind(ApplicationSurfaceOperation::GitApply),
-        HttpApplicationOwnerKind::Git
+        Some(HttpApplicationOwnerKind::Git)
     );
     assert!(
         is_http_application_operation_exposed(ApplicationSurfaceOperation::GitHubStackSignalExpand)

@@ -18,7 +18,7 @@ use tracedecay_lsp::LspSessionRegistry;
 use super::project_open_owners::project_open_retained_grant;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::resolved_scope_for_project;
-use tracedecay_daemon_protocol::invocation_now_micros;
+use tracedecay_contracts::now_micros;
 use tracedecay_daemon_service::{
     DaemonInvocationService, DaemonRetainedRuntimeRegistrar, daemon_owned_project_source_access_at,
 };
@@ -34,7 +34,7 @@ struct RetainedOwnerTestExecutor {
 impl tracedecay_contracts::ApplicationInvocationExecutor for RetainedOwnerTestExecutor {
     fn invoke(
         &self,
-        _invocation: tracedecay_contracts::ApplicationInvocation,
+        invocation: tracedecay_contracts::ApplicationInvocation,
     ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
@@ -42,7 +42,15 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for RetainedOwnerTestEx
             tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async { Err(tracedecay_contracts::InvocationError::Unavailable) })
+        Box::pin(async move {
+            let (context, request) = invocation.into_parts();
+            let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request
+            else {
+                return Err(tracedecay_contracts::InvocationError::Unavailable);
+            };
+            tracedecay_daemon_protocol::invoke_application_surface(self, context, binding, payload)
+                .await
+        })
     }
 }
 
@@ -157,7 +165,7 @@ pub(crate) async fn register_project_retained_owner_for_test(
             message: format!("retained test owner scope is invalid: {error}"),
         }
     })?;
-    let observed_at = invocation_now_micros();
+    let observed_at = now_micros();
     let configuration = graph
         .configuration_runtime()
         .client()

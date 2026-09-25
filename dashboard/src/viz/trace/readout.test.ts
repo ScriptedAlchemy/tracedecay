@@ -1,10 +1,9 @@
 /**
- * The instrument plate must not become a second source of truth.
+ * The readout strip must not become a second source of truth.
  *
- * Two failure modes are worth a test each. The first is DRIFT: the legend says
- * "channel width is call sites" and prints a range that the drawn channels do
- * not actually span, because someone typed the range once and the payload
- * moved. The second is SILENT ABSENCE: a measurement the wire never sent gets
+ * Two failure modes are worth a test each. The first is DRIFT: a cell prints a
+ * count the drawn rows do not actually carry, because someone typed it once
+ * and the payload moved. The second is SILENT ABSENCE: a measurement the wire never sent gets
  * rendered as a blank cell or a plausible zero, which reads as "none" when the
  * truth is "not asked, not answered".
  *
@@ -18,7 +17,7 @@ import {
   GraphNeighborsPayloadV1Schema,
 } from '../../contracts/generated.ts';
 import { TRACE_BUDGET, buildTraceModel, type NeighborsPayload } from './model.ts';
-import { legendPanels, readoutCells, type ReadoutValue } from './readout.ts';
+import { readoutCells, type ReadoutValue } from './readout.ts';
 import type { TraceModel, TraceNode } from './types.ts';
 
 function neighbors(id: string): NeighborsPayload {
@@ -51,8 +50,6 @@ function node(over: Partial<TraceNode> & { id: string }): TraceNode {
     filePath: 'crates/retrieval/src/lib.rs',
     startLine: 1,
     ring: 0,
-    x0: 0,
-    y0: 0,
     undrawnEdges: 0,
     selfCalls: 0,
     ...over,
@@ -69,8 +66,6 @@ function synthetic(over: {
   const nodes = over.nodes ?? [node({ id: 'focus' })];
   return {
     focusId: 'focus',
-    world: { width: 1200, height: 1040 },
-    rows: new Map([[0, 520]]),
     nodes,
     channels: over.channels ?? [],
     membranes: over.membranes ?? [],
@@ -82,7 +77,6 @@ function synthetic(over: {
       cappedAt: null,
       capped: false,
       membranesAvailable: true,
-      rowFields: ['degree', 'id', 'kind', 'name'],
       ...over.coverage,
     },
   };
@@ -165,41 +159,4 @@ describe('the header readout strip', () => {
     const model = synthetic({ nodes: [node({ id: 'focus', filePath: null })] });
     expect(readoutCells(model)[6]!.value.kind).toBe('absent');
   });
-});
-
-describe('the legend row', () => {
-  it('prints the call-site range the drawn channels actually span', () => {
-    const model = fixtureModel();
-    const calls = model.channels.map((c) => c.calls);
-    const low = Math.min(...calls);
-    const high = Math.max(...calls);
-    const panel = legendPanels(model)[0]!;
-    expect(panel.reading).toMatchObject({
-      value: low === high ? String(low) : `${low}–${high}`,
-      unit: `across ${model.channels.length} channels`,
-    });
-  });
-
-  it('reports the membrane panel as absent when the wire carried no contains edges', () => {
-    const panel = legendPanels(synthetic({ coverage: { membranesAvailable: false } }))[4]!;
-    expect(panel.reading.kind).toBe('absent');
-    expect(panel.qualifier).toContain('no enclosure is drawn');
-  });
-
-  it('counts dashed mouths and the edges behind them from the drawn nodes', () => {
-    const model = synthetic({
-      nodes: [
-        node({ id: 'focus', undrawnEdges: 5 }),
-        node({ id: 'b', undrawnEdges: 0 }),
-        node({ id: 'c', undrawnEdges: 2 }),
-      ],
-    });
-    expect(legendPanels(model)[5]!.reading).toMatchObject({ value: '7', unit: 'at 2 symbols' });
-  });
-
-  it('distinguishes "no mouth drawn" from a measured zero', () => {
-    const panel = legendPanels(synthetic({ nodes: [node({ id: 'focus', undrawnEdges: null })] }))[5]!;
-    expect(panel.reading.kind).toBe('absent');
-  });
-
 });

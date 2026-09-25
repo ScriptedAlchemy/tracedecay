@@ -2,9 +2,9 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_global_db::{AnalyticsEventInsert, AnalyticsEventQuery};
 use tracedecay_lcm::LcmStorageKind;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::store_port::TranscriptIngestStore;
 use tracedecay_sessions::runtime::{
@@ -856,11 +856,9 @@ async fn upsert_session_message_round_trips_and_updates() {
             .text
             .starts_with("Updated answer about parsing transcripts.")
     );
-    assert!(fetched.text.chars().count() <= tracedecay_lcm::MAX_DERIVED_TEXT_CHARS);
-    assert!(
-        fetched
-            .text
-            .contains(tracedecay_lcm::DERIVED_TRUNCATION_MARKER)
+    assert_eq!(
+        fetched.text, updated,
+        "the message row is the one lossless copy"
     );
     assert_eq!(fetched.tool_names.as_deref(), Some("tracedecay_context"));
     assert_eq!(fetched.source_offset, Some(99));
@@ -938,15 +936,13 @@ async fn upsert_session_message_preserves_oversized_text_losslessly() {
     let message = sample_message("cursor", "message-1", "session-1", &oversized);
     assert!(db.upsert_session_message(&message).await);
 
-    let compatibility = db
+    let stored = db
         .get_session_message("cursor", "message-1")
         .await
-        .expect("compatibility message should exist");
-    assert!(compatibility.text.chars().count() <= tracedecay_lcm::MAX_DERIVED_TEXT_CHARS);
-    assert!(
-        compatibility
-            .text
-            .contains(tracedecay_lcm::DERIVED_TRUNCATION_MARKER)
+        .expect("session message should exist");
+    assert_eq!(
+        stored.text, oversized,
+        "the message row is the one lossless copy"
     );
 
     let raw = db
@@ -955,8 +951,6 @@ async fn upsert_session_message_preserves_oversized_text_losslessly() {
         .expect("raw message should exist");
     assert_eq!(raw.content, oversized);
     assert!(raw.content.ends_with("::lossless-tail"));
-    assert!(!raw.legacy_source);
-    assert!(!raw.legacy_truncated);
 }
 
 #[tokio::test]

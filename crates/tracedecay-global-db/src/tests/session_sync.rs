@@ -16,9 +16,12 @@ async fn registered_session_message_batch_executes_json_rowset_with_exact_provid
     }
     writer
         .execute(
-            "INSERT INTO session_messages(provider, message_id, session_id, role, ordinal, text)
-             VALUES ('cursor', 'comp:b2', 'session.fixture', 'user', 1, 'cursor'),
-                    ('codex', 'comp:b1', 'session.fixture', 'user', 1, 'codex')",
+            "INSERT INTO lcm_raw_messages(
+                provider, message_id, session_id, role, ordinal, content, content_hash,
+                storage_kind
+             )
+             VALUES ('cursor', 'comp:b2', 'session.fixture', 'user', 1, 'cursor', 'h', 'inline'),
+                    ('codex', 'comp:b1', 'session.fixture', 'user', 1, 'codex', 'h', 'inline')",
             (),
         )
         .await
@@ -50,10 +53,11 @@ async fn session_sync_journal_survives_remount_and_compare_and_swap() {
     let scope = tracedecay_domain::ObservationScopeV1::Project {
         project_id: tracedecay_domain::ProjectId::new("project.fixture").unwrap(),
     };
-    let cursor = tracedecay_domain::ObservationSourceCursorV1::new(
+    let cursor = tracedecay_domain::ObservationSourceCursorV1::for_ordering(
         source.clone(),
         scope.clone(),
         tracedecay_domain::ObservationSourceGenerationV1::new(1).unwrap(),
+        tracedecay_domain::ObservationOrderingDomainV1::FileBytes,
         72,
     )
     .unwrap();

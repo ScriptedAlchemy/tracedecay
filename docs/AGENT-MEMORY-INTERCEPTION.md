@@ -165,7 +165,7 @@ Writes the Cursor projection of the shared plugin bundle
 (`crates/tracedecay-agent-hosts/src/agents/plugin_bundle.rs::cursor_files`) to
 `~/.cursor/plugins/local/tracedecay/`:
 
-- **`mcp.json`**, stdio server `tracedecay serve --path ${workspaceFolder}`
+- **`mcp.json`**, stdio server `tracedecay serve` (workspace resolved from cwd)
   (all fact-store/memory/graph tools available to the model).
 - **`hooks/hooks.json`**, 8 hooks: `sessionStart`, `postToolUse`,
   `afterFileEdit`, `afterShellExecution`, `preCompact`, `sessionEnd`, `stop`,

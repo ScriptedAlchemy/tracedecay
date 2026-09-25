@@ -16,7 +16,7 @@ use tracedecay_contracts::{
     WorkAttemptService, WorkAttemptTopologyBindingV1, WorkAttemptTopologyStateV1,
     WorkIntelligenceServiceV1, WorkPlacementReadingV1, WorkPlacementService,
     WorkPlacementStorageError, WorkPlacementStoragePort, WorkProductAttemptServiceV1,
-    WorkProductSelectionScopeV1, WorkRelationScopeV1, WorkRoutingSnapshotErrorV1,
+    WorkProductAuthorizedRelationScopeV1, WorkProductSelectionScopeV1, WorkRoutingSnapshotErrorV1,
     WorkRoutingSnapshotPortV1, WorkRoutingSnapshotV1, WorkTopologyViewRequestV1,
     execution_topology_view,
 };
@@ -178,10 +178,12 @@ fn execution_snapshot(topology: tracedecay_domain::WorkTopologyPolicyV1) -> Work
 }
 
 fn selected_product_scope(context: &RequestContext) -> WorkProductSelectionScopeV1 {
-    WorkProductSelectionScopeV1::relations(BTreeSet::from([WorkRelationScopeV1::Repository {
-        project_id: context.scope().project_id.clone(),
-        repository_id: context.scope().repository_id.clone(),
-    }]))
+    WorkProductSelectionScopeV1::relations(BTreeSet::from([
+        WorkProductAuthorizedRelationScopeV1::Repository {
+            project_id: context.scope().project_id.clone(),
+            repository_id: context.scope().repository_id.clone(),
+        },
+    ]))
     .unwrap()
 }
 

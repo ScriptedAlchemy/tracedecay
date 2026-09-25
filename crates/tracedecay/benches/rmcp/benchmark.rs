@@ -27,10 +27,11 @@ use tracedecay_daemon_protocol::{
 };
 use tracedecay_domain::ProjectId;
 
-use super::{BrokerStreamTransport, DaemonLifecycle, serve_routed_rmcp_connection};
+use super::{BrokerStreamTransport, serve_routed_rmcp_connection};
 use crate::mcp::McpServer;
-use crate::project::TraceDecayOpenOptions;
-use crate::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_daemon_service::shutdown::DaemonLifecycle;
+use tracedecay_project::project::TraceDecayOpenOptions;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 
 pub const PERSISTENT_WARMUP_REQUESTS: usize = 8;
 pub const PERSISTENT_MEASURED_REQUESTS: usize = 64;
@@ -70,7 +71,7 @@ struct BenchmarkServerFixture {
 
 impl BenchmarkServerFixture {
     async fn open() -> Result<Self, String> {
-        crate::product_runtime::register_fixture_product_runtime();
+        tracedecay_project::product_runtime::register_fixture_product_runtime();
         let sandbox = tempfile::TempDir::new()
             .map_err(|error| format!("create benchmark sandbox: {error}"))?;
         let project = sandbox.path().join("project");

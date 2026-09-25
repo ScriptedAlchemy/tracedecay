@@ -91,19 +91,19 @@ export function RunRegister({
             tone="bg-accent"
             ariaLabel={`${progress.concluded} of ${progress.total} sources concluded`}
           />
-          <span className="td-value text-2xs text-text-secondary" data-cell="numeric">
+          <span className="td-value text-sm text-text-secondary" data-cell="numeric">
             {progress.concluded}/{progress.total}
           </span>
-          <span className="text-3xs text-text-muted">sources concluded</span>
+          <span className="text-sm text-text-muted">sources concluded</span>
         </span>
       ) : null}
-      <span className="td-value text-3xs text-text-muted" data-cell="numeric">
+      <span className="td-value text-xs text-text-muted" data-cell="numeric">
         {Math.round(run.elapsed_micros / 1_000).toLocaleString()} ms
       </span>
-      <span className="hidden min-w-0 truncate font-mono text-3xs text-text-muted xl:inline" title={run.run_id}>
+      <span className="hidden min-w-0 truncate font-mono text-xs text-text-muted xl:inline" title={run.run_id}>
         {run.run_id}
       </span>
-      <span className="hidden text-3xs text-text-muted 2xl:inline">{run.ordering_policy}</span>
+      <span className="hidden text-sm text-text-muted 2xl:inline">{run.ordering_policy}</span>
       {onCancel ? (
         <button
           type="button"

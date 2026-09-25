@@ -1,3 +1,4 @@
+import { Crosshair, Database, Waypoints } from 'lucide-react';
 import { describe, expect, it } from 'vitest';
 
 import type {
@@ -128,6 +129,8 @@ describe('the selection register', () => {
     });
     // Each register carries its own glyph so the strip never falls back to a
     // link icon for a graph, an index, or a selection.
-    expect(selectionRegister(null).icon).toBeTypeOf('object');
+    expect(selectionRegister(null).icon).toBe(Crosshair);
+    expect(graphRegister(true, undefined).icon).toBe(Waypoints);
+    expect(indexRegister(true, undefined).icon).toBe(Database);
   });
 });

@@ -32,7 +32,7 @@ import {
  */
 
 const INPUT_CLASS =
-  'min-h-[var(--touch-target-min)] rounded-sm border border-edge bg-surface-1 px-2 font-mono text-2xs text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent';
+  'min-h-[var(--touch-target-min)] rounded-panel border border-edge-subtle bg-surface-1 px-2 font-mono text-sm text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent';
 
 const COMMAND_CLASS =
   'flex min-h-[var(--touch-target-min)] w-full min-w-0 items-center gap-2.5 border border-edge-subtle px-2.5 py-1.5 text-left hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-60';
@@ -122,7 +122,7 @@ export function LifecyclePanel({
       }
     >
       <div className="flex min-w-0 flex-col gap-1">
-        <label className="flex min-w-0 flex-col gap-0.5 text-3xs text-text-muted" htmlFor={revisionId}>
+        <label className="flex min-w-0 flex-col gap-0.5 text-sm text-text-muted" htmlFor={revisionId}>
           <span className="td-legend">Expected revision · CAS input</span>
           <input
             id={revisionId}
@@ -133,7 +133,7 @@ export function LifecyclePanel({
             className={cn(INPUT_CLASS, 'w-28')}
           />
         </label>
-        <p className="text-3xs leading-snug text-text-muted">
+        <p className="text-sm leading-snug text-text-muted">
           The current revision is not served by any read route. A registered candidate starts at 1
           and every applied transition increments it; the daemon compares this value and answers a
           typed conflict when it is stale.{' '}
@@ -142,7 +142,7 @@ export function LifecyclePanel({
             : `The last answer this session for v${definition.definition_version} reported revision ${sessionReceipt.disposition.revision}.`}
         </p>
         {validRevision ? null : (
-          <p role="alert" className="text-3xs text-state-error">
+          <p role="alert" className="text-sm text-state-error">
             Expected revision must be a whole number of at least 1; nothing is sent until it is.
           </p>
         )}
@@ -164,14 +164,14 @@ export function LifecyclePanel({
               <Lamp tone={lifecycleStateTone(lifecycleTarget(entry.action))} />
               <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                 <span className="flex min-w-0 flex-wrap items-baseline gap-x-2">
-                  <span className="td-value text-2xs text-text-primary">
+                  <span className="td-value text-sm text-text-primary">
                     {entry.label} v{definition.definition_version}
                   </span>
-                  <span className="td-value text-3xs text-text-muted" data-cell="numeric">
+                  <span className="td-value text-xs text-text-muted" data-cell="numeric">
                     expected_rev = {validRevision ? parsedRevision : '?'}
                   </span>
                 </span>
-                <span className="min-w-0 text-3xs text-text-muted">
+                <span className="min-w-0 text-sm text-text-muted">
                   {entry.from} → {lifecycleTarget(entry.action)} · confirm before send
                 </span>
               </span>
@@ -228,14 +228,14 @@ function LifecycleResult({
           detail={`sending ${lastSent.action} · expected revision ${lastSent.expectedRevision} · awaiting the daemon's compare-and-swap`}
         />
       ) : result === undefined ? (
-        <p className="text-3xs text-text-muted">
+        <p className="text-sm text-text-muted">
           No lifecycle command has been sent for this version in this session. Nothing here is a
           success until the daemon answers one.
         </p>
       ) : result.outcome === 'refused' ? (
         <div className="flex min-w-0 flex-col gap-1">
           <StateChip kind={result.state} detail={result.detail} />
-          <p className="text-3xs text-text-muted">
+          <p className="text-sm text-text-muted">
             {lastSent === null ? 'The command' : `${lastSent.action} · expected revision ${lastSent.expectedRevision}`}{' '}
             did not transition anything.
             {result.state === 'conflicting'
@@ -245,9 +245,9 @@ function LifecycleResult({
         </div>
       ) : (
         <div className="flex min-w-0 flex-col gap-1" data-lifecycle-receipt={result.value.state}>
-          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-3xs">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-sm">
             <Lamp tone={lifecycleStateTone(result.value.state)} />
-            <span className="uppercase tracking-[0.1em] text-text-secondary">
+            <span className="uppercase tracking-[0.1em] text-text-secondary text-3xs">
               disposition {result.value.state}
             </span>
             <span className="td-value text-text-secondary" data-cell="numeric">
@@ -255,7 +255,7 @@ function LifecycleResult({
             </span>
             <GradeTag grade="EXACT" source="cas receipt" />
           </div>
-          <p className="td-value text-3xs text-text-muted">
+          <p className="td-value text-xs text-text-muted">
             {result.value.definition_id} v{result.value.definition_version} · transitioned{' '}
             {formatMicrosUtcClock(result.value.transitioned_at)} UTC
             {receipt === null
@@ -302,7 +302,7 @@ function ConfirmDialog({
                     Confirm {entry.label.toLowerCase()} · {definition.definition_id} v
                     {definition.definition_version}
                   </Dialog.Title>
-                  <Dialog.Description className="mt-1 text-3xs text-text-muted">
+                  <Dialog.Description className="mt-1 text-sm text-text-muted">
                     One compare-and-swap command. The daemon validates, checks permission, compares
                     the expected revision, and answers with the stored disposition or a typed
                     refusal. This dialog changes nothing by itself.
@@ -315,7 +315,7 @@ function ConfirmDialog({
                 </Dialog.Close>
               </div>
 
-              <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 border border-edge-subtle bg-surface-0 p-2.5 text-3xs">
+              <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 border border-edge-subtle bg-surface-0 p-2.5 text-sm">
                 <dt className="td-legend">operation</dt>
                 <dd className="td-value break-all text-text-secondary">{entry.operation}</dd>
                 <dt className="td-legend">definition</dt>
@@ -372,14 +372,14 @@ function ConfirmDialog({
               </label>
 
               <div className="flex flex-wrap justify-end gap-2">
-                <Dialog.Close className="min-h-[var(--touch-target-min)] border border-edge-subtle px-3 text-2xs text-text-secondary hover:bg-surface-3">
+                <Dialog.Close className="min-h-[var(--touch-target-min)] border border-edge-subtle px-3 text-body text-text-secondary hover:bg-surface-3">
                   Cancel
                 </Dialog.Close>
                 <button
                   type="button"
                   disabled={!sendable || !confirmed}
                   onClick={() => onSend(entry.action)}
-                  className="min-h-[var(--touch-target-min)] border border-edge-strong px-3 text-2xs text-text-primary hover:bg-surface-3 disabled:cursor-not-allowed disabled:opacity-60"
+                  className="min-h-[var(--touch-target-min)] border border-edge-strong px-3 text-body text-text-primary hover:bg-surface-3 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   Send {entry.label.toLowerCase()}
                 </button>

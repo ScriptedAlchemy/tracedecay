@@ -13,7 +13,7 @@ use tracedecay_domain::{
     ProjectId, ProviderId, RetentionClass, SessionId, UserProfileId,
 };
 use tracedecay_global_db::{GlobalDbObservationStore, RegisteredGlobalDb};
-use tracedecay_privacy::{ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1};
+use tracedecay_privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_sessions::admission::HostAdmissionStatus;
 use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
@@ -85,7 +85,7 @@ fn host_capture_request(scope: ObservationScopeV1, record_id: &str) -> CaptureOb
                 }],
                 CanonicalObservationEvidenceV1::new(ordering_domain, range),
             )
-            .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
         })
         .unwrap();
     CaptureObservationRequest::new(
@@ -170,7 +170,7 @@ async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stab
     // CPU authority that plan installs and refuses with
     // `Unavailable/background_cpu_unavailable` when none is injected.
     let background_cpu =
-        crate::test_support::host_admission::ensure_process_background_cpu_authority()
+        tracedecay_project::test_support::host_admission::ensure_process_background_cpu_authority()
             .expect("install the process background CPU authority");
     let root = TempDir::new().unwrap();
     let repository_root = root.path().join("repository");
@@ -374,7 +374,7 @@ async fn registered_profile_runtime_is_required_and_mismatch_never_falls_back() 
     // CPU authority that plan installs and refuses with
     // `Unavailable/background_cpu_unavailable` when none is injected.
     let background_cpu =
-        crate::test_support::host_admission::ensure_process_background_cpu_authority()
+        tracedecay_project::test_support::host_admission::ensure_process_background_cpu_authority()
             .expect("install the process background CPU authority");
     let temporary = TempDir::new().unwrap();
     let profile_root = temporary.path().join("profile");
@@ -508,7 +508,7 @@ async fn registered_project_runtime_is_exact_and_revocation_never_falls_back() {
     // CPU authority that plan installs and refuses with
     // `Unavailable/background_cpu_unavailable` when none is injected.
     let background_cpu =
-        crate::test_support::host_admission::ensure_process_background_cpu_authority()
+        tracedecay_project::test_support::host_admission::ensure_process_background_cpu_authority()
             .expect("install the process background CPU authority");
     let temporary = TempDir::new().unwrap();
     let profile_root = temporary.path().join("profile");

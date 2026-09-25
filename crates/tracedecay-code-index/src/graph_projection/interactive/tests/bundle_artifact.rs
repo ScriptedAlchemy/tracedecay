@@ -1,6 +1,7 @@
 //! Seal-time catalog artifact: the manifest-derived bundle artifact must
 //! install as a ready catalog identical to the one the projection warm scan
-//! builds, and a foreign or corrupt artifact must be a typed refusal.
+//! builds, carry no generation of its own, and a corrupt artifact must be a
+//! typed refusal.
 
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -132,6 +133,15 @@ fn installed_artifact_serves_identically_to_the_warm_scan_without_scanning() {
         .expect("installed page");
     assert_eq!(warm_page, installed_page);
     assert_eq!(
+        warmed_reader
+            .degree_ranking(64, request())
+            .expect("warm ranking"),
+        installed_reader
+            .degree_ranking(64, request())
+            .expect("installed ranking"),
+        "seal-time and scan-derived degrees must agree"
+    );
+    assert_eq!(
         warmed_reader.files(64, request()).expect("warm files"),
         installed_reader
             .files(64, request())
@@ -145,23 +155,118 @@ fn installed_artifact_serves_identically_to_the_warm_scan_without_scanning() {
 }
 
 #[test]
-fn artifact_for_a_foreign_generation_is_a_typed_mismatch() {
+fn unresolved_caller_coverage_survives_catalog_install_and_respects_scope() {
+    let reference = CodeIndexUnresolvedReferenceV1 {
+        from_occurrence: id("sym.gamma.main"),
+        reference_name: "receiver.run".to_owned(),
+        kind: RelationEdgeKindV1::Calls,
+        evidence_span: SourceSpan {
+            start_byte: 0,
+            end_byte: 3,
+        },
+    };
+    let manifest = production_manifest_with_unresolved_calls(&[reference]);
+    let mut bytes = Vec::new();
+    write_interactive_catalog_artifact(&manifest, &mut bytes, &NeverCancelled).unwrap();
+    let cold = store_for(manifest.clone());
+    let installed = store_for(manifest);
+    installed
+        .install_interactive_catalog_artifact(&bytes, request())
+        .unwrap();
+    for store in [&cold, &installed] {
+        let reader = reader(store);
+        assert!(
+            reader
+                .has_unresolved_callers(&[id("sym.beta.run")], None, request())
+                .unwrap()
+        );
+        assert!(
+            reader
+                .has_unresolved_callers(&[id("sym.beta.run")], Some("src/gamma.rs"), request())
+                .unwrap()
+        );
+        assert!(
+            !reader
+                .has_unresolved_callers(&[id("sym.beta.run")], Some("src/alpha.rs"), request())
+                .unwrap()
+        );
+        assert!(
+            !reader
+                .has_unresolved_callers(&[id("sym.beta.runner")], None, request())
+                .unwrap()
+        );
+        assert!(matches!(
+            reader.has_unresolved_callers(&[id("sym.beta.run")], None, Arc::new(CancelledNow)),
+            Err(CodeGraphProjectionError::Cancelled)
+        ));
+        assert!(matches!(
+            reader.has_unresolved_callers(&[id("sym.missing")], None, request()),
+            Err(CodeGraphProjectionError::Unavailable(_))
+        ));
+    }
+    assert_eq!(installed.interactive_catalog_scan_builds(), 0);
+    assert!(cold.interactive_catalog_scan_builds() > 0);
+}
+
+#[test]
+fn catalog_without_receiver_coverage_is_refused() {
+    let mut artifact: serde_json::Value =
+        serde_json::from_slice(&encoded_fixture_artifact()).unwrap();
+    artifact["symbols"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("unresolved_calls");
+    let store = store_for(production_manifest());
+    assert!(matches!(
+        store.install_interactive_catalog_artifact(
+            &serde_json::to_vec(&artifact).unwrap(),
+            request()
+        ),
+        Err(CodeGraphProjectionError::Corrupt(_)),
+    ));
+}
+
+#[test]
+fn catalog_with_reversed_receiver_span_is_refused() {
+    let mut artifact: serde_json::Value =
+        serde_json::from_slice(&encoded_fixture_artifact()).unwrap();
+    let source = artifact["symbols"][0]["occurrence"].clone();
+    artifact["symbols"][0]["unresolved_calls"] = serde_json::json!([{
+        "from_occurrence": source,
+        "reference_name": "receiver.run",
+        "kind": "calls",
+        "evidence_span": { "start_byte": 5, "end_byte": 1 }
+    }]);
+    let store = store_for(production_manifest());
+    assert!(matches!(
+        store.install_interactive_catalog_artifact(
+            &serde_json::to_vec(&artifact).unwrap(),
+            request()
+        ),
+        Err(CodeGraphProjectionError::Corrupt(_)),
+    ));
+}
+
+/// Linked worktrees seal the same graph under their own generations; the
+/// artifact must not tell them apart, or they could never share it. The
+/// generation binding is the per-generation bundle manifest's job.
+#[test]
+fn the_same_graph_under_another_generation_encodes_identical_bytes() {
     let bytes = encoded_fixture_artifact();
-    let foreign = code_graph_generation_id(
+    let mut other = production_manifest();
+    other.generation = code_graph_generation_id(
         &id::<CodeGenerationId>("generation.interactive.other"),
         &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())
             .expect("projector revision"),
     )
-    .expect("foreign generation id");
-    let error = match decode_interactive_catalog_artifact(&bytes, foreign.as_str(), &NeverCancelled)
-    {
-        Ok(_) => panic!("foreign generation must be refused"),
-        Err(error) => error,
-    };
-    assert!(matches!(
-        error,
-        CodeGraphProjectionError::GenerationMismatch
-    ));
+    .expect("other generation id");
+    assert_ne!(other.generation, production_manifest().generation);
+    let mut other_bytes = Vec::new();
+    write_interactive_catalog_artifact(&other, &mut other_bytes, &NeverCancelled)
+        .expect("encode catalog artifact under another generation");
+    assert_eq!(bytes, other_bytes);
+    decode_interactive_catalog_artifact(&other_bytes, &NeverCancelled)
+        .expect("the shared artifact decodes for either generation");
 }
 
 #[test]

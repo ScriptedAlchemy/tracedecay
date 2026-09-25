@@ -56,6 +56,7 @@ lang-wgsl = ["tracedecay-code-extraction/lang-wgsl"]
 lang-hlsl = ["tracedecay-code-extraction/lang-hlsl"]
 lang-metal = ["tracedecay-code-extraction/lang-metal"]
 lang-markdown = ["tracedecay-code-extraction/lang-markdown"]
+lang-json = ["tracedecay-code-extraction/lang-json"]
 lang-r = ["tracedecay-code-extraction/lang-r"]
 lang-sql = ["tracedecay-code-extraction/lang-sql"]
 lang-julia = ["tracedecay-code-extraction/lang-julia"]
@@ -71,6 +72,7 @@ lang-lean = ["tracedecay-code-extraction/lang-lean"]
 
 [dependencies]
 ast-grep-core = "0.44"
+flate2 = "1"
 hex = "0.4"
 hotpath.workspace = true
 ignore = "0.4"
@@ -81,22 +83,25 @@ serde_json = { version = "1", features = ["raw_value"] }
 sha2 = "0.11"
 thiserror = "2"
 toml = "1"
-tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
-tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
-tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
-tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+tracedecay-contracts = { path = "../tracedecay-contracts" }
+tracedecay-code-extraction = { path = "../tracedecay-code-extraction", default-features = false }
+tracedecay-domain = { path = "../tracedecay-domain" }
+tracedecay-graph-db = { path = "../tracedecay-graph-db" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
 tree-sitter = "0.26"
 
 [dev-dependencies]
+# Self dev-dependency: the integration suite forces indexing width through
+# the `test-helpers` hooks; production builds never select them.
+tracedecay-code-index = { path = ".", default-features = false, features = ["test-helpers"] }
 criterion = "0.5"
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 tempfile = "3"
-tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false, features = ["lite", "test-helpers"] }
-tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }
-tracedecay-privacy = { path = "../tracedecay-privacy", version = "0.1.0" }
-tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
-tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+tracedecay-code-extraction = { path = "../tracedecay-code-extraction", default-features = false, features = ["lite", "test-helpers"] }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", features = ["test-helpers"] }
+tracedecay-privacy = { path = "../tracedecay-privacy" }
+tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime" }
+tracedecay-store = { path = "../tracedecay-store" }
 
 # Profiling benches: built only under the opt-in `hotpath` feature so a
 # default `cargo bench` / `cargo test --all-targets` never compiles hotpath
@@ -121,6 +126,11 @@ name = "partitioned_codec"
 harness = false
 test = false
 required-features = ["hotpath"]
+
+[[bench]]
+name = "sealed_storage"
+harness = false
+test = false
 
 [[bench]]
 name = "restore_generation"

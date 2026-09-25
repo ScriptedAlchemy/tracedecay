@@ -19,11 +19,12 @@ use tracedecay_domain::configuration::{
     ConfigurationAuditEventKindV1, ConfigurationCandidateV1, ConfigurationIdempotencyKey,
     ConfigurationLayerIdV1, ConfigurationReceiptId, ConfigurationRevisionId,
     ConfigurationSnapshotV1, ConfigurationValueV1, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
-    ProtectedChange, ProtectedChangePlan, ProtectedChangeSnapshotError,
-    RETIRED_CORE_SETTING_KEYS_V1, RedactedConfigurationChangeV1, RollbackModeV1, RuleEffect,
-    SOURCE_BINDINGS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, ScopeControlOperationV1,
-    ScopeSourceBinding, SettingKey, SourceKindV1, USER_CODE_INDEX_WORKERS_SETTING_KEY,
-    UserProfileId, WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY, ProtectedChange, ProtectedChangePlan,
+    ProtectedChangeSnapshotError, RETIRED_CORE_SETTING_KEYS_V1, RedactedConfigurationChangeV1,
+    RollbackModeV1, RuleEffect, SOURCE_BINDINGS_SETTING_KEY,
+    SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, ScopeControlOperationV1, ScopeSourceBinding,
+    SettingKey, SourceKindV1, USER_CODE_INDEX_WORKERS_SETTING_KEY, UserProfileId,
+    WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::{AccessPolicyDigest, ActorId, ManifestDigest, UtcMicros, canonical_sha256};
 #[cfg(test)]
@@ -360,6 +361,7 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
             let registry = ConfigurationRegistry::core().map_err(ConfigurationError::validation)?;
             let additive_keys = [
                 INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
+                LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
                 SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
             ]
             .into_iter()

@@ -7,18 +7,18 @@ use std::process::{Command, Output, Stdio};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay_agent_hosts::agents::host_bundle::{
-    HostComponentSetReceiptV1, HostComponentV1, HostKindV1, latest_host_component_receipt_at,
-    latest_host_component_set_receipt_at,
+    HostBundleLifecycleOpV1, HostComponentSetReceiptV1, HostComponentV1, HostKindV1,
+    latest_host_component_receipt_at, latest_host_component_set_receipt_at,
 };
 use tracedecay_agent_hosts::agents::host_bundle_registry::unsupported_host_component_set_reason;
+use tracedecay_agent_hosts::agents::load_jsonc_file_strict;
 
 #[path = "host_lifecycle_cli_acceptance/native_plugin_fixture.rs"]
 mod native_plugin_fixture;
-use native_plugin_fixture::{
-    apply_current_codex_plugin_remediation, remediation_command, set_claude_native_activation,
-};
 #[cfg(unix)]
-use native_plugin_fixture::{install_current_claude_cli, recorded_claude_invocations};
+use native_plugin_fixture::{
+    install_current_claude_cli, install_current_codex_cli, recorded_claude_invocations,
+};
 
 const VERIFY_FAILURE_ENV: &str = "TRACEDECAY_TEST_FAIL_HOST_REGISTRATION_VERIFY";
 
@@ -48,19 +48,23 @@ const CURSOR_CONFIGS: &[(&str, &[u8])] = &[(
 )];
 const CODEX_CONFIGS: &[(&str, &[u8])] = &[(
     ".codex/config.toml",
-    b"# operator comment\nmodel = \"o4-mini\" # keep inline\napproval_policy = \"on-failure\"\n\n[mcp_servers.foreign]\ncommand = \"foreign-bin\"\nargs = [\"--stdio\"]\n",
+    b"# operator comment\nmodel = \"o4-mini\" # keep inline\napproval_policy   =   'on-failure'\nsandbox = { mode = \"workspace-write\", network = false }\n\n[mcp_servers.foreign]\nargs = [ \"--stdio\" ]\ncommand = \"foreign-bin\"\n",
 )];
 const DEVIN_CONFIGS: &[(&str, &[u8])] = &[(
     ".config/devin/mcp_config.json",
     br#"{"mcpServers":{"foreign":{"command":"foreign-bin","args":["serve"]}},"ui":{"theme":"dark"}}
 "#,
 )];
+#[cfg(target_os = "macos")]
+const ZED_SETTINGS_RELATIVE: &str = "Library/Application Support/Zed/settings.json";
+#[cfg(not(target_os = "macos"))]
+const ZED_SETTINGS_RELATIVE: &str = ".config/zed/settings.json";
 const ZED_CONFIGS: &[(&str, &[u8])] = &[(
-    ".config/zed/settings.json",
+    ZED_SETTINGS_RELATIVE,
     br#"{
-  // preserve through the byte-exact uninstall snapshot
-  "context_servers": {"foreign": {"command": "foreign-bin"}},
-  "theme": "dark"
+  // operator comment survives the byte-exact uninstall
+  "context_servers": {"foreign": {"command": "foreign-bin"},},
+  "theme": "dark", /* inline */
 }
 "#,
 )];
@@ -167,18 +171,7 @@ const ROO_CONFIGS: &[(&str, &[u8])] = &[(
 )];
 const KILO_CONFIGS: &[(&str, &[u8])] = &[(
     ".config/kilo/kilo.jsonc",
-    br#"{
-  "mcp": {
-    "foreign": {
-      "command": [
-        "foreign-bin"
-      ],
-      "type": "local"
-    }
-  },
-  "theme": "dark"
-}
-"#,
+    b"{\n\t// operator comment\n\t\"theme\": \"dark\",\n\t\"mcp\": {\n\t\t\"foreign\": {\"type\": \"local\", \"command\": [\"foreign-bin\"]},\n\t},\n}\n",
 )];
 
 fn host_case(host: HostKindV1) -> HostCase {
@@ -199,6 +192,7 @@ fn host_case(host: HostKindV1) -> HostCase {
         HostKindV1::Cline => CLINE_CONFIGS,
         HostKindV1::RooCode => ROO_CONFIGS,
         HostKindV1::Kilo => KILO_CONFIGS,
+        HostKindV1::Pi => &[],
         unsupported => panic!("no production lifecycle case for unsupported host {unsupported:?}"),
     };
     HostCase {
@@ -261,6 +255,9 @@ impl IsolatedCli {
             .env("XDG_CONFIG_HOME", self.home.path().join(".config"))
             .env("TRACEDECAY_DATA_DIR", &self.profile)
             .env("TRACEDECAY_GLOBAL_DB", self.profile.join("global.db"))
+            // `HOME` is the sandbox here, so an inherited Pi relocation would
+            // otherwise be honored and point outside it.
+            .env_remove("PI_CODING_AGENT_DIR")
             .env("PATH", path)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -270,6 +267,14 @@ impl IsolatedCli {
 
     fn run(&self, args: &[&str]) -> Output {
         self.command(args).output().unwrap()
+    }
+
+    /// Runs with only the isolated bin dir on `PATH`, so no host CLI the
+    /// machine happens to carry can resolve.
+    fn run_without_host_clis(&self, args: &[&str]) -> Output {
+        let mut command = self.command(args);
+        command.env("PATH", &self.bin_dir);
+        command.output().unwrap()
     }
 
     fn run_with_env(&self, args: &[&str], key: &str, value: &str) -> Output {
@@ -327,17 +332,68 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
     let (relative, root) = match case.host {
         HostKindV1::Cline => (".cline/mcp.json", "mcpServers"),
         HostKindV1::Devin => (".config/devin/mcp_config.json", "mcpServers"),
-        HostKindV1::Zed => (".config/zed/settings.json", "context_servers"),
+        HostKindV1::Zed => (ZED_SETTINGS_RELATIVE, "context_servers"),
         HostKindV1::Antigravity => (".gemini/antigravity/mcp_config.json", "mcpServers"),
         HostKindV1::RooCode => (
             ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/cline_mcp_settings.json",
             "mcpServers",
         ),
         HostKindV1::Kilo => (".config/kilo/kilo.jsonc", "mcp"),
+        HostKindV1::Pi => {
+            let extension = fs::read_to_string(
+                cli.home
+                    .path()
+                    .join(".pi/agent/extensions/tracedecay/index.ts"),
+            )
+            .unwrap();
+            assert!(extension.contains("TraceDecayPiExtension"));
+            assert!(
+                extension.contains(
+                    &serde_json::to_string(cli.bin_dir.join("tracedecay").to_str().unwrap())
+                        .unwrap()
+                ),
+                "{} extension did not render the resolved binary",
+                case.id
+            );
+            let package = fs::read_to_string(
+                cli.home
+                    .path()
+                    .join(".pi/agent/extensions/tracedecay/package.json"),
+            )
+            .unwrap();
+            assert!(package.contains(env!("CARGO_PKG_VERSION")));
+            let schemas: serde_json::Value = serde_json::from_slice(
+                &fs::read(
+                    cli.home
+                        .path()
+                        .join(".pi/agent/extensions/tracedecay/schemas.json"),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert!(
+                schemas
+                    .as_array()
+                    .is_some_and(|entries| entries.len() > 100),
+                "{} schemas.json did not carry the generated catalog",
+                case.id
+            );
+            let skill = fs::read_to_string(
+                cli.home
+                    .path()
+                    .join(".pi/agent/skills/tracedecay-cli/SKILL.md"),
+            )
+            .unwrap();
+            assert!(skill.contains("tracedecay_context"));
+            return;
+        }
         _ => return,
     };
-    let config: serde_json::Value =
-        serde_json::from_slice(&fs::read(cli.home.path().join(relative)).unwrap()).unwrap();
+    let config_path = cli.home.path().join(relative);
+    let config: serde_json::Value = match case.host {
+        HostKindV1::Zed | HostKindV1::Kilo => load_jsonc_file_strict(&config_path).unwrap(),
+        _ => serde_json::from_slice(&fs::read(config_path).unwrap()).unwrap(),
+    };
     assert!(
         config[root].get("foreign").is_some(),
         "{} install discarded a sibling MCP server",
@@ -638,6 +694,22 @@ fn native_feedback(case: HostCase) -> Vec<(&'static str, &'static str, Vec<u8>)>
         | HostKindV1::Cline
         | HostKindV1::RooCode
         | HostKindV1::Kilo => Vec::new(),
+        HostKindV1::Pi => vec![
+            (
+                "session start",
+                "hook-pi-event",
+                include_bytes!(
+                    "../../../../crates/tracedecay-hooks/fixtures/host_events/pi/session-start.json"
+                )
+                .to_vec(),
+            ),
+            (
+                "stop",
+                "hook-pi-event",
+                include_bytes!("../../../../crates/tracedecay-hooks/fixtures/host_events/pi/agent-end.json")
+                    .to_vec(),
+            ),
+        ],
         _ => unreachable!("non-acceptance host"),
     }
 }
@@ -677,6 +749,7 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
         HostKindV1::Antigravity,
         HostKindV1::Vibe,
         HostKindV1::Hermes,
+        HostKindV1::Pi,
     ] {
         let case = host_case(host);
         assert!(!lifecycle_requires_absent_host_binary(case.host));
@@ -749,24 +822,7 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
             "{} interrupted repair did not preserve its durable receipt",
             case.id
         );
-        assert_success(
-            case.id,
-            "interruption recovery",
-            cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]),
-        );
-        assert_eq!(
-            owned_bytes(&cli, &repaired_receipt, &originals),
-            before_interruption,
-            "{} recovery did not preserve rolled-back configs/artifacts",
-            case.id
-        );
-        assert_eq!(
-            serde_json::to_vec(&latest_receipt(&cli, case.host)).unwrap(),
-            receipt_before_interruption,
-            "{} recovery did not preserve the pre-interruption receipt",
-            case.id
-        );
-        assert_success(case.id, "post-recovery repair", cli.run(&["reinstall"]));
+        assert_success(case.id, "post-interruption repair", cli.run(&["reinstall"]));
         let repaired_receipt = latest_receipt(&cli, case.host);
         assert_receipt_digests(&cli, &repaired_receipt);
 
@@ -774,58 +830,62 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
             .home
             .path()
             .join(format!("{}-feedback-rollback.json", case.id));
-        let dry_run = cli.run_with_env(
-            &["feedback-rollback", "dry-run", "--agent", case.id],
-            "TRACEDECAY_TEST_FEEDBACK_ROUTE_REVISION",
-            "next",
-        );
-        assert!(
-            !String::from_utf8_lossy(&dry_run.stdout).contains(" 0 mutation(s)"),
-            "{} feedback route planned no real byte mutation",
-            case.id
-        );
-        assert_success(case.id, "feedback rollback dry-run", dry_run);
-        let before_feedback = owned_bytes(&cli, &repaired_receipt, &originals);
-        assert_success(
-            case.id,
-            "feedback rollback apply",
-            cli.run_with_env(
-                &[
+        // Pi has no feedback route to switch: its extension is the whole
+        // registration, so the feedback-rollback leg has nothing to rehearse.
+        if case.host != HostKindV1::Pi {
+            let dry_run = cli.run_with_env(
+                &["feedback-rollback", "dry-run", "--agent", case.id],
+                "TRACEDECAY_TEST_FEEDBACK_ROUTE_REVISION",
+                "next",
+            );
+            assert!(
+                !String::from_utf8_lossy(&dry_run.stdout).contains(" 0 mutation(s)"),
+                "{} feedback route planned no real byte mutation",
+                case.id
+            );
+            assert_success(case.id, "feedback rollback dry-run", dry_run);
+            let before_feedback = owned_bytes(&cli, &repaired_receipt, &originals);
+            assert_success(
+                case.id,
+                "feedback rollback apply",
+                cli.run_with_env(
+                    &[
+                        "feedback-rollback",
+                        "apply",
+                        "--agent",
+                        case.id,
+                        "--state",
+                        state.to_str().unwrap(),
+                        "--yes",
+                    ],
+                    "TRACEDECAY_TEST_FEEDBACK_ROUTE_REVISION",
+                    "next",
+                ),
+            );
+            let applied_feedback = owned_bytes(&cli, &repaired_receipt, &originals);
+            assert_ne!(
+                applied_feedback, before_feedback,
+                "{} feedback apply did not change any owned bytes",
+                case.id
+            );
+            assert_success(
+                case.id,
+                "feedback rollback restore",
+                cli.run(&[
                     "feedback-rollback",
-                    "apply",
-                    "--agent",
-                    case.id,
+                    "restore",
                     "--state",
                     state.to_str().unwrap(),
                     "--yes",
-                ],
-                "TRACEDECAY_TEST_FEEDBACK_ROUTE_REVISION",
-                "next",
-            ),
-        );
-        let applied_feedback = owned_bytes(&cli, &repaired_receipt, &originals);
-        assert_ne!(
-            applied_feedback, before_feedback,
-            "{} feedback apply did not change any owned bytes",
-            case.id
-        );
-        assert_success(
-            case.id,
-            "feedback rollback restore",
-            cli.run(&[
-                "feedback-rollback",
-                "restore",
-                "--state",
-                state.to_str().unwrap(),
-                "--yes",
-            ]),
-        );
-        assert_snapshot_eq(
-            case.id,
-            "feedback rollback",
-            &owned_bytes(&cli, &latest_receipt(&cli, case.host), &originals),
-            &before_feedback,
-        );
+                ]),
+            );
+            assert_snapshot_eq(
+                case.id,
+                "feedback rollback",
+                &owned_bytes(&cli, &latest_receipt(&cli, case.host), &originals),
+                &before_feedback,
+            );
+        }
 
         assert_success(
             case.id,
@@ -957,6 +1017,7 @@ fn hermes_dashboard_opt_out_survives_install_update_and_reinstall() {
     let case = host_case(HostKindV1::Hermes);
     seed_host(case, &cli);
 
+    let bin_literal = serde_json::to_string(&cli.bin_dir.join("tracedecay")).unwrap();
     let assert_dashboard_absent = || {
         for plugin in [
             cli.home.path().join(".hermes/plugins/tracedecay"),
@@ -964,10 +1025,33 @@ fn hermes_dashboard_opt_out_survives_install_update_and_reinstall() {
                 .path()
                 .join(".hermes/profiles/review/plugins/tracedecay"),
         ] {
+            let manifest = fs::read_to_string(plugin.join("plugin.yaml")).unwrap();
+            assert!(
+                manifest.starts_with("name: tracedecay\nkind: standalone\n"),
+                "{}: {manifest}",
+                plugin.display()
+            );
+            let tools = fs::read_to_string(plugin.join("tools.py")).unwrap();
+            assert!(
+                tools.contains(&format!(
+                    r#"TRACEDECAY_BIN = os.environ.get("TRACEDECAY_BIN") or {bin_literal}"#
+                )),
+                "{}: tools.py must invoke the installed binary",
+                plugin.display()
+            );
+            let skill = fs::read_to_string(plugin.join("skills/tracedecay/SKILL.md")).unwrap();
+            assert!(skill.starts_with("---\nname: tracedecay\n"), "{skill}");
             assert!(!plugin.join("dashboard/manifest.json").exists());
             assert!(!plugin.join("dashboard/plugin_api.py").exists());
             assert!(!plugin.join("dashboard/dist/index.js").exists());
         }
+        let config: toml::Value =
+            toml::from_str(&fs::read_to_string(cli.profile.join("config.toml")).unwrap()).unwrap();
+        assert_eq!(
+            config["agent_dashboard_enabled"]["hermes"].as_bool(),
+            Some(false),
+            "the opt-out must persist: {config}"
+        );
     };
 
     assert_success(
@@ -1070,111 +1154,142 @@ fn feedback_policy_failure_precedes_apply_and_restore_mutations() {
     assert_eq!(owned_bytes(&cli, &receipt, &originals), before_apply);
 }
 
+/// Codex activation is part of the component transaction: without its CLI
+/// the transaction rolls back and leaves nothing staged out of band; with it,
+/// install and a stale-cache update both converge through `codex plugin add`.
+#[cfg(unix)]
 #[test]
-fn codex_stale_cache_remediation_executes_on_the_current_stock_cli_and_converges_update() {
+fn codex_lifecycle_activates_through_the_stock_cli_inside_the_transaction() {
     let cli = IsolatedCli::new();
     let case = host_case(HostKindV1::Codex);
     let originals = seed_host(case, &cli);
+    let home = cli.home.path();
 
-    let staged = cli.run(&["install", "--agent", case.id]);
-    assert!(!staged.status.success());
+    let refused = cli.run_without_host_clis(&["install", "--agent", case.id]);
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("Install the `codex` CLI"),
+        "missing-CLI refusal must name the host CLI: {stderr}"
+    );
     assert_seeded_bytes(&cli, &originals);
     assert!(
-        cli.home
-            .path()
+        !home
             .join(".codex/plugins/tracedecay/.codex-plugin/plugin.json")
-            .is_file(),
-        "Codex remediation has no staged plugin source"
+            .exists(),
+        "a refused activation left the plugin source behind"
     );
     assert!(
-        cli.home
-            .path()
-            .join(".agents/plugins/marketplace.json")
-            .is_file(),
-        "Codex remediation has no staged marketplace entry"
+        !home.join(".agents/plugins/marketplace.json").exists(),
+        "a refused activation left the marketplace entry behind"
     );
     assert!(
         latest_host_component_set_receipt_at(&cli.lifecycle_root(), case.host)
             .unwrap()
-            .is_none(),
-        "staging Codex activation published a lifecycle receipt"
-    );
-    apply_current_codex_plugin_remediation(cli.home.path(), remediation_command(&staged.stderr))
-        .unwrap();
-    assert_success(
-        case.id,
-        "receipt-backed install after native activation",
-        cli.run(&["install", "--agent", case.id]),
+            .is_none()
     );
 
-    let cache_manifest = cli
-        .home
-        .path()
+    install_current_codex_cli(&cli.bin_dir);
+    assert_success(
+        case.id,
+        "install through the stock plugin CLI",
+        cli.run(&["install", "--agent", case.id]),
+    );
+    assert_receipt_digests(&cli, &latest_receipt(&cli, case.host));
+    // The stock CLI appends its activation record and TraceDecay appends only
+    // its hook-trust tables: every operator byte stays in place.
+    let config_path = home.join(".codex/config.toml");
+    let installed_config = fs::read(&config_path).unwrap();
+    assert!(
+        installed_config.starts_with(&originals[&PathBuf::from(".codex/config.toml")]),
+        "install rewrote operator bytes in config.toml:\n{}",
+        String::from_utf8_lossy(&installed_config)
+    );
+    let source_manifest = home.join(".codex/plugins/tracedecay/.codex-plugin/plugin.json");
+    let cache_manifest = home
         .join(".codex/plugins/cache/personal/tracedecay")
         .join(tracedecay_agent_hosts::PRODUCT_VERSION)
         .join(".codex-plugin/plugin.json");
+    assert_eq!(
+        fs::read(&cache_manifest).unwrap(),
+        fs::read(&source_manifest).unwrap()
+    );
+
     fs::write(
         &cache_manifest,
         br#"{"name":"tracedecay","version":"stale"}"#,
     )
     .unwrap();
-
-    let stale_update = cli.run(&["update-plugin"]);
-    assert!(!stale_update.status.success());
-    apply_current_codex_plugin_remediation(
-        cli.home.path(),
-        remediation_command(&stale_update.stderr),
-    )
-    .unwrap();
     assert_success(
         case.id,
-        "update after current stock remediation",
+        "update re-drives the stock plugin CLI over a stale cache",
         cli.run(&["update-plugin"]),
+    );
+    assert_eq!(
+        fs::read(&cache_manifest).unwrap(),
+        fs::read(&source_manifest).unwrap()
+    );
+    assert_eq!(
+        fs::read(&config_path).unwrap(),
+        installed_config,
+        "re-driving the converged Codex activation rewrote config.toml"
     );
 }
 
+/// Claude's marketplace source is receipt-owned from the first install: the
+/// transaction deploys it and then drives the stock `claude plugin` grammar,
+/// or rolls both back when that CLI is absent.
 #[cfg(unix)]
 #[test]
-fn claude_lifecycle_tracks_assets_only_after_native_activation() {
+fn claude_lifecycle_activates_through_the_stock_cli_inside_the_transaction() {
     let cli = IsolatedCli::new();
     let case = host_case(HostKindV1::ClaudeCode);
     let originals = seed_host(case, &cli);
+    let home = cli.home.path();
+    let source_manifest =
+        home.join(".claude/plugins/marketplaces/tracedecay/.claude-plugin/plugin.json");
 
-    let deferred = cli.run(&["install", "--agent", case.id]);
-    assert!(!deferred.status.success());
-    let stderr = String::from_utf8_lossy(&deferred.stderr);
+    let refused = cli.run_without_host_clis(&["install", "--agent", case.id]);
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(
-        stderr.contains("Claude Code owns marketplace registration"),
-        "Claude deferral omitted its native activation boundary: {stderr}"
+        stderr.contains("host CLI is unavailable"),
+        "missing-CLI refusal must name the host CLI: {stderr}"
     );
     assert!(
-        cli.home
-            .path()
-            .join(".claude/plugins/marketplaces/tracedecay/.claude-plugin/marketplace.json")
-            .is_file(),
-        "Claude deferral did not stage the verified marketplace source"
+        !source_manifest.exists(),
+        "a refused activation left the marketplace source behind"
     );
     assert_seeded_bytes(&cli, &originals);
     assert!(
         latest_host_component_set_receipt_at(&cli.lifecycle_root(), case.host)
             .unwrap()
-            .is_none(),
-        "staging native activation published a lifecycle receipt"
+            .is_none()
     );
 
-    set_claude_native_activation(cli.home.path(), true);
-    let settings_path = cli.home.path().join(".claude/settings.json");
-    let marketplaces_path = cli
-        .home
-        .path()
-        .join(".claude/plugins/known_marketplaces.json");
+    let claude_invocations = install_current_claude_cli(home, &cli.bin_dir);
+    let settings_path = home.join(".claude/settings.json");
+    let marketplaces_path = home.join(".claude/plugins/known_marketplaces.json");
     let settings_before_install: serde_json::Value =
         serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
-    let marketplaces_before_install = fs::read(&marketplaces_path).unwrap();
+    let marketplaces_before_install: serde_json::Value =
+        serde_json::from_slice(&fs::read(&marketplaces_path).unwrap()).unwrap();
     assert_success(
         case.id,
-        "receipt-backed install after native activation",
+        "install through the stock plugin CLI",
         cli.run(&["install", "--agent", case.id]),
+    );
+    assert_eq!(
+        recorded_claude_invocations(&claude_invocations),
+        [
+            format!(
+                "plugin marketplace add {}",
+                home.join(".claude/plugins/marketplaces/tracedecay")
+                    .display()
+            ),
+            "plugin install tracedecay@tracedecay".to_string(),
+        ],
+        "Claude activation must use the current stock plugin lifecycle grammar"
     );
     let install_receipt = latest_receipt(&cli, case.host);
     assert_receipt_digests(&cli, &install_receipt);
@@ -1190,18 +1305,22 @@ fn claude_lifecycle_tracks_assets_only_after_native_activation() {
         serde_json::json!(["Read", "mcp__plugin_tracedecay_graph__*"]),
         "catalog install must add the one managed permission without replacing foreign grants"
     );
-    assert_eq!(
-        fs::read(&marketplaces_path).unwrap(),
-        marketplaces_before_install
-    );
-    let active_native_state = [
-        fs::read(&settings_path).unwrap(),
-        fs::read(&marketplaces_path).unwrap(),
-    ];
+    let installed_marketplaces: serde_json::Value =
+        serde_json::from_slice(&fs::read(&marketplaces_path).unwrap()).unwrap();
+    for (name, entry) in marketplaces_before_install.as_object().unwrap() {
+        assert_eq!(
+            &installed_marketplaces[name], entry,
+            "foreign marketplace {name}"
+        );
+    }
+    let native_values = || {
+        [&settings_path, &marketplaces_path].map(|path| {
+            serde_json::from_slice::<serde_json::Value>(&fs::read(path).unwrap()).unwrap()
+        })
+    };
+    let converged_activation = native_values();
 
-    let cache_manifest = cli
-        .home
-        .path()
+    let cache_manifest = home
         .join(".claude/plugins/cache/tracedecay/tracedecay")
         .join(tracedecay_agent_hosts::PRODUCT_VERSION)
         .join(".claude-plugin/plugin.json");
@@ -1210,31 +1329,26 @@ fn claude_lifecycle_tracks_assets_only_after_native_activation() {
         br#"{"name":"tracedecay","version":"stale"}"#,
     )
     .unwrap();
-    let before_stale_update = serde_json::to_vec(&latest_receipt(&cli, case.host)).unwrap();
-    let stale_update = cli.run(&["update-plugin"]);
-    assert!(!stale_update.status.success());
-    assert!(
-        String::from_utf8_lossy(&stale_update.stderr).contains("loaded TraceDecay cache is stale"),
-        "Claude stale cache did not produce native-update remediation: {}",
-        String::from_utf8_lossy(&stale_update.stderr)
-    );
-    assert_eq!(
-        serde_json::to_vec(&latest_receipt(&cli, case.host)).unwrap(),
-        before_stale_update,
-        "stale native cache changed the component receipt"
-    );
-    fs::copy(
-        cli.home
-            .path()
-            .join(".claude/plugins/marketplaces/tracedecay/.claude-plugin/plugin.json"),
-        &cache_manifest,
-    )
-    .unwrap();
     assert_success(
         case.id,
-        "catalog update after native cache refresh",
+        "update re-drives the stock plugin CLI over a stale cache",
         cli.run(&["update-plugin"]),
     );
+    assert_eq!(
+        fs::read(&cache_manifest).unwrap(),
+        fs::read(&source_manifest).unwrap()
+    );
+    // The re-driven `claude plugin install` rewrites these host-owned files in
+    // the host's own serialization; only their values are TraceDecay's to keep.
+    assert_eq!(
+        native_values(),
+        converged_activation,
+        "re-driving the stock plugin CLI changed the converged Claude activation state"
+    );
+    let active_native_state = [
+        fs::read(&settings_path).unwrap(),
+        fs::read(&marketplaces_path).unwrap(),
+    ];
     assert_success(case.id, "catalog repair", cli.run(&["reinstall"]));
     for (phase, entrypoint, fixture) in native_feedback(case) {
         assert_success(case.id, phase, cli.run_with_stdin(&[entrypoint], &fixture));
@@ -1248,7 +1362,7 @@ fn claude_lifecycle_tracks_assets_only_after_native_activation() {
         "catalog maintenance changed the converged Claude activation state"
     );
 
-    let claude_invocations = install_current_claude_cli(cli.home.path(), &cli.bin_dir);
+    fs::remove_file(&claude_invocations).unwrap();
     assert_success(
         case.id,
         "stock CLI-backed uninstall",
@@ -1297,15 +1411,206 @@ fn kimi_lifecycle_reports_official_activation_deferral() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let staged = cli
+        .home
+        .path()
+        .join(".tracedecay/host-bundle-stage/kimi/tracedecay");
     assert!(
-        stderr.contains("Kimi") && stderr.contains("plugin"),
+        stderr.contains(&format!("/plugins install {}", staged.display())),
         "Kimi deferral omitted its official activation boundary: {stderr}"
     );
+    // The staged source that `/plugins install` consumes is receipt-owned;
+    // Kimi's own registry is never written.
+    assert!(staged.join(".kimi-plugin/plugin.json").is_file());
     assert!(
         latest_host_component_set_receipt_at(&cli.lifecycle_root(), case.host)
             .unwrap()
-            .is_none()
+            .is_some()
     );
+    assert!(
+        !cli.home
+            .path()
+            .join(".kimi-code/plugins/installed.json")
+            .exists()
+    );
+}
+
+const PI_ARTIFACTS: [&str; 4] = [
+    ".pi/agent/extensions/tracedecay/index.ts",
+    ".pi/agent/extensions/tracedecay/package.json",
+    ".pi/agent/extensions/tracedecay/schemas.json",
+    ".pi/agent/skills/tracedecay-cli/SKILL.md",
+];
+
+/// Operator-owned Pi state beside the TraceDecay extension; every lifecycle
+/// phase must leave these bytes exactly as seeded.
+fn seed_pi(cli: &IsolatedCli, agent_dir: &std::path::Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut originals = BTreeMap::new();
+    for (relative, bytes) in [
+        ("settings.json", &br#"{"defaultModel":"foreign"}"#[..]),
+        ("extensions/foreign.ts", b"export default function () {}\n"),
+        ("skills/foreign/SKILL.md", b"---\nname: foreign\n---\n"),
+    ] {
+        let path = agent_dir.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, bytes).unwrap();
+        originals.insert(
+            path.strip_prefix(cli.home.path()).unwrap().to_path_buf(),
+            bytes.to_vec(),
+        );
+    }
+    originals
+}
+
+fn pi_doctor_section(cli: &IsolatedCli, envs: &[(&str, &std::path::Path)]) -> String {
+    let mut command = cli.command(&["doctor"]);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let stderr = String::from_utf8(command.output().unwrap().stderr).unwrap();
+    let start = stderr
+        .find("Pi integration")
+        .unwrap_or_else(|| panic!("doctor omitted the Pi section:\n{stderr}"));
+    stderr[start..]
+        .split("\x1b[1m")
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+#[test]
+fn pi_lifecycle_installs_diagnoses_sweeps_and_uninstalls_exact_bytes() {
+    let cli = IsolatedCli::new();
+    let agent_dir = cli.home.path().join(".pi/agent");
+    let originals = seed_pi(&cli, &agent_dir);
+
+    assert_success("pi", "install", cli.run(&["install", "--agent", "pi"]));
+    let install_receipt = latest_receipt(&cli, HostKindV1::Pi);
+    assert_receipt_digests(&cli, &install_receipt);
+    let mut owned = install_receipt
+        .component_receipts
+        .iter()
+        .flat_map(|component| &component.artifacts)
+        .map(|artifact| artifact.relative_path.as_str())
+        .collect::<Vec<_>>();
+    owned.sort_unstable();
+    assert_eq!(owned, PI_ARTIFACTS);
+    let extension = fs::read_to_string(cli.home.path().join(PI_ARTIFACTS[0])).unwrap();
+    assert!(extension.contains(&serde_json::to_string(&cli.bin_dir.join("tracedecay")).unwrap()));
+    let schemas: Vec<serde_json::Value> =
+        serde_json::from_slice(&fs::read(cli.home.path().join(PI_ARTIFACTS[2])).unwrap()).unwrap();
+    assert!(
+        schemas
+            .iter()
+            .any(|tool| tool["name"] == "tracedecay_search" && tool["read_only"] == true)
+    );
+    assert!(
+        schemas
+            .iter()
+            .any(|tool| tool["name"] == "tracedecay_str_replace" && tool["read_only"] == false)
+    );
+    assert_seeded_bytes(&cli, &originals);
+
+    let doctor = pi_doctor_section(&cli, &[]);
+    assert!(
+        doctor.contains(&format!(
+            "TraceDecay extension deployed at {}",
+            cli.home.path().join(PI_ARTIFACTS[0]).display()
+        )) && doctor.contains("TraceDecay routing skill deployed at"),
+        "{doctor}"
+    );
+
+    assert_success("pi", "update", cli.run(&["update-plugin"]));
+    let update_receipt = latest_receipt(&cli, HostKindV1::Pi);
+    assert_ne!(update_receipt.operation_id, install_receipt.operation_id);
+    assert_eq!(update_receipt.operation, HostBundleLifecycleOpV1::Update);
+    assert_receipt_digests(&cli, &update_receipt);
+
+    fs::write(
+        cli.home.path().join(PI_ARTIFACTS[0]),
+        b"// operator-corrupted managed artifact\n",
+    )
+    .unwrap();
+    let doctor = pi_doctor_section(&cli, &[]);
+    assert!(doctor.contains("incomplete or stale"), "{doctor}");
+    assert_success("pi", "repair", cli.run(&["reinstall"]));
+    assert_receipt_digests(&cli, &latest_receipt(&cli, HostKindV1::Pi));
+    assert_eq!(
+        fs::read_to_string(cli.home.path().join(PI_ARTIFACTS[0])).unwrap(),
+        extension
+    );
+
+    assert_success("pi", "uninstall", cli.run(&["uninstall", "--agent", "pi"]));
+    for artifact in PI_ARTIFACTS {
+        assert!(
+            !cli.home.path().join(artifact).exists(),
+            "uninstall left {artifact}"
+        );
+    }
+    assert_seeded_bytes(&cli, &originals);
+}
+
+/// `PI_CODING_AGENT_DIR` relocates the directory Pi loads. The receipt-owned
+/// bytes stay under `~/.pi/agent`; activation mirrors them into the relocated
+/// directory, doctor and the sweep read that directory, and uninstall removes
+/// the mirror without touching the operator's files there.
+#[test]
+fn pi_relocated_agent_dir_tracks_the_receipt_owned_bytes() {
+    let cli = IsolatedCli::new();
+    let relocated = cli.home.path().join("relocated-pi-agent");
+    let originals = seed_pi(&cli, &relocated);
+    let env = [("PI_CODING_AGENT_DIR", relocated.as_path())];
+    let run = |args: &[&str]| {
+        let mut command = cli.command(args);
+        command.env(env[0].0, env[0].1);
+        command.output().unwrap()
+    };
+
+    assert_success(
+        "pi",
+        "relocated install",
+        run(&["install", "--agent", "pi"]),
+    );
+    let receipt = latest_receipt(&cli, HostKindV1::Pi);
+    assert_receipt_digests(&cli, &receipt);
+    for artifact in PI_ARTIFACTS {
+        let relative = artifact.strip_prefix(".pi/agent/").unwrap();
+        assert_eq!(
+            fs::read(relocated.join(relative)).unwrap(),
+            fs::read(cli.home.path().join(artifact)).unwrap(),
+            "{relative} mirror differs from the receipt-owned bytes"
+        );
+    }
+    let doctor = pi_doctor_section(&cli, &env);
+    assert!(
+        doctor.contains(&format!(
+            "TraceDecay extension deployed at {}",
+            relocated.join("extensions/tracedecay/index.ts").display()
+        )),
+        "{doctor}"
+    );
+
+    fs::remove_file(relocated.join("skills/tracedecay-cli/SKILL.md")).unwrap();
+    assert_success("pi", "relocated update", run(&["update-plugin"]));
+    assert!(relocated.join("skills/tracedecay-cli/SKILL.md").is_file());
+
+    assert_success(
+        "pi",
+        "relocated uninstall",
+        run(&["uninstall", "--agent", "pi"]),
+    );
+    for artifact in PI_ARTIFACTS {
+        let relative = artifact.strip_prefix(".pi/agent/").unwrap();
+        assert!(
+            !relocated.join(relative).exists(),
+            "uninstall left {relative}"
+        );
+        assert!(
+            !cli.home.path().join(artifact).exists(),
+            "uninstall left {artifact}"
+        );
+    }
+    assert_seeded_bytes(&cli, &originals);
 }
 
 #[test]
@@ -1339,76 +1644,70 @@ fn unadmitted_catalog_hosts_never_fall_back_to_direct_installers() {
     }
 }
 
+/// An integration rendered by an older binary whose profile config never
+/// tracked it is exactly what `doctor` reports as version skew. The unscoped
+/// `update-plugin` sweep must refresh it through the same install path and
+/// track it, never exit 0 having touched nothing.
 #[test]
-fn killed_registration_mutation_recovers_exact_pre_effect_state() {
+fn update_plugin_refreshes_detected_integrations_the_config_never_tracked() {
     let cli = IsolatedCli::new();
-    let case = host_case(HostKindV1::OpenCode);
-    let originals = seed_host(case, &cli);
+    let case = host_case(HostKindV1::Cline);
+    seed_host(case, &cli);
     assert_success(
         case.id,
-        "initial install",
+        "install",
         cli.run(&["install", "--agent", case.id]),
     );
-    let receipt = latest_receipt(&cli, case.host);
-    let config_path = cli.home.path().join(".config/opencode/opencode.json");
-    let mut config: serde_json::Value =
-        serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
-    config["mcp"]["tracedecay"]["command"] = serde_json::json!(["operator-owned", "pending"]);
-    fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o640)).unwrap();
-    }
-    let before = owned_bytes(&cli, &receipt, &originals);
-    let receipt_before = serde_json::to_vec(&latest_receipt(&cli, case.host)).unwrap();
-
-    let killed = cli.run_with_env(
-        &["reinstall"],
-        "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE",
-        "1",
+    let install_receipt = latest_receipt(&cli, case.host);
+    let config_path = cli.profile.join("config.toml");
+    let tracked = fs::read_to_string(&config_path).unwrap();
+    assert!(
+        tracked.contains("installed_agents = [\"cline\"]"),
+        "{tracked}"
     );
-    assert!(!killed.status.success(), "fault subprocess did not abort");
-    assert_ne!(
-        fs::read(&config_path).unwrap(),
-        before[&PathBuf::from(".config/opencode/opencode.json")],
-        "fault boundary did not cross a real host-config mutation"
-    );
+    fs::write(
+        &config_path,
+        tracked.replace("installed_agents = [\"cline\"]", "installed_agents = []"),
+    )
+    .unwrap();
 
-    assert_success(
-        case.id,
-        "restart recovery",
-        cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]),
-    );
-    assert_eq!(owned_bytes(&cli, &receipt, &originals), before);
-    assert_eq!(
-        serde_json::to_vec(&latest_receipt(&cli, case.host)).unwrap(),
-        receipt_before
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
+    assert_success(case.id, "update-plugin", cli.run(&["update-plugin"]));
 
-        assert_eq!(
-            fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
-            0o640
-        );
-    }
+    let update_receipt = latest_receipt(&cli, case.host);
+    assert_ne!(update_receipt.operation_id, install_receipt.operation_id);
+    assert_eq!(update_receipt.operation, HostBundleLifecycleOpV1::Update);
+    assert_receipt_digests(&cli, &update_receipt);
+    assert!(
+        fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("installed_agents = [\"cline\"]"),
+        "the refreshed integration must be tracked again"
+    );
 }
 
+/// With nothing tracked and nothing detected there is nothing the sweep can
+/// refresh; that is a typed refusal naming the next step, not an empty exit 0.
 #[test]
-fn killed_install_recovers_with_original_journal_operation() {
+fn update_plugin_with_no_integration_refuses_instead_of_exiting_zero() {
+    let cli = IsolatedCli::new();
+
+    let output = cli.run(&["update-plugin"]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("nothing to update"), "{stderr}");
+    assert!(stderr.contains("tracedecay install"), "{stderr}");
+}
+
+/// Rollback bytes live only in the process that staged them, so a killed
+/// install leaves whatever it wrote and nothing to recover from: no journal,
+/// backup, or copy of any host config. The next install converges over it.
+#[test]
+fn killed_install_keeps_no_rollback_state_and_the_next_install_converges() {
     let cli = IsolatedCli::new();
     let case = host_case(HostKindV1::OpenCode);
     let originals = seed_host(case, &cli);
     let config_path = cli.home.path().join(".config/opencode/opencode.json");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o640)).unwrap();
-    }
     let killed = cli.run_with_env(
         &["install", "--agent", case.id],
         "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE",
@@ -1422,112 +1721,30 @@ fn killed_install_recovers_with_original_journal_operation() {
         fs::read(&config_path).unwrap(),
         originals[&PathBuf::from(".config/opencode/opencode.json")]
     );
-    assert_success(
-        case.id,
-        "install restart recovery",
-        cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]),
-    );
-    assert_seeded_bytes(&cli, &originals);
-    assert!(
-        latest_host_component_set_receipt_at(&cli.lifecycle_root(), case.host)
-            .unwrap()
-            .is_none()
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        assert_eq!(
-            fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
-            0o640
+    let control = cli.lifecycle_root().join(".tracedecay-host-bundle-v1");
+    if let Ok(entries) = fs::read_dir(&control) {
+        for entry in entries {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            assert!(
+                name.starts_with("receipt.") || name.starts_with("writer."),
+                "a killed install must leave no rollback state: {name}"
+            );
+        }
+    }
+    for entry in fs::read_dir(config_path.parent().unwrap()).unwrap() {
+        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+        assert!(
+            !name.ends_with(".bak") && !name.ends_with(".tracedecay-original"),
+            "no copy of the host config may remain beside it: {name}"
         );
     }
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn recovery_rejects_foreign_metadata_drift_with_unchanged_bytes() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let cli = IsolatedCli::new();
-    let case = host_case(HostKindV1::OpenCode);
-    seed_host(case, &cli);
-    let config_path = cli.home.path().join(".config/opencode/opencode.json");
-    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o640)).unwrap();
-    let mut original_acl = 2_u32.to_le_bytes().to_vec();
-    for (tag, permissions, id) in [
-        (0x01_u16, 0x06_u16, u32::MAX),
-        (0x02, 0x04, 65_534),
-        (0x04, 0x04, u32::MAX),
-        (0x10, 0x04, u32::MAX),
-        (0x20, 0x00, u32::MAX),
-    ] {
-        original_acl.extend_from_slice(&tag.to_le_bytes());
-        original_acl.extend_from_slice(&permissions.to_le_bytes());
-        original_acl.extend_from_slice(&id.to_le_bytes());
-    }
-    xattr::set(&config_path, "system.posix_acl_access", &original_acl).unwrap();
-    let killed = cli.run_with_env(
-        &["install", "--agent", case.id],
-        "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE",
-        "1",
-    );
-    assert!(!killed.status.success());
-    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600)).unwrap();
-
-    let bytes_after_kill = fs::read(&config_path).unwrap();
-    let acl_after_drift = xattr::get(&config_path, "system.posix_acl_access").unwrap();
-    let refused = cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]);
-    assert!(!refused.status.success());
-    assert_eq!(fs::read(&config_path).unwrap(), bytes_after_kill);
-    assert_eq!(
-        fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
-        0o600,
-        "recovery must not overwrite foreign metadata drift"
-    );
-    assert_eq!(
-        xattr::get(&config_path, "system.posix_acl_access").unwrap(),
-        acl_after_drift
-    );
-    assert_ne!(acl_after_drift, Some(original_acl));
-}
-
-#[test]
-fn interrupted_registration_rollback_converges_across_two_restarts() {
-    let cli = IsolatedCli::new();
-    let case = host_case(HostKindV1::OpenCode);
-    let originals = seed_host(case, &cli);
-    let config_path = cli.home.path().join(".config/opencode/opencode.json");
-    let killed = cli.run_with_env(
-        &["install", "--agent", case.id],
-        "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE",
-        "1",
-    );
-    assert!(!killed.status.success());
-
-    let mut recovery = cli.command(&["host-bundle", "recover", "--agent", case.id, "--yes"]);
-    let interrupted = recovery
-        .env(
-            "TRACEDECAY_TEST_ABORT_AFTER_REGISTRATION_ROLLBACK_WRITE_PATH",
-            &config_path,
-        )
-        .output()
-        .unwrap();
-    assert!(!interrupted.status.success());
-    assert_seeded_bytes(&cli, &originals);
 
     assert_success(
         case.id,
-        "rollback restart",
-        cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]),
+        "install after the killed install",
+        cli.run(&["install", "--agent", case.id]),
     );
-    assert_seeded_bytes(&cli, &originals);
-    assert_success(
-        case.id,
-        "idempotent rollback restart",
-        cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]),
-    );
-    assert_seeded_bytes(&cli, &originals);
+    assert_receipt_digests(&cli, &latest_receipt(&cli, case.host));
 }
 
 #[cfg(target_os = "linux")]
@@ -1598,44 +1815,6 @@ fn claude_install_rejects_empty_symlinked_config_directory() {
         "Claude symlink refusal omitted actionable remediation: {stderr}"
     );
     assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
-}
-
-#[test]
-fn killed_install_recovery_refuses_later_operator_edit() {
-    let cli = IsolatedCli::new();
-    let case = host_case(HostKindV1::OpenCode);
-    let originals = seed_host(case, &cli);
-    let killed = cli.run_with_env(
-        &["install", "--agent", case.id],
-        "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE",
-        "1",
-    );
-    assert!(!killed.status.success());
-
-    let config_path = cli.home.path().join(".config/opencode/opencode.json");
-    let mut config: serde_json::Value =
-        serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
-    config["operatorAfterKill"] = serde_json::json!(true);
-    fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
-    let config_before = fs::read(&config_path).unwrap();
-    let receipt_before =
-        latest_host_component_set_receipt_at(&cli.lifecycle_root(), case.host).unwrap();
-
-    let refused = cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]);
-    assert!(!refused.status.success());
-    assert_eq!(fs::read(&config_path).unwrap(), config_before);
-    assert_eq!(
-        latest_host_component_set_receipt_at(&cli.lifecycle_root(), case.host).unwrap(),
-        receipt_before
-    );
-    for relative in originals.keys() {
-        if relative != &PathBuf::from(".config/opencode/opencode.json") {
-            assert_eq!(
-                fs::read(cli.home.path().join(relative)).unwrap(),
-                originals[relative]
-            );
-        }
-    }
 }
 
 #[test]

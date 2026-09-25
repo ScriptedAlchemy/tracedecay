@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracedecay_domain::{
@@ -45,7 +46,7 @@ struct AutomaticFactDigestProjection<'a> {
 /// The only durable outcomes of an automatic fact apply. Candidate discovery
 /// and in-flight work are owned by the automation run receipt, never this
 /// terminal audit record.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectMemoryAutomaticFactStateV1 {
     Applied,

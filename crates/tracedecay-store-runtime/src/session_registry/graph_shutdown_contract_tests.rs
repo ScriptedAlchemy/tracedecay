@@ -169,6 +169,75 @@ async fn healthy_shutdown_joins_workers_then_closes_every_retained_graph_without
         .expect("shutdown close is idempotent after the drain");
 }
 
+fn wal_bytes(database: &Path) -> u64 {
+    let mut wal = database.as_os_str().to_owned();
+    wal.push("-wal");
+    std::fs::metadata(PathBuf::from(wal)).map_or(0, |metadata| metadata.len())
+}
+
+#[tokio::test]
+async fn terminal_shutdown_truncates_every_released_session_store_wal() {
+    let temp = TempDir::new().expect("shutdown wal fixture root");
+    let profile_root = temp.path().join("profile");
+    let project_id = ProjectId::new("project.shutdown-wal-truncate").expect("project id");
+    let project_root = enrolled_root(temp.path(), &project_id);
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        67,
+        "shutdown wal truncate",
+    )
+    .expect("daemon database scope");
+    let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("daemon registry");
+    let profile_sessions = registry
+        .profile_sessions()
+        .await
+        .expect("profile sessions authority");
+    let project_sessions = registry
+        .project_sessions(project_id, [project_root])
+        .await
+        .expect("project sessions authority");
+    let stores = [
+        profile_sessions.db_path().to_path_buf(),
+        project_sessions.db_path().to_path_buf(),
+    ];
+    for store in &stores {
+        assert!(
+            wal_bytes(store) > 0,
+            "schema install leaves frames in {}",
+            store.display()
+        );
+    }
+
+    // The daemon's terminal owner order: join terminal and reconciliation
+    // tasks, then drain the owners and close.
+    registry
+        .shutdown_terminal_tasks()
+        .await
+        .expect("terminal tasks join");
+    registry.cancel_memory_graph_reconciliation_tasks();
+    registry
+        .shutdown_memory_graph_reconciliation_tasks()
+        .await
+        .expect("reconciliation workers join");
+    drop((profile_sessions, project_sessions));
+    registry
+        .close_retained_graph_runtimes_for_shutdown()
+        .await
+        .expect("terminal shutdown closes released runtimes");
+
+    for store in &stores {
+        assert_eq!(
+            wal_bytes(store),
+            0,
+            "a released session store keeps no WAL after shutdown: {}",
+            store.display()
+        );
+    }
+}
+
 #[tokio::test]
 async fn terminal_shutdown_refuses_an_in_flight_project_owner_transition() {
     let temp = TempDir::new().expect("shutdown transition fixture root");

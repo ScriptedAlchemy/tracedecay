@@ -407,7 +407,7 @@ pub(super) fn outcome_matches_operation(
     let result = match outcome {
         ApplicationOutcome::Evidence(packet) => packet.payload.as_ref(),
         ApplicationOutcome::Effect(effect) => effect.payload.as_ref(),
-        ApplicationOutcome::Preview(_) => None,
+        ApplicationOutcome::Preview(_) | ApplicationOutcome::Result(_) => None,
     };
     if let Some(RetainedSurfaceResultV1::FactStoreCurate(result)) = result {
         return operation == RetainedSurfaceOperation::FactStoreCurate

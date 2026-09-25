@@ -34,6 +34,8 @@ mod go;
 mod gwbasic;
 mod incremental_parse;
 mod java;
+#[cfg(feature = "lang-json")]
+mod json;
 mod kotlin;
 #[cfg(feature = "lang-lean")]
 mod lean;

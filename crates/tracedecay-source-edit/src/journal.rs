@@ -1,4 +1,4 @@
-use std::fs::{self, File};
+use std::fs;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -8,6 +8,7 @@ use tracedecay_contracts::{
     SourceEditVerificationV1,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
+use tracedecay_private_fs::FileLease;
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_parent_directory};
 use tracedecay_runtime_core::storage::try_acquire_sidecar_lock;
 
@@ -42,7 +43,8 @@ pub(super) struct SourceEditJournalV1 {
     pub(super) effect_id: EffectId,
     pub(super) input_digest: ManifestDigest,
     pub(super) expected_state: ManifestDigest,
-    #[serde(default)]
+    /// `None` only on in-memory pre-effect records; every persisted journal
+    /// carries the exact previewed postimage digest.
     pub(super) predicted_state: Option<ManifestDigest>,
     pub(super) candidate_files: Vec<String>,
     #[serde(default)]
@@ -54,7 +56,12 @@ pub(super) struct SourceEditJournalV1 {
 }
 
 impl SourceEditJournalV1 {
-    fn validate_recovery(&self) -> Result<()> {
+    fn validate_persisted(&self) -> Result<()> {
+        if self.predicted_state.is_none() {
+            return Err(config_error(
+                "unsupported source edit journal: it carries no predicted state",
+            ));
+        }
         match (&self.recovery_digest, self.recovery_files.is_empty()) {
             (None, true) => Ok(()),
             (Some(digest), false)
@@ -175,7 +182,7 @@ impl SourceEditDurability {
     /// store behind one exclusive lock file. The lock is released when the
     /// returned handle drops; contention is a typed refusal, never a wait.
     #[hotpath::measure(label = "usecases.edit.lock")]
-    pub(super) fn lock(&self) -> Result<File> {
+    pub(super) fn lock(&self) -> Result<FileLease> {
         let lock_path = self.root.join("source-edit.lock");
         try_acquire_sidecar_lock(&lock_path)?.ok_or_else(|| TraceDecayError::SyncLock {
             message: format!(
@@ -236,7 +243,7 @@ impl SourceEditDurability {
                 &journal.request.authority,
                 &journal.request.authority_proof,
             )?;
-            journal.validate_recovery()?;
+            journal.validate_persisted()?;
         }
         Ok(journal)
     }

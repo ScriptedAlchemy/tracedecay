@@ -341,7 +341,7 @@ describe('ObservatoryPage store telemetry', () => {
     expect(panel.textContent).toContain('0 / 0');
   });
 
-  it('keeps partial, backfilling, stale, and unavailable clone states distinct', async () => {
+  it('keeps partial, stale, and unavailable clone states distinct', async () => {
     const ready = readyCodeIndexFreshnessEnvelope();
     const observation = cloneIndexObservation();
     stubTelemetry(telemetryPayload(), emptyStorageFindingsPayload(), {
@@ -366,24 +366,7 @@ describe('ObservatoryPage store telemetry', () => {
                   near_fingerprint_postings: null,
                 },
               },
-              omission_reasons: ['positional fingerprint successor is missing'],
-            },
-          },
-          {
-            ...ready.payload.worktrees[0],
-            worktree_root: '/worktrees/backfilling',
-            clone_index: {
-              state: 'backfilling',
-              observation: {
-                ...observation,
-                coverage: {
-                  ...observation.coverage,
-                  completed_source_pages: 2,
-                  total_source_pages: 5,
-                  near_fingerprint_bodies: null,
-                  near_fingerprint_postings: null,
-                },
-              },
+              omission_reasons: ['positional fingerprints do not cover every eligible body'],
             },
           },
           {
@@ -408,12 +391,13 @@ describe('ObservatoryPage store telemetry', () => {
     });
     renderObservatory('pipeline');
 
-    await screen.findByText('positional fingerprint successor is missing');
-    for (const state of ['partial', 'backfilling', 'stale', 'unavailable']) {
+    await screen.findByText('positional fingerprints do not cover every eligible body');
+    for (const state of ['partial', 'stale', 'unavailable']) {
       expect(document.querySelector(`[data-clone-index-state="${state}"]`)).toBeTruthy();
     }
-    expect(screen.getByText('positional fingerprint successor is missing')).toBeTruthy();
-    expect(screen.getByText('2 / 5 sealed pages')).toBeTruthy();
+    expect(
+      screen.getByText('positional fingerprints do not cover every eligible body'),
+    ).toBeTruthy();
     expect(screen.getByText('the sealed lexical artifact is unreadable')).toBeTruthy();
     // Said on the overview rail and again in the exact readiness list.
     expect(screen.getAllByText('unavailable · graph artifact unreadable').length).toBeGreaterThan(0);
@@ -453,7 +437,7 @@ function stubTelemetry(
       const url = String(input);
       const route = url.replace(/^\/api\/projects\/[^/]+/, '/api');
       if (route === '/api/storage/telemetry') return jsonResponse(envelope(payload));
-      if (route === '/api/storage/findings') {
+      if (route === '/api/doctor/findings?family=storage') {
         return jsonResponse(envelope(findingsPayload));
       }
       if (route === '/api/code-index/freshness') {
@@ -471,6 +455,7 @@ function stubTelemetry(
             report_coverage: null,
             known_families: ['storage'],
             schema_convergences: [],
+            storage_kind_statuses: [],
             note: 'no admitted Doctor report source is available for this dashboard scope',
           }),
         );
@@ -624,8 +609,6 @@ function cloneIndexObservation() {
       excluded_incomplete_tokenization_bodies: 1,
       rename_partial_bodies: 1,
       rename_unsupported_bodies: 1,
-      completed_source_pages: 2,
-      total_source_pages: 2,
     },
     budgets: {
       posting_rows: 16_384,
@@ -653,14 +636,14 @@ function emptyStorageFindingsPayload() {
     known_families: ['storage'],
     schema_convergences: [],
     note: 'canonical Doctor storage family contained no entries',
-    kind_statuses: sourceStatuses(),
+    storage_kind_statuses: sourceStatuses(),
   };
 }
 
 function sourceStatusFindingsPayload() {
   return {
     ...emptyStorageFindingsPayload(),
-    kind_statuses: sourceStatuses({
+    storage_kind_statuses: sourceStatuses({
       over_budget_store: {
         state: 'partial',
         observed_entries: 0,

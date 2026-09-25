@@ -12,6 +12,7 @@ use tracedecay_privacy::{
     ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
     protect_sensitive_structural_id,
 };
+use tracedecay_runtime_core::logging::StateChangeLogGate;
 use tracedecay_store::{ParseOffset, observation::ObservationCoverageReason};
 
 use crate::admission::{HostAdmission, HostDiscoveryQueueEntry};
@@ -46,6 +47,14 @@ const KIMI_DISCOVERY_FRONTIER_KEY: &str = "host-frontier://kimi/discovery/v1";
 const KIMI_QUEUE_FRONTIER_KEY: &str = "host-frontier://kimi/queue/v1";
 const KIMI_FRONTIER_VERSION: u64 = 1;
 const KIMI_CODE_HOME_ENV: &str = "KIMI_CODE_HOME";
+
+/// Discovery failures already reported, keyed by the failing file's digest.
+/// The state files Kimi leaves behind are re-scanned on every capture pass,
+/// so a malformed one repeats its typed failure indefinitely.
+static KIMI_DISCOVERY_FAILURE_GATE: StateChangeLogGate<
+    String,
+    (KimiDiscoveryFailureKind, io::ErrorKind),
+> = StateChangeLogGate::new();
 
 #[derive(Clone)]
 pub struct KimiSource {
@@ -449,6 +458,15 @@ pub async fn capture_kimi_observations(
             .map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER })??;
             let (discovery, scan_budget) = discovered;
             for failure in &discovery.failures {
+                // A malformed state file fails identically on every capture
+                // pass until it changes on disk; log the condition when it
+                // appears or changes, not per pass.
+                if !KIMI_DISCOVERY_FAILURE_GATE.admit(
+                    failure.source_digest.clone(),
+                    (failure.kind, failure.error_kind),
+                ) {
+                    continue;
+                }
                 tracing::warn!(
                     provider = PROVIDER,
                     failure_kind = ?failure.kind,
@@ -1102,6 +1120,120 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Counts `tracing` warnings carrying a given message on this thread.
+    struct WarningCensus {
+        message: &'static str,
+        count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    struct MessageVisitor<'a> {
+        message: &'static str,
+        matched: &'a mut bool,
+    }
+
+    impl tracing::field::Visit for MessageVisitor<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" && format!("{value:?}") == self.message {
+                *self.matched = true;
+            }
+        }
+    }
+
+    impl tracing::Subscriber for WarningCensus {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() == tracing::Level::WARN
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut matched = false;
+            event.record(&mut MessageVisitor {
+                message: self.message,
+                matched: &mut matched,
+            });
+            if matched {
+                self.count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    /// The malformed state file is re-scanned on every capture pass and fails
+    /// identically each time. The warning is a state transition, logged when
+    /// the failure appears and again only when its typed condition changes.
+    #[tokio::test]
+    async fn a_repeating_discovery_failure_is_warned_once_per_state_change() {
+        let (_temp, project, transcript, source) = fixture();
+        let session = transcript
+            .parent()
+            .and_then(std::path::Path::parent)
+            .and_then(std::path::Path::parent)
+            .unwrap();
+        std::fs::write(session.join("state.json"), "{ not json").unwrap();
+        let admission = MemoryHostAdmission::default();
+        let warnings = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dispatch = tracing::Dispatch::new(WarningCensus {
+            message: "Kimi session discovery is incomplete",
+            count: std::sync::Arc::clone(&warnings),
+        });
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+
+        let mut failures = 0;
+        for _ in 0..5 {
+            let outcome = capture_kimi_observations(
+                &admission,
+                &source,
+                &project,
+                ObservationScopeV1::Profile,
+                None,
+                &ObservationCancellation::default(),
+            )
+            .await
+            .unwrap();
+            failures += outcome.discovery_failures;
+        }
+        assert_eq!(
+            failures, 5,
+            "every pass re-observes the malformed state file; the outcome stays truthful"
+        );
+        assert_eq!(
+            warnings.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "five identical observations are one log transition"
+        );
+
+        // A second malformed session is its own condition and is reported.
+        let sibling = session.with_file_name("session-sibling");
+        std::fs::create_dir_all(sibling.join("agents/main")).unwrap();
+        std::fs::write(sibling.join("state.json"), "[]").unwrap();
+        capture_kimi_observations(
+            &admission,
+            &source,
+            &project,
+            ObservationScopeV1::Profile,
+            None,
+            &ObservationCancellation::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            warnings.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "a distinct failing file is a distinct condition and logs once"
+        );
     }
 
     #[cfg(unix)]

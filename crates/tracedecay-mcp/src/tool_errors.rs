@@ -248,6 +248,25 @@ pub fn tool_error_response(id: Value, tool_name: &str, error: &TraceDecayError) 
             _ => {}
         }
     }
+    // A refused persisted shape is a terminal typed state with one legal
+    // action (reset); it travels with its authority so the client can render
+    // the exact reset command instead of an anonymous internal error.
+    if let Some((authority, reason)) = reset_required_context(error) {
+        let remedy = reset_required_remedy(&authority, None);
+        return JsonRpcResponse::error_with_data(
+            id,
+            ErrorCode::InternalError,
+            format!("{error}\n\n{remedy}"),
+            Some(json!({
+                "tool": tool_name,
+                "kind": "reset_required",
+                "retryable": false,
+                "authority": authority,
+                "reason": reason,
+                "remedy": remedy,
+            })),
+        );
+    }
     if let TraceDecayError::ProjectRoute {
         reason_code,
         retryable: false,
@@ -309,6 +328,79 @@ pub fn tool_error_response(id: Value, tool_name: &str, error: &TraceDecayError) 
     )
 }
 
+/// Authorities whose refused shape is one project's store. Everything else a
+/// typed reset names is profile-scoped state.
+const PROJECT_STORE_AUTHORITIES: [&str; 2] = ["project store", "graph store"];
+
+fn is_project_store_authority(authority: &str) -> bool {
+    PROJECT_STORE_AUTHORITIES.contains(&authority)
+}
+
+fn project_root_argument(project_root: Option<&std::path::Path>) -> String {
+    project_root.map_or_else(
+        || "<project-root>".to_string(),
+        |root| shell_words::quote(&root.to_string_lossy()).into_owned(),
+    )
+}
+
+/// The one exact command that performs the legal `reset` action for a typed
+/// reset refusal. Refused shapes are never migrated or backed up: the reset
+/// deletes the authority's old data and the next open creates the shape this
+/// binary writes. `project_root` scopes a project-store reset to the refused
+/// project when the caller knows it. Single line, so it fits a bounded
+/// problem diagnostic.
+pub fn reset_required_command(authority: &str, project_root: Option<&std::path::Path>) -> String {
+    if is_project_store_authority(authority) {
+        format!(
+            "tracedecay storage reset-project-store --project-root {} --yes",
+            project_root_argument(project_root)
+        )
+    } else {
+        "tracedecay wipe --all --yes".to_string()
+    }
+}
+
+/// Operator rendering of [`reset_required_command`]: the refused authority,
+/// what the reset deletes, the command, and the re-initialization that
+/// follows. `tracedecay update` performs the profile reset itself after
+/// refreshing the binary and daemon.
+pub fn reset_required_remedy(authority: &str, project_root: Option<&std::path::Path>) -> String {
+    let command = reset_required_command(authority, project_root);
+    if is_project_store_authority(authority) {
+        return format!(
+            "refused authority: {authority}\n\
+             this binary does not open or migrate that shape; reset it (its old data is \
+             deleted, nothing is backed up):\n  \
+             {command}\n\
+             then re-run `tracedecay init {}`",
+            project_root_argument(project_root)
+        );
+    }
+    format!(
+        "refused authority: {authority}\n\
+         this binary does not open or migrate that shape; reset it (its old data is deleted, \
+         nothing is backed up):\n  \
+         tracedecay update              refreshes the binary and daemon, then resets every \
+         refused profile authority\n  \
+         {command}    resets the complete profile database state now\n\
+         then re-run `tracedecay init <project-root>` for each project"
+    )
+}
+
+/// The refused authority and its reason for both typed reset states: the
+/// generic persisted-shape refusal and the LCM profile schema refusal.
+fn reset_required_context(error: &TraceDecayError) -> Option<(String, String)> {
+    match error {
+        TraceDecayError::ResetRequired { authority, reason } => {
+            Some((authority.clone(), reason.clone()))
+        }
+        TraceDecayError::ProfileResetRequired { component, .. } => {
+            Some((format!("{component} profile schema"), error.to_string()))
+        }
+        _ => None,
+    }
+}
+
 fn hardcoded_internal_error_response(id: &Value, detail: &str) -> String {
     let id_json = serde_json::to_string(id).unwrap_or_else(|_| "null".to_string());
     let detail_json = serde_json::to_string(detail)
@@ -346,6 +438,74 @@ mod tests {
     use tracedecay_domain::errors::TraceDecayError;
 
     use super::tool_error_response;
+
+    #[test]
+    fn reset_required_travels_with_its_authority_and_reason() {
+        let response = tool_error_response(
+            json!(3),
+            "tracedecay_project_list",
+            &TraceDecayError::reset_required(
+                "session temporal",
+                "persisted session temporal schema is the published v3 shape",
+            ),
+        );
+        let wire = serde_json::to_value(response).expect("JSON-RPC wire response");
+
+        assert_eq!(wire["error"]["data"]["kind"], "reset_required");
+        assert_eq!(wire["error"]["data"]["retryable"], false);
+        assert_eq!(wire["error"]["data"]["authority"], "session temporal");
+        assert_eq!(
+            wire["error"]["data"]["reason"],
+            "persisted session temporal schema is the published v3 shape"
+        );
+        let remedy = wire["error"]["data"]["remedy"]
+            .as_str()
+            .expect("the refusal names its reset command");
+        assert!(remedy.contains("tracedecay wipe --all --yes"), "{remedy}");
+        assert!(
+            wire["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("tracedecay wipe --all --yes")),
+            "the human-readable message must carry the reset command too: {wire}"
+        );
+        assert!(
+            wire["error"]["data"].get("cli_fallback").is_none(),
+            "a refused shape is not a transport failure to retry from the shell"
+        );
+    }
+
+    #[test]
+    fn reset_remedy_scopes_project_stores_and_quotes_their_roots() {
+        let project = super::reset_required_remedy(
+            "project store",
+            Some(std::path::Path::new("/repo/it's an example")),
+        );
+        let command = project
+            .split_once("\n  tracedecay storage")
+            .map(|(_, tail)| format!("tracedecay storage{}", tail.split_once('\n').unwrap().0))
+            .expect("project-store reset command");
+        assert_eq!(
+            shell_words::split(&command).unwrap(),
+            [
+                "tracedecay",
+                "storage",
+                "reset-project-store",
+                "--project-root",
+                "/repo/it's an example",
+                "--yes",
+            ]
+        );
+        assert!(!project.contains("wipe --all"), "{project}");
+
+        let profile = super::reset_required_remedy("session temporal", None);
+        assert!(profile.contains("refused authority: session temporal"));
+        assert!(profile.contains("\n  tracedecay update "), "{profile}");
+        assert!(
+            profile.contains("\n  tracedecay wipe --all --yes"),
+            "{profile}"
+        );
+        assert!(!profile.contains("reset-project-store"), "{profile}");
+    }
 
     #[test]
     fn application_surface_invalid_request_keeps_its_typed_wire_kind() {

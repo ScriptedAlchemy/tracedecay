@@ -34,7 +34,7 @@ pub async fn dispatch_tool(
             handle_dependency_depth(&open(read("health_read")?).await?, args, scope_prefix).await
         }
         "tracedecay_health" => {
-            handle_health(&open(read("health_read")?).await?, args, scope_prefix).await
+            handle_health(&open(read("health_delta")?).await?, args, scope_prefix).await
         }
         "tracedecay_dsm" => {
             handle_dsm(&open(read("health_read")?).await?, args, scope_prefix).await

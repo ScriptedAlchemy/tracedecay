@@ -67,7 +67,7 @@ pub struct UserConfig {
     pub agent_dashboard_enabled: BTreeMap<String, bool>,
 
     /// Debounce duration for the embedded MCP file watcher (e.g. "2s", "15s", "1m").
-    #[serde(default = "default_watcher_debounce", alias = "daemon_debounce")]
+    #[serde(default = "default_watcher_debounce")]
     pub watcher_debounce: String,
 
     /// Cached country flags from the worldwide counter.
@@ -506,7 +506,7 @@ impl UserConfig {
                 revision_id,
             })
         })();
-        let _ = lock_file.unlock();
+        drop(lock_file);
         result
     }
 
@@ -542,7 +542,7 @@ impl UserConfig {
             })?;
 
         let result = Self::write_locked(&path, &contents, recover);
-        let _ = lock_file.unlock();
+        drop(lock_file);
         result
     }
 

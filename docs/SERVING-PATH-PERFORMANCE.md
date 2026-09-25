@@ -293,6 +293,15 @@ First post-wave measurement (2026-08-01, release build, 96-core host): index
 search took 6+ minutes at 670% daemon CPU). Open tails: grep p95 4.6s / max
 25s; daemon peak RSS 4.4GB.
 
+Those index seconds came from a `tracedecay init` that built the index inside
+the CLI process. Indexing has been daemon-owned since 1caf016e57, so
+`scripts/perf-gate.sh` now starts its private daemon before it indexes and
+times init through to the daemon's own terminal signal,
+`code_index_freshness.status = current` with
+`worktree.code_graph_serving.state = ready`. The number still means the time to
+a queryable index and stays comparable with 76.7s, but it is now measured along
+the serving path rather than an in-process build.
+
 Reservation measurement (2026-08-02, release build, 96-core host,
 `PERF_REINDEX_WORKTREES=2`, 6 workers × 120s, 149,737 nodes). Interactive p95
 with the box idle versus with a full index running continuously beside the

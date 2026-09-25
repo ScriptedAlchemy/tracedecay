@@ -142,7 +142,7 @@ pub struct SessionTemporalRefreshSchedulerRegistry {
     shutdown_guard: tokio::sync::Mutex<()>,
     project_lifecycle: tokio::sync::Mutex<()>,
     retired_project_owners: std::sync::Mutex<HashSet<StoreOwnerKey>>,
-    codex_discovery: Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub>,
+    codex_discovery: Arc<tracedecay_sessions::runtime::hosts::codex::CodexDiscoveryHub>,
     /// The process background CPU authority mounted by
     /// [`Self::configure_codex_preparation_resources`]; retained so historical
     /// ingest compositions built through this registry inject the same
@@ -163,7 +163,7 @@ impl Default for SessionTemporalRefreshSchedulerRegistry {
             project_lifecycle: tokio::sync::Mutex::new(()),
             retired_project_owners: std::sync::Mutex::new(HashSet::new()),
             codex_discovery: Arc::new(
-                tracedecay_sessions::runtime::codex::CodexDiscoveryHub::default(),
+                tracedecay_sessions::runtime::hosts::codex::CodexDiscoveryHub::default(),
             ),
             background_cpu: std::sync::OnceLock::new(),
             historical_ingest_admission: Arc::new(tokio::sync::Semaphore::new(
@@ -245,7 +245,9 @@ impl SessionTemporalRefreshSchedulerRegistry {
         self.background_cpu.get().map(Arc::clone)
     }
 
-    pub fn codex_discovery(&self) -> Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub> {
+    pub fn codex_discovery(
+        &self,
+    ) -> Arc<tracedecay_sessions::runtime::hosts::codex::CodexDiscoveryHub> {
         Arc::clone(&self.codex_discovery)
     }
 
@@ -568,18 +570,6 @@ impl SessionTemporalRefreshSchedulerRegistry {
         if let Some(entry) = self.project.lock().await.remove(owner) {
             entry.shutdown().await;
         }
-    }
-
-    #[hotpath::skip]
-    pub async fn owns_project_database_paths(
-        &self,
-        database_paths: &HashSet<std::path::PathBuf>,
-    ) -> bool {
-        self.project
-            .lock()
-            .await
-            .keys()
-            .any(|owner| database_paths.contains(&owner.graph_db_path))
     }
 
     #[hotpath::skip]

@@ -12,9 +12,9 @@ use tracedecay_store::{
     SessionRefreshProgressV1, SessionStoreError, SessionStoreResult,
     SessionTemporalProjectionBatchV1,
 };
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
-use crate::support::derive_projection;
+use tracedecay_store::derive_canonical_projection;
 
 use super::super::query::{
     PERSIST_OPERATION, frontier_i64, generation_i64, missing_observation, now_micros,
@@ -324,8 +324,8 @@ pub(super) async fn materialize_effect_occurrences(
             .get(observation_id.as_str())
             .ok_or_else(|| missing_observation(observation_id))?;
         // One derivation per observation, reused across all of its outputs.
-        let projection =
-            derive_projection(observation).map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
+        let projection = derive_canonical_projection(observation)
+            .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
         let outputs = projection.messages().collect::<Vec<_>>();
         if outputs.len() != *output_count {
             return Err(storage_message(
@@ -784,8 +784,8 @@ pub async fn canonical_parent_message_resolver(
             } else {
                 None
             };
-            let projection =
-                derive_projection(&observation).map_err(|error| storage(operation, error))?;
+            let projection = derive_canonical_projection(&observation)
+                .map_err(|error| storage(operation, error))?;
             for output in projection
                 .messages()
                 .filter(|output| output.session().session_id == session_id)

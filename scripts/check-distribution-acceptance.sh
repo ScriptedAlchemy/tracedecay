@@ -11,18 +11,22 @@ usage() {
   cat <<'EOF'
 Usage: scripts/check-distribution-acceptance.sh [OPTIONS]
 
-Build and exercise the release distribution with every Cargo feature enabled.
+Build and exercise the release distribution from packaged crate archives.
 The gate packages every workspace crate, extracts the produced .crate archives
-into an isolated temporary directory, and tests the packaged library and CLI.
+into an isolated temporary directory, release-builds the packaged CLI, and
+tests the packaged library and that CLI. The production binary this gate
+proves is the one it builds from the extracted package; it never
+release-builds the source tree.
 
 Options:
   --repo PATH                      Repository root (default: parent of this script)
   --keep-temp                      Preserve the isolated package/install directory
-  --reuse-release-binary PATH      Skip the workspace release rebuild; prove this
-                                   already-built production binary instead
+  --reuse-release-binary PATH      Also prove this already-built production
+                                   binary reports the staged source commit
   --skip-packaged-runtime-battery  After packaging and manifest checks, skip
                                    extracted-crate rebuilds, nextest, cargo
-                                   install, and MCP inspector dogfood
+                                   install, and MCP inspector dogfood; requires
+                                   --reuse-release-binary as the smoked binary
   -h, --help                       Show this help
 EOF
 }
@@ -319,6 +323,11 @@ release_cli_cargo_args=(
   --features "$release_cargo_features"
 )
 
+# No source-tree release build here. The packaged CLI compiled from the
+# extracted package below is the production binary this gate proves, and the
+# source-tree production compile is `shipped-cli` in ci.yml. A caller that
+# already holds a source-tree production binary may hand it in to prove it
+# was built from this exact commit; nothing else in the battery reads it.
 if [[ -n $reuse_release_binary ]]; then
   echo "distribution acceptance: reusing the just-built production binary"
   assert_binary_source_sha \
@@ -326,16 +335,6 @@ if [[ -n $reuse_release_binary ]]; then
     "$product_version" \
     "$source_git_sha" \
     "reused-release"
-else
-  echo "distribution acceptance: release-building the production feature set"
-  cargo build \
-    --manifest-path "$repo/Cargo.toml" \
-    --workspace \
-    --release \
-    --no-default-features \
-    --features tracedecay/production \
-    --lib \
-    --bins
 fi
 
 echo "distribution acceptance: staging the product package tree"
@@ -363,12 +362,6 @@ tar -C "$repo" \
   --exclude='./node_modules' \
   -cf - . | tar -xf - -C "$staged"
 resolve_clean_source_head "$repo" "$source_git_sha" >/dev/null
-# The asset staging below rewrites package-local directories inside `$staged`
-# (its `crates/tracedecay/tests/fixtures` becomes the root fixtures), so the
-# integration suites that read package-local fixtures run from this untouched
-# copy of the same snapshot.
-source_snapshot="$work/source"
-cp -a -- "$staged" "$source_snapshot"
 
 staged_product="$staged/crates/tracedecay"
 [[ -f "$staged_product/Cargo.toml" ]] ||
@@ -586,21 +579,17 @@ for required_package in \
   tracedecay-contracts \
   tracedecay-api \
   tracedecay-tool-catalog \
-  tracedecay-lsp \
   tracedecay-code-index \
   tracedecay-code-index-runtime \
-  tracedecay-code-extraction \
-  tracedecay-query; do
+  tracedecay-code-extraction; do
   [[ -n ${package_dirs[$required_package]:-} ]] ||
     die "workspace package required by the distribution gate was not produced: $required_package"
 done
 root_package=${package_dirs[tracedecay]}
 cli_package=${package_dirs[tracedecay-cli]}
 agent_hosts_package=${package_dirs[tracedecay-agent-hosts]}
-lsp_package=${package_dirs[tracedecay-lsp]}
 code_index_package=${package_dirs[tracedecay-code-index]}
 code_extraction_package=${package_dirs[tracedecay-code-extraction]}
-query_package=${package_dirs[tracedecay-query]}
 catalog_package=${package_dirs[tracedecay-tool-catalog]}
 contracts_package=${package_dirs[tracedecay-contracts]}
 
@@ -700,60 +689,26 @@ cargo nextest run \
   -E 'test(/^rust::/)' \
   --no-tests=fail
 
-echo "distribution acceptance: compiling packaged library with production features"
-cargo check \
-  --manifest-path "$root_package/Cargo.toml" \
-  --release \
-  --no-default-features \
-  --features production \
-  --lib \
-  --config "$patch_config"
-
-echo "distribution acceptance: checking extracted query library behavior"
-CARGO_NET_OFFLINE=true cargo nextest run \
-  --manifest-path "$query_package/Cargo.toml" \
-  --release \
-  --all-features \
-  --lib \
-  --config "$patch_config" \
-  --no-tests=fail
-
-echo "distribution acceptance: checking extracted root library behavior with production features"
-CARGO_NET_OFFLINE=true cargo nextest run \
-  --manifest-path "$root_package/Cargo.toml" \
-  --release \
-  --no-default-features \
-  --features production \
-  --lib \
-  --config "$patch_config" \
-  --no-tests=fail
-
-echo "distribution acceptance: checking extracted LSP framing and protocol behavior"
-CARGO_NET_OFFLINE=true cargo nextest run \
-  --manifest-path "$lsp_package/Cargo.toml" \
-  --release \
-  --all-features \
-  --lib \
-  --config "$patch_config" \
-  --no-tests=fail
-
-# `cargo package` publishes no integration tests (the root crate's `include`
-# whitelist carries only fixtures), and `mcp_suite` requires the
-# `test-transport` feature the production graph excludes, so the extracted
-# package cannot run this suite. Run it from the untouched source snapshot
-# under the `root-transport` CI lens instead, with the packaged CLI as the
-# binary the suite spawns.
-echo "distribution acceptance: checking packaged MCP tool behavior"
+# The extracted CLI build above compiles the complete packaged production
+# graph. Query, root-library, and LSP source suites run in exhaustive Linux CI;
+# rerunning them here added no archive assertion. The MCP harness stays focused
+# on the modules that spawn TRACEDECAY_TEST_BIN, so it proves the packaged CLI
+# without rerunning all 573 source-library tests. Run it from the verified
+# checkout so unchanged source-graph units retain their original Cargo paths.
+echo "distribution acceptance: checking packaged CLI integration behavior"
+resolve_clean_source_head "$repo" "$source_git_sha" >/dev/null
 TRACEDECAY_TEST_BIN="$packaged_cli_bin" \
   CARGO_NET_OFFLINE=true cargo nextest run \
-  --manifest-path "$source_snapshot/Cargo.toml" \
+  --manifest-path "$repo/Cargo.toml" \
   --release \
   -p tracedecay \
   --test mcp_suite \
   --features tracedecay/test-transport \
   --no-fail-fast \
   --retries 2 \
+  -E 'test(/^mcp_cli_serve_test::/) | test(/^serve_template_path_test::/) | test(=mcp_handler_test::lcm_test::lcm_status_cli_bridge_accepts_json_args)' \
   --no-tests=fail
+resolve_clean_source_head "$repo" "$source_git_sha" >/dev/null
 
 install_root="$work/install"
 echo "distribution acceptance: staging the packaged CLI as the installed binary"
@@ -779,10 +734,21 @@ with Path(sys.argv[1]).open("rb") as handle:
     manifest = tomllib.load(handle)
 if "production" not in manifest.get("features", {}):
     raise SystemExit("packaged tracedecay manifest omitted the production feature")
+# The consumer proves the packaged catalog composes and the host bundles
+# verify; neither depends on optimization. Its feature unification differs
+# from the packaged CLI's (the CLI's own dependencies light extra features on
+# mio, hyper, tower, ...), so under --release it recompiled the whole
+# workspace spine: 18m measured on ubuntu-latest for a crate that itself
+# compiles in seconds. Unoptimized and without debuginfo the same graph
+# compiles in ~3m on the same hardware.
 print("""[package]
 name = "tracedecay-distribution-consumer"
 version = "0.0.0"
 edition = "2024"
+
+[profile.dev]
+opt-level = 0
+debug = 0
 
 [dependencies]""")
 print(
@@ -877,16 +843,14 @@ fn main() {
 }
 RS
 
-# A fresh manifest resolves from scratch, and offline resolution refuses a
-# version that has since been yanked even when the workspace lockfile pins
-# it (bisync 0.3.0 under gix-protocol). Seed the consumer with that
-# lockfile, as the extracted packages are, so it resolves what the product
-# resolves.
-cp -- "$staged/Cargo.lock" "$consumer/Cargo.lock"
+# Deliberately no lockfile. Unlike the extracted packages, which are each
+# their own Cargo root and need the release resolution, this consumer is a
+# downstream crate that has never seen our lockfile. Letting it resolve from
+# scratch is the only check that the published dependency set is resolvable
+# at all, which is what caught the yanked bisync 0.3.0 under gix-protocol.
 echo "distribution acceptance: calling packaged catalog and host bundles"
 CARGO_NET_OFFLINE=true cargo run \
   --manifest-path "$consumer/Cargo.toml" \
-  --release \
   --bin tracedecay-distribution-consumer \
   --config "$patch_config"
 
@@ -911,8 +875,14 @@ RS
 cp -- "$staged/Cargo.lock" "$test_api_probe/Cargo.lock"
 echo "distribution acceptance: proving production package omits test APIs"
 test_api_stderr="$work/test-api-probe.stderr"
+# Same production features and lockfile as the packaged CLI release build,
+# which already compiled this graph into the shared release directory (repo
+# `target-dir`). Only the probe itself is compiled. A dev-profile check paid
+# a second metadata compile of the whole graph. The expected refusal is still
+# E0599 on the test-only associated item.
 if CARGO_NET_OFFLINE=true cargo check \
   --manifest-path "$test_api_probe/Cargo.toml" \
+  --release \
   --config "$patch_config" \
   2>"$test_api_stderr"; then
   die "production package exposed test-transport APIs"
@@ -952,7 +922,10 @@ import json
 import sys
 from pathlib import Path
 
-value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+inventory = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if not isinstance(inventory, dict) or inventory.get("resolution") not in {"daemon", "cli_path"}:
+    raise SystemExit("distribution acceptance: lsp servers omitted its availability resolution")
+value = inventory.get("servers")
 if not isinstance(value, list) or not value:
     raise SystemExit("distribution acceptance: lsp servers returned an empty inventory")
 required_languages = {"rust", "typescript", "javascript", "python", "go", "c", "cpp"}

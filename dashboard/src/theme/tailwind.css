@@ -84,6 +84,10 @@
   --text-2xs: 11px;
   --text-xs: 12px;
   --text-sm: 13px;
+  /* The design system's base text: explanations, row labels and control text.
+   * Dense ledgers step down to `sm`/`xs` mono values; nothing but legends and
+   * units sits at `3xs`/`2xs`. */
+  --text-body: 14px;
   --text-base: 15px;
   --text-lg: 19px;
   --text-xl: 26px;
@@ -91,6 +95,11 @@
   --text-3xl: 44px;
   --text-4xl: 60px;
 
+  /* `rounded-panel` (2px) and `rounded-chip` (1px) are the only corners in the
+   * design system. Tailwind's default `rounded-sm` is 0.25rem (3.5px at the
+   * 14px root), and there is no `--color-edge`, so `border-edge` falls back to
+   * currentColor: hairlines are `border-edge-subtle` or `border-edge-strong`. */
+  --radius-panel: var(--radius-panel);
   --radius-standard: var(--radius-standard);
   --radius-chip: var(--radius-chip);
 }
@@ -215,7 +224,7 @@
   .td-title {
     font-family: var(--font-display);
     font-stretch: var(--display-width);
-    font-size: var(--text-2xs);
+    font-size: var(--text-xs);
     line-height: 1;
     letter-spacing: 0.13em;
     text-transform: uppercase;

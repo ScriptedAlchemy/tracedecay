@@ -149,13 +149,9 @@ pub struct ProjectSettingsPatchResponseV1 {
 
 #[derive(Clone, Debug, JsonSchema, Serialize)]
 struct ProjectSettingsPayloadV1 {
-    config_path: String,
-    legacy_config_path: String,
-    legacy_config_read_only: bool,
     configuration_snapshot_id: String,
     configuration_revision_id: String,
     config: ProjectEditableSettingsV1,
-    tracedecay_dir_gitignored: bool,
     pr_autotrack: PrAutoTrackPayloadV1,
 }
 
@@ -211,8 +207,6 @@ struct SyncSettingsV1 {
 
 #[derive(Clone, Debug, JsonSchema, Serialize)]
 struct UserSettingsPayloadV1 {
-    legacy_config_path: String,
-    legacy_config_read_only: bool,
     configuration_snapshot_id: String,
     configuration_revision_id: String,
     /// Independent ProfileSessions revision for the code-index worker
@@ -604,7 +598,6 @@ async fn settings_envelope(
 {
     let project_configuration = crate::config::cached_runtime_configuration(&state.project_root)
         .map_err(|_| configuration_authority_unavailable_error())?;
-    let legacy_config_path = state.config_path.clone();
     let user = state
         .user_settings
         .read()
@@ -623,9 +616,6 @@ async fn settings_envelope(
     let automation = automation_settings_payload(&project_configuration);
     let payload = SettingsPayloadV1 {
         project: ProjectSettingsPayloadV1 {
-            config_path: legacy_config_path.display().to_string(),
-            legacy_config_path: legacy_config_path.display().to_string(),
-            legacy_config_read_only: true,
             configuration_snapshot_id: project_configuration
                 .snapshot()
                 .snapshot_id
@@ -633,7 +623,6 @@ async fn settings_envelope(
                 .to_owned(),
             configuration_revision_id: project_configuration.revision_id().as_str().to_owned(),
             config: project_editable_settings(&project_configuration),
-            tracedecay_dir_gitignored: crate::config::is_in_gitignore(&state.project_root),
             pr_autotrack,
         },
         user: user_settings_payload(&user, &worker_configuration),
@@ -697,8 +686,6 @@ fn user_settings_payload(
     worker_configuration: &DashboardCodeIndexWorkerConfigurationV1,
 ) -> UserSettingsPayloadV1 {
     UserSettingsPayloadV1 {
-        legacy_config_path: user.legacy_config_path.clone(),
-        legacy_config_read_only: true,
         configuration_snapshot_id: user.configuration_snapshot_id.clone(),
         configuration_revision_id: user.configuration_revision_id.clone(),
         code_index_worker_configuration_snapshot_id: worker_configuration

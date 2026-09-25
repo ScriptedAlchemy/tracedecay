@@ -242,10 +242,9 @@ fn manifest_encodes_sessions_spans_commits_and_evidence_relations() {
 fn manifest_rejects_a_foreign_projector_revision() {
     let identity =
         git_evidence_projection_identity(GraphNamespace::new("project").unwrap()).unwrap();
-    let legacy =
-        GraphProjectorRevision::try_from(GIT_EVIDENCE_LEGACY_PROJECTOR_REVISION_V1.to_owned())
-            .unwrap();
-    let error = build_git_evidence_manifest_checked(identity, &projection(), &legacy, &|| Ok(()))
+    let foreign =
+        GraphProjectorRevision::try_from("session-git-evidence-projector.v1".to_owned()).unwrap();
+    let error = build_git_evidence_manifest_checked(identity, &projection(), &foreign, &|| Ok(()))
         .unwrap_err();
     assert!(matches!(error, GitCorrelationError::Contract(_)), "{error}");
 }

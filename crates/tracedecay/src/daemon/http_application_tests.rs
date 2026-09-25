@@ -263,7 +263,7 @@ async fn service_with_canonical_application(
     // The canonical handshake reports the client's build version from the
     // product runtime; this composition never passes through the binary's
     // registration.
-    crate::product_runtime::register_fixture_product_runtime();
+    tracedecay_project::product_runtime::register_fixture_product_runtime();
     let project = tempfile::tempdir().expect("canonical application project");
     let broker = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -284,7 +284,10 @@ async fn service_with_canonical_application(
     )
     .expect("canonical application handshake");
     let client = tracedecay_daemon_protocol::DaemonInvocationClient::new(
-        tracedecay_daemon_protocol::DaemonConnection::new(broker_endpoint, None),
+        tracedecay_daemon_protocol::DaemonConnection::new(
+            broker_endpoint,
+            "http-application-test-token".to_owned(),
+        ),
         handshake,
     );
     let canonical = tracedecay_daemon_service::application_surface::http_application_router(

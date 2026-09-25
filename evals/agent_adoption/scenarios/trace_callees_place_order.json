@@ -14,7 +14,8 @@
       "tracedecay_call_chain",
       "tracedecay_context",
       "tracedecay_search",
-      "tracedecay_body"
+      "tracedecay_find_exact_symbol",
+      "tracedecay_source_body"
     ],
     "acceptable": [
       "tracedecay_grep",

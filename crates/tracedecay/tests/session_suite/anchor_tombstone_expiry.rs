@@ -6,17 +6,16 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 use tracedecay_domain::{
-    AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId,
+    AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGeneration, CapabilityId,
     ComponentVersion, Confidence, CoverageReportV1, EntityId, EntityKind, EntityRef, EvidenceClass,
     FactAssertionKindV1, FactAssertionV1, FactCategoryV1, FactEventId, FactEvidenceRefV1,
     FactEvidenceRelationV1, FactId, FactIdentityMaterialV1, FactIdentitySourceV1,
     FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, ObservationScopeV1,
     PayloadAccessState, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest, PrivacyDomainId,
     ProjectId, ProjectionGenerationId, ResolutionAuthorizationV1, RetentionClass,
-    RetrievalAnchorId, RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts,
-    RetrievalAnchorTargetV2, SanitizationReceiptId, SanitizationReceiptRefV1,
-    SanitizationReceiptV1, SanitizerDispositionV1, ScopeResolutionId, SensitivityV1, UtcMicros,
-    VectorWatermark,
+    RetrievalAnchorId, RetrievalAnchorRecord, RetrievalAnchorRecordParts, RetrievalAnchorTarget,
+    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
+    ScopeResolutionId, SensitivityV1, UtcMicros, VectorWatermark,
 };
 use tracedecay_runtime_core::db::Database;
 use tracedecay_session_memory::fact_store::DatabaseFactStore;
@@ -55,9 +54,9 @@ struct CommittedFact {
     last_event_id: FactEventId,
 }
 
-fn evidence_anchor(operation: &str, ingested_at: UtcMicros) -> RetrievalAnchorRecordV2 {
-    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
-        target: RetrievalAnchorTargetV2::Entity(EntityRef {
+fn evidence_anchor(operation: &str, ingested_at: UtcMicros) -> RetrievalAnchorRecord {
+    RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
+        target: RetrievalAnchorTarget::Entity(EntityRef {
             id: EntityId::new(format!("entity.tombstone.{operation}")).unwrap(),
             kind: EntityKind::Document,
         }),
@@ -66,7 +65,7 @@ fn evidence_anchor(operation: &str, ingested_at: UtcMicros) -> RetrievalAnchorRe
         occurred_at: None,
         ingested_at,
         evidence_class: EvidenceClass::Observed,
-        source_generation: AnchorSourceGenerationV2::Unknown,
+        source_generation: AnchorSourceGeneration::Unknown,
         projection_generation: ProjectionGenerationId::new(format!(
             "projection.tombstone.{operation}"
         ))

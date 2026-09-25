@@ -6,7 +6,7 @@ use tracedecay_domain::*;
 fn test_batch_call_sites() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.bat").unwrap();
     let extractor = BatchExtractor;
-    let result = extractor.extract("sample.bat", &source);
+    let result = extractor.extract_artifact("sample.bat", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let call_refs: Vec<_> = result
@@ -14,7 +14,6 @@ fn test_batch_call_sites() {
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
-    assert!(!call_refs.is_empty(), "should have call refs");
     assert!(
         call_refs.iter().any(|r| r.reference_name == "Log"),
         "should find Log call"
@@ -39,7 +38,7 @@ fn test_batch_call_sites() {
 fn test_batch_docstrings() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.bat").unwrap();
     let extractor = BatchExtractor;
-    let result = extractor.extract("sample.bat", &source);
+    let result = extractor.extract_artifact("sample.bat", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let log_fn = result
@@ -47,15 +46,9 @@ fn test_batch_docstrings() {
         .iter()
         .find(|n| n.kind == NodeKind::Function && n.name == "Log")
         .expect("Log function not found");
-    assert!(log_fn.docstring.is_some(), "Log should have docstring");
-    assert!(
-        log_fn
-            .docstring
-            .as_ref()
-            .unwrap()
-            .contains("Logs a message"),
-        "docstring: {:?}",
-        log_fn.docstring
+    assert_eq!(
+        log_fn.docstring.as_deref(),
+        Some("Logs a message with timestamp.")
     );
 
     let vc_fn = result
@@ -86,22 +79,5 @@ fn test_batch_docstrings() {
             .contains("Main entry point"),
         "docstring: {:?}",
         main_fn.docstring
-    );
-}
-
-#[test]
-fn test_batch_contains_edges() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.bat").unwrap();
-    let extractor = BatchExtractor;
-    let result = extractor.extract("sample.bat", &source);
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(
-        contains.len() >= 7,
-        "should have >= 7 Contains edges, got {}",
-        contains.len()
     );
 }

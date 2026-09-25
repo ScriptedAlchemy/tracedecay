@@ -4,7 +4,7 @@
 use tempfile::TempDir;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::SessionProvider;
-use tracedecay_sessions::runtime::codex::CodexSource;
+use tracedecay_sessions::runtime::hosts::codex::CodexSource;
 use tracedecay_store::ObservationProjectionStore;
 use tracedecay_store::ObservationReplayRequest;
 

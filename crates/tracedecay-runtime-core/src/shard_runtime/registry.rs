@@ -46,9 +46,9 @@ pub use attachment::{
     PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot, PhysicalWriterRuntimeSnapshot,
     PublishedShardRuntime,
 };
-pub use capacity::StoreRuntimeRegistryConfig;
 #[cfg(test)]
-pub(crate) use capacity::{DEFAULT_PROJECT_CODE_OPEN_RUNTIMES, MAX_PROJECT_CODE_OPEN_RUNTIMES};
+pub(crate) use capacity::MAX_PROJECT_CODE_OPEN_RUNTIMES;
+pub use capacity::StoreRuntimeRegistryConfig;
 pub use close::ClosedStoreRuntime;
 pub use destructive::{DestructiveMaintenanceReservation, DestructiveMaintenanceTarget};
 pub use graph::{
@@ -1170,24 +1170,6 @@ impl StoreRuntimeClientLease {
         }
         self.validate_opened_file_identity("authorize registered runtime read")?;
         self.inner.attachment.dispatch_read(request, probe)
-    }
-}
-
-impl tracedecay_store::StorageRuntimeReadPort for StoreRuntimeClientLease {
-    fn dispatch_read<'a>(
-        &'a self,
-        request: tracedecay_store::RuntimeReadRequestV1,
-        probe: &'a dyn tracedecay_store::RuntimeRequestProbeV1,
-    ) -> tracedecay_store::StorageRuntimePortFutureV1<'a, tracedecay_store::RuntimeReadOutcomeV1>
-    {
-        Box::pin(async move {
-            StoreRuntimeClientLease::dispatch_read(self, request, probe).map_err(|_| {
-                tracedecay_store::StorageRuntimeErrorV1::Infrastructure {
-                    operation: "dispatch registered runtime read".to_owned(),
-                }
-                .into()
-            })
-        })
     }
 }
 

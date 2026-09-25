@@ -9,8 +9,6 @@
 //! constructs are preserved as evidence; extraction never invents successful
 //! structure.
 
-use std::sync::Arc;
-
 use serde::{Deserialize, Serialize};
 use tracedecay_code_extraction::{
     ExtractedImportEvidenceV1, ExtractedSchemaEvidenceV1, ExtractionArtifactV1,
@@ -63,9 +61,6 @@ pub struct ExtractionBatchV1 {
 pub enum ParseOutcomeV1 {
     Complete,
     Partial { reason: String },
-    TimedOut,
-    Cancelled,
-    Failed { reason: String },
 }
 
 /// Extraction coverage and ambiguity evidence. These are canonical raw
@@ -223,22 +218,15 @@ pub const MAX_EXTRACTION_SOURCE_BYTES: usize = 1024 * 1024;
 /// canonically ordered before hashing, so identical sanitized input under
 /// identical descriptor revisions produces identical digests.
 pub struct TreeSitterExtractor {
-    parsers: Arc<tracedecay_code_extraction::LanguageRegistry>,
+    parsers: tracedecay_code_extraction::LanguageRegistry,
 }
 
 impl TreeSitterExtractor {
     /// Create the adapter over a freshly built extraction registry.
     pub fn new() -> Self {
         Self {
-            parsers: Arc::new(tracedecay_code_extraction::LanguageRegistry::new()),
+            parsers: tracedecay_code_extraction::LanguageRegistry::new(),
         }
-    }
-
-    /// Share one generation-scoped registry with downstream chunking.
-    pub fn from_shared_registry(
-        parsers: Arc<tracedecay_code_extraction::LanguageRegistry>,
-    ) -> Self {
-        Self { parsers }
     }
 
     /// Resolve the parser for one file, falling back to the descriptor's
@@ -771,13 +759,13 @@ mod tests {
         // initializers; v9 adds the clone-body token bound and v10 the byte
         // bound; v11 drops the bare method name of a dotted call and types
         // `self` from the enclosing impl or trait; v12 binds a receiver typed
-        // by a type parameter with one trait bound to `Trait::method`. The
-        // revision is part of the batch identity, so the pinned digest moves
-        // with it.
-        assert_eq!(descriptor.extractor_revision.as_str(), "extractor.rust.v12");
+        // by a type parameter with one trait bound to `Trait::method`; v13
+        // retains parser-positioned receiver-call evidence. The revision is
+        // part of the batch identity, so the pinned digest moves with it.
+        assert_eq!(descriptor.extractor_revision.as_str(), "extractor.rust.v13");
         assert_eq!(
             extraction.batch().rows_digest.as_str(),
-            "sha256:4e483806dfce308dfc97ec460c65f674b28f2dc8bad0e57c28a3b1519c8e495c"
+            "sha256:e6f69e1ee3d2f96f61ac6ea937b1557f6ef2a8ed770b8f08365e0f7570f639dc"
         );
     }
 

@@ -5,7 +5,7 @@
 //! time a soft hint surfaces. Whether the model *acted* on that hint is not
 //! known at emit time, it depends on which tools fire next. This module closes
 //! that loop after the fact: for each emitted hint that has not yet been
-//! resolved, it inspects the session's ingested `session_messages` activity
+//! resolved, it inspects the session's ingested session message activity
 //! *after* the hint timestamp and appends a new `hint_outcome` analytics event:
 //!
 //! * `acted`  , a tracedecay tool matching the hint's category fired inside the

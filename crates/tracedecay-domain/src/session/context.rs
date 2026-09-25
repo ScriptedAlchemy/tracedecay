@@ -22,7 +22,7 @@ pub enum HydrationStateV1 {
     RetentionExpired,
     Unauthorized,
     Locked,
-    UnverifiableLegacy,
+    Unverifiable,
 }
 
 impl HydrationStateV1 {
@@ -35,7 +35,7 @@ impl HydrationStateV1 {
             Self::RetentionExpired => "retention_expired",
             Self::Unauthorized => "unauthorized",
             Self::Locked => "locked",
-            Self::UnverifiableLegacy => "unverifiable_legacy",
+            Self::Unverifiable => "unverifiable",
         }
     }
 }

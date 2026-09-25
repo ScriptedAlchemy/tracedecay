@@ -65,8 +65,6 @@ CREATE INDEX IF NOT EXISTS idx_lcm_summary_convergence_due
         next_attempt_at_ms, attempt_generation, queue_id
     )
     WHERE state IN ('pending', 'retryable');
-CREATE INDEX IF NOT EXISTS idx_lcm_summary_sources_source_node
-    ON lcm_summary_sources(source_kind, source_id, node_id);
 CREATE TRIGGER IF NOT EXISTS lcm_summary_convergence_dirty_raw_seed
     AFTER INSERT ON lcm_summary_convergence_dirty_raw BEGIN
         INSERT INTO lcm_summary_convergence_invalidation_work (

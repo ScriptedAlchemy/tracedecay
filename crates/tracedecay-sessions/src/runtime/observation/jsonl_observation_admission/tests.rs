@@ -27,11 +27,11 @@ use tracedecay_domain::{
     ObservationSourceIdentityV1, ProjectId, ProviderId, RetentionClass, SessionId,
 };
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
+use tracedecay_store::ParseOffset;
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
     ObservationIdentityCollisionDispositionV1,
 };
-use tracedecay_store::{ObservationBatchFallbackCause, ParseOffset};
 
 use crate::admission::test_support::MemoryHostAdmission;
 use crate::admission::{
@@ -40,7 +40,7 @@ use crate::admission::{
 use crate::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
-use crate::runtime::codex::{
+use crate::runtime::hosts::codex::{
     try_admit_codex_jsonl_observations_for_profile_with_admission,
     try_admit_codex_jsonl_observations_for_project_with_admission,
 };
@@ -860,7 +860,7 @@ fn rollout_fixture() -> (tempfile::TempDir, PathBuf, u64) {
 }
 
 async fn stored_cursor(spy: &SeamSpyAdmission) -> Option<ObservationSourceCursorV1> {
-    let source = crate::runtime::codex::codex_observation_source_v2(SESSION_ID).unwrap();
+    let source = crate::runtime::hosts::codex::codex_observation_source_v2(SESSION_ID).unwrap();
     spy.get_source_cursor(&source, &ObservationScopeV1::Profile)
         .await
         .unwrap()
@@ -1055,8 +1055,8 @@ async fn eligible_identity_collision_retries_once_with_normalizer_fallback() {
     let bytes = b"{\"role\":\"user\",\"content\":\"repeated\"}\n";
     std::fs::write(&path, bytes).unwrap();
     let spy = SeamSpyAdmission::default();
-    spy.script_batch_error(HostAdmissionOutcome::batch_requires_scalar_fallback(
-        ObservationBatchFallbackCause::IntraBatchIdentityCollision,
+    spy.script_batch_error(HostAdmissionOutcome::deterministic_content_refusal(
+        "observation_identity_collision",
     ));
     spy.script_capture_error_once(HostAdmissionOutcome::deterministic_content_refusal(
         "observation_identity_collision",
@@ -1173,8 +1173,8 @@ async fn exhausted_identity_collision_retry_uses_its_exact_terminal_coverage_rea
     let bytes = b"{\"role\":\"user\",\"content\":\"repeated\"}\n";
     std::fs::write(&path, bytes).unwrap();
     let spy = SeamSpyAdmission::default();
-    spy.script_batch_error(HostAdmissionOutcome::batch_requires_scalar_fallback(
-        ObservationBatchFallbackCause::IntraBatchIdentityCollision,
+    spy.script_batch_error(HostAdmissionOutcome::deterministic_content_refusal(
+        "observation_identity_collision",
     ));
     spy.script_capture_error(HostAdmissionOutcome::deterministic_content_refusal(
         "observation_identity_collision",
@@ -1332,7 +1332,7 @@ async fn codex_session_meta_prefix_is_decoded_once_across_consumers() {
     let (_temp, path, _) = rollout_fixture();
     let first = SeamSpyAdmission::default();
     let second = SeamSpyAdmission::default();
-    let before = crate::runtime::codex::session_meta_read_count_for_test(&path);
+    let before = crate::runtime::hosts::codex::session_meta_read_count_for_test(&path);
 
     try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &first, None)
         .await
@@ -1342,7 +1342,7 @@ async fn codex_session_meta_prefix_is_decoded_once_across_consumers() {
         .expect("second profile consumer");
 
     assert_eq!(
-        crate::runtime::codex::session_meta_read_count_for_test(&path) - before,
+        crate::runtime::hosts::codex::session_meta_read_count_for_test(&path) - before,
         1,
         "canonical path+native identity must share one bounded prefix decode"
     );
@@ -1382,8 +1382,8 @@ async fn batch_refusal_reuses_pre_context_switch_frames() {
     let contents = lines.join("\n") + "\n";
     std::fs::write(&path, contents).unwrap();
     let spy = SeamSpyAdmission::default();
-    spy.script_batch_error(HostAdmissionOutcome::batch_requires_scalar_fallback(
-        ObservationBatchFallbackCause::IntraBatchIdentityCollision,
+    spy.script_batch_error(HostAdmissionOutcome::deterministic_content_refusal(
+        "observation_identity_collision",
     ));
     spy.script_capture_error(HostAdmissionOutcome::deterministic_content_refusal(
         "observation_identity_collision",

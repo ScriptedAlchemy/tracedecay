@@ -329,13 +329,13 @@ fn run_cwd(run: &DiscoveredRun) -> Option<PathBuf> {
     });
     if let Some(cwd) = parent_transcript
         .as_deref()
-        .and_then(crate::runtime::claude::transcript_cwd)
+        .and_then(crate::runtime::hosts::claude::transcript_cwd)
     {
         return Some(cwd);
     }
     // Fall back to the first agent transcript that records a cwd.
     for path in agent_transcripts(&run.agents_dir) {
-        if let Some(cwd) = crate::runtime::claude::transcript_cwd(&path) {
+        if let Some(cwd) = crate::runtime::hosts::claude::transcript_cwd(&path) {
             return Some(cwd);
         }
     }

@@ -41,7 +41,7 @@ export function PricingAuthority({
         <Fact label="last fetch" value={fetchedAt ?? 'never · bundled'} muted={fetchedAt === null} />
         <div className="col-span-2 flex min-w-0 flex-col gap-0.5">
           <dt className="td-legend">revision</dt>
-          <dd className="td-value break-all text-3xs text-text-secondary" title={revision ?? undefined}>
+          <dd className="td-value break-all text-xs text-text-secondary" title={revision ?? undefined}>
             {revision ?? 'not reported'}
           </dd>
         </div>
@@ -66,7 +66,7 @@ export function PricingAuthority({
               {formatShare(ledger.coverage)}
             </span>
           </div>
-          <p className="text-3xs leading-relaxed text-text-muted">
+          <p className="text-sm leading-relaxed text-text-muted">
             {ledger.usageEvents === 0
               ? 'no usage events observed in this range, so coverage has no denominator'
               : `${ledger.pricedEvents.toLocaleString()} of ${ledger.usageEvents.toLocaleString()} usage events priced against revision ${shortRevision(ledger.pricingRevision)}`}
@@ -93,11 +93,11 @@ export function PricingAuthority({
           />
           <div className="flex items-baseline justify-between gap-2 border-t border-edge-subtle pt-2">
             <span className="td-legend">null identity</span>
-            <span className="td-value text-2xs text-text-secondary" data-cell="numeric">
+            <span className="td-value text-sm text-text-secondary" data-cell="numeric">
               {ledger.unknownModelEvents.toLocaleString()} events
             </span>
           </div>
-          <p className="text-3xs leading-relaxed text-text-muted">
+          <p className="text-sm leading-relaxed text-text-muted">
             usage events whose observation named no model. They are counted and tokenised, and
             cannot be priced, there is no rate for an unknown model.
           </p>
@@ -144,14 +144,14 @@ function ClassColumn({
         />
         <span className="td-legend">{label}</span>
         <span aria-hidden className="td-rule" />
-        <span className="td-value text-3xs text-text-muted" data-cell="numeric">
+        <span className="td-value text-xs text-text-muted" data-cell="numeric">
           {providers.length.toLocaleString()}
         </span>
       </div>
       {providers.length === 0 ? (
-        <p className="pl-4 text-3xs text-text-muted">{empty}</p>
+        <p className="pl-4 text-sm text-text-muted">{empty}</p>
       ) : (
-        <ul className="flex flex-col gap-0.5 pl-4 text-2xs text-text-secondary">
+        <ul className="flex flex-col gap-0.5 pl-4 text-body text-text-secondary">
           {providers.map((provider) => (
             <li key={provider} className="truncate" title={provider}>
               {provider}

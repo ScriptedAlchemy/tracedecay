@@ -649,8 +649,8 @@ async fn resolve_project_root_finds_enclosing_repo_root() {
     let repo = root.join("repo");
     let subdir = repo.join("crates/inner/src");
     std::fs::create_dir_all(&subdir).unwrap();
-    std::fs::create_dir_all(repo.join(".tracedecay")).unwrap();
-    std::fs::write(repo.join(".tracedecay/tracedecay.db"), b"stub").unwrap();
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(&repo, "proj_skill_root")
+        .unwrap();
 
     assert_eq!(resolve_project_root(&subdir), repo);
     assert_eq!(resolve_project_root(&repo), repo);

@@ -56,7 +56,7 @@ export function SectionsRail({
               />
               <OriginMark origin={section.origin} />
               <span className="min-w-0 flex-1 truncate">{section.title}</span>
-              <span className="td-value shrink-0 text-3xs text-text-muted" data-cell="numeric">
+              <span className="td-value shrink-0 text-xs text-text-muted" data-cell="numeric">
                 {count}
               </span>
             </button>

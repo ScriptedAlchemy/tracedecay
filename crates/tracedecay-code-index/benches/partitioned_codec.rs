@@ -3,7 +3,6 @@ use std::{
     error::Error,
     fmt::Debug,
     hint::black_box,
-    io::Cursor,
     path::PathBuf,
     sync::Arc,
     time::Instant,
@@ -485,10 +484,7 @@ fn decode_and_open(fixture: &EncodedFixture) -> Result<(), CodeIndexProductionEr
             buffer.extend_from_slice(&bytes[start..end]);
             Ok(())
         },
-    )?
-    .ok_or_else(|| {
-        CodeIndexProductionErrorV1::Contract("benchmark manifest is incompatible".to_owned())
-    })?;
+    )?;
     black_box(decoded);
     black_box(open_lexical(fixture)?);
     Ok(())
@@ -497,12 +493,11 @@ fn decode_and_open(fixture: &EncodedFixture) -> Result<(), CodeIndexProductionEr
 #[hotpath::measure(label = "code_index.lexical.open")]
 fn open_lexical(
     fixture: &EncodedFixture,
-) -> Result<VerifiedSealedLexicalPageSourceV1<Cursor<Vec<u8>>>, CodeIndexProductionErrorV1> {
+) -> Result<VerifiedSealedLexicalPageSourceV1, CodeIndexProductionErrorV1> {
     let source_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&fixture.manifest))
         .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
     let segments = Arc::clone(&fixture.segments);
-    let source = VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
-        Cursor::new(Vec::<u8>::new()),
+    VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
         &fixture.manifest,
         source_digest,
         move |digest, _, buffer, _control| {
@@ -515,11 +510,7 @@ fn open_lexical(
         },
         256,
         1024 * 1024,
-    )?
-    .ok_or_else(|| {
-        CodeIndexProductionErrorV1::Contract("benchmark manifest is incompatible".to_owned())
-    })?;
-    Ok(source)
+    )
 }
 
 fn drain_lexical(fixture: &EncodedFixture) -> Result<(), CodeIndexProductionErrorV1> {

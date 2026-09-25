@@ -42,6 +42,7 @@ use super::{
     LatestCompleteCodeIndexV1, PendingHintsV1, SharedCodeIndexBytePoolV1,
     newly_eligible_percentile, now_micros,
 };
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 #[cfg(test)]
 mod cold_read_wake_tests;
@@ -145,11 +146,12 @@ const TEXT_PROJECTION_MAXIMUM_ACTIVATION_ADVANCES_V1: usize = 10_000;
 /// generation, so a complete sealed generation sat on disk with zero seat
 /// attempts and no log line, because a missing prepare is not a refusal. The
 /// gate is now the text owner, not the tree: a publication prepares on its own
-/// pass once its lightweight text owner has finished, and an unchanged pass
-/// prepares as soon as a retained owner exists to recover a verified head.
-/// Fresh graph publication and any retained full replay follow text projection
-/// because both are corpus-sized consumers of the sealed source and process
-/// memory. Every skip names itself.
+/// pass alongside its lightweight text owner's projection, and an unchanged
+/// pass prepares as soon as a retained owner exists to recover a verified head.
+/// Both are corpus-sized consumers of the sealed source and process memory, so
+/// fresh graph publication starts only once that projection holds its build
+/// reservation, and any retained full replay follows text projection. Every
+/// skip names itself.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphSeatGateV1 {
     /// Prepare, decode, activate, and swap this generation into serving.
@@ -182,9 +184,11 @@ enum PublishedTextProjectionOutcomeV1 {
 
 impl GraphSeatGateV1 {
     /// `text_owner_admitted_for_graph` means a publication's replacement
-    /// owner is ready, or an unchanged pass has a retained owner from which it
-    /// can first try to recover an already-verified graph head. A retained full
-    /// replay is gated separately on text readiness after that recovery attempt.
+    /// owner is ready or its projection runs in this pass (the serving swap
+    /// joins it before seating), or an unchanged pass has a retained owner
+    /// from which it can first try to recover an already-verified graph head.
+    /// A retained full replay is gated separately on text readiness after that
+    /// recovery attempt.
     #[hotpath::skip]
     pub const fn decide(
         activation_enabled: bool,
@@ -354,11 +358,8 @@ impl ServingSwapOutcomeV1 {
     }
 }
 
-/// An unfinished text projection withholds the serving seat only when exact
-/// or lexical owners are still missing.
-///
-/// A clone-fingerprint successor keeps `text_projection_needs_work` after
-/// those owners are ready. That is not `published_text_owner_unfinished`.
+/// An unfinished text projection withholds the serving seat only when its
+/// query owners are still missing.
 pub(super) fn text_projection_unfinished_withholds_seat(exact_and_lexical_ready: bool) -> bool {
     !exact_and_lexical_ready
 }
@@ -600,6 +601,10 @@ pub struct CodeIndexMountedScopeV1 {
     pub shutting_down: Arc<AtomicBool>,
 }
 
+/// One worktree's graph-bearing serving seat. Every read path takes it, so it
+/// is Hotpath instrumented; each writer bumps the worktree's serving epoch.
+pub type ServingGenerationSlot = hotpath::rw_locks::RwLock<Option<LatestCompleteCodeIndexV1>>;
+
 /// Outcome of retiring the retained generation from a failed branch
 /// publication. A no-match preserves a newer generation that won the race.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -678,7 +683,7 @@ pub struct MountedCodeIndexWorktreeV1 {
     /// work so competing builds wait without occupying a blocking-pool thread.
     pub(super) build_publication_lock: Arc<tokio::sync::Mutex<()>>,
     pub historical_generation_owner: super::HistoricalCodeIndexGenerationOwnerV1,
-    pub serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
+    pub serving_generation: Arc<ServingGenerationSlot>,
     /// Complete-generation callers need the decoded serving owner; restored
     /// text and persistent graph reads do not. Only their explicit demand
     /// admits this optional decode after verified-head recovery.
@@ -817,9 +822,22 @@ const CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1: &str = "inspect the daemon l
      abnormal text-projection failure; indexing retries when a new generation seals over \
      changed input";
 
-const CONVERGENCE_PARK_PUBLICATION_CORRUPTION_REMEDIATION_V1: &str = "the durable code-index \
-     publication store is corrupt; retire this project route, replace or rebuild that store, \
-     then remount, `tracedecay sync` and ordinary wakes cannot clear it";
+/// Remediation when the derived publication was already deleted and rebuilt
+/// once in this mount and is corrupt again. The daemon deletes and rebuilds a
+/// corrupt derived store automatically; a repeat is bounded to one attempt per
+/// mount so a defect that corrupts every fresh seal cannot cycle re-indexes.
+const CONVERGENCE_PARK_PUBLICATION_CORRUPTION_REMEDIATION_V1: &str = "the derived code-index \
+     publication was deleted and rebuilt once in this daemon and is corrupt again; run \
+     `tracedecay daemon restart` for one more automatic rebuild, and report the daemon log's \
+     code_index_publication_authority_* events if it recurs";
+
+/// Remediation when the derived publication could not be deleted (the store
+/// directory refused the unlink). Nothing in that directory is authoritative,
+/// so the operator fixes the named filesystem fault and restarts.
+const CONVERGENCE_PARK_PUBLICATION_RESET_FAILED_REMEDIATION_V1: &str = "the derived code-index \
+     publication is corrupt and could not be deleted; fix the named filesystem fault on the \
+     project's code-index-v1 scope store, then run `tracedecay daemon restart` to rebuild it \
+     from source";
 
 fn is_terminal_publication_authority_park(parked: &CodeIndexConvergenceParkedV1) -> bool {
     parked.blocked_reason == Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt)
@@ -1455,7 +1473,7 @@ impl Drop for PendingWakeClaimV1 {
 type ReadyProbeServingPartsV1 = (
     super::SourceFreshnessFenceV1,
     super::HistoricalCodeIndexGenerationOwnerV1,
-    Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
+    Arc<ServingGenerationSlot>,
     Arc<RwLock<Option<super::ServingSourceWitnessV1>>>,
     Arc<AtomicBool>,
     Arc<tokio::sync::Notify>,
@@ -1511,18 +1529,14 @@ pub struct CodeIndexSchedulerRegistryV1 {
     cadence_telemetry: Arc<Mutex<CodeIndexCadenceTelemetryV1>>,
     pub(super) relation_symbol_hydrations: Arc<AtomicU64>,
     activations: Arc<Mutex<BTreeMap<ManifestDigest, Weak<super::CodeIndexActivationV1>>>>,
-    test_attribution_authorities: Arc<
-        RwLock<
-            BTreeMap<
-                PathBuf,
-                (
-                    CodeGenerationId,
-                    crate::code_index::production::PublishedGenerationTestAttributionAuthorityV1,
-                ),
-            >,
-        >,
-    >,
+    /// The serving generation each root last proved current, held weakly so a
+    /// retired generation is not pinned here. Its test attribution is
+    /// materialized only on an attribution read, never on query admission.
+    test_attribution_authorities: Arc<RwLock<AttributionSeatsV1>>,
 }
+
+type AttributionSeatsV1 =
+    BTreeMap<PathBuf, (CodeGenerationId, Weak<CodeIndexPublishedGenerationV1>)>;
 
 impl CodeIndexSchedulerRegistryV1 {
     fn incomplete_text_slice_may_continue(pending_wake: &PendingWakeV1) -> bool {
@@ -1912,7 +1926,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         expected: &Arc<CodeIndexPublishedGenerationV1>,
     ) -> ServingGenerationInstallationOutcomeV1 {
-        let Ok(project_root) = project_root.canonicalize() else {
+        let Ok(project_root) = canonical_existing_identity(project_root) else {
             return ServingGenerationInstallationOutcomeV1::NoMatch;
         };
         let (serving_generation, serving_epoch, installation_slot) = {
@@ -1985,7 +1999,7 @@ impl CodeIndexSchedulerRegistryV1 {
         installation: &ServingGenerationInstallationClaimV1,
         retire: bool,
     ) -> ServingGenerationRollbackOutcomeV1 {
-        let Ok(project_root) = project_root.canonicalize() else {
+        let Ok(project_root) = canonical_existing_identity(project_root) else {
             return ServingGenerationRollbackOutcomeV1::NoMatch;
         };
         let (
@@ -2297,9 +2311,12 @@ impl CodeIndexSchedulerRegistryV1 {
     /// advance at a time, until exact and lexical serving are ready or the
     /// projection stops typed.
     ///
-    /// The caller chooses ordering. Fresh publications await this before graph
-    /// work because text and graph compete for the same sealed source and
-    /// resident-memory headroom. Retained owners may still run on their own
+    /// The caller chooses ordering. Text and graph compete for the same sealed
+    /// source and resident-memory headroom, so a fresh publication starts
+    /// graph work only once `opened` fires: the first advance succeeded and
+    /// the build holds its reservation. A projection that stops before that
+    /// (parked, failed, or already ready) drops the sender instead, and graph
+    /// then waits for ready owners. Retained owners may still run on their own
     /// task while the scheduler recovers an already-verified graph head. The
     /// advance itself is single-flight on the owner's projection slot, so
     /// scheduler wakes that race it wait, never double drive.
@@ -2322,6 +2339,7 @@ impl CodeIndexSchedulerRegistryV1 {
         shutting_down: Arc<AtomicBool>,
         convergence_park: Arc<RwLock<Option<CodeIndexConvergenceParkedV1>>>,
         installed: Option<Arc<RwLock<Option<LatestCodeTextGenerationV1>>>>,
+        mut opened: Option<tokio::sync::oneshot::Sender<()>>,
         #[cfg(test)] project_root: PathBuf,
     ) -> PublishedTextProjectionOutcomeV1 {
         #[cfg(test)]
@@ -2334,11 +2352,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 return PublishedTextProjectionOutcomeV1::Shutdown;
             }
             // A publication's pass waits only for the owners the seat needs.
-            // Once the admission artifact serves exact and lexical, the slot
-            // may still hold the clone-fingerprint successor: that backfill
-            // re-decodes the whole sealed source into a second artifact and
-            // is not a seat precondition, so it continues on the retained
-            // driver of a later pass instead of holding graph activation.
             if installed.is_none() && text.query_owners_are_ready() {
                 break;
             }
@@ -2353,14 +2366,19 @@ impl CodeIndexSchedulerRegistryV1 {
                 break;
             }
             let advancing = text.clone();
-            match hotpath::future!(
+            let advance = hotpath::future!(
                 tokio::task::spawn_blocking(
                     move || advancing.advance_text_serving(TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1)
                 ),
                 label = "daemon.code_index.text_projection"
             )
-            .await
+            .await;
+            if matches!(advance, Ok(Ok(_)))
+                && let Some(opened) = opened.take()
             {
+                let _ = opened.send(());
+            }
+            match advance {
                 Ok(Ok(true)) => {
                     clear_convergence_park(&convergence_park);
                     break;
@@ -2619,7 +2637,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
     ) -> Option<tokio::sync::watch::Receiver<()>> {
-        let project_root = project_root.canonicalize().ok()?;
+        let project_root = canonical_existing_identity(project_root).ok()?;
         let mounted = self.mounted.lock().await;
         let worktree = mounted.get(&project_root)?;
         Some(worktree.serving_generation_changed.subscribe())
@@ -2629,7 +2647,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// notes a [`CodeIndexCadenceTriggerV1::QueryAdmission`] wake so the worker
     /// yields text-only work and seats a complete generation.
     pub async fn request_complete_generation(&self, project_root: &Path) -> bool {
-        let Ok(project_root) = project_root.canonicalize() else {
+        let Ok(project_root) = canonical_existing_identity(project_root) else {
             return false;
         };
         let mounted = self.mounted.lock().await;
@@ -2679,7 +2697,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// only when its sealed-digest proof describes this snapshot, so a seat
     /// the checkout has moved past is never armed here.
     pub(super) fn bind_unproven_seat_to_verified_source(
-        serving_generation: &RwLock<Option<LatestCompleteCodeIndexV1>>,
+        serving_generation: &ServingGenerationSlot,
         serving_source_witness: &RwLock<Option<super::ServingSourceWitnessV1>>,
         source_freshness: &super::SourceFreshnessFenceV1,
         verified_snapshot_content_identity: &tracedecay_domain::ContentDigest,
@@ -2777,7 +2795,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// `false` when the path cannot be canonicalized (a path Doctor could never
     /// have mounted under).
     pub async fn is_worktree_mounted(&self, project_root: &Path) -> bool {
-        let Ok(project_root) = project_root.canonicalize() else {
+        let Ok(project_root) = canonical_existing_identity(project_root) else {
             return false;
         };
         self.mounted.lock().await.contains_key(&project_root)
@@ -2801,7 +2819,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         path: PathBuf,
     ) -> CodeIndexDemandAdmissionV1 {
-        let Ok(project_root) = project_root.canonicalize() else {
+        let Ok(project_root) = canonical_existing_identity(project_root) else {
             return CodeIndexDemandAdmissionV1::Unavailable(
                 CodeIndexDemandUnavailableV1::SchedulerUnmounted,
             );
@@ -2842,7 +2860,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         rel_paths: &[String],
     ) -> CodeIndexDemandAdmissionV1 {
-        let Ok(project_root) = project_root.canonicalize() else {
+        let Ok(project_root) = canonical_existing_identity(project_root) else {
             return CodeIndexDemandAdmissionV1::Unavailable(
                 CodeIndexDemandUnavailableV1::SchedulerUnmounted,
             );
@@ -2888,7 +2906,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
     ) -> Option<CodeIndexConvergenceParkedV1> {
-        let Ok(project_root) = project_root.canonicalize() else {
+        let Ok(project_root) = canonical_existing_identity(project_root) else {
             return None;
         };
         let mounted = self.mounted.lock().await;
@@ -2906,7 +2924,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         reason: &str,
     ) -> bool {
-        let Ok(project_root) = project_root.canonicalize() else {
+        let Ok(project_root) = canonical_existing_identity(project_root) else {
             return false;
         };
         let mounted = self.mounted.lock().await;
@@ -2934,7 +2952,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// bounded exact-path capacity. Overflow requests one authoritative scan for
     /// this exact mounted worktree; it never aliases a sibling worktree.
     pub async fn notify_hook_overflow(&self, project_root: &Path) -> CodeIndexDemandAdmissionV1 {
-        let Ok(project_root) = project_root.canonicalize() else {
+        let Ok(project_root) = canonical_existing_identity(project_root) else {
             return CodeIndexDemandAdmissionV1::Unavailable(
                 CodeIndexDemandUnavailableV1::SchedulerUnmounted,
             );
@@ -2978,7 +2996,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
     ) -> CodeIndexDemandAdmissionV1 {
-        let Ok(canonical) = project_root.canonicalize() else {
+        let Ok(canonical) = canonical_existing_identity(project_root) else {
             return CodeIndexDemandAdmissionV1::Unavailable(
                 CodeIndexDemandUnavailableV1::SchedulerUnmounted,
             );
@@ -3014,7 +3032,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
     ) -> Option<Arc<Mutex<CodeIndexWorktreeSchedulerV1>>> {
-        let project_root = project_root.canonicalize().ok()?;
+        let project_root = canonical_existing_identity(project_root).ok()?;
         let mounted = self.mounted.lock().await;
         mounted
             .get(&project_root)
@@ -3216,7 +3234,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         scope: &tracedecay_contracts::ResolvedScope,
     ) -> Option<LatestCodeTextGenerationV1> {
-        let project_root = project_root.canonicalize().ok()?;
+        let project_root = canonical_existing_identity(project_root).ok()?;
         let mounted_root = {
             let mounted = self.mounted.lock().await;
             let (mounted_root, _) = unique_mounted_for_scope(&mounted, scope).unique()?;
@@ -3248,7 +3266,7 @@ impl ScopedFeedbackDocumentIdentityV1 {
     ) -> Option<Self> {
         Some(Self {
             registry,
-            project_root: project_root.canonicalize().ok()?,
+            project_root: canonical_existing_identity(project_root).ok()?,
             scope,
         })
     }
@@ -3265,8 +3283,7 @@ impl tracedecay_application::feedback::cycle_production::ProductionFeedbackDocum
     {
         let owner = self.clone();
         Box::pin(async move {
-            let requested_root = project_root
-                .canonicalize()
+            let requested_root = canonical_existing_identity(&project_root)
                 .map_err(|_| LspRuntimeFailure::new("feedback-code-index-root-unavailable"))?;
             if requested_root != owner.project_root {
                 return Err(LspRuntimeFailure::new("feedback-code-index-root-mismatch"));
@@ -3351,7 +3368,7 @@ impl CodeIndexSchedulerRegistryV1 {
         scope: Option<tracedecay_contracts::ResolvedScope>,
     ) -> Option<tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityV1>
     {
-        let root = project_root.canonicalize().ok()?;
+        let root = canonical_existing_identity(&project_root).ok()?;
         let root_generation = self.latest_text_serving_for_root(&root).await?;
         let scope = match scope {
             Some(scope) => scope,
@@ -3432,34 +3449,40 @@ impl crate::code_index::provider::GenerationTestAttributionJoinReadPort
     fn read_test_attribution(
         &self,
         generation: &CodeGenerationId,
-    ) -> crate::code_index::provider::GenerationProviderReadV1<
-        crate::code_index::test_attribution::GenerationTestJoinV1,
+    ) -> Arc<
+        crate::code_index::provider::GenerationProviderReadV1<
+            crate::code_index::test_attribution::GenerationTestJoinV1,
+        >,
     > {
-        let authorities = self
-            .test_attribution_authorities
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut matching = authorities
-            .values()
-            .filter(|(candidate, _)| candidate == generation);
-        let Some((_, authority)) = matching.next() else {
-            return crate::code_index::provider::GenerationProviderReadV1::new(
-                tracedecay_domain::ProviderEvaluationStateV1::Unavailable,
-                crate::code_index::provider::GenerationProviderCoverageV1::Unavailable,
-                None,
+        let unavailable = || {
+            Arc::new(
+                crate::code_index::provider::GenerationProviderReadV1::new(
+                    tracedecay_domain::ProviderEvaluationStateV1::Unavailable,
+                    crate::code_index::provider::GenerationProviderCoverageV1::Unavailable,
+                    None,
+                )
+                .unwrap_or_else(|_| panic!("static unavailable attribution read")),
             )
-            .unwrap_or_else(|_| panic!("static unavailable attribution read"));
         };
-        if matching.next().is_some() {
-            return crate::code_index::provider::GenerationProviderReadV1::new(
-                tracedecay_domain::ProviderEvaluationStateV1::Unavailable,
-                crate::code_index::provider::GenerationProviderCoverageV1::Unavailable,
-                None,
-            )
-            .unwrap_or_else(|_| panic!("static ambiguous attribution read"));
-        }
+        let seated = {
+            let authorities = self
+                .test_attribution_authorities
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut matching = authorities
+                .values()
+                .filter(|(candidate, _)| candidate == generation);
+            // Two roots claiming one generation is ambiguous, not a choice.
+            match (matching.next(), matching.next()) {
+                (Some((_, seated)), None) => seated.upgrade(),
+                _ => None,
+            }
+        };
+        let Some(Ok(authority)) = seated.map(|seated| seated.test_attribution_authority()) else {
+            return unavailable();
+        };
         crate::code_index::provider::GenerationTestAttributionJoinReadPort::read_test_attribution(
-            authority, generation,
+            &authority, generation,
         )
     }
 }
@@ -3512,7 +3535,7 @@ fn canonical_relative_document_path(project_root: &Path, path: &Path) -> Option<
     let mut unresolved: Vec<&std::ffi::OsStr> = Vec::new();
     let mut candidate = path;
     loop {
-        if let Ok(canonical) = candidate.canonicalize() {
+        if let Ok(canonical) = canonical_existing_identity(candidate) {
             let mut relative = canonical.strip_prefix(project_root).ok()?.to_path_buf();
             for component in unresolved.iter().rev() {
                 relative.push(component);
@@ -3527,6 +3550,7 @@ fn canonical_relative_document_path(project_root: &Path, path: &Path) -> Option<
 #[cfg(all(test, unix))]
 mod feedback_document_path_tests {
     use super::feedback_document_logical_path;
+    use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
     /// A symlinked root reproduces on Linux exactly what every macOS
     /// `/var/folders/...` temporary root does in production: the daemon holds
@@ -3541,7 +3565,7 @@ mod feedback_document_path_tests {
         let alias = base.path().join("alias");
         std::os::unix::fs::symlink(&real, &alias).expect("root alias");
 
-        let canonical_root = real.canonicalize().expect("canonical root");
+        let canonical_root = canonical_existing_identity(&real).expect("canonical root");
         let canonical_uri = url::Url::from_file_path(canonical_root.join("src/lib.rs"))
             .expect("canonical document uri");
         let alias_uri =
@@ -3568,7 +3592,7 @@ mod feedback_document_path_tests {
         std::fs::create_dir_all(real.join("src")).expect("real tree");
         let alias = base.path().join("alias");
         std::os::unix::fs::symlink(&real, &alias).expect("root alias");
-        let canonical_root = real.canonicalize().expect("canonical root");
+        let canonical_root = canonical_existing_identity(&real).expect("canonical root");
 
         let uri = url::Url::from_file_path(alias.join("src/unsaved.rs")).expect("document uri");
         assert_eq!(
@@ -3589,7 +3613,7 @@ mod feedback_document_path_tests {
         std::fs::create_dir_all(&outside).expect("outside tree");
         std::fs::write(outside.join("secret.rs"), b"pub fn secret() {}\n").expect("outside file");
         std::os::unix::fs::symlink(&outside, real.join("escape")).expect("escaping alias");
-        let canonical_root = real.canonicalize().expect("canonical root");
+        let canonical_root = canonical_existing_identity(&real).expect("canonical root");
 
         let escaping = url::Url::from_file_path(canonical_root.join("escape/secret.rs"))
             .expect("escaping document uri");

@@ -16,6 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_contracts::{ApplicationContractError, ResolvedScope};
 use tracedecay_domain::{CommitId, ProjectId, RefId, RepositoryId, TreeId, WorktreeId};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 /// Failure to resolve an exact indexing identity from a checkout.
 #[derive(Debug, thiserror::Error)]
@@ -63,8 +64,8 @@ impl IndexingIdentityV1 {
 
         // HEAD/commit/tree are best-effort: an unborn or detached HEAD is a
         // truthful `None`, never a fabricated placeholder.
-        let repository =
-            gix::open(project_root).map_err(|error| IdentityErrorV1::Git(error.to_string()))?;
+        let repository = tracedecay_runtime_core::git_open::open(project_root)
+            .map_err(|error| IdentityErrorV1::Git(error.to_string()))?;
         let head_ref = repository
             .head()
             .ok()
@@ -286,7 +287,7 @@ fn git_metadata_dirs(project_root: &Path) -> (PathBuf, PathBuf) {
     {
         return (topology.git_dir.clone(), topology.common_dir.clone());
     }
-    if let Ok(repository) = gix::open(project_root) {
+    if let Ok(repository) = tracedecay_runtime_core::git_open::open(project_root) {
         let git_dir = repository.git_dir().to_path_buf();
         let common_dir = {
             let common = repository.common_dir().to_path_buf();
@@ -315,13 +316,12 @@ pub fn repository_id_for_common_dir(common_dir: &Path) -> Result<RepositoryId, I
 }
 
 pub fn worktree_id_for(project_root: &Path) -> Result<WorktreeId, IdentityErrorV1> {
-    let project_root =
-        project_root
-            .canonicalize()
-            .map_err(|source| IdentityErrorV1::CanonicalWorktreePath {
-                path: project_root.to_path_buf(),
-                source,
-            })?;
+    let project_root = canonical_existing_identity(project_root).map_err(|source| {
+        IdentityErrorV1::CanonicalWorktreePath {
+            path: project_root.to_path_buf(),
+            source,
+        }
+    })?;
     WorktreeId::new(format!(
         "worktree.daemon.{}",
         super::sha256_hex(project_root.to_string_lossy().as_bytes())

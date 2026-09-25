@@ -620,7 +620,7 @@ fn host_admission_failures_preserve_provider_with_bounded_reason_codes() {
                 retryable: true,
                 reason_code: Some("authority_unavailable"),
                 recovery: None,
-                storage_cause: None,
+                cause: None,
             },
         );
         assert!(matches!(

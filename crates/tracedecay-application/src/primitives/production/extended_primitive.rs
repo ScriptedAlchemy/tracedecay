@@ -28,11 +28,12 @@ use super::super::runtime::{
     SourceOutlinePrimitiveRequest, SourceOutlinePrimitiveResult, StorageStatusHistoryPointV1,
     StorageStatusPrimitiveRequest, StorageStatusPrimitiveResult,
 };
-use super::super::symbol_graph::symbol_record;
+use super::super::symbol_graph::{read_symbol_source_body, symbol_record};
 use super::{
     AuthenticatedDiagnosticCursorAuthorityV1, DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
-    all_code_graph_symbols, completed, diagnostics_result, diagnostics_unavailable,
-    evidence_unavailable, failed, graph_read_outcome, now_observed, open_code_graph,
+    all_code_graph_symbols, completed, completed_unsupported, diagnostics_result,
+    diagnostics_unavailable, evidence_unavailable, failed, graph_read_outcome, now_observed,
+    open_code_graph,
 };
 use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use crate::diagnostics_query::{DiagnosticPageRequest, DiagnosticQueryCoverage, DiagnosticsQuery};
@@ -512,7 +513,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                     }
                 };
                 let query = GraphQueryManager::new(&reader, cancellation);
-                let Ok(dependent_files) = query.get_file_dependents(&request.file).await else {
+                let Ok(dependents) = query.get_file_dependents(&request.file).await else {
                     return evidence_unavailable(
                         EvidenceDomain::Graph,
                         now_observed(),
@@ -520,14 +521,15 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                         0,
                     );
                 };
-                completed(
-                    FileDependentsPrimitiveResult {
-                        file: request.file.clone(),
-                        dependent_files,
-                    },
-                    EvidenceDomain::Graph,
-                    now_observed(),
-                )
+                let payload = FileDependentsPrimitiveResult {
+                    file: request.file.clone(),
+                    dependent_files: dependents.files,
+                };
+                if dependents.unresolved_callers {
+                    completed_unsupported(payload, EvidenceDomain::Graph, now_observed())
+                } else {
+                    completed(payload, EvidenceDomain::Graph, now_observed())
+                }
             },
             label = "usecases.primitives.file_dependents"
         ))
@@ -571,18 +573,16 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                 let Some(end_line) = metadata.start_line.checked_add(line_span) else {
                     return failed(EvidenceDomain::Source, now_observed());
                 };
-                let path = self.source_runtime.project_root().join(&file);
-                let Ok(content) = tokio::fs::read_to_string(&path).await else {
+                let Ok(body) = read_symbol_source_body(
+                    self.source_runtime.project_root(),
+                    &file,
+                    metadata.start_line,
+                    end_line,
+                )
+                .await
+                else {
                     return failed(EvidenceDomain::Source, now_observed());
                 };
-                let start = metadata.start_line as usize;
-                let end = end_line as usize;
-                let body = content
-                    .lines()
-                    .skip(start)
-                    .take(end.saturating_sub(start).saturating_add(1))
-                    .collect::<Vec<_>>()
-                    .join("\n");
                 completed(
                     SourceBodyPrimitiveResult {
                         node_id: occurrence.as_str().to_owned(),

@@ -155,7 +155,12 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
             fixture.near_duplicate_fact_id.clone(),
             fixture.near_duplicate_last_event_id.clone(),
         );
-        let _codex_bin_guard = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &fake_codex.bin);
+        let project_id = cg
+            .configuration_runtime()
+            .configuration_target()
+            .project_id
+            .as_str()
+            .to_owned();
         let dashboard_root = cg.store_layout().dashboard_root.clone();
         let agent = http_agent();
         let port = pick_free_port();
@@ -163,10 +168,11 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
         let mut server = spawn_dashboard_server_with_configuration_runtime(
             cg,
             host_runtime,
-            dashboard::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             port,
         );
         wait_for_dashboard(&agent, &base_url).await;
+        configure_codex_summarizer(&agent, &base_url, &project_id, &fake_codex.bin);
 
         let config_url = format!("{base_url}/api/plugins/holographic/curation/config");
         let (status, current_config) = get_json(&agent, &config_url);
@@ -479,6 +485,7 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
                     backoff_millis: 0,
                 }],
                 fallback_status: None,
+                session_evidence_budget_stage: None,
                 report_ref: None,
                 artifacts: vec![artifact],
                 started_at: ledger_unix_seconds.to_string(),
@@ -495,7 +502,7 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             host_runtime,
-            dashboard::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             port,
         );
         wait_for_dashboard(&agent, &base_url).await;
@@ -622,7 +629,7 @@ fn automation_outcomes_endpoint_reports_activated_skills_and_automatic_fact_rece
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             host_runtime,
-            dashboard::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             port,
         );
         wait_for_dashboard(&agent, &base_url).await;

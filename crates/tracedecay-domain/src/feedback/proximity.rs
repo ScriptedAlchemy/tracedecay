@@ -20,7 +20,6 @@ crate::canonical_text::validated_string_newtype!(
     DomainError,
     super::validate_label;
     ProximityContributionIdV1 => "proximity contribution id",
-    ProximityWarningIdV1 => "proximity warning id",
     ProximityObservationIdV1 => "proximity observation id",
 );
 
@@ -166,7 +165,6 @@ impl ProximityRiskInputsV1 {
 #[serde(deny_unknown_fields)]
 pub struct ProximityContributionV1 {
     pub contribution_id: ProximityContributionIdV1,
-    pub warning_id: ProximityWarningIdV1,
     pub warning_class: ProximityWarningClassV1,
     pub source_observation_ids: Vec<ProximityObservationIdV1>,
     pub retrieval_anchor_ids: Vec<RetrievalAnchorId>,
@@ -193,7 +191,6 @@ impl ProximityContributionV1 {
 
     pub fn validate(&self) -> Result<(), DomainError> {
         self.contribution_id.validate()?;
-        self.warning_id.validate()?;
         let immediate_class = matches!(
             self.warning_class,
             ProximityWarningClassV1::SameFile
@@ -399,7 +396,6 @@ mod tests {
     fn concealed_private_contribution() -> ProximityContributionV1 {
         ProximityContributionV1 {
             contribution_id: ProximityContributionIdV1::new("contribution.private").unwrap(),
-            warning_id: ProximityWarningIdV1::new("warning.private").unwrap(),
             warning_class: ProximityWarningClassV1::Neighborhood,
             source_observation_ids: Vec::new(),
             retrieval_anchor_ids: Vec::new(),

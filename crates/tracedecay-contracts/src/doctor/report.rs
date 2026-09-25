@@ -716,7 +716,9 @@ impl<'a> DoctorReportComposerV1<'a> {
             LanguageServerReadV1::Unsupported => {
                 unavailable(DoctorFamilyUnavailableReasonV1::Unsupported)
             }
-            LanguageServerReadV1::Absent => unavailable(DoctorFamilyUnavailableReasonV1::Absent),
+            LanguageServerReadV1::Absent { .. } => {
+                unavailable(DoctorFamilyUnavailableReasonV1::Absent)
+            }
             LanguageServerReadV1::Denied => unavailable(DoctorFamilyUnavailableReasonV1::Denied),
             LanguageServerReadV1::Unknown => unavailable(DoctorFamilyUnavailableReasonV1::Unknown),
         };

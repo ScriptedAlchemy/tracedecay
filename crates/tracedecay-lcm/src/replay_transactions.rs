@@ -300,8 +300,7 @@ fn active_replay_message_from_metadata(message: &LcmRawMessage) -> Option<Value>
     let mut replay = metadata
         .get(ACTIVE_REPLAY_MESSAGE_KEY)
         .and_then(Value::as_object)
-        .cloned()
-        .or_else(|| legacy_active_replay_message_from_metadata(&metadata))?;
+        .cloned()?;
     if !replay.contains_key("content") {
         replay.insert(
             "content".to_string(),
@@ -335,19 +334,6 @@ pub fn strip_disposable_assistant_replay_sidecars(
     }
 }
 
-fn legacy_active_replay_message_from_metadata(metadata: &Value) -> Option<Map<String, Value>> {
-    let mut replay = metadata.as_object()?.clone();
-    replay.remove(ACTIVE_REPLAY_METADATA_KEY);
-    replay.remove(ACTIVE_REPLAY_MESSAGE_KEY);
-    replay.remove("ingest_protection");
-    replay.remove("external_payload");
-    replay.remove("payload_ref");
-    replay.remove("byte_count");
-    replay.remove("char_count");
-    replay.remove("sha256");
-    Some(replay)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,8 +352,6 @@ mod tests {
             content_hash: "hash".to_string(),
             storage_kind: LcmStorageKind::Inline,
             payload_ref: None,
-            legacy_source: false,
-            legacy_truncated: false,
             metadata_json: Some(
                 json!({
                     ACTIVE_REPLAY_METADATA_KEY: true,

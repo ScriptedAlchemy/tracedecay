@@ -131,7 +131,7 @@ async fn request_refresh(harness: &ProductionProjectCompositionHarnessV1, projec
         harness,
         project,
         "tracedecay_admin_sync",
-        json!({"force": true, "format": "json"}),
+        json!({"format": "json"}),
     )
     .await;
     assert_eq!(receipt["status"], "queued", "refresh receipt: {receipt}");

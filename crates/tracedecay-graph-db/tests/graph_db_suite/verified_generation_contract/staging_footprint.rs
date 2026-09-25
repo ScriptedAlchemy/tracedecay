@@ -961,6 +961,104 @@ fn release_sweep_retries_idle_sealed_reader_hibernation() {
     assert_snapshot_reads(&commit.snapshot, &identity, "retry-idle");
 }
 
+/// A serving owner pins its generation's engine once, and every read shares
+/// that one open engine: neither the bounded release sweep nor a peer
+/// generation's install may step it down for the next read to reopen.
+///
+/// Fails if any hibernation path ignores a live serving pin (the census drops
+/// to `(_, 0)` between reads), or if a dropped pin stops returning the reader
+/// to ordinary idle hibernation.
+#[test]
+fn a_pinned_serving_generation_opens_once_across_sweeps_and_peer_installs() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("code:pinned-serving", "code");
+    let manifest = rich_manifest(identity.clone(), "pinned-g1", "pinned");
+    let replay = stage_sealed_manifest(
+        &mut authority,
+        &registered.binding,
+        &manifest,
+        "publish:pinned-g1",
+        None,
+        '6',
+    );
+    stage_rows_before_publish(&registered, temp.path(), &manifest);
+    let commit = publish_sealed(&registered, temp.path(), &mut authority, &replay, &manifest);
+    let database = probe_lease(&registered, temp.path());
+    release_sealed_head(
+        &registered,
+        temp.path(),
+        &mut authority,
+        &replay.publication.key.projection,
+    );
+    assert_eq!(
+        commit.snapshot.serving_engine_resident(),
+        Ok(false),
+        "an unpinned idle reader is stepped down by the sweep"
+    );
+
+    let pin = commit.snapshot.pin_serving_engine().unwrap();
+    assert_eq!(
+        database.sealed_generation_engine_census(),
+        (1, 1),
+        "taking the pin opens the sealed engine"
+    );
+    for _ in 0..3 {
+        assert_snapshot_reads(&commit.snapshot, &identity, "pinned");
+        release_sealed_head(
+            &registered,
+            temp.path(),
+            &mut authority,
+            &replay.publication.key.projection,
+        );
+        assert_eq!(
+            database.sealed_generation_engine_census(),
+            (1, 1),
+            "a release sweep must not hibernate a pinned serving engine"
+        );
+    }
+
+    let peer_identity = projection("code:pinned-peer", "code");
+    let peer_manifest = rich_manifest(peer_identity.clone(), "pinned-peer-g1", "peer");
+    let peer_replay = stage_sealed_manifest(
+        &mut authority,
+        &registered.binding,
+        &peer_manifest,
+        "publish:pinned-peer-g1",
+        None,
+        '7',
+    );
+    let peer = publish_sealed(
+        &registered,
+        temp.path(),
+        &mut authority,
+        &peer_replay,
+        &peer_manifest,
+    );
+    assert_eq!(
+        commit.snapshot.serving_engine_resident(),
+        Ok(true),
+        "installing a peer generation must not step a pinned serving engine down"
+    );
+    assert_snapshot_reads(&commit.snapshot, &identity, "pinned");
+
+    drop(pin);
+    release_sealed_head(
+        &registered,
+        temp.path(),
+        &mut authority,
+        &replay.publication.key.projection,
+    );
+    assert_eq!(
+        commit.snapshot.serving_engine_resident(),
+        Ok(false),
+        "once its pin drops, the reader returns to idle hibernation"
+    );
+    assert_snapshot_reads(&commit.snapshot, &identity, "pinned");
+    assert_snapshot_reads(&peer.snapshot, &peer_identity, "peer");
+}
+
 /// A remount of a generation with no staging rows must adopt the sealed store
 /// and must not re-stage rows into the shared container.
 ///

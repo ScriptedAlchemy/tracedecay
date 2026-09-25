@@ -36,6 +36,24 @@ pub const COMMIT_SOURCE_CURSOR_SQL: &str =
      ON CONFLICT(source_json, scope_json) DO UPDATE SET
         cursor_json = excluded.cursor_json";
 
+/// Deletes the advance rows the durable cursor strictly supersedes: params
+/// `(source_json, scope_json)`, run after the cursor moves in the same
+/// transaction. The row supporting the current frontier and rows beyond it
+/// stay; the predicate is the one `source_cursor_advances_immutable_delete_v1`
+/// admits, so a prune can never trip that trigger.
+pub const PRUNE_SUPERSEDED_CURSOR_ADVANCES_SQL: &str = "DELETE FROM source_cursor_advances
+     WHERE source_json = ?1 AND scope_json = ?2
+       AND EXISTS (
+         SELECT 1 FROM source_cursors AS cursor
+         WHERE cursor.source_json = source_cursor_advances.source_json
+           AND cursor.scope_json = source_cursor_advances.scope_json
+           AND (json_extract(cursor.cursor_json, '$.generation')
+                   IS NOT json_extract(source_cursor_advances.coverage_json, '$.generation')
+             OR (COALESCE(json_extract(cursor.cursor_json, '$.ordering_domain'), 'file_bytes')
+                   = json_extract(source_cursor_advances.coverage_json, '$.ordering_domain')
+               AND json_extract(cursor.cursor_json, '$.byte_offset')
+                   > json_extract(source_cursor_advances.coverage_json, '$.range.end'))))";
+
 /// Whether one [`READ_CURSOR_ADVANCE_SQL`] row is exactly this advance's
 /// row, the same reason and the same (possibly absent) sanitization receipt
 /// id. Any other row retained under the coverage key is a cursor-advance

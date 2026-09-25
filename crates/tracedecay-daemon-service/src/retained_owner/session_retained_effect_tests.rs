@@ -7,7 +7,7 @@ use tracedecay_contracts::retained_surfaces::{
     RetainedSurfaceOperation, RetainedSurfaceRequestV1, SessionRefreshActionRequestV1,
     SessionRefreshActionV1, SessionRefreshFrontierV1, SessionRefreshGrainV1,
     SessionRefreshRequestV1, SessionRefreshScopeV1, SessionRefreshSessionV1,
-    SessionRefreshSourceV1, SessionRefreshTargetV1, SessionRefreshTemporalModeV1,
+    SessionRefreshSourceV1, SessionRefreshTargetV1,
 };
 use tracedecay_contracts::{
     ApplicationProblem, ApplicationProblemKind, CancellationContext, CancellationSignal,
@@ -18,7 +18,8 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RefId, RepositoryId, SessionId,
-    SessionRefreshOperationIdV1, UserProfileId, UtcMicros, WorktreeId, canonical_sha256,
+    SessionRefreshOperationIdV1, TemporalModeV1, UserProfileId, UtcMicros, WorktreeId,
+    canonical_sha256,
 };
 use tracedecay_session_memory::context::{BranchId, ProfileId, SessionRootId, SessionStoreId};
 use tracedecay_sessions::admission::HostAdmissionScope;
@@ -176,7 +177,7 @@ impl RetiredRefreshFixture {
                     scope: "cursor".to_owned(),
                 },
                 target: SessionRefreshTargetV1 {
-                    temporal_mode: SessionRefreshTemporalModeV1::Current,
+                    temporal_mode: TemporalModeV1::Current,
                     grain: SessionRefreshGrainV1::LogicalMessage,
                     frontier: SessionRefreshFrontierV1 {
                         observed_through: 0,
@@ -184,7 +185,6 @@ impl RetiredRefreshFixture {
                     },
                 },
                 handle,
-                format: None,
             },
         )
     }

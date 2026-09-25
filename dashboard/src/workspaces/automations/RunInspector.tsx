@@ -1,15 +1,15 @@
 import { useState, type ReactNode } from 'react';
 
-import type { AutomationTaskStatusV1 } from '../../contracts/generated.ts';
-import {
-  useAutomationRunArtifactPayload,
-  useAutomationRunArtifacts,
-  type AutomaticFactReceipt,
-  type JobRow,
-  type RunArtifactRow,
-  type RunArtifactsPayload,
-  type RunRow,
-} from '../../data/query/automation.ts';
+import type {
+  AutomaticFactReceipt,
+  AutomationJob,
+  AutomationRunArtifact,
+  AutomationRunArtifactsPayloadV1,
+  AutomationRunLedgerRecord,
+  AutomationRunRowV1,
+  AutomationTaskStatusV1,
+} from '../../contracts/generated.ts';
+import { useAutomationRunArtifactPayload, useAutomationRunArtifacts } from '../../data/query/automation.ts';
 import { cn } from '../../ui/cn';
 import { Corners } from '../../ui/instrument.tsx';
 import { PayloadBoundary } from '../../ui/ReadSection.tsx';
@@ -25,7 +25,6 @@ import {
   jobTaskKey,
   latestRunForKey,
   missingArtifactKinds,
-  readLastSchedulerRun,
   receiptStateTone,
   runStatusTone,
   runTiming,
@@ -57,9 +56,9 @@ export function RunInspector({
   pinned: boolean;
   /** Each source is null while its read is blocked, so the inspector can say
    * "not readable" rather than "not found". */
-  runs: readonly RunRow[] | null;
+  runs: readonly AutomationRunRowV1[] | null;
   tasks: readonly AutomationTaskStatusV1[] | null;
-  jobs: readonly JobRow[] | null;
+  jobs: readonly AutomationJob[] | null;
   receipts: readonly AutomaticFactReceipt[] | null;
   receiptsByRun: ReadonlyMap<string, RunReceipts> | null;
   onSelect: (next: Inspected) => void;
@@ -93,7 +92,7 @@ export function RunInspector({
           />
         )}
       </div>
-      <footer className="shrink-0 border-t border-edge-subtle px-2.5 py-1.5 text-3xs text-text-muted">
+      <footer className="shrink-0 border-t border-edge-subtle px-2.5 py-1.5 text-sm text-text-muted">
         read-only · every value is the daemon&apos;s own ledger, receipt or verdict
       </footer>
     </section>
@@ -102,7 +101,7 @@ export function RunInspector({
 
 function EmptyInspector() {
   return (
-    <div className="flex flex-col gap-2 text-2xs leading-relaxed text-text-muted">
+    <div className="flex flex-col gap-2 text-body leading-relaxed text-text-muted">
       <p className="text-text-secondary">No run, task, job or receipt is selected.</p>
       <p>Hover or focus a ledger row to preview it here. Click or press Enter to select it; Escape clears the selection.</p>
     </div>
@@ -119,9 +118,9 @@ function InspectedBody({
   onSelect,
 }: {
   inspected: Inspected;
-  runs: readonly RunRow[] | null;
+  runs: readonly AutomationRunRowV1[] | null;
   tasks: readonly AutomationTaskStatusV1[] | null;
-  jobs: readonly JobRow[] | null;
+  jobs: readonly AutomationJob[] | null;
   receipts: readonly AutomaticFactReceipt[] | null;
   receiptsByRun: ReadonlyMap<string, RunReceipts> | null;
   onSelect: (next: Inspected) => void;
@@ -166,7 +165,7 @@ function InspectedBody({
 
 function Gap({ children }: { children: ReactNode }) {
   return (
-    <p role="status" className="text-2xs leading-relaxed text-text-secondary">
+    <p role="status" className="text-body leading-relaxed text-text-secondary">
       {children}
     </p>
   );
@@ -193,7 +192,7 @@ function InspectLink({ onClick, children }: { onClick: () => void; children: Rea
       onClick={onClick}
       className="group inline-flex min-h-[var(--touch-target-min)] min-w-0 max-w-full items-center text-left"
     >
-      <span className="truncate border-b border-accent/50 text-2xs text-accent group-hover:border-accent">{children}</span>
+      <span className="truncate border-b border-accent/50 text-body text-accent group-hover:border-accent">{children}</span>
     </button>
   );
 }
@@ -205,7 +204,7 @@ function RunDetail({
   receipts,
   onSelect,
 }: {
-  run: RunRow;
+  run: AutomationRunRowV1;
   receipts: RunReceipts | null;
   onSelect: (next: Inspected) => void;
 }) {
@@ -218,10 +217,10 @@ function RunDetail({
           {timing.kind === 'unparsed' ? timing.startedAt : `${formatUtc(timing.startedAt)} UTC`}
         </span>
         <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
-          <span className="td-value min-w-0 truncate text-2xs text-text-secondary">{run.task_key ?? run.task}</span>
-          <ToneWord tone={tone} word={run.status} className="text-2xs" />
+          <span className="td-value min-w-0 truncate text-sm text-text-secondary">{run.task_key ?? run.task}</span>
+          <ToneWord tone={tone} word={run.status} className="text-body" />
         </div>
-        <span className="td-value break-all text-3xs text-text-muted">{run.run_id}</span>
+        <span className="td-value break-all text-xs text-text-muted">{run.run_id}</span>
       </div>
 
       <dl className="grid grid-cols-2 gap-x-3 gap-y-2">
@@ -263,7 +262,7 @@ function RunDetail({
       {run.error !== null || run.error_classification !== null ? (
         <Box legend="typed error">
           {run.error !== null ? (
-            <p className="break-words text-2xs leading-relaxed text-state-error">{run.error}</p>
+            <p className="break-words text-body leading-relaxed text-state-error">{run.error}</p>
           ) : null}
           <dl className="grid grid-cols-2 gap-x-3 gap-y-2">
             <Term label="class">
@@ -284,7 +283,7 @@ function RunDetail({
         {receipts === null ? (
           <Gap>the fact receipt read is blocked</Gap>
         ) : receipts.rows.length === 0 ? (
-          <p className="text-2xs text-text-muted">no fact receipt in the loaded receipt page names this run</p>
+          <p className="text-body text-text-muted">no fact receipt in the loaded receipt page names this run</p>
         ) : (
           <ul className="flex flex-col gap-1">
             {receipts.rows.map((receipt) => (
@@ -292,7 +291,7 @@ function RunDetail({
                 <InspectLink onClick={() => onSelect({ kind: 'receipt', applyId: receipt.apply_id })}>
                   <span className="td-value">{receipt.apply_id}</span>
                 </InspectLink>
-                <ToneWord tone={receiptStateTone(receipt.state)} word={receipt.state} className="text-2xs" />
+                <ToneWord tone={receiptStateTone(receipt.state)} word={receipt.state} className="text-body" />
               </li>
             ))}
           </ul>
@@ -313,7 +312,7 @@ function RunArtifacts({ runId, recordedKinds }: { runId: string; recordedKinds: 
     <Box legend={`artifacts (${recordedKinds.length})`}>
       {recordedKinds.length === 0 ? (
         <>
-          <p className="text-2xs text-text-muted">this run recorded no artifacts in its ledger entry</p>
+          <p className="text-body text-text-muted">this run recorded no artifacts in its ledger entry</p>
           <dl className="grid gap-y-2">
             <Term label="integrity verdict (daemon)">
               <Absent>no artifact to verify</Absent>
@@ -329,7 +328,7 @@ function RunArtifacts({ runId, recordedKinds }: { runId: string; recordedKinds: 
   );
 }
 
-function ArtifactList({ runId, data }: { runId: string; data: RunArtifactsPayload }) {
+function ArtifactList({ runId, data }: { runId: string; data: AutomationRunArtifactsPayloadV1 }) {
   const [selectedKind, setSelectedKind] = useState<string | null>(null);
   const chain = data.artifact_chain;
   const missing = missingArtifactKinds(chain);
@@ -370,7 +369,7 @@ function ArtifactLine({
   selected,
   onSelect,
 }: {
-  artifact: RunArtifactRow;
+  artifact: AutomationRunArtifact;
   selected: boolean;
   onSelect: () => void;
 }) {
@@ -388,10 +387,10 @@ function ArtifactLine({
       >
         <span aria-hidden className={cn('absolute inset-y-0 left-0 w-[3px]', selected ? 'bg-accent' : 'bg-transparent')} />
         <span className="flex min-w-0 items-baseline justify-between gap-2">
-          <span className="td-value truncate text-2xs text-text-primary">{artifact.kind.replaceAll('_', ' ')}</span>
-          <span className="td-value shrink-0 text-3xs text-text-muted">{artifact.sha256.slice(0, 12)}</span>
+          <span className="td-value truncate text-sm text-text-primary">{artifact.kind.replaceAll('_', ' ')}</span>
+          <span className="td-value shrink-0 text-xs text-text-muted">{artifact.sha256.slice(0, 12)}</span>
         </span>
-        <span className="truncate text-3xs text-text-muted">
+        <span className="truncate text-sm text-text-muted">
           {artifact.summary ?? 'no summary recorded'}
           {created !== null ? ` · ${formatUtc(created)}` : ''}
         </span>
@@ -400,7 +399,7 @@ function ArtifactLine({
   );
 }
 
-function ArtifactPayload({ runId, artifact }: { runId: string; artifact: RunArtifactRow }) {
+function ArtifactPayload({ runId, artifact }: { runId: string; artifact: AutomationRunArtifact }) {
   const payload = useAutomationRunArtifactPayload(runId, artifact.kind, true);
   return (
     <Box legend="selected artifact payload">
@@ -414,12 +413,12 @@ function ArtifactPayload({ runId, artifact }: { runId: string; artifact: RunArti
           artifactPayloadBelongsTo(data, runId, artifact) ? (
             <pre
               aria-label={`${artifact.kind} artifact payload`}
-              className="max-h-64 overflow-auto whitespace-pre-wrap break-words border border-edge-subtle bg-surface-1 p-2 font-mono text-3xs text-text-secondary"
+              className="max-h-64 overflow-auto whitespace-pre-wrap break-words border border-edge-subtle bg-surface-1 p-2 font-mono text-xs text-text-secondary"
             >
               {JSON.stringify(data.payload, null, 2)}
             </pre>
           ) : (
-            <p role="status" className="text-2xs text-state-error">
+            <p role="status" className="text-body text-state-error">
               the artifact payload does not belong to this run and kind
             </p>
           )
@@ -437,15 +436,15 @@ function TaskDetail({
   onSelect,
 }: {
   task: AutomationTaskStatusV1;
-  runs: readonly RunRow[] | null;
+  runs: readonly AutomationRunRowV1[] | null;
   onSelect: (next: Inspected) => void;
 }) {
-  const last = readLastSchedulerRun(task.last_scheduler_run);
+  const last = task.last_scheduler_run;
   return (
     <>
       <div className="flex min-w-0 flex-col gap-1 border-b border-edge-subtle pb-2">
         <span className="td-value text-sm text-text-primary">{task.task}</span>
-        <span className="text-3xs text-text-muted">built-in scheduler task · reading from the scheduler status route</span>
+        <span className="text-sm text-text-muted">built-in scheduler task · reading from the scheduler status route</span>
       </div>
       <dl className="grid grid-cols-2 gap-x-3 gap-y-2">
         <Term label="due now">{task.due ? 'yes' : 'no'}</Term>
@@ -454,12 +453,10 @@ function TaskDetail({
         </Term>
       </dl>
       <Box legend="last scheduler run">
-        {last.kind === 'none' ? (
-          <p className="text-2xs text-text-muted">no scheduler-triggered run is recorded for this task</p>
-        ) : last.kind === 'unreadable' ? (
-          <Gap>the scheduler attached a last-run record this build cannot read</Gap>
+        {last == null ? (
+          <p className="text-body text-text-muted">no scheduler-triggered run is recorded for this task</p>
         ) : (
-          <LastRunSummary run={last.run} runs={runs} onSelect={onSelect} />
+          <LastRunSummary run={last} runs={runs} onSelect={onSelect} />
         )}
       </Box>
     </>
@@ -471,8 +468,8 @@ function LastRunSummary({
   runs,
   onSelect,
 }: {
-  run: { run_id: string; status: string; started_at: string; completed_at: string; error?: string | null | undefined };
-  runs: readonly RunRow[] | null;
+  run: Pick<AutomationRunLedgerRecord, 'run_id' | 'status' | 'started_at' | 'completed_at' | 'error'>;
+  runs: readonly AutomationRunRowV1[] | null;
   onSelect: (next: Inspected) => void;
 }) {
   const completed = epochSeconds(run.completed_at);
@@ -485,7 +482,7 @@ function LastRunSummary({
         ) : (
           <>
             {run.run_id}
-            <span className="block text-3xs text-text-muted">
+            <span className="block text-sm text-text-muted">
               {runs === null ? 'ledger read blocked' : 'not in the loaded ledger page'}
             </span>
           </>
@@ -511,8 +508,8 @@ function JobDetail({
   runs,
   onSelect,
 }: {
-  job: JobRow;
-  runs: readonly RunRow[] | null;
+  job: AutomationJob;
+  runs: readonly AutomationRunRowV1[] | null;
   onSelect: (next: Inspected) => void;
 }) {
   const key = jobTaskKey(job.id);
@@ -522,11 +519,11 @@ function JobDetail({
       <div className="flex min-w-0 flex-col gap-1 border-b border-edge-subtle pb-2">
         <span className="truncate text-sm text-text-primary">{job.name}</span>
         <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
-          <span className="td-value min-w-0 truncate text-2xs text-text-secondary">{key}</span>
+          <span className="td-value min-w-0 truncate text-sm text-text-secondary">{key}</span>
           <ToneWord
             tone={job.enabled ? runStatusTone('succeeded') : runStatusTone('skipped')}
             word={job.enabled ? 'enabled' : 'disabled'}
-            className="text-2xs"
+            className="text-body"
           />
         </div>
       </div>
@@ -539,28 +536,25 @@ function JobDetail({
           {job.skill_ids && job.skill_ids.length > 0 ? job.skill_ids.join(', ') : <Absent>none attached</Absent>}
         </Term>
         <Term label="delivery" mono>
-          {job.delivery ? (
-            <>
-              {job.delivery.mode}
-              {job.delivery.path ? ` · ${job.delivery.path}` : ''}
-              {job.delivery.url ? ` · ${job.delivery.url}` : ''}
-            </>
-          ) : (
-            <Absent>not served</Absent>
-          )}
+          {job.delivery.mode}
+          {job.delivery.mode === 'file'
+            ? job.delivery.path
+              ? ` · ${job.delivery.path}`
+              : ''
+            : ` · ${job.delivery.url}`}
         </Term>
         <Term label="pre-run command" mono>
           {job.pre_run_command ?? <Absent>none</Absent>}
         </Term>
         <Term label="updated" mono>
-          {job.updated_at != null ? formatUtc(job.updated_at) : <Absent>not served</Absent>}
+          {formatUtc(job.updated_at)}
         </Term>
       </dl>
       <Box legend="latest run in loaded page">
         {runs === null ? (
           <Gap>the run ledger read is blocked</Gap>
         ) : latest === undefined ? (
-          <p className="text-2xs text-text-muted">no run recorded under {key} in the loaded ledger page</p>
+          <p className="text-body text-text-muted">no run recorded under {key} in the loaded ledger page</p>
         ) : (
           <LastRunSummary run={latest} runs={runs} onSelect={onSelect} />
         )}
@@ -577,7 +571,7 @@ function ReceiptDetail({
   onSelect,
 }: {
   receipt: AutomaticFactReceipt;
-  runs: readonly RunRow[] | null;
+  runs: readonly AutomationRunRowV1[] | null;
   onSelect: (next: Inspected) => void;
 }) {
   const recorded = Math.floor(receipt.recorded_at_micros / 1_000_000);
@@ -588,15 +582,15 @@ function ReceiptDetail({
       <div className="flex min-w-0 flex-col gap-1 border-b border-edge-subtle pb-2">
         <span className="td-value text-sm text-text-primary">{formatUtc(recorded)} UTC</span>
         <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
-          <span className="td-value min-w-0 truncate text-2xs text-text-secondary">{receipt.apply_id}</span>
-          <ToneWord tone={receiptStateTone(receipt.state)} word={receipt.state} className="text-2xs" />
+          <span className="td-value min-w-0 truncate text-sm text-text-secondary">{receipt.apply_id}</span>
+          <ToneWord tone={receiptStateTone(receipt.state)} word={receipt.state} className="text-body" />
         </div>
       </div>
       <Box legend="fact">
         {content !== undefined ? (
-          <p className="break-words text-2xs leading-relaxed text-text-primary">{content}</p>
+          <p className="break-words text-body leading-relaxed text-text-primary">{content}</p>
         ) : (
-          <p className="text-2xs text-text-muted">receipt carries no fact text</p>
+          <p className="text-body text-text-muted">receipt carries no fact text</p>
         )}
       </Box>
       <dl className="grid grid-cols-2 gap-x-3 gap-y-2">
@@ -606,7 +600,7 @@ function ReceiptDetail({
           ) : (
             <>
               {receipt.run_id}
-              <span className="block text-3xs text-text-muted">
+              <span className="block text-sm text-text-muted">
                 {runs === null ? 'ledger read blocked' : 'not in the loaded ledger page'}
               </span>
             </>
@@ -622,16 +616,16 @@ function ReceiptDetail({
       </dl>
       {receipt.quarantine_reason ? (
         <Box legend="quarantine">
-          <p className="break-words text-2xs leading-relaxed text-state-error">{receipt.quarantine_reason}</p>
+          <p className="break-words text-body leading-relaxed text-state-error">{receipt.quarantine_reason}</p>
         </Box>
       ) : null}
       <Box legend="validation">
         {receipt.validation !== undefined ? (
-          <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words border border-edge-subtle bg-surface-1 p-2 font-mono text-3xs text-text-secondary">
+          <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words border border-edge-subtle bg-surface-1 p-2 font-mono text-xs text-text-secondary">
             {JSON.stringify(receipt.validation, null, 2)}
           </pre>
         ) : (
-          <p className="text-2xs text-text-muted">no validation record attached</p>
+          <p className="text-body text-text-muted">no validation record attached</p>
         )}
       </Box>
     </>

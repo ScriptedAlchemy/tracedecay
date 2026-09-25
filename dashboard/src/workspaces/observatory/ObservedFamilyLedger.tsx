@@ -55,7 +55,7 @@ export function BlockedFamilyLedger({
         <span aria-hidden className="td-rule" />
       </div>
       <StateChip kind={state} detail={detail} />
-      <p className="text-3xs leading-snug text-text-muted">
+      <p className="text-sm leading-snug text-text-muted">
         No record count is shown. The read that would have supplied them did not resolve, and a
         family with no reported count is not a family that produced nothing.
       </p>
@@ -88,11 +88,11 @@ export function ObservedFamilyLedger({
       <div className="flex min-w-0 items-center gap-2">
         <h3 className="td-legend truncate">{label}</h3>
         <span aria-hidden className="td-rule" />
-        <span className="shrink-0 text-3xs text-text-muted tabular">
+        <span className="shrink-0 text-xs text-text-muted tabular">
           {observed} of {rows.length} publishable
         </span>
       </div>
-      <p className="text-3xs leading-snug text-text-muted" data-family-caption={marker}>
+      <p className="text-sm leading-snug text-text-muted" data-family-caption={marker}>
         {caption}
       </p>
       <div
@@ -102,7 +102,7 @@ export function ObservedFamilyLedger({
         aria-label={`${label} table`}
         tabIndex={tableViewportTabStop}
       >
-        <table className="w-full min-w-[34rem] border-collapse text-2xs">
+        <table className="w-full min-w-[34rem] border-collapse text-sm">
           <caption className="sr-only">{caption}</caption>
           <thead>
             <tr className="border-b border-edge-subtle text-3xs uppercase tracking-[0.08em] text-text-muted">
@@ -133,7 +133,7 @@ export function ObservedFamilyLedger({
                   <span className="td-value block truncate" title={row.eventKind}>
                     {row.label}
                   </span>
-                  <span className="block truncate text-3xs text-text-muted">{row.eventKind}</span>
+                  <span className="block truncate text-sm text-text-muted">{row.eventKind}</span>
                 </th>
                 <td
                   className={cn(

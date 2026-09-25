@@ -24,6 +24,7 @@ import { cn } from '../../../ui/cn.ts';
 export type WorkProjectionKind =
   | 'board'
   | 'dag'
+  | 'matrix'
   | 'timeline'
   | 'causal'
   | 'workload'
@@ -33,6 +34,7 @@ export type WorkProjectionKind =
 export const WORK_PROJECTIONS: readonly WorkProjectionKind[] = [
   'board',
   'dag',
+  'matrix',
   'timeline',
   'causal',
   'workload',
@@ -50,6 +52,8 @@ export function projectionLabel(kind: WorkProjectionKind): string {
       return 'Board';
     case 'dag':
       return 'DAG';
+    case 'matrix':
+      return 'Matrix';
     case 'timeline':
       return 'Timeline';
     case 'causal':
@@ -75,6 +79,8 @@ export function projectionNote(kind: WorkProjectionKind): string {
       return 'tasks grouped by the furthest gate each has passed';
     case 'dag':
       return 'declared dependencies, layered by longest path';
+    case 'matrix':
+      return 'every declared relation as a cell, task order on both axes, for dense graphs';
     case 'timeline':
       return 'runs woven across the tasks they attached evidence to';
     case 'causal':
@@ -95,6 +101,7 @@ export function projectionNote(kind: WorkProjectionKind): string {
 function asProjection(value: string | null): WorkProjectionKind {
   switch (value) {
     case 'dag':
+    case 'matrix':
     case 'timeline':
     case 'causal':
     case 'workload':

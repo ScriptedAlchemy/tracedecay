@@ -43,8 +43,8 @@ fn initialize_payload_uses_composed_product_metadata() {
 }
 
 #[test]
-fn typed_and_legacy_envelopes_share_read_classification() {
-    let legacy = JsonRpcRequest {
+fn typed_and_raw_envelopes_share_read_classification() {
+    let raw_request = JsonRpcRequest {
         jsonrpc: "2.0".to_owned(),
         id: Some(json!(1)),
         method: "tools/call".to_owned(),
@@ -53,7 +53,7 @@ fn typed_and_legacy_envelopes_share_read_classification() {
             "arguments": {"query": "server owner"}
         })),
     };
-    let raw = McpDispatchRequest::from_legacy(&legacy);
+    let raw = McpDispatchRequest::raw(&raw_request);
     let typed = McpDispatchRequest::typed(
         json!(1),
         "tools/call",

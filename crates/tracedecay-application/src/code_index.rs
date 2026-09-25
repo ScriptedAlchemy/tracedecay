@@ -21,9 +21,8 @@ use tracedecay_code_index::{
     },
     projection::CodeChunkProjectionSink,
 };
-use tracedecay_session_memory::context::{
-    CancellationToken, RequestInterruption, application_request_interruption,
-};
+use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_session_memory::context::{RequestInterruption, application_request_interruption};
 
 /// Production owner type exposed to daemon, CLI, MCP, and hook composition.
 pub type ProductionCodeIndexOwnerV1<P, S> = CodeIndexProductionOwnerV1<P, S>;

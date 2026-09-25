@@ -215,7 +215,7 @@ pub(crate) const fn admission_outcome(
         retryable,
         reason_code,
         recovery: None,
-        storage_cause: None,
+        cause: None,
     }
 }
 
@@ -1103,13 +1103,13 @@ fn classify_git_evidence_error(
     tracing::warn!(%error, "canonical Git evidence publication failed");
     let mut outcome =
         HostAdmissionOutcome::retained_unavailable("git_evidence_publication_unavailable");
-    outcome.storage_cause = Some(error.to_string());
+    outcome.cause = Some(error.to_string());
     outcome
 }
 
 fn accepted_for_external_source_replay(
     outcome: CaptureObservationOutcome,
-    receipt: tracedecay_store::SourceCommitReceiptV1,
+    receipt: tracedecay_store::SourceCommitReceiptSummaryV1,
 ) -> Result<CaptureObservationOutcome, HostAdmissionOutcome> {
     let CaptureObservationOutcome::Persisted {
         outcome,
@@ -1124,7 +1124,7 @@ fn accepted_for_external_source_replay(
     };
     let durable_observation_id = outcome.receipt().observation().observation_id().clone();
     let retry_handle = ExternalSourceProjectionRetryHandleV1::new(
-        receipt.source_frontier().binding().clone(),
+        receipt.binding().clone(),
         receipt.receipt_digest().clone(),
     );
     Ok(CaptureObservationOutcome::AcceptedForReplay {
@@ -1140,12 +1140,10 @@ fn accepted_for_external_source_replay(
 
 fn classify_store_error(error: &ObservationStoreError) -> HostAdmissionOutcome {
     let reason_code = match error {
-        ObservationStoreError::BatchRequiresScalarFallback { cause } => {
-            return HostAdmissionOutcome::batch_requires_scalar_fallback(*cause);
-        }
         ObservationStoreError::ObservationCollision { .. } => {
-            return HostAdmissionOutcome::deterministic_content_refusal(
+            return HostAdmissionOutcome::deterministic_content_refusal_with_cause(
                 "observation_identity_collision",
+                error,
             );
         }
         ObservationStoreError::SanitizationReceiptCollision => {
@@ -1246,7 +1244,7 @@ fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {
                 true,
                 Some("authority_write_failed"),
             );
-            outcome.storage_cause = Some(format!("{operation}: {source}"));
+            outcome.cause = Some(format!("{operation}: {source}"));
             outcome
         }
         ObservationApplicationError::Contract(_) => {
@@ -1259,8 +1257,11 @@ fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {
             true,
             Some("privacy_authority_unavailable"),
         ),
-        ObservationApplicationError::Privacy(_) => {
-            HostAdmissionOutcome::deterministic_content_refusal("privacy_boundary_failed")
+        ObservationApplicationError::Privacy(error) => {
+            HostAdmissionOutcome::deterministic_content_refusal_with_cause(
+                "privacy_boundary_failed",
+                error,
+            )
         }
         ObservationApplicationError::Store(error) => classify_store_error(error),
     }

@@ -5,6 +5,7 @@ use tracedecay_code_index::production::{
 };
 
 use super::{CodeIndexSchedulerErrorV1, GitFixture};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 /// The shared source readers run under the ordinary reconcile as well as under
 /// an ignored-dependency admission, so they report the reconcile interruption;
@@ -59,10 +60,7 @@ fn admitted_source_read_observes_live_cancellation_between_chunks() {
     // Cancel on the second read checkpoint, after one full chunk was observed.
     let control = CancelAfterChecks::new(5);
     // The scheduler supplies a canonical root; TempDir may retain a system alias.
-    let project_root = fixture
-        .path()
-        .canonicalize()
-        .expect("canonical fixture root");
+    let project_root = canonical_existing_identity(fixture.path()).expect("canonical fixture root");
 
     let error = tracedecay_code_index_runtime::code_index_scheduler::ignored_dependencies::read_bounded_admitted_source(
         &project_root,

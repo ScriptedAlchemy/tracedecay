@@ -1,8 +1,10 @@
 use tracedecay_code_extraction::{LanguageExtractor, ScalaExtractor};
 use tracedecay_domain::{EdgeKind, NodeKind};
 
+include!("support/edges.rs");
+
 fn extract(source: &str) -> tracedecay_domain::ExtractionResult {
-    ScalaExtractor.extract("test.scala", source)
+    ScalaExtractor.extract_artifact("test.scala", source).result
 }
 
 #[test]
@@ -171,7 +173,10 @@ fn test_scala_extract_class_params_as_fields() {
         .filter(|n| n.kind == NodeKind::ValField)
         .collect();
     // x and y are val params, z is a plain param (also extracted as ValField but private)
-    assert!(vals.len() >= 2);
+    assert_eq!(
+        vals.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+        ["x", "y", "z"]
+    );
     assert!(vals.iter().any(|n| n.name == "x"));
     assert!(vals.iter().any(|n| n.name == "y"));
 }
@@ -179,13 +184,10 @@ fn test_scala_extract_class_params_as_fields() {
 #[test]
 fn test_scala_contains_edges() {
     let result = extract("object Main {\n  def hello(): Unit = ()\n}");
-    let contains_edges: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    // File → Object, Object → Method
-    assert!(contains_edges.len() >= 2);
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Contains),
+        [("test.scala", "Main"), ("Main", "hello")]
+    );
 }
 
 #[test]
@@ -197,7 +199,6 @@ fn test_scala_extract_call_sites() {
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
-    assert!(calls.len() >= 2);
     assert!(calls.iter().any(|c| c.reference_name == "println"));
     assert!(calls.iter().any(|c| c.reference_name == "foo"));
 }

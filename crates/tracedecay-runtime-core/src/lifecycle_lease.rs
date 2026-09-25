@@ -7,8 +7,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::db::is_lock_contended;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_private_fs::FileLease;
 
 const LIFECYCLE_LOCK_FILENAME: &str = "lifecycle.lock";
+const LIFECYCLE_LEASE_LABEL: &str = "lifecycle";
 const EXCLUSIVE_LEASE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 static LEASE_NONCE: AtomicU64 = AtomicU64::new(0);
 static PROCESS_LEASE_TOKENS: LazyLock<Mutex<Vec<String>>> =
@@ -16,7 +18,7 @@ static PROCESS_LEASE_TOKENS: LazyLock<Mutex<Vec<String>>> =
 
 #[derive(Debug)]
 enum LeaseHold {
-    File(File),
+    File(FileLease),
     Inherited,
 }
 
@@ -128,12 +130,9 @@ impl Drop for LifecycleLease {
         if let Some(token) = self.token.as_deref() {
             unregister_process_token(token);
         }
-        if let LeaseHold::File(file) = &self.hold {
-            #[cfg(windows)]
-            if self.exclusive {
-                remove_owner_sidecar_if_current(&self.lock_path, self.token.as_deref());
-            }
-            let _ = file.unlock();
+        #[cfg(windows)]
+        if self.exclusive && matches!(self.hold, LeaseHold::File(_)) {
+            remove_owner_sidecar_if_current(&self.lock_path, self.token.as_deref());
         }
     }
 }
@@ -191,7 +190,7 @@ pub fn acquire_shared_blocking(operation: &str) -> Result<LifecycleLease> {
     file.lock_shared()
         .map_err(|error| lock_error(&path, operation, &error))?;
     Ok(LifecycleLease {
-        hold: LeaseHold::File(file),
+        hold: LeaseHold::File(FileLease::held(file, LIFECYCLE_LEASE_LABEL)),
         token: None,
         lock_path: path,
         exclusive: false,
@@ -223,7 +222,7 @@ fn acquire_shared_or_inherited_at(path: &Path, operation: &str) -> Result<Lifecy
     let mut file = open_lock_file(path)?;
     match file.try_lock_shared().map_err(std::io::Error::from) {
         Ok(()) => Ok(LifecycleLease {
-            hold: LeaseHold::File(file),
+            hold: LeaseHold::File(FileLease::held(file, LIFECYCLE_LEASE_LABEL)),
             token: None,
             lock_path: path.to_path_buf(),
             exclusive: false,
@@ -383,7 +382,7 @@ fn acquire_shared_at(path: &Path, operation: &str) -> Result<LifecycleLease> {
     let mut file = open_lock_file(path)?;
     match file.try_lock_shared().map_err(std::io::Error::from) {
         Ok(()) => Ok(LifecycleLease {
-            hold: LeaseHold::File(file),
+            hold: LeaseHold::File(FileLease::held(file, LIFECYCLE_LEASE_LABEL)),
             token: None,
             lock_path: path.to_path_buf(),
             exclusive: false,
@@ -400,7 +399,7 @@ fn try_acquire_shared_at(path: &Path, operation: &str) -> Result<SharedLeaseAtte
     let file = open_lock_file(path)?;
     match file.try_lock_shared().map_err(std::io::Error::from) {
         Ok(()) => Ok(SharedLeaseAttempt::Acquired(LifecycleLease {
-            hold: LeaseHold::File(file),
+            hold: LeaseHold::File(FileLease::held(file, LIFECYCLE_LEASE_LABEL)),
             token: None,
             lock_path: path.to_path_buf(),
             exclusive: false,
@@ -410,7 +409,8 @@ fn try_acquire_shared_at(path: &Path, operation: &str) -> Result<SharedLeaseAtte
     }
 }
 
-fn own_exclusive(mut file: File, path: &Path, operation: &str) -> Result<LifecycleLease> {
+fn own_exclusive(file: File, path: &Path, operation: &str) -> Result<LifecycleLease> {
+    let mut file = FileLease::held(file, LIFECYCLE_LEASE_LABEL);
     let token = lease_token();
     let pid = std::process::id();
     #[cfg(not(windows))]

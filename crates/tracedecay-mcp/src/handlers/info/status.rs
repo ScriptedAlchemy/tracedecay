@@ -655,7 +655,6 @@ fn active_project_context(
             "class": store_kind_name(&layout.store_kind),
             "mode": storage_mode_name(&layout.storage_mode),
             "data_root": display_path(&layout.data_root),
-            "config_path": display_path(&layout.config_path),
             "graph_db_path": display_path(graph_db_path),
             "graph_db_exists": graph_db_path.exists(),
             "graph_db_size_bytes": graph_db_path.metadata().map_or(0, |metadata| metadata.len()),
@@ -684,7 +683,6 @@ fn active_project_context(
 
 fn storage_mode_name(mode: &StorageMode) -> &'static str {
     match mode {
-        StorageMode::ProjectLocal => "project_local",
         StorageMode::ProfileSharded => "profile_sharded",
     }
 }

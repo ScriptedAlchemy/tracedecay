@@ -360,15 +360,17 @@ fn mcp_payload(response: &Value) -> Value {
 /// Normalizes any transport's payload to `{ "problem": ... }`.
 ///
 /// The transports wrap the canonical problem envelope differently, a bare
-/// envelope, a `value` body, an `outcome.value`, but the envelope itself is
-/// the contract under test, so the journey asserts against it wherever the
-/// transport parked it rather than hard-coding one wrapper.
+/// envelope, a `value` body, an `outcome.value`, MCP `structuredContent`, but
+/// the envelope itself is the contract under test, so the journey asserts
+/// against it wherever the transport parked it rather than hard-coding one
+/// wrapper.
 fn problem_envelope(payload: &Value, context: &str) -> Value {
     for candidate in [
         payload.clone(),
         payload["value"].clone(),
         payload["data"].clone(),
         payload["outcome"]["value"].clone(),
+        payload["structuredContent"].clone(),
     ] {
         if candidate["problem"].is_object() {
             return json!({ "problem": candidate["problem"].clone() });

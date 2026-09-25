@@ -53,8 +53,9 @@ hydrating payloads.
   source, repository, session, copy-cluster, and evidence-role caps apply after fusion.
 - Retrieval, fusion, dedupe, and diversity operate on compact anchors and metadata.
   Final context hydration occurs only for the selected result set.
-- Shared-code facts are sealed with the code generation. Clone backfill and
-  verification never gate lexical or graph readiness. Exhausted work, posting,
+- Shared-code facts are sealed with the code generation, and clone postings
+  seal with the lexical artifact in one build. Clone verification never gates
+  lexical or graph readiness. Exhausted work, posting,
   or deadline budgets return partial coverage with accounting, not an empty
   complete result.
 - A digest narrows shared-code candidates. Token comparison supplies evidence.
@@ -523,7 +524,7 @@ temporal failure, or scope leakage fails the evaluation. Optional retriever
 failure returns a visible partial result. Exact or lexical authority failure
 returns unavailable.
 
-Clone backfill and shared-code queries use bounded work, posting, candidate,
+Clone indexing and shared-code queries use bounded work, posting, candidate,
 verification, result, and deadline budgets. Exhaustion returns a continuation
 or partial-with-accounting result. It never resets counters inside one request,
 reports absence, or changes lexical or graph readiness.

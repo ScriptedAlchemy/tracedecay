@@ -8,11 +8,10 @@ use tracedecay_agent_hosts::hooks::{
 };
 use tracedecay_agent_hosts::ports::hook_runtime;
 use tracedecay_contracts::ResolvedScope;
+use tracedecay_domain::NativeHostIdentityV1;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{ProjectId, UtcMicros};
-use tracedecay_hooks::{
-    DaemonHookEvent, HookHostV1, NativeHookCaptureSourceV1, NativeHookDecodeError,
-};
+use tracedecay_hooks::{DaemonHookEvent, NativeHookCaptureSourceV1, NativeHookDecodeError};
 use tracedecay_runtime_core::storage::StoreLayout;
 
 #[test]
@@ -51,7 +50,7 @@ fn native_identity_ignores_provider_content_but_preserves_typed_ids() {
         "permission_mode":"default","stop_hook_active":false,
         "last_assistant_message":"secret two"
     }"#;
-    let source = NativeHookCaptureSourceV1::Host(HookHostV1::Codex);
+    let source = NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::Codex);
 
     let first = native_capture_material(source, first, UtcMicros(42)).expect("first material");
     let second = native_capture_material(source, second, UtcMicros(42)).expect("second material");
@@ -72,7 +71,7 @@ fn installed_but_unsupported_events_remain_successful_noop_candidates() {
 
     assert!(matches!(
         native_capture_material(
-            NativeHookCaptureSourceV1::Host(HookHostV1::Codex),
+            NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::Codex),
             codex_subagent,
             UtcMicros(42),
         ),
@@ -80,7 +79,7 @@ fn installed_but_unsupported_events_remain_successful_noop_candidates() {
     ));
     assert!(matches!(
         native_capture_material(
-            NativeHookCaptureSourceV1::Host(HookHostV1::CursorDesktop),
+            NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::CursorDesktop),
             cursor_session_end,
             UtcMicros(42),
         ),

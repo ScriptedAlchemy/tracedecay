@@ -19,8 +19,6 @@ fn raw_message(store_id: i64, role: &str, content: &str) -> LcmRawMessage {
         content_hash: format!("hash-{store_id}"),
         storage_kind: LcmStorageKind::Inline,
         payload_ref: None,
-        legacy_source: false,
-        legacy_truncated: false,
         metadata_json: None,
     }
 }

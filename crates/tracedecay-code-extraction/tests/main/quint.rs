@@ -3,7 +3,7 @@ use tracedecay_code_extraction::QuintExtractor;
 use tracedecay_domain::*;
 
 fn extract(source: &str) -> ExtractionResult {
-    QuintExtractor.extract("spec.qnt", source)
+    QuintExtractor.extract_artifact("spec.qnt", source).result
 }
 
 fn names_of(result: &ExtractionResult, kind: NodeKind) -> Vec<String> {

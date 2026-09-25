@@ -61,10 +61,6 @@ vi.mock('./TraceView.tsx', async () => {
 
 // Sigma wants WebGL, which jsdom does not have. Same stand-in the sibling
 // suite uses; it is not the subject here.
-vi.mock('../../viz/graph/GraphCanvas.tsx', () => ({
-  GraphCanvas: () => <div data-testid="graph-canvas" />,
-}));
-
 /** Wire-true bodies from the shared fixture module. */
 function mockFetch() {
   vi.stubGlobal(

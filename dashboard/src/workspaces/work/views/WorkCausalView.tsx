@@ -500,7 +500,7 @@ function DeclaredEdges({
               declares it, and what the terminal attempt state at the two ends reads as.
             </caption>
             <thead>
-              <tr className="border-b border-edge text-text-muted">
+              <tr className="border-b border-edge-subtle text-text-muted">
                 <th scope="col" className="px-2 py-1 text-left font-medium">
                   Dependency
                 </th>

@@ -108,8 +108,8 @@ export function cortexRegister(payload: {
       label: 'layout',
       reading: {
         kind: 'measured',
-        value: 'force-directed',
-        note: 'ForceAtlas2, settled once',
+        value: 'module-packed',
+        note: 'directories packed by shared relations',
       },
     },
     {

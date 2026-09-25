@@ -1,7 +1,7 @@
 //! Authorized Loom temporal projection over the retained project session store.
 //!
 //! The endpoint composes existing authorities; it does not collect new data.
-//! `sessions`/`session_messages` provide thread bounds and
+//! `sessions`/`lcm_raw_messages` provide thread bounds and
 //! `sessions.metadata_json` provides provider-native edited-file rollups. Git
 //! correlation is read through [`DashboardGitCorrelationReadPortV1`], the
 //! daemon-owned typed read over the verified session-git-evidence graph
@@ -138,6 +138,15 @@ struct LoomSessionRowV1 {
     messages: i64,
     edited_files_recorded: bool,
     models: Vec<LoomSessionModelV1>,
+    /// The delegating session as the provider recorded it on `sessions`, the
+    /// same column the analytics subagent tree reads. Absent means no parent
+    /// was recorded; a branch is never inferred from time overlap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_session_id: Option<String>,
+    /// The tool invocation that spawned this session, when the provider
+    /// recorded one; it binds a fork to a specific call, not just a parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_tool_use_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -161,6 +170,11 @@ struct LoomEditedFileV1 {
     path: String,
     change_type: Option<String>,
     hunks: Option<i64>,
+    /// Unix microseconds of the edit when the provider rollup recorded
+    /// `edited_at_micros` as an integer. Absent is unrecorded; it is never
+    /// derived from the session bounds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    edited_at_micros: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -293,13 +307,16 @@ async fn read_temporal(
     let total = query_count(conn, "SELECT COUNT(*) AS total FROM sessions", (), "total").await?;
     let session_sql = "
         SELECT s.provider, s.session_id, s.title, s.started_at, s.ended_at,
-               s.is_subagent, COUNT(m.message_id) AS messages,
+               s.is_subagent,
+               NULLIF(TRIM(s.parent_session_id), '') AS parent_session_id,
+               NULLIF(TRIM(s.parent_tool_use_id), '') AS parent_tool_use_id,
+               COUNT(m.message_id) AS messages,
                MAX(m.timestamp) AS last_message_at,
                CASE WHEN json_valid(s.metadata_json)
                           AND json_type(s.metadata_json, '$.edited_files') = 'array'
                     THEN 1 ELSE 0 END AS edited_files_recorded
         FROM sessions s
-        LEFT JOIN session_messages m
+        LEFT JOIN lcm_raw_messages m
           ON m.provider = s.provider AND m.session_id = s.session_id
         GROUP BY s.provider, s.session_id
         ORDER BY (s.started_at IS NULL), s.started_at DESC, s.rowid DESC
@@ -310,7 +327,7 @@ async fn read_temporal(
     let model_sql = format!(
         "{PAGE_CTE}
          SELECT m.provider, m.session_id, m.model
-         FROM session_messages m
+         FROM lcm_raw_messages m
          JOIN page p ON p.provider = m.provider AND p.session_id = m.session_id
          WHERE m.model IS NOT NULL AND TRIM(m.model) != ''
          GROUP BY m.provider, m.session_id, m.model
@@ -349,7 +366,10 @@ async fn read_temporal(
          SELECT p.provider, p.session_id,
                 json_extract(file.value, '$.path') AS path,
                 json_extract(file.value, '$.change_type') AS change_type,
-                json_extract(file.value, '$.hunks') AS hunks
+                json_extract(file.value, '$.hunks') AS hunks,
+                CASE WHEN json_type(file.value, '$.edited_at_micros') = 'integer'
+                     THEN json_extract(file.value, '$.edited_at_micros') END
+                    AS edited_at_micros
          FROM page p
          JOIN sessions s ON s.provider = p.provider AND s.session_id = p.session_id
          JOIN json_each(
@@ -413,7 +433,9 @@ async fn read_temporal(
             rows: &edited_files,
             reason: Some(
                 "edited-file coverage is provider-native metadata; sessions without an \
-                 edited_files array are omitted, never treated as no edits"
+                 edited_files array are omitted, never treated as no edits; \
+                 edited_at_micros is served only where the rollup recorded it, \
+                 files without it have no known edit time"
                     .to_string(),
             ),
             required_authority: None,

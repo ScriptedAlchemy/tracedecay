@@ -8,10 +8,11 @@ use tracedecay_contracts::retrieval::{
 };
 use tracedecay_domain::{SessionId, SignedCursorKeyRefV1};
 use tracedecay_runtime_core::db::engine::params;
-use tracedecay_temporal_query::ports::{
-    BindingDigest, MAX_TEMPORAL_PARTICIPANTS, TemporalAuthorizedRoot,
-    TemporalParticipantAuthorization, TemporalParticipantGeneration, TemporalParticipantManifest,
-    TemporalPreparedCandidateCohort, TemporalRetrievalScope, TemporalSourceAccess,
+use tracedecay_temporal_query::execution::BindingDigest;
+use tracedecay_temporal_query::ports::{TemporalAuthorizedRoot, TemporalRetrievalScope};
+use tracedecay_temporal_query::snapshot::{
+    MAX_TEMPORAL_PARTICIPANTS, TemporalParticipantAuthorization, TemporalParticipantGeneration,
+    TemporalParticipantManifest, TemporalPreparedCandidateCohort, TemporalSourceAccess,
     TemporalWatermarks,
 };
 
@@ -523,11 +524,10 @@ mod tests {
     use tracedecay_runtime_core::db::engine::{Executor, TestConnection};
     use tracedecay_temporal_query::candidates::CandidateChannel;
     use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
-    use tracedecay_temporal_query::ports::{
-        ExecutionControl, ExecutionLimits, TemporalCandidatePopulationCount,
-        TemporalSnapshotRequest,
-    };
+    use tracedecay_temporal_query::execution::{ExecutionControl, ExecutionLimits};
+    use tracedecay_temporal_query::ports::TemporalSnapshotRequest;
     use tracedecay_temporal_query::ranking::DiversityLimits;
+    use tracedecay_temporal_query::snapshot::TemporalCandidatePopulationCount;
 
     fn root(project_id: Option<&str>) -> TemporalAuthorizedRoot {
         match project_id {
@@ -746,7 +746,7 @@ mod tests {
             "root-fixture",
         )
         .expect("resolution authorization");
-        let anchor = tracedecay_store::build_observation_retrieval_anchor_v2(
+        let anchor = tracedecay_store::build_observation_retrieval_anchor(
             &observation,
             projection_generation,
             UtcMicros(1),
@@ -916,8 +916,7 @@ mod tests {
                          session_id, generation, occurrence_id, source_observation_id,
                          source_provider, projection_output_ordinal, retrieval_anchor_id,
                          message_id, turn_id, role, knowledge_at, valid_time_json,
-                         evidence_json, sanitized_content_digest, sanitized_content_bytes,
-                         snippet_text, index_text
+                         evidence_json, sanitized_content_digest, sanitized_content_bytes, index_text
                      ) VALUES (?1, 1, ?2, ?3, 'codex', 0, ?4, ?5, ?6, 'user', ?7,
                                '{\"kind\":\"unknown\"}',
                                '{\"authority\":\"provider_native\",
@@ -928,7 +927,7 @@ mod tests {
                                     \"sanitizer_version\":\"root-sanitizer\"
                                  }}',
                                '0000000000000000000000000000000000000000000000000000000000000000',
-                               14, ?8, ?8)",
+                               14, ?8)",
                     params![
                         session_id.as_str(),
                         occurrence_id.as_str(),
@@ -1023,8 +1022,7 @@ mod tests {
                          session_id, generation, occurrence_id, source_observation_id,
                          source_provider, projection_output_ordinal, retrieval_anchor_id,
                          message_id, turn_id, role, knowledge_at, valid_time_json,
-                         evidence_json, sanitized_content_digest, sanitized_content_bytes,
-                         snippet_text, index_text
+                         evidence_json, sanitized_content_digest, sanitized_content_bytes, index_text
                      ) VALUES ('session.000', 1, ?1, 'observation.000', 'codex', ?2,
                                ?4, ?3, 'turn.000', 'user', ?2,
                                '{\"kind\":\"unknown\"}',
@@ -1036,7 +1034,7 @@ mod tests {
                                     \"sanitizer_version\":\"root-sanitizer\"
                                  }}',
                                '0000000000000000000000000000000000000000000000000000000000000000',
-                               14, ?5, ?5)",
+                               14, ?5)",
                     params![
                         occurrence_id.as_str(),
                         i64::try_from(extra + 1).expect("member ordinal"),

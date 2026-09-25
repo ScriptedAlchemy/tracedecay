@@ -20,6 +20,7 @@ use super::{
     cold_mount_post_check_controls, published_text_projection_gate, query_admission_controls,
     unique_mounted_for_scope, wait_notified_if_unset,
 };
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 impl CodeIndexSchedulerRegistryV1 {
     #[cfg(test)]
@@ -63,7 +64,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Test-only observation of an exact mounted worktree's active owner pass.
     #[cfg(test)]
     pub async fn reconcile_in_progress_for_test(&self, project_root: &Path) -> bool {
-        let Ok(project_root) = project_root.canonicalize() else {
+        let Ok(project_root) = canonical_existing_identity(project_root) else {
             return false;
         };
         let reconcile_in_progress = self
@@ -84,7 +85,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
     ) -> Option<super::super::ReconcilePassGuard> {
-        let project_root = project_root.canonicalize().ok()?;
+        let project_root = canonical_existing_identity(project_root).ok()?;
         let reconcile_in_progress = self
             .mounted
             .lock()
@@ -102,7 +103,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
     ) -> Option<LatestCompleteCodeIndexV1> {
-        let project_root = project_root.canonicalize().ok()?;
+        let project_root = canonical_existing_identity(project_root).ok()?;
         let serving = {
             let mounted = self.mounted.lock().await;
             Arc::clone(&mounted.get(&project_root)?.serving_generation)
@@ -115,9 +116,8 @@ impl CodeIndexSchedulerRegistryV1 {
 
     #[cfg(test)]
     pub fn install_cold_mount_admission_barrier(&self, project_root: &Path, callers: usize) {
-        let project_root = project_root
-            .canonicalize()
-            .expect("canonical test project root");
+        let project_root =
+            canonical_existing_identity(project_root).expect("canonical test project root");
         let barrier = Arc::new(tokio::sync::Barrier::new(callers));
         let replaced = cold_mount_admission_barriers()
             .lock()
@@ -128,9 +128,8 @@ impl CodeIndexSchedulerRegistryV1 {
 
     #[cfg(test)]
     pub fn install_cold_mount_post_check_gate(&self, project_root: &Path) {
-        let project_root = project_root
-            .canonicalize()
-            .expect("canonical test project root");
+        let project_root =
+            canonical_existing_identity(project_root).expect("canonical test project root");
         let replaced = cold_mount_post_check_controls()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -150,9 +149,8 @@ impl CodeIndexSchedulerRegistryV1 {
 
     #[cfg(test)]
     pub async fn wait_for_cold_mount_post_check(&self, project_root: &Path) {
-        let project_root = project_root
-            .canonicalize()
-            .expect("canonical test project root");
+        let project_root =
+            canonical_existing_identity(project_root).expect("canonical test project root");
         let control = cold_mount_post_check_controls()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -167,9 +165,8 @@ impl CodeIndexSchedulerRegistryV1 {
 
     #[cfg(test)]
     pub fn release_cold_mount_post_check(&self, project_root: &Path) {
-        let project_root = project_root
-            .canonicalize()
-            .expect("canonical test project root");
+        let project_root =
+            canonical_existing_identity(project_root).expect("canonical test project root");
         cold_mount_post_check_controls()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -191,9 +188,8 @@ impl CodeIndexSchedulerRegistryV1 {
 
     #[cfg(test)]
     fn install_cold_mount_open_control(project_root: &Path, blocks_open: bool) {
-        let project_root = project_root
-            .canonicalize()
-            .expect("canonical test project root");
+        let project_root =
+            canonical_existing_identity(project_root).expect("canonical test project root");
         let replaced = cold_mount_open_controls()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -265,7 +261,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
     ) -> Option<tokio::sync::watch::Receiver<()>> {
-        let project_root = project_root.canonicalize().ok()?;
+        let project_root = canonical_existing_identity(project_root).ok()?;
         self.cold_mount_reservations
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -359,7 +355,7 @@ impl CodeIndexSchedulerRegistryV1 {
     fn cold_mount_open_control_for_test(
         project_root: &Path,
     ) -> Option<Arc<ColdMountOpenTestControlV1>> {
-        let project_root = project_root.canonicalize().ok()?;
+        let project_root = canonical_existing_identity(project_root).ok()?;
         cold_mount_open_controls()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -528,7 +524,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// `reconcile_in_progress_for_test`.
     #[cfg(test)]
     pub(crate) async fn pending_wake_micros_for_root(&self, project_root: &Path) -> Option<u64> {
-        let project_root = project_root.canonicalize().ok()?;
+        let project_root = canonical_existing_identity(project_root).ok()?;
         let mounted = self.mounted.lock().await;
         mounted.get(&project_root).map(|worktree| {
             worktree
@@ -547,7 +543,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
     ) -> Option<Arc<RwLock<Option<super::super::ServingSourceWitnessV1>>>> {
-        let project_root = project_root.canonicalize().ok()?;
+        let project_root = canonical_existing_identity(project_root).ok()?;
         let mounted = self.mounted.lock().await;
         mounted
             .get(&project_root)
@@ -562,7 +558,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
     ) -> Option<Arc<std::sync::Mutex<super::super::CodeIndexWorktreeSchedulerV1>>> {
-        let project_root = project_root.canonicalize().ok()?;
+        let project_root = canonical_existing_identity(project_root).ok()?;
         let mounted = self.mounted.lock().await;
         mounted
             .get(&project_root)
@@ -576,7 +572,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
     ) -> Option<super::super::SourceFreshnessFenceV1> {
-        let project_root = project_root.canonicalize().ok()?;
+        let project_root = canonical_existing_identity(project_root).ok()?;
         let mounted = self.mounted.lock().await;
         mounted
             .get(&project_root)
@@ -669,7 +665,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
     ) -> Option<Arc<tokio::sync::Mutex<()>>> {
-        let project_root = project_root.canonicalize().ok()?;
+        let project_root = canonical_existing_identity(project_root).ok()?;
         let mounted = self.mounted.lock().await;
         mounted
             .get(&project_root)

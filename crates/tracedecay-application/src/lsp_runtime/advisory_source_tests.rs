@@ -378,19 +378,6 @@ impl FeedbackImpactPort for FixedImpact {
     }
 }
 
-#[derive(Clone)]
-struct Observations(Arc<dyn FeedbackObservationPort + Send + Sync>);
-
-impl FeedbackObservationPort for Observations {
-    fn observe(
-        &self,
-        input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
-        observation: tracedecay_domain::feedback::FeedbackCycleObservationV1,
-    ) {
-        self.0.observe(input, observation);
-    }
-}
-
 fn feedback_service(
     runtime: Arc<crate::feedback::concrete::FeedbackRuntime>,
     request: &FeedbackCycleExecutionRequest,
@@ -399,7 +386,7 @@ fn feedback_service(
     SavedDiagnostics,
     FixedImpact,
     crate::feedback::concrete::ProjectFeedbackStore,
-    Observations,
+    Arc<dyn FeedbackObservationPort + Send + Sync>,
     crate::feedback::concrete::ProjectFeedbackRouteAuthorization,
 > {
     let provider = request.providers.first().expect("saved provider").clone();
@@ -446,7 +433,7 @@ fn feedback_service(
         },
         FixedImpact(impact),
         runtime.publication_store(),
-        Observations(runtime.observation_port()),
+        runtime.observation_port(),
         runtime.route_authorization(),
         operation(),
     )
@@ -621,6 +608,7 @@ async fn seed_github_diagnostic(database: &Database, observed_at: UtcMicros) {
 
 #[tokio::test]
 async fn concrete_feedback_source_projects_expands_and_clears_a_saved_github_finding() {
+    let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let root = tempfile::tempdir().expect("root");
     std::fs::create_dir_all(root.path().join("src")).expect("source directory");
     std::fs::write(root.path().join("src/lib.rs"), SOURCE).expect("source");

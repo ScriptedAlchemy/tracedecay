@@ -64,7 +64,11 @@ use super::{
 };
 
 mod canonical_json;
+mod clone_rows;
 mod helpers;
+mod lineage_rows;
+mod projection_rows;
+mod typescript_resolution;
 pub use helpers::generation_language_revisions_are_current;
 use helpers::*;
 mod ignored_sources;
@@ -101,9 +105,8 @@ pub use partitioned_codec::{
 };
 mod sealed_codec;
 pub use sealed_codec::{
-    MAX_SEALED_CODE_GENERATION_BYTES_V1, MINIMUM_SEALED_GENERATION_FORMAT_REVISION,
-    SEALED_GENERATION_FORMAT_REVISION_V1, sealed_generation_format_revision_is_compatible,
-    sealed_generation_payload_digest, superseded_sealed_generation_revision,
+    MAX_SEALED_CODE_GENERATION_BYTES_V1, SEALED_GENERATION_FORMAT_REVISION_V1,
+    superseded_sealed_generation_revision,
 };
 
 /// Current daemon chunker identity shared by production indexing and native
@@ -111,7 +114,8 @@ pub use sealed_codec::{
 /// must never be emitted as current activation evidence.
 ///
 /// `v4` attributes whitespace-only FileWindow ranges to a neighboring
-/// retrievable grain instead of minting unreachable rows.
+/// retrievable grain instead of minting unreachable rows. Rust receiver-call
+/// extraction changes are tracked by the Rust extractor revision.
 pub const DAEMON_CODE_INDEX_CHUNKER_REVISION: &str = "chunker.daemon.v4";
 
 /// Immutable configuration retained by one production index owner.
@@ -869,6 +873,13 @@ impl CodeIndexPublishedGenerationV1 {
         })
     }
 
+    /// TypeScript-family call sites whose import binding names project code
+    /// the seal could not bind; see
+    /// [`helpers::unresolved_typescript_import_calls`].
+    pub fn unresolved_typescript_import_calls(&self) -> Vec<CodeIndexUnresolvedReferenceV1> {
+        unresolved_typescript_import_calls(&self.files)
+    }
+
     pub fn analysis_coverage(&self) -> impl Iterator<Item = (&str, &ExtractionBatchV1)> {
         self.files
             .iter()
@@ -1195,7 +1206,7 @@ impl CodeIndexPublishedGenerationV1 {
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
         Ok(PublishedGenerationTestAttributionAuthorityV1 {
             generation_id: self.manifest.generation_id.clone(),
-            read,
+            read: Arc::new(read),
         })
     }
 
@@ -2021,15 +2032,13 @@ where
         };
         lexical_page_source::checkpoint(control)?;
 
-        let parser_registry = Arc::new(tracedecay_code_extraction::LanguageRegistry::new());
-        let extractor = TreeSitterExtractor::from_shared_registry(Arc::clone(&parser_registry));
-        let chunker = DeterministicCodeChunker::from_shared_registry(
+        let extractor = TreeSitterExtractor::new();
+        let chunker = DeterministicCodeChunker::new(
             manifest.generation_id.clone(),
             self.config.repository.clone(),
             self.config.sanitizer_revision.clone(),
             self.config.policy_revision.clone(),
             self.config.chunker_revision.clone(),
-            parser_registry,
         );
         crate::hotpath_observe::record_rebuild_state(match increment.as_ref() {
             Some(plan) if plan.is_full_rebuild() => "rebuild",

@@ -43,7 +43,7 @@ mod jsonc_tests {
 }
 
 // ---------------------------------------------------------------------------
-// Regression tests for safe config backup / load / write
+// Regression tests for safe config load / write
 // ---------------------------------------------------------------------------
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod safe_config_tests {
@@ -53,28 +53,6 @@ mod safe_config_tests {
     /// Create a temp directory that is cleaned up on drop.
     fn tmpdir() -> tempfile::TempDir {
         tempfile::tempdir().expect("failed to create temp dir")
-    }
-
-    // ----- backup_config_file -----
-
-    #[test]
-    fn backup_returns_none_when_file_missing() {
-        let dir = tmpdir();
-        let path = dir.path().join("nonexistent.json");
-        let result = backup_config_file(&path).unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn backup_staging_file_is_cleaned_up() {
-        let dir = tmpdir();
-        let path = dir.path().join("config.json");
-        fs::write(&path, "{}").unwrap();
-
-        backup_config_file(&path).unwrap();
-
-        let staging = dir.path().join("config.json.bak.new");
-        assert!(!staging.exists(), ".bak.new staging file should be removed");
     }
 
     // ----- load_json_file_strict -----
@@ -114,7 +92,7 @@ mod safe_config_tests {
     fn safe_write_cleans_up_new_file_on_success() {
         let dir = tmpdir();
         let path = dir.path().join("config.json");
-        safe_write_json_file(&path, &serde_json::json!({}), None).unwrap();
+        safe_write_json_file(&path, &serde_json::json!({})).unwrap();
 
         let new_path = dir.path().join("config.json.new");
         assert!(!new_path.exists(), ".new staging file should be removed");
@@ -122,8 +100,8 @@ mod safe_config_tests {
 
     #[test]
     fn full_install_cycle_preserves_existing_config() {
-        // Simulate the full install cycle: backup → strict load → mutate → safe write.
-        // Existing keys must be preserved.
+        // Simulate the full install cycle: strict load → mutate → safe write.
+        // Existing keys must be preserved and no copy of the prior bytes kept.
         let dir = tmpdir();
         let path = dir.path().join("config.json");
         let original = serde_json::json!({
@@ -136,13 +114,12 @@ mod safe_config_tests {
         fs::write(&path, serde_json::to_string_pretty(&original).unwrap()).unwrap();
 
         // Simulate install
-        let backup = backup_config_file(&path).unwrap();
         let mut config = load_json_file_strict(&path).unwrap();
         config["mcp"]["tracedecay"] = serde_json::json!({
             "type": "local",
             "command": ["tracedecay", "serve"]
         });
-        safe_write_json_file(&path, &config, backup.as_deref()).unwrap();
+        safe_write_json_file(&path, &config).unwrap();
 
         // Verify
         let result: serde_json::Value =
@@ -156,12 +133,11 @@ mod safe_config_tests {
             "http://localhost:8080"
         );
         assert_eq!(result["other_setting"], serde_json::json!([1, 2, 3]));
-
-        // Backup exists with original content
-        let bak_content: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(backup.unwrap()).unwrap()).unwrap();
-        assert!(bak_content.get("tracedecay").is_none());
-        assert_eq!(bak_content["theme"], "dark");
+        let entries: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("config.json")]);
     }
 
     #[test]
@@ -173,21 +149,12 @@ mod safe_config_tests {
         let corrupt_content = "{ this is not valid json at all }}}";
         fs::write(&path, corrupt_content).unwrap();
 
-        // Backup succeeds (it just copies bytes)
-        let backup = backup_config_file(&path).unwrap();
-        assert!(backup.is_some());
-
         // Strict load fails
         let err = load_json_file_strict(&path);
         assert!(err.is_err());
 
         // Original file is byte-for-byte unchanged
         assert_eq!(fs::read_to_string(&path).unwrap(), corrupt_content);
-        // Backup also has the same content
-        assert_eq!(
-            fs::read_to_string(backup.unwrap()).unwrap(),
-            corrupt_content
-        );
     }
 }
 
@@ -369,7 +336,7 @@ mod local_install_safety_tests {
         let pause = pause_next_host_config_write_at_publication(path);
         let path = path.to_path_buf();
         let writer = std::thread::spawn(move || {
-            safe_write_bytes_file(&path, contents, None).map_err(|error| error.to_string())
+            safe_write_bytes_file(&path, contents).map_err(|error| error.to_string())
         });
         pause.wait_until_reached();
         (pause, writer)
@@ -487,7 +454,7 @@ mod local_install_safety_tests {
         std::fs::write(&outside, b"operator bytes").unwrap();
         symlink(&outside, &config).unwrap();
 
-        let error = safe_write_bytes_file(&config, b"tracedecay bytes", None).unwrap_err();
+        let error = safe_write_bytes_file(&config, b"tracedecay bytes").unwrap_err();
         assert!(
             error.to_string().contains("unsafe host metadata path"),
             "shared writer must surface its cross-host symlink refusal: {error}"
@@ -504,8 +471,8 @@ mod local_install_safety_tests {
         let (finished_tx, finished_rx) = std::sync::mpsc::channel();
         let second_path = config.clone();
         let second = std::thread::spawn(move || {
-            let result = safe_write_bytes_file(&second_path, b"second", None)
-                .map_err(|error| error.to_string());
+            let result =
+                safe_write_bytes_file(&second_path, b"second").map_err(|error| error.to_string());
             finished_tx.send(()).unwrap();
             result
         });
@@ -530,8 +497,7 @@ mod local_install_safety_tests {
         let pause = pause_next_host_config_write_at_publication(&config);
         let writer_path = config.clone();
         let writer = std::thread::spawn(move || {
-            safe_write_bytes_file(&writer_path, b"tracedecay", None)
-                .map_err(|error| error.to_string())
+            safe_write_bytes_file(&writer_path, b"tracedecay").map_err(|error| error.to_string())
         });
         pause.wait_until_reached();
 
@@ -556,8 +522,7 @@ mod local_install_safety_tests {
         let published = pause_next_host_config_write_after_publication(&config);
         let writer_path = config.clone();
         let writer = std::thread::spawn(move || {
-            safe_write_bytes_file(&writer_path, b"tracedecay", None)
-                .map_err(|error| error.to_string())
+            safe_write_bytes_file(&writer_path, b"tracedecay").map_err(|error| error.to_string())
         });
         publication.wait_until_reached();
 
@@ -640,5 +605,125 @@ mod local_install_safety_tests {
 
         assert!(error.contains("changed since it was read"), "{error}");
         assert_eq!(std::fs::read(&config).unwrap(), b"foreign create");
+    }
+}
+
+/// Install and uninstall edit only TraceDecay's member of an operator config,
+/// so the operator's bytes survive both without any copy being kept.
+#[allow(clippy::unwrap_used)]
+mod format_preserving_edit_tests {
+    use super::*;
+    use crate::agents::{McpUninstallPolicy, install_mcp_server_entry, uninstall_mcp_server_entry};
+
+    const PRUNE: McpUninstallPolicy = McpUninstallPolicy {
+        prune_empty_root: true,
+        remove_empty_file: true,
+    };
+
+    fn entry(binary: &str) -> serde_json::Value {
+        serde_json::json!({"command": binary, "args": ["serve"]})
+    }
+
+    /// Install, reinstall with a moved binary, then uninstall `original`,
+    /// asserting the operator's bytes at every step.
+    fn assert_lifecycle_preserves_bytes(
+        file_name: &str,
+        dialect: JsonConfigDialect,
+        original: &str,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(file_name);
+        std::fs::write(&path, original).unwrap();
+
+        install_mcp_server_entry(
+            &path,
+            "mcpServers",
+            entry("/opt/a/tracedecay"),
+            "test",
+            dialect,
+        )
+        .unwrap();
+        let installed = std::fs::read_to_string(&path).unwrap();
+        let mut parsed = dialect.parse_for_edit(&path, &installed).unwrap();
+        let servers = parsed["mcpServers"].as_object_mut().unwrap();
+        assert_eq!(
+            servers.remove("tracedecay"),
+            Some(entry("/opt/a/tracedecay"))
+        );
+        if servers.is_empty() {
+            parsed.as_object_mut().unwrap().remove("mcpServers");
+        }
+        assert_eq!(parsed, dialect.parse_for_edit(&path, original).unwrap());
+
+        install_mcp_server_entry(
+            &path,
+            "mcpServers",
+            entry("/opt/b/tracedecay"),
+            "test",
+            dialect,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            installed.replace("/opt/a/tracedecay", "/opt/b/tracedecay"),
+            "a reinstall rewrote more than the moved command"
+        );
+
+        uninstall_mcp_server_entry(&path, "mcpServers", dialect, PRUNE).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from(file_name)]);
+    }
+
+    #[test]
+    fn json_lifecycle_restores_indentation_key_order_and_line_endings() {
+        assert_lifecycle_preserves_bytes(
+            "mcp.json",
+            JsonConfigDialect::Json,
+            "{\r\n    \"zeta\": true,\r\n    \"mcpServers\": {\r\n        \"foreign\": {\"command\": \"foreign-bin\", \"args\": []}\r\n    },\r\n    \"alpha\": [1, 2]\r\n}",
+        );
+        assert_lifecycle_preserves_bytes(
+            "minified.json",
+            JsonConfigDialect::Json,
+            r#"{"zeta":1,"mcpServers":{"foreign":{"command":"foreign-bin"}}}"#,
+        );
+    }
+
+    #[test]
+    fn jsonc_lifecycle_restores_comments_and_trailing_commas() {
+        assert_lifecycle_preserves_bytes(
+            "settings.json",
+            JsonConfigDialect::Jsonc,
+            "// operator header\n{\n\t\"theme\": \"dark\", // same-line note\n\t/* servers */\n\t\"mcpServers\": {\n\t\t\"foreign\": {\"command\": \"foreign-bin\",},\n\t},\n\t\"alpha\": [1, 2,],\n}\n",
+        );
+        // The root key TraceDecay creates is pruned again on uninstall.
+        assert_lifecycle_preserves_bytes(
+            "absent-root.json",
+            JsonConfigDialect::Jsonc,
+            "{\n  // keep me\n  \"theme\": \"dark\" // tail\n}\n",
+        );
+    }
+
+    #[test]
+    fn edit_refuses_a_config_it_cannot_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let original = "{\n  // a comment is not JSON\n  \"a\": 1\n}\n";
+        std::fs::write(&path, original).unwrap();
+
+        let error = install_mcp_server_entry(
+            &path,
+            "mcpServers",
+            entry("/opt/a/tracedecay"),
+            "test",
+            JsonConfigDialect::Json,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("cannot parse"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
     }
 }

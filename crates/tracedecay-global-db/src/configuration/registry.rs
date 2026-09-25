@@ -12,21 +12,21 @@ use tracedecay_domain::configuration::{
     INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY,
     INDEX_INCLUDE_SETTING_KEY, INDEX_MAX_FILE_SIZE_SETTING_KEY,
     INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
+    LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY, LcmSummarizerExecutablesV1,
     PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY, RestartRequirementV1, SOURCE_BINDINGS_SETTING_KEY,
     SYNC_AUTO_INIT_SETTING_KEY, SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY,
     SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY, SYNC_BRANCH_GC_DAYS_SETTING_KEY,
     SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY, SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
-    SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY, SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
-    SYNC_READ_REFRESH_SETTING_KEY, SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY,
-    SYNC_SESSION_START_SYNC_SETTING_KEY, SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
-    SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
-    SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingDefinitionV1, SettingKey, SettingScopeV1,
-    SettingSensitivityV1, TELEMETRY_TIMINGS_SETTING_KEY, USER_CODE_INDEX_WORKERS_SETTING_KEY,
-    USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY, USER_UPLOAD_ENABLED_SETTING_KEY,
-    USER_WATCHER_DEBOUNCE_MS_SETTING_KEY, USER_WORK_EXPERTISE_CONSENT_SETTING_KEY,
-    WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WORK_TOPOLOGY_POLICY_SETTING_KEY, WorkExpertiseConsentV1,
-    safe_work_topology_policy_v1,
+    SYNC_READ_COOLDOWN_SECS_SETTING_KEY, SYNC_READ_REFRESH_SETTING_KEY,
+    SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY, SYNC_SESSION_START_SYNC_SETTING_KEY,
+    SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
+    SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingDefinitionV1,
+    SettingKey, SettingScopeV1, SettingSensitivityV1, TELEMETRY_TIMINGS_SETTING_KEY,
+    USER_CODE_INDEX_WORKERS_SETTING_KEY, USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
+    USER_UPLOAD_ENABLED_SETTING_KEY, USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
+    USER_WORK_EXPERTISE_CONSENT_SETTING_KEY, WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
+    WORK_TOPOLOGY_POLICY_SETTING_KEY, WorkExpertiseConsentV1, safe_work_topology_policy_v1,
 };
 use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
 
@@ -162,6 +162,21 @@ impl ConfigurationRegistry {
             schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
             value_kind: ConfigurationValueKindV1::AutomationSettings,
             default_value: ConfigurationValueV1::AutomationSettings(Box::default()),
+            sensitivity: SettingSensitivityV1::Sensitive,
+            scope: SettingScopeV1::Project,
+            restart_requirement: RestartRequirementV1::None,
+            deprecation: DeprecationStateV1::Active,
+        })?;
+        // On-demand LCM summarization launches a host CLI only through this
+        // explicit binding; the unconfigured default keeps compaction pending
+        // rather than resolving a binary from the daemon's environment.
+        registry.register(SettingDefinitionV1 {
+            key: setting_key(LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY)?,
+            schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
+            value_kind: ConfigurationValueKindV1::LcmSummarizerExecutables,
+            default_value: ConfigurationValueV1::LcmSummarizerExecutables(
+                LcmSummarizerExecutablesV1::unconfigured(),
+            ),
             sensitivity: SettingSensitivityV1::Sensitive,
             scope: SettingScopeV1::Project,
             restart_requirement: RestartRequirementV1::None,
@@ -416,7 +431,6 @@ struct SyncDefaults {
     full_sync_escalation_files: usize,
     max_concurrent_syncs: usize,
     branch_gc_days: u64,
-    orphan_db_gc_days: u64,
     auto_init: bool,
     auto_track_pr_branches: bool,
     auto_track_pr_poll_secs: u64,
@@ -438,7 +452,6 @@ impl Default for SyncDefaults {
             full_sync_escalation_files: 500,
             max_concurrent_syncs: 2,
             branch_gc_days: 14,
-            orphan_db_gc_days: 7,
             auto_init: true,
             auto_track_pr_branches: false,
             auto_track_pr_poll_secs: 300,
@@ -607,12 +620,6 @@ fn register_project_settings(
             RestartRequirementV1::DaemonRestart,
         ),
         (
-            SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
-            ConfigurationValueV1::Unsigned(sync.orphan_db_gc_days),
-            SettingSensitivityV1::Public,
-            RestartRequirementV1::DaemonRestart,
-        ),
-        (
             SYNC_AUTO_INIT_SETTING_KEY,
             ConfigurationValueV1::Boolean(sync.auto_init),
             SettingSensitivityV1::Public,
@@ -698,6 +705,85 @@ mod proximity_threshold_tests {
             ),
             Err(ConfigurationRegistryError::UnsignedValueOutOfRange { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod released_setting_keys_tests {
+    use super::*;
+    use tracedecay_domain::configuration::RETIRED_CORE_SETTING_KEYS_V1;
+
+    /// Every setting key a published release persisted, as literals so that
+    /// removing a key constant cannot silently shrink this history. Append a
+    /// key here when it first ships; never delete one.
+    const RELEASED_SETTING_KEYS: &[&str] = &[
+        "analyzer.settings.v1",
+        "automation.settings.v1",
+        "context_scout.settings.v1",
+        "diagnostics.prewarm.v1",
+        "feedback.proximity.risk_threshold",
+        "index.exclude.v1",
+        "index.extract_docstrings.v1",
+        "index.git_ignore.v1",
+        "index.include.v1",
+        "index.max_file_size.v1",
+        "index.native_graph_activation.v1",
+        "index.track_call_sites.v1",
+        "lcm.summarizer_executables.v1",
+        "scope.access_rules.v1",
+        "scope.source_bindings.v1",
+        "semantic.runtime.v1",
+        "sync.auto_init.v1",
+        "sync.auto_track_pr_branches.v1",
+        "sync.auto_track_pr_poll_secs.v1",
+        "sync.auto_watch.v1",
+        "sync.backstop_interval_mins.v1",
+        "sync.branch_gc_days.v1",
+        "sync.full_sync_escalation_files.v1",
+        "sync.max_concurrent_syncs.v1",
+        "sync.orphan_db_gc_days.v1",
+        "sync.read_cooldown_secs.v1",
+        "sync.read_refresh.v1",
+        "sync.session_start_stale_threshold_secs.v1",
+        "sync.session_start_sync.v1",
+        "sync.watch_debounce_ms.v1",
+        "sync.watch_linked_worktrees.v1",
+        "sync.watch_max_delay_ms.v1",
+        "sync.watch_max_projects.v1",
+        "telemetry.timings.v1",
+        "user.code_index_workers.v1",
+        "user.extraction_timeout_secs.v1",
+        "user.upload_enabled.v1",
+        "user.watcher_debounce_ms.v1",
+        "user.work_expertise_consent.v1",
+        "work.executable_bindings.v1",
+        "work.expertise_consent.v1",
+        "work.topology_policy.v1",
+    ];
+
+    /// A released key that is neither registered nor retired would turn every
+    /// persisted snapshot carrying it into a configuration reset on open.
+    #[test]
+    fn every_released_setting_key_is_registered_or_retired() {
+        let core = ConfigurationRegistry::core().expect("core registry");
+        let profile =
+            ConfigurationRegistry::profile_code_index_workers().expect("profile registry");
+        for raw_key in RELEASED_SETTING_KEYS {
+            let key = SettingKey::new(*raw_key).expect("key");
+            let registered = core.definition(&key).is_ok() || profile.definition(&key).is_ok();
+            let retired = RETIRED_CORE_SETTING_KEYS_V1.contains(raw_key);
+            assert!(
+                registered != retired,
+                "released setting {raw_key} must be exactly one of registered or retired \
+                 (registered: {registered}, retired: {retired})"
+            );
+        }
+        for raw_key in RETIRED_CORE_SETTING_KEYS_V1 {
+            assert!(
+                RELEASED_SETTING_KEYS.contains(raw_key),
+                "retired setting {raw_key} must record a released key"
+            );
+        }
     }
 }
 

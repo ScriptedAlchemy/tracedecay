@@ -9,6 +9,8 @@ use super::*;
 use std::future::Future;
 use tracedecay_code_index_runtime::git_transactions;
 use tracedecay_contracts::SharedProfileStoreLocatorV1;
+#[cfg(any(not(unix), test))]
+use tracedecay_daemon_service::shutdown::DaemonLifecycle;
 use tracedecay_daemon_service::{
     DaemonInvocationOperation, DaemonInvocationPayload, DaemonInvocationProblem,
     DaemonInvocationService, Lease,
@@ -265,6 +267,7 @@ async fn open_scope_set_cas_projects<'a>(
         .await;
         match project_server {
             Ok(Ok(_)) => {}
+            Ok(Err(error)) if error_is_project_open_retryable(&error) => {}
             Ok(Err(error)) => {
                 record_project_open_refusal("multi_root_scope_set_compare_and_swap", &error);
                 return Err(project_open_refusal_response(

@@ -1,5 +1,7 @@
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tracedecay_store::{RuntimeMaintenanceStateV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 
@@ -9,6 +11,7 @@ use super::{
     StoreRuntimeRegistry, StoreRuntimeRegistryFailure,
 };
 use crate::db::DatabaseAuthority;
+use crate::shard_runtime::shard::ShardRuntimeEvictionBlocker;
 
 /// Proof that one exact runtime reached `Closed` after all physical `SQLite`
 /// handles joined and before its registry entry was removed.
@@ -46,6 +49,77 @@ struct CloseReservation {
 }
 
 impl StoreRuntimeRegistry {
+    /// Closes every mounted runtime that no lease, queued work, profile pin,
+    /// or graph lease still holds, so each writer runs its shutdown TRUNCATE
+    /// checkpoint. The daemon process exits with this registry reachable, so
+    /// no destructor closes these attachments otherwise. Held runtimes stay
+    /// mounted and are logged with their blockers. Returns the number of
+    /// runtimes closed.
+    #[hotpath::measure(label = "runtime_core.registry.close_idle_for_shutdown", future = true)]
+    pub async fn close_idle_for_shutdown(&self) -> Result<usize, StoreRuntimeRegistryFailure> {
+        let (reservations, reserve_failure) = {
+            let mut state = self.lock_state();
+            let mut idle = Vec::new();
+            for (key, entry) in &state.entries {
+                let RegistryEntry::Ready(ready) = entry else {
+                    continue;
+                };
+                let mut blockers = ready
+                    .owner
+                    .runtime()
+                    .eviction_eligibility(Duration::ZERO)
+                    .blockers;
+                blockers.retain(|blocker| {
+                    !matches!(blocker, ShardRuntimeEvictionBlocker::PinnedProfile)
+                });
+                let profile_pins = state.profile_pin_tokens.get(key).map_or(0, BTreeSet::len);
+                let graph_leases = state
+                    .graph_publications
+                    .get(key)
+                    .map_or(0, |retained| retained.lease_tokens.len());
+                if blockers.is_empty() && profile_pins == 0 && graph_leases == 0 {
+                    idle.push(key.clone());
+                } else {
+                    tracing::warn!(
+                        path = %ready.owner.locator().path().display(),
+                        ?blockers,
+                        profile_pins,
+                        graph_leases,
+                        "store runtime still held at shutdown; its WAL is not truncated"
+                    );
+                }
+            }
+            let mut reservations = Vec::with_capacity(idle.len());
+            let mut reserve_failure = None;
+            for key in idle {
+                match Self::reserve_eviction(&mut state, key) {
+                    Ok(reservation) => reservations.extend(reservation),
+                    Err(failure) => {
+                        reserve_failure = Some(failure);
+                        break;
+                    }
+                }
+            }
+            (reservations, reserve_failure)
+        };
+        let registry = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let closed = reservations.len();
+            let mut first_failure = reserve_failure;
+            for reservation in reservations {
+                if let Err(failure) = registry.complete_eviction(reservation) {
+                    first_failure.get_or_insert(failure);
+                }
+            }
+            first_failure.map_or(Ok(closed), Err)
+        })
+        .await
+        .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+            operation: "join shutdown close of idle registered runtimes",
+            message: error.to_string(),
+        })?
+    }
+
     #[hotpath::measure(label = "runtime_core.registry.close_path")]
     pub async fn close_path(
         &self,

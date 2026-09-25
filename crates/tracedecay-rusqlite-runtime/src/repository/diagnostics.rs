@@ -5,9 +5,8 @@ use tracedecay_domain::{
     RetrievalAnchorId, SourceSpan, UtcMicros,
 };
 use tracedecay_store::{
-    DIAGNOSTIC_STATE_CLEARED, DIAGNOSTIC_STATE_CURRENT, DIAGNOSTIC_STATE_SUPERSEDED,
-    DiagnosticGenerationSupersessionV1, DiagnosticReadOperationV1, DiagnosticReadResultV1,
-    DiagnosticRecordStateKindV1, SanitizedCleanDiagnosticSnapshotV1,
+    DIAGNOSTIC_STATE_CLEARED, DIAGNOSTIC_STATE_CURRENT, DiagnosticReadOperationV1,
+    DiagnosticReadResultV1, DiagnosticRecordStateKindV1, SanitizedCleanDiagnosticSnapshotV1,
     diagnostic_evidence_class_name, diagnostic_producer_kind_name, diagnostic_severity_name,
     diagnostic_snapshot_observation_eq, diagnostic_state_columns, parse_diagnostic_evidence_class,
     parse_diagnostic_producer_kind, parse_diagnostic_severity,
@@ -19,7 +18,6 @@ use super::support::{conversion, invalid, u64_to_i64};
 // this executor and the root `DiagnosticsStore` cannot drift apart across a
 // migration. These aliases keep the SQL below readable.
 const CURRENT: &str = DIAGNOSTIC_STATE_CURRENT;
-const SUPERSEDED: &str = DIAGNOSTIC_STATE_SUPERSEDED;
 const CLEARED: &str = DIAGNOSTIC_STATE_CLEARED;
 
 #[derive(Clone, Default)]
@@ -123,48 +121,6 @@ impl DiagnosticExecutor {
         Ok(())
     }
 
-    /// Transitions every current record of `request.prior_generation()` into
-    /// the superseded state, back-pointing at the successor generation, and
-    /// moves the prior generation's publication row with it.
-    ///
-    /// This mirrors `DiagnosticsStore::supersede_generation` exactly: the same
-    /// two `UPDATE`s over the same predicates, the same `state_generation`
-    /// back-pointer, and the same refusal to let a generation supersede itself
-    /// (enforced by [`DiagnosticGenerationSupersessionV1`] before admission,
-    /// and re-checked here so a hand-built request cannot bypass it). Returns
-    /// the number of diagnostic rows transitioned.
-    ///
-    /// Clearing (the publication path above) and supersession are distinct
-    /// lanes and must stay so: clearing marks records a newer clean generation
-    /// replaced wholesale, while supersession preserves a walkable chain from
-    /// a prior finding to its logical successor.
-    pub fn execute_supersession(
-        &mut self,
-        savepoint: &Savepoint<'_>,
-        request: &DiagnosticGenerationSupersessionV1,
-    ) -> rusqlite::Result<u64> {
-        request.validate().map_err(invalid)?;
-        let prior = request.prior_generation().as_str();
-        let successor = request.successor_generation().as_str();
-        let transitioned = savepoint.execute(
-            "UPDATE generation_diagnostics
-             SET record_state = ?1, state_generation = ?2
-             WHERE record_state = ?3 AND generation_id = ?4
-             AND publication_revision = (
-               SELECT publication_revision FROM diagnostic_generation_publications
-               WHERE generation_id = ?4 AND record_state = ?3
-             )",
-            params![SUPERSEDED, successor, CURRENT, prior],
-        )?;
-        savepoint.execute(
-            "UPDATE diagnostic_generation_publications
-             SET record_state = ?1, state_generation = ?2
-             WHERE record_state = ?3 AND generation_id = ?4",
-            params![SUPERSEDED, successor, CURRENT, prior],
-        )?;
-        Ok(transitioned as u64)
-    }
-
     pub fn execute_read(
         &mut self,
         snapshot: &Transaction<'_>,
@@ -230,103 +186,8 @@ impl DiagnosticExecutor {
                 let record = read_record_by_anchor(snapshot, anchor)?;
                 Ok(DiagnosticReadResultV1::Record(Box::new(record)))
             }
-            // Stale findings stay queryable but never re-enter active
-            // publication, so this lane selects the exact complement of the
-            // current set rather than naming the two stale states.
-            DiagnosticReadOperationV1::Stale(generation) => read_records(
-                snapshot,
-                "WHERE generation_id = ?1 AND record_state != 'current'
-                 AND publication_revision = (SELECT MAX(publication_revision)
-                   FROM diagnostic_generation_publications WHERE generation_id = ?1)
-                 ORDER BY diagnostic_anchor",
-                [generation.as_str()],
-            )
-            .map(DiagnosticReadResultV1::Records),
-            DiagnosticReadOperationV1::SupersessionChain(anchor) => {
-                read_supersession_chain(snapshot, anchor).map(DiagnosticReadResultV1::Records)
-            }
         }
     }
-}
-
-/// Walks the supersession chain from `anchor`, oldest first and including the
-/// starting record.
-///
-/// Each step follows the record's `Superseded { successor_generation }` edge to
-/// the record in the successor generation carrying the same logical finding key,
-/// repository, producer, code, file occurrence, span, and message digest.
-/// The walk stops at a current, cleared, or missing successor. An anchor
-/// already visited also stops the walk, so a cyclic `state_generation` graph
-/// cannot spin here.
-fn read_supersession_chain(
-    connection: &rusqlite::Connection,
-    anchor: &RetrievalAnchorId,
-) -> rusqlite::Result<Vec<GenerationDiagnosticV1>> {
-    let mut chain = Vec::new();
-    let Some(start) = read_record_by_anchor(connection, anchor)? else {
-        return Ok(chain);
-    };
-    chain.push(start);
-    loop {
-        let Some(last) = chain.last() else {
-            return Ok(chain);
-        };
-        let DiagnosticRecordStateV1::Superseded {
-            successor_generation,
-        } = &last.state
-        else {
-            return Ok(chain);
-        };
-        let Some(successor) = read_logical_successor(connection, last, successor_generation)?
-        else {
-            return Ok(chain);
-        };
-        if chain
-            .iter()
-            .any(|seen| seen.diagnostic_anchor == successor.diagnostic_anchor)
-        {
-            return Ok(chain);
-        }
-        chain.push(successor);
-    }
-}
-
-fn read_logical_successor(
-    connection: &rusqlite::Connection,
-    prior: &GenerationDiagnosticV1,
-    successor_generation: &CodeGenerationId,
-) -> rusqlite::Result<Option<GenerationDiagnosticV1>> {
-    let sql = format!(
-        "{SELECT_RECORDS} WHERE generation_id = ?1 AND publication_revision = (\
-         SELECT MAX(publication_revision) FROM diagnostic_generation_publications \
-         WHERE generation_id = ?1) AND repository = ?2 \
-         AND producer = ?3 AND code = ?4 AND file_occurrence_id = ?5 \
-         AND span_start = ?6 AND span_end = ?7 AND message_digest = ?8 \
-         ORDER BY diagnostic_anchor"
-    );
-    let mut statement = connection.prepare_cached(&sql)?;
-    let mut records = statement
-        .query_map(
-            params![
-                successor_generation.as_str(),
-                prior.repository.as_str(),
-                prior.provenance.producer.as_str(),
-                prior.code,
-                prior.file_occurrence_id.as_str(),
-                u64_to_i64(prior.span.start_byte, "diagnostic span start")?,
-                u64_to_i64(prior.span.end_byte, "diagnostic span end")?,
-                prior.message_digest.as_str(),
-            ],
-            record_from_row,
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    if records.len() > 1 {
-        return Err(conversion(format!(
-            "ambiguous logical successor for {} in {successor_generation}",
-            prior.diagnostic_anchor
-        )));
-    }
-    Ok(records.pop())
 }
 
 fn insert_record(
@@ -432,12 +293,7 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GenerationDiagno
         .ok_or_else(|| conversion(format!("unknown diagnostic state {stored_state}")))?;
     let state_generation = match (kind.state_generation_field(), optional_text(23)?) {
         (Some(_), Some(value)) => Some(CodeGenerationId::new(value).map_err(conversion)?),
-        (Some(_), None) => {
-            return Err(conversion(match kind {
-                DiagnosticRecordStateKindV1::Cleared => "cleared diagnostic has no generation",
-                _ => "superseded diagnostic has no generation",
-            }));
-        }
+        (Some(_), None) => return Err(conversion("cleared diagnostic has no generation")),
         (None, _) => None,
     };
     let state = kind

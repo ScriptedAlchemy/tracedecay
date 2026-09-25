@@ -10,7 +10,7 @@ use tracedecay_domain::{
 
 use crate::{
     OpaqueCursor, RequestAdmission, RequestContext, WorkAttemptTopologyBindingV1,
-    WorkAttemptTopologyStateV1, WorkRelationScopeV1,
+    WorkAttemptTopologyStateV1, WorkProductAuthorizedRelationScopeV1,
 };
 
 use super::{
@@ -642,7 +642,7 @@ where
         observed_at: UtcMicros,
     ) -> Result<WorkAttemptTopologyStateV1, WorkProductApplicationErrorV1> {
         let selection = WorkProductSelectionScopeV1::relations(BTreeSet::from([
-            WorkRelationScopeV1::Repository {
+            WorkProductAuthorizedRelationScopeV1::Repository {
                 project_id: context.scope().project_id.clone(),
                 repository_id: context.scope().repository_id.clone(),
             },

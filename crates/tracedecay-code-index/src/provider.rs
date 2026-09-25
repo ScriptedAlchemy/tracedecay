@@ -4,6 +4,8 @@
 //! persistence interface and never copy Git, diagnostic, graph, or test
 //! records into another store.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
@@ -163,9 +165,13 @@ pub enum GenerationProviderContractErrorV1 {
 }
 
 /// Read adapter over canonical generation-bound test-attribution records.
+///
+/// The join holds every test's transitive coverage closure, so it scales with
+/// tests times reachable symbols; reads share the one materialization rather
+/// than copying it.
 pub trait GenerationTestAttributionJoinReadPort {
     fn read_test_attribution(
         &self,
         generation: &CodeGenerationId,
-    ) -> GenerationProviderReadV1<GenerationTestJoinV1>;
+    ) -> Arc<GenerationProviderReadV1<GenerationTestJoinV1>>;
 }

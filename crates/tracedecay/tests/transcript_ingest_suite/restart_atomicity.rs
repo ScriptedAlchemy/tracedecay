@@ -3,19 +3,27 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay_domain::{ObservationScopeV1, ObservationSourceCursorV1, ProjectId};
+use tracedecay_domain::{
+    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1, ProjectId,
+    SessionId,
+};
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::storage::{
     read_repository_identity_marker, write_repository_identity_marker,
 };
 use tracedecay_sessions::admission::HostAdmissionScope;
-use tracedecay_sessions::runtime::claude::ClaudeSource;
-use tracedecay_sessions::runtime::cline_like::ClineLikeSource;
-use tracedecay_sessions::runtime::codex::CodexSource;
-use tracedecay_sessions::runtime::cursor::{
+use tracedecay_sessions::observation::ObservationCancellation;
+use tracedecay_sessions::runtime::hosts::claude::{ClaudeSource, identify_claude_source};
+use tracedecay_sessions::runtime::hosts::claude_observation::{
+    ClaudeObservationIngestError, ingest_source_with_observations_with_admission,
+};
+use tracedecay_sessions::runtime::hosts::cline_like::ClineLikeSource;
+use tracedecay_sessions::runtime::hosts::codex::CodexSource;
+use tracedecay_sessions::runtime::hosts::cursor::{
     ingest_cursor_transcript_event as ingest_cursor_transcript_event_registered,
     try_ingest_cursor_transcript_event as try_ingest_cursor_transcript_event_registered,
 };
+use tracedecay_sessions::runtime::shared::TranscriptIngestStats;
 use tracedecay_sessions::runtime::source::{TranscriptIngestError, TranscriptSource};
 use tracedecay_sessions::runtime::{SessionMessageSearchResult, SessionProvider};
 use tracedecay_store::ObservationReplayRequest;
@@ -198,11 +206,52 @@ pub(super) async fn try_ingest_source(
         .await
 }
 
+/// Runs one Claude source through the production observation pipeline against
+/// the registered project authority.
+pub(super) async fn try_ingest_claude_source(
+    runtime: &ProjectSessionTestRuntime,
+    source: &ClaudeSource,
+    project_root: &Path,
+) -> Result<TranscriptIngestStats, ClaudeObservationIngestError> {
+    ingest_source_with_observations_with_admission(
+        source,
+        project_root,
+        ObservationScopeV1::Project {
+            project_id: runtime.project_id.clone(),
+        },
+        &runtime.runtime.facade(),
+        None,
+        ObservationCancellation::default(),
+    )
+    .await
+    .map(|stats| stats.transcript)
+}
+
+/// Committed observation cursor offset for one Claude transcript.
+pub(super) async fn claude_observation_cursor(
+    runtime: &ProjectSessionTestRuntime,
+    transcript: &Path,
+) -> Option<u64> {
+    let identity = identify_claude_source(transcript).unwrap();
+    let source = ObservationSourceIdentityV1::for_source(
+        SessionId::new(identity.session_id).unwrap(),
+        SessionId::new(identity.source_id).unwrap(),
+    )
+    .unwrap();
+    runtime
+        .runtime
+        .project_observation_source_cursor_for_test(&source)
+        .await
+        .ok()
+        .flatten()
+        .map(|cursor| cursor.byte_offset())
+}
+
 async fn ingest_cursor_transcript_event(
     event_json: &str,
     runtime: &ProjectSessionTestRuntime,
     project_id: ProjectId,
-) -> tracedecay_sessions::runtime::cursor::CursorTranscriptIngestStats {
+) -> tracedecay_sessions::runtime::hosts::cursor::CursorTranscriptIngestStats {
     ingest_cursor_transcript_event_registered(event_json, &runtime.runtime.facade(), project_id)
         .await
 }
@@ -212,7 +261,7 @@ async fn try_ingest_cursor_transcript_event(
     runtime: &ProjectSessionTestRuntime,
     project_id: ProjectId,
 ) -> tracedecay_sessions::runtime::source::TranscriptIngestResult<
-    tracedecay_sessions::runtime::cursor::CursorTranscriptIngestStats,
+    tracedecay_sessions::runtime::hosts::cursor::CursorTranscriptIngestStats,
 > {
     try_ingest_cursor_transcript_event_registered(event_json, &runtime.runtime.facade(), project_id)
         .await
@@ -251,12 +300,6 @@ async fn parse_offset_for_task_history(
         .await
         .ok()
         .flatten()
-}
-
-fn claude_cursor_key(source: &ClaudeSource, project: &Path) -> String {
-    let paths = source.transcript_paths(project);
-    assert_eq!(paths.len(), 1);
-    paths[0].to_string_lossy().into_owned()
 }
 
 pub(super) async fn set_projection_failure(runtime: &ProjectSessionTestRuntime, enabled: bool) {
@@ -438,14 +481,13 @@ async fn claude_restart_ingests_only_the_appended_suffix() {
     let (home, project) = setup(&tmp);
     let path = write_claude_transcript(&home, &project, "claude-restart");
     let source = ClaudeSource::with_home(&home);
-    let path_key = claude_cursor_key(&source, &project);
 
     let db = open_project_session_db(&project).await.unwrap();
-    let first = try_ingest_source(&db, &source, &project, None)
+    let first = try_ingest_claude_source(&db, &source, &project)
         .await
         .unwrap();
     assert_eq!(first.messages_upserted, 2);
-    let first_offset = db.get_parse_offset(&path_key).await.unwrap();
+    let first_offset = claude_observation_cursor(&db, &path).await.unwrap();
     let first_session = db.get_session("claude", "claude-restart").await.unwrap();
 
     let mut transcript = std::fs::OpenOptions::new()
@@ -470,14 +512,10 @@ async fn claude_restart_ingests_only_the_appended_suffix() {
 
     let rejected = open_project_session_db(&project).await.unwrap();
     set_projection_failure(&rejected, true).await;
-    let failed = try_ingest_source(&rejected, &source, &project, None).await;
+    let failed = try_ingest_claude_source(&rejected, &source, &project).await;
     assert!(
         failed.is_err(),
         "projection failure must surface as an ingest error"
-    );
-    assert_eq!(
-        rejected.get_parse_offset(&path_key).await,
-        Some(first_offset)
     );
     assert_eq!(rejected.session_message_count().await.unwrap(), 2);
     assert_eq!(
@@ -495,25 +533,25 @@ async fn claude_restart_ingests_only_the_appended_suffix() {
     drop(rejected);
 
     let reopened = open_project_session_db(&project).await.unwrap();
-    let suffix = try_ingest_source(&reopened, &source, &project, None)
+    let suffix = try_ingest_claude_source(&reopened, &source, &project)
         .await
         .unwrap();
     assert_eq!(suffix.messages_upserted, 1);
-    let final_offset = reopened.get_parse_offset(&path_key).await.unwrap();
-    assert!(final_offset.byte_offset > first_offset.byte_offset);
-    assert_eq!(
-        final_offset.byte_offset,
-        std::fs::metadata(&path).unwrap().len()
-    );
+    let final_offset = claude_observation_cursor(&reopened, &path).await.unwrap();
+    assert!(final_offset > first_offset);
+    assert_eq!(final_offset, std::fs::metadata(&path).unwrap().len());
     drop(reopened);
 
     let replay = open_project_session_db(&project).await.unwrap();
-    let unchanged = try_ingest_source(&replay, &source, &project, None)
+    let unchanged = try_ingest_claude_source(&replay, &source, &project)
         .await
         .unwrap();
     assert_eq!(unchanged.sessions_upserted, 0);
     assert_eq!(unchanged.messages_upserted, 0);
-    assert_eq!(replay.get_parse_offset(&path_key).await, Some(final_offset));
+    assert_eq!(
+        claude_observation_cursor(&replay, &path).await,
+        Some(final_offset)
+    );
     assert_eq!(replay.session_message_count().await.unwrap(), 3);
 }
 
@@ -523,16 +561,15 @@ async fn claude_malformed_complete_frame_retries_suffix_without_gap_or_duplicate
     let (home, project) = setup(&tmp);
     let path = write_claude_transcript(&home, &project, "claude-malformed-frame");
     let source = ClaudeSource::with_home(&home);
-    let path_key = claude_cursor_key(&source, &project);
     let valid_prefix = std::fs::read_to_string(&path).unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    let initial = try_ingest_source(&db, &source, &project, None)
+    let initial = try_ingest_claude_source(&db, &source, &project)
         .await
         .unwrap();
     assert_eq!(initial.messages_upserted, 2);
-    let prefix_offset = db.get_parse_offset(&path_key).await.unwrap();
-    assert_eq!(prefix_offset.byte_offset, valid_prefix.len() as u64);
+    let prefix_offset = claude_observation_cursor(&db, &path).await.unwrap();
+    assert_eq!(prefix_offset, valid_prefix.len() as u64);
     drop(db);
 
     let suffix = serde_json::json!({
@@ -550,24 +587,13 @@ async fn claude_malformed_complete_frame_retries_suffix_without_gap_or_duplicate
     .unwrap();
 
     let rejected = open_project_session_db(&project).await.unwrap();
-    let malformed = try_ingest_source(&rejected, &source, &project, None).await;
-    assert!(
-        matches!(
-            malformed,
-            Err(TranscriptIngestError::NonDurableRecord {
-                provider: "claude",
-                ..
-            })
-        ),
-        "malformed complete frame must surface as a non-durable scanner error, got {malformed:?}"
-    );
+    let malformed = try_ingest_claude_source(&rejected, &source, &project)
+        .await
+        .expect("malformed complete frame must defer, not fail the pass");
+    assert_eq!(malformed.messages_upserted, 0);
     assert_eq!(
-        rejected
-            .get_parse_offset(&path_key)
-            .await
-            .unwrap()
-            .byte_offset,
-        prefix_offset.byte_offset
+        claude_observation_cursor(&rejected, &path).await,
+        Some(prefix_offset)
     );
     assert_eq!(rejected.session_message_count().await.unwrap(), 2);
     assert!(rejected.get_session_message("claude", "u4").await.is_none());
@@ -584,27 +610,27 @@ async fn claude_malformed_complete_frame_retries_suffix_without_gap_or_duplicate
     std::fs::write(&path, format!("{valid_prefix}{repaired}\n{suffix}\n")).unwrap();
 
     let retry = open_project_session_db(&project).await.unwrap();
-    let recovered = try_ingest_source(&retry, &source, &project, None)
+    let recovered = try_ingest_claude_source(&retry, &source, &project)
         .await
         .unwrap();
     assert_eq!(recovered.messages_upserted, 2);
     assert_eq!(retry.session_message_count().await.unwrap(), 4);
     assert!(retry.get_session_message("claude", "u3").await.is_some());
     assert!(retry.get_session_message("claude", "u4").await.is_some());
-    let final_offset = retry.get_parse_offset(&path_key).await.unwrap();
-    assert_eq!(
-        final_offset.byte_offset,
-        std::fs::metadata(&path).unwrap().len()
-    );
+    let final_offset = claude_observation_cursor(&retry, &path).await.unwrap();
+    assert_eq!(final_offset, std::fs::metadata(&path).unwrap().len());
     drop(retry);
 
     let replay = open_project_session_db(&project).await.unwrap();
-    let unchanged = try_ingest_source(&replay, &source, &project, None)
+    let unchanged = try_ingest_claude_source(&replay, &source, &project)
         .await
         .unwrap();
     assert_eq!(unchanged.sessions_upserted, 0);
     assert_eq!(unchanged.messages_upserted, 0);
-    assert_eq!(replay.get_parse_offset(&path_key).await, Some(final_offset));
+    assert_eq!(
+        claude_observation_cursor(&replay, &path).await,
+        Some(final_offset)
+    );
     assert_eq!(replay.session_message_count().await.unwrap(), 4);
     assert!(replay.get_session_message("claude", "u4").await.is_some());
 }
@@ -615,7 +641,6 @@ async fn claude_restart_defers_a_partial_final_line() {
     let (home, project) = setup(&tmp);
     let path = write_claude_transcript(&home, &project, "claude-partial");
     let source = ClaudeSource::with_home(&home);
-    let path_key = claude_cursor_key(&source, &project);
     let complete_len = std::fs::metadata(&path).unwrap().len();
     let partial = serde_json::json!({
         "type": "user",
@@ -634,21 +659,21 @@ async fn claude_restart_defers_a_partial_final_line() {
         .unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    let first = try_ingest_source(&db, &source, &project, None)
+    let first = try_ingest_claude_source(&db, &source, &project)
         .await
         .unwrap();
     assert_eq!(first.messages_upserted, 2);
-    let committed_offset = db.get_parse_offset(&path_key).await.unwrap();
-    assert_eq!(committed_offset.byte_offset, complete_len);
+    let committed_offset = claude_observation_cursor(&db, &path).await.unwrap();
+    assert_eq!(committed_offset, complete_len);
     drop(db);
 
     let reopened = open_project_session_db(&project).await.unwrap();
-    let still_partial = try_ingest_source(&reopened, &source, &project, None)
+    let still_partial = try_ingest_claude_source(&reopened, &source, &project)
         .await
         .unwrap();
     assert_eq!(still_partial.messages_upserted, 0);
     assert_eq!(
-        reopened.get_parse_offset(&path_key).await,
+        claude_observation_cursor(&reopened, &path).await,
         Some(committed_offset)
     );
 
@@ -658,25 +683,25 @@ async fn claude_restart_defers_a_partial_final_line() {
         .unwrap()
         .write_all(b"\n")
         .unwrap();
-    let completed = try_ingest_source(&reopened, &source, &project, None)
+    let completed = try_ingest_claude_source(&reopened, &source, &project)
         .await
         .unwrap();
     assert_eq!(completed.messages_upserted, 1);
     assert_eq!(reopened.session_message_count().await.unwrap(), 3);
-    let final_offset = reopened.get_parse_offset(&path_key).await.unwrap();
-    assert_eq!(
-        final_offset.byte_offset,
-        std::fs::metadata(&path).unwrap().len()
-    );
+    let final_offset = claude_observation_cursor(&reopened, &path).await.unwrap();
+    assert_eq!(final_offset, std::fs::metadata(&path).unwrap().len());
     drop(reopened);
 
     let replay = open_project_session_db(&project).await.unwrap();
-    let unchanged = try_ingest_source(&replay, &source, &project, None)
+    let unchanged = try_ingest_claude_source(&replay, &source, &project)
         .await
         .unwrap();
     assert_eq!(unchanged.sessions_upserted, 0);
     assert_eq!(unchanged.messages_upserted, 0);
-    assert_eq!(replay.get_parse_offset(&path_key).await, Some(final_offset));
+    assert_eq!(
+        claude_observation_cursor(&replay, &path).await,
+        Some(final_offset)
+    );
     assert_eq!(replay.session_message_count().await.unwrap(), 3);
     assert!(replay.get_session_message("claude", "u3").await.is_some());
 }
@@ -928,15 +953,10 @@ async fn claude_incremental_ingest_converges_with_clean_rebuild() {
     let incremental_source = ClaudeSource::with_home(&incremental_home);
     let incremental_db = open_project_session_db(&incremental_project).await.unwrap();
     assert_eq!(
-        try_ingest_source(
-            &incremental_db,
-            &incremental_source,
-            &incremental_project,
-            None,
-        )
-        .await
-        .unwrap()
-        .messages_upserted,
+        try_ingest_claude_source(&incremental_db, &incremental_source, &incremental_project)
+            .await
+            .unwrap()
+            .messages_upserted,
         2
     );
     let suffix = serde_json::json!({
@@ -956,15 +976,10 @@ async fn claude_incremental_ingest_converges_with_clean_rebuild() {
     )
     .unwrap();
     assert_eq!(
-        try_ingest_source(
-            &incremental_db,
-            &incremental_source,
-            &incremental_project,
-            None,
-        )
-        .await
-        .unwrap()
-        .messages_upserted,
+        try_ingest_claude_source(&incremental_db, &incremental_source, &incremental_project)
+            .await
+            .unwrap()
+            .messages_upserted,
         1
     );
     let mut incremental_messages = incremental_db
@@ -999,7 +1014,7 @@ async fn claude_incremental_ingest_converges_with_clean_rebuild() {
     let rebuild_source = ClaudeSource::with_home(&rebuild_home);
     let rebuild_db = open_project_session_db(&rebuild_project).await.unwrap();
     assert_eq!(
-        try_ingest_source(&rebuild_db, &rebuild_source, &rebuild_project, None)
+        try_ingest_claude_source(&rebuild_db, &rebuild_source, &rebuild_project)
             .await
             .unwrap()
             .messages_upserted,
@@ -1579,22 +1594,14 @@ async fn claude_and_codex_jsonl_truncation_replacement_preserves_prior_and_new_f
     for provider in ["claude", "codex"] {
         let tmp = TempDir::new().unwrap();
         let (home, project) = setup(&tmp);
-        let (path, source): (PathBuf, Box<dyn TranscriptSource>) = match provider {
-            "claude" => {
-                let path = write_claude_transcript(&home, &project, "claude-trunc-repl");
-                (path, Box::new(ClaudeSource::with_home(&home)))
-            }
-            "codex" => {
-                let path = write_codex_rollout_fixture(&home, &project, "codex-trunc-repl");
-                (path, Box::new(CodexSource::with_home(&home)))
-            }
+        let path = match provider {
+            "claude" => write_claude_transcript(&home, &project, "claude-trunc-repl"),
+            "codex" => write_codex_rollout_fixture(&home, &project, "codex-trunc-repl"),
             _ => unreachable!(),
         };
 
         let db = open_project_session_db(&project).await.unwrap();
-        let first = try_ingest_source(&db, source.as_ref(), &project, None)
-            .await
-            .unwrap();
+        let first = ingest_jsonl_fixture(provider, &db, &home, &project).await;
         assert!(
             first.messages_upserted >= 2,
             "{provider}: initial ingest must commit provider frames"
@@ -1686,9 +1693,7 @@ async fn claude_and_codex_jsonl_truncation_replacement_preserves_prior_and_new_f
         }
 
         let replaced = open_project_session_db(&project).await.unwrap();
-        let stats = try_ingest_source(&replaced, source.as_ref(), &project, None)
-            .await
-            .unwrap();
+        let stats = ingest_jsonl_fixture(provider, &replaced, &home, &project).await;
         assert_eq!(stats.messages_upserted, 2, "{provider}");
         assert_eq!(
             replaced.session_message_count().await.unwrap(),
@@ -1725,13 +1730,29 @@ async fn claude_and_codex_jsonl_truncation_replacement_preserves_prior_and_new_f
             "{provider}"
         );
         assert_eq!(
-            try_ingest_source(&replaced, source.as_ref(), &project, None)
+            ingest_jsonl_fixture(provider, &replaced, &home, &project)
                 .await
-                .unwrap()
                 .messages_upserted,
             0,
             "{provider}: exact replay must be a durable no-op"
         );
+    }
+}
+
+async fn ingest_jsonl_fixture(
+    provider: &str,
+    runtime: &ProjectSessionTestRuntime,
+    home: &Path,
+    project: &Path,
+) -> TranscriptIngestStats {
+    match provider {
+        "claude" => try_ingest_claude_source(runtime, &ClaudeSource::with_home(home), project)
+            .await
+            .unwrap(),
+        "codex" => try_ingest_source(runtime, &CodexSource::with_home(home), project, None)
+            .await
+            .unwrap(),
+        _ => unreachable!(),
     }
 }
 

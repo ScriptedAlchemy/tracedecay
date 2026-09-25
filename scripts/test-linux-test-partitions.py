@@ -77,6 +77,7 @@ COMPLETE = [
     {
         "name": "root-lib",
         "timeout_minutes": 60,
+        "windows_timeout_minutes": 150,
         "macos_group": "root",
         "packages": ["root"],
         "targets": ["lib"],
@@ -85,6 +86,7 @@ COMPLETE = [
     {
         "name": "root-suites",
         "timeout_minutes": 45,
+        "windows_timeout_minutes": 110,
         "macos_group": "root",
         "packages": ["root", "cli"],
         "targets": ["test:session_suite", "test:graph_suite", "bins", "test:cli_suite"],
@@ -93,6 +95,7 @@ COMPLETE = [
     {
         "name": "store",
         "timeout_minutes": 30,
+        "windows_timeout_minutes": 75,
         "macos_group": "store",
         "packages": ["store"],
         "features": ["store/test-helpers"],
@@ -138,7 +141,7 @@ class CoverageTest(unittest.TestCase):
         # cargo skips a `required-features` target silently when the feature is
         # off, so selecting it by name without the feature leaves it unrun.
         partitions = [dict(p) for p in COMPLETE]
-        partitions[2] = {"name": "store", "timeout_minutes": 30, "packages": ["store"]}
+        partitions[2] = {"name": "store", "timeout_minutes": 30, "windows_timeout_minutes": 75, "packages": ["store"]}
         with self.assertRaises(self.script.PartitionError) as caught:
             self.check(partitions)
         self.assertIn("store test `durability` is in no partition", str(caught.exception))
@@ -175,7 +178,7 @@ class CoverageTest(unittest.TestCase):
 
     def test_partition_that_runs_nothing_fails(self) -> None:
         partitions = [dict(p) for p in COMPLETE]
-        partitions.append({"name": "empty", "timeout_minutes": 10, "packages": ["root"], "targets": ["examples"]})
+        partitions.append({"name": "empty", "timeout_minutes": 10, "windows_timeout_minutes": 25, "packages": ["root"], "targets": ["examples"]})
         with self.assertRaises(self.script.PartitionError) as caught:
             self.check(partitions)
         self.assertIn("partition 'empty' runs no test target", str(caught.exception))
@@ -232,6 +235,30 @@ class CoverageTest(unittest.TestCase):
                 "include": [
                     {"group": "root", "timeout": 90, "partitions": "root-lib root-suites"},
                     {"group": "store", "timeout": 40, "partitions": "store"},
+                ]
+            },
+        )
+
+    def test_matrices_carry_each_host_budget(self) -> None:
+        # Linux and Windows run the same partitions under separately measured
+        # budgets, so the two matrices differ only in the timeout they carry.
+        self.assertEqual(
+            self.script.matrix(manifest(COMPLETE)),
+            {
+                "include": [
+                    {"partition": "root-lib", "timeout": 60},
+                    {"partition": "root-suites", "timeout": 45},
+                    {"partition": "store", "timeout": 30},
+                ]
+            },
+        )
+        self.assertEqual(
+            self.script.matrix(manifest(COMPLETE), "windows_timeout_minutes"),
+            {
+                "include": [
+                    {"partition": "root-lib", "timeout": 150},
+                    {"partition": "root-suites", "timeout": 110},
+                    {"partition": "store", "timeout": 75},
                 ]
             },
         )
@@ -300,6 +327,34 @@ class CoverageTest(unittest.TestCase):
             )
             with self.assertRaises(self.script.PartitionError) as caught:
                 self.script.load_manifest(path)
+            self.assertIn("has no 'windows_timeout_minutes'", str(caught.exception))
+            path.write_text(
+                json.dumps(
+                    manifest(
+                        [
+                            {
+                                "name": "a",
+                                "packages": ["root"],
+                                "timeout_minutes": 5,
+                                "windows_timeout_minutes": 0,
+                                "macos_group": "root",
+                            }
+                        ]
+                    )
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(self.script.PartitionError) as caught:
+                self.script.load_manifest(path)
+            self.assertIn("needs a positive windows_timeout_minutes", str(caught.exception))
+            path.write_text(
+                json.dumps(
+                    manifest([{"name": "a", "packages": ["root"], "timeout_minutes": 5, "windows_timeout_minutes": 12}])
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(self.script.PartitionError) as caught:
+                self.script.load_manifest(path)
             self.assertIn("has no 'macos_group'", str(caught.exception))
             path.write_text(
                 json.dumps(manifest([COMPLETE[0], {**COMPLETE[2], "name": "root-lib"}])), encoding="utf-8"
@@ -351,6 +406,23 @@ class CommandLineTest(unittest.TestCase):
                     "include": [
                         {"group": "root", "timeout": 90, "partitions": "root-lib root-suites"},
                         {"group": "store", "timeout": 40, "partitions": "store"},
+                    ]
+                },
+            )
+
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT_PATH), "--manifest", str(manifest_path), "windows-matrix"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(
+                json.loads(result.stdout),
+                {
+                    "include": [
+                        {"partition": "root-lib", "timeout": 150},
+                        {"partition": "root-suites", "timeout": 110},
+                        {"partition": "store", "timeout": 75},
                     ]
                 },
             )

@@ -109,7 +109,7 @@ fn host_admission_error(outcome: HostAdmissionOutcome) -> String {
             outcome.retryable
         ));
     }
-    if let Some(cause) = outcome.storage_cause {
+    if let Some(cause) = outcome.cause {
         message.push_str(&format!(": {cause}"));
     }
     message
@@ -256,6 +256,7 @@ pub(super) async fn admit_rows_with_admission_and_cancellation(
                             provider = PROVIDER,
                             row = row.id,
                             reason = outcome.reason_code.unwrap_or("host_admission_refused"),
+                            cause = outcome.cause.as_deref().unwrap_or("unspecified"),
                             "admission refused a Hermes row; covering past it"
                         );
                         advance_coverage(

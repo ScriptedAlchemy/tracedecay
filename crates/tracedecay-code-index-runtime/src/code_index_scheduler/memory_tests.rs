@@ -198,7 +198,23 @@ fn latest_complete_reuses_the_immutable_generation_allocation() {
         std::ptr::eq(first.generation(), second.generation()),
         "readers must share the sealed generation instead of deep-cloning it"
     );
-    assert!(!first.exact().expect("exact chunks").is_empty());
+    let exact = first.exact().expect("exact chunks");
+    let files = &first.generation().snapshot().files;
+    for admitted in exact.iter() {
+        let path = files
+            .iter()
+            .find(|file| file.file_occurrence_id == admitted.chunk().anchor.file_occurrence_id)
+            .map(|file| file.logical_path.as_str());
+        assert_eq!(path, Some("src/lib.rs"));
+    }
+    assert!(
+        exact.iter().any(|admitted| admitted
+            .chunk()
+            .sanitized_text
+            .as_str()
+            .contains("pub fn retained_generation() -> u32 { 1 }")),
+        "exact chunks must carry the committed fixture source"
+    );
     let generation_id = first.generation().manifest().generation_id.clone();
     drop(first);
     drop(second);

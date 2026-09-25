@@ -122,9 +122,16 @@ mod tests {
     fn a_traversal_spelling_is_rejected() {
         let temp = tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
+        // PathBuf::join removes `..` under a Windows verbatim root, so retain
+        // the spelling that the registry is supposed to reject.
+        let mut traversal = root.into_os_string();
+        traversal.push(std::path::MAIN_SEPARATOR_STR);
+        traversal.push("..");
+        traversal.push(std::path::MAIN_SEPARATOR_STR);
+        traversal.push("graph.grafeo");
 
         assert!(matches!(
-            canonical_graph_database_file(&root.join("..").join("graph.grafeo")).unwrap_err(),
+            canonical_graph_database_file(Path::new(&traversal)).unwrap_err(),
             GraphDbError::InvalidRequest { .. }
         ));
         assert!(matches!(

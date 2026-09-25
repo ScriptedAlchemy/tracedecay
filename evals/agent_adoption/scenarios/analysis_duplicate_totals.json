@@ -16,8 +16,8 @@
       "tracedecay_search"
     ],
     "acceptable": [
-      "tracedecay_body",
-      "tracedecay_outline",
+      "tracedecay_source_body",
+      "tracedecay_source_outline",
       "Read"
     ],
     "forbidden_first": [

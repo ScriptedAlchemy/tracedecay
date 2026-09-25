@@ -9,12 +9,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::Duration;
 
+use tracedecay_domain::NativeHostIdentityV1;
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_hooks::{
-    HookHostV1, HookReplayAdmissionOutcomeV1, HookReplayPassReportV1, HookSpoolConfigV1,
-    HookSpoolV1, admit_replayed_envelope_with_authoritative_session, drain_host_spool_once,
-    hook_v2_spool_root, published_hook_scope_binding,
+    HookReplayAdmissionOutcomeV1, HookReplayPassReportV1, HookSpoolConfigV1, HookSpoolV1,
+    admit_replayed_envelope_with_authoritative_session, drain_host_spool_once, hook_v2_spool_root,
+    published_hook_scope_binding,
 };
 
 use tracedecay_mcp::handlers::hook_runtime::{
@@ -41,7 +42,7 @@ fn replay_admission_outcome(outcome: HookV2AdmissionOutcomeV1) -> HookReplayAdmi
 #[hotpath::measure(label = "daemon.hook_replay.receipt_drain", future = true)]
 async fn drain_hook_delivery_receipts(
     data_root: &Path,
-    host: HookHostV1,
+    host: NativeHostIdentityV1,
     authority: &tracedecay_application::observability::DeliverySettlementAuthorityV1,
 ) {
     let root = tracedecay_hooks::hook_delivery_receipt_spool_root(data_root, host);
@@ -109,7 +110,7 @@ impl Drop for HookReplaySweepObservation {
 
 #[hotpath::measure(label = "daemon.hook_replay.sweep", future = true)]
 async fn drain_all_hosts(
-    graph: &crate::project::TraceDecay,
+    graph: &tracedecay_project::project::TraceDecay,
     data_root: &Path,
     delivery_settlements: &tracedecay_application::observability::DeliverySettlementAuthorityV1,
     project_sessions: &tracedecay_global_db::RegisteredGlobalDb,
@@ -181,11 +182,11 @@ async fn drain_all_hosts(
 }
 
 async fn drain_admitted_host_spool(
-    host: HookHostV1,
+    host: NativeHostIdentityV1,
     project_id: [u8; 16],
     worktree_id: [u8; 16],
     now: UtcMicros,
-    graph: &crate::project::TraceDecay,
+    graph: &tracedecay_project::project::TraceDecay,
     project_sessions: &tracedecay_global_db::RegisteredGlobalDb,
     background_cpu: &Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
 ) -> Option<HookReplayPassReportV1> {
@@ -254,7 +255,7 @@ fn hook_replay_now() -> UtcMicros {
 }
 
 struct RegisteredReplayConsumer {
-    graph: Weak<crate::project::TraceDecay>,
+    graph: Weak<tracedecay_project::project::TraceDecay>,
     delivery_settlements:
         Weak<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
     task: Option<tokio::task::JoinHandle<()>>,
@@ -277,7 +278,7 @@ pub(crate) fn hook_v2_replay_consumer_registered(data_root: &Path) -> bool {
 /// Start the per-project replay consumer exactly once per hook data root.
 /// Returns `false` when one is already running for this root.
 pub(crate) fn register_hook_v2_replay_consumer(
-    graph: Arc<crate::project::TraceDecay>,
+    graph: Arc<tracedecay_project::project::TraceDecay>,
     delivery_settlements: Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
     project_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     background_cpu: Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,

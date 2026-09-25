@@ -83,6 +83,38 @@ fn daemon_tool_searches_the_active_project() {
     );
 }
 
+/// `status --json .` names the CLI's working directory as the diagnostic
+/// target. The daemon runs from its own directory, so a `.` forwarded verbatim
+/// resolved to whatever that was (`/` under launchd) and reported the wrong
+/// project, or no project, instead of the one the operator stood in.
+#[test]
+fn status_anchors_an_explicit_dot_to_the_cli_working_directory() {
+    let (_home, _project, home_path, project_path) =
+        setup_daemon_project("pub fn status_marker() {}\n");
+
+    let output = tracedecay_command_with_home(&home_path)
+        .current_dir(&project_path)
+        .args(["status", "--json", "."])
+        .output()
+        .expect("tracedecay status should run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "status --json . must report the project the CLI ran in\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let status: serde_json::Value = serde_json::from_str(&stdout).expect("status JSON");
+    let reported = status["project_root"]
+        .as_str()
+        .expect("status names its project_root");
+    assert_eq!(
+        canonical_existing_path(Path::new(reported)),
+        project_path,
+        "status must select the CLI's project, never the daemon's working directory"
+    );
+}
+
 #[test]
 fn daemon_tool_search_discloses_configured_alias_recovery() {
     let (_home, _project, home_path, project_path) = setup_daemon_project("pub fn cache() {}\n");

@@ -14,8 +14,9 @@ use tracedecay_sessions::admission::{
     HostAdmissionTelemetryDisposition as HookDispositionTelemetry,
 };
 
-use super::tool_hints::{HintAgent, ToolHint};
+use super::tool_hints::ToolHint;
 use super::{HookWorkspaceStatus, claude, prompt_like_text};
+use tracedecay_domain::HostIntegrationIdV1;
 
 pub(crate) const HOOK_ANALYTICS_FILENAME: &str = "hook_analytics.jsonl";
 
@@ -111,7 +112,7 @@ impl HookTimingSpan {
     fn new(
         runtime: &HookRuntimeV1,
         root: Option<&Path>,
-        agent: HintAgent,
+        agent: HostIntegrationIdV1,
         hook_name: &str,
         prompt_category: Option<&'static str>,
         payload_bytes: Option<u64>,
@@ -484,7 +485,7 @@ fn disposition_from_daemon_error(error: &TraceDecayError) -> HookDispositionTele
 
 /// Shared implementation for [`record_hook_invoked`] and
 /// [`record_other_hook_invoked`], which differ only in how the analytics
-/// `agent` key is derived (a typed [`HintAgent`] vs. the literal `"other"`).
+/// `agent` key is derived (a typed [`HostIntegrationIdV1`] vs. the literal `"other"`).
 fn record_hook_invoked_named(
     runtime: &HookRuntimeV1,
     root: Option<&Path>,
@@ -522,7 +523,7 @@ fn record_hook_invoked_named(
 pub(crate) fn record_hook_invoked(
     runtime: &HookRuntimeV1,
     root: Option<&Path>,
-    agent: HintAgent,
+    agent: HostIntegrationIdV1,
     hook_name: &str,
     event_json: &str,
 ) -> HookTimingSpan {
@@ -543,7 +544,7 @@ pub(crate) fn record_hook_invoked(
 pub(crate) fn record_hook_invoked_parsed(
     runtime: &HookRuntimeV1,
     root: Option<&Path>,
-    agent: HintAgent,
+    agent: HostIntegrationIdV1,
     hook_name: &str,
     event_json: &str,
     parsed: &Value,
@@ -575,7 +576,7 @@ pub(super) fn mint_hint_id() -> String {
 pub(super) fn record_hint_analytics(
     root: Option<&Path>,
     event: &str,
-    agent: HintAgent,
+    agent: HostIntegrationIdV1,
     session_id: Option<&str>,
     hint_id: &str,
     hint: &ToolHint,
@@ -601,7 +602,7 @@ pub(super) fn record_workspace_status_analytics(
         root,
         "workspace_status",
         serde_json::json!({
-            "agent": HintAgent::Codex.as_key(),
+            "agent": HostIntegrationIdV1::Codex.as_key(),
             "session_id": session_id,
             "workspace_status": status.as_key(),
         }),
@@ -610,7 +611,7 @@ pub(super) fn record_workspace_status_analytics(
 
 pub(super) fn record_hint_emitted(
     root: Option<&Path>,
-    agent: HintAgent,
+    agent: HostIntegrationIdV1,
     session_id: Option<&str>,
     hint_id: &str,
     hint: &ToolHint,

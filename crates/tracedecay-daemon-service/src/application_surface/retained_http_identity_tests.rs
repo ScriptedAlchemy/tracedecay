@@ -19,8 +19,7 @@ use tracedecay_domain::{
 };
 use tracedecay_tool_catalog::EffectClass;
 
-use super::super::registered_http::{RegisteredHttpOperation, invoke_registered_http};
-use super::validated_daemon_outcome;
+use super::super::registered_http::RegisteredHttpOperation;
 use tracedecay_api::WorkOperation;
 
 use tracedecay_domain::test_fixtures::digest;
@@ -148,12 +147,20 @@ impl StaticDaemonResponseExecutor {
 impl tracedecay_contracts::ApplicationInvocationExecutor for StaticDaemonResponseExecutor {
     fn invoke(
         &self,
-        _invocation: tracedecay_contracts::ApplicationInvocation,
+        invocation: tracedecay_contracts::ApplicationInvocation,
     ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         Result<tracedecay_contracts::ApplicationResponse, tracedecay_contracts::InvocationError>,
     > {
-        Box::pin(async { Err(tracedecay_contracts::InvocationError::Unavailable) })
+        Box::pin(async move {
+            let (context, request) = invocation.into_parts();
+            let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request
+            else {
+                return Err(tracedecay_contracts::InvocationError::Unavailable);
+            };
+            tracedecay_daemon_protocol::invoke_application_surface(self, context, binding, payload)
+                .await
+        })
     }
 }
 
@@ -202,56 +209,43 @@ async fn response_json(response: axum::response::Response) -> Value {
     .expect("problem JSON")
 }
 
+/// Dispatch one retained HTTP operation through the application path against
+/// a daemon that answers with `response`.
 async fn invoke_retained_http_with_response(
     operation: RetainedSurfaceOperation,
     request_id: RequestId,
     response: tracedecay_daemon_protocol::DaemonInvocationResponse,
 ) -> axum::response::Response {
-    let deadline = Deadline::new(UtcMicros(1_000)).expect("deadline");
-    let cancellation =
-        CancellationSignal::active("cancellation.retained.http").expect("cancellation");
-    let retained_request = super::super::retained::decode_request(
+    let application_operation =
+        tracedecay_tool_catalog::ApplicationSurfaceOperation::from_catalog_name(operation.as_str())
+            .expect("retained application operation");
+    let retained_request = tracedecay_daemon_protocol::decode_retained_request(
         operation,
         json!({"fact_id": "fact.retained.fixture"}),
     )
     .expect("retained request");
-    let invocation = tracedecay_daemon_protocol::DaemonInvocationRequest::retained_application(
-        request_id.as_str(),
-        retained_request,
-        UtcMicros(10),
-        deadline.clone(),
-        cancellation.context(),
-    );
-    let executor = StaticDaemonResponseExecutor::new(response);
-    let selected_request_id = request_id.clone();
-    invoke_registered_http::<tracedecay_contracts::retained_surfaces::RetainedSurfaceResultV1, _>(
-        &executor,
-        operation,
+    let dispatched = super::super::resolve_application_surface_dispatch(
+        tracedecay_tool_catalog::BindingSurface::Http,
+        application_operation,
         request_id,
-        tracedecay_api::HttpApplicationControls {
-            deadline,
-            cancellation,
-        },
-        invocation,
-        |outcome| match outcome {
-            tracedecay_daemon_protocol::DaemonInvocationOutcome::RetainedApplication {
-                scope,
-                outcome,
-            } => tracedecay_contracts::retained_surface_outcome_matches_terminal(
-                operation,
-                &selected_request_id,
-                &scope,
-                &outcome,
-            )
-            .then_some((scope, outcome)),
-            _ => None,
-        },
+        tracedecay_daemon_protocol::ApplicationSurfaceRequest::Retained(retained_request),
+        tracedecay_daemon_protocol::RequestedOutputFormat::Json,
+    )
+    .expect("retained dispatch");
+    let executor = StaticDaemonResponseExecutor::new(response);
+    let result = super::super::execute_application_surface(
+        application_operation,
+        dispatched,
+        Some(&executor),
     )
     .await
+    .expect("retained invocation");
+    tracedecay_api::CanonicalInvocationResult::new(result.binding_id, result.result)
+        .into_http_response()
 }
 
-#[test]
-fn rejects_each_untrusted_daemon_envelope_field_before_payload_selection() {
+#[tokio::test]
+async fn rejects_each_untrusted_daemon_envelope_field_before_payload_selection() {
     let operation = RetainedSurfaceOperation::FactStoreRemove;
     let caller_request_id =
         RequestId::new("request.retained.http.caller").expect("caller request id");
@@ -276,13 +270,17 @@ fn rejects_each_untrusted_daemon_envelope_field_before_payload_selection() {
     invalid_responses.push(invalid_request_id);
 
     for response in invalid_responses {
-        let problem = validated_daemon_outcome(operation, &caller_request_id, Ok(response))
-            .expect_err("invalid daemon identity must be rejected before reading its payload");
-        let ApplicationProblem::Unavailable { diagnostic, .. } = problem else {
-            panic!("invalid daemon identity must become a pre-admission unavailable problem");
-        };
-        assert_eq!(diagnostic.code, "retained.invalid_envelope");
-        assert_ne!(diagnostic.code, "retained.fixture.partial_effect");
+        let response =
+            invoke_retained_http_with_response(operation, caller_request_id.clone(), response)
+                .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = response_json(response).await;
+        assert_eq!(body["value"]["problem"]["kind"], "unavailable");
+        assert_eq!(
+            body["value"]["problem"]["code"],
+            "application.surface.invalid_response"
+        );
+        assert_eq!(body["value"]["problem"]["committed_receipt"], Value::Null);
     }
 }
 
@@ -321,7 +319,7 @@ async fn registered_http_rejects_invalid_identity_without_exposing_its_receipt()
     assert_eq!(body["value"]["problem"]["kind"], "unavailable");
     assert_eq!(
         body["value"]["problem"]["code"],
-        "retained.invalid_envelope"
+        "application.surface.invalid_response"
     );
     assert_eq!(body["value"]["problem"]["committed_receipt"], Value::Null);
 }
@@ -405,7 +403,7 @@ async fn registered_http_rejects_unbound_partial_effect_receipts_without_exposin
         let body = response_json(response).await;
         assert_eq!(
             body["value"]["problem"]["code"],
-            "retained.invalid_terminal"
+            "application.surface.invalid_response"
         );
         assert_eq!(body["value"]["problem"]["committed_receipt"], Value::Null);
     }
@@ -479,7 +477,7 @@ async fn registered_http_rejects_successes_with_the_wrong_payload_receipt_or_sco
         let body = response_json(response).await;
         assert_eq!(
             body["value"]["problem"]["code"],
-            "retained.protocol_unavailable"
+            "application.surface.invalid_response"
         );
     }
 }

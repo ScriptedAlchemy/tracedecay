@@ -6,6 +6,13 @@
 # graph, not those assets. Beta.40 run 35271070760 spent ~24m of the aarch64
 # ship job on that battery and then failed before MCPB. This workflow runs
 # the battery on one free ubuntu-latest runner when someone dispatches it.
+#
+# The battery's production binary is the CLI it release-builds from the
+# extracted package. This job does not release-build the source tree first:
+# that compile is `shipped-cli` in ci.yml, and the script only compared the
+# extra binary's `--version` string. Packaged builds use the host
+# `target/release` layout, so that source-tree binary was not an input they
+# read.
 name: Distribution acceptance
 
 # On demand only. Nothing in this repository runs on a timer: a scheduled
@@ -25,7 +32,7 @@ jobs:
     name: Distribution acceptance (x86_64-linux)
     if: github.repository == 'ScriptedAlchemy/tracedecay'
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 240
     env:
       TARGET: x86_64-unknown-linux-gnu
     steps:
@@ -70,40 +77,28 @@ jobs:
           toolchain: ${{ steps.pin.outputs.toolchain }}
           targets: ${{ env.TARGET }}
 
+      # Own lineage. release-beta stores the `--target` layout. This battery
+      # compiles into the host layout (`target/release`, `target/debug`), so
+      # that shared key restored nothing this job reads, and an exact-key hit
+      # would have skipped saving this job's artifacts. Dependency artifacts
+      # only: extracted packages live under a fresh temporary path every run.
       - name: Cache Rust build
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          shared-key: release-beta-${{ env.TARGET }}
+          shared-key: distribution-acceptance-${{ env.TARGET }}
           cache-workspace-crates: "false"
           cache-on-failure: true
 
-      - name: Install mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
-        with:
-          mold-version: 2.41.0
-          make-default: true
-
-      # The acceptance script runs the packaged suites through nextest, and
-      # the MCP suite's structural-rewrite proof shells out to ast-grep.
+      # The acceptance script runs the packaged Rust-grammar proof and the
+      # focused packaged-CLI integration journeys through nextest.
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
-
-      - name: Install ast-grep
-        uses: ./.github/actions/install-ast-grep
-        with:
-          version: "0.44.0"
-
-      - name: Build release binary for packaging
-        run: cargo build --package tracedecay-cli --bin tracedecay --release --target ${{ env.TARGET }} --no-default-features --features production --locked
 
       - name: Run distribution acceptance
         run: |
           set -euo pipefail
           cargo fetch --locked --target ${{ env.TARGET }}
           lockfile_sha="$(python3 -c 'import hashlib; print(hashlib.sha256(open("Cargo.lock", "rb").read()).hexdigest())')"
-          binary="target/${TARGET}/release/tracedecay"
-          test -f "$binary"
-          CARGO_NET_OFFLINE=true bash scripts/check-distribution-acceptance.sh \
-            --reuse-release-binary "$binary"
+          CARGO_NET_OFFLINE=true bash scripts/check-distribution-acceptance.sh
           actual_lockfile_sha="$(python3 -c 'import hashlib; print(hashlib.sha256(open("Cargo.lock", "rb").read()).hexdigest())')"
           test "$actual_lockfile_sha" = "$lockfile_sha"

@@ -16,8 +16,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_global_db::AnalyticsEventQuery;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::storage::{StorageMode, default_profile_sharded_layout};
 
 use crate::common::{git_program, spawn_tracedecay_daemon_with, tracedecay_command_with_home};

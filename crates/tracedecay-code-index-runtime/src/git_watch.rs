@@ -77,6 +77,7 @@ use ownership::{GitWatcherTaskFailure, GitWatcherTaskFailureKind, GitWatcherTask
 #[cfg(test)]
 use state::WorktreeRegistration;
 use state::{WatchCancellation, WatchState};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 #[cfg(test)]
 use watch_plan::{MAX_METADATA_WATCH_DIRECTORIES, observe_watch_plan};
 use watch_plan::{WatchInstallFailure, WatchPlanFailure, install_watches};
@@ -398,8 +399,7 @@ impl GitWatcher {
                 "reason": "project_path_missing",
             });
         };
-        let canonical = project_root
-            .canonicalize()
+        let canonical = canonical_existing_identity(project_root)
             .unwrap_or_else(|_| project_root.to_path_buf());
         let state = {
             let projects = self.inner.projects.lock().await;

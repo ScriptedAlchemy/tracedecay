@@ -3,9 +3,10 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
-use crate::ToolResult;
-use crate::{decode_primitive_request, generic_tool_result};
+use crate::decode_primitive_request;
+use crate::handlers::graph::graph_tool_completion;
 use serde_json::Value;
+use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{TodoMarkerV1, TodosResultV1, TodosSurfaceRequestV1};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::VerifiedGraphQuery;
@@ -48,11 +49,11 @@ fn contains_marker_word(text: &str, marker: &str) -> Option<usize> {
 }
 
 #[hotpath::measure(label = "mcp.info.todos.total")]
-pub async fn handle_todos(
+pub async fn compute_todos(
     graph: &VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
-) -> Result<ToolResult> {
+) -> Result<GraphToolCompletionV1> {
     let request: TodosSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_todos")?;
     let kinds = request
         .kinds
@@ -97,7 +98,6 @@ pub async fn handle_todos(
     // Graph phase is done. The marker walk reads every candidate source file,
     // so it belongs on a blocking worker like the sibling analysis scans.
     let project_root = graph.project_root()?.to_path_buf();
-    let response_project_root = project_root.clone();
     let (markers, touched, by_kind) = hotpath::future!(
         tokio::task::spawn_blocking(move || -> Result<_> {
             let mut markers = Vec::<TodoMarkerV1>::new();
@@ -170,11 +170,8 @@ pub async fn handle_todos(
         by_kind,
         markers,
     };
-    let output = serde_json::to_value(result)?;
-    Ok(generic_tool_result(
-        Some(&response_project_root),
-        &args,
-        &output,
+    Ok(graph_tool_completion(
+        GraphToolResultV1::Todos(result),
         touched,
     ))
 }

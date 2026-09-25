@@ -2,11 +2,11 @@ use std::hash::BuildHasher;
 use std::io::Write;
 
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 #[cfg(unix)]
 use tracedecay_agent_hosts::hooks::cursor_pre_compact_via_daemon;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
-use tracedecay_sessions::runtime::cursor::{
+use tracedecay_sessions::runtime::hosts::cursor::{
     CursorSweepSource, CursorTranscriptIngestStats, cursor_project_slug,
     ingest_cursor_transcript_event as ingest_cursor_transcript_event_for_project,
     ingest_cursor_transcript_event_capped as ingest_cursor_transcript_event_capped_for_project,
@@ -432,8 +432,6 @@ async fn cursor_transcript_ingest_populates_searchable_messages() {
     ];
     let project = tmp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::create_dir(project.join(".tracedecay")).unwrap();
-    std::fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
     init_git_repo(&project);
     let project_id = mark_test_project(&project);
 
@@ -741,8 +739,8 @@ async fn cursor_transcript_ingest_retries_after_mid_batch_db_failure() {
         "transcript_path": transcript,
         "workspace_roots": [project]
     });
-    // Keep the registered authority alive, then deliberately break its fixture
-    // table so ingest exercises the exact retained runtime against the damage.
+    // Keep the registered authority alive, then deliberately fail its message
+    // writes so ingest exercises the exact retained runtime against the damage.
     let broken_db = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id.clone())
         .await
         .unwrap();
@@ -752,9 +750,11 @@ async fn cursor_transcript_ingest_retries_after_mid_batch_db_failure() {
         .to_path_buf();
     let broken_conn = rusqlite::Connection::open(&db_path).unwrap();
     broken_conn
-        .execute("DROP TABLE session_messages", [])
+        .execute_batch(
+            "CREATE TRIGGER fail_cursor_message_write BEFORE INSERT ON lcm_raw_messages
+             BEGIN SELECT RAISE(ABORT, 'injected message write failure'); END;",
+        )
         .unwrap();
-    drop(broken_conn);
 
     let first = ingest_cursor_transcript_event_for_project(
         &event.to_string(),
@@ -765,9 +765,13 @@ async fn cursor_transcript_ingest_retries_after_mid_batch_db_failure() {
     assert_eq!(first.sessions_upserted, 0);
     assert_eq!(first.messages_upserted, 0);
     drop(broken_db);
+    broken_conn
+        .execute_batch("DROP TRIGGER fail_cursor_message_write;")
+        .unwrap();
+    drop(broken_conn);
 
-    // Re-opening with schema ensure repairs the dropped table; retry should
-    // ingest the same line because the failed pass did not advance the cursor.
+    // Once the failure clears, the retry ingests the same line because the
+    // failed pass did not advance the cursor.
     let repaired_db = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id.clone())
         .await
         .unwrap();

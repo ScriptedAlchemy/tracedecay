@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::code_index::{
@@ -10,7 +11,7 @@ use tracedecay_code_index::graph_projection::{
 use tracedecay_contracts::retrieval::{
     PrimitiveFailure, PrimitiveFailureKind, SymbolGraphPortContext, SymbolGraphScope,
 };
-use tracedecay_temporal_query::ports::TemporalExecutionSnapshot;
+use tracedecay_temporal_query::snapshot::TemporalExecutionSnapshot;
 
 use super::{
     CanonicalSymbolGraphAdapter, MAX_COMPATIBILITY_RESULTS, OpenSymbolGraph, SymbolGraphCursorPort,
@@ -20,11 +21,13 @@ use super::{
 impl<C> CanonicalSymbolGraphAdapter<C> {
     pub fn new(
         code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
+        source_root: PathBuf,
         cursors: C,
         ignored_dependency_admission: Option<Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1>>,
     ) -> Self {
         Self {
             code_graph,
+            source_root,
             cursors,
             ignored_dependency_admission,
         }

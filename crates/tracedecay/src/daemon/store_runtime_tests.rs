@@ -1,6 +1,6 @@
 //! Composition-root integration tests for the store-runtime crate.
 //!
-//! These tests reach `remote_protocol_tests` and `crate::config`, which compose
+//! These tests reach `remote_protocol_tests` and `tracedecay_project::config`, which compose
 //! root daemon fixtures and therefore cannot live in
 //! `tracedecay-store-runtime` itself.
 
@@ -10,8 +10,7 @@ use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{
     BrainNodeId, Confidence, FactCategoryV1, FactCurationActionV1, FactLineageEventKindV1,
-    FactOwnerV1, FactRelationKindV1, ObservationScopeV1, ObservationSourceGenerationV1,
-    ObservationSourceIdentityV1, ObservationSourceRangeV1, ProviderId, SessionId,
+    FactOwnerV1, FactRelationKindV1,
 };
 use tracedecay_global_db::register_registered_schema_installer;
 use tracedecay_graph_db::{
@@ -29,8 +28,7 @@ use tracedecay_session_memory::memory::{
     ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome, memory_application_for_db,
 };
 use tracedecay_store::{
-    CursorAdvanceOutcome, FactReadControl, FactWriteControl, ObservationCoverageReason,
-    ObservationCursorAdvance, ObservationStore, ProjectId, ProjectMemoryFactHistoryQueryV1,
+    FactReadControl, FactWriteControl, ProjectId, ProjectMemoryFactHistoryQueryV1,
     ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1, RetainedGraphStoreLeaseV1,
     StoreShardIdV1,
 };
@@ -38,6 +36,16 @@ use tracedecay_store_runtime::{
     DaemonSessionRuntimeRegistryV1, RegisteredSchemaConvergenceStatus, process_runtime_generation,
     registry_open_error,
 };
+
+/// Bound for the assertions in this file that read "must not wait for
+/// background recovery" or "must settle".
+///
+/// The regression each one catches is an operation that never returns, and no
+/// finite bound reaches that, so the value only has to exceed the honest
+/// latency of the operation itself. At two seconds it did not: a machine
+/// running the whole lib suite across its cores opens a session database
+/// slower than that, and the bound reported a loaded host as a blocked one.
+const MUST_NOT_BLOCK: std::time::Duration = std::time::Duration::from_mins(1);
 
 struct TestRemoteKeyring(Arc<RemoteSpoolKeyV1>);
 
@@ -183,10 +191,8 @@ async fn wait_for_schema_convergence(
     .expect("registered schema convergence must reach a terminal state")
 }
 
-const LCM_STATUS_PERFORMANCE_INDEX_NAMES: [&str; 4] = [
-    "idx_lcm_raw_legacy_truncated",
+const LCM_STATUS_PERFORMANCE_INDEX_NAMES: [&str; 2] = [
     "idx_lcm_raw_lossy_ingest",
-    "idx_lcm_summary_nodes_depth_tokens",
     "idx_lcm_external_payloads_owner_bytes",
 ];
 const SUPERSEDED_LCM_PAYLOAD_OWNER_INDEX: &str = "idx_lcm_external_payloads_owner";
@@ -260,29 +266,6 @@ async fn lcm_migration_applied_at(connection: &(impl QueryExecutor + ?Sized)) ->
         "SELECT applied_at FROM session_schema_migrations WHERE name = 'lcm'",
     )
     .await
-}
-
-fn runtime_cursor_advance(
-    project_id: &ProjectId,
-    marker: &str,
-    reason: ObservationCoverageReason,
-) -> ObservationCursorAdvance {
-    ObservationCursorAdvance::new(
-        ObservationSourceIdentityV1::for_provider(
-            ProviderId::new("runtime-ledger-convergence").expect("cursor provider identity"),
-            SessionId::new(format!("session.runtime-ledger.{marker}"))
-                .expect("cursor session identity"),
-        )
-        .expect("cursor source identity"),
-        ObservationScopeV1::Project {
-            project_id: project_id.clone(),
-        },
-        ObservationSourceGenerationV1::new(1).expect("cursor source generation"),
-        None,
-        ObservationSourceRangeV1::new(0, 1).expect("cursor source range"),
-        reason,
-    )
-    .expect("runtime cursor advance")
 }
 
 fn accepting_memory_write_control() -> FactWriteControl {
@@ -800,18 +783,15 @@ async fn daemon_admission_remains_ready_while_lcm_indexes_converge_in_background
            VALUES ('cursor', 'deferred-index-session', 'project.schema-admission', '/deferred');
            INSERT INTO lcm_raw_messages (
                provider, message_id, session_id, role, ordinal, content,
-               content_hash, storage_kind, snippet_text, index_text,
-               legacy_truncated, metadata_json
+               content_hash, storage_kind, metadata_json
            ) VALUES (
                'cursor', 'deferred-index-message', 'deferred-index-session', 'assistant', 1,
-               'deferred body', 'deferred-hash', 'inline', 'deferred', 'deferred', 1, NULL
+               'deferred body', 'deferred-hash', 'inline', NULL
            );
            UPDATE session_schema_migrations
                SET applied_at = 123
                WHERE name = 'lcm';
-           DROP INDEX idx_lcm_raw_legacy_truncated;
            DROP INDEX idx_lcm_raw_lossy_ingest;
-           DROP INDEX idx_lcm_summary_nodes_depth_tokens;
            DROP INDEX idx_lcm_external_payloads_owner_bytes;
            CREATE INDEX idx_lcm_external_payloads_owner
                ON lcm_external_payloads(provider, session_id);",
@@ -910,35 +890,6 @@ async fn daemon_admission_remains_ready_while_lcm_indexes_converge_in_background
     );
 }
 
-/// The two activity indexes a store can carry: the blob-covering predecessor
-/// and the replacement that leaves `metadata_json` in the table.
-const SESSION_ACTIVITY_INDEX_NAMES: [&str; 2] = [
-    "idx_session_messages_session_activity",
-    "idx_session_messages_session_activity_v2",
-];
-
-/// Rows still in the retired external-source table, or `None` once the
-/// migration has dropped it.
-async fn retired_external_source_rows(connection: &(impl QueryExecutor + ?Sized)) -> Option<i64> {
-    let present = scalar_i64(
-        connection,
-        "SELECT COUNT(*) FROM sqlite_master
-         WHERE type = 'table' AND name = 'external_source_objects_v1'",
-    )
-    .await
-        > 0;
-    if !present {
-        return None;
-    }
-    Some(
-        scalar_i64(
-            connection,
-            "SELECT COUNT(*) FROM external_source_objects_v1",
-        )
-        .await,
-    )
-}
-
 async fn migrating_session_row_count(connection: &(impl QueryExecutor + ?Sized)) -> i64 {
     scalar_i64(
         connection,
@@ -947,39 +898,24 @@ async fn migrating_session_row_count(connection: &(impl QueryExecutor + ?Sized))
     .await
 }
 
-/// The incident, end to end. Both of these migrations once ran inside the
-/// open's leased schema transaction: on a large store each outran its
-/// execution deadline, the batch was interrupted, and the daemon exited, so
-/// systemd restarted it into the same failure forever.
+/// Store-sized convergence runs after admission, never inside the open's
+/// leased schema transaction, where a large store outran its execution
+/// deadline and the daemon restarted into the same failure forever.
 ///
-/// Admission must therefore leave both alone and complete, the store must
-/// serve while they are outstanding, Doctor must report which store is
-/// migrating rather than claiming health, and background convergence must be
-/// what actually retires them.
+/// Admission must therefore complete, the store must serve while
+/// convergence is outstanding, Doctor must report which store is converging
+/// rather than claiming health, and background convergence must settle it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn store_sized_migrations_are_reported_and_converge_after_admission() {
+async fn schema_convergence_is_reported_and_completes_after_admission() {
     let (_temporary, identity, project_id, project_root, sessions_path, _database_scope) =
         project_sessions_pending_convergence("project.schema-store-sized").await;
     let seed = TestConnection::open(&sessions_path);
     seed.execute_batch(
         r"INSERT INTO sessions(provider, session_id, project_key, project_path)
-           VALUES ('cursor', 'migrating-session', 'project.schema-store-sized', '/migrating');
-           DROP INDEX IF EXISTS idx_session_messages_session_activity_v2;
-           CREATE INDEX idx_session_messages_session_activity
-               ON session_messages(
-                   provider, session_id, timestamp, ordinal, message_id, kind,
-                   tool_names, metadata_json
-               );
-           CREATE TABLE external_source_objects_v1 (
-               binding_id TEXT NOT NULL, native_object_digest TEXT NOT NULL,
-               partition_digest TEXT NOT NULL, mutation_digest TEXT NOT NULL,
-               mutation_json TEXT NOT NULL,
-               PRIMARY KEY (binding_id, native_object_digest));
-           INSERT INTO external_source_objects_v1 VALUES
-               ('b', 'sha256:obj', 'sha256:part', 'sha256:mut', '{}');",
+           VALUES ('cursor', 'migrating-session', 'project.schema-store-sized', '/migrating');",
     )
     .await
-    .expect("seed a store carrying both pre-migration shapes");
+    .expect("seed a store row");
     drop(seed);
     let shard_id = StoreShardIdV1::project_sessions(
         identity.brain_id().clone(),
@@ -1002,16 +938,6 @@ async fn store_sized_migrations_are_reported_and_converge_after_admission() {
             .read_snapshot()
             .await
             .expect("ordinary read snapshot while migrations are outstanding");
-        assert_eq!(
-            installed_index_names(&snapshot, &SESSION_ACTIVITY_INDEX_NAMES).await,
-            vec!["idx_session_messages_session_activity".to_owned()],
-            "admission must not rebuild the activity index inside its write lease"
-        );
-        assert_eq!(
-            retired_external_source_rows(&snapshot).await,
-            Some(1),
-            "admission must not rewrite the retired external-source table"
-        );
         assert_eq!(
             migrating_session_row_count(&snapshot).await,
             1,
@@ -1071,250 +997,9 @@ async fn store_sized_migrations_are_reported_and_converge_after_admission() {
         .await
         .expect("ordinary read snapshot after convergence");
     assert_eq!(
-        installed_index_names(&snapshot, &SESSION_ACTIVITY_INDEX_NAMES).await,
-        vec!["idx_session_messages_session_activity_v2".to_owned()],
-        "convergence must install the replacement and drop the blob-covering index"
-    );
-    assert_eq!(
-        retired_external_source_rows(&snapshot).await,
-        None,
-        "convergence must retire the external-source predecessor once it is empty"
-    );
-    assert_eq!(
         migrating_session_row_count(&snapshot).await,
         1,
         "convergence must preserve the seeded rows"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn retained_runtime_ledger_replays_during_bounded_background_convergence() {
-    let (_temporary, identity, project_id, project_root, sessions_path, _database_scope) =
-        project_sessions_current_convergence("project.runtime-ledger-convergence").await;
-    let shard_id = StoreShardIdV1::project_sessions(
-        identity.brain_id().clone(),
-        identity.profile_id().clone(),
-        project_id.clone(),
-    );
-
-    let seed_registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
-        .await
-        .expect("seed session runtime registry");
-    let seed_database = seed_registry
-        .project_sessions(project_id.clone(), [project_root.clone()])
-        .await
-        .expect("seed registered project sessions");
-    let retired_advance = runtime_cursor_advance(
-        &project_id,
-        "retired",
-        ObservationCoverageReason::OutOfScope,
-    );
-    assert_eq!(
-        seed_database
-            .observation_store()
-            .advance_source_cursor(retired_advance.clone())
-            .await
-            .expect("commit cursor before ledger migration"),
-        CursorAdvanceOutcome::Committed
-    );
-    drop(seed_database);
-    drop(seed_registry);
-
-    let seed = TestConnection::open(&sessions_path);
-    seed.execute_batch(
-        "CREATE TABLE td_runtime_writer_idempotency_v1 (
-             shard_json TEXT NOT NULL,
-             incarnation INTEGER NOT NULL,
-             authority_epoch INTEGER NOT NULL,
-             idempotency_key TEXT NOT NULL,
-             request_digest TEXT NOT NULL,
-             original_receipt_json TEXT NOT NULL,
-             transaction_scope_json TEXT NOT NULL,
-             operation_id TEXT NOT NULL,
-             durability_json TEXT NOT NULL,
-             committed_at_micros INTEGER NOT NULL,
-             PRIMARY KEY (shard_json, incarnation, authority_epoch, idempotency_key)
-         ) WITHOUT ROWID;
-         INSERT INTO td_runtime_writer_idempotency_v1
-             SELECT * FROM td_runtime_writer_idempotency_v2;
-         DROP TABLE td_runtime_writer_idempotency_v2",
-    )
-    .await
-    .expect("restore released WITHOUT ROWID ledger name");
-    let mut retired_rows = seed
-        .query(
-            "SELECT idempotency_key, authority_epoch, original_receipt_json
-             FROM td_runtime_writer_idempotency_v1
-             WHERE idempotency_key LIKE 'cursor.%'",
-            (),
-        )
-        .await
-        .expect("read retained cursor receipt identity");
-    let retired_row = retired_rows
-        .next()
-        .await
-        .expect("read retained cursor receipt")
-        .expect("retained cursor receipt row");
-    let retired_key = retired_row
-        .get::<String>(0)
-        .expect("decode retained cursor key");
-    let retired_epoch = retired_row
-        .get::<i64>(1)
-        .expect("decode retained cursor authority epoch");
-    let retired_receipt_json = retired_row
-        .get::<String>(2)
-        .expect("decode retained cursor receipt");
-    assert!(
-        retired_rows
-            .next()
-            .await
-            .expect("check retained cursor receipt cardinality")
-            .is_none(),
-        "the released fixture carries one cursor receipt"
-    );
-    drop(retired_rows);
-    drop(seed);
-
-    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
-        .await
-        .expect("session runtime registry");
-    let convergence_gate = registry.block_registered_schema_convergence_for_test();
-    let database = registry
-        .project_sessions(project_id.clone(), [project_root])
-        .await
-        .expect("admit retained runtime ledger");
-    convergence_gate.wait_until_blocked().await;
-
-    assert_eq!(
-        database
-            .observation_store()
-            .advance_source_cursor(retired_advance)
-            .await
-            .expect("replay retained cursor while convergence is pending"),
-        CursorAdvanceOutcome::ExactDuplicate
-    );
-    // The same range under a different coverage reason finds the retained
-    // cursor already at its `next_cursor`, so it is a duplicate of the
-    // applied coverage rather than a collision (#1842).
-    let rereasoned_advance = runtime_cursor_advance(
-        &project_id,
-        "retired",
-        ObservationCoverageReason::BlankFrame,
-    );
-    assert_eq!(
-        database
-            .observation_store()
-            .advance_source_cursor(rereasoned_advance)
-            .await
-            .expect("a later reason does not unseat the owned frontier"),
-        CursorAdvanceOutcome::ExactDuplicate
-    );
-
-    let fresh_advance =
-        runtime_cursor_advance(&project_id, "fresh", ObservationCoverageReason::OutOfScope);
-    assert_eq!(
-        database
-            .observation_store()
-            .advance_source_cursor(fresh_advance)
-            .await
-            .expect("ordinary cursor write while convergence is pending"),
-        CursorAdvanceOutcome::Committed
-    );
-
-    convergence_gate.release();
-    assert_eq!(
-        wait_for_schema_convergence(&registry, &shard_id).await,
-        RegisteredSchemaConvergenceStatus::Complete
-    );
-    let snapshot = database
-        .read_snapshot()
-        .await
-        .expect("runtime ledger convergence snapshot");
-    let mut tables = snapshot
-        .query(
-            "SELECT COUNT(*) FROM sqlite_master
-             WHERE type = 'table' AND name = 'td_runtime_writer_idempotency_v1'",
-            (),
-        )
-        .await
-        .expect("inspect retired runtime ledger table");
-    assert_eq!(
-        tables
-            .next()
-            .await
-            .expect("read retired runtime ledger state")
-            .expect("retired runtime ledger state row")
-            .get::<i64>(0)
-            .expect("decode retired runtime ledger state"),
-        0
-    );
-    let mut cursor_effects = snapshot
-        .query("SELECT COUNT(*) FROM source_cursors", ())
-        .await
-        .expect("inspect committed cursor effects");
-    assert_eq!(
-        cursor_effects
-            .next()
-            .await
-            .expect("read committed cursor effects")
-            .expect("committed cursor effect count row")
-            .get::<i64>(0)
-            .expect("decode committed cursor effect count"),
-        2,
-        "the retained replay and the later reason must not create another cursor effect"
-    );
-    let mut receipts = snapshot
-        .query(
-            "SELECT idempotency_key, authority_epoch, original_receipt_json
-             FROM td_runtime_writer_idempotency_v2
-             WHERE idempotency_key LIKE 'cursor.%'",
-            (),
-        )
-        .await
-        .expect("inspect converged runtime ledger receipts");
-    let mut receipt_rows = Vec::new();
-    while let Some(row) = receipts
-        .next()
-        .await
-        .expect("read converged runtime ledger receipt")
-    {
-        receipt_rows.push((
-            row.get::<String>(0).expect("decode converged cursor key"),
-            row.get::<i64>(1)
-                .expect("decode converged cursor authority epoch"),
-            row.get::<String>(2)
-                .expect("decode converged cursor receipt"),
-        ));
-    }
-    let retired_identity_rows = receipt_rows
-        .iter()
-        .filter(|(key, _, _)| key == &retired_key)
-        .collect::<Vec<_>>();
-    assert_eq!(
-        retired_identity_rows.len(),
-        2,
-        "the same logical cursor is receipted once per admitted authority epoch"
-    );
-    assert!(
-        retired_identity_rows
-            .iter()
-            .any(|(_, epoch, receipt)| *epoch == retired_epoch
-                && receipt.as_str() == retired_receipt_json),
-        "bounded convergence must preserve the released receipt bytes"
-    );
-    assert!(
-        retired_identity_rows
-            .iter()
-            .any(|(_, epoch, _)| *epoch != retired_epoch),
-        "the reopened authority records its own exact cursor acknowledgement"
-    );
-    assert_eq!(
-        receipt_rows
-            .iter()
-            .filter(|(key, _, _)| key != &retired_key)
-            .count(),
-        1,
-        "the fresh cursor has one runtime receipt"
     );
 }
 
@@ -1352,12 +1037,9 @@ async fn foreground_project_open_defers_historical_convergence_until_full_public
         .expect("foreground project-open writer probe rolls back");
 
     drop(foreground);
-    tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        convergence_gate.wait_until_blocked(),
-    )
-    .await
-    .expect("historical convergence starts after full publication");
+    tokio::time::timeout(MUST_NOT_BLOCK, convergence_gate.wait_until_blocked())
+        .await
+        .expect("historical convergence starts after full publication");
     convergence_gate.release();
 }
 
@@ -1469,13 +1151,10 @@ async fn terminal_shutdown_cancels_and_joins_blocked_schema_convergence() {
     convergence_gate.wait_until_blocked().await;
 
     registry.cancel_terminal_tasks();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        registry.shutdown_terminal_tasks(),
-    )
-    .await
-    .expect("terminal shutdown must not wait for cancelled convergence work")
-    .expect("session runtime terminal tasks shut down cleanly");
+    tokio::time::timeout(MUST_NOT_BLOCK, registry.shutdown_terminal_tasks())
+        .await
+        .expect("terminal shutdown must not wait for cancelled convergence work")
+        .expect("session runtime terminal tasks shut down cleanly");
     convergence_gate.release();
     tokio::task::yield_now().await;
 
@@ -1706,7 +1385,8 @@ async fn worktree_graph_mount_does_not_require_git() {
         .await
         .expect("register non-git project authority");
     let project_store_root = profile_root.join("projects/project.non-git-worktree");
-    let database_path = project_store_root.join(crate::config::db_filename(&project_store_root));
+    let database_path =
+        project_store_root.join(tracedecay_project::config::db_filename(&project_store_root));
     std::fs::create_dir_all(database_path.parent().expect("database parent"))
         .expect("database directory");
     let authority = DatabaseAuthority::for_runtime(&database_path, "non-git project graph mount")
@@ -1770,7 +1450,7 @@ async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
     .expect("manifest");
     let idempotency = GraphIdempotencyKey::new("idempotency.generic-test.1").expect("idempotency");
 
-    let publication_operation = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    let publication_operation = tokio::time::timeout(MUST_NOT_BLOCK, async {
         loop {
             match project_database.issue_memory_graph_runtime_operation() {
                 Ok(operation) => break operation,
@@ -1986,7 +1666,8 @@ async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
     )
     .expect("daemon database scope");
     let project_store_root = profile_root.join("projects/project.derived-graph-corrupt");
-    let database_path = project_store_root.join(crate::config::db_filename(&project_store_root));
+    let database_path =
+        project_store_root.join(tracedecay_project::config::db_filename(&project_store_root));
     std::fs::create_dir_all(database_path.parent().expect("database parent"))
         .expect("database directory");
 
@@ -2045,7 +1726,7 @@ async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
     )
     .expect("reopened project database authority");
     let reopened = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
+        MUST_NOT_BLOCK,
         reopened_registry.project_graph(
             &project_root,
             project_id.clone(),
@@ -2066,7 +1747,7 @@ async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
     // window is asserting a race. Wait for the settled outcome instead, and
     // keep refusing the one result that would mean the relational owner was
     // damaged.
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    tokio::time::timeout(MUST_NOT_BLOCK, async {
         loop {
             match reopened.issue_memory_graph_runtime_operation() {
                 Ok(_) => return,
@@ -2084,7 +1765,7 @@ async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
     .expect("derived graph recovery rebinds the memory graph to its relational owner");
     drop(reopened);
     tokio::time::timeout(
-        std::time::Duration::from_secs(2),
+        MUST_NOT_BLOCK,
         reopened_registry.retire_project_memory_graph(&project_id),
     )
     .await
@@ -2135,7 +1816,7 @@ async fn corrupt_session_relation_graph_preserves_relational_session_database() 
         .await
         .expect("reopened session runtime registry");
     let reopened = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
+        MUST_NOT_BLOCK,
         reopened_registry.project_sessions(project_id.clone(), [project_root]),
     )
     .await
@@ -2274,7 +1955,8 @@ async fn read_only_project_graph_reuses_daemon_publication_without_write_authori
         .expect("register project authority");
     let project_store_root = profile_root.join("projects/project.graph-publication");
     std::fs::create_dir_all(&project_store_root).expect("project store directory");
-    let main_path = project_store_root.join(crate::config::db_filename(&project_store_root));
+    let main_path =
+        project_store_root.join(tracedecay_project::config::db_filename(&project_store_root));
     let unpublished_path = project_store_root.join("unpublished.db");
     rusqlite::Connection::open(&unpublished_path)
         .expect("seed unpublished branch database")

@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_global_db::{
     GraphScopeUpsert, ProjectObservationStoreError, StoreArtifactUpsert, StoreInstanceUpsert,
 };
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::storage::{
     BRANCH_META_FILENAME, SESSIONS_DB_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
     StoreKind, StoreManifest, write_store_manifest_to_path,
@@ -287,7 +287,8 @@ async fn registered_profile_runtime_creates_and_round_trips_registry_records() {
     assert_eq!(projects[0].project_id, "proj_registry");
     assert_eq!(
         projects[0].canonical_root,
-        project_root.canonicalize().unwrap().to_string_lossy()
+        tracedecay_runtime_core::path_safety::canonical_root_identity(&project_root)
+            .to_string_lossy()
     );
     assert_eq!(
         db.search_code_projects("repo.git", 10).await.unwrap().len(),
@@ -983,8 +984,8 @@ async fn project_tokens_saved_schema_and_queries_still_work() {
             .await
             .expect("project ledger path listing should succeed"),
         vec![
-            project_one.canonicalize().unwrap(),
-            project_two.canonicalize().unwrap(),
+            tracedecay_runtime_core::path_safety::canonical_root_identity(&project_one),
+            tracedecay_runtime_core::path_safety::canonical_root_identity(&project_two),
         ]
     );
     close_profile_runtime(db).await;

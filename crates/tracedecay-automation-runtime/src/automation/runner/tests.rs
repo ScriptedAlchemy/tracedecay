@@ -12,9 +12,10 @@ use tracedecay_domain::{
     ActorId, FactOwnerV1, ProjectId, RepositoryId, RetrievalAnchorId, RetrievalGrainV1, SessionId,
     TemporalCoverageCountsV1, UtcMicros, WorktreeId,
 };
+use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_session_memory::context::{
-    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
-    RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    BranchId, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId, RequestBudgets,
+    ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
     session_application_grant_digest,
 };
 use tracedecay_session_memory::memory::MemoryApplication;
@@ -27,7 +28,7 @@ use tracedecay_session_memory::session::{
 };
 use tracedecay_temporal_query::TemporalKernelResult;
 use tracedecay_temporal_query::context::VersionedTokenEstimator;
-use tracedecay_temporal_query::ports::ExecutionLimits;
+use tracedecay_temporal_query::execution::ExecutionLimits;
 use tracedecay_temporal_query::ranking::RankedCandidate;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -40,7 +41,7 @@ use super::evidence::{
 };
 use super::retrieval::{
     AUTOMATION_SESSION_MAX_BYTES, AutomationWordEstimator, accept_automation_temporal_outcome,
-    automation_structural_refusal_reason, ranked_evidence_owner,
+    automation_structural_refusal_skip, ranked_evidence_owner,
     retrieve_automation_session_evidence,
 };
 use super::{
@@ -112,7 +113,11 @@ fn asymmetric_combined_failure_preserves_the_successful_sibling_record() {
     assert_eq!(failure.reflector_record, Some(record));
     assert!(failure.reflector_error.is_none());
     assert!(failure.skill_writer_record.is_none());
-    assert!(failure.skill_writer_error.is_some());
+    assert!(matches!(
+        failure.skill_writer_error,
+        Some(tracedecay_domain::errors::TraceDecayError::Config { ref message })
+            if message == "skill terminal construction failed"
+    ));
 }
 
 #[test]
@@ -521,18 +526,16 @@ fn temporal_automation_evidence_fails_closed_for_non_complete_outcomes() {
 
 #[test]
 fn temporal_automation_evidence_preserves_cursor_manifest_refusal() {
-    for (kind, observed, maximum, expected_reason) in [
+    for (kind, observed, maximum) in [
         (
             tracedecay_domain::CursorManifestLimitKindV1::Participants,
             257,
             256,
-            "session_cursor_manifest_participants_limit_exceeded",
         ),
         (
             tracedecay_domain::CursorManifestLimitKindV1::CanonicalBytes,
             65_537,
             65_536,
-            "session_cursor_manifest_canonical_bytes_limit_exceeded",
         ),
     ] {
         let actual = accept_automation_temporal_outcome(SessionRetrievalOutcome::<
@@ -554,8 +557,8 @@ fn temporal_automation_evidence_preserves_cursor_manifest_refusal() {
             }
         );
         assert_eq!(
-            automation_structural_refusal_reason(refusal),
-            expected_reason
+            automation_structural_refusal_skip(refusal),
+            ("session_cursor_manifest_limit_exceeded", None)
         );
     }
 }
@@ -627,6 +630,16 @@ async fn combined_reflector_first_preserves_budget_stage_for_sequential_fallback
     )
     .await
     .expect("structural refusal is a terminal skip");
+    assert!(matches!(
+        evidence,
+        super::evidence::SessionReflectorEvidenceOutcome::Skipped {
+            reason: "session_evidence_budget_exhausted",
+            budget_stage: Some(
+                tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes
+            ),
+            ..
+        }
+    ));
 
     let dispatch = match combined_reflector_evidence_or_not_combined(evidence) {
         Ok(_) => panic!("reflector refusal must fall back to the per-task runner"),
@@ -636,7 +649,7 @@ async fn combined_reflector_first_preserves_budget_stage_for_sequential_fallback
     assert!(matches!(
         dispatch,
         CombinedReviewDispatch::NotCombined {
-            reason: "session_evidence_budget_exhausted_request_candidate_bytes",
+            reason: "session_evidence_budget_exhausted",
         }
     ));
     assert_eq!(retrieval.calls.load(Ordering::SeqCst), 1);
@@ -665,6 +678,16 @@ async fn combined_skill_second_preserves_distinct_budget_stage_for_sequential_fa
     )
     .await
     .expect("structural refusal is a terminal skip");
+    assert!(matches!(
+        evidence,
+        super::evidence::SkillWriterEvidenceOutcome::Skipped {
+            reason: "session_evidence_budget_exhausted",
+            budget_stage: Some(
+                tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted
+            ),
+            ..
+        }
+    ));
 
     let dispatch = match combined_skill_writer_evidence_or_not_combined(evidence) {
         Ok(_) => panic!("skill refusal must fall back to the per-task runner"),
@@ -674,7 +697,7 @@ async fn combined_skill_second_preserves_distinct_budget_stage_for_sequential_fa
     assert!(matches!(
         dispatch,
         CombinedReviewDispatch::NotCombined {
-            reason: "session_evidence_budget_exhausted_execution_work_exhausted",
+            reason: "session_evidence_budget_exhausted",
         }
     ));
     assert_eq!(retrieval.calls.load(Ordering::SeqCst), 1);

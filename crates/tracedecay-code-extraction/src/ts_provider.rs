@@ -87,6 +87,9 @@ fn build_language_table() -> HashMap<&'static str, Language> {
     #[cfg(feature = "lang-wgsl")]
     let languages = languages.chain(std::iter::once(("wgsl", wgsl_grammar::LANGUAGE.into())));
 
+    #[cfg(feature = "lang-json")]
+    let languages = languages.chain(std::iter::once(("json", tree_sitter_json::LANGUAGE.into())));
+
     // HLSL uses the newer LanguageFn API.
     #[cfg(feature = "lang-hlsl")]
     let languages = languages.chain(std::iter::once((

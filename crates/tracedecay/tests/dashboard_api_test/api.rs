@@ -19,7 +19,7 @@ fn retired_dashboard_routes_fall_through_to_the_canonical_spa_index() {
         // The suite serves the fixture bundle; production placeholder-proofing
         // lives in the CLI build script's manifest validation and the
         // registered product-runtime provider's bundle validation.
-        let fixture_index = tracedecay::product_runtime::FIXTURE_DASHBOARD_ASSETS
+        let fixture_index = tracedecay_project::product_runtime::FIXTURE_DASHBOARD_ASSETS
             .assets
             .iter()
             .find(|asset| asset.path == "index.html")
@@ -93,7 +93,7 @@ fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
             .host_runtime
             .open_project_graph_for_test(
                 &fixture.project_root,
-                tracedecay::project::TraceDecayOpenOptions::default(),
+                tracedecay_project::project::TraceDecayOpenOptions::default(),
             )
             .await
             .unwrap_or_else(|err| panic!("failed to reopen dashboard fixture project: {err}"));
@@ -161,7 +161,7 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         let (status, overview) = get_json(
             &agent,
             &format!(
-                "{}/api/plugins/holographic/?q=cache&limit=5&graph_limit=10",
+                "{}/api/plugins/holographic?q=cache&limit=5&graph_limit=10",
                 fixture.base_url
             ),
         );
@@ -197,7 +197,7 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         let (status, entity_bounded) = get_json(
             &agent,
             &format!(
-                "{}/api/plugins/holographic/?limit=1&graph_limit=10",
+                "{}/api/plugins/holographic?limit=1&graph_limit=10",
                 fixture.base_url
             ),
         );
@@ -398,11 +398,12 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
             "distribution bins should cover every computed pair"
         );
         assert_eq!(
-            distribution["min"], distribution["min_score"],
+            bins[0]["start"], distribution["min_score"],
             "bins should adapt to the observed score range"
         );
         assert_eq!(
-            distribution["max"], distribution["max_score"],
+            bins[bins.len() - 1]["end"],
+            distribution["max_score"],
             "bins should adapt to the observed score range"
         );
         let occupied_bins = bins
@@ -820,7 +821,7 @@ fn lcm_serves_project_session_store_without_global_override() {
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             session_store,
-            dashboard::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             port,
         );
 
@@ -902,7 +903,7 @@ fn lcm_project_store_wins_over_global_accounting_override() {
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             session_store,
-            dashboard::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             port,
         );
 

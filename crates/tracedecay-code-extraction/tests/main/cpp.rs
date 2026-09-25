@@ -6,6 +6,8 @@ use tracedecay_domain::*;
 // into this module's own namespace, so the tests below call them unqualified
 // without each extractor module re-declaring the support module.
 include!("support/docstrings.rs");
+include!("support/edges.rs");
+
 #[test]
 fn test_cpp_file_node_is_root() {
     let source = r#"
@@ -14,7 +16,7 @@ int main() {
 }
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("test.cpp", source);
+    let result = extractor.extract_artifact("test.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let files: Vec<_> = result
         .nodes
@@ -33,7 +35,7 @@ int add(int a, int b) {
 }
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("math.cpp", source);
+    let result = extractor.extract_artifact("math.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fns: Vec<_> = result
         .nodes
@@ -61,7 +63,7 @@ private:
 };
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("dog.cpp", source);
+    let result = extractor.extract_artifact("dog.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let classes: Vec<_> = result
@@ -109,7 +111,7 @@ public:
 };
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("foo.cpp", source);
+    let result = extractor.extract_artifact("foo.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let constructors: Vec<_> = result
@@ -117,10 +119,12 @@ public:
         .iter()
         .filter(|n| n.kind == NodeKind::Constructor)
         .collect();
-    assert!(
-        constructors.len() >= 2,
-        "should have 2 constructors, got: {:?}",
+    assert_eq!(
         constructors
+            .iter()
+            .map(|x| x.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Foo", "Foo"]
     );
 
     // Destructor can also be a Method with special name
@@ -141,7 +145,7 @@ namespace mylib {
 }
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("lib.cpp", source);
+    let result = extractor.extract_artifact("lib.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let namespaces: Vec<_> = result
@@ -153,16 +157,13 @@ namespace mylib {
     assert_eq!(namespaces[0].name, "mylib");
 
     // Namespace should contain the function
-    let ns_id = &namespaces[0].id;
-    let contains_from_ns: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains && e.source == *ns_id)
-        .collect();
-    assert!(
-        !contains_from_ns.is_empty(),
-        "namespace should contain children, got: {:?}",
-        contains_from_ns
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Contains),
+        [
+            ("lib.cpp", "mylib"),
+            ("mylib", "helper"),
+            ("mylib", "value")
+        ]
     );
 
     let fns: Vec<_> = result
@@ -183,7 +184,7 @@ T maximum(T a, T b) {
 }
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("tmpl.cpp", source);
+    let result = extractor.extract_artifact("tmpl.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let templates: Vec<_> = result
@@ -205,7 +206,7 @@ public:
 };
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("shape.cpp", source);
+    let result = extractor.extract_artifact("shape.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let methods: Vec<_> = result
@@ -247,7 +248,7 @@ private:
 };
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("widget.cpp", source);
+    let result = extractor.extract_artifact("widget.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let fields: Vec<_> = result
@@ -296,7 +297,7 @@ public:
 };
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("animals.cpp", source);
+    let result = extractor.extract_artifact("animals.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let classes: Vec<_> = result
@@ -312,11 +313,6 @@ public:
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Extends)
         .collect();
-    assert!(
-        !extends_refs.is_empty(),
-        "should have Extends refs, got: {:?}",
-        extends_refs
-    );
     assert!(extends_refs.iter().any(|r| r.reference_name == "Animal"));
 }
 
@@ -330,7 +326,7 @@ struct Point {
 };
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("point.cpp", source);
+    let result = extractor.extract_artifact("point.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let structs: Vec<_> = result
@@ -367,7 +363,7 @@ enum Color {
 };
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("color.cpp", source);
+    let result = extractor.extract_artifact("color.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let enums: Vec<_> = result
@@ -399,7 +395,7 @@ union Data {
 };
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("data.cpp", source);
+    let result = extractor.extract_artifact("data.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let unions: Vec<_> = result
@@ -417,7 +413,7 @@ fn test_cpp_typedef() {
 typedef unsigned long ulong;
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("types.hpp", source);
+    let result = extractor.extract_artifact("types.hpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let typedefs: Vec<_> = result
@@ -437,7 +433,7 @@ fn test_cpp_preprocessor_and_include() {
 #include "myheader.h"
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("main.cpp", source);
+    let result = extractor.extract_artifact("main.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let macros: Vec<_> = result
@@ -462,7 +458,7 @@ fn test_cpp_using_declaration() {
 using namespace std;
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("main.cpp", source);
+    let result = extractor.extract_artifact("main.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let uses: Vec<_> = result
@@ -513,7 +509,7 @@ int divide(int a, int b) {
 
     for (style, source, expected) in cases {
         let extractor = CppExtractor;
-        let result = extractor.extract("math.cpp", source);
+        let result = extractor.extract_artifact("math.cpp", source).result;
         assert_node_docstring(style, &result, NodeKind::Function, None, expected);
     }
 }
@@ -531,7 +527,7 @@ int main() {
 }
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("main.cpp", source);
+    let result = extractor.extract_artifact("main.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let call_refs: Vec<_> = result
@@ -540,11 +536,9 @@ int main() {
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
     assert!(
-        !call_refs.is_empty(),
-        "should have call refs for helper, got: {:?}",
-        call_refs
+        call_refs.iter().any(|r| r.reference_name == "helper"),
+        "should have call refs for helper, got: {call_refs:?}"
     );
-    assert!(call_refs.iter().any(|r| r.reference_name == "helper"));
 }
 
 #[test]
@@ -554,18 +548,12 @@ void foo() {}
 void bar() {}
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("test.cpp", source);
+    let result = extractor.extract_artifact("test.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(
-        contains.len() >= 2,
-        "should have Contains edges from File to Functions, got: {}",
-        contains.len()
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Contains),
+        [("test.cpp", "foo"), ("test.cpp", "bar")]
     );
 }
 
@@ -580,7 +568,7 @@ public:
 };
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("rect.cpp", source);
+    let result = extractor.extract_artifact("rect.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let class_node = result
@@ -611,7 +599,7 @@ static int helper(int x) {
 }
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("utils.cpp", source);
+    let result = extractor.extract_artifact("utils.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let fns: Vec<_> = result
@@ -632,7 +620,7 @@ int public_func() {
 }
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("api.cpp", source);
+    let result = extractor.extract_artifact("api.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let fns: Vec<_> = result
@@ -656,7 +644,7 @@ public:
 };
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("container.hpp", source);
+    let result = extractor.extract_artifact("container.hpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let templates: Vec<_> = result
@@ -679,7 +667,7 @@ enum class Direction {
 };
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("direction.cpp", source);
+    let result = extractor.extract_artifact("direction.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let enums: Vec<_> = result
@@ -706,7 +694,7 @@ class B {};
 class C : public A, public B {};
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("multi.cpp", source);
+    let result = extractor.extract_artifact("multi.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let extends_refs: Vec<_> = result
@@ -714,10 +702,12 @@ class C : public A, public B {};
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Extends)
         .collect();
-    assert!(
-        extends_refs.len() >= 2,
-        "should have 2 Extends refs, got: {:?}",
+    assert_eq!(
         extends_refs
+            .iter()
+            .map(|x| x.reference_name.as_str())
+            .collect::<Vec<_>>(),
+        ["A", "B"]
     );
     assert!(extends_refs.iter().any(|r| r.reference_name == "A"));
     assert!(extends_refs.iter().any(|r| r.reference_name == "B"));
@@ -736,7 +726,7 @@ class [[nodiscard]] Result {
 };
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("attr.cpp", source);
+    let result = extractor.extract_artifact("attr.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     // Should have 3 AnnotationUsage nodes: nodiscard, deprecated, nodiscard
@@ -745,23 +735,21 @@ class [[nodiscard]] Result {
         .iter()
         .filter(|n| n.kind == NodeKind::AnnotationUsage)
         .collect();
-    assert!(
-        annots.len() >= 3,
-        "expected at least 3 annotations, got: {:?}",
-        annots.iter().map(|a| &a.name).collect::<Vec<_>>()
+    assert_eq!(
+        annots.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+        ["nodiscard", "deprecated", "nodiscard"]
     );
     assert!(annots.iter().any(|a| a.name == "nodiscard"));
     assert!(annots.iter().any(|a| a.name == "deprecated"));
 
     // Should have Annotates edges.
-    let annotates_edges: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Annotates)
-        .collect();
-    assert!(
-        annotates_edges.len() >= 3,
-        "expected at least 3 Annotates edges"
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Annotates),
+        [
+            ("nodiscard", "getValue"),
+            ("deprecated", "oldFunc"),
+            ("nodiscard", "Result")
+        ]
     );
 
     // Should have Annotates unresolved refs.
@@ -770,7 +758,13 @@ class [[nodiscard]] Result {
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Annotates)
         .collect();
-    assert!(annot_refs.len() >= 3, "expected at least 3 Annotates refs");
+    assert_eq!(
+        annot_refs
+            .iter()
+            .map(|x| x.reference_name.as_str())
+            .collect::<Vec<_>>(),
+        ["nodiscard", "deprecated", "nodiscard"]
+    );
 }
 
 #[test]
@@ -779,7 +773,7 @@ fn test_cpp_function_pointer_typedef() {
 typedef int (*compare_fn)(const void *, const void *);
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("types.hpp", source);
+    let result = extractor.extract_artifact("types.hpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let typedefs: Vec<_> = result
@@ -789,4 +783,17 @@ typedef int (*compare_fn)(const void *, const void *);
         .collect();
     assert_eq!(typedefs.len(), 1, "typedef nodes: {:?}", typedefs);
     assert_eq!(typedefs[0].name, "compare_fn");
+}
+
+#[test]
+fn test_cpp_docstring_needs_an_adjacent_own_line_comment() {
+    let source = "// Section banner\n\nint detached() { return 0; }\nint x = 1; // trailing note\nint trailing() { return 0; }\n/// Adjacent doc.\nint documented() { return 0; }\n";
+    let result = CppExtractor.extract_artifact("docs.cpp", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let docs: Vec<(&str, &str)> = result
+        .nodes
+        .iter()
+        .filter_map(|n| Some((n.name.as_str(), n.docstring.as_deref()?)))
+        .collect();
+    assert_eq!(docs, [("documented", "Adjacent doc.")]);
 }

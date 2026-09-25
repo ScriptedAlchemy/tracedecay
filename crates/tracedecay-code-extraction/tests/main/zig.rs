@@ -2,13 +2,15 @@ use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_code_extraction::ZigExtractor;
 use tracedecay_domain::*;
 
+include!("support/edges.rs");
+
 #[test]
 fn test_zig_extract_imports() {
     let source = r#"const std = @import("std");
 const mem = @import("std").mem;
 "#;
     let extractor = ZigExtractor;
-    let result = extractor.extract("sample.zig", source);
+    let result = extractor.extract_artifact("sample.zig", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let uses: Vec<_> = result
         .nodes
@@ -30,7 +32,7 @@ const LogLevel = enum {
 };
 "#;
     let extractor = ZigExtractor;
-    let result = extractor.extract("log.zig", source);
+    let result = extractor.extract_artifact("log.zig", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let enums: Vec<_> = result
@@ -67,7 +69,7 @@ const Foo = struct {
 };
 "#;
     let extractor = ZigExtractor;
-    let result = extractor.extract("funcs.zig", source);
+    let result = extractor.extract_artifact("funcs.zig", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let fns: Vec<_> = result
@@ -93,7 +95,7 @@ fn test_zig_const_extraction() {
 const max_connections: u32 = 100;
 "#;
     let extractor = ZigExtractor;
-    let result = extractor.extract("const.zig", source);
+    let result = extractor.extract_artifact("const.zig", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let consts: Vec<_> = result
@@ -125,7 +127,7 @@ pub fn publicFn() void {}
 fn privateFn() void {}
 "#;
     let extractor = ZigExtractor;
-    let result = extractor.extract("vis.zig", source);
+    let result = extractor.extract_artifact("vis.zig", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let public_method = result
@@ -167,7 +169,7 @@ test "point distance" {
 }
 "#;
     let extractor = ZigExtractor;
-    let result = extractor.extract("test.zig", source);
+    let result = extractor.extract_artifact("test.zig", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     // test declarations are mapped as Function nodes
@@ -196,7 +198,7 @@ pub fn main() void {
 }
 "#;
     let extractor = ZigExtractor;
-    let result = extractor.extract("main.zig", source);
+    let result = extractor.extract_artifact("main.zig", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let call_refs: Vec<_> = result
@@ -204,7 +206,6 @@ pub fn main() void {
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
-    assert!(!call_refs.is_empty(), "should have call refs");
     assert!(
         call_refs.iter().any(|r| r.reference_name.contains("print")),
         "should find print call, got: {:?}",
@@ -226,7 +227,7 @@ fn test_zig_docstrings() {
 pub fn setup() void {}
 "#;
     let extractor = ZigExtractor;
-    let result = extractor.extract("doc.zig", source);
+    let result = extractor.extract_artifact("doc.zig", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let fns: Vec<_> = result
@@ -253,17 +254,10 @@ fn test_zig_contains_edges() {
 };
 "#;
     let extractor = ZigExtractor;
-    let result = extractor.extract("foo.zig", source);
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    // File -> Struct, Struct -> Field, Struct -> Method = 3 minimum
-    assert!(
-        contains.len() >= 3,
-        "should have >= 3 Contains edges, got {}",
-        contains.len()
+    let result = extractor.extract_artifact("foo.zig", source).result;
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Contains),
+        [("foo.zig", "Foo"), ("Foo", "x"), ("Foo", "bar")]
     );
 }
 
@@ -298,7 +292,7 @@ fn test_zig_struct_with_multiple_methods() {
 };
 "#;
     let extractor = ZigExtractor;
-    let result = extractor.extract("conn.zig", source);
+    let result = extractor.extract_artifact("conn.zig", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let structs: Vec<_> = result

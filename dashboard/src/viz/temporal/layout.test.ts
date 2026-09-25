@@ -357,7 +357,7 @@ describe('layoutTemporalScene', () => {
     }
     const proj = projection({ lanes });
     const dense = layoutTemporalScene(proj, optionsFor(proj, { denseLaneThreshold: 10 }));
-    expect(dense.denseDefault).toBe(true);
+    expect(dense.denseDepth).toBe(0);
     expect(dense.lanes.map((l) => l.id)).toEqual(['r0', 'r1', 'r2', 'r3', 'r4', 'r5']);
     expect(dense.lanes.every((l) => l.kind === 'bundle')).toBe(true);
     expect(dense.counts.lanesCollapsed).toBe(6);
@@ -374,8 +374,32 @@ describe('layoutTemporalScene', () => {
     expect(reopened.counts.lanesCollapsed).toBe(5);
 
     const sparse = layoutTemporalScene(proj, optionsFor(proj, { denseLaneThreshold: 12 }));
-    expect(sparse.denseDefault).toBe(false);
+    expect(sparse.denseDepth).toBeNull();
     expect(sparse.lanes).toHaveLength(12);
+  });
+
+  it('bundles a lone orchestrator at its workstream leads, not into one bundle', () => {
+    const lanes: JourneyLane[] = [lane({ id: 'orch', start: T0, end: T0 + 900, endSource: 'session_end' })];
+    for (let l = 0; l < 3; l += 1) {
+      lanes.push(lane({ id: `lead${l}`, parentId: 'orch', depth: 1, start: T0 + 10 + l }));
+      for (let w = 0; w < 4; w += 1) {
+        lanes.push(lane({ id: `w${l}.${w}`, parentId: `lead${l}`, depth: 2, start: T0 + 20 + l * 10 + w }));
+      }
+    }
+    const proj = projection({ lanes });
+    // 16 lanes over a threshold of 10: depth 1 keeps 4 visible, depth 2 would keep 16.
+    const dense = layoutTemporalScene(proj, optionsFor(proj, { denseLaneThreshold: 10 }));
+    expect(dense.denseDepth).toBe(1);
+    expect(dense.lanes.map((l) => [l.id, l.kind])).toEqual([
+      ['orch', 'session'],
+      ['lead0', 'bundle'],
+      ['lead1', 'bundle'],
+      ['lead2', 'bundle'],
+    ]);
+    expect(dense.clusters.map((c) => c.counts.sessions)).toEqual([4, 4, 4]);
+    // Workstream zoom bundles where more than one session first delegates.
+    const workstream = layoutTemporalScene(proj, optionsFor(proj, { zoom: 'workstream' }));
+    expect(workstream.lanes.map((l) => [l.id, l.kind])).toEqual(dense.lanes.map((l) => [l.id, l.kind]));
   });
 
   it('collapses every parent at workstream zoom', () => {
@@ -668,6 +692,50 @@ describe('layoutTemporalScene', () => {
     const k = Math.min(28, Math.max(8, Math.abs(b.y - a.y) * 0.35));
     expect(path?.controls).toEqual([x - k, a.y, x + k * 0.2, a.y, x - k * 0.2, b.y, x + k, b.y]);
     expect(path).toMatchObject({ fromId: 'A', grade: 'exact', basis: spawn(A, B).basis, weight: null });
+  });
+
+  it('leaves a fork from its spawning tool-call glyph and links a same-second edit to it', () => {
+    const task = event({ id: 'msg:A:task', laneId: 'A', kind: 'tool_call', time: T0 + 540, source: 'transcript', label: 'Task' });
+    const undatedTask = event({ id: 'msg:A:undated', laneId: 'A', kind: 'tool_call', time: null, sequence: 1, source: 'transcript', label: 'Task' });
+    const edit = event({ id: 'edit:A:src/a.ts', laneId: 'A', kind: 'file_edit', time: T0 + 540.25, source: 'file_rollup', label: 'a.ts', linkedEventId: 'msg:A:task' });
+    const proj = projection({
+      lanes: [A, B, C],
+      events: [...laneEvents(A, [edit]), task, undatedTask, ...laneEvents(B), ...laneEvents(C)],
+      relations: [
+        { ...spawn(A, B), time: T0 + 540, fromEventId: 'msg:A:task' },
+        { ...spawn(A, C), time: null, fromEventId: 'msg:A:undated' },
+      ],
+    });
+    const expanded = layoutTemporalScene(proj, optionsFor(proj, { zoom: 'event', selectedLaneId: 'A' }));
+    const glyph = expanded.nodes.find((n) => n.id === 'msg:A:task');
+    const undatedGlyph = expanded.nodes.find((n) => n.id === 'msg:A:undated');
+    const b = sceneLane(expanded, 'B');
+    const c = sceneLane(expanded, 'C');
+    expect(glyph).toMatchObject({ x: timeToX(expanded.viewport, T0 + 540), xBasis: 'time' });
+    const forks = new Map(expanded.paths.filter((p) => p.kind === 'spawn').map((p) => [p.toId, p.controls]));
+    const kOf = (y0: number, y1: number) => Math.min(28, Math.max(8, Math.abs(y1 - y0) * 0.35));
+    const kb = kOf(glyph!.y, b.y);
+    expect(forks.get('B')).toEqual([glyph!.x - kb, glyph!.y, glyph!.x + kb * 0.2, glyph!.y, glyph!.x - kb * 0.2, b.y, glyph!.x + kb, b.y]);
+    // An undated tool call still anchors the fork, in the recorded-order gutter.
+    expect(undatedGlyph?.xBasis).toBe('sequence');
+    expect(forks.get('C')?.slice(0, 2)).toEqual([undatedGlyph!.x - kOf(undatedGlyph!.y, c.y), undatedGlyph!.y]);
+    const editNode = expanded.nodes.find((n) => n.id === 'edit:A:src/a.ts');
+    expect(expanded.paths.find((p) => p.kind === 'edit_link')).toMatchObject({
+      fromId: 'edit:A:src/a.ts',
+      toId: 'msg:A:task',
+      grade: 'exact',
+      controls: [editNode!.x, editNode!.y, glyph!.x, glyph!.y],
+    });
+
+    // Folded transcript: the dated fork falls back to its recorded time on the
+    // parent row, the undated one has no x at all, and the edit links nothing.
+    const folded = layoutTemporalScene(proj, optionsFor(proj));
+    const a = sceneLane(folded, 'A');
+    const x = timeToX(folded.viewport, T0 + 540);
+    expect(folded.paths.filter((p) => p.kind === 'spawn').map((p) => [p.toId, p.controls[0], p.controls[1]])).toEqual([
+      ['B', x - kOf(a.y, sceneLane(folded, 'B').y), a.y],
+    ]);
+    expect(folded.paths.some((p) => p.kind === 'edit_link')).toBe(false);
   });
 
   it('places intervals on their lane rows, clamped to the window', () => {

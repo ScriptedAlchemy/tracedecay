@@ -9,7 +9,9 @@ use tracedecay_store::{
 };
 
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_session_temporal_store::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
+use tracedecay_session_temporal_store::{
+    SessionRefreshRecoveryV1, SessionRefreshRestartStateV1, SessionTemporalAccess,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub struct SessionTemporalRefreshPolicy {
@@ -109,7 +111,7 @@ impl SessionTemporalRefreshProjector for CanonicalSessionTemporalProjector {
         recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         Box::pin(async move {
-            match database
+            match SessionTemporalAccess::new(&**database)
                 .materialize_session_temporal_refresh_batch_result(&recovery)
                 .await
             {

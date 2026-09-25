@@ -13,11 +13,11 @@ use tracedecay_mcp::server::{
 };
 
 struct TestLease {
-    revoked: tracedecay_session_memory::context::CancellationToken,
+    revoked: tracedecay_runtime_core::cancellation::CancellationToken,
 }
 
 impl McpResponseLease for TestLease {
-    fn revoked(&self) -> &tracedecay_session_memory::context::CancellationToken {
+    fn revoked(&self) -> &tracedecay_runtime_core::cancellation::CancellationToken {
         &self.revoked
     }
 }
@@ -37,10 +37,6 @@ impl McpConnectionState for TestConnection {
         Self {
             scope: self.scope.clone(),
         }
-    }
-
-    fn fork_for_connection_owned_read(&self) -> Self {
-        self.fork_for_independent_read()
     }
 
     fn take_selected_response_lease(&mut self) -> Option<Self::ResponseLease> {
@@ -78,16 +74,12 @@ impl McpConnectionContext for TestContext {
         true
     }
 
-    fn tool_supports_live_cancellation(&self, _tool_name: &str) -> bool {
-        false
-    }
-
     fn dispatch<'a>(
         &'a self,
         request: McpDispatchRequest<'a>,
         _timings_enabled: bool,
         _connection: &'a mut Self::Connection,
-        _cancellation: tracedecay_session_memory::context::CancellationToken,
+        _cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
     ) -> Pin<Box<dyn Future<Output = Option<JsonRpcResponse>> + Send + 'a>> {
         Box::pin(async move {
             let id = request.cloned_id()?;
@@ -115,10 +107,6 @@ impl McpConnectionContext for TestContext {
         &self.cancellation_registered
     }
 
-    fn take_pending_notifications(&self) -> Vec<Value> {
-        Vec::new()
-    }
-
     fn run_in_connection_admission<'a, T, F>(
         &'a self,
         future: F,
@@ -128,10 +116,6 @@ impl McpConnectionContext for TestContext {
         F: Future<Output = T> + Send + 'a,
     {
         Box::pin(future)
-    }
-
-    fn shutdown(self: Arc<Self>) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        Box::pin(async {})
     }
 }
 

@@ -247,7 +247,7 @@ impl tracedecay_store::TranscriptStore for CountingStore {
 #[tokio::test]
 async fn physical_transcript_locations_do_not_replace_opaque_checkpoint_identity() {
     let store = CountingStore::default();
-    let source = crate::runtime::codex::CodexSource::with_home(Path::new("fixture-home"));
+    let source = crate::runtime::hosts::codex::CodexSource::with_home(Path::new("fixture-home"));
     let paths = vec![PathBuf::from("archived-rollout.jsonl")];
     #[cfg(unix)]
     let paths = {

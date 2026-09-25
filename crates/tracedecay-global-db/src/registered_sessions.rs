@@ -208,7 +208,7 @@ mod tests {
         );
     }
 
-    async fn insert_interleaved_session_messages(database: &RegisteredGlobalDb, rows: i64) {
+    async fn insert_interleaved_messages(database: &RegisteredGlobalDb, rows: i64) {
         let final_value = rows - 1;
         let transaction = database.begin_write_transaction().await.unwrap();
         transaction
@@ -218,9 +218,10 @@ mod tests {
                     UNION ALL
                     SELECT value + 1 FROM rows WHERE value < {final_value}
                  )
-                 INSERT INTO session_messages(
-                    provider, message_id, session_id, role, timestamp, ordinal, text,
-                    kind, model, tool_names, source_path, source_offset, metadata_json
+                 INSERT INTO lcm_raw_messages(
+                    provider, message_id, session_id, role, timestamp, ordinal, content,
+                    kind, model, tool_names, source_path, source_offset, metadata_json,
+                    content_hash, storage_kind
                  )
                  SELECT
                     'claude',
@@ -229,7 +230,8 @@ mod tests {
                     'assistant',
                     1700000000 + ({final_value} - value / 8),
                     CASE WHEN value % 2 = 0 THEN value / 4 ELSE value / 2 END,
-                    'payload', NULL, NULL, printf('tool-%04d', {final_value} - value), NULL, NULL, NULL
+                    'payload', NULL, NULL, printf('tool-%04d', {final_value} - value), NULL, NULL, NULL,
+                    'hash', 'inline'
                  FROM rows;"
             ))
             .await
@@ -382,7 +384,7 @@ mod tests {
                 .await
         );
 
-        insert_interleaved_session_messages(database, 2_048).await;
+        insert_interleaved_messages(database, 2_048).await;
 
         let activities = database
             .session_messages_after("claude", "target", 1_700_000_000, 512)
@@ -413,7 +415,7 @@ mod tests {
             ],
         )
         .await;
-        assert_scoped_index_plan(&activity_plan, "idx_session_messages_session_activity_v2");
+        assert_scoped_index_plan(&activity_plan, "idx_lcm_raw_session_activity");
         // The index orders the scan; `metadata_json` is fetched from the table
         // for the bounded page rather than duplicated into the index.
         assert!(

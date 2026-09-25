@@ -78,7 +78,7 @@ function TableGrowthFleetCoverage({ coverage }: { coverage: DashboardCoverageV1 
       aria-label="Table growth coverage across all stores"
       data-table-growth-coverage={coverage.completeness}
     >
-      <p className="flex flex-wrap items-center gap-1.5 text-2xs">
+      <p className="flex flex-wrap items-center gap-1.5 text-body">
         <span
           aria-hidden
           className={`size-1.5 shrink-0 rounded-full ${dimensionDotClass(
@@ -96,7 +96,7 @@ function TableGrowthFleetCoverage({ coverage }: { coverage: DashboardCoverageV1 
           <p className="mt-1.5 text-3xs font-medium uppercase tracking-wide text-text-muted">
             Stores without a complete per-table comparison
           </p>
-          <ul className="mt-1 space-y-1 text-2xs text-text-muted">
+          <ul className="mt-1 space-y-1 text-body text-text-muted">
             {coverage.omission_reasons.map((reason) => (
               <li key={reason}>{reason}</li>
             ))}
@@ -125,7 +125,7 @@ function StoreCard({
       <div className="flex flex-col gap-2">
         <div className="flex flex-wrap items-center gap-2">
           <StateChip kind={readKindToState(entry.read.kind)} />
-          <span className="text-2xs text-text-muted" data-store-roles={entry.roles.join(',')}>
+          <span className="text-body text-text-muted" data-store-roles={entry.roles.join(',')}>
             {storeRolesLabel(entry.roles)}
           </span>
         </div>
@@ -145,7 +145,7 @@ function StoreCard({
               </dd>
             </dl>
             {sampled ? null : (
-              <p className="text-2xs text-text-muted">
+              <p className="text-body text-text-muted">
                 total size only · this store reported no page-level sample, so free pages are
                 unmeasured rather than zero
               </p>
@@ -163,7 +163,7 @@ function StoreCard({
           threshold={tableGrowthThreshold}
           store={entry.store}
         />
-        <p className="truncate font-mono text-2xs text-text-muted" title={entry.path}>
+        <p className="truncate font-mono text-sm text-text-muted" title={entry.path}>
           {entry.path}
         </p>
       </div>
@@ -191,7 +191,7 @@ function TableGrowthPanel({
       // growth" entries would name nothing.
       aria-label={`Per-table growth · ${store}`}
     >
-      <div className="flex items-center gap-1.5 text-2xs">
+      <div className="flex items-center gap-1.5 text-body">
         <span
           aria-hidden
           className={`size-1.5 shrink-0 rounded-full ${dimensionDotClass(presentation.tone)}`}
@@ -205,7 +205,7 @@ function TableGrowthPanel({
           {growth.significant_samples.map((sample) => (
             <li
               key={`${sample.table}:${sample.previous_observed_at}:${sample.current_observed_at}`}
-              className="rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 p-2 text-2xs"
+              className="rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 p-2 text-body"
               data-table-growth-sample={sample.table}
             >
               <p className="flex flex-wrap items-baseline justify-between gap-2">
@@ -217,7 +217,7 @@ function TableGrowthPanel({
               <p className="mt-1 text-text-muted tabular">
                 {formatBytes(sample.previous_bytes)} → {formatBytes(sample.current_bytes)}
               </p>
-              <p className="mt-1 text-3xs text-text-muted">
+              <p className="mt-1 text-sm text-text-muted">
                 {formatMicrosUtc(sample.previous_observed_at)} →{' '}
                 {formatMicrosUtc(sample.current_observed_at)}
               </p>
@@ -231,7 +231,7 @@ function TableGrowthPanel({
           <p className="text-3xs font-medium uppercase tracking-wide text-text-muted">
             Omitted from significant list
           </p>
-          <ul className="mt-1 space-y-1 text-2xs text-text-muted">
+          <ul className="mt-1 space-y-1 text-body text-text-muted">
             {growth.omissions.map((omission) => {
               const omitted = tableGrowthOmissionPresentation(omission);
               return (
@@ -255,19 +255,19 @@ function TableGrowthPanel({
           whose table coverage is partial. The rows above format the structured
           byte evidence; these sentences say why each table was left out. */}
       {presentation.notes.length > 0 ? (
-        <ul className="mt-2 space-y-1 text-2xs text-text-muted">
+        <ul className="mt-2 space-y-1 text-body text-text-muted">
           {presentation.notes.map((note) => (
             <li key={note}>{note}</li>
           ))}
         </ul>
       ) : null}
 
-      <p className="mt-2 text-3xs text-text-muted">
+      <p className="mt-2 text-sm text-text-muted">
         Informational threshold · {formatBytes(threshold.absolute_bytes)} absolute, or{' '}
         {formatBytes(threshold.relative_floor_bytes)} and {threshold.relative_percent}% of previous
         size
       </p>
-      <p className="mt-1 text-3xs text-text-muted">
+      <p className="mt-1 text-sm text-text-muted">
         Coverage · this store · {growth.coverage.examined ?? 'unknown'} of{' '}
         {growth.coverage.denominator ?? 'unknown'} {growth.coverage.unit ?? 'reads'} compared
       </p>
@@ -288,7 +288,7 @@ function DimensionRow({
 }) {
   return (
     <div
-      className="rounded-[var(--radius-chip)] bg-surface-2 px-2.5 py-2 text-2xs"
+      className="rounded-[var(--radius-chip)] bg-surface-2 px-2.5 py-2 text-body"
       data-dimension={label.toLowerCase()}
       data-dimension-state={presentation.state}
       data-dimension-tone={presentation.tone}
@@ -329,7 +329,7 @@ function DimensionSummary({ presentation }: { presentation: DimensionPresentatio
 
 export function ReadModelNotes({ notes }: { notes: string[] }) {
   return (
-    <p className="border-t border-edge-subtle px-4 py-2 text-2xs text-text-muted">
+    <p className="border-t border-edge-subtle px-4 py-2 text-body text-text-muted">
       {notes.join(' · ')}
     </p>
   );

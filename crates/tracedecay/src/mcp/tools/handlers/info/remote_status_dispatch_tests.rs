@@ -14,13 +14,13 @@ use tracedecay_contracts::remote::status::{
 use tracedecay_contracts::{DoctorCoverageCompletenessV1, RemoteListenerReadV1};
 use tracedecay_domain::{CurrentRemoteAuthorityStateV1, UtcMicros};
 
-use crate::config::lock_user_data_dir_test_env;
 use crate::mcp::tools::handlers::dispatch_test_support::SelectorEnv;
 use crate::mcp::tools::handlers::{
     ToolCallRegistryOptions, handle_tool_call_with_registry_options,
 };
-use crate::project::TraceDecay;
 use tracedecay_mcp::ToolResult;
+use tracedecay_project::config::lock_user_data_dir_test_env;
+use tracedecay_project::project::TraceDecay;
 
 fn available_authority() -> CurrentRemoteAuthorityStateV1 {
     serde_json::from_value(json!({

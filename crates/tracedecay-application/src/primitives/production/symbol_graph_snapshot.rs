@@ -8,11 +8,12 @@ use tracedecay_domain::{
     CommitId, ManifestDigest, RetrievalGrainV1, SessionId, SignedCursorKeyRefV1, TemporalModeV1,
     UtcMicros, canonical_sha256,
 };
-use tracedecay_temporal_query::ports::{
-    BindingDigest, KernelVersions, TemporalExecutionSnapshot, TemporalSnapshotRequest,
-    TemporalWatermarks,
-};
+use tracedecay_temporal_query::execution::BindingDigest;
+use tracedecay_temporal_query::ports::TemporalSnapshotRequest;
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+use tracedecay_temporal_query::snapshot::{
+    KernelVersions, TemporalExecutionSnapshot, TemporalWatermarks,
+};
 
 use super::super::concrete::{SymbolGraphCursorSnapshot, SymbolGraphCursorSnapshotAuthority};
 use crate::lsp_runtime::LspCodeIndexProjectionIdentityPort;

@@ -78,7 +78,7 @@ function EvidenceResult({ value }: { value: WorkEvidenceRetrievalV1 }) {
       {sessions.map((source) => (
         <section
           key={`${source.attempt.run_id}:${source.attempt.attempt_id}`}
-          className="mt-2 rounded-sm border border-edge bg-surface-2 p-2"
+          className="mt-2 rounded-[var(--radius-panel)] border border-edge-subtle bg-surface-2 p-2"
           aria-label={`Session evidence ${source.attempt.attempt_id}`}
         >
           <h4 className="text-2xs text-text-primary">{qualifiedSession(source)}</h4>
@@ -156,7 +156,7 @@ export function WorkEvidencePanel({
         <label className="grid gap-1 text-3xs text-text-muted">
           Evidence time
           <select
-            className="min-h-[var(--touch-target-min)] rounded-sm border border-edge bg-surface-2 px-2 text-2xs text-text-primary"
+            className="min-h-[var(--touch-target-min)] rounded-[var(--radius-panel)] border border-edge-subtle bg-surface-2 px-2 text-2xs text-text-primary"
             value={draftKind}
             onChange={(event) => {
               setDraftKind(event.target.value as WorkEvidenceTemporalKind);
@@ -175,7 +175,7 @@ export function WorkEvidencePanel({
             <input
               type="datetime-local"
               step="0.001"
-              className="min-h-[var(--touch-target-min)] rounded-sm border border-edge bg-surface-2 px-2 text-2xs text-text-primary"
+              className="min-h-[var(--touch-target-min)] rounded-[var(--radius-panel)] border border-edge-subtle bg-surface-2 px-2 text-2xs text-text-primary"
               value={cutoffUtc}
               onChange={(event) => {
                 setCutoffUtc(event.target.value);
@@ -194,7 +194,7 @@ export function WorkEvidencePanel({
         )}
         <button
           type="submit"
-          className="min-h-[var(--touch-target-min)] self-end rounded-sm border border-edge px-2 py-1 text-2xs text-text-primary hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+          className="min-h-[var(--touch-target-min)] self-end rounded-[var(--radius-panel)] border border-edge-subtle px-2 py-1 text-2xs text-text-primary hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
         >
           Retrieve evidence
         </button>
@@ -214,7 +214,7 @@ export function WorkEvidencePanel({
         <button
           key={`${next.kind}:${index}`}
           type="button"
-          className="mt-2 min-h-[44px] rounded-sm border border-edge px-2 py-1 text-2xs text-text-primary hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+          className="mt-2 min-h-[44px] rounded-[var(--radius-panel)] border border-edge-subtle px-2 py-1 text-2xs text-text-primary hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
           onClick={() => setContinuation(next)}
         >
           Continue {next.kind === 'task_session' ? 'provider session' : 'evidence anchor'}
@@ -223,7 +223,7 @@ export function WorkEvidencePanel({
       {continuation === null ? null : (
         <button
           type="button"
-          className="ml-2 mt-2 min-h-[44px] rounded-sm border border-edge px-2 py-1 text-2xs text-text-secondary hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+          className="ml-2 mt-2 min-h-[44px] rounded-[var(--radius-panel)] border border-edge-subtle px-2 py-1 text-2xs text-text-secondary hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
           onClick={() => setContinuation(null)}
         >
           Return to task evidence root

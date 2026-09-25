@@ -102,7 +102,7 @@ impl RuntimeLspSession {
             return LspDeliverySettlementAdmissionV1::RecorderUnavailable;
         };
         let settlement = tracedecay_domain::DeliverySettlementV1 {
-            settled_at: current_micros().max(attempt.attempted_at),
+            settled_at: now_micros().max(attempt.attempted_at),
             attempt,
             outcome,
             drop_reason,

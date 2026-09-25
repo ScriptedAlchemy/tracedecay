@@ -7,20 +7,18 @@ use tracedecay_api::{
     CanonicalInvocationResult, HttpApplicationInvocationFuture, HttpApplicationRequest,
 };
 use tracedecay_contracts::catalog_composition::ApplicationCatalogComposition;
-use tracedecay_contracts::feedback::observations::{FeedbackOutcomeV1, FeedbackSourceEventV1};
-use tracedecay_contracts::retrieval::PrimitiveRequest;
 use tracedecay_contracts::{
-    APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, ApplicationEnvelope,
-    ApplicationProblem, ApplicationProblemEnvelope, CancellationSignal, Deadline, PageRequest,
-    RequestId, ResultContractRef, SafeDiagnostic,
+    APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, ApplicationProblem,
+    ApplicationProblemEnvelope, CancellationSignal, Deadline, PageRequest, RequestId,
+    ResultContractRef, SafeDiagnostic,
 };
 use tracedecay_daemon_protocol::{
     ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest,
-    BindingResolution, CatalogBindingResolver, DaemonInvocationError, DispatchInput,
-    DispatchedInvocation, InvocationCancellationPolicy, InvocationControls, RequestedOutputFormat,
-    ScopeSelector, parse_application_surface_request, resolve_dispatch,
+    BindingResolution, CatalogBindingResolver, DispatchInput, DispatchedInvocation,
+    InvocationControls, RequestedOutputFormat, ScopeSelector, parse_application_surface_request,
+    resolve_dispatch,
 };
-use tracedecay_domain::{UtcMicros, canonical_sha256};
+use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, BindingSurface, CatalogSnapshotV1, ProfileId, SurfaceOperationName,
 };
@@ -29,20 +27,14 @@ use super::catalog::{
     application_negotiated_features, application_surface_catalog_ref, resolve_application_binding,
     validate_current_application_binding,
 };
-use super::configuration_wire::{
-    configuration_invocation_payload, is_configuration_operation, validate_application_outcome,
-};
-use super::feedback_observation::{
-    feedback_delivery_route, feedback_surface_is_observable, feedback_surface_operation,
-    observe_surface_argument_rejection,
-};
+use super::configuration_wire::validate_application_outcome;
+use super::feedback_observation::observe_surface_argument_rejection;
 use super::problems::{
-    current_micros, http_adapter_problem, invocation_contract_problem, invocation_problem,
-    map_dispatch_error,
+    current_micros, http_adapter_problem, invocation_contract_problem, map_dispatch_error,
 };
 use super::{
     APPLICATION_PROTOCOL_REVISION, CatalogBoundHttpApplicationRequest,
-    HttpApplicationCatalogDispatcher, retained,
+    HttpApplicationCatalogDispatcher,
 };
 
 pub fn application_surface_dispatch_input_with_controls(
@@ -90,7 +82,6 @@ pub async fn execute_application_surface(
     let binding_id = dispatched.invocation.binding_id.clone();
     let request_id = dispatched.request_id;
     let surface = dispatched.surface;
-    let delivery_route = feedback_delivery_route(dispatched.surface);
     let (invocation, requested_format) = dispatched.invocation.into_application_invocation();
     let observed_at = current_micros()?;
     let (
@@ -99,7 +90,6 @@ pub async fn execute_application_surface(
         terminal_states,
         receipt_contract,
         reconciliation_contract,
-        catalog_effect,
     ) = hotpath::measure_block!("application_surface.execute.catalog", {
         let catalog = application_surface_catalog_ref()?;
         let capability = catalog
@@ -114,7 +104,6 @@ pub async fn execute_application_surface(
             capability.terminal_states().clone(),
             capability.receipt(),
             capability.reconciliation(),
-            capability.effect().is_effect(),
         )
     });
     let maximum_deadline_at = UtcMicros(observed_at.0.saturating_add(deadline_ceiling_micros));
@@ -125,282 +114,7 @@ pub async fn execute_application_surface(
         .filter(|expires_at| *expires_at <= maximum_deadline_at)
         .unwrap_or(maximum_deadline_at);
     let deadline = Deadline::new(effective_deadline_at)?;
-    let cancellation = invocation.cancellation;
-    let cancellation_context = cancellation.context();
-    let resolved_scope = match &invocation.scope {
-        tracedecay_contracts::InvocationTarget::CurrentProject => None,
-        tracedecay_contracts::InvocationTarget::Resolved(scope) => Some(scope.clone()),
-    };
-    let request_deadline = deadline.clone();
-    let migrated_payload = match (&operation, &invocation.request) {
-        (
-            ApplicationSurfaceOperation::ConfigurationGet
-            | ApplicationSurfaceOperation::ConfigurationSet
-            | ApplicationSurfaceOperation::ConfigurationUnset
-            | ApplicationSurfaceOperation::ConfigurationBatch,
-            ApplicationSurfaceRequest::Configuration(request),
-        ) => Some(configuration_invocation_payload(request)?),
-        (
-            ApplicationSurfaceOperation::FeedbackGet,
-            ApplicationSurfaceRequest::Feedback(request),
-        ) => Some(
-            serde_json::to_value(request)
-                .map_err(ApplicationSurfaceAdapterError::invalid_request)?,
-        ),
-        _ => None,
-    };
-    if let Some(payload) = migrated_payload {
-        let Some(executor) = executor else {
-            return Ok(ApplicationSurfaceInvocationResult {
-                operation,
-                binding_id,
-                result: Err(ApplicationProblemEnvelope::new(
-                    result_contract,
-                    request_id,
-                    ApplicationProblem::unavailable(SafeDiagnostic::new(
-                        "application.transport.unavailable",
-                        "The daemon application transport is unavailable",
-                    )?),
-                )?),
-                requested_format,
-            });
-        };
-        let binding = tracedecay_contracts::ApplicationInvocationBinding::new(
-            binding_id.clone(),
-            surface,
-            SurfaceOperationName::new(operation.name_for_surface(surface))?,
-            result_contract.clone(),
-            invocation.page,
-        )?;
-        let context = tracedecay_contracts::ApplicationInvocationContext::new(
-            request_id.clone(),
-            invocation.scope,
-            deadline,
-            cancellation,
-        )?;
-        let request = tracedecay_contracts::ApplicationRequest::surface(binding, payload)?;
-        let invocation = tracedecay_contracts::ApplicationInvocation::new(context, request)?;
-        let result = match hotpath::future!(
-            tracedecay_contracts::ApplicationInvocationExecutor::invoke(executor, invocation),
-            label = "application_surface.execute.invoke"
-        )
-        .await
-        {
-            Ok(response) => match response
-                .envelope()
-                .filter(|envelope| {
-                    validate_application_outcome(
-                        operation,
-                        &envelope.outcome,
-                        &cancellation_contract,
-                        &terminal_states,
-                        receipt_contract,
-                        reconciliation_contract,
-                    )
-                })
-                .cloned()
-            {
-                Some(envelope) => Ok(envelope),
-                None => Err(ApplicationProblemEnvelope::new(
-                    result_contract.clone(),
-                    request_id.clone(),
-                    ApplicationProblem::unavailable(SafeDiagnostic {
-                        code: "application.surface.invalid_response".to_owned(),
-                        message: "The daemon returned an invalid application response".to_owned(),
-                    }),
-                )?),
-            },
-            // Same dispatch-failure contract as the non-migrated arm below: an
-            // unreachable daemon never saw the request, so it is an error, not
-            // a retryable problem envelope.
-            Err(tracedecay_contracts::InvocationError::Unreachable {
-                reason_code,
-                detail,
-            }) => {
-                return Err(ApplicationSurfaceAdapterError::DaemonUnreachable {
-                    reason_code,
-                    detail,
-                });
-            }
-            Err(error) => Err(ApplicationProblemEnvelope::new(
-                result_contract,
-                request_id,
-                invocation_contract_problem(error)?,
-            )?),
-        };
-        return Ok(ApplicationSurfaceInvocationResult {
-            operation,
-            binding_id,
-            result,
-            requested_format,
-        });
-    }
-    let request = hotpath::measure_block!("application_surface.execute.request_build", {
-        match invocation.request {
-            ApplicationSurfaceRequest::GitRead(request) => {
-                tracedecay_daemon_protocol::DaemonInvocationRequest::git_read(
-                    request_id.as_str(),
-                    operation,
-                    request,
-                    observed_at,
-                    deadline,
-                    cancellation_context,
-                )
-            }
-            ApplicationSurfaceRequest::GitPreview(request) => {
-                tracedecay_daemon_protocol::DaemonInvocationRequest::git_preview(
-                    request_id.as_str(),
-                    request,
-                    observed_at,
-                    deadline,
-                    cancellation_context,
-                )
-            }
-            ApplicationSurfaceRequest::GitApply(request) => {
-                tracedecay_daemon_protocol::DaemonInvocationRequest::git_apply(
-                    request_id.as_str(),
-                    request,
-                    observed_at,
-                    deadline,
-                    cancellation_context,
-                )
-            }
-            ApplicationSurfaceRequest::GitHubStackSignalExpand(request) => {
-                tracedecay_daemon_protocol::DaemonInvocationRequest::github_stack_signal_expand(
-                    request_id.as_str(),
-                    request,
-                    observed_at,
-                    deadline,
-                    cancellation_context,
-                )
-            }
-            ApplicationSurfaceRequest::NativeIntegration(request) => {
-                tracedecay_daemon_protocol::DaemonInvocationRequest::native_integration(
-                    request_id.as_str(),
-                    operation,
-                    request,
-                    observed_at,
-                    deadline,
-                    cancellation_context,
-                )
-            }
-            ApplicationSurfaceRequest::Feedback(request) => {
-                tracedecay_daemon_protocol::DaemonInvocationRequest::feedback(
-                    request_id.as_str(),
-                    operation,
-                    request.request_handle,
-                    observed_at,
-                    deadline,
-                    cancellation_context,
-                )
-            }
-            ApplicationSurfaceRequest::FeedbackAdvisoryCycle(request) => {
-                tracedecay_daemon_protocol::DaemonInvocationRequest::feedback_advisory_cycle(
-                    request_id.as_str(),
-                    request.document_uri,
-                    observed_at,
-                    deadline,
-                    cancellation_context,
-                )
-            }
-            ApplicationSurfaceRequest::FeedbackProximity(request) => {
-                tracedecay_daemon_protocol::DaemonInvocationRequest::feedback_proximity(
-                    request_id.as_str(),
-                    request,
-                    deadline,
-                    cancellation_context,
-                )
-            }
-            ApplicationSurfaceRequest::TestResults(_) => {
-                tracedecay_daemon_protocol::DaemonInvocationRequest::primitive(
-                    request_id.as_str(),
-                    operation,
-                    PrimitiveRequest::RecentTestResults(invocation.page),
-                    observed_at,
-                    deadline,
-                    cancellation_context,
-                )
-            }
-            ApplicationSurfaceRequest::CallableCode(request) => {
-                tracedecay_daemon_protocol::DaemonInvocationRequest::callable_code(
-                    request_id.as_str(),
-                    operation,
-                    request,
-                    invocation.page,
-                    observed_at,
-                    deadline,
-                    cancellation_context,
-                )
-            }
-            ApplicationSurfaceRequest::PrimitiveCode(request) => {
-                tracedecay_daemon_protocol::DaemonInvocationRequest::primitive_code(
-                    request_id.as_str(),
-                    operation,
-                    request,
-                    invocation.page,
-                    observed_at,
-                    deadline,
-                    cancellation_context,
-                )
-            }
-            ApplicationSurfaceRequest::Primitive(request) => {
-                tracedecay_daemon_protocol::DaemonInvocationRequest::primitive(
-                    request_id.as_str(),
-                    operation,
-                    request,
-                    observed_at,
-                    deadline,
-                    cancellation_context,
-                )
-            }
-            ApplicationSurfaceRequest::ObservatoryRead(request) => {
-                tracedecay_daemon_protocol::DaemonInvocationRequest::observatory_read(
-                    request_id.as_str(),
-                    request,
-                    observed_at,
-                    deadline,
-                    cancellation_context,
-                )
-            }
-            ApplicationSurfaceRequest::Configuration(request) => {
-                tracedecay_daemon_protocol::DaemonInvocationRequest::configuration(
-                    request_id.as_str(),
-                    operation,
-                    request,
-                    observed_at,
-                    deadline,
-                    cancellation_context,
-                )
-            }
-            ApplicationSurfaceRequest::ContextScout(request) => {
-                tracedecay_daemon_protocol::DaemonInvocationRequest::context_scout(
-                    request_id.as_str(),
-                    operation,
-                    request,
-                    observed_at,
-                    deadline,
-                    cancellation_context,
-                )
-            }
-            ApplicationSurfaceRequest::Retained(request) => {
-                tracedecay_daemon_protocol::DaemonInvocationRequest::retained_application(
-                    request_id.as_str(),
-                    request,
-                    observed_at,
-                    deadline,
-                    cancellation_context,
-                )
-            }
-        }
-    });
-    let request = request
-        .with_resolved_scope(resolved_scope)
-        .map_err(|problem| {
-            ApplicationSurfaceAdapterError::invalid_request(format!(
-                "resolved scope was refused: {problem:?}"
-            ))
-        })?
-        .with_delivery_route(delivery_route);
+    let payload = invocation.request.into_invocation_payload()?;
     let Some(executor) = executor else {
         return Ok(ApplicationSurfaceInvocationResult {
             operation,
@@ -416,222 +130,70 @@ pub async fn execute_application_surface(
             requested_format,
         });
     };
-    let policy = if (is_configuration_operation(operation) && catalog_effect)
-        || matches!(
-            operation,
-            ApplicationSurfaceOperation::GitApply
-                | ApplicationSurfaceOperation::NativeIntegrationApprove
-                | ApplicationSurfaceOperation::NativeIntegrationApply
-                | ApplicationSurfaceOperation::NativeIntegrationCancel
-                | ApplicationSurfaceOperation::ContextScoutPause
-                | ApplicationSurfaceOperation::ContextScoutResume
-                | ApplicationSurfaceOperation::ContextScoutCancel
-                | ApplicationSurfaceOperation::ContextScoutClaim
-                | ApplicationSurfaceOperation::ContextScoutDelivery
-                | ApplicationSurfaceOperation::ContextScoutFeedback
-        ) {
-        InvocationCancellationPolicy::AuthoritativeEffect
-    } else {
-        InvocationCancellationPolicy::ReadOnly
-    };
-    let response = hotpath::future!(
-        executor.invoke_controlled(request, request_deadline, cancellation, policy),
+    let binding = tracedecay_contracts::ApplicationInvocationBinding::new(
+        binding_id.clone(),
+        surface,
+        SurfaceOperationName::new(operation.name_for_surface(surface))?,
+        result_contract.clone(),
+        invocation.page,
+    )?;
+    let context = tracedecay_contracts::ApplicationInvocationContext::new(
+        request_id.clone(),
+        invocation.scope,
+        deadline,
+        invocation.cancellation,
+    )?;
+    let request = tracedecay_contracts::ApplicationRequest::surface(binding, payload)?;
+    let invocation = tracedecay_contracts::ApplicationInvocation::new(context, request)?;
+    let result = match hotpath::future!(
+        tracedecay_contracts::ApplicationInvocationExecutor::invoke(executor, invocation),
         label = "application_surface.execute.invoke"
     )
-    .await;
-    let response = match response {
-        Ok(response) => response,
-        Err(error) => {
-            // An unreachable daemon is a dispatch failure, not an answer:
-            // wrapping it in a retryable problem envelope made every CLI
-            // surface re-dispatch (and re-pay the connect grace) until its
-            // deadline, 128 s against a dead socket, while sibling
-            // compatibility tools failed typed in one grace. The feedback
-            // observation below rides the same dead transport, so it is
-            // skipped too: it would pay one more full connect grace to
-            // observe that the daemon it reports to is down.
-            if let DaemonInvocationError::Unreachable {
-                reason_code,
-                detail,
-            } = error
-            {
-                return Err(ApplicationSurfaceAdapterError::DaemonUnreachable {
-                    reason_code,
-                    detail,
-                });
-            }
-            if feedback_surface_is_observable(operation)
-                && let Ok(subject_digest) = canonical_sha256(&(
-                    "tracedecay.feedback.transport-observation.v1",
-                    request_id.as_str(),
-                    operation.as_str(),
-                    delivery_route,
-                ))
-                && let Ok(observed_at) = current_micros()
-            {
-                let event = match &error {
-                    DaemonInvocationError::Cancelled { .. } => {
-                        FeedbackSourceEventV1::Cancellation {
-                            operation: feedback_surface_operation(operation),
-                            outcome: FeedbackOutcomeV1::Cancelled,
-                        }
-                    }
-                    DaemonInvocationError::TimedOut { .. } => FeedbackSourceEventV1::Cancellation {
-                        operation: feedback_surface_operation(operation),
-                        outcome: FeedbackOutcomeV1::TimedOut,
-                    },
-                    DaemonInvocationError::Unavailable
-                    | DaemonInvocationError::Unreachable { .. } => {
-                        FeedbackSourceEventV1::Delivery {
-                            operation: feedback_surface_operation(operation),
-                            route: delivery_route,
-                            outcome: FeedbackOutcomeV1::Unavailable,
-                            item_count: 0,
-                            duration_micros: None,
-                        }
-                    }
-                };
-                let _ = executor
-                    .observe_feedback(subject_digest, observed_at, event)
-                    .await;
-            }
-            return Ok(ApplicationSurfaceInvocationResult {
-                operation,
-                binding_id,
-                result: Err(ApplicationProblemEnvelope::new(
-                    result_contract,
-                    request_id,
-                    error.into_application_problem(),
-                )?),
-                requested_format,
-            });
-        }
-    };
-    let result = hotpath::measure_block!("application_surface.execute.assemble", {
-        match response.outcome {
-            tracedecay_daemon_protocol::DaemonInvocationOutcome::GitRead { scope, result } => {
-                Ok(ApplicationEnvelope::evidence(
-                    result_contract.clone(),
-                    request_id.clone(),
-                    scope,
-                    result.into_application(),
-                ))
-            }
-            tracedecay_daemon_protocol::DaemonInvocationOutcome::GitPreview { scope, preview } => {
-                Ok(ApplicationEnvelope::preview(
-                    result_contract.clone(),
-                    request_id.clone(),
-                    scope,
-                    preview.into_application_result()?,
-                ))
-            }
-            tracedecay_daemon_protocol::DaemonInvocationOutcome::GitApply { scope, effect } => {
-                Ok(ApplicationEnvelope::effect(
-                    result_contract.clone(),
-                    request_id.clone(),
-                    scope,
-                    effect.into_application_result()?,
-                ))
-            }
-            tracedecay_daemon_protocol::DaemonInvocationOutcome::Feedback { scope, result }
-            | tracedecay_daemon_protocol::DaemonInvocationOutcome::Primitive { scope, result }
-            | tracedecay_daemon_protocol::DaemonInvocationOutcome::ObservatoryRead {
-                scope,
-                result,
-            } => Ok(ApplicationEnvelope::evidence(
-                result_contract.clone(),
-                request_id.clone(),
-                scope,
-                result.into_application(),
-            )),
-            tracedecay_daemon_protocol::DaemonInvocationOutcome::CallableCode { scope, result } => {
-                Ok(ApplicationEnvelope::evidence(
-                    result_contract.clone(),
-                    request_id.clone(),
-                    scope,
-                    result.into_application(),
-                ))
-            }
-            tracedecay_daemon_protocol::DaemonInvocationOutcome::Configuration {
-                scope,
-                outcome,
-            } => {
-                if validate_application_outcome(
+    .await
+    {
+        Ok(response) => match response
+            .envelope()
+            .filter(|envelope| {
+                validate_application_outcome(
                     operation,
-                    &outcome,
+                    &envelope.outcome,
                     &cancellation_contract,
                     &terminal_states,
                     receipt_contract,
                     reconciliation_contract,
-                ) {
-                    Ok(ApplicationEnvelope {
-                        contract: result_contract.clone(),
-                        request_id: request_id.clone(),
-                        scope,
-                        outcome,
-                    })
-                } else {
-                    Err(ApplicationProblemEnvelope::new(
-                        result_contract.clone(),
-                        request_id.clone(),
-                        ApplicationProblem::unavailable(SafeDiagnostic::new(
-                            "application.surface.invalid_configuration_response",
-                            "The daemon returned a configuration result that did not match its wire contract",
-                        )?),
-                    )?)
-                }
-            }
-            tracedecay_daemon_protocol::DaemonInvocationOutcome::GitHubStackSignalExpand {
-                scope,
-                outcome,
-            }
-            | tracedecay_daemon_protocol::DaemonInvocationOutcome::NativeIntegration {
-                scope,
-                outcome,
-            }
-            | tracedecay_daemon_protocol::DaemonInvocationOutcome::ContextScout {
-                scope,
-                outcome,
-            } => Ok(ApplicationEnvelope {
-                contract: result_contract.clone(),
-                request_id: request_id.clone(),
-                scope,
-                outcome,
-            }),
-            tracedecay_daemon_protocol::DaemonInvocationOutcome::RetainedApplication {
-                scope,
-                outcome,
-            } => Ok(ApplicationEnvelope {
-                contract: result_contract.clone(),
-                request_id: request_id.clone(),
-                scope,
-                outcome: retained::outcome_value(outcome)?,
-            }),
-            tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem { problem } => {
-                Err(ApplicationProblemEnvelope::new(
-                    result_contract.clone(),
-                    request_id.clone(),
-                    problem,
-                )?)
-            }
-            tracedecay_daemon_protocol::DaemonInvocationOutcome::Problem { problem } => {
-                Err(ApplicationProblemEnvelope::new(
-                    result_contract.clone(),
-                    request_id.clone(),
-                    invocation_problem(problem)?,
-                )?)
-            }
-            _ => Err(ApplicationProblemEnvelope::new(
+                )
+            })
+            .cloned()
+        {
+            Some(envelope) => Ok(envelope),
+            None => Err(ApplicationProblemEnvelope::new(
                 result_contract.clone(),
                 request_id.clone(),
-                ApplicationProblem::unavailable(SafeDiagnostic::new(
-                    "application.surface.invalid_response",
-                    "The daemon returned an invalid application response",
-                )?),
+                ApplicationProblem::unavailable(SafeDiagnostic {
+                    code: "application.surface.invalid_response".to_owned(),
+                    message: "The daemon returned an invalid application response".to_owned(),
+                }),
             )?),
+        },
+        // An unreachable daemon never saw the request: it is a dispatch
+        // failure, not a retryable problem envelope. Wrapping it made every
+        // CLI surface re-dispatch (and re-pay the connect grace) until its
+        // deadline, 128 s against a dead socket.
+        Err(tracedecay_contracts::InvocationError::Unreachable {
+            reason_code,
+            detail,
+        }) => {
+            return Err(ApplicationSurfaceAdapterError::DaemonUnreachable {
+                reason_code,
+                detail,
+            });
         }
-    });
-
+        Err(error) => Err(ApplicationProblemEnvelope::new(
+            result_contract,
+            request_id,
+            invocation_contract_problem(error)?,
+        )?),
+    };
     Ok(ApplicationSurfaceInvocationResult {
         operation,
         binding_id,

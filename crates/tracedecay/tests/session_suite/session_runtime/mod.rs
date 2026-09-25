@@ -6,9 +6,9 @@
 
 use std::sync::Arc;
 
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_session_runtime::StoreOwnerKey;
 use tracedecay_session_runtime::session_sync::test_harness::{
     SessionTemporalRefreshPassReport, SessionTemporalRefreshWakeState,

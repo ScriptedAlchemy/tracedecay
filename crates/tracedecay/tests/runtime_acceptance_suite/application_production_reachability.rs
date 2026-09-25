@@ -14,8 +14,9 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tracedecay_contracts::retrieval::SymbolGraphScope;
 use tracedecay_contracts::{
-    ApplicationEnvelope, ApplicationOutcome, LegalAction, OpaqueCursor, OperationTermination,
-    ProblemTerminality, RequestId, ResultProjection, RetrievalOrder,
+    ApplicationEnvelope, ApplicationOutcome, CoverageCompleteness, EvidencePacket, LegalAction,
+    OpaqueCursor, OperationTermination, ProblemTerminality, RequestId, ResultProjection,
+    RetrievalOrder,
 };
 use tracedecay_daemon_protocol::{
     ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest,
@@ -27,12 +28,23 @@ use tracedecay_daemon_service::application_surface::{
     resolve_http_application_surface,
 };
 use tracedecay_mcp::tools::dispatch::resolve_mcp_application_surface;
-use tracedecay_tool_catalog::ApplicationSurfaceOperation;
+use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
-/// Every surface pins its page size to ten rows, so a query with more matches
-/// than this must cross a page boundary to answer at all.
-const SURFACE_PAGE_SIZE: usize = 10;
+/// The page size the surface serves when MCP and CLI callers, who cannot
+/// choose one, omit it: ten rows for most reads, wider for the primitive
+/// navigation reads whose typical answer is longer (`code_callers` serves
+/// 100). A query with more matches than this must cross a page boundary to
+/// answer at all.
+fn surface_page_size(operation: ApplicationSurfaceOperation) -> usize {
+    tracedecay_contracts::application_operation_default_page_size(operation) as usize
+}
+fn symbol_search_page_size() -> usize {
+    surface_page_size(ApplicationSurfaceOperation::CodeSymbolSearch)
+}
 const PROBE_SYMBOL_COUNT: usize = 24;
+/// Callers of one anchor and callees of another; sized past the 100-row
+/// callers page.
+const PROBE_RELATION_COUNT: usize = 104;
 const PROBE_TOKEN: &str = "application_pagination_probe";
 /// Called by every `*_caller_NN` probe, so its callers and references both
 /// exceed one page.
@@ -135,8 +147,8 @@ async fn production_fixture() -> ProductionFixture {
 /// inside one page.
 ///
 /// Each generated file feeds a different continuation-capable operation, and
-/// every one of them is sized past [`SURFACE_PAGE_SIZE`] so the operation is
-/// forced to mint a cursor instead of answering in one page:
+/// every one of them is sized past that operation's [`surface_page_size`] so
+/// the operation is forced to mint a cursor instead of answering in one page:
 ///
 /// * uniform free functions, symbol, signature, exact, and phrase reads;
 /// * one call sink with many callers and one caller with many callees,
@@ -167,7 +179,7 @@ fn write_pagination_probe(project: &Path) {
     // sites or prefixed names. One short file per declaration keeps the
     // generated sources privacy-safe and under the exact-lane budget.
     let mut occ_mods = String::new();
-    for index in 0..(SURFACE_PAGE_SIZE + 2) {
+    for index in 0..(surface_page_size(ApplicationSurfaceOperation::CodeExactOccurrence) + 2) {
         let name = format!("probe_occ_{index:02}.rs");
         std::fs::write(
             destination.join(&name),
@@ -288,22 +300,28 @@ fn probe_symbol_source() -> String {
 /// edges are dense in both directions from a single named anchor.
 fn probe_relation_source() -> String {
     let mut source = format!("pub fn {PROBE_SINK}(input: u32) -> u32 {{\n    input\n}}\n\n");
-    for index in 0..PROBE_SYMBOL_COUNT {
+    for index in 0..PROBE_RELATION_COUNT {
         source.push_str(&format!(
-            "pub fn {PROBE_TOKEN}_caller_{index:02}(input: u32) -> u32 {{\n    {PROBE_SINK}(input) + {index}\n}}\n\n"
+            "pub fn {PROBE_TOKEN}_caller_{index:03}(input: u32) -> u32 {{\n    {PROBE_SINK}(input) + {index}\n}}\n\n"
         ));
     }
-    for index in 0..PROBE_SYMBOL_COUNT {
+    for index in 0..PROBE_RELATION_COUNT {
         source.push_str(&format!(
-            "pub fn {PROBE_TOKEN}_leaf_{index:02}(input: u32) -> u32 {{\n    input + {index}\n}}\n\n"
+            "pub fn {PROBE_TOKEN}_leaf_{index:03}(input: u32) -> u32 {{\n    input + {index}\n}}\n\n"
         ));
     }
-    source.push_str(&format!("pub fn {PROBE_FANOUT}(input: u32) -> u32 {{\n"));
-    for index in 0..PROBE_SYMBOL_COUNT {
-        let joiner = if index == 0 { "    " } else { "        + " };
-        source.push_str(&format!("{joiner}{PROBE_TOKEN}_leaf_{index:02}(input)\n"));
+    // One call per statement: a single `a + b + ...` chain nests one level per
+    // operand and the extractor stops resolving call sites past its nesting
+    // budget, which would cap the fan-out well under the callees page.
+    source.push_str(&format!(
+        "pub fn {PROBE_FANOUT}(input: u32) -> u32 {{\n    let mut total = 0;\n"
+    ));
+    for index in 0..PROBE_RELATION_COUNT {
+        source.push_str(&format!(
+            "    total += {PROBE_TOKEN}_leaf_{index:03}(input);\n"
+        ));
     }
-    source.push_str("}\n");
+    source.push_str("    total\n}\n");
     source
 }
 
@@ -399,6 +417,13 @@ fn symbol_search_surface_request(query: &str, cursor: Option<&str>) -> Applicati
 }
 
 fn evidence_payload(result: &ApplicationSurfaceInvocationResult) -> &Value {
+    evidence_packet(result)
+        .payload
+        .as_ref()
+        .expect("evidence payload")
+}
+
+fn evidence_packet(result: &ApplicationSurfaceInvocationResult) -> &EvidencePacket<Value> {
     let envelope = result.result.as_ref().unwrap_or_else(|problem| {
         panic!(
             "{} returned {:?}: {:?}",
@@ -422,7 +447,7 @@ fn evidence_payload(result: &ApplicationSurfaceInvocationResult) -> &Value {
                 result.operation.as_str(),
                 evidence.execution.termination,
             );
-            evidence.payload.as_ref().expect("evidence payload")
+            evidence
         }
         other => panic!("expected evidence outcome, got {other:?}"),
     }
@@ -455,13 +480,16 @@ fn run_application_cli(
 ) -> Output {
     let project = fixture.project.to_string_lossy().into_owned();
     let arguments = arguments.to_string();
+    // `tracedecay tool` answers to the operation's CLI binding name, the
+    // transport spelling MCP advertises (`diagnostics`, not `diagnostics_read`);
+    // the canonical identity names it only in HTTP/SDK and rendered envelopes.
     common::tracedecay_command_with_home(fixture.home())
         .current_dir(&fixture.project)
         .args([
             "tool",
             "--project",
             project.as_str(),
-            operation.as_str(),
+            operation.name_for_surface(BindingSurface::Cli),
             "--args",
             arguments.as_str(),
             "--json",
@@ -613,7 +641,7 @@ async fn invoke_mcp_symbol_search(
 
 /// Asserts the page is the first of several and was produced by the cursor
 /// authority rather than by truncation.
-fn assert_first_page_of_many(surface: &str, payload: &Value) {
+fn assert_first_page_of_many(surface: &str, page_size: usize, payload: &Value) {
     let items = payload["items"]
         .as_array()
         .unwrap_or_else(|| panic!("{surface} symbol page items: {payload:#}"));
@@ -621,12 +649,12 @@ fn assert_first_page_of_many(surface: &str, payload: &Value) {
         .as_u64()
         .unwrap_or_else(|| panic!("{surface} symbol page total: {payload:#}"));
     assert!(
-        total > SURFACE_PAGE_SIZE as u64,
-        "{surface} probe query must exceed one page, saw {total}"
+        total > page_size as u64,
+        "{surface} probe query must exceed one page of {page_size}, saw {total}"
     );
     assert_eq!(
         items.len(),
-        SURFACE_PAGE_SIZE,
+        page_size,
         "{surface} must return a full first page"
     );
     assert!(
@@ -726,7 +754,11 @@ async fn immediate_concurrent_and_repeated_opens_publish_one_callable_owner() {
     )
     .await;
     let immediate = evidence_payload(&immediate).clone();
-    assert_first_page_of_many("immediate post-open MCP", &immediate);
+    assert_first_page_of_many(
+        "immediate post-open MCP",
+        symbol_search_page_size(),
+        &immediate,
+    );
 
     let fresh_client = || {
         let handshake = tracedecay::daemon::handshake_for_current_client(
@@ -767,7 +799,7 @@ async fn immediate_concurrent_and_repeated_opens_publish_one_callable_owner() {
         ("concurrent-d", d),
     ] {
         let payload = evidence_payload(&result);
-        assert_first_page_of_many(label, payload);
+        assert_first_page_of_many(label, symbol_search_page_size(), payload);
         assert_eq!(
             payload["items"], immediate["items"],
             "{label} must reach the same mounted owner"
@@ -941,7 +973,7 @@ async fn production_project_open_serves_a_paginated_symbol_graph_read() {
     )
     .await;
     let first = evidence_payload(&result).clone();
-    assert_first_page_of_many("MCP", &first);
+    assert_first_page_of_many("MCP", symbol_search_page_size(), &first);
 
     let cursor = first["next_cursor"]
         .as_str()
@@ -994,7 +1026,7 @@ async fn production_primitive_reads_agree_across_mcp_http_and_cli() {
     )
     .await;
     let mcp = evidence_payload(&mcp).clone();
-    assert_first_page_of_many("MCP", &mcp);
+    assert_first_page_of_many("MCP", symbol_search_page_size(), &mcp);
 
     let http = resolve_http_application_surface(
         ApplicationSurfaceOperation::CodeSymbolSearch,
@@ -1006,10 +1038,10 @@ async fn production_primitive_reads_agree_across_mcp_http_and_cli() {
     .await
     .expect("HTTP application dispatch");
     let http = evidence_payload(&http).clone();
-    assert_first_page_of_many("HTTP", &http);
+    assert_first_page_of_many("HTTP", symbol_search_page_size(), &http);
 
     let cli = cli_symbol_search_payload(&fixture, PROBE_TOKEN, None);
-    assert_first_page_of_many("CLI", &cli);
+    assert_first_page_of_many("CLI", symbol_search_page_size(), &cli);
 
     assert_eq!(mcp["items"], http["items"], "MCP and HTTP page contents");
     assert_eq!(mcp["items"], cli["items"], "MCP and CLI page contents");
@@ -1033,9 +1065,14 @@ async fn production_primitive_reads_agree_across_mcp_http_and_cli() {
 /// operation can never be quietly skipped.
 #[derive(Clone, Copy, Debug)]
 enum ContinuationExpectation {
-    /// The fixture must drive this operation past [`SURFACE_PAGE_SIZE`]. A
-    /// short page fails and says to grow the fixture.
+    /// The fixture must drive this operation past its [`surface_page_size`].
+    /// A short page fails and says to grow the fixture.
     CrossesPages,
+    /// [`CrossesPages`](Self::CrossesPages), and the fixture holds exactly this
+    /// many rows: `total` must report that count and the cursors must walk
+    /// every row once, so a lane budget can no longer pass off its admitted
+    /// prefix as the whole relation set.
+    CrossesPagesWithTotal(u64),
     /// The runtime materializes at most one row here whatever the fixture
     /// holds, so there is no continuation to mint. A page that does mint one
     /// fails, because the operation has become continuation-capable and owes
@@ -1207,7 +1244,9 @@ fn continuation_cases() -> Vec<ContinuationCase> {
                     "meta": callable_code_meta(cursor),
                 })
             },
-            expectation: ContinuationExpectation::CrossesPages,
+            expectation: ContinuationExpectation::CrossesPagesWithTotal(
+                PROBE_RELATION_COUNT as u64,
+            ),
         },
         ContinuationCase {
             operation: ApplicationSurfaceOperation::CodeCallees,
@@ -1220,7 +1259,9 @@ fn continuation_cases() -> Vec<ContinuationCase> {
                     "meta": callable_code_meta(cursor),
                 })
             },
-            expectation: ContinuationExpectation::CrossesPages,
+            expectation: ContinuationExpectation::CrossesPagesWithTotal(
+                PROBE_RELATION_COUNT as u64,
+            ),
         },
         ContinuationCase {
             operation: ApplicationSurfaceOperation::CodeFacets,
@@ -1289,6 +1330,15 @@ async fn continuation_page(
     label: &str,
     arguments: Value,
 ) -> Value {
+    evidence_payload(&continuation_result(fixture, operation, label, arguments).await).clone()
+}
+
+async fn continuation_result(
+    fixture: &ProductionFixture,
+    operation: ApplicationSurfaceOperation,
+    label: &str,
+    arguments: Value,
+) -> ApplicationSurfaceInvocationResult {
     let build_request = || {
         parse_application_surface_request(operation, arguments.clone()).unwrap_or_else(|error| {
             panic!(
@@ -1309,7 +1359,7 @@ async fn continuation_page(
         "{} must decode into a request that carries a surface cursor",
         operation.as_str()
     );
-    let result = admitted_mcp_invocation(
+    admitted_mcp_invocation(
         &fixture.client,
         operation,
         &format!(
@@ -1318,8 +1368,7 @@ async fn continuation_page(
         ),
         build_request,
     )
-    .await;
-    evidence_payload(&result).clone()
+    .await
 }
 
 /// The continuation contract holds for every operation whose surface request
@@ -1349,13 +1398,14 @@ async fn every_cursor_carrying_code_operation_mints_and_spends_a_continuation() 
 
     for case in cases {
         let surface = case.operation.as_str();
-        let first = continuation_page(
+        let first_result = continuation_result(
             &fixture,
             case.operation,
             "first",
             (case.arguments)(&anchors, None),
         )
         .await;
+        let first = evidence_payload(&first_result).clone();
         match case.expectation {
             ContinuationExpectation::BoundedToOneRow { authority } => {
                 let items = first["items"]
@@ -1374,7 +1424,8 @@ async fn every_cursor_carrying_code_operation_mints_and_spends_a_continuation() 
                 assert_truncation_agrees_with_cursor(surface, &first);
                 continue;
             }
-            ContinuationExpectation::CrossesPages => {}
+            ContinuationExpectation::CrossesPages
+            | ContinuationExpectation::CrossesPagesWithTotal(_) => {}
         }
 
         let items = first["items"]
@@ -1383,13 +1434,53 @@ async fn every_cursor_carrying_code_operation_mints_and_spends_a_continuation() 
         let total = first["total"]
             .as_u64()
             .unwrap_or_else(|| panic!("{surface} page total: {first:#}"));
+        if let ContinuationExpectation::CrossesPagesWithTotal(expected) = case.expectation {
+            assert_eq!(
+                total, expected,
+                "{surface} must report the fixture's whole relation set: {first:#}"
+            );
+            assert_eq!(
+                evidence_packet(&first_result).coverage.completeness,
+                CoverageCompleteness::Complete,
+                "{surface} coverage must read complete when every relation is counted: {first:#}"
+            );
+            let mut walked = std::collections::BTreeSet::new();
+            let mut page = first.clone();
+            loop {
+                for item in page["items"].as_array().expect("page items") {
+                    let node_id = item["symbol"]["node_id"]
+                        .as_str()
+                        .unwrap_or_else(|| panic!("{surface} relation node id: {item:#}"));
+                    assert!(
+                        walked.insert(node_id.to_owned()),
+                        "{surface} served {node_id} twice while walking its cursors"
+                    );
+                }
+                let Some(cursor) = page["next_cursor"].as_str().map(str::to_owned) else {
+                    break;
+                };
+                page = continuation_page(
+                    &fixture,
+                    case.operation,
+                    "walk",
+                    (case.arguments)(&anchors, Some(cursor.as_str())),
+                )
+                .await;
+            }
+            assert_eq!(
+                walked.len() as u64,
+                expected,
+                "{surface} cursors must walk every relation exactly once"
+            );
+        }
+        let page_size = surface_page_size(case.operation);
         assert!(
-            total > SURFACE_PAGE_SIZE as u64 && items.len() == SURFACE_PAGE_SIZE,
-            "{surface} must be driven past one page of {SURFACE_PAGE_SIZE} rows; the \
+            total > page_size as u64 && items.len() == page_size,
+            "{surface} must be driven past one page of {page_size} rows; the \
              fixture produced {total} matching rows, so grow the probe sources in \
              `write_pagination_probe` rather than accepting single-page coverage: {first:#}"
         );
-        assert_first_page_of_many(surface, &first);
+        assert_first_page_of_many(surface, page_size, &first);
 
         let cursor = first["next_cursor"]
             .as_str()

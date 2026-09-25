@@ -15,9 +15,14 @@ const NOW = 1_753_003_600_000_000;
 
 describe('latency dimensions', () => {
   it('reads the p95 the wire publishes', () => {
-    const dimensions = latencyDimensions(model([metric('operation_latency_p95', 43_250)]));
-    const p95 = dimensions.find((dimension) => dimension.id === 'latency_p95');
-    expect(p95?.reading.kind).toBe('measured');
+    const read = model([metric('operation_latency_p95', 43_250)]);
+    const p95 = latencyDimensions(read).find((dimension) => dimension.id === 'latency_p95')!;
+    expect(planDimensionPresentation(p95, budgetAnchors(read))).toMatchObject({
+      available: true,
+      figure: '43.25',
+      unit: 'ms',
+      exact: '43,250 µs',
+    });
   });
 
   it('keeps p50 and p99 unpublished rather than repeating the p95 figure', () => {
@@ -48,7 +53,6 @@ describe('latency dimensions', () => {
     for (const dimension of latencyDimensions(model([]))) {
       const presented = planDimensionPresentation(dimension, anchors);
       expect(presented.figure).toBe(NO_FIGURE);
-      expect(presented.figure).not.toBe('0');
       expect(presented.unit).toBeNull();
     }
   });

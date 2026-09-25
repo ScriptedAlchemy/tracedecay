@@ -282,7 +282,7 @@ impl ProjectIdentityAliasKind {
 /// the keys written while the path existed, so a moved project stays
 /// resolvable by its former root.
 pub(super) fn canonical_project_path(project_path: &Path) -> PathBuf {
-    tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(project_path)
+    tracedecay_runtime_core::path_safety::canonical_root_identity(project_path)
 }
 
 pub(super) fn project_path_alias_key(project_path: &Path) -> String {

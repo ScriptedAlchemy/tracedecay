@@ -10,9 +10,11 @@ use tracedecay_domain::{
     RetrievalAnchorId, RetrieverKind,
 };
 
-use super::dispatch_test_support::{SelectorEnv, verified_graph_options};
+use super::dispatch_test_support::{
+    SelectorEnv, dispatch_on_graph_authority, verified_graph_options,
+};
 use super::*;
-use crate::config::lock_user_data_dir_test_env;
+use tracedecay_project::config::lock_user_data_dir_test_env;
 
 const LEXICAL_SYMBOL_ID: &str =
     "symbol.v1.sha256:4ddd636456fccc2962006c7803bd94b2d7d732c6830993a429535e0b0ff0b688";
@@ -64,7 +66,7 @@ fn lexical_candidate() -> RankedCandidate {
     }
 }
 
-fn completed_lexical_search() -> crate::mcp::server::CodeIndexSearchOutcomeV1 {
+fn completed_lexical_search() -> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
     let candidate = lexical_candidate();
     let fallback_coverage = RetrieverKind::QUERY_FALLBACK_LANES
         .into_iter()
@@ -79,45 +81,48 @@ fn completed_lexical_search() -> crate::mcp::server::CodeIndexSearchOutcomeV1 {
     )
     .expect("canonical lexical fallback payload");
     let anchor = candidate.candidate.anchor_id.clone();
-    crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(
-        crate::mcp::server::CodeIndexSearchCompletedV1 {
+    tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(
+        tracedecay_query::code_search::CodeIndexSearchCompletedV1 {
             code_generation: "generation.search-degradation.1".to_owned(),
             ordered_candidates: vec![candidate],
             query_fallback: Arc::new(query_fallback),
             display_by_anchor: HashMap::from([(
                 anchor,
-                crate::mcp::server::CodeIndexSearchDisplayV1 {
+                tracedecay_query::code_search::CodeIndexSearchDisplayV1 {
                     name: "LexicalWidget".to_owned(),
                     qualified_name: "crate::LexicalWidget".to_owned(),
                     kind: "function".to_owned(),
                     path: "src/lib.rs".to_owned(),
                 },
             )]),
-            coverage: crate::mcp::server::CodeIndexSearchCoverageV1::warm(),
+            coverage: tracedecay_query::code_search::CodeIndexSearchCoverageV1::warm(),
             next_cursor: None,
             lexical_routes: tracedecay_query::retrieval::lexical::LexicalRouteReceiptV1 {
                 routes: vec![tracedecay_query::retrieval::lexical::LexicalRouteKindV1::Query],
                 matches_by_anchor: BTreeMap::new(),
+                anchors: Vec::new(),
             },
         },
     )
 }
 
 fn lexical_search_options(cg: &TraceDecay) -> ToolCallRegistryOptions<'_> {
-    let executor: crate::mcp::server::CodeIndexSearchExecutor =
+    let executor: tracedecay_query::code_search::CodeIndexSearchExecutor =
         Arc::new(|_| Box::pin(async { completed_lexical_search() }));
     verified_graph_options(
         cg,
         ToolCallRegistryOptions {
             code_index_search_executor: Some(executor),
-            code_index_search_authority: Some(crate::mcp::server::CodeIndexSearchAuthorityV1 {
-                principal: PrincipalId::new("principal.search-graph-independence")
-                    .expect("search principal"),
-                authorization_revision: AuthorizationRevision::new(
-                    "authorization.search-graph-independence",
-                )
-                .expect("search authorization revision"),
-            }),
+            code_index_search_authority: Some(
+                tracedecay_query::code_search::CodeIndexSearchAuthorityV1 {
+                    principal: PrincipalId::new("principal.search-graph-independence")
+                        .expect("search principal"),
+                    authorization_revision: AuthorizationRevision::new(
+                        "authorization.search-graph-independence",
+                    )
+                    .expect("search authorization revision"),
+                },
+            ),
             ..ToolCallRegistryOptions::default()
         },
     )
@@ -356,7 +361,7 @@ async fn tracedecay_context_preserves_fallback_results_while_graph_warms() {
 
     let mut options = lexical_search_options(&cg);
     options.verified_graph_query_port = None;
-    let result = handle_tool_call_with_registry_options(
+    let result = dispatch_on_graph_authority(
         &cg,
         "tracedecay_context",
         json!({
@@ -364,8 +369,6 @@ async fn tracedecay_context_preserves_fallback_results_while_graph_warms() {
             "include_memory": false,
             "format": "json",
         }),
-        None,
-        None,
         options,
     )
     .await
@@ -395,7 +398,7 @@ async fn tracedecay_context_preserves_fallback_results_while_graph_warms() {
 
     let mut markdown_options = lexical_search_options(&cg);
     markdown_options.verified_graph_query_port = None;
-    let markdown = handle_tool_call_with_registry_options(
+    let markdown = dispatch_on_graph_authority(
         &cg,
         "tracedecay_context",
         json!({
@@ -403,8 +406,6 @@ async fn tracedecay_context_preserves_fallback_results_while_graph_warms() {
             "include_memory": false,
             "format": "markdown",
         }),
-        None,
-        None,
         markdown_options,
     )
     .await
@@ -435,7 +436,7 @@ async fn tracedecay_context_waits_for_requested_code_graph_admission() {
 
     let mut options = lexical_search_options(&cg);
     options.verified_graph_query_port = Some(Arc::new(YieldingUnavailableVerifiedGraphQueryPort));
-    let result = handle_tool_call_with_registry_options(
+    let result = dispatch_on_graph_authority(
         &cg,
         "tracedecay_context",
         json!({
@@ -444,8 +445,6 @@ async fn tracedecay_context_waits_for_requested_code_graph_admission() {
             "include_memory": false,
             "format": "json",
         }),
-        None,
-        None,
         options,
     )
     .await
@@ -477,13 +476,13 @@ async fn tracedecay_context_returns_typed_pending_coverage_when_every_code_lane_
             .await
             .expect("registered cold context fixture");
 
-    let executor: crate::mcp::server::CodeIndexSearchExecutor = Arc::new(|_| {
+    let executor: tracedecay_query::code_search::CodeIndexSearchExecutor = Arc::new(|_| {
         Box::pin(async {
-            crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                crate::mcp::server::CodeIndexSearchUnavailableV1 {
+            tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Unavailable(
+                tracedecay_query::code_search::CodeIndexSearchUnavailableV1 {
                     code_generation: None,
-                    reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
-                    coverage: crate::mcp::server::CodeIndexSearchCoverageV1::unavailable(
+                    reason: tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
+                    coverage: tracedecay_query::code_search::CodeIndexSearchCoverageV1::unavailable(
                         tracedecay_query::code_search::lane_reason::GENERATION_REBUILDING,
                     ),
                 },
@@ -495,7 +494,7 @@ async fn tracedecay_context_returns_typed_pending_coverage_when_every_code_lane_
         verified_graph_query_port: None,
         ..lexical_search_options(&cg)
     };
-    let result = handle_tool_call_with_registry_options(
+    let result = dispatch_on_graph_authority(
         &cg,
         "tracedecay_context",
         json!({
@@ -503,8 +502,6 @@ async fn tracedecay_context_returns_typed_pending_coverage_when_every_code_lane_
             "include_memory": false,
             "format": "json",
         }),
-        None,
-        None,
         options,
     )
     .await
@@ -527,14 +524,15 @@ async fn tracedecay_context_returns_typed_pending_coverage_when_every_code_lane_
     cg.close();
 }
 
-fn stale_lexical_search() -> crate::mcp::server::CodeIndexSearchOutcomeV1 {
+fn stale_lexical_search() -> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
     match completed_lexical_search() {
-        crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(mut complete) => {
-            complete.coverage =
-                crate::mcp::server::CodeIndexSearchCoverageV1::stale(&complete.code_generation);
-            crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete)
+        tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(mut complete) => {
+            complete.coverage = tracedecay_query::code_search::CodeIndexSearchCoverageV1::stale(
+                &complete.code_generation,
+            );
+            tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(complete)
         }
-        other @ crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(_) => other,
+        other @ tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Unavailable(_) => other,
     }
 }
 
@@ -554,12 +552,12 @@ async fn tracedecay_context_preserves_stale_lane_coverage_markers() {
     .await
     .expect("registered stale context fixture");
 
-    let executor: crate::mcp::server::CodeIndexSearchExecutor =
+    let executor: tracedecay_query::code_search::CodeIndexSearchExecutor =
         Arc::new(|_| Box::pin(async { stale_lexical_search() }));
     let mut options = lexical_search_options(&cg);
     options.code_index_search_executor = Some(executor);
     options.verified_graph_query_port = None;
-    let result = handle_tool_call_with_registry_options(
+    let result = dispatch_on_graph_authority(
         &cg,
         "tracedecay_context",
         json!({
@@ -567,8 +565,6 @@ async fn tracedecay_context_preserves_stale_lane_coverage_markers() {
             "include_memory": false,
             "format": "json",
         }),
-        None,
-        None,
         options,
     )
     .await

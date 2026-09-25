@@ -1,10 +1,9 @@
-/// Clone-fingerprint backfill is still unfinished after exact and lexical
-/// owners are ready. That successor is not `published_text_owner_unfinished`.
+/// Only missing query owners withhold the seat.
 #[test]
-fn unfinished_clone_fingerprint_successor_is_not_text_projection_unfinished() {
+fn only_missing_query_owners_withhold_the_seat() {
     assert!(
         !super::text_projection_unfinished_withholds_seat(true),
-        "ready exact and lexical owners must still seat while the clone successor runs"
+        "ready query owners must seat"
     );
     assert!(
         super::text_projection_unfinished_withholds_seat(false),

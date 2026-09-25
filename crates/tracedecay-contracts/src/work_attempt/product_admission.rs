@@ -14,10 +14,10 @@ use crate::{
     ApplicationProblem, RequestContext, WorkGraphReadPortV1, WorkGraphReadRequestV1,
     WorkGraphReadV1, WorkProductApplicationErrorV1, WorkProductAttemptAdmissionErrorV1,
     WorkProductAttemptAdmissionOutcomeV1, WorkProductAttemptAdmissionPortV1,
-    WorkProductAttemptAdmissionV1, WorkProductBindingV1, WorkProductEventDraftV1,
-    WorkProductOwnerAuthorizationErrorV1, WorkProductOwnerAuthorizationPortV1,
-    WorkProductPortContextV1, WorkProductRevisionPinsV1, WorkProductSelectionScopeV1,
-    WorkRelationScopeV1,
+    WorkProductAttemptAdmissionV1, WorkProductAuthorizedRelationScopeV1, WorkProductBindingV1,
+    WorkProductEventDraftV1, WorkProductOwnerAuthorizationErrorV1,
+    WorkProductOwnerAuthorizationPortV1, WorkProductPortContextV1, WorkProductRevisionPinsV1,
+    WorkProductSelectionScopeV1,
 };
 
 use super::{
@@ -90,12 +90,13 @@ where
     S: WorkGraphReadPortV1 + WorkProductOwnerAuthorizationPortV1,
 {
     admit_product_attempt_request(context, binding, observed_at)?;
-    let selection =
-        WorkProductSelectionScopeV1::relations(BTreeSet::from([WorkRelationScopeV1::Repository {
+    let selection = WorkProductSelectionScopeV1::relations(BTreeSet::from([
+        WorkProductAuthorizedRelationScopeV1::Repository {
             project_id: context.scope().project_id.clone(),
             repository_id: context.scope().repository_id.clone(),
-        }]))
-        .map_err(|_| invalid_start_problem())?;
+        },
+    ]))
+    .map_err(|_| invalid_start_problem())?;
     let authorized_scope = storage
         .authorize_scope(context, &selection, observed_at)
         .map_err(owner_problem)?;

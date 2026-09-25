@@ -157,8 +157,10 @@ fn repository_revision(project_root: &Path) -> Result<Option<String>> {
     if !project_root.join(".git").try_exists()? {
         return Ok(None);
     }
-    let repository = gix::open(project_root).map_err(|error| TraceDecayError::Config {
-        message: format!("cannot open the rename repository: {error}"),
+    let repository = tracedecay_runtime_core::git_open::open(project_root).map_err(|error| {
+        TraceDecayError::Config {
+            message: format!("cannot open the rename repository: {error}"),
+        }
     })?;
     let commit = repository
         .head_commit()

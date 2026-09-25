@@ -64,6 +64,10 @@ impl AgentTaskBackend for RecordingBackend {
         self.calls.fetch_add(1, Ordering::SeqCst);
         panic!("scheduled-disabled automation must not invoke its backend")
     }
+
+    fn executable(&self) -> Option<&std::path::Path> {
+        None
+    }
 }
 
 fn scheduled_disabled_config() -> AutomationConfig {

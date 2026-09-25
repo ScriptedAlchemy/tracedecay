@@ -9,8 +9,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Shared with hook emitters so the receiver accepts the same agent keys.
-pub use tracedecay_hooks::core_events::HookAgent;
+use tracedecay_domain::HostIntegrationIdV1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookEventKind {
@@ -54,7 +53,7 @@ impl HookEventKind {
 }
 
 pub struct HookEvent {
-    pub agent: HookAgent,
+    pub agent: HostIntegrationIdV1,
     pub kind: HookEventKind,
     pub rel_paths: Vec<String>,
     pub had_command: bool,
@@ -145,13 +144,13 @@ pub enum HookEventPlan {
     AddBranchAt {
         root: PathBuf,
         branch: String,
-        agent: HookAgent,
+        agent: HostIntegrationIdV1,
     },
     SyncCurrentBranch {
         branch: String,
-        agent: HookAgent,
+        agent: HostIntegrationIdV1,
     },
-    DebouncedIncrementalSync(HookAgent),
+    DebouncedIncrementalSync(HostIntegrationIdV1),
     RecordTerminalReceipt {
         route: Option<tracedecay_hooks::core_events::HookRouteMetadata>,
         receipt: tracedecay_hooks::core_events::HookTerminalReceipt,
@@ -443,19 +442,21 @@ fn runtime_plan_from_durable(
                 .map_err(|()| DurableHookEventDecodeError::Malformed)?,
             branch: durable_bound_required_str(&branch, DURABLE_MAX_BRANCH_BYTES)
                 .map_err(|()| DurableHookEventDecodeError::Malformed)?,
-            agent: HookAgent::from_wire(&agent).ok_or(DurableHookEventDecodeError::Malformed)?,
+            agent: HostIntegrationIdV1::from_wire(&agent)
+                .ok_or(DurableHookEventDecodeError::Malformed)?,
         }),
         DurableHookEventPlan::SyncCurrentBranch { branch, agent } => {
             Ok(HookEventPlan::SyncCurrentBranch {
                 branch: durable_bound_required_str(&branch, DURABLE_MAX_BRANCH_BYTES)
                     .map_err(|()| DurableHookEventDecodeError::Malformed)?,
-                agent: HookAgent::from_wire(&agent)
+                agent: HostIntegrationIdV1::from_wire(&agent)
                     .ok_or(DurableHookEventDecodeError::Malformed)?,
             })
         }
         DurableHookEventPlan::DebouncedIncrementalSync { agent } => {
             Ok(HookEventPlan::DebouncedIncrementalSync(
-                HookAgent::from_wire(&agent).ok_or(DurableHookEventDecodeError::Malformed)?,
+                HostIntegrationIdV1::from_wire(&agent)
+                    .ok_or(DurableHookEventDecodeError::Malformed)?,
             ))
         }
         DurableHookEventPlan::RecordTerminalReceipt { route, receipt } => {
@@ -517,7 +518,7 @@ pub fn parse_hook_event(params: Option<&Value>) -> Option<HookEvent> {
         protect_hook_receipt_structural_ids(receipt).ok()?;
     }
     Some(HookEvent {
-        agent: HookAgent::from_wire(&event.agent)?,
+        agent: HostIntegrationIdV1::from_wire(&event.agent)?,
         kind: HookEventKind::from_wire(&event.event)?,
         rel_paths: safe_hook_rel_paths(&event.rel_paths),
         // Shell text is an untyped observation. Keep only a content-free
@@ -585,7 +586,7 @@ pub fn plan_hook_event(
     }
 }
 
-pub fn sync_marker_path(data_root: &Path, agent: HookAgent) -> PathBuf {
+pub fn sync_marker_path(data_root: &Path, agent: HostIntegrationIdV1) -> PathBuf {
     data_root.join(agent.sync_marker_file())
 }
 
@@ -910,9 +911,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        AddBranchAtRootAuthError, DurableHookEventDecodeError, HookAgent, HookEvent, HookEventKind,
-        HookEventPlan, authorize_add_branch_at_root, decode_durable_hook_event_plan,
-        encode_durable_hook_event_plan, parse_hook_event, plan_hook_event,
+        AddBranchAtRootAuthError, DurableHookEventDecodeError, HookEvent, HookEventKind,
+        HookEventPlan, HostIntegrationIdV1, authorize_add_branch_at_root,
+        decode_durable_hook_event_plan, encode_durable_hook_event_plan, parse_hook_event,
+        plan_hook_event,
     };
 
     fn parse_or_panic(params: &serde_json::Value) -> HookEvent {
@@ -1044,7 +1046,7 @@ mod tests {
             "planned root {root:?} should match expected root {expected_root:?}"
         );
         assert_eq!(branch, expected_branch);
-        assert_eq!(agent, HookAgent::Codex);
+        assert_eq!(agent, HostIntegrationIdV1::Codex);
     }
 
     #[test]
@@ -1074,7 +1076,7 @@ mod tests {
                 PathBuf::from("/project"),
             ),
             tracedecay_hooks::core_events::DaemonHookEvent::post_tool_use_shell(
-                HookAgent::Codex,
+                HostIntegrationIdV1::Codex,
                 PathBuf::from("/project"),
             ),
         ] {
@@ -1109,10 +1111,10 @@ mod tests {
     #[test]
     fn accepts_every_constructible_hook_agent() {
         for agent in [
-            HookAgent::Claude,
-            HookAgent::Codex,
-            HookAgent::Cursor,
-            HookAgent::Kiro,
+            HostIntegrationIdV1::Claude,
+            HostIntegrationIdV1::Codex,
+            HostIntegrationIdV1::Cursor,
+            HostIntegrationIdV1::Kiro,
         ] {
             let params = json!({
                 "agent": agent.as_wire(),
@@ -1211,13 +1213,13 @@ mod tests {
             HookEventPlan::AddBranchAt {
                 root: worktree_root,
                 branch: "feature/test".to_string(),
-                agent: HookAgent::Codex,
+                agent: HostIntegrationIdV1::Codex,
             },
             HookEventPlan::SyncCurrentBranch {
                 branch: "main".to_string(),
-                agent: HookAgent::Claude,
+                agent: HostIntegrationIdV1::Claude,
             },
-            HookEventPlan::DebouncedIncrementalSync(HookAgent::Cursor),
+            HookEventPlan::DebouncedIncrementalSync(HostIntegrationIdV1::Cursor),
             HookEventPlan::RecordTerminalReceipt {
                 route: route.clone(),
                 receipt: receipt.clone(),
@@ -1361,7 +1363,7 @@ mod tests {
             encode_durable_hook_event_plan(&HookEventPlan::AddBranchAt {
                 root: PathBuf::from("/tmp/worktree/../escape"),
                 branch: "feature".to_string(),
-                agent: HookAgent::Codex,
+                agent: HostIntegrationIdV1::Codex,
             })
             .is_err()
         );
@@ -1374,7 +1376,7 @@ mod tests {
         // The sender-side wire shape the Hermes plugin emits; production only
         // deserializes these events.
         let params = serde_json::to_value(tracedecay_hooks::core_events::DaemonHookEvent {
-            agent: HookAgent::Hermes.as_wire().to_string(),
+            agent: HostIntegrationIdV1::Hermes.as_wire().to_string(),
             event: "terminalReceipt".to_string(),
             rel_paths: Vec::new(),
             command: None,

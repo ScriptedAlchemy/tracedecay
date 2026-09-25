@@ -3,36 +3,30 @@ use std::fs;
 use serde_json::json;
 use tempfile::TempDir;
 
-use super::dispatch_test_support::{SelectorEnv, verified_graph_options};
+use super::dispatch_test_support::{
+    SelectorEnv, dispatch_on_graph_authority, verified_graph_options,
+};
 use super::*;
-use crate::config::lock_user_data_dir_test_env;
+use tracedecay_project::config::lock_user_data_dir_test_env;
 
 fn graph_handlers_that_await_query() -> &'static [&'static str] {
     &[
-        "tracedecay_callers",
-        "tracedecay_callees",
+        // Callers, callees, implementations, type hierarchy, and signature
+        // search are application-surface reads served by the daemon.
         "tracedecay_impact",
         "tracedecay_node",
         // `tracedecay_similar` / `tracedecay_redundancy` bind clone-family
         // executors, never `verified_graph_query_port`. Behavioral coverage is
         // `clone_family_tools_refuse_absent_executors_without_awaiting_graph_query`.
         "tracedecay_rename_preview",
-        "tracedecay_implementations",
-        "tracedecay_callers_for",
         "tracedecay_find_exact_symbol",
         "tracedecay_by_qualified_name",
         "tracedecay_signature",
-        "tracedecay_impls",
         "tracedecay_derives",
         "tracedecay_files",
         "tracedecay_port_status",
         "tracedecay_port_order",
-        "tracedecay_type_hierarchy",
-        "tracedecay_body",
         "tracedecay_todos",
-        "tracedecay_read",
-        "tracedecay_outline",
-        "tracedecay_signature_search",
         "tracedecay_dead_code",
         "tracedecay_circular",
         "tracedecay_hotspots",
@@ -142,15 +136,7 @@ async fn clone_family_tools_refuse_absent_executors_without_awaiting_graph_query
     ];
 
     for (tool_name, args, expected_reason, expected_detail) in cases {
-        let outcome = handle_tool_call_with_registry_options(
-            &cg,
-            tool_name,
-            args,
-            None,
-            None,
-            options.clone(),
-        )
-        .await;
+        let outcome = dispatch_on_graph_authority(&cg, tool_name, args, options.clone()).await;
         let error = outcome.expect_err(tool_name);
         let (reason_code, retryable, detail) = error
             .project_route_context()
@@ -234,12 +220,10 @@ async fn absent_query_port_fails_closed_for_every_awaiting_graph_handler() {
     let options = lower_level_ports_without_query(&cg);
     let mut seen = 0usize;
     for tool_name in graph_handlers_that_await_query() {
-        let outcome = handle_tool_call_with_registry_options(
+        let outcome = dispatch_on_graph_authority(
             &cg,
             tool_name,
             query_authority_probe_args(tool_name),
-            None,
-            None,
             options.clone(),
         )
         .await;
@@ -336,15 +320,7 @@ async fn search_and_context_report_absent_query_port_as_typed_evidence() {
                 "format": "json",
             })
         };
-        let error = handle_tool_call_with_registry_options(
-            &cg,
-            tool_name,
-            args,
-            None,
-            None,
-            options.clone(),
-        )
-        .await;
+        let error = dispatch_on_graph_authority(&cg, tool_name, args, options.clone()).await;
         match error {
             Ok(result) => {
                 let payload: serde_json::Value = serde_json::from_str(

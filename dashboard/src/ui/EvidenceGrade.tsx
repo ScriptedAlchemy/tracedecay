@@ -74,7 +74,7 @@ export function Absence({
     >
       <span className="td-legend text-text-muted">{field}</span>
       <GradeTag grade="UNAVAILABLE" />
-      <span className="min-w-0 text-text-muted">{reason}</span>
+      <span className="min-w-0 text-sm text-text-muted">{reason}</span>
     </div>
   );
 }

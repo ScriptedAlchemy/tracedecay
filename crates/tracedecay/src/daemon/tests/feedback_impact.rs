@@ -285,9 +285,14 @@ async fn publish_advisory_cycle(
 ) -> Value {
     let compiler_output = compiler_warning(project);
     let deadline = Instant::now() + Duration::from_secs(90);
+    // Only the first publication inserts. Every later pass through this loop
+    // republishes the same finding so a generation move cannot strand it, and
+    // an unchanged generation converges on the records it already holds.
+    let mut first_publication = true;
     loop {
-        match publish_compiler_warning(harness, project, &compiler_output).await {
-            CompilerPublication::Published => {}
+        match publish_compiler_warning(harness, project, &compiler_output, first_publication).await
+        {
+            CompilerPublication::Published => first_publication = false,
             CompilerPublication::StillSettling(detail) => {
                 assert!(
                     Instant::now() < deadline,
@@ -382,6 +387,7 @@ async fn publish_compiler_warning(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
     compiler_output: &str,
+    expect_insert: bool,
 ) -> CompilerPublication {
     let response = harness
         .call_tool(
@@ -407,10 +413,17 @@ async fn publish_compiler_warning(
     let status = body["published"]["status"].as_str().unwrap_or("");
     match status {
         "published" => {
+            if expect_insert {
+                assert_eq!(
+                    body["published"]["inserted"],
+                    json!(1),
+                    "one unused-variable warning must enter the diagnostic store: {body}"
+                );
+            }
             assert_eq!(
-                body["published"]["inserted"],
-                json!(1),
-                "one unused-variable warning must enter the diagnostic store: {body}"
+                body["published"]["rejected"],
+                json!([]),
+                "publication must accept the compiler warning: {body}"
             );
             let diagnostics = body["diagnostics"]
                 .as_array()

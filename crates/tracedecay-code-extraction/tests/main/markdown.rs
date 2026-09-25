@@ -5,7 +5,9 @@ use tracedecay_domain::*;
 #[test]
 fn test_markdown_header_hierarchy() {
     let source = "# Top\n\n## Section1\n\n### Deep\n\n## Section2";
-    let result = MarkdownExtractor.extract("README.md", source);
+    let result = MarkdownExtractor
+        .extract_artifact("README.md", source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     // Section1 and Section2 should be children of Top
     // Deep should be child of Section1
@@ -39,7 +41,9 @@ fn test_markdown_header_hierarchy() {
 #[test]
 fn test_markdown_skips_external_links() {
     let source = "Check [Google](https://google.com) for more.";
-    let result = MarkdownExtractor.extract("README.md", source);
+    let result = MarkdownExtractor
+        .extract_artifact("README.md", source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let uses_edges: Vec<_> = result
         .edges
@@ -55,7 +59,9 @@ fn test_markdown_skips_external_links() {
 #[test]
 fn test_markdown_skips_non_code_links() {
     let source = "See [image](docs/image.png) for diagram.";
-    let result = MarkdownExtractor.extract("README.md", source);
+    let result = MarkdownExtractor
+        .extract_artifact("README.md", source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     // .png is not a code extension, so no Uses edge
     let uses_edges: Vec<_> = result
@@ -72,7 +78,9 @@ fn test_markdown_skips_non_code_links() {
 #[test]
 fn test_markdown_handles_empty_file() {
     let source = "";
-    let result = MarkdownExtractor.extract("README.md", source);
+    let result = MarkdownExtractor
+        .extract_artifact("README.md", source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     // Should still have a File node
     let files: Vec<_> = result
@@ -86,7 +94,9 @@ fn test_markdown_handles_empty_file() {
 #[test]
 fn test_markdown_handles_no_headers() {
     let source = "Just some plain text without any headers.";
-    let result = MarkdownExtractor.extract("README.md", source);
+    let result = MarkdownExtractor
+        .extract_artifact("README.md", source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let modules: Vec<_> = result
         .nodes
@@ -99,7 +109,9 @@ fn test_markdown_handles_no_headers() {
 #[test]
 fn test_markdown_multiple_links_same_line() {
     let source = "See [main](src/main.rs) and [lib](src/lib.rs).";
-    let result = MarkdownExtractor.extract("README.md", source);
+    let result = MarkdownExtractor
+        .extract_artifact("README.md", source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let uses_edges: Vec<_> = result
         .edges
@@ -112,7 +124,9 @@ fn test_markdown_multiple_links_same_line() {
 #[test]
 fn test_markdown_handles_header_with_punctuation() {
     let source = "# Hello, World! (2024)";
-    let result = MarkdownExtractor.extract("README.md", source);
+    let result = MarkdownExtractor
+        .extract_artifact("README.md", source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let modules: Vec<_> = result
         .nodes
@@ -128,7 +142,9 @@ fn test_markdown_link_inside_heading_emits_uses_edge() {
     // `## See [main](src/main.rs)`. The link inside the heading should
     // be captured as a Uses edge parented to that heading.
     let source = "## See [main](src/main.rs)\n";
-    let result = MarkdownExtractor.extract("README.md", source);
+    let result = MarkdownExtractor
+        .extract_artifact("README.md", source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let uses_edges: Vec<_> = result
@@ -156,7 +172,9 @@ fn test_markdown_link_in_heading_does_not_double_count_body_links() {
     // A heading with a link, plus a body paragraph with another link,
     // produces exactly two Uses edges. One per link.
     let source = "# [foo](src/foo.rs)\n\nSee also [bar](src/bar.rs).\n";
-    let result = MarkdownExtractor.extract("README.md", source);
+    let result = MarkdownExtractor
+        .extract_artifact("README.md", source)
+        .result;
     let uses_edges: Vec<_> = result
         .edges
         .iter()

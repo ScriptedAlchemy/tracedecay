@@ -333,7 +333,7 @@ fn render_project_context_payload(payload: &Value) -> String {
 #[hotpath::measure(label = "cli.projects.request", future = true)]
 async fn call_registry_admin(arguments: Value) -> Result<Value> {
     let cwd = std::env::current_dir()?;
-    let project_root = tracedecay::config::discover_project_root(&cwd);
+    let project_root = tracedecay_project::config::discover_project_root(&cwd);
     let arguments = registry_admin_arguments(project_root, arguments);
     daemon_tool_json(None, "tracedecay_admin_cli", arguments).await
 }

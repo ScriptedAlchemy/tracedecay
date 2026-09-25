@@ -15,6 +15,7 @@ use crate::code_index_scheduler::{
     CodeIndexIgnoredDependencyRefusalV1, CodeIndexIgnoredDependencyRequestV1,
     CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1,
 };
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 struct ProjectCodeIndexIgnoredDependencyAdmissionPortV1 {
     schedulers: CodeIndexSchedulerRegistryV1,
@@ -74,11 +75,12 @@ impl CodeIndexIgnoredDependencyAdmissionPortV1
             if !self.database_writable {
                 return Err(CodeIndexIgnoredDependencyAdmissionErrorV1::ReadOnly);
             }
-            let project_root = self.project_root.canonicalize().map_err(|error| {
-                CodeIndexIgnoredDependencyAdmissionErrorV1::Unavailable {
-                    detail: format!("ignored-dependency project root is unavailable: {error}"),
-                }
-            })?;
+            let project_root =
+                canonical_existing_identity(&self.project_root).map_err(|error| {
+                    CodeIndexIgnoredDependencyAdmissionErrorV1::Unavailable {
+                        detail: format!("ignored-dependency project root is unavailable: {error}"),
+                    }
+                })?;
             let scheduler_request = CodeIndexIgnoredDependencyRequestV1 {
                 scope: self.scope.clone(),
                 expected_generation: request.source_generation().clone(),

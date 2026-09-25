@@ -9,7 +9,8 @@ import { gradeLabel, type EvidenceGrade } from './evidence.ts';
 import { activeAttention, projectFor } from './inboxFilter.ts';
 import { pullRequestStateKind } from './PullRequestInspector.tsx';
 import type { Umbrella, UmbrellaMember } from './umbrella.ts';
-import { UmbrellaField } from './UmbrellaField.tsx';
+import { LaneField } from './LaneField.tsx';
+import { laneZoom } from './lanes.ts';
 
 const BASES_SENTENCE =
   'Umbrellas form only from served bases: shared Work objective, explicit handoff, session–Git relation, shared agent. Proximity never groups.';
@@ -90,29 +91,34 @@ export function UmbrellaWorkspace({ context }: { context: DeliveryContext }) {
             <p className="mb-2 truncate font-mono text-3xs tracking-[0.08em] text-text-muted">
               Umbrella · {selected.basisLabel} · {selected.identity}
             </p>
-            <UmbrellaField
-              inbox={inbox}
-              rows={inbox.pull_requests}
-              projection={projection}
-              focusUmbrellaId={selected.id}
-              selectedRowId={location.pullRequest}
-              selectedUmbrellaId={selected.id}
-              onSelectRow={(row) => navigate({ pullRequest: row.id })}
-              onSelectUmbrella={(id) => navigate({ umbrella: id })}
-            />
-            <ul className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-3xs text-text-muted" aria-label="Field legend">
-              <li>root = selected umbrella · rails = repositories · edge stroke = grade</li>
-              <li className="flex items-center gap-2">
-                {(['exact', 'explicit', 'inferred', 'stale'] as const).map((grade) => (
-                  <GradeMark key={grade} grade={grade} />
-                ))}
-              </li>
-            </ul>
+            <UmbrellaLanes context={context} umbrella={selected} />
           </div>
           <UmbrellaInspector context={context} umbrella={selected} className="lg:col-span-2 xl:col-span-1" />
         </div>
       )}
     </div>
+  );
+}
+
+/** The selected umbrella drawn on the inbox lanes: only its member PRs, only
+ * its own basis threads. The umbrella is never a node of its own. */
+function UmbrellaLanes({ context, umbrella }: { context: DeliveryContext; umbrella: Umbrella }) {
+  const { inbox, location, navigate, umbrellas } = context;
+  const members = new Set(umbrella.members.map((member) => member.id));
+  const rows = inbox.pull_requests.filter((row) => members.has(row.id));
+  const selected = location.pullRequest !== null && members.has(location.pullRequest) ? location.pullRequest : null;
+  const focusProject = rows.find((row) => row.id === selected)?.project_id ?? null;
+  return (
+    <LaneField
+      inbox={inbox}
+      rows={rows}
+      projection={{ ...umbrellas, umbrellas: [umbrella] }}
+      zoom={laneZoom(null, selected)}
+      focusProject={focusProject}
+      selectedRowId={selected}
+      onSelectRow={(row) => navigate({ pullRequest: row.id })}
+      onZoom={(zoom) => navigate(zoom === 'portfolio' ? { pullRequest: null } : {})}
+    />
   );
 }
 
@@ -126,7 +132,7 @@ function CorrelationUnavailable({ context, reason }: { context: DeliveryContext;
       <p className="pb-4 text-center">
         <button
           type="button"
-          className="inline-flex min-h-9 items-center border border-edge-strong px-3 text-xs text-text-primary hover:bg-surface-2"
+          className="inline-flex min-h-[var(--touch-target-min)] items-center border border-edge-strong px-3 text-xs text-text-primary hover:bg-surface-2"
           onClick={() => context.navigate({ mode: 'inbox' })}
         >
           Back to inbox

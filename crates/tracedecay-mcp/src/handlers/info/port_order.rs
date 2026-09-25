@@ -2,9 +2,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ToolResult;
-use crate::{decode_primitive_request, generic_tool_result, unique_file_paths};
+use crate::handlers::graph::graph_tool_completion;
+use crate::{decode_primitive_request, unique_file_paths};
 use serde_json::Value;
+use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
     PortCycleAnchorV1, PortCycleFileV1, PortCycleSymbolV1, PortCycleV1, PortOrderLevelV1,
     PortOrderResultV1, PortOrderSurfaceRequestV1, PortOrderSymbolV1,
@@ -27,7 +28,10 @@ struct PortOrderSymbol<'a> {
 }
 
 #[hotpath::measure(label = "mcp.info.port_order.total")]
-pub async fn handle_port_order(graph: &VerifiedGraphQuery, args: Value) -> Result<ToolResult> {
+pub async fn compute_port_order(
+    graph: &VerifiedGraphQuery,
+    args: Value,
+) -> Result<GraphToolCompletionV1> {
     let request: PortOrderSurfaceRequestV1 =
         decode_primitive_request(&args, "tracedecay_port_order")?;
     let kind_strs = request.kinds.as_ref().map_or_else(
@@ -81,12 +85,9 @@ pub async fn handle_port_order(graph: &VerifiedGraphQuery, args: Value) -> Resul
             levels: Vec::new(),
             cycles: Vec::new(),
         };
-        let output = serde_json::to_value(result)?;
-        return Ok(generic_tool_result(
-            Some(graph.project_root()?),
-            &args,
-            &output,
-            vec![],
+        return Ok(graph_tool_completion(
+            GraphToolResultV1::PortOrder(result),
+            Vec::new(),
         ));
     }
 
@@ -408,12 +409,8 @@ pub async fn handle_port_order(graph: &VerifiedGraphQuery, args: Value) -> Resul
         levels: result_levels,
         cycles,
     };
-    let output = serde_json::to_value(result)?;
-
-    Ok(generic_tool_result(
-        Some(graph.project_root()?),
-        &args,
-        &output,
+    Ok(graph_tool_completion(
+        GraphToolResultV1::PortOrder(result),
         touched_files,
     ))
 }

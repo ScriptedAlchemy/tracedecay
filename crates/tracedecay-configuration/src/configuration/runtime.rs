@@ -20,9 +20,9 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use tracedecay_global_db::configuration::contracts::ports::{
-    ConfigurationClock, ConfigurationControlStore, ConfigurationCurrentStateV1,
-    ConfigurationMutationAuthorizationPort, ConfigurationOperationFuture,
-    CurrentConfigurationMutationAuthorizationV1, ScopeResolutionPort, ScopeRevalidationEvidenceV1,
+    ConfigurationControlStore, ConfigurationCurrentStateV1, ConfigurationMutationAuthorizationPort,
+    ConfigurationOperationFuture, CurrentConfigurationMutationAuthorizationV1, ScopeResolutionPort,
+    ScopeRevalidationEvidenceV1,
 };
 use tracedecay_global_db::configuration::contracts::types::{
     AuthorizedActor, ComponentConfigurationState, ConfigurationAuditPage, ConfigurationAuditQuery,
@@ -72,7 +72,6 @@ impl ProjectConfigurationRuntime {
                 store: store.clone(),
                 scopes: SharedScopeResolution(Arc::clone(&authorities)),
                 authorization: SharedMutationAuthorization(Arc::clone(&authorities)),
-                clock: SystemConfigurationClock,
             });
         let client = Arc::new(ProductionConfigurationDaemonClient {
             target: configuration.target().clone(),
@@ -249,7 +248,6 @@ struct RetainedConfigurationControlPlane {
     store: OwnedGlobalDbConfigurationControlStore,
     scopes: SharedScopeResolution,
     authorization: SharedMutationAuthorization,
-    clock: SystemConfigurationClock,
 }
 
 impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
@@ -263,7 +261,7 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 &self.store,
                 &self.scopes,
                 &self.authorization,
-                &self.clock,
+                now_micros,
             )
             .list(actor)
             .await
@@ -281,7 +279,7 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 &self.store,
                 &self.scopes,
                 &self.authorization,
-                &self.clock,
+                now_micros,
             )
             .get(actor, key)
             .await
@@ -300,7 +298,7 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 &self.store,
                 &self.scopes,
                 &self.authorization,
-                &self.clock,
+                now_micros,
             )
             .mutate_direct(authority, mutation, expected_revision)
             .await
@@ -317,7 +315,7 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 &self.store,
                 &self.scopes,
                 &self.authorization,
-                &self.clock,
+                now_micros,
             )
             .observed_state(actor)
             .await
@@ -336,7 +334,7 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 &self.store,
                 &self.scopes,
                 &self.authorization,
-                &self.clock,
+                now_micros,
             )
             .dry_run_protected_change(authority, change, expected_revision)
             .await
@@ -354,7 +352,7 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 &self.store,
                 &self.scopes,
                 &self.authorization,
-                &self.clock,
+                now_micros,
             )
             .apply_protected_change(authority, request)
             .await
@@ -372,7 +370,7 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 &self.store,
                 &self.scopes,
                 &self.authorization,
-                &self.clock,
+                now_micros,
             )
             .dry_run_rollback(authority, rollback)
             .await
@@ -390,7 +388,7 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 &self.store,
                 &self.scopes,
                 &self.authorization,
-                &self.clock,
+                now_micros,
             )
             .apply_rollback(authority, request)
             .await
@@ -408,7 +406,7 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 &self.store,
                 &self.scopes,
                 &self.authorization,
-                &self.clock,
+                now_micros,
             )
             .audit(actor, query)
             .await
@@ -511,14 +509,6 @@ impl ConfigurationMutationAuthorizationPort for SharedMutationAuthorization {
             return Box::pin(async { Err(ConfigurationError::Unavailable) });
         };
         authorization.recheck(receipt, operation, expected_revision, sink, effect, now)
-    }
-}
-
-struct SystemConfigurationClock;
-
-impl ConfigurationClock for SystemConfigurationClock {
-    fn now(&self) -> UtcMicros {
-        now_micros()
     }
 }
 

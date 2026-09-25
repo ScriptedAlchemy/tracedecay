@@ -23,6 +23,7 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::project_code_graph_projection_read_port;
 use crate::code_index_scheduler::{CodeIndexSchedulerRegistryV1, LatestCompleteCodeIndexV1};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 const PROJECT_ID: &str = "project.project-open-code-graph-scope";
 
@@ -316,7 +317,7 @@ async fn wait_for_initial_generation(registry: &CodeIndexSchedulerRegistryV1, pr
     if registry.latest_generation_id(project_root).await.is_some() {
         return;
     }
-    let canonical_root = project_root.canonicalize().expect("canonical fixture root");
+    let canonical_root = canonical_existing_identity(project_root).expect("canonical fixture root");
     let mut publications = registry.subscribe_generation_publications();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {

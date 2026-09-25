@@ -39,7 +39,7 @@ export function CostsInspector({
 
   if (row === null) {
     return (
-      <div className="flex flex-col gap-3 text-2xs leading-relaxed text-text-secondary" data-costs-inspector="idle">
+      <div className="flex flex-col gap-3 text-body leading-relaxed text-text-secondary" data-costs-inspector="idle">
         <p>
           Hover or focus a provider in the legend or the ledger to inspect its exact usage and
           pricing rows here. Inspection never changes the query; Enter scopes it, Escape clears it.
@@ -52,7 +52,7 @@ export function CostsInspector({
           <Fact label="priced total" value={formatUsd(ledger.pricedTotalUsd)} />
           <Fact label="coverage" value={formatShare(ledger.coverage)} />
         </dl>
-        <p className="text-3xs text-text-muted">
+        <p className="text-sm text-text-muted">
           identity · OBSERVED / EXACT · rate · BUNDLED PRICING / EXACT where applied
         </p>
       </div>
@@ -73,7 +73,7 @@ export function CostsInspector({
           {inspected === null ? 'scoped' : 'inspecting'} · {pricingClassLabel(row.pricing)}
         </span>
       </div>
-      <p className="text-2xs leading-relaxed text-text-secondary">{pricingClassSentence(row)}.</p>
+      <p className="text-body leading-relaxed text-text-secondary">{pricingClassSentence(row)}.</p>
       <dl className="grid grid-cols-2 gap-x-3 gap-y-2">
         <Fact label="priced spend" value={formatUsd(row.pricedCostUsd)} />
         <Fact label="share of priced" value={formatShare(row.share)} />
@@ -116,12 +116,12 @@ function ModelRows({
       <div className="flex items-center gap-2">
         <span className="td-legend">models · exact provider/model rows</span>
         <span aria-hidden className="td-rule" />
-        <span className="td-value text-3xs text-text-muted" data-cell="numeric">
+        <span className="td-value text-xs text-text-muted" data-cell="numeric">
           {models.length.toLocaleString()}
         </span>
       </div>
       {models.length === 0 ? (
-        <p className="text-2xs text-text-muted">
+        <p className="text-body text-text-muted">
           the projection carried no model rows for this provider
         </p>
       ) : (
@@ -129,7 +129,7 @@ function ModelRows({
           {models.map((model) => (
             <li
               key={model.model ?? '∅'}
-              className="flex flex-col gap-1 py-1.5 text-2xs"
+              className="flex flex-col gap-1 py-1.5 text-body"
               data-model={model.model ?? undefined}
               data-model-pricing={model.costUsd === null ? 'unpriced' : 'priced'}
             >
@@ -150,7 +150,7 @@ function ModelRows({
                   height="row"
                   className="w-24 shrink-0 max-sm:hidden"
                 />
-                <span className="min-w-0 flex-1 truncate text-3xs text-text-muted">
+                <span className="min-w-0 flex-1 truncate text-sm text-text-muted">
                   {model.usageEvents.toLocaleString()} events · {formatCount(model.totalTokens, 1_000)}{' '}
                   tokens ·{' '}
                   {model.model === null

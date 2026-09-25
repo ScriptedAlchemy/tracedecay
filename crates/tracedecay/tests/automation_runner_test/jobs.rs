@@ -90,6 +90,10 @@ impl AgentTaskBackend for ContentBackend {
             output_tokens: Some(20),
         })
     }
+
+    fn executable(&self) -> Option<&std::path::Path> {
+        None
+    }
 }
 
 #[tokio::test]
@@ -526,6 +530,10 @@ async fn user_job_pre_run_command_is_refused_unless_allowed() {
                 output_tokens: None,
             })
         }
+
+        fn executable(&self) -> Option<&std::path::Path> {
+            None
+        }
     }
     let config = AutomationConfig {
         allow_job_commands: true,
@@ -581,6 +589,10 @@ async fn user_job_pre_run_command_runs_from_project_root() {
                 input_tokens: None,
                 output_tokens: None,
             })
+        }
+
+        fn executable(&self) -> Option<&std::path::Path> {
+            None
         }
     }
 
@@ -659,6 +671,10 @@ async fn scheduler_user_job_uses_explicit_profile_root_for_attached_skills() {
                 input_tokens: None,
                 output_tokens: None,
             })
+        }
+
+        fn executable(&self) -> Option<&std::path::Path> {
+            None
         }
     }
 
@@ -742,6 +758,10 @@ async fn user_job_does_not_attach_archived_managed_skills() {
                 input_tokens: None,
                 output_tokens: None,
             })
+        }
+
+        fn executable(&self) -> Option<&std::path::Path> {
+            None
         }
     }
 
@@ -994,12 +1014,12 @@ async fn scheduler_prefilter_config_skip_precedes_live_lock_and_is_exact() {
     drop(guard);
 
     let first =
-        evaluate_and_record_scheduler_skip(&dashboard_root, &config, &job, occurrence, None)
+        evaluate_and_record_scheduler_skip(&dashboard_root, &config, None, &job, occurrence, None)
             .await
             .unwrap()
             .expect("disabled automation must produce an out-of-band diagnostic");
     let repeated =
-        evaluate_and_record_scheduler_skip(&dashboard_root, &config, &job, occurrence, None)
+        evaluate_and_record_scheduler_skip(&dashboard_root, &config, None, &job, occurrence, None)
             .await
             .unwrap()
             .expect("the same config skip must return its exact diagnostic");
@@ -1055,7 +1075,7 @@ async fn scheduler_prefilter_live_lock_wins_over_not_due_summary() {
     let config = enabled_job_config();
     let occurrence = "locked-prefilter-occurrence";
     let prefilter =
-        evaluate_and_record_scheduler_skip(&dashboard_root, &config, &job, occurrence, None)
+        evaluate_and_record_scheduler_skip(&dashboard_root, &config, None, &job, occurrence, None)
             .await
             .unwrap()
             .expect("the live job lock must produce a diagnostic");
@@ -1111,7 +1131,7 @@ async fn retained_scheduler_runner_reacquires_after_due_prefilter() {
     let occurrence = "prefilter-gap-occurrence";
 
     assert!(
-        evaluate_and_record_scheduler_skip(&dashboard_root, &config, &job, occurrence, None)
+        evaluate_and_record_scheduler_skip(&dashboard_root, &config, None, &job, occurrence, None)
             .await
             .unwrap()
             .is_none(),
@@ -1193,6 +1213,10 @@ async fn concurrent_manual_job_triggers_do_not_double_execute() {
                 input_tokens: None,
                 output_tokens: None,
             })
+        }
+
+        fn executable(&self) -> Option<&std::path::Path> {
+            None
         }
     }
 

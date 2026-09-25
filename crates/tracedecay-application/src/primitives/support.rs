@@ -171,7 +171,7 @@ pub(crate) async fn collect_affected_test_files(
         }
         let mut dependents = Vec::new();
         for file in &frontier {
-            dependents.extend(graph.get_file_dependents(file).await?);
+            dependents.extend(graph.get_file_dependents(file).await?.files);
         }
         dependents.sort();
         dependents.dedup();

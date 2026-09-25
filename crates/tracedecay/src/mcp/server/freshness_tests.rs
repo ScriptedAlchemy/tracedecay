@@ -1,12 +1,12 @@
 use super::{DatabaseOwnerReconciler, McpServer, McpServerConstructionContext};
-use crate::config::PinnedUserDataDir;
-use crate::project::TraceDecay;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_mcp::tool_error_response;
+use tracedecay_project::config::PinnedUserDataDir;
+use tracedecay_project::project::TraceDecay;
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
 struct FreshnessRuntime {
@@ -60,7 +60,7 @@ fn git(root: &std::path::Path, args: &[&str]) {
 
 struct FreshnessFixtureAuthority {
     _pin: PinnedUserDataDir,
-    _runtime: Arc<crate::test_support::host_admission::HostAdmissionTestRuntimeV1>,
+    _runtime: Arc<tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1>,
 }
 
 async fn init_indexed_repo() -> (TraceDecay, TempDir, FreshnessFixtureAuthority) {
@@ -101,7 +101,7 @@ async fn branch_drift_serves_the_old_snapshot_until_the_swap_lands() {
     drop(cg);
 
     let mut meta = tracedecay_runtime_core::branch_meta::BranchMeta::new("main");
-    meta.add_branch("feature", "branches/feature.db", "main");
+    meta.add_branch("feature", "main");
     tracedecay_runtime_core::branch_meta::save_branch_meta(&layout.data_root, &meta).unwrap();
     // `add_branch` only admits the branch; until its exact graph source is
     // published the branch is still indexing and a reopen legitimately keeps
@@ -128,18 +128,15 @@ async fn branch_drift_serves_the_old_snapshot_until_the_swap_lands() {
         ),
         "the feature branch must be query-eligible before the drift"
     );
-    std::fs::create_dir_all(layout.data_root.join("branches")).unwrap();
-    std::fs::copy(
-        &layout.graph_db_path,
-        layout.data_root.join("branches/feature.db"),
-    )
-    .unwrap();
 
     git(root, &["checkout", "-q", "-b", "feature"]);
     git(root, &["checkout", "-q", "main"]);
     let main = fixture_authority
         ._runtime
-        .open_project_graph_for_test(root, crate::project::TraceDecayOpenOptions::default())
+        .open_project_graph_for_test(
+            root,
+            tracedecay_project::project::TraceDecayOpenOptions::default(),
+        )
         .await
         .unwrap();
     let observed = Arc::new(Mutex::new(Vec::new()));
@@ -256,7 +253,8 @@ async fn a_cancelled_machine_reads_as_settled_and_refuses_further_phases() {
 #[tokio::test]
 async fn direct_server_keeps_configured_profile_root_with_overridden_registry_db() {
     let (cg, dir, _pin) = init_indexed_repo().await;
-    let profile_root = crate::config::user_data_dir().expect("configured profile root");
+    let profile_root =
+        tracedecay_project::config::user_data_dir().expect("configured profile root");
     let override_root = dir.path().join("registry-override");
     let runtime = FreshnessRuntime::open(&override_root).await;
     let registry = runtime.profile_database().await;

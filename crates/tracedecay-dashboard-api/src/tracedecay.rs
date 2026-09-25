@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tracedecay_automation_runtime::automation::host_io::HostIo;
-pub use tracedecay_code_index::is_test_file;
 use tracedecay_configuration::UserSettingsDaemonClient;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::storage::StoreLayout;

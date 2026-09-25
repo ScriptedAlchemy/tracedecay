@@ -28,7 +28,10 @@ import { formatMicrosUtc } from '../../ui/format.ts';
 import { Readout } from '../../ui/instrument.tsx';
 import { Chart } from '../../viz/chart/Chart.tsx';
 import type { PayloadResult } from '../../data/query/payload.ts';
-import type { TrustHistoryEvent, TrustHistoryPayload } from '../../data/query/memory.ts';
+import type {
+  MemoryTrustHistoryEventV1,
+  MemoryTrustHistoryPayloadV1,
+} from '../../contracts/generated.ts';
 import { trustDetailState, trustHistoryReading } from './memoryModel.ts';
 
 export function TrustHistorySection({
@@ -36,7 +39,7 @@ export function TrustHistorySection({
   result,
 }: {
   pending: boolean;
-  result: PayloadResult<TrustHistoryPayload> | undefined;
+  result: PayloadResult<MemoryTrustHistoryPayloadV1> | undefined;
 }) {
   return (
     <section className="flex flex-col gap-2" aria-label="Trust history">
@@ -48,7 +51,7 @@ export function TrustHistorySection({
   );
 }
 
-function TrustHistoryBody({ data }: { data: TrustHistoryPayload }) {
+function TrustHistoryBody({ data }: { data: MemoryTrustHistoryPayloadV1 }) {
   // The handler emits `error: ""` on success and a sentence on failure; a
   // failure that still parsed must not render as an audit with no events.
   if (data.error !== '') {
@@ -154,7 +157,7 @@ function TrustHistoryBody({ data }: { data: TrustHistoryPayload }) {
  * recorded. Real history only, the series is exactly the `new_trust` column,
  * so a step is a feedback event and a flat run is the absence of one. The
  * exact rows beneath are the accessible reading of the same data. */
-function TrustTrace({ data }: { data: TrustHistoryPayload }) {
+function TrustTrace({ data }: { data: MemoryTrustHistoryPayloadV1 }) {
   const events = data.trust_history;
   const option = useMemo<EChartsOption>(
     () => ({
@@ -201,7 +204,7 @@ function TrustTrace({ data }: { data: TrustHistoryPayload }) {
   );
 }
 
-function TrustEventRow({ event }: { event: TrustHistoryEvent }) {
+function TrustEventRow({ event }: { event: MemoryTrustHistoryEventV1 }) {
   const detailState = trustDetailState(event.details_availability);
   const delta = `${event.delta >= 0 ? '+' : ''}${event.delta.toFixed(3)}`;
   return (

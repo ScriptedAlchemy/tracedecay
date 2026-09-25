@@ -120,13 +120,8 @@ fn session_temporal_store_fingerprint(
     })
 }
 
-const REQUIRED_BASE_TABLES: &[&str] = &[
-    "lcm_summary_nodes",
-    "lcm_summary_sources",
-    "observations",
-    "retrieval_anchors",
-    "sanitization_receipts",
-];
+const REQUIRED_BASE_TABLES: &[&str] =
+    &["observations", "retrieval_anchors", "sanitization_receipts"];
 
 const REQUIRED_FTS_SHADOW_TABLES: &[&str] = &[
     "session_occurrences_fts_docsize",
@@ -164,8 +159,11 @@ const REQUIRED_INDEXES: &[&str] = &[
     "idx_session_refresh_operations_state",
     "idx_session_refresh_receipts_session",
     "idx_session_summary_availability_generation",
+    "idx_session_summary_nodes_depth_tokens",
     "idx_session_summary_nodes_root_created_order",
     "idx_session_summary_nodes_session_created",
+    "idx_session_summary_nodes_session_depth_time",
+    "idx_session_summary_sources_source",
     "idx_session_temporal_generations_one_active",
     "idx_session_temporal_generations_session_state",
     "idx_session_temporal_observation_effects_session",
@@ -177,38 +175,34 @@ const REQUIRED_TRIGGERS: &[(&str, &str)] = &[
         "session_occurrences_fts_insert_v1",
         "CREATE TRIGGER session_occurrences_fts_insert_v1
          AFTER INSERT ON session_occurrences BEGIN
-             INSERT INTO session_occurrences_fts(rowid, index_text, snippet_text)
-             VALUES (NEW.rowid, NEW.index_text, NEW.snippet_text);
+             INSERT INTO session_occurrences_fts(rowid, index_text)
+             VALUES (NEW.rowid, NEW.index_text);
          END",
     ),
     (
         "session_occurrences_fts_delete_v1",
         "CREATE TRIGGER session_occurrences_fts_delete_v1
          AFTER DELETE ON session_occurrences BEGIN
-             INSERT INTO session_occurrences_fts(
-                 session_occurrences_fts, rowid, index_text, snippet_text
-             )
-             VALUES ('delete', OLD.rowid, OLD.index_text, OLD.snippet_text);
+             INSERT INTO session_occurrences_fts(session_occurrences_fts, rowid, index_text)
+             VALUES ('delete', OLD.rowid, OLD.index_text);
          END",
     ),
     (
         "session_occurrences_fts_update_v1",
         "CREATE TRIGGER session_occurrences_fts_update_v1
-         AFTER UPDATE OF index_text, snippet_text ON session_occurrences BEGIN
-             INSERT INTO session_occurrences_fts(
-                 session_occurrences_fts, rowid, index_text, snippet_text
-             )
-             VALUES ('delete', OLD.rowid, OLD.index_text, OLD.snippet_text);
-             INSERT INTO session_occurrences_fts(rowid, index_text, snippet_text)
-             VALUES (NEW.rowid, NEW.index_text, NEW.snippet_text);
+         AFTER UPDATE OF index_text ON session_occurrences BEGIN
+             INSERT INTO session_occurrences_fts(session_occurrences_fts, rowid, index_text)
+             VALUES ('delete', OLD.rowid, OLD.index_text);
+             INSERT INTO session_occurrences_fts(rowid, index_text)
+             VALUES (NEW.rowid, NEW.index_text);
          END",
     ),
     (
         "session_summary_nodes_fts_insert_v1",
         "CREATE TRIGGER session_summary_nodes_fts_insert_v1
          AFTER INSERT ON session_summary_nodes BEGIN
-             INSERT INTO session_summary_nodes_fts(rowid, summary_text, index_text)
-             VALUES (NEW.rowid, NEW.summary_text, NEW.index_text);
+             INSERT INTO session_summary_nodes_fts(rowid, summary_text)
+             VALUES (NEW.rowid, NEW.summary_text);
          END",
     ),
     (
@@ -216,21 +210,21 @@ const REQUIRED_TRIGGERS: &[(&str, &str)] = &[
         "CREATE TRIGGER session_summary_nodes_fts_delete_v1
          AFTER DELETE ON session_summary_nodes BEGIN
              INSERT INTO session_summary_nodes_fts(
-                 session_summary_nodes_fts, rowid, summary_text, index_text
+                 session_summary_nodes_fts, rowid, summary_text
              )
-             VALUES ('delete', OLD.rowid, OLD.summary_text, OLD.index_text);
+             VALUES ('delete', OLD.rowid, OLD.summary_text);
          END",
     ),
     (
         "session_summary_nodes_fts_update_v1",
         "CREATE TRIGGER session_summary_nodes_fts_update_v1
-         AFTER UPDATE OF summary_text, index_text ON session_summary_nodes BEGIN
+         AFTER UPDATE OF summary_text ON session_summary_nodes BEGIN
              INSERT INTO session_summary_nodes_fts(
-                 session_summary_nodes_fts, rowid, summary_text, index_text
+                 session_summary_nodes_fts, rowid, summary_text
              )
-             VALUES ('delete', OLD.rowid, OLD.summary_text, OLD.index_text);
-             INSERT INTO session_summary_nodes_fts(rowid, summary_text, index_text)
-             VALUES (NEW.rowid, NEW.summary_text, NEW.index_text);
+             VALUES ('delete', OLD.rowid, OLD.summary_text);
+             INSERT INTO session_summary_nodes_fts(rowid, summary_text)
+             VALUES (NEW.rowid, NEW.summary_text);
          END",
     ),
 ];
@@ -379,15 +373,14 @@ const STUCK_RECEIPT_TAIL: &str = "LEFT JOIN session_refresh_receipts AS receipt
              OR receipt.failure_code IS NOT candidate.failure_code
          ))";
 
-const COMPATIBILITY_DRIFT_TAIL: &str = "LEFT JOIN lcm_summary_nodes AS compatibility
-    ON compatibility.node_id = candidate.summary_id
-  WHERE compatibility.node_id IS NULL
-     OR candidate.publication_json IS NULL
-     OR json_extract(candidate.publication_json, '$.summary_hash') IS NULL
-     OR compatibility.session_id <> candidate.session_id
-     OR compatibility.summary_text <> candidate.summary_text
-     OR compatibility.summary_hash
-          <> json_extract(candidate.publication_json, '$.summary_hash')";
+/// The promoted summary columns and the frozen publication manifest describe
+/// the same publication; a row where they disagree was not written by the
+/// publication path.
+const COMPATIBILITY_DRIFT_TAIL: &str = "WHERE candidate.publication_json IS NULL
+     OR json_extract(candidate.publication_json, '$.summary_hash') IS NOT candidate.summary_hash
+     OR json_extract(candidate.publication_json, '$.provider') IS NOT candidate.provider
+     OR json_extract(candidate.publication_json, '$.session_id') IS NOT candidate.session_id
+     OR json_extract(candidate.publication_json, '$.depth') IS NOT candidate.depth";
 
 macro_rules! row_health_check {
     (
@@ -676,9 +669,9 @@ const CHECKS: &[HealthCheck] = &[
     ),
     row_health_check!(
         CompatibilityDrift,
-        &["lcm_summary_nodes", "session_summary_nodes"],
+        &["session_summary_nodes"],
         "session_summary_nodes",
-        ", summary_id, session_id, summary_text, publication_json",
+        ", summary_id, session_id, provider, depth, summary_hash, publication_json",
         "COUNT(*)",
         COMPATIBILITY_DRIFT_TAIL
     ),

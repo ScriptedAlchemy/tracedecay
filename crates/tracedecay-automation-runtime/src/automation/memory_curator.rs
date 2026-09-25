@@ -192,6 +192,7 @@ async fn run_memory_curator_for_store_with_publication(
         "memory_curator",
         options.trigger,
         config,
+        backend.executable(),
         AgentTaskKind::MemoryCurator,
     )
     .with_ledger_publication(ledger_publication)

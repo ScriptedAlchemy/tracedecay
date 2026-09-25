@@ -8,26 +8,24 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use tokio::io::{AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use tracedecay_contracts::{
-    ApplicationEnvelope, ApplicationInvocation, ApplicationInvocationExecutor,
-    ApplicationInvocationFuture, ApplicationProblem, ApplicationProblemKind, ApplicationRequest,
-    ApplicationResponse, CancellationSignal, CancellationStage, Deadline, InvocationError,
-    InvocationTarget, PageRequest, RequestId, SafeDiagnostic,
+    ApplicationInvocation, ApplicationInvocationExecutor, ApplicationInvocationFuture,
+    ApplicationProblem, ApplicationProblemKind, ApplicationRequest, ApplicationResponse,
+    CancellationSignal, CancellationStage, Deadline, InvocationError, InvocationTarget,
+    PageRequest, RequestId, SafeDiagnostic, try_now_micros,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_tool_catalog::{
-    ApplicationSurfaceOperation, BindingId, BindingSurface, CatalogSnapshotV1, FeatureId,
-    ProfileId, SchemaRef, SurfaceOperationName,
+    BindingId, BindingSurface, CatalogSnapshotV1, FeatureId, ProfileId, SchemaRef,
+    SurfaceOperationName,
 };
 
-use tracedecay_contracts::feedback::observations::{
-    FeedbackDeliveryRouteV1, FeedbackSourceEventV1,
-};
+use tracedecay_contracts::feedback::observations::FeedbackSourceEventV1;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 pub type ScopeSelector = InvocationTarget;
@@ -1005,31 +1003,6 @@ impl DaemonInvocationExecutor for DaemonInvocationClient {
     }
 }
 
-/// Decode the envelope-stripped configuration body selected by `operation`.
-///
-/// This is the socket-client dispatch arm: producers strip the tagged
-/// `ConfigurationWireRequestV1` envelope before admission, so the client
-/// deserializes the inner request and wraps the operation-selected variant.
-fn configuration_request_from_surface_payload(
-    operation: ApplicationSurfaceOperation,
-    payload: serde_json::Value,
-) -> Result<tracedecay_contracts::ConfigurationWireRequestV1, InvocationError> {
-    tracedecay_contracts::configuration_wire_request_from_invocation_payload(
-        operation.as_str(),
-        payload,
-    )
-    .map_err(|_| InvocationError::InvalidRequest)
-}
-
-fn feedback_handle_from_surface_payload(
-    payload: serde_json::Value,
-) -> Result<tracedecay_contracts::feedback::FeedbackHandleRequestV1, InvocationError> {
-    let request: tracedecay_contracts::feedback::FeedbackHandleRequestV1 =
-        serde_json::from_value(payload).map_err(|_| InvocationError::InvalidRequest)?;
-    tracedecay_contracts::feedback::FeedbackHandleRequestV1::new(request.request_handle)
-        .map_err(|_| InvocationError::InvalidRequest)
-}
-
 impl ApplicationInvocationExecutor for DaemonInvocationClient {
     fn invoke(
         &self,
@@ -1037,79 +1010,12 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
     ) -> ApplicationInvocationFuture<'_, Result<ApplicationResponse, InvocationError>> {
         Box::pin(async move {
             let (context, request) = invocation.into_parts();
-            let (request_id, target, deadline, cancellation) = context.into_parts();
             match request {
                 ApplicationRequest::Surface { binding, payload } => {
-                    let (_binding_id, surface, operation, result_contract, _page) =
-                        binding.into_parts();
-                    let operation =
-                        ApplicationSurfaceOperation::from_surface_name(surface, operation.as_str())
-                            .ok_or(InvocationError::InvalidRequest)?;
-                    let observed_at = invocation_now_micros();
-                    let cancellation_context = cancellation.context();
-                    let scope = match target {
-                        InvocationTarget::CurrentProject => None,
-                        InvocationTarget::Resolved(scope) => Some(scope),
-                    };
-                    let policy = if matches!(
-                        operation,
-                        ApplicationSurfaceOperation::ConfigurationSet
-                            | ApplicationSurfaceOperation::ConfigurationUnset
-                            | ApplicationSurfaceOperation::ConfigurationBatch
-                    ) {
-                        InvocationCancellationPolicy::AuthoritativeEffect
-                    } else {
-                        InvocationCancellationPolicy::ReadOnly
-                    };
-                    let request = match operation {
-                        ApplicationSurfaceOperation::ConfigurationGet
-                        | ApplicationSurfaceOperation::ConfigurationSet
-                        | ApplicationSurfaceOperation::ConfigurationUnset
-                        | ApplicationSurfaceOperation::ConfigurationBatch => {
-                            let request =
-                                configuration_request_from_surface_payload(operation, payload)?;
-                            crate::contract::DaemonInvocationRequest::configuration(
-                                request_id.as_str(),
-                                operation,
-                                request,
-                                observed_at,
-                                deadline.clone(),
-                                cancellation_context,
-                            )
-                            .with_resolved_scope(scope)
-                            .map_err(|_| InvocationError::InvalidRequest)?
-                        }
-                        ApplicationSurfaceOperation::FeedbackGet => {
-                            let request = feedback_handle_from_surface_payload(payload)?;
-                            crate::contract::DaemonInvocationRequest::feedback(
-                                request_id.as_str(),
-                                operation,
-                                request.request_handle,
-                                observed_at,
-                                deadline.clone(),
-                                cancellation_context,
-                            )
-                            .with_resolved_scope(scope)
-                            .map_err(|_| InvocationError::InvalidRequest)?
-                        }
-                        ApplicationSurfaceOperation::FeedbackProximity => {
-                            let request = serde_json::from_value(payload)
-                                .map_err(|_| InvocationError::InvalidRequest)?;
-                            crate::contract::DaemonInvocationRequest::feedback_proximity(
-                                request_id.as_str(),
-                                request,
-                                deadline.clone(),
-                                cancellation_context,
-                            )
-                        }
-                        _ => return Err(InvocationError::InvalidRequest),
-                    }
-                    .with_delivery_route(application_delivery_route(surface));
-                    let response = self
-                        .invoke_controlled(request, deadline, cancellation, policy)
-                        .await
-                        .map_err(map_invocation_error)?;
-                    application_response(request_id, result_contract, response.outcome)
+                    crate::application_surface::invoke_application_surface(
+                        self, context, binding, payload,
+                    )
+                    .await
                 }
                 ApplicationRequest::FeedbackObservation {
                     configuration_digest,
@@ -1130,23 +1036,6 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
     }
 }
 
-/// Retained name for its call sites across the daemon, application surface,
-/// and CLI commands (the bin target is a separate crate, so `pub(crate)`
-/// would hide it from `src/commands`); the saturating clamp is the one
-/// shared definition.
-pub fn invocation_now_micros() -> UtcMicros {
-    tracedecay_contracts::clock::now_micros()
-}
-
-pub fn application_delivery_route(surface: BindingSurface) -> FeedbackDeliveryRouteV1 {
-    match surface {
-        BindingSurface::Cli => FeedbackDeliveryRouteV1::Cli,
-        BindingSurface::Mcp => FeedbackDeliveryRouteV1::Mcp,
-        BindingSurface::Http | BindingSurface::Dashboard => FeedbackDeliveryRouteV1::Http,
-        BindingSurface::Lsp => FeedbackDeliveryRouteV1::Lsp,
-    }
-}
-
 pub fn map_invocation_error(error: DaemonInvocationError) -> InvocationError {
     match error {
         DaemonInvocationError::Cancelled { .. } => InvocationError::Cancelled,
@@ -1160,66 +1049,6 @@ pub fn map_invocation_error(error: DaemonInvocationError) -> InvocationError {
             detail,
         },
     }
-}
-
-pub fn application_response(
-    request_id: RequestId,
-    result_contract: tracedecay_contracts::ResultContractRef,
-    outcome: crate::contract::DaemonInvocationOutcome,
-) -> Result<ApplicationResponse, InvocationError> {
-    let envelope = match outcome {
-        crate::contract::DaemonInvocationOutcome::Feedback { scope, result } => {
-            ApplicationEnvelope::evidence(
-                result_contract,
-                request_id,
-                scope,
-                result.into_application(),
-            )
-        }
-        crate::contract::DaemonInvocationOutcome::Configuration { scope, outcome } => {
-            ApplicationEnvelope {
-                contract: result_contract,
-                request_id,
-                scope,
-                outcome,
-            }
-        }
-        crate::contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
-            // The daemon already resolved this invocation to a typed problem
-            // (e.g. `configuration.conflict`); carry it whole so surface
-            // adapters republish that diagnostic instead of refabricating a
-            // generic one.
-            return Err(InvocationError::Problem(Box::new(problem)));
-        }
-        crate::contract::DaemonInvocationOutcome::Problem { problem } => {
-            return Err(match problem {
-                crate::contract::DaemonInvocationProblem::InvalidRequest
-                | crate::contract::DaemonInvocationProblem::UnsupportedRevision => {
-                    InvocationError::InvalidRequest
-                }
-                crate::contract::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
-                    InvocationError::Denied
-                }
-                crate::contract::DaemonInvocationProblem::ResetRequired => {
-                    InvocationError::Problem(Box::new(ApplicationProblem::reset_required(
-                        SafeDiagnostic {
-                            code: "daemon.reset_required".to_owned(),
-                            message: "The owning daemon authority requires an explicit reset"
-                                .to_owned(),
-                        },
-                    )))
-                }
-                crate::contract::DaemonInvocationProblem::ApplicationContractViolation => {
-                    InvocationError::Unavailable
-                }
-                crate::contract::DaemonInvocationProblem::Unavailable => {
-                    InvocationError::Unavailable
-                }
-            });
-        }
-        _ => return Err(InvocationError::Unavailable),
-    };
-    Ok(ApplicationResponse::unary(envelope))
 }
 
 fn invocation_error_from_problem(problem: &ApplicationProblem) -> InvocationError {
@@ -1321,17 +1150,9 @@ fn with_daemon_version_skew_context(
 }
 
 pub fn deadline_remaining(deadline: &Deadline) -> Option<Duration> {
-    let now = current_system_micros().map_or(i64::MAX, |now| now.0);
+    let now = try_now_micros().map_or(i64::MAX, |now| now.0);
     let remaining = deadline.expires_at.0.checked_sub(now)?;
     (remaining > 0).then(|| Duration::from_micros(remaining as u64))
-}
-
-fn current_system_micros() -> Option<UtcMicros> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_micros()).ok())
-        .map(UtcMicros)
 }
 
 mod lsp_session;
@@ -1348,17 +1169,12 @@ mod controlled_invocation_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DaemonInvocationError, application_response, configuration_request_from_surface_payload,
-        feedback_handle_from_surface_payload, invocation_now_micros,
-    };
+    use super::DaemonInvocationError;
     use tracedecay_contracts::{
-        ApplicationProblemKind, CancellationContext, CancellationStage, ConfigurationWireRequestV1,
-        Deadline, InvocationError, RequestId, ResultContractRef,
+        ApplicationProblemKind, CancellationContext, CancellationStage, Deadline, now_micros,
     };
     use tracedecay_domain::UtcMicros;
     use tracedecay_tool_catalog::ApplicationSurfaceOperation;
-    use tracedecay_tool_catalog::SchemaId;
 
     #[test]
     fn daemon_invocation_errors_keep_canonical_problem_categories() {
@@ -1384,27 +1200,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn daemon_reset_response_remains_an_authoritative_typed_problem() {
-        let error = application_response(
-            RequestId::new("request.daemon-client.reset").expect("request"),
-            ResultContractRef::new(
-                SchemaId::new("schema.test.daemon-client-reset-result").expect("schema"),
-                1,
-            )
-            .expect("contract"),
-            crate::contract::DaemonInvocationOutcome::Problem {
-                problem: crate::contract::DaemonInvocationProblem::ResetRequired,
-            },
-        )
-        .expect_err("reset-required must not become a successful response");
-
-        let InvocationError::Problem(problem) = error else {
-            panic!("reset-required must remain an authoritative typed problem");
-        };
-        assert_eq!(problem.kind(), ApplicationProblemKind::ResetRequired);
-    }
-
     fn unused_test_endpoint() -> crate::transport::DaemonEndpoint {
         crate::transport::DaemonEndpoint::loopback(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
             .expect("loopback endpoint")
@@ -1412,8 +1207,11 @@ mod tests {
 
     #[test]
     fn transport_failures_name_version_skew_when_the_authority_daemon_differs() {
-        let connection = crate::connection::DaemonConnection::new(unused_test_endpoint(), None)
-            .with_daemon_version("0.1.0-beta.36+aaaa");
+        let connection = crate::connection::DaemonConnection::new(
+            unused_test_endpoint(),
+            "unused-token".to_owned(),
+        )
+        .with_daemon_version("0.1.0-beta.36+aaaa");
         let mut handshake = test_skew_handshake();
         handshake.client_version = "0.1.0-beta.37+bbbb".to_owned();
 
@@ -1442,9 +1240,15 @@ mod tests {
 
     #[test]
     fn transport_failures_stay_untouched_without_version_skew() {
-        let matching = crate::connection::DaemonConnection::new(unused_test_endpoint(), None)
-            .with_daemon_version("0.1.0-beta.37+cccc");
-        let unknown = crate::connection::DaemonConnection::new(unused_test_endpoint(), None);
+        let matching = crate::connection::DaemonConnection::new(
+            unused_test_endpoint(),
+            "unused-token".to_owned(),
+        )
+        .with_daemon_version("0.1.0-beta.37+cccc");
+        let unknown = crate::connection::DaemonConnection::new(
+            unused_test_endpoint(),
+            "unused-token".to_owned(),
+        );
         let mut handshake = test_skew_handshake();
         handshake.client_version = "0.1.0-beta.37+cccc".to_owned();
 
@@ -1490,8 +1294,11 @@ mod tests {
 
         // The skew decorator must not relabel the daemon's definitive answer,
         // even when the authority record names a different daemon version.
-        let connection = crate::connection::DaemonConnection::new(unused_test_endpoint(), None)
-            .with_daemon_version("0.1.0-beta.36+dddd");
+        let connection = crate::connection::DaemonConnection::new(
+            unused_test_endpoint(),
+            "unused-token".to_owned(),
+        )
+        .with_daemon_version("0.1.0-beta.36+dddd");
         let decorated = super::with_daemon_version_skew_context(error, &connection, &handshake);
         let (code, _, _) = decorated
             .project_route_context()
@@ -1517,7 +1324,8 @@ mod tests {
             let (stream, _) = listener.accept().await.expect("accept client");
             let (reader, mut writer) = stream.into_split();
             let mut lines = tokio::io::BufReader::new(reader).lines();
-            // Handshake line, then the pipelined request line.
+            // Auth preface and handshake lines, then the pipelined request line.
+            let _ = lines.next_line().await.expect("read auth preface");
             let _ = lines.next_line().await.expect("read handshake");
             let _ = lines.next_line().await.expect("read request");
             writer
@@ -1532,13 +1340,13 @@ mod tests {
         let client = super::DaemonInvocationClient::new(
             crate::connection::DaemonConnection::new(
                 crate::transport::DaemonEndpoint::Unix(socket),
-                None,
+                "refused-handshake-token".to_owned(),
             )
             .with_daemon_version("0.1.0-beta.36+ffff"),
             handshake,
         );
 
-        let observed_at = invocation_now_micros();
+        let observed_at = now_micros();
         let error = client
             .invoke(crate::contract::DaemonInvocationRequest::feedback(
                 "request.refused-handshake",
@@ -1578,60 +1386,5 @@ mod tests {
             catalog_version: String::new(),
             moved_store_adoption: crate::handshake::MovedStoreAdoption::Never,
         }
-    }
-
-    #[test]
-    fn configuration_dispatch_accepts_envelope_stripped_get_and_set_payloads() {
-        let get = configuration_request_from_surface_payload(
-            ApplicationSurfaceOperation::ConfigurationGet,
-            serde_json::json!({"key": "mcp.tool_timings"}),
-        )
-        .expect("stripped get payload");
-        assert!(matches!(
-            get,
-            ConfigurationWireRequestV1::Get(request) if request.key.as_str() == "mcp.tool_timings"
-        ));
-
-        let set = configuration_request_from_surface_payload(
-            ApplicationSurfaceOperation::ConfigurationSet,
-            serde_json::json!({
-                "layer": {"kind": "default"},
-                "key": "mcp.tool_timings",
-                "value": {"kind": "boolean", "value": true},
-                "expected_revision": "revision.test-configuration-set",
-                "idempotency_key": "configuration.idempotency.test-set"
-            }),
-        )
-        .expect("stripped set payload");
-        assert!(matches!(set, ConfigurationWireRequestV1::Set(_)));
-    }
-
-    #[test]
-    fn configuration_dispatch_rejects_the_tagged_envelope() {
-        assert!(matches!(
-            configuration_request_from_surface_payload(
-                ApplicationSurfaceOperation::ConfigurationGet,
-                serde_json::json!({
-                    "operation": "get",
-                    "request": {"key": "mcp.tool_timings"}
-                }),
-            ),
-            Err(InvocationError::InvalidRequest)
-        ));
-    }
-
-    #[test]
-    fn feedback_get_dispatch_validates_handles_client_side() {
-        let accepted = feedback_handle_from_surface_payload(serde_json::json!({
-            "request_handle": "feedback.handle.v1"
-        }))
-        .expect("valid handle");
-        assert_eq!(accepted.request_handle, "feedback.handle.v1");
-        assert_eq!(
-            feedback_handle_from_surface_payload(serde_json::json!({
-                "request_handle": " leading"
-            })),
-            Err(InvocationError::InvalidRequest)
-        );
     }
 }

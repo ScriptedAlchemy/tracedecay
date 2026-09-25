@@ -22,9 +22,9 @@ use crate::daemon::{
     DaemonHandshake, InProcessDaemonInvocationExecutor, execute_daemon_invocation,
 };
 use crate::mcp::tools::{ToolCallRegistryOptions, handle_tool_call_with_registry_options};
-use crate::project::TraceDecay;
 use tracedecay_daemon_protocol::DaemonInvocationExecutor;
 use tracedecay_daemon_service::{DaemonInvocationOutcome, DaemonInvocationRequest};
+use tracedecay_project::project::TraceDecay;
 
 const SCOPE_SET_ID: &str = "scope-set.mcp-execute-proof";
 const ALPHA_NAME: &str = "alpha_marker";

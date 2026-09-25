@@ -109,12 +109,22 @@ pub fn validate_envelope(value: &Value) -> std::result::Result<(), JsonRpcDecode
 /// after [`validate_envelope`]. Transports that parse to [`Value`] first (the
 /// rmcp receive loop) use this so their shape rejections carry the same id
 /// correlation as [`JsonRpcRequest::decode`].
+///
+/// MCP forbids a `null` request id, and the typed `rmcp` model cannot carry
+/// one (it would decode as a notification and never be answered), so an
+/// explicit `"id": null` is refused as `InvalidRequest` with the null id.
 pub fn decode_envelope<T: DeserializeOwned>(
-    value: Value,
+    value: &Value,
 ) -> std::result::Result<T, JsonRpcDecodeError> {
-    validate_envelope(&value)?;
-    let id = detected_request_id(&value);
-    serde_json::from_value(value).map_err(|error| JsonRpcDecodeError::invalid_request(id, error))
+    validate_envelope(value)?;
+    if value.get("id").is_some_and(Value::is_null) {
+        return Err(JsonRpcDecodeError::invalid_request(
+            Value::Null,
+            "MCP request id must be a string or number, not null",
+        ));
+    }
+    T::deserialize(value)
+        .map_err(|error| JsonRpcDecodeError::invalid_request(detected_request_id(value), error))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -412,7 +422,7 @@ mod tests {
     fn decode_envelope_applies_the_same_rule_to_parsed_values() {
         let value = json!({"jsonrpc": "2.0", "id": 3, "method": "ping"});
         assert!(validate_envelope(&value).is_ok());
-        let request: JsonRpcRequest = decode_envelope(value).unwrap();
+        let request: JsonRpcRequest = decode_envelope(&value).unwrap();
         assert_eq!(request.method, "ping");
 
         let foreign = json!({"jsonrpc": "1.0", "id": 3, "method": "ping"});
@@ -421,7 +431,7 @@ mod tests {
             json!(3)
         );
         assert_eq!(
-            invalid_request_id(decode_envelope::<JsonRpcRequest>(foreign).unwrap_err()),
+            invalid_request_id(decode_envelope::<JsonRpcRequest>(&foreign).unwrap_err()),
             json!(3)
         );
         assert_eq!(
@@ -435,9 +445,20 @@ mod tests {
         // A valid envelope whose body is not a request still correlates by id.
         assert_eq!(
             invalid_request_id(
-                decode_envelope::<JsonRpcRequest>(json!({"jsonrpc": "2.0", "id": 5})).unwrap_err()
+                decode_envelope::<JsonRpcRequest>(&json!({"jsonrpc": "2.0", "id": 5})).unwrap_err()
             ),
             json!(5)
+        );
+        // MCP forbids a null id; it must be refused, not decoded as work.
+        let null_id = decode_envelope::<JsonRpcRequest>(
+            &json!({"jsonrpc": "2.0", "id": null, "method": "ping"}),
+        )
+        .unwrap_err()
+        .into_response();
+        assert_eq!(null_id.id, Value::Null);
+        assert_eq!(
+            null_id.error.unwrap().code,
+            ErrorCode::InvalidRequest.as_i32()
         );
     }
 }

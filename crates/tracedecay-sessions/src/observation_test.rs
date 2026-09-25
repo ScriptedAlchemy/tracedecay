@@ -8,9 +8,9 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_domain::{
     EvidenceAvailabilityV1, MAX_OBSERVATION_STRUCTURE_DEPTH, MAX_OBSERVATION_STRUCTURE_VALUES,
-    ObservationScopeV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-    ObservationSourceRangeV1, ProjectId, RepositoryId, RetrievalAnchorTargetV2, SessionId,
-    WorktreeId,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceGenerationV1,
+    ObservationSourceIdentityV1, ObservationSourceRangeV1, ProjectId, RepositoryId,
+    RetrievalAnchorTarget, SessionId, WorktreeId,
 };
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, NonDurableFrameReason, ObservationCursorAdvance,
@@ -20,7 +20,7 @@ use tracedecay_store::{
     ObservationStoreResult,
 };
 
-use tracedecay_privacy::{ClaudeSanitizerPolicyV1, parse_claude_record_v1};
+use tracedecay_privacy::{ClaudeSanitizerPolicyV1, parse_observation_record_v1};
 
 use super::*;
 
@@ -312,9 +312,10 @@ fn request_at_for_session(
 ) -> CaptureClaudeObservationRequest {
     let encoded_frame = serde_json::to_vec(record).unwrap();
     let end = start + u64::try_from(encoded_frame.len()).unwrap();
-    let parsed_record = parse_claude_record_v1(
+    let parsed_record = parse_observation_record_v1(
         &encoded_frame,
         ObservationSourceRangeV1::new(start, end).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
     )
     .unwrap();
     let source = ObservationSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap();
@@ -323,7 +324,14 @@ fn request_at_for_session(
     };
     let generation = ObservationSourceGenerationV1::new(1).unwrap();
     let expected_cursor = (start != 0).then(|| {
-        ObservationSourceCursorV1::new(source.clone(), scope.clone(), generation, start).unwrap()
+        ObservationSourceCursorV1::for_ordering(
+            source.clone(),
+            scope.clone(),
+            generation,
+            ObservationOrderingDomainV1::FileBytes,
+            start,
+        )
+        .unwrap()
     });
     let identity = ObservationIdentityMaterialV1::new(
         source,
@@ -556,8 +564,8 @@ async fn repository_provenance_is_bound_to_the_sanitized_observation_write() {
         Some(outcome.receipt().observation().observation_id())
     );
     assert!(matches!(
-        attachment.anchor().map(tracedecay_domain::RetrievalAnchorRecordV2::target),
-        Some(RetrievalAnchorTargetV2::RepositoryCapture { capture_id, .. })
+        attachment.anchor().map(tracedecay_domain::RetrievalAnchorRecord::target),
+        Some(RetrievalAnchorTarget::RepositoryCapture { capture_id, .. })
             if capture_id == provenance.capture_id()
     ));
     let encoded = serde_json::to_string(attachment).unwrap();
@@ -609,9 +617,10 @@ fn request_accepts_only_bounded_parser_evidence_for_the_identity_range() {
     let retention = || RetentionClass::new("retention.application-test").unwrap();
 
     let raw = b"{}";
-    let parsed = parse_claude_record_v1(
+    let parsed = parse_observation_record_v1(
         raw,
         ObservationSourceRangeV1::new(10, 10 + u64::try_from(raw.len()).unwrap()).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
     )
     .unwrap();
     assert!(matches!(
@@ -1165,7 +1174,7 @@ async fn capture_observations_reports_cancellation_after_the_single_batch_commit
 
 #[tokio::test]
 async fn capture_observations_refuses_mixed_privacy_batch_before_persist() {
-    // `parse_claude_record_v1` (used by `request`/`request_at` below) enforces
+    // `parse_observation_record_v1` (used by `request`/`request_at` below) enforces
     // the parser's own 1 MiB ceiling before any record reaches the sanitizer,
     // so a record large enough to trip that ceiling can never reach
     // `sanitize_parsed`'s own `RecordSize` disposition through this path. To

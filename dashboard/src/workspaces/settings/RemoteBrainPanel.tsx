@@ -30,14 +30,14 @@ export function RemoteBrainPanel() {
   if (status.isPending) {
     return (
       <PanelFrame>
-        <p className="td-value text-3xs text-text-muted">reading remote brain…</p>
+        <p className="td-value text-xs text-text-muted">reading remote brain…</p>
       </PanelFrame>
     );
   }
   if (!status.data) {
     return (
       <PanelFrame>
-        <p className="td-value text-3xs text-text-muted">
+        <p className="td-value text-xs text-text-muted">
           The remote operational read produced no response, so enrollment and
           authority are unknown.
         </p>
@@ -243,18 +243,18 @@ function AuthorityDetail({ authority }: { authority: RemoteAuthoritySummaryV1 })
               <Field term="epoch" detail={String(authority.fence.authority_epoch)} />
             </dl>
           ) : (
-            <p className="td-value text-3xs text-text-muted">
+            <p className="td-value text-xs text-text-muted">
               No verified fence is known for this partial authority.
             </p>
           )}
-          <p className="td-value text-3xs text-text-muted">
+          <p className="td-value text-xs text-text-muted">
             Missing evidence: {authority.missing.map(reasonLabel).join(', ')}
           </p>
         </div>
       );
     case 'unavailable':
       return (
-        <p className="td-value text-3xs text-text-muted" data-remote-authority="unavailable">
+        <p className="td-value text-xs text-text-muted" data-remote-authority="unavailable">
           Authority unavailable: {reasonLabel(authority.reason)}
         </p>
       );
@@ -269,7 +269,7 @@ function Field({ term, detail }: { term: string; detail: string }) {
   return (
     <div className="flex gap-2">
       <dt className="td-legend shrink-0">{term}</dt>
-      <dd className="td-value min-w-0 break-all font-mono text-3xs text-text-secondary">
+      <dd className="td-value min-w-0 break-all font-mono text-xs text-text-secondary">
         {detail}
       </dd>
     </div>

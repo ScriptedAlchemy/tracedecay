@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -105,79 +108,67 @@ class DropPrefixRestoredArtifactsTests(unittest.TestCase):
 
 
 class HostedWorkflowLineageTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.checker = load_module(CHECKER_PATH, "check_rust_cache_lineage")
+    """Drive the checker against scratch copies of the hosted lane workflows."""
 
-    def test_canonical_workflows_pass(self) -> None:
+    def setUp(self) -> None:
+        self.checker = load_module(CHECKER_PATH, "check_rust_cache_lineage")
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.workflows = Path(scratch.name)
+        for filename in self.checker.HOSTED_COMPILER_LANES:
+            shutil.copyfile(WORKFLOWS / filename, self.workflows / filename)
+        self.checker.WORKFLOWS = self.workflows
+
+    def _assert_rejected_after(self, filename: str, old: str, new: str, reason: str) -> None:
         self.assertEqual(self.checker.main(), 0)
-
-    def _rewrite(self, filename: str, old: str, new: str) -> None:
-        path = WORKFLOWS / filename
+        path = self.workflows / filename
         text = path.read_text(encoding="utf-8")
-        if old not in text:
-            self.fail(f"{filename} does not contain {old!r}")
-        mutated = text.replace(old, new, 1)
-        self.assertNotEqual(mutated, text)
-        path.write_text(mutated, encoding="utf-8")
+        self.assertIn(old, text)
+        path.write_text(text.replace(old, new, 1), encoding="utf-8")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+            self.checker.main()
+        self.assertIn(reason, stderr.getvalue())
 
     def test_rejects_restoring_the_v0_prefix(self) -> None:
-        original = (WORKFLOWS / "hotpath-coverage.yml").read_text(encoding="utf-8")
-        try:
-            self._rewrite("hotpath-coverage.yml", "prefix-key: v1-rust", "prefix-key: v0-rust")
-            with self.assertRaises(SystemExit):
-                self.checker.main()
-        finally:
-            (WORKFLOWS / "hotpath-coverage.yml").write_text(original, encoding="utf-8")
+        self._assert_rejected_after(
+            "hotpath-coverage.yml",
+            "prefix-key: v1-rust",
+            "prefix-key: v0-rust",
+            "hotpath-coverage.yml:slice-tests rust-cache prefix-key must be 'v1-rust'",
+        )
 
     def test_rejects_dropping_the_prefix_restore_guard(self) -> None:
-        path = WORKFLOWS / "hotpath-runtime-core.yml"
-        original = path.read_text(encoding="utf-8")
-        try:
-            self._rewrite(
-                "hotpath-runtime-core.yml",
-                'scripts/drop-prefix-restored-rust-artifacts.sh "${{ steps.rust-cache.outputs.cache-hit }}"',
-                "echo skip-drop",
-            )
-            with self.assertRaises(SystemExit):
-                self.checker.main()
-        finally:
-            path.write_text(original, encoding="utf-8")
+        self._assert_rejected_after(
+            "hotpath-runtime-core.yml",
+            'scripts/drop-prefix-restored-rust-artifacts.sh "${{ steps.rust-cache.outputs.cache-hit }}"',
+            "echo skip-drop",
+            "hotpath-runtime-core.yml:git-authority must drop target/",
+        )
 
     def test_rejects_sharing_a_cache_lineage_across_lanes(self) -> None:
-        path = WORKFLOWS / "hotpath-profile.yml"
-        original = path.read_text(encoding="utf-8")
-        try:
-            self._rewrite(
-                "hotpath-profile.yml",
-                "shared-key: hotpath-profile",
-                "shared-key: hotpath-runtime-core",
-            )
-            with self.assertRaises(SystemExit):
-                self.checker.main()
-        finally:
-            path.write_text(original, encoding="utf-8")
+        self._assert_rejected_after(
+            "hotpath-profile.yml",
+            "shared-key: hotpath-profile",
+            "shared-key: hotpath-runtime-core",
+            "hotpath-profile.yml:profile rust-cache shared-key must be 'hotpath-profile'",
+        )
 
     def test_rejects_base_profile_writing_into_the_restored_target(self) -> None:
-        path = WORKFLOWS / "hotpath-profile.yml"
-        original = path.read_text(encoding="utf-8")
-        try:
-            self._rewrite("hotpath-profile.yml", "CARGO_TARGET_DIR: target-base", "CARGO_TARGET_DIR: target")
-            with self.assertRaises(SystemExit):
-                self.checker.main()
-        finally:
-            path.write_text(original, encoding="utf-8")
+        self._assert_rejected_after(
+            "hotpath-profile.yml",
+            "CARGO_TARGET_DIR: target-base",
+            "CARGO_TARGET_DIR: target",
+            "hotpath-profile base compile must use CARGO_TARGET_DIR=target-base",
+        )
 
     def test_rejects_leaving_incremental_compilation_on(self) -> None:
-        path = WORKFLOWS / "hotpath-coverage.yml"
-        original = path.read_text(encoding="utf-8")
-        try:
-            self._rewrite("hotpath-coverage.yml", 'CARGO_INCREMENTAL: "0"', 'CARGO_INCREMENTAL: "1"')
-            with self.assertRaises(SystemExit):
-                self.checker.main()
-        finally:
-            path.write_text(original, encoding="utf-8")
-
+        self._assert_rejected_after(
+            "hotpath-coverage.yml",
+            'CARGO_INCREMENTAL: "0"',
+            'CARGO_INCREMENTAL: "1"',
+            "hotpath-coverage.yml must set CARGO_INCREMENTAL=0",
+        )
 
 if __name__ == "__main__":
     unittest.main()

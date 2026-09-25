@@ -14,6 +14,7 @@ use tracedecay_sessions::{
 
 use tracedecay_global_db::GlobalDbWorkflowStore;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 use tracedecay_sessions::runtime::git_correlation::{GitCorrelationError, GitScopeFilter};
 use tracedecay_sessions::runtime::workflow_index::{
     MAX_WORKFLOW_LIMIT, RegisteredWorkflowIndexSnapshot, WorkflowIndexError,
@@ -90,8 +91,7 @@ impl DaemonWorkflowIndexReadService {
                     worktree: filter.worktree,
                     commit: filter.commit,
                 };
-                let session_ids = match self
-                    .database
+                let session_ids = match SessionTemporalAccess::new(&*self.database)
                     .git_scope_session_ids_bounded(&filter, MAX_WORKFLOW_LIMIT + 1)
                 {
                     Ok(session_ids) => session_ids,

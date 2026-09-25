@@ -12,11 +12,12 @@ use serde_json::Value;
 use crate::ports::hook_runtime::HookRuntimeV1;
 
 use super::claude::is_code_research_prompt;
-use super::tool_hints::{HintAgent, ToolHintInput, decide_hint};
+use super::tool_hints::{ToolHintInput, decide_hint};
 use super::{
     event_cwd_from_parsed, event_project_root_or_process_cwd, event_session_id, read_hook_event,
     record_hook_invoked_parsed, rel_under_root, research_block_reason,
 };
+use tracedecay_domain::HostIntegrationIdV1;
 
 /// Largest transcript tail the Kiro `userPromptSubmit` hook will read per call.
 const KIRO_HOT_INGEST_MAX_BYTES: u64 = 256 * 1024;
@@ -38,7 +39,7 @@ pub fn evaluate_kiro_pre_tool_use(event_json: &str) -> Option<String> {
     let tool_input = parsed.get("tool_input").unwrap_or(&Value::Null);
     if let Some(prompt) = kiro_event_text(tool_input).filter(|text| is_code_research_prompt(text)) {
         let hint = decide_hint(&ToolHintInput {
-            agent: HintAgent::Kiro,
+            agent: HostIntegrationIdV1::Kiro,
             session_id: event_session_id(&parsed),
             tool_name: Some(tool_name.to_string()),
             command: None,
@@ -130,8 +131,13 @@ pub async fn hook_kiro_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
     match profile {
         Ok(None) => {
             return i32::from(
-                !super::write_hook_output(None, tracedecay_hooks::HookHostV1::Kiro, &event, "{}")
-                    .await,
+                !super::write_hook_output(
+                    None,
+                    tracedecay_domain::NativeHostIdentityV1::Kiro,
+                    &event,
+                    "{}",
+                )
+                .await,
             );
         }
         Err(error) => {
@@ -144,7 +150,7 @@ pub async fn hook_kiro_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
     let hook_telemetry = record_hook_invoked_parsed(
         runtime,
         root.as_deref(),
-        HintAgent::Kiro,
+        HostIntegrationIdV1::Kiro,
         "userPromptSubmit",
         &event,
         &parsed,
@@ -152,7 +158,7 @@ pub async fn hook_kiro_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
     let dispatch_guidance = if let Some(root) = root.as_deref() {
         super::dispatch::dispatch(
             runtime,
-            tracedecay_hooks::HookHostV1::Kiro,
+            tracedecay_domain::NativeHostIdentityV1::Kiro,
             &event,
             root,
             Some(&hook_telemetry),
@@ -187,7 +193,7 @@ pub async fn hook_kiro_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
         .unwrap_or_else(|| serde_json::json!({}).to_string());
     if !super::write_hook_output(
         root.as_deref(),
-        tracedecay_hooks::HookHostV1::Kiro,
+        tracedecay_domain::NativeHostIdentityV1::Kiro,
         &event,
         &output,
     )

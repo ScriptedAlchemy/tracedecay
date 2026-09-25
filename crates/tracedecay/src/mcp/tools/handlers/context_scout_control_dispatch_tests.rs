@@ -6,8 +6,8 @@ use tempfile::TempDir;
 
 use super::dispatch_test_support::*;
 use super::*;
-use crate::config::lock_user_data_dir_test_env;
-use crate::project::TraceDecay;
+use tracedecay_project::config::lock_user_data_dir_test_env;
+use tracedecay_project::project::TraceDecay;
 
 #[derive(Default)]
 struct RecordingUnavailableExecutor {
@@ -23,7 +23,7 @@ struct RecordingUnavailableExecutor {
 impl tracedecay_contracts::ApplicationInvocationExecutor for RecordingUnavailableExecutor {
     fn invoke(
         &self,
-        _invocation: tracedecay_contracts::ApplicationInvocation,
+        invocation: tracedecay_contracts::ApplicationInvocation,
     ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
@@ -31,7 +31,15 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for RecordingUnavailabl
             tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async { Err(tracedecay_contracts::InvocationError::Unavailable) })
+        Box::pin(async move {
+            let (context, request) = invocation.into_parts();
+            let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request
+            else {
+                return Err(tracedecay_contracts::InvocationError::Unavailable);
+            };
+            tracedecay_daemon_protocol::invoke_application_surface(self, context, binding, payload)
+                .await
+        })
     }
 }
 

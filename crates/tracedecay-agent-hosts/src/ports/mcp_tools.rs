@@ -74,6 +74,28 @@ pub fn advertised_tools() -> Result<Vec<AdvertisedToolV1>> {
         .collect())
 }
 
+/// The generated `schemas.json` that CLI-bridge hosts (Hermes, Pi) register
+/// their tools from: exact name, description, argument schema, and the
+/// `readOnlyHint` the bridge uses to gate mutating and cross-project calls.
+pub fn advertised_tool_schemas_json(advertised_tools: &[AdvertisedToolV1]) -> Result<String> {
+    let defs = advertised_tools
+        .iter()
+        .map(|tool| {
+            serde_json::json!({
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.input_schema,
+                "read_only": tool.read_only,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string_pretty(&defs)
+        .map(|json| format!("{json}\n"))
+        .map_err(|e| TraceDecayError::Config {
+            message: format!("failed to serialize tool schemas.json: {e}"),
+        })
+}
+
 /// The tool names whose output honours a `format` argument.
 #[must_use]
 pub fn format_capable_tool_names() -> &'static [&'static str] {

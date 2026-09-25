@@ -10,9 +10,9 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use tracedecay::mcp::McpServer;
-use tracedecay::project::TraceDecay;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::ProjectId;
+use tracedecay_project::project::TraceDecay;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 
 use crate::support::{
     TestEnv, TestTempDir, TestTraceDecay, extract_real_server_text, handle_real_server_tool_call,

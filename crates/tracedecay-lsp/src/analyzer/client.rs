@@ -29,6 +29,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracedecay_daemon_protocol::{ConnectionLocalRequestSequence, FramePoll};
+use tracedecay_runtime_core::path_safety::plain_host_path;
 
 use super::broker::{CodeDiagnostic, DiagnosticSeverity};
 use super::error::{
@@ -1335,7 +1336,9 @@ fn lsp_initialization_options(command: &str) -> Value {
 /// percent-encoding. Handles POSIX paths, Windows drive paths (`C:/…`), and UNC
 /// (`//server/share`) prefixes. Shared with the Kiro installer.
 pub fn file_uri_from_path_text(path: &str) -> String {
-    let normalized = path.replace('\\', "/");
+    let normalized = plain_host_path(Path::new(path))
+        .to_string_lossy()
+        .replace('\\', "/");
     let encoded = percent_encode_file_uri_path(&normalized);
     if normalized.starts_with("//") {
         format!("file:{encoded}")
@@ -1507,6 +1510,11 @@ mod tests {
         assert_eq!(
             file_uri_from_path_text("/tmp/100% real.rs"),
             "file:///tmp/100%25%20real.rs"
+        );
+        assert_eq!(
+            file_uri_from_path_text(r"\\?\D:\repo\src\main.rs"),
+            "file:///D:/repo/src/main.rs",
+            "a canonicalized Windows path must not become a `?` URL host"
         );
     }
 

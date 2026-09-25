@@ -23,6 +23,57 @@ const PROTECTED_CHANGE_GUIDANCE: &str = "Read the affected setting first through
     the daemon validates the change against the canonical ProtectedChange schema before it \
     returns the redacted preview.";
 
+/// Operations whose shipped MCP definition (input schema and description) is
+/// the handwritten `def_*` in [`super`], not a projection of the catalog.
+const HANDWRITTEN_DEFINITION_OPERATIONS: [ApplicationSurfaceOperation; 46] = [
+    ApplicationSurfaceOperation::Context,
+    ApplicationSurfaceOperation::Node,
+    ApplicationSurfaceOperation::Impact,
+    ApplicationSurfaceOperation::Similar,
+    ApplicationSurfaceOperation::Redundancy,
+    ApplicationSurfaceOperation::RenamePreview,
+    ApplicationSurfaceOperation::PortStatus,
+    ApplicationSurfaceOperation::PortOrder,
+    ApplicationSurfaceOperation::Todos,
+    ApplicationSurfaceOperation::StrReplace,
+    ApplicationSurfaceOperation::MultiStrReplace,
+    ApplicationSurfaceOperation::InsertAt,
+    ApplicationSurfaceOperation::AstGrepRewrite,
+    ApplicationSurfaceOperation::ReplaceSymbol,
+    ApplicationSurfaceOperation::InsertAtSymbol,
+    ApplicationSurfaceOperation::MoveSymbol,
+    ApplicationSurfaceOperation::RenameSymbol,
+    ApplicationSurfaceOperation::SourceEditReconcile,
+    ApplicationSurfaceOperation::SourceEditRollback,
+    ApplicationSurfaceOperation::FactStoreCurate,
+    ApplicationSurfaceOperation::FactStoreAdd,
+    ApplicationSurfaceOperation::FactStoreSearch,
+    ApplicationSurfaceOperation::FactStoreProbe,
+    ApplicationSurfaceOperation::FactStoreRelated,
+    ApplicationSurfaceOperation::FactStoreReason,
+    ApplicationSurfaceOperation::FactStoreContradict,
+    ApplicationSurfaceOperation::FactStoreGet,
+    ApplicationSurfaceOperation::FactStoreUpdate,
+    ApplicationSurfaceOperation::FactStoreRemove,
+    ApplicationSurfaceOperation::FactStoreSupersede,
+    ApplicationSurfaceOperation::FactStoreList,
+    ApplicationSurfaceOperation::FactFeedback,
+    ApplicationSurfaceOperation::MemoryStatus,
+    ApplicationSurfaceOperation::SessionRefreshStatus,
+    ApplicationSurfaceOperation::SessionRefreshCancel,
+    ApplicationSurfaceOperation::SessionRefreshBegin,
+    ApplicationSurfaceOperation::MessageSearch,
+    ApplicationSurfaceOperation::SessionsFor,
+    ApplicationSurfaceOperation::Workflows,
+    ApplicationSurfaceOperation::LcmStatus,
+    ApplicationSurfaceOperation::LcmDoctor,
+    ApplicationSurfaceOperation::LcmLoadSession,
+    ApplicationSurfaceOperation::LcmGrep,
+    ApplicationSurfaceOperation::LcmDescribe,
+    ApplicationSurfaceOperation::LcmExpand,
+    ApplicationSurfaceOperation::LcmExpandQuery,
+];
+
 /// Project every canonical application handler into its MCP transport view.
 ///
 /// Operation identity comes from `ApplicationHandlerDescriptor`, exposure and
@@ -39,6 +90,7 @@ pub(super) fn application_definitions() -> Result<Vec<ToolDefinition>, McpCatalo
 
     ApplicationSurfaceOperation::ALL
         .into_iter()
+        .filter(|operation| !HANDWRITTEN_DEFINITION_OPERATIONS.contains(operation))
         .map(|operation| {
             let descriptor = handlers.for_surface_operation(operation).ok_or_else(|| {
                 invalid_application_definition(
@@ -88,8 +140,14 @@ pub(super) fn application_definitions() -> Result<Vec<ToolDefinition>, McpCatalo
                     "readOnlyHint": executable.effect().is_read_only(),
                     "title": manifest.routing().name(),
                 })),
-                meta: (operation == ApplicationSurfaceOperation::StorageStatus)
-                    .then(|| json!({ "anthropic/alwaysLoad": true })),
+                // Callers stays loaded: "who calls this" is the most common
+                // native reflex after grep and chains straight from a node ID.
+                meta: matches!(
+                    operation,
+                    ApplicationSurfaceOperation::StorageStatus
+                        | ApplicationSurfaceOperation::CodeCallers
+                )
+                .then(|| json!({ "anthropic/alwaysLoad": true })),
             })
         })
         .collect()
@@ -186,7 +244,9 @@ pub(super) fn def_remote_status_read() -> ToolDefinition {
 
 #[cfg(test)]
 mod tests {
-    use super::{application_definitions, application_input_schema};
+    use super::{
+        HANDWRITTEN_DEFINITION_OPERATIONS, application_definitions, application_input_schema,
+    };
     use crate::definitions::{
         add_format_property, add_registered_project_selector_properties,
         get_maximal_tool_definitions, project_input_schema,
@@ -217,6 +277,48 @@ mod tests {
     }
 
     #[test]
+    fn code_navigation_reads_publish_only_their_short_tool_names() {
+        let advertised = get_maximal_tool_definitions().expect("advertised definitions");
+        for operation in [
+            ApplicationSurfaceOperation::CodeCallers,
+            ApplicationSurfaceOperation::CodeCallees,
+            ApplicationSurfaceOperation::CodeTypeHierarchy,
+            ApplicationSurfaceOperation::CodeSignatureSearch,
+            ApplicationSurfaceOperation::CodeImplementations,
+        ] {
+            let short = operation.mcp_tool_name();
+            let canonical = format!("tracedecay_{}", operation.as_str());
+            assert_ne!(short, canonical);
+            assert_eq!(
+                advertised
+                    .iter()
+                    .filter(|definition| definition.name == short)
+                    .count(),
+                1,
+                "{short}"
+            );
+            assert!(
+                advertised
+                    .iter()
+                    .all(|definition| definition.name != canonical),
+                "{canonical} must not be a second advertisement"
+            );
+        }
+        let callers = advertised
+            .iter()
+            .find(|definition| definition.name == "tracedecay_callers")
+            .expect("callers definition");
+        assert_eq!(
+            callers.input_schema["required"],
+            serde_json::json!(["node_id"])
+        );
+        assert_eq!(
+            callers.meta,
+            Some(serde_json::json!({ "anthropic/alwaysLoad": true }))
+        );
+    }
+
+    #[test]
     fn definitions_project_each_handler_and_executable_once() {
         let handlers =
             tracedecay_contracts::application_handler_descriptors().expect("application handlers");
@@ -236,15 +338,32 @@ mod tests {
                 .get(&operation_id)
                 .and_then(|availability| availability.binding())
                 .expect("executable binding");
-            let definition = definitions
-                .iter()
-                .find(|definition| definition.name == operation.mcp_tool_name())
-                .expect("MCP definition");
 
             assert_eq!(
                 executable.capability_id(),
                 descriptor.operation().capability_id()
             );
+            if HANDWRITTEN_DEFINITION_OPERATIONS.contains(&operation) {
+                assert!(
+                    definitions
+                        .iter()
+                        .all(|definition| definition.name != operation.mcp_tool_name()),
+                    "{operation:?} keeps its handwritten definition"
+                );
+                assert_eq!(
+                    advertised
+                        .iter()
+                        .filter(|published| published.name == operation.mcp_tool_name())
+                        .count(),
+                    1,
+                    "{operation:?}"
+                );
+                continue;
+            }
+            let definition = definitions
+                .iter()
+                .find(|definition| definition.name == operation.mcp_tool_name())
+                .expect("MCP definition");
             let canonical = executable.request_schema().body();
             let expected_schema = match operation {
                 // These tools deliberately adapt a shipped request or bound

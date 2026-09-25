@@ -8,7 +8,6 @@ use crate::support::{
 
 #[tokio::test]
 async fn script_calls_keep_only_the_uncalled_shell_function_dead() {
-    let (_isolated_env, _) = crate::common::IsolatedEnv::acquire().await;
     let fixture = production_composition_fixture_with_sources(|project| {
         fs::write(
             project.join("usage.sh"),

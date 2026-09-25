@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{
-    Arc, Mutex, RwLock,
+    Arc, Mutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::Duration;
@@ -11,7 +11,7 @@ use std::time::Duration;
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexProductionErrorV1};
 use tracedecay_domain::canonical_sha256;
 
-use super::{CodeIndexSchedulerRegistryV1, PendingWakeV1};
+use super::{CodeIndexSchedulerRegistryV1, PendingWakeV1, ServingGenerationSlot};
 use crate::code_index_scheduler::graph_activation::CodeGraphActivationAuthorityV1;
 use crate::code_index_scheduler::{
     CodeGraphReplayBindingV1, CodeIndexCadenceTriggerV1, CodeIndexIgnoredDependencyIndexOutcomeV1,
@@ -19,6 +19,7 @@ use crate::code_index_scheduler::{
     CodeIndexSchedulerErrorV1, DaemonCodeIndexControlV1, LatestCompleteCodeIndexV1, PendingHintsV1,
     ReconcilePassGuard,
 };
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AdmissionFlightKeyV1 {
@@ -399,7 +400,7 @@ impl CodeIndexSchedulerRegistryV1 {
         request: CodeIndexIgnoredDependencyRequestV1,
         control: Arc<dyn CodeIndexExecutionControlV1 + Send + Sync + '_>,
     ) -> Result<CodeIndexIgnoredDependencyIndexOutcomeV1, CodeIndexSchedulerErrorV1> {
-        let project_root = project_root.canonicalize()?;
+        let project_root = canonical_existing_identity(project_root)?;
         let flight_key = AdmissionFlightKeyV1::for_request(&request)?;
         let (
             repository_id,
@@ -704,15 +705,16 @@ impl CodeIndexSchedulerRegistryV1 {
                 return Err(error);
             }
         }
-        if let Ok(authority) = build.latest.test_attribution_authority() {
-            self.test_attribution_authorities
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(
-                    project_root.to_path_buf(),
-                    (build.outcome.generation_id.clone(), authority),
-                );
-        }
+        self.test_attribution_authorities
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                project_root.to_path_buf(),
+                (
+                    build.outcome.generation_id.clone(),
+                    Arc::downgrade(&build.latest.generation),
+                ),
+            );
         // The swap above already installed this candidate in the serving
         // slot, so the broadcast follows a witnessed seat.
         Self::broadcast_generation_publication(
@@ -728,7 +730,7 @@ fn validate_serving_request(
     request: &CodeIndexIgnoredDependencyRequestV1,
     repository_id: &tracedecay_domain::RepositoryId,
     worktree_id: &tracedecay_domain::WorktreeId,
-    serving_generation: &RwLock<Option<LatestCompleteCodeIndexV1>>,
+    serving_generation: &ServingGenerationSlot,
 ) -> Result<LatestCompleteCodeIndexV1, CodeIndexSchedulerErrorV1> {
     if request.scope.validate().is_err()
         || &request.scope.repository_id != repository_id
@@ -753,7 +755,7 @@ fn validate_serving_request(
 }
 
 pub fn exact_activated_serving_generation(
-    serving_generation: &RwLock<Option<LatestCompleteCodeIndexV1>>,
+    serving_generation: &ServingGenerationSlot,
     candidate: &LatestCompleteCodeIndexV1,
 ) -> Option<LatestCompleteCodeIndexV1> {
     let serving = serving_generation

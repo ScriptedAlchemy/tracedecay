@@ -16,7 +16,7 @@ use tracedecay_code_index::production::{
     CodeIndexPublishedGenerationV1, SealedGenerationSegmentReadV1,
 };
 use tracedecay_code_index_retention::code_index_generations::{
-    DurablePublicationPointerV1, scoped_code_index_store_root,
+    DurablePublicationPointerV1, code_generation_segments_root, scoped_code_index_store_root,
 };
 use tracedecay_daemon_protocol::DaemonHandshake;
 use tracedecay_domain::sha256_hex_suffix;
@@ -28,6 +28,7 @@ use crate::code_index_journey::{
     wait_for_terminal_generation,
 };
 use crate::common::{EnvVarGuard, IsolatedEnv, daemon_socket_path, spawn_tracedecay_daemon_with};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 fn initialize_repository(project: &Path) -> (String, String) {
     fs::create_dir_all(project.join("src")).expect("fixture source directory");
@@ -90,7 +91,7 @@ async fn inject_overflow(socket: &Path, handshake: &DaemonHandshake) {
         socket,
         handshake,
         "tracedecay_admin_sync",
-        json!({ "force": true, "format": "json" }),
+        json!({ "format": "json" }),
     )
     .await;
     assert_eq!(receipt["status"], "queued", "overflow receipt: {receipt}");
@@ -193,7 +194,7 @@ fn read_active_generation(home: &Path, project: &Path) -> CodeIndexPublishedGene
     .expect("sealed active code generation");
     // The daemon publishes partitioned manifests whose file segments live
     // beside the generations directory; decode those the way the store does.
-    let segments_root = scope.join("code-generation-segments-v1");
+    let segments_root = code_generation_segments_root(&scope);
     CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&sealed, |request, buffer| {
         let (digest, size_bytes, offset, length) = match request {
             SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
@@ -222,7 +223,6 @@ fn read_active_generation(home: &Path, project: &Path) -> CodeIndexPublishedGene
         Ok(())
     })
     .expect("active generation must be sealed and compatible")
-    .expect("active generation must be a partitioned manifest")
 }
 
 fn assert_sealed_generation_identity(
@@ -302,13 +302,13 @@ fn assert_exact_ignored_dependency_roster(generation: &CodeIndexPublishedGenerat
 #[tokio::test]
 async fn ignored_dependency_admission_survives_physical_daemon_restart_without_widening() {
     let (environment, project) = IsolatedEnv::acquire().await;
-    let project = project.canonicalize().expect("canonical fixture project");
+    let project = canonical_existing_identity(&project).expect("canonical fixture project");
     let revision = initialize_ignored_dependency_repository(&project);
     let socket = daemon_socket_path(environment.home());
     let mut daemon = spawn_tracedecay_daemon_with(environment.home(), |_| {});
     let project_id = initialize_tracedecay(environment.home(), &project);
     let identity = exact_identity(&project, project_id);
-    tracedecay::product_runtime::register_fixture_product_runtime();
+    tracedecay_project::product_runtime::register_fixture_product_runtime();
     let handshake =
         tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
             .expect("production daemon handshake");
@@ -418,7 +418,7 @@ async fn ignored_dependency_admission_survives_physical_daemon_restart_without_w
 #[tokio::test]
 async fn one_line_append_publishes_fresh_generation_with_carried_clone_bodies() {
     let (environment, project) = IsolatedEnv::acquire().await;
-    let project = project.canonicalize().expect("canonical fixture project");
+    let project = canonical_existing_identity(&project).expect("canonical fixture project");
     fs::create_dir_all(project.join("src")).expect("fixture source directory");
     fs::write(
         project.join("Cargo.toml"),
@@ -453,7 +453,7 @@ async fn one_line_append_publishes_fresh_generation_with_carried_clone_bodies() 
     });
     let project_id = initialize_tracedecay(environment.home(), &project);
     let identity = exact_identity(&project, project_id);
-    tracedecay::product_runtime::register_fixture_product_runtime();
+    tracedecay_project::product_runtime::register_fixture_product_runtime();
     let handshake =
         tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
             .expect("production daemon handshake");
@@ -504,7 +504,7 @@ async fn one_line_append_publishes_fresh_generation_with_carried_clone_bodies() 
 #[tokio::test]
 async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_generations() {
     let (environment, project) = IsolatedEnv::acquire().await;
-    let project = project.canonicalize().expect("canonical fixture project");
+    let project = canonical_existing_identity(&project).expect("canonical fixture project");
     let (main_revision, feature_revision) = initialize_repository(&project);
     let socket = daemon_socket_path(environment.home());
     let log_path = environment
@@ -519,7 +519,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
     });
     let project_id = initialize_tracedecay(environment.home(), &project);
     let identity = exact_identity(&project, project_id);
-    tracedecay::product_runtime::register_fixture_product_runtime();
+    tracedecay_project::product_runtime::register_fixture_product_runtime();
     let handshake =
         tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
             .expect("production daemon handshake");

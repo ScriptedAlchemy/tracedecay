@@ -16,12 +16,11 @@ use tracedecay_global_db::configuration::contracts::types::DirectConfigurationMu
 use tracedecay_lsp::LspSessionRegistry;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
-use crate::project::TraceDecay;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use tracedecay_contracts::now_micros;
 use tracedecay_contracts::{
     ConfigurationBatchRequestV1, ConfigurationDirectMutationRequestV1, ConfigurationWireRequestV1,
 };
-use tracedecay_daemon_protocol::invocation_now_micros;
 use tracedecay_daemon_protocol::{DaemonInvocationOutcome, DaemonInvocationRequest};
 use tracedecay_daemon_service::{
     DaemonConfigurationRuntimeRegistrar, DaemonInvocationService, DaemonRetainedRuntimeRegistrar,
@@ -33,6 +32,7 @@ use tracedecay_dashboard_api::{
     DashboardHttpRequestControlV1, DashboardScopeSetReadFuture,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_project::project::TraceDecay;
 
 const CONFIGURATION_REQUEST_DEADLINE_MICROS: i64 = 15_000_000;
 const CONFIGURATION_AUTHORITY_LIFETIME_MICROS: i64 = 3_600_000_000;
@@ -83,7 +83,7 @@ impl DashboardApplicationRuntime for DashboardConfigurationRuntimeForTestV1 {
             flatten_configuration_mutation(mutation, &mut direct_mutations);
         }
         Box::pin(async move {
-            let observed_at = invocation_now_micros();
+            let observed_at = now_micros();
             let deadline = tracedecay_contracts::Deadline::new(UtcMicros(
                 observed_at
                     .0
@@ -170,10 +170,18 @@ impl DashboardApplicationRuntime for DashboardConfigurationRuntimeForTestV1 {
 impl ApplicationInvocationExecutor for DashboardConfigurationRuntimeForTestV1 {
     fn invoke(
         &self,
-        _invocation: ApplicationInvocation,
+        invocation: ApplicationInvocation,
     ) -> ApplicationInvocationFuture<'_, std::result::Result<ApplicationResponse, InvocationError>>
     {
-        Box::pin(async { Err(InvocationError::Unavailable) })
+        Box::pin(async move {
+            let (context, request) = invocation.into_parts();
+            let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request
+            else {
+                return Err(InvocationError::Unavailable);
+            };
+            tracedecay_daemon_protocol::invoke_application_surface(self, context, binding, payload)
+                .await
+        })
     }
 }
 
@@ -301,11 +309,12 @@ pub(crate) async fn dashboard_configuration_authorities_for_test(
         ),
     );
     let user_profile_id = cg.store_runtime_registry().profile_id().clone();
-    let configured = crate::config::read_or_initialize_profile_code_index_worker_selection(
-        profile_database.clone(),
-        &user_profile_id,
-    )
-    .await?;
+    let configured =
+        tracedecay_project::config::read_or_initialize_profile_code_index_worker_selection(
+            profile_database.clone(),
+            &user_profile_id,
+        )
+        .await?;
     let resident_snapshot = resident_memory.snapshot();
     tracedecay_code_index::parallelism::install_worker_plan(
         configured,
@@ -319,7 +328,7 @@ pub(crate) async fn dashboard_configuration_authorities_for_test(
     let service = DaemonInvocationService::with_code_index_schedulers(
         CodeIndexSchedulerRegistryV1::with_resident_memory(1, resident_memory),
     );
-    let observed_at = invocation_now_micros();
+    let observed_at = now_micros();
     let expires_at = UtcMicros(
         observed_at
             .0
@@ -392,7 +401,7 @@ pub(crate) async fn register_dashboard_test_retained_runtime(
             .map_err(|error| TraceDecayError::Config {
                 message: format!("dashboard test retained scope is invalid: {error}"),
             })?;
-    let observed_at = invocation_now_micros();
+    let observed_at = now_micros();
     let configuration = cg
         .configuration_runtime()
         .client()

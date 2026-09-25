@@ -11,10 +11,10 @@ fn native_record_identity_is_stable_across_json_formatting() {
     )
     .unwrap();
     assert_eq!(
-        observation_native_record_id("cursor", "session-redacted", &compact)
+        observation_native_record_id("session-redacted", &compact)
             .unwrap()
             .as_str(),
-        observation_native_record_id("cursor", "session-redacted", &spaced)
+        observation_native_record_id("session-redacted", &spaced)
             .unwrap()
             .as_str()
     );
@@ -97,7 +97,7 @@ fn canonical_record_is_stable_across_hook_sweep_and_mtime_context() {
         "role": "assistant",
         "message": {"content": "stable transcript content"}
     });
-    let record_id = observation_native_record_id("cursor", "session.fixture", &native).unwrap();
+    let record_id = observation_native_record_id("session.fixture", &native).unwrap();
     let range = tracedecay_domain::ObservationSourceRangeV1::new(10, 90).unwrap();
 
     let hook = normalize_cursor_observation_with_message_id(
@@ -135,7 +135,7 @@ fn cursor_subagent_lineage_sets_native_agent_relations() {
         "message": {"content": [{"type": "text", "text": "subagent reply"}]}
     });
     let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 20).unwrap();
-    let record_id = observation_native_record_id("cursor", "child-agent", &native).unwrap();
+    let record_id = observation_native_record_id("child-agent", &native).unwrap();
     let envelope = normalize_cursor_observation(
         &native,
         "child-agent",
@@ -169,7 +169,7 @@ fn fixture_backed_cursor_jsonl_tool_use_reaches_canonical_envelope() {
     ))
     .expect("Cursor golden expected envelope");
     let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 64).unwrap();
-    let record_id = observation_native_record_id("cursor", "cursor-tool-fixture", &native).unwrap();
+    let record_id = observation_native_record_id("cursor-tool-fixture", &native).unwrap();
     let envelope = normalize_cursor_observation(
         &native,
         "cursor-tool-fixture",
@@ -226,8 +226,7 @@ fn fixture_backed_cursor_workflow_lookalike_emits_no_workflow_lifecycle() {
     ))
     .expect("Cursor workflow lookalike expected");
     let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 64).unwrap();
-    let record_id =
-        observation_native_record_id("cursor", "cursor-workflow-lookalike", &native).unwrap();
+    let record_id = observation_native_record_id("cursor-workflow-lookalike", &native).unwrap();
     let envelope = normalize_cursor_observation(
         &native,
         "cursor-workflow-lookalike",

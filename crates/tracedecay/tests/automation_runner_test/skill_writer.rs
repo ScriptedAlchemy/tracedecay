@@ -378,15 +378,7 @@ async fn skill_writer_runner_repairs_then_activates_validated_create() {
         run.report["created_skills"][0]["metadata"]["state"],
         json!("active")
     );
-    assert_eq!(
-        run.report["created_skills"][0]["proposal_action"],
-        json!("create")
-    );
     assert_eq!(run.report["created_skills"][0]["action"], json!("create"));
-    assert_eq!(
-        run.report["created_skills"][0]["proposal_reason"],
-        json!("Session evidence repeats automation workflow outcome review.")
-    );
     assert_eq!(
         run.report["created_skills"][0]["reason"],
         json!("Session evidence repeats automation workflow outcome review.")
@@ -733,10 +725,6 @@ async fn skill_writer_runner_activates_validated_skills() {
         run.report["created_skills"][0]["activation_status"],
         json!("active")
     );
-    assert_eq!(
-        run.report["updated_skills"][0]["proposal_action"],
-        json!("update")
-    );
     assert_eq!(run.report["updated_skills"][0]["action"], json!("update"));
     assert_eq!(
         run.report["updated_skills"][0]["activation_status"],
@@ -843,7 +831,7 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
                 "reason": "Session evidence repeats automation workflow outcome review."
             },
             {
-                "action": "patch",
+                "action": "update",
                 "id": "automation-run-review",
                 "base_checksum": "sha256:stale",
                 "summary": "Stale patch should be rejected."
@@ -906,15 +894,7 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
         run.report["updated_skills"][0]["metadata"]["state"],
         json!("active")
     );
-    assert_eq!(
-        run.report["updated_skills"][0]["proposal_action"],
-        json!("update")
-    );
     assert_eq!(run.report["updated_skills"][0]["action"], json!("update"));
-    assert_eq!(
-        run.report["updated_skills"][0]["proposal_reason"],
-        json!("Session evidence repeats automation workflow outcome review.")
-    );
     assert_eq!(
         run.report["updated_skills"][0]["reason"],
         json!("Session evidence repeats automation workflow outcome review.")

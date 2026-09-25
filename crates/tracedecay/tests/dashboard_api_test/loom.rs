@@ -21,6 +21,8 @@ fn loom_temporal_endpoint_reads_recorded_ends_and_causal_authorities() {
         session.metadata_json = Some(
             serde_json::json!({
                 "edited_files": [
+                    {"path": "src/lib.rs", "change_type": "edit", "hunks": 1,
+                     "edited_at_micros": 1_700_001_050_000_000i64},
                     {"path": "src/runtime.rs", "change_type": "edit", "hunks": 2}
                 ]
             })
@@ -32,6 +34,25 @@ fn loom_temporal_endpoint_reads_recorded_ends_and_causal_authorities() {
                 .upsert_session_for_test(HostAdmissionScope::Project, &session)
                 .await
                 .expect("update Loom session")
+        );
+        let delegated = SessionRecord {
+            session_id: "sess-dashboard-child".to_string(),
+            title: Some("Delegated explorer".to_string()),
+            started_at: Some(1_700_001_030),
+            ended_at: Some(1_700_001_060),
+            metadata_json: None,
+            parent_session_id: Some("sess-dashboard-1".to_string()),
+            is_subagent: true,
+            agent_id: Some("explorer".to_string()),
+            parent_tool_use_id: Some("toolu_fork_01".to_string()),
+            ..session.clone()
+        };
+        assert!(
+            fixture
+                .host_runtime
+                .upsert_session_for_test(HostAdmissionScope::Project, &delegated)
+                .await
+                .expect("seed delegated Loom session")
         );
         fixture
             .host_runtime
@@ -60,14 +81,35 @@ fn loom_temporal_endpoint_reads_recorded_ends_and_causal_authorities() {
         assert_eq!(envelope["schema_revision"], 1);
         assert_eq!(envelope["domain_state"], "partial");
         assert_eq!(envelope["payload"]["available"], true);
-        assert_eq!(
-            envelope["payload"]["sessions"][0]["ended_at"],
-            1_700_001_090
+        // Newest start first: the delegated child leads, then its parent.
+        let sessions = &envelope["payload"]["sessions"];
+        assert_eq!(sessions[0]["session_id"], "sess-dashboard-child");
+        assert_eq!(sessions[0]["parent_session_id"], "sess-dashboard-1");
+        assert_eq!(sessions[0]["parent_tool_use_id"], "toolu_fork_01");
+        assert_eq!(sessions[0]["is_subagent"], true);
+        assert_eq!(sessions[1]["session_id"], "sess-dashboard-1");
+        assert_eq!(sessions[1]["ended_at"], 1_700_001_090);
+        assert!(
+            sessions[1].get("parent_session_id").is_none()
+                && sessions[1].get("parent_tool_use_id").is_none(),
+            "an unrecorded parent is absent, never null-as-root: {}",
+            sessions[1]
         );
+
+        // Files are served in path order; only the recorded timestamp is carried.
+        let edited_files = &envelope["payload"]["edited_files"];
+        assert_eq!(edited_files[0]["path"], "src/lib.rs");
         assert_eq!(
-            envelope["payload"]["edited_files"][0]["path"],
-            "src/runtime.rs"
+            edited_files[0]["edited_at_micros"],
+            1_700_001_050_000_000i64
         );
+        assert_eq!(edited_files[1]["path"], "src/runtime.rs");
+        assert!(
+            edited_files[1].get("edited_at_micros").is_none(),
+            "a rollup without a recorded time must not fabricate one: {}",
+            edited_files[1]
+        );
+        assert_eq!(edited_files.as_array().map(Vec::len), Some(2));
         assert_eq!(envelope["payload"]["branch_spans"][0]["branch"], "main");
 
         let statuses = envelope["payload"]["source_statuses"]

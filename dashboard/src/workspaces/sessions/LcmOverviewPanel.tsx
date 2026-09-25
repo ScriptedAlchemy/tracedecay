@@ -96,12 +96,12 @@ function TemporalScopeFacts({ payload, bucket }: { payload: LcmTimelinePayloadV1
     return <StateChip kind="complete_zero_findings" detail="no dated buckets in the loaded window" />;
   }
   return (
-    <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-2xs">
+    <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-body">
       <Fact label="first loaded bucket" value={first.bucket} />
       <Fact label="last loaded bucket" value={last.bucket} />
       <div className="col-span-2 flex min-w-0 flex-col gap-0.5">
         <dt className="td-legend">loaded window</dt>
-        <dd className="text-3xs text-text-secondary tabular">
+        <dd className="text-xs text-text-secondary tabular">
           {coverage
             ? `${coverage.returned_buckets.toLocaleString()} of ${coverage.total_dated_buckets.toLocaleString()} dated ${bucketNoun(bucket, coverage.total_dated_buckets)} (limit ${coverage.limit.toLocaleString()})${coverage.truncated ? ' · older buckets omitted' : ''}`
             : `${payload.buckets.length.toLocaleString()} dated ${bucketNoun(bucket, payload.buckets.length)} · coverage not reported`}
@@ -147,11 +147,11 @@ function LoadedWindowFacts({ envelope }: { envelope: DashboardEnvelopeV1<LcmOver
         omissions={envelope.coverage.omitted ?? undefined}
       />
       {envelope.coverage.omission_reasons.map((reason) => (
-        <p key={reason} className="text-3xs text-text-muted">
+        <p key={reason} className="text-sm text-text-muted">
           {reason}
         </p>
       ))}
-      <p className="text-3xs leading-snug text-text-muted">
+      <p className="text-sm leading-snug text-text-muted">
         Counts describe the canonical hydrated records the daemon drained for this read
         {envelope.coverage.unit ? ` (${envelope.coverage.unit})` : ''}, not the whole store.
       </p>
@@ -190,7 +190,7 @@ function LoadedWindowFacts({ envelope }: { envelope: DashboardEnvelopeV1<LcmOver
         )}
       </div>
 
-      <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-2xs">
+      <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-body">
         <Fact label="summary nodes" value={stats.summary_nodes_total.toLocaleString()} />
         <Fact label="sessions compacted" value={stats.summary_node_sessions_total.toLocaleString()} />
         <Fact label="max summary depth" value={String(stats.max_summary_depth)} />
@@ -238,7 +238,7 @@ function TokenProvenanceRows({ payload }: { payload: LcmTimelinePayloadV1 }) {
         value={tally.known.toLocaleString()}
         fraction={tally.known / total}
         figureWidth="wide"
-        leading={<span className="td-value w-12 shrink-0 text-3xs text-text-muted">{share(tally.known)}</span>}
+        leading={<span className="td-value w-12 shrink-0 text-xs text-text-muted">{share(tally.known)}</span>}
       />
       <MeterRow
         label="unavailable"
@@ -247,9 +247,9 @@ function TokenProvenanceRows({ payload }: { payload: LcmTimelinePayloadV1 }) {
         fraction={tally.unknown / total}
         tone="bg-state-partial"
         figureWidth="wide"
-        leading={<span className="td-value w-12 shrink-0 text-3xs text-text-muted">{share(tally.unknown)}</span>}
+        leading={<span className="td-value w-12 shrink-0 text-xs text-text-muted">{share(tally.unknown)}</span>}
       />
-      <p className="text-3xs text-text-muted tabular">
+      <p className="text-xs text-text-muted tabular">
         {total.toLocaleString()} messages · {tally.dated.toLocaleString()} dated ·{' '}
         {tally.undated.toLocaleString()} undated (held separately from the field)
       </p>
@@ -293,7 +293,7 @@ function IndexPageFacts({
   const bounds = pageBounds(page, rows, payload.sessions.length, payload.total);
   return (
     <div className="flex flex-col gap-2">
-      <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-2xs">
+      <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-body">
         <Fact label="page" value={`${page} of ${bounds.pageCount ?? '?'}`} />
         <Fact label="rows per page" value={String(rows)} />
         <Fact

@@ -30,7 +30,7 @@ use tracedecay_contracts::feedback::{
     FeedbackListRequestV1, FeedbackListResultV1, FeedbackObservationPort, FeedbackPortFuture,
     FeedbackPublicationReadPort, FeedbackPublicationRecordState, FeedbackPublicationV1,
     FeedbackReadPort, FeedbackReadPortContext, FeedbackReadPortFuture, FeedbackReadService,
-    FeedbackRouteAdmission, FeedbackRouteAuthorizationPort, feedback_surface_operation,
+    FeedbackRouteAuthorizationPort, feedback_surface_operation,
 };
 use tracedecay_contracts::{
     ApplicationContractError, ApplicationOperation, ApplicationProblem, AuthorityReceipt,
@@ -370,7 +370,7 @@ impl ProjectFeedbackObservationSinkV1 {
         // refused) are the waste being diagnosed; count them even though the
         // durable drop tally also travels inside later envelopes.
         hotpath::gauge!("usecases.feedback.observations_dropped").inc(1.0);
-        saturating_increment(&self.dropped_count);
+        saturating_add(&self.dropped_count, 1);
     }
 
     fn restore_drops(&self, dropped: u64) {
@@ -782,7 +782,7 @@ impl FeedbackRouteAuthorizationPort for ProjectFeedbackRouteAuthorization {
         context: &RequestContext,
         operation: &ApplicationOperation,
         observed_at: UtcMicros,
-    ) -> Result<FeedbackRouteAdmission, ApplicationProblem> {
+    ) -> Result<AuthorityReceipt, ApplicationProblem> {
         match context.admission_at(observed_at) {
             RequestAdmission::Cancelled => {
                 return Err(ApplicationProblem::cancelled_before_admission());
@@ -810,7 +810,6 @@ impl FeedbackRouteAuthorizationPort for ProjectFeedbackRouteAuthorization {
             .map_err(|_| ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never))?,
             observed_at,
         )
-        .map(FeedbackRouteAdmission::Routed)
         .map_err(|_| ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never))
     }
 
@@ -818,20 +817,10 @@ impl FeedbackRouteAuthorizationPort for ProjectFeedbackRouteAuthorization {
         &self,
         context: &RequestContext,
         operation: &ApplicationOperation,
-        admission: &FeedbackRouteAdmission,
+        admission: &AuthorityReceipt,
         observed_at: UtcMicros,
     ) -> Result<AuthorityReceipt, ApplicationProblem> {
         let current = self.admit(context, operation, observed_at)?;
-        let FeedbackRouteAdmission::Routed(admission) = admission else {
-            return Err(ApplicationProblem::not_found_or_not_authorized(
-                RetryDirective::Never,
-            ));
-        };
-        let FeedbackRouteAdmission::Routed(current) = current else {
-            return Err(ApplicationProblem::not_found_or_not_authorized(
-                RetryDirective::Never,
-            ));
-        };
         if admission.grant_id != current.grant_id
             || admission.grant_revision != current.grant_revision
             || admission.grant_digest != current.grant_digest
@@ -1922,10 +1911,6 @@ fn retain_removed_boot_accounting(ledger: &mut StoredFeedbackObservationLedgerV1
     if !boot.terminal {
         ledger.retained_incomplete_boots = ledger.retained_incomplete_boots.saturating_add(1);
     }
-}
-
-fn saturating_increment(counter: &AtomicU64) {
-    saturating_add(counter, 1);
 }
 
 fn saturating_add(counter: &AtomicU64, increment: u64) {

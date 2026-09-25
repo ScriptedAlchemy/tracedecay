@@ -1,12 +1,12 @@
 //! Conservative, opt-in retention for the largest append-only telemetry
 //! tables.
 //!
-//! Three tables grow without bound and had no scheduled pruning:
+//! Two tables grow without bound and had no scheduled pruning:
 //!
 //! * `analytics_events`, hook/tool/skill telemetry. Derived, reconstructable
 //!   signal, so it carries a **safe default retention of 180 days**.
-//! * `session_messages` and `lcm_raw_messages`, legacy session copies retained
-//!   for a six-month recovery horizon. Current session stores additionally use
+//! * `lcm_raw_messages`, the stored session messages, retained for a
+//!   six-month recovery horizon. Current session stores additionally use
 //!   projection-durability-aware retention in `tracedecay_lcm::retention`.
 //!
 //! Every window is expressed in whole days. Rows are pruned only when their
@@ -22,24 +22,19 @@
 use std::fmt;
 
 use serde::Serialize;
-pub use tracedecay_automation::config::{
-    DEFAULT_ANALYTICS_EVENTS_RETENTION_DAYS, DEFAULT_LEGACY_SESSION_RETENTION_DAYS, RetentionConfig,
-};
+pub use tracedecay_automation::config::RetentionConfig;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::db::engine::{Executor, params};
 
-/// Free-page compaction for tracked branch databases, off the hot path
-/// (plan 38, §6).
-pub mod branch_compaction;
 /// Bounded retention for unmounted profile-sharded stores.
 pub mod cold_store;
 /// Read-only diagnostics over retention-owned state.
 pub mod diagnostics;
 /// Exact-liveness mark-and-sweep for immutable derived code generations.
-/// Store-owned quarantine and collection for corruption/recovery artifacts
-/// found beside live databases (plan 38, §5).
+/// Detection and deletion of corruption/recovery artifacts found beside live
+/// databases (plan 38, §5).
 pub mod incident_debris;
 /// Bounded compaction for stores retained by live runtime authorities.
 pub mod live_compaction;
@@ -67,8 +62,6 @@ const TIMESTAMP_COLUMN: &str = "timestamp";
 pub enum RetentionTable {
     /// `analytics_events` (global DB), pruned by `timestamp`.
     AnalyticsEvents,
-    /// `session_messages` (global DB), pruned by `timestamp`.
-    SessionMessages,
     /// `lcm_raw_messages` (per-store LCM DB), pruned by `timestamp`.
     LcmRawMessages,
 }
@@ -76,23 +69,17 @@ pub enum RetentionTable {
 fn retention_window_days(config: &RetentionConfig, table: RetentionTable) -> Option<u32> {
     match table {
         RetentionTable::AnalyticsEvents => config.analytics_events_days,
-        RetentionTable::SessionMessages => config.session_messages_days,
         RetentionTable::LcmRawMessages => config.lcm_raw_messages_days,
     }
 }
 
 impl RetentionTable {
-    /// The three tables that live in the global database.
-    pub const GLOBAL_TABLES: [RetentionTable; 3] = [
-        Self::AnalyticsEvents,
-        Self::SessionMessages,
-        Self::LcmRawMessages,
-    ];
+    /// The tables that live in the global database.
+    pub const GLOBAL_TABLES: [RetentionTable; 2] = [Self::AnalyticsEvents, Self::LcmRawMessages];
 
     pub fn table_name(self) -> &'static str {
         match self {
             Self::AnalyticsEvents => "analytics_events",
-            Self::SessionMessages => "session_messages",
             Self::LcmRawMessages => "lcm_raw_messages",
         }
     }
@@ -162,25 +149,14 @@ async fn delete_slice(
         .map_err(|error| retention_error(name, "delete", &error))
 }
 
-/// Legacy session windows still obey the current projection-durability
-/// authority. Age alone never makes lossless content eligible.
+/// Session windows still obey the current projection-durability authority.
+/// Age alone never makes lossless content eligible.
 fn retention_eligibility(table: RetentionTable) -> &'static str {
     match table {
         RetentionTable::AnalyticsEvents => "1 = 1",
-        RetentionTable::SessionMessages => {
-            "EXISTS (
-                SELECT 1
-                FROM lcm_raw_messages AS raw
-                JOIN lcm_summary_sources AS source
-                  ON source.source_kind = 'raw_message'
-                 AND source.source_id = CAST(raw.store_id AS TEXT)
-                WHERE raw.provider = session_messages.provider
-                  AND raw.message_id = session_messages.message_id
-            )"
-        }
         RetentionTable::LcmRawMessages => {
             "EXISTS (
-                SELECT 1 FROM lcm_summary_sources AS source
+                SELECT 1 FROM session_summary_sources AS source
                 WHERE source.source_kind = 'raw_message'
                   AND source.source_id = CAST(lcm_raw_messages.store_id AS TEXT)
             )"
@@ -227,9 +203,7 @@ impl std::error::Error for RetentionPassInterruption {
 /// Applies global-database retention for [`RetentionTable::GLOBAL_TABLES`] in
 /// bounded, separately committed slices.
 ///
-/// Tables run in declaration order so `session_messages` is evaluated while
-/// its `lcm_raw_messages` lineage still exists. The cutoff is captured once
-/// per table; each slice re-checks eligibility in its own transaction, so
+/// The cutoff is captured once per table; each slice re-checks eligibility in its own transaction, so
 /// rows that gain or lose lineage between slices are judged by the current
 /// authority. Disabled windows never acquire the writer.
 #[hotpath::measure(label = "maintenance.retention.prune_global", future = true)]
@@ -339,7 +313,6 @@ mod tests {
     fn config_days(days: Option<u32>) -> RetentionConfig {
         RetentionConfig {
             analytics_events_days: days,
-            session_messages_days: None,
             lcm_raw_messages_days: None,
         }
     }
@@ -473,7 +446,6 @@ mod tests {
                     applied: true,
                     rows: eligible - abort_after,
                 },
-                RetentionTableReport::skipped(RetentionTable::SessionMessages),
                 RetentionTableReport::skipped(RetentionTable::LcmRawMessages),
             ],
             "the resumed pass drains exactly the remainder without double counting"
@@ -518,51 +490,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_windows_require_durable_summary_lineage() {
+    async fn session_windows_require_durable_summary_lineage() {
         let directory = tempfile::tempdir().unwrap();
         let conn = test_conn(&directory);
         let now = 1_000_000_000;
         conn.execute_batch(
-            "CREATE TABLE session_messages (
-                provider TEXT NOT NULL,
-                message_id TEXT NOT NULL,
-                timestamp INTEGER
-             );
-             CREATE TABLE lcm_raw_messages (
+            "CREATE TABLE lcm_raw_messages (
                 store_id INTEGER PRIMARY KEY,
                 provider TEXT NOT NULL,
                 message_id TEXT NOT NULL,
                 timestamp INTEGER
              );
-             CREATE TABLE lcm_summary_sources (
+             CREATE TABLE session_summary_sources (
                 source_kind TEXT NOT NULL,
                 source_id TEXT NOT NULL
              );
-             INSERT INTO session_messages VALUES
-                ('claude', 'durable', 1),
-                ('claude', 'live', 1);
              INSERT INTO lcm_raw_messages VALUES
                 (1, 'claude', 'durable', 1),
                 (2, 'claude', 'live', 1);
-             INSERT INTO lcm_summary_sources VALUES ('raw_message', '1');",
+             INSERT INTO session_summary_sources VALUES ('raw_message', '1');",
         )
         .await
         .unwrap();
 
         let config = RetentionConfig::default();
-        for table in [
-            RetentionTable::SessionMessages,
-            RetentionTable::LcmRawMessages,
-        ] {
-            let window = retention_window_days(&config, table).unwrap();
-            delete_slice(&*conn, table, cutoff_secs(window, now))
-                .await
-                .unwrap();
-        }
+        let table = RetentionTable::LcmRawMessages;
+        let window = retention_window_days(&config, table).unwrap();
+        delete_slice(&*conn, table, cutoff_secs(window, now))
+            .await
+            .unwrap();
 
-        assert_eq!(count_message(&conn, "session_messages", "durable").await, 0);
         assert_eq!(count_message(&conn, "lcm_raw_messages", "durable").await, 0);
-        assert_eq!(count_message(&conn, "session_messages", "live").await, 1);
         assert_eq!(count_message(&conn, "lcm_raw_messages", "live").await, 1);
     }
 }

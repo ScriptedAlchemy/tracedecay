@@ -241,7 +241,7 @@ pub enum WorkTaskSessionHydrationStateV1 {
     RetentionExpired,
     Unauthorized,
     Locked,
-    UnverifiableLegacy,
+    Unverifiable,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

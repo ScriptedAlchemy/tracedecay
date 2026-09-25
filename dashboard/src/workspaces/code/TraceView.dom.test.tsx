@@ -1,20 +1,17 @@
 /**
  * The TRACE drill-in, against the wire-true neighbors fixture.
  *
- * What this suite is protecting is not the picture, jsdom has no 2D context
- * and draws nothing, but the three claims that make the picture admissible:
- * the caption tells the truth about what is left out, the accessible equivalent
- * carries every symbol the field would draw, and reduced motion is a rendering
- * mode with the same data rather than a switched-off feature.
+ * What this suite protects: the readouts tell the truth about what is left
+ * out, every drawn symbol is a focusable plate control AND a list row, hover
+ * and focus inspect without re-centring, and every call link is drawn.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { TraceView, type TraceFocus } from './TraceView.tsx';
 import { resolveFixture } from '../../../stories/fixtures/data.ts';
-import { setMotionPreference } from '../../viz/trace/reducedMotion.ts';
 
 const FOCUS: TraceFocus = {
   id: 'sym-0',
@@ -46,25 +43,31 @@ function mockFetch(override?: (url: string) => Response | undefined) {
   );
 }
 
-function renderTrace(onClose = vi.fn()) {
+function renderTrace(onClose = vi.fn(), onFocusChange?: (node: TraceFocus) => void) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
   const utils = render(
     <QueryClientProvider client={client}>
-      <TraceView focus={FOCUS} onClose={onClose} />
+      <TraceView focus={FOCUS} onClose={onClose} {...(onFocusChange ? { onFocusChange } : {})} />
     </QueryClientProvider>,
   );
   return { ...utils, onClose };
 }
 
 beforeEach(() => {
-  setMotionPreference('full');
-  // jsdom ships no 2D context and logs a "not implemented" notice on every
-  // probe. Returning null explicitly is the same answer with none of the noise,
-  // and it is the case the surface has to survive: the canvas draws nothing and
-  // the accessible list carries the whole field.
-  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
+  // jsdom lays nothing out; give the plate's host a real column width.
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+    width: 926,
+    height: 600,
+    x: 0,
+    y: 0,
+    top: 0,
+    left: 0,
+    right: 926,
+    bottom: 600,
+    toJSON: () => ({}),
+  });
   // jsdom has neither; the surface must not depend on either existing.
   vi.stubGlobal('ResizeObserver', undefined);
   vi.stubGlobal(
@@ -78,7 +81,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  setMotionPreference('system');
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -130,70 +132,61 @@ describe('TraceView', () => {
       expect(readout).toMatch(/Types enteredabsent/);
       expect(readout).toContain('the payload carried no contains edges');
       expect(readout).toContain('not a claim about whether these symbols have types');
-      const key = container.querySelector('figure > figcaption')!.textContent ?? '';
-      expect(key).toContain('no enclosure is drawn on this frame');
+      const plate = container.querySelector('[data-trace-field="plate"] svg')!.textContent ?? '';
+      expect(plate).toContain('ENCLOSUREabsent');
     });
   });
 
-  it('carries every drawn symbol on the canvas and in an accessible equivalent', async () => {
+  it('draws every drawn symbol as a plate control and as a list row', async () => {
     mockFetch();
     const { container } = renderTrace();
     await screen.findByText(/symbols on the field/i);
-
-    // One role="img" with a description, and the canvas itself hidden from AT.
-    const field = await screen.findByRole('img');
-    const description = field.getAttribute('aria-label') ?? '';
-    expect(description).toMatch(/Call topography of resolve_context/);
-    expect(description).toMatch(/tributaries/);
-    expect(description).toMatch(/delta/);
-    expect(description).toMatch(/The ranked list below carries the same symbols as text/);
-    expect(container.querySelector('canvas')?.getAttribute('aria-hidden')).toBe('true');
-
-    // The list is that equivalent: the focus plus every drawn neighbour, each
-    // with the numbers the field encodes as position and width.
+    await waitFor(() => expect(container.querySelector('[data-trace-field="plate"] [data-ring="-2"]')).not.toBeNull());
+    const field = container.querySelector('[data-trace-field="plate"] svg')!;
+    expect(field.getAttribute('aria-label')).toMatch(
+      /^Call neighbourhood of resolve_context as an anatomy plate, callers left and callees right on one call-site scale\./,
+    );
+    expect(field.getAttribute('aria-label')).not.toMatch(/tributar|delta/);
+    const targets = field.querySelectorAll('[data-node]');
     const list = container.querySelector('ol')!;
     const items = within(list).getAllByRole('listitem');
     const drawnCount = Number(
       /(\d+) drawn/.exec(screen.getByText(/drawn · ordered by hop/).textContent ?? '')?.[1],
     );
     expect(items.length).toBe(drawnCount);
-    expect(within(list).getByText('resolve_context')).toBeTruthy();
-    expect(within(list).getAllByText(/call sites/).length).toBe(items.length);
-    expect(within(list).getAllByText(/hops? (up|down)/).length).toBeGreaterThan(0);
+    expect(targets.length).toBe(drawnCount);
+    expect(field.textContent).toContain('7 symbols · 45 sites');
+    expect(field.textContent).toContain('ONE SCALE · CALL SITES PER CHANNEL');
+    expect(field.textContent).toContain('52 of 90 links run between neighbours: connector only, no bar');
+    // Every call link is a connector, and nothing on the surface animates.
+    expect(field.querySelectorAll('[data-connectors] > path')).toHaveLength(90);
+    expect(container.querySelector('canvas')).toBeNull();
+    expect(screen.queryByRole('radiogroup')).toBeNull();
   });
 
-  it('renders reduced motion from settled positions instead of animating', async () => {
+  it('inspects on hover and focus, lifts the lit route, and re-centres only on Enter', async () => {
     mockFetch();
-    const raf = vi.spyOn(globalThis, 'requestAnimationFrame');
-    setMotionPreference('reduced');
-    const { container } = renderTrace();
-    await screen.findByText(/symbols on the field/i);
-
-    expect(screen.getByText(/settled once; tension drawn as rail thickness/)).toBeTruthy();
-    // The animated path is the only caller of requestAnimationFrame here, so a
-    // reduced-motion mount that scheduled frames would be animating anyway.
-    expect(raf).not.toHaveBeenCalled();
-    // And the reader still gets the whole field as text.
-    expect(container.querySelector('ol')!.querySelectorAll('li').length).toBeGreaterThan(1);
-
-    const control = screen.getByRole('radio', { name: 'Reduced' });
-    expect(control.getAttribute('aria-checked')).toBe('true');
-  });
-
-  it('lets the reader pin motion on or off regardless of the OS setting', async () => {
-    mockFetch();
+    const onFocusChange = vi.fn();
+    const { container } = renderTrace(vi.fn(), onFocusChange);
+    await waitFor(() => expect(container.querySelector('[data-trace-field="plate"] [data-ring="-2"]')).not.toBeNull());
+    const node = container.querySelector<SVGGElement>('[data-trace-field="plate"] [data-ring="-2"]')!;
+    const name = node.getAttribute('aria-label')!.split(' · ')[0]!;
+    const readout = container.querySelector('[data-trace-inspect]')!;
+    expect(readout.textContent).toMatch(/^Hover or focus a symbol/);
+    expect(container.querySelectorAll('[data-lit]')).toHaveLength(0);
     const user = userEvent.setup();
-    renderTrace();
-    await screen.findByText(/symbols on the field/i);
-
-    await user.click(screen.getByRole('radio', { name: 'Reduced' }));
-    await waitFor(() => {
-      expect(screen.getByText(/settled once; tension drawn as rail thickness/)).toBeTruthy();
-    });
-    await user.click(screen.getByRole('radio', { name: 'Full' }));
-    await waitFor(() => {
-      expect(screen.getByText(/hover a symbol to feel its weight/)).toBeTruthy();
-    });
+    await user.hover(node);
+    expect(readout.textContent).toMatch(new RegExp(`^${name} · `));
+    // Its own links plus the hop-1 route inward are lifted in cyan.
+    expect(container.querySelectorAll('[data-lit]').length).toBeGreaterThanOrEqual(2);
+    expect(onFocusChange).not.toHaveBeenCalled();
+    await user.unhover(node);
+    // Focus inspects the same way; the 2px ring itself keys off
+    // `:focus-visible`, which jsdom does not model, so it is checked in Chrome.
+    act(() => node.focus());
+    expect(readout.textContent).toMatch(new RegExp(`^${name} · `));
+    await user.keyboard('{Enter}');
+    expect(onFocusChange).toHaveBeenCalledWith(expect.objectContaining({ id: node.getAttribute('data-node'), name }));
   });
 
   it('returns to the spine on Escape and on the back control', async () => {
@@ -220,7 +213,7 @@ describe('TraceView', () => {
       expect(container.querySelector('[data-state="error"]')).toBeTruthy();
     });
     expect(screen.getByText(/nothing is being invented in its place/i)).toBeTruthy();
-    expect(container.querySelector('canvas')).toBeNull();
+    expect(container.querySelector('[data-trace-field]')).toBeNull();
   });
 
   it('does not treat an empty neighbor envelope as a measured zero', async () => {

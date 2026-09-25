@@ -110,7 +110,7 @@ function ExtentCell({ row }: { row: LoomSessionRowV1 }) {
         {lines.start}
       </span>
       <span
-        className={cn('text-3xs', lines.startKnown ? 'text-text-secondary' : 'text-text-muted')}
+        className={cn('text-sm', lines.startKnown ? 'text-text-secondary' : 'text-text-muted')}
         title={lines.end}
       >
         {lines.end}
@@ -178,7 +178,7 @@ function SessionRow({
     >
       <DataRow selected={selected} onSelect={onSelect}>
         <span
-          className={cn('td-value text-3xs text-text-muted', COLUMN.ordinal)}
+          className={cn('td-value text-xs text-text-muted', COLUMN.ordinal)}
           data-cell="numeric"
         >
           {ordinal}
@@ -190,7 +190,7 @@ function SessionRow({
           <span className="flex min-w-0 items-baseline gap-1.5">
             <span className="td-legend shrink-0 text-text-secondary sm:hidden">{row.provider}</span>
             <span
-              className={cn('truncate text-3xs', row.title ? 'text-text-muted' : 'italic text-text-muted')}
+              className={cn('truncate text-sm', row.title ? 'text-text-muted' : 'italic text-text-muted')}
               title={row.title ?? undefined}
             >
               {row.title ?? 'untitled'}
@@ -211,11 +211,11 @@ function SessionRow({
         >
           {row.provider}
         </span>
-        <span className={cn('td-value truncate text-2xs text-text-secondary', COLUMN.model)}>
+        <span className={cn('td-value truncate text-sm text-text-secondary', COLUMN.model)}>
           <ModelCell row={row} />
         </span>
         <span
-          className={cn('td-value flex flex-col gap-0.5 text-2xs [&>span]:truncate', COLUMN.extent)}
+          className={cn('td-value flex flex-col gap-0.5 text-sm [&>span]:truncate', COLUMN.extent)}
           data-cell="extent"
         >
           <ExtentCell row={row} />
@@ -316,7 +316,7 @@ export function SessionIndex({
           className="td-hit group"
           onClick={() => onPageChange(lastPage)}
         >
-          <span className="inline-flex items-center gap-1 border border-edge-subtle bg-surface-2 px-2 py-1 text-3xs text-text-secondary group-hover:text-text-primary">
+          <span className="inline-flex items-center gap-1 border border-edge-subtle bg-surface-2 px-2 py-1 text-sm text-text-secondary group-hover:text-text-primary">
             Go to last page
           </span>
         </button>
@@ -364,7 +364,7 @@ export function SessionIndex({
         <PagerButton label="Previous page" disabled={atFirst} onClick={() => onPageChange(page - 1)}>
           <ChevronLeft aria-hidden size={12} />
         </PagerButton>
-        <span role="status" className="td-value px-1 text-3xs text-text-muted" data-cell="numeric">
+        <span role="status" className="td-value px-1 text-xs text-text-muted" data-cell="numeric">
           {`Page ${page} of ${pageCount ?? '?'}`}
         </span>
         <PagerButton label="Next page" disabled={atLast} onClick={() => onPageChange(page + 1)}>
@@ -383,7 +383,7 @@ export function SessionIndex({
       <label className="td-legend flex items-center gap-1.5">
         rows per page
         <select
-          className="td-value min-h-[var(--touch-target-min)] border border-edge-subtle bg-surface-2 px-1.5 text-2xs"
+          className="td-value min-h-[var(--touch-target-min)] border border-edge-subtle bg-surface-2 px-1.5 text-sm"
           value={rows}
           onChange={(event) => onRowsChange(Number(event.target.value) as RowsPerPage)}
         >
@@ -402,14 +402,14 @@ export function SessionIndex({
             omissions={envelope.coverage.omitted ?? undefined}
           />
           {envelope.coverage.omission_reasons.map((reason) => (
-            <span key={reason} className="text-3xs text-text-muted">
+            <span key={reason} className="text-sm text-text-muted">
               {reason}
             </span>
           ))}
         </>
       ) : null}
       {store !== null && sessions.length > 0 ? (
-        <span className="text-3xs text-text-muted">
+        <span className="text-sm text-text-muted">
           message rails are scaled to the heaviest session on this page ({pageMax} msg)
         </span>
       ) : null}
@@ -433,7 +433,7 @@ export function SessionIndex({
       bodyClassName="flex min-h-0 flex-col p-0"
       actions={
         <>
-          <span className="td-value shrink-0 text-3xs text-text-muted" data-cell="numeric">
+          <span className="td-value shrink-0 text-xs text-text-muted" data-cell="numeric">
             {`${ordinalText(first)}–${ordinalText(last)} of ${total === null ? '—' : total.toLocaleString()}`}
           </span>
           {actions}

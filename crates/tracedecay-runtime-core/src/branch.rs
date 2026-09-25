@@ -5,6 +5,7 @@
 use std::path::Path;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_private_fs::FileLease;
 
 #[cfg(any(test, feature = "test-helpers"))]
 use std::collections::HashMap;
@@ -80,13 +81,11 @@ mod tracking;
 pub use admin::{
     BranchAdminAction, BranchAdminOutcome, BranchAdminReport, PreparedBranchAdminMutation,
     SingleStoreBranchRetirementV1, prepare_branch_admin_mutation,
-    remove_tracked_branch_store_checked,
 };
 pub use tracking::{
     BranchAddOutcome, BranchTrackingPreparation, PreparedBranchRollbackOutcome,
     PreparedBranchTracking, finalize_prepared_branch_tracking, find_nearest_tracked_ancestor,
-    is_branch_ref_present, local_branch_exists, prepare_branch_tracking_in_layout,
-    rollback_prepared_branch_tracking,
+    local_branch_exists, prepare_branch_tracking_in_layout, rollback_prepared_branch_tracking,
 };
 pub(crate) use tracking::{now_unix_secs, parse_unix_secs};
 
@@ -182,7 +181,7 @@ impl BranchMemo {
 }
 
 /// Acquires the shared branch-add lock.
-pub fn try_acquire_branch_add_lock(tracedecay_dir: &Path) -> Result<std::fs::File> {
+pub fn try_acquire_branch_add_lock(tracedecay_dir: &Path) -> Result<FileLease> {
     std::fs::create_dir_all(tracedecay_dir)?;
     let lock_path = tracedecay_dir.join(".branch-add.lock");
     let file = std::fs::OpenOptions::new()
@@ -195,20 +194,20 @@ pub fn try_acquire_branch_add_lock(tracedecay_dir: &Path) -> Result<std::fs::Fil
         .map_err(|e| TraceDecayError::SyncLock {
             message: format!("branch add already running at {}: {e}", lock_path.display()),
         })?;
-    Ok(file)
+    Ok(FileLease::held(file, "branch.add"))
 }
 
 /// Blocking-with-timeout variant of [`try_acquire_branch_add_lock`] for
 /// synchronous callers. Retries a briefly-contended lock (a concurrent branch
 /// add is only holding it for the duration of a DB clone) before giving up.
-pub fn acquire_branch_lock_blocking(tracedecay_dir: &Path) -> Result<std::fs::File> {
+pub fn acquire_branch_lock_blocking(tracedecay_dir: &Path) -> Result<FileLease> {
     acquire_branch_add_lock_blocking_with(tracedecay_dir, try_acquire_branch_add_lock)
 }
 
 fn acquire_branch_add_lock_blocking_with(
     tracedecay_dir: &Path,
-    acquire: fn(&Path) -> Result<std::fs::File>,
-) -> Result<std::fs::File> {
+    acquire: fn(&Path) -> Result<FileLease>,
+) -> Result<FileLease> {
     let mut last_contention = None;
     for _ in 0..BRANCH_LOCK_RETRY_ATTEMPTS {
         match acquire(tracedecay_dir) {

@@ -12,9 +12,9 @@ use std::fmt;
 
 use serde::Deserialize;
 use tracedecay_contracts::doctor::{
-    DoctorCoverageCompletenessV1, DoctorEvidenceStateV1, DoctorFamilyConsultationV1,
-    DoctorFamilyUnavailableReasonV1, DoctorFindingFamilyV1, DoctorReportCoverageV1,
-    DoctorReportEntryV1, DoctorReportV1,
+    DOCTOR_FINDING_FAMILIES, DoctorCoverageCompletenessV1, DoctorEvidenceStateV1,
+    DoctorFamilyConsultationV1, DoctorFamilyUnavailableReasonV1, DoctorFindingFamilyV1,
+    DoctorReportCoverageV1, DoctorReportEntryV1, DoctorReportV1,
 };
 
 use crate::read_model::{
@@ -30,14 +30,8 @@ pub const DOCTOR_FINDINGS_REFRESH_OPERATION: &str = "use-case.dashboard.doctor.f
 pub const DOCTOR_REPORT_SOURCE_UNSUPPORTED_NOTE: &str =
     "no admitted Doctor report source is available for this dashboard scope";
 
-/// The closed Doctor finding-family vocabulary the read routes project.
-pub use tracedecay_contracts::doctor::DOCTOR_FINDING_FAMILIES as KNOWN_DOCTOR_FINDING_FAMILIES;
-
 /// Path of the Doctor finding read route, filtered by the caller's query.
 pub const DOCTOR_FINDINGS_ROUTE_PATH: &str = "/api/doctor/findings";
-
-/// Path of the storage-family compatibility projection of the same report.
-pub const STORAGE_FINDINGS_ROUTE_PATH: &str = "/api/storage/findings";
 
 /// Query DTO for the Doctor findings read route.
 ///
@@ -221,10 +215,9 @@ fn family_coverage(
     }
 
     match report.coverage().completeness() {
-        DoctorCoverageCompletenessV1::Complete => DashboardCoverageV1::complete(
-            KNOWN_DOCTOR_FINDING_FAMILIES.len() as u64,
-            "doctor_families",
-        ),
+        DoctorCoverageCompletenessV1::Complete => {
+            DashboardCoverageV1::complete(DOCTOR_FINDING_FAMILIES.len() as u64, "doctor_families")
+        }
         DoctorCoverageCompletenessV1::Partial => {
             let consulted = report
                 .coverage()
@@ -250,7 +243,7 @@ fn family_coverage(
                 })
                 .collect();
             DashboardCoverageV1::partial(
-                KNOWN_DOCTOR_FINDING_FAMILIES.len() as u64,
+                DOCTOR_FINDING_FAMILIES.len() as u64,
                 consulted,
                 "doctor_families",
                 omissions,

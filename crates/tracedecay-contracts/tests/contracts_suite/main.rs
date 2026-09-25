@@ -9,8 +9,6 @@
 mod common;
 
 mod advisory_requests;
-mod authorization_non_disclosure;
-mod authorization_recheck;
 mod callable_code_queries;
 mod catalog_contributions;
 mod diagnostic_provider_identity;

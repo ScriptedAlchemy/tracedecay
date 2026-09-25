@@ -1,3 +1,4 @@
+import { MemoryRouter } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -26,7 +27,7 @@ beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
 
-/** The sentence `LegacyStates` prints for each state it can reach. Distinct
+/** The sentence `ReadFailure` prints for each state it can reach. Distinct
  * wording per state is the point: a reader has to be able to tell "the daemon
  * is down" from "the daemon answered wrong" without opening a console. */
 const GUIDANCE = {
@@ -178,7 +179,9 @@ function renderAgents() {
   });
   return render(
     <QueryClientProvider client={client}>
-      <AgentsPage />
+      <MemoryRouter>
+        <AgentsPage />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }

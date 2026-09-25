@@ -2,16 +2,14 @@
 //!
 //! The [`SourceReadContext`] wired at composition enters a verified graph
 //! query exactly once, at admitted open, where it is frozen into
-//! [`AdmittedSourceAuthority`]: root, database authority, read-only posture,
-//! and project identity are copied once and used exclusively thereafter, so
-//! no later API accepts a substitute.
+//! [`AdmittedSourceAuthority`]: root and project identity are copied once and
+//! used exclusively thereafter, so no later API accepts a substitute.
 
 use std::path::{Path, PathBuf};
 
 use tracedecay_contracts::RequestContext;
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_runtime_core::db::Database;
 
 use crate::SourceReadContext;
 
@@ -22,8 +20,6 @@ use crate::SourceReadContext;
 /// is the admission-validated capture inside [`super::open_verified_graph_query`].
 pub(crate) struct AdmittedSourceAuthority {
     project_root: PathBuf,
-    db: Database,
-    read_only: bool,
     project_id: ProjectId,
 }
 
@@ -37,22 +33,12 @@ impl AdmittedSourceAuthority {
         }
         Ok(Self {
             project_root: source.project_root,
-            db: source.db,
-            read_only: source.read_only,
             project_id: context.scope().project_id.clone(),
         })
     }
 
     pub(crate) fn project_root(&self) -> &Path {
         &self.project_root
-    }
-
-    pub(crate) fn db(&self) -> &Database {
-        &self.db
-    }
-
-    pub(crate) fn read_only(&self) -> bool {
-        self.read_only
     }
 
     pub(crate) fn project_id(&self) -> &str {

@@ -21,7 +21,7 @@ use std::time::Instant;
 use serde::Serialize;
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay_sessions::runtime::cursor::parent_dispatch_model_for_subagent_with_receipt;
+use tracedecay_sessions::runtime::hosts::cursor::parent_dispatch_model_for_subagent_with_receipt;
 
 const PARENT_SESSION_ID: &str = "P";
 const AGENT_ID: &str = "X";

@@ -208,7 +208,7 @@ export function ReadSection<T>({
   return (
     <section className={className} aria-label={title}>
       <h2 className="px-4 pt-4 text-sm font-semibold tracking-tight">{title}</h2>
-      {blurb ? <p className="px-4 pt-0.5 text-2xs text-text-muted">{blurb}</p> : null}
+      {blurb ? <p className="px-4 pt-0.5 text-body text-text-muted">{blurb}</p> : null}
       {state.kind === 'ready' ? (
         children(state.value)
       ) : (
@@ -385,13 +385,13 @@ export function CenteredState({
     <div className="td-graticule @container flex h-full min-h-48 items-center justify-center bg-surface-0 p-3 @md:p-8">
       <div className="relative flex w-full max-w-md flex-col items-center gap-3 border border-edge-subtle bg-surface-1 px-3 py-4 text-center @md:w-auto @md:px-8 @md:py-6">
         <Corners />
-        <h1 className="text-2xs font-semibold uppercase tracking-[0.2em] text-text-primary">
+        <h1 className="text-xs font-semibold uppercase tracking-[0.2em] text-text-primary">
           {title}
         </h1>
         <span aria-hidden className="h-px w-10 bg-edge-strong" />
         <StateChip kind={kind} detail={detail} />
         {guidance ? (
-          <p className="max-w-xs text-xs leading-relaxed text-text-muted">
+          <p className="max-w-xs text-body leading-relaxed text-text-muted">
             {guidance.sentence}{' '}
             <span className="text-text-secondary">{guidance.action}</span>
           </p>

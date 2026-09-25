@@ -5,10 +5,12 @@ mod quickbasic_tests {
     use tracedecay_code_extraction::QuickBasicExtractor;
     use tracedecay_domain::*;
 
+    include!("support/edges.rs");
+
     fn extract_fixture() -> ExtractionResult {
         let source = std::fs::read_to_string("../../tests/fixtures/sample.bi").unwrap();
         let extractor = QuickBasicExtractor;
-        let result = extractor.extract("sample.bi", &source);
+        let result = extractor.extract_artifact("sample.bi", &source).result;
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         result
     }
@@ -28,21 +30,13 @@ mod quickbasic_tests {
     #[test]
     fn test_quickbasic_sub_functions() {
         let result = extract_fixture();
-        let fns: Vec<_> = result
+        let fns: Vec<&str> = result
             .nodes
             .iter()
             .filter(|n| n.kind == NodeKind::Function)
+            .map(|n| n.name.as_str())
             .collect();
-        assert!(
-            fns.len() >= 4,
-            "expected >= 4 functions, got {}: {:?}",
-            fns.len(),
-            fns.iter().map(|n| &n.name).collect::<Vec<_>>()
-        );
-        assert!(fns.iter().any(|n| n.name == "InitSystem"));
-        assert!(fns.iter().any(|n| n.name == "Shutdown"));
-        assert!(fns.iter().any(|n| n.name == "GetStatus"));
-        assert!(fns.iter().any(|n| n.name == "LogInit"));
+        assert_eq!(fns, ["InitSystem", "Shutdown", "GetStatus", "LogInit"]);
     }
 
     #[test]
@@ -60,31 +54,24 @@ mod quickbasic_tests {
     #[test]
     fn test_quickbasic_type_fields() {
         let result = extract_fixture();
-        let fields: Vec<_> = result
-            .nodes
-            .iter()
-            .filter(|n| n.kind == NodeKind::Field && n.qualified_name.contains("Config"))
+        let fields: Vec<&str> = edge_pairs(&result, EdgeKind::Contains)
+            .into_iter()
+            .filter(|(parent, _)| *parent == "Config")
+            .map(|(_, child)| child)
             .collect();
-        assert!(
-            fields.len() >= 3,
-            "expected >= 3 fields in Config, got {}: {:?}",
-            fields.len(),
-            fields.iter().map(|n| &n.name).collect::<Vec<_>>()
-        );
-        assert!(fields.iter().any(|n| n.name == "name"));
-        assert!(fields.iter().any(|n| n.name == "value"));
-        assert!(fields.iter().any(|n| n.name == "active"));
+        assert_eq!(fields, ["name", "value", "active"]);
     }
 
     #[test]
     fn test_quickbasic_const_nodes() {
         let result = extract_fixture();
-        let consts: Vec<_> = result
+        let consts: Vec<&str> = result
             .nodes
             .iter()
             .filter(|n| n.kind == NodeKind::Const)
+            .map(|n| n.name.as_str())
             .collect();
-        assert!(!consts.is_empty(), "expected at least 1 CONST node");
+        assert_eq!(consts, ["VERSION", "MAX_ITEMS"]);
     }
 
     #[test]
@@ -95,7 +82,6 @@ mod quickbasic_tests {
             .iter()
             .filter(|r| r.reference_kind == EdgeKind::Calls)
             .collect();
-        assert!(!calls.is_empty(), "expected call site refs");
         assert!(
             calls.iter().any(|r| r.reference_name == "LogInit"),
             "expected CALL LogInit from InitSystem"
@@ -110,44 +96,46 @@ mod quickbasic_tests {
             .iter()
             .find(|n| n.kind == NodeKind::Function && n.name == "GetStatus")
             .expect("GetStatus function not found");
-        assert!(
-            get_status.branches >= 1,
-            "GetStatus should have >= 1 branch (IF), got {}",
-            get_status.branches
-        );
+        assert_eq!(get_status.branches, 1);
     }
 
     #[test]
     fn test_quickbasic_docstrings() {
         let result = extract_fixture();
-        let init_fn = result
+        let docs: Vec<(&str, &str)> = result
             .nodes
             .iter()
-            .find(|n| n.kind == NodeKind::Function && n.name == "InitSystem")
-            .expect("InitSystem not found");
-        assert!(
-            init_fn.docstring.is_some(),
-            "InitSystem should have a docstring"
-        );
-        assert!(
-            init_fn.docstring.as_ref().unwrap().contains("Initializes"),
-            "docstring: {:?}",
-            init_fn.docstring
+            .filter_map(|n| Some((n.name.as_str(), n.docstring.as_deref()?)))
+            .collect();
+        assert_eq!(
+            docs,
+            [
+                ("InitSystem", "Initializes the system."),
+                ("Shutdown", "Shuts down the system."),
+                ("GetStatus", "Returns the current status."),
+                ("LogInit", "Logs initialization.")
+            ]
         );
     }
 
     #[test]
     fn test_quickbasic_contains_edges() {
         let result = extract_fixture();
-        let contains: Vec<_> = result
-            .edges
-            .iter()
-            .filter(|e| e.kind == EdgeKind::Contains)
-            .collect();
-        assert!(
-            contains.len() >= 8,
-            "should have >= 8 Contains edges, got {}",
-            contains.len()
+        assert_eq!(
+            edge_pairs(&result, EdgeKind::Contains),
+            [
+                ("sample.bi", "VERSION"),
+                ("sample.bi", "MAX_ITEMS"),
+                ("sample.bi", "Config"),
+                ("Config", "name"),
+                ("Config", "value"),
+                ("Config", "active"),
+                ("sample.bi", "appConfig"),
+                ("sample.bi", "InitSystem"),
+                ("sample.bi", "Shutdown"),
+                ("sample.bi", "GetStatus"),
+                ("sample.bi", "LogInit")
+            ]
         );
     }
 
@@ -161,7 +149,7 @@ SUB Test
 END SUB
 "#;
         let extractor = QuickBasicExtractor;
-        let result = extractor.extract("test.bi", source);
+        let result = extractor.extract_artifact("test.bi", source).result;
         assert!(
             result.errors.is_empty(),
             "QB4.5 statements should parse without errors: {:?}",

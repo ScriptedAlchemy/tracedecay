@@ -18,8 +18,8 @@ use tracedecay_contracts::{
     ResumeWorkRunCommand, RetryWorkAttemptCommandV1, TaskHandoffIssueRequest,
     TaskHandoffRedeemRequest, TaskHandoffScope, WorkAttemptStatusRequestV1,
     WorkEvidenceRetrieveRequestV1, WorkEvidenceSourceV1, WorkGraphReadRequestV1,
-    WorkHandoffFrontierV1, WorkHandoffLineageV1, WorkProductChangeDraftV1,
-    WorkProductMutationRequestV1, WorkProductSelectionScopeV1, WorkRelationScopeV1,
+    WorkHandoffFrontierV1, WorkHandoffLineageV1, WorkProductAuthorizedRelationScopeV1,
+    WorkProductChangeDraftV1, WorkProductMutationRequestV1, WorkProductSelectionScopeV1,
     WorkRetryAttemptOutcomeV1, WorkRetryCauseV1, WorkRetryFailureSelectorV1, WorkRetrySourceV1,
     WorkSynthesisAttemptV1, WorkflowDefinitionActivateRequest, WorkflowDefinitionDiffRequest,
     WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
@@ -603,12 +603,13 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     let repository_id: RepositoryId =
         id(&format!("repository.daemon.{}", sha256_path(&common_dir)));
     let worktree_id: WorktreeId = id(&format!("worktree.daemon.{}", sha256_path(&project)));
-    let product_selection =
-        WorkProductSelectionScopeV1::relations(BTreeSet::from([WorkRelationScopeV1::Repository {
+    let product_selection = WorkProductSelectionScopeV1::relations(BTreeSet::from([
+        WorkProductAuthorizedRelationScopeV1::Repository {
             project_id: project_id.clone(),
             repository_id: repository_id.clone(),
-        }]))
-        .expect("repository Work selection");
+        },
+    ]))
+    .expect("repository Work selection");
     let reference = tracedecay_runtime_core::branch::current_branch(&project)
         .map(|branch| id::<RefId>(&format!("refs/heads/{branch}")));
     let scope = tracedecay_contracts::ResolvedScope::new(

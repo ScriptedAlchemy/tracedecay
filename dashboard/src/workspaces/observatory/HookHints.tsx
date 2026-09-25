@@ -36,7 +36,7 @@ export function HookHints() {
         const payload = envelope.payload;
         if (payload == null) {
           return (
-            <p className="text-2xs text-text-muted">
+            <p className="text-body text-text-muted">
               the daemon sent no hint payload with this envelope
             </p>
           );
@@ -49,22 +49,22 @@ export function HookHints() {
               onRefresh={() => void hints.refetch()}
             />
             {payload.error != null ? (
-              <p role="status" className="text-2xs leading-relaxed text-state-error">
+              <p role="status" className="text-body leading-relaxed text-state-error">
                 {payload.error}
               </p>
             ) : null}
             {!payload.available ? (
-              <p className="text-2xs text-text-muted">
+              <p className="text-body text-text-muted">
                 the hint analytics source is unavailable, so no counts can be shown
               </p>
             ) : payload.by_category.length === 0 ? (
-              <p className="text-2xs text-text-muted">
+              <p className="text-body text-text-muted">
                 no hook hints have been recorded in the analytics window
               </p>
             ) : (
               <HintTable categories={payload.by_category} />
             )}
-            <p className="text-3xs leading-relaxed text-text-muted">
+            <p className="text-sm leading-relaxed text-text-muted">
               source: {payload.source} · counts are independent tallies within the analytics
               window, not a funnel
             </p>
@@ -77,7 +77,7 @@ export function HookHints() {
 
 function HintTable({ categories }: { categories: readonly AnalyticsHintCategoryV1[] }) {
   return (
-    <table className="w-full border-collapse text-2xs">
+    <table className="w-full border-collapse text-sm">
       <caption className="sr-only">
         Hook hint counts by category: emitted, followed, ignored, and suppressed.
       </caption>

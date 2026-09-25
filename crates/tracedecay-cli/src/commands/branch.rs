@@ -320,16 +320,12 @@ fn handle_branch_action_inner(
                     for name in &report.removed_branches {
                         eprintln!("  removed '{name}'");
                     }
-                    for path in &report.removed_orphan_dbs {
-                        eprintln!("  removed orphan '{}'", path.display());
-                    }
                     eprintln!(
-                        "\x1b[32m✔\x1b[0m Cleaned up {} stale branch(es) and {} orphan database(s).",
+                        "\x1b[32m✔\x1b[0m Cleaned up {} stale branch(es).",
                         report.removed_branches.len(),
-                        report.removed_orphan_dbs.len()
                     );
                 } else {
-                    eprintln!("No stale branches or orphan databases to clean up.");
+                    eprintln!("No stale branches to clean up.");
                 }
             }
             BranchAction::Autotrack { action } => {
@@ -543,7 +539,7 @@ async fn resolve_branch_data_root(
     project_path: &Path,
 ) -> tracedecay_domain::errors::Result<PathBuf> {
     Ok(
-        tracedecay::project::TraceDecay::resolve_store_layout_for_identity(project_path)
+        tracedecay_project::project::TraceDecay::resolve_store_layout_for_identity(project_path)
             .await?
             .data_root,
     )
@@ -598,7 +594,6 @@ mod tests {
         let report = parse_daemon_branch_admin_report(&serde_json::json!({
             "outcome": "removed",
             "removed_branches": ["feature/a"],
-            "removed_orphan_dbs": ["branches/orphan.db"],
             "default_branch": "main"
         }))
         .expect("valid branch admin response");
@@ -607,10 +602,6 @@ mod tests {
             tracedecay_runtime_core::branch::BranchAdminOutcome::Removed
         );
         assert_eq!(report.removed_branches, vec!["feature/a"]);
-        assert_eq!(
-            report.removed_orphan_dbs,
-            vec![std::path::PathBuf::from("branches/orphan.db")]
-        );
         assert_eq!(report.default_branch.as_deref(), Some("main"));
     }
 

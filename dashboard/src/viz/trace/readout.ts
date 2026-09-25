@@ -1,18 +1,7 @@
 /**
- * The instrument plate for the TRACE field: the header readout strip and the
- * legend row, both derived from the one `TraceModel` the field is drawn from.
- *
- * Why this is a module and not JSX
- * --------------------------------
- * Sheet 02 of the approved design carries two plates around its field, a
- * seven-cell readout strip above and a six-panel key below. A legend is the
- * one place in an instrument where a *second* source of truth can grow: the
- * picture is drawn from the payload, the legend is typed by hand, and the day
- * the payload changes only one of them moves. The approved sheet avoids this
- * by printing counts it computed from its own dataset, and this module is how
- * that property survives the port: every number on both plates is counted here
- * from `model`, the same record `render.ts` draws. Nothing on either plate is
- * a literal that a payload change could falsify.
+ * The header readout strip for the TRACE surface, counted from the one
+ * `TraceModel` the anatomy plate is drawn from, so no cell is a literal a
+ * payload change could falsify.
  *
  * The house rule from the design note, "every position, size, elevation and
  * width encodes a stated measurement", has a corollary this file exists to
@@ -21,9 +10,7 @@
  * that reason. A caller cannot render a cell without having decided what it
  * says when the wire was silent.
  *
- * Pure by construction: types only, no DOM, no colour, no clock. `sim.ts`
- * imports nothing at all and keeps that stronger boundary; this module sits
- * beside it on the same side of the honesty line.
+ * Pure by construction: types only, no DOM, no colour, no clock.
  */
 
 import type { TraceModel, TraceNode } from './types.ts';
@@ -51,23 +38,6 @@ export interface ReadoutCell {
   readonly qualifier: string | null;
 }
 
-/** One panel of the legend row. */
-export interface LegendPanel {
-  readonly label: string;
-  /** The sensory contract in one clause: what this channel means. */
-  readonly teach: string;
-  /** What that channel is actually carrying on THIS frame. */
-  readonly reading: ReadoutValue;
-  readonly qualifier: string | null;
-  /**
-   * Which sample the row should draw beside the panel. A closed set so the
-   * component cannot invent a swatch for a channel the field does not draw.
-   */
-  readonly sample: LegendSample;
-}
-
-export type LegendSample = 'channel' | 'sill' | 'rows' | 'hue' | 'membrane' | 'mouth';
-
 /* ---- small shared counting helpers -------------------------------------- */
 
 function measured(value: string, unit: string | null = null): ReadoutValue {
@@ -80,22 +50,6 @@ function absent(why: string): ReadoutValue {
 
 function plural(n: number, one: string, many: string): string {
   return n === 1 ? one : many;
-}
-
-/**
- * Inclusive range of a set of numbers as the legend prints it. Returns null
- * for an empty set so the caller must decide what absence reads as, rather
- * than receiving a plausible `0–0`.
- */
-function range(values: readonly number[]): string | null {
-  if (values.length === 0) return null;
-  let low = values[0] as number;
-  let high = low;
-  for (const value of values) {
-    if (value < low) low = value;
-    if (value > high) high = value;
-  }
-  return low === high ? String(low) : `${low}–${high}`;
 }
 
 /**
@@ -236,100 +190,4 @@ function countCrossings(model: TraceModel): number {
     if (ma !== mb) crossings += 1;
   }
   return crossings;
-}
-
-/* ---- the legend row ------------------------------------------------------ */
-
-/**
- * The six channels this field actually draws, each with what it is carrying
- * right now.
- *
- * The approved sheet's sixth panel is `Underlay`, sheet 01's module relief,
- * dimmed behind the flow. This surface draws no relief, so that panel is not
- * here: a legend panel for a channel the renderer does not paint would be the
- * exact drift this module exists to prevent. Its slot goes to `Sill`, which
- * the field does draw and which the sheet folds into its `Width` caption.
- */
-export function legendPanels(model: TraceModel): readonly LegendPanel[] {
-  const capped = cappedQualifier(model);
-
-  const callSites = model.channels.map((channel) => channel.calls);
-  const degrees = model.nodes
-    .map((node) => node.degree)
-    .filter((degree): degree is number => degree !== null);
-  const unmeasuredDegrees = model.nodes.length - degrees.length;
-
-  const up = model.nodes.filter((node) => node.ring < 0).length;
-  const down = model.nodes.filter((node) => node.ring > 0).length;
-  const kinds = new Set(model.nodes.map((node) => node.kind));
-
-  const mouths = model.nodes.filter((node) => (node.undrawnEdges ?? 0) > 0);
-  const undrawn = mouths.reduce((sum, node) => sum + (node.undrawnEdges ?? 0), 0);
-
-  const callRange = range(callSites);
-  const degreeRange = range(degrees);
-
-  return [
-    {
-      label: 'Channel width',
-      teach: 'call sites on that one edge',
-      reading:
-        callRange === null
-          ? absent('no calls edge was drawn on this frame')
-          : measured(callRange, `across ${model.channels.length} ${plural(model.channels.length, 'channel', 'channels')}`),
-      qualifier: capped,
-      sample: 'channel',
-    },
-    {
-      label: 'Sill width',
-      teach: "the symbol's degree, straight off the payload",
-      reading:
-        degreeRange === null
-          ? absent('no drawn row carried a degree')
-          : measured(degreeRange, `over ${degrees.length} ${plural(degrees.length, 'symbol', 'symbols')}`),
-      qualifier:
-        unmeasuredDegrees > 0
-          ? `${unmeasuredDegrees} without a degree, hollow sill at the floor width`
-          : null,
-      sample: 'sill',
-    },
-    {
-      label: 'Row',
-      // Named in the sheet's own words. Sheet 01 spends height on dependency
-      // depth; this one does not, and says so rather than borrowing that axis.
-      teach: 'hop distance from the focus, not elevation, not importance',
-      reading: measured(`${up} ↑ / ${down} ↓`, `${model.coverage.drawn} drawn`),
-      qualifier: null,
-      sample: 'rows',
-    },
-    {
-      label: 'Hue',
-      teach: 'symbol kind, off the same arc as the connectivity spine',
-      reading: measured(String(kinds.size), plural(kinds.size, 'kind', 'kinds')),
-      qualifier: null,
-      sample: 'hue',
-    },
-    {
-      label: 'Membrane',
-      teach: 'one type enclosure, from contains edges',
-      reading: model.coverage.membranesAvailable
-        ? measured(
-            String(model.membranes.length),
-            plural(model.membranes.length, 'enclosure', 'enclosures'),
-          )
-        : absent('the payload carried no contains edges'),
-      qualifier: model.coverage.membranesAvailable ? null : 'no enclosure is drawn on this frame',
-      sample: 'membrane',
-    },
-    {
-      label: 'Dashed mouth',
-      teach: 'edges this frame does not draw',
-      reading:
-        mouths.length === 0
-          ? absent('every drawn symbol had all its edges drawn, or none carried a degree')
-          : measured(String(undrawn), `at ${mouths.length} ${plural(mouths.length, 'symbol', 'symbols')}`),
-      qualifier: null,
-      sample: 'mouth',
-    },
-  ];
 }

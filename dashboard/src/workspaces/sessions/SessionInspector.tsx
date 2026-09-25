@@ -62,7 +62,7 @@ import {
 const PAGE_SIZE = 100;
 
 const PAGER_BEZEL =
-  'inline-flex items-center gap-1 border border-edge-subtle bg-surface-2 px-2 py-1 text-3xs text-text-secondary group-hover:text-text-primary';
+  'inline-flex items-center gap-1 border border-edge-subtle bg-surface-2 px-2 py-1 text-sm text-text-secondary group-hover:text-text-primary';
 
 export interface SessionInspectorProps {
   selection: SessionSelection;
@@ -95,7 +95,7 @@ export function SessionInspector({
       onClose={onClose}
     >
       <div className="flex flex-col gap-4">
-        <p className="td-value break-all text-3xs text-text-primary" data-session-inspector-id>
+        <p className="td-value break-all text-xs text-text-primary" data-session-inspector-id>
           {selection.sessionId}
         </p>
         <IdentitySection identity={identity} onSelectProvider={onSelectProvider} />
@@ -187,7 +187,7 @@ function IdentityBody({
       return (
         <div className="flex flex-col gap-1.5">
           <StateChip kind={identity.state} detail={identity.detail} />
-          <p className="text-3xs leading-snug text-text-muted">
+          <p className="text-sm leading-snug text-text-muted">
             Identity facts and Git relations are read with the index page; until it answers, only
             the transcript below can be read.
           </p>
@@ -198,7 +198,7 @@ function IdentityBody({
     case 'ambiguous':
       return (
         <div className="flex flex-col gap-1.5" data-identity="ambiguous">
-          <p className="text-3xs leading-snug text-text-secondary">
+          <p className="text-sm leading-snug text-text-secondary">
             {identity.rows.length} loaded rows answer to this id under different providers. The
             store keys a session by provider and id together; choose which one to inspect.
           </p>
@@ -230,7 +230,7 @@ function IdentityBody({
             kind="unavailable"
             detail={`not on loaded index page ${identity.page} (${identity.loaded.toLocaleString()} of ${identity.total.toLocaleString()} sessions)`}
           />
-          <p className="text-3xs leading-snug text-text-muted">
+          <p className="text-sm leading-snug text-text-muted">
             Identity facts and Git relations are read with the index page. The transcript below is
             read directly by id.
           </p>
@@ -247,12 +247,12 @@ function IdentityFacts({ row }: { row: LoomSessionRowV1 }) {
   const extent = sessionExtent(row);
   const models = recordedModels(row);
   return (
-    <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-2xs" data-identity="row">
+    <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-body" data-identity="row">
       <Fact label="provider" value={row.provider} />
       <Fact label="kind" value={row.is_subagent ? 'subagent' : 'session'} />
       <div className="col-span-2 flex min-w-0 flex-col gap-0.5">
         <dt className="td-legend">title</dt>
-        <dd className={row.title ? 'text-3xs text-text-secondary' : 'text-3xs italic text-text-muted'}>
+        <dd className={row.title ? 'text-sm text-text-secondary' : 'text-sm italic text-text-muted'}>
           {row.title ?? 'untitled'}
         </dd>
       </div>
@@ -262,13 +262,13 @@ function IdentityFacts({ row }: { row: LoomSessionRowV1 }) {
           {models.models.map((model) => (
             <span
               key={model}
-              className="td-value border border-edge-subtle px-1.5 py-0.5 text-3xs text-text-secondary"
+              className="td-value border border-edge-subtle px-1.5 py-0.5 text-xs text-text-secondary"
             >
               {model}
             </span>
           ))}
           {models.unrecorded > 0 || models.models.length === 0 ? (
-            <span className="text-3xs italic text-text-muted">
+            <span className="text-sm italic text-text-muted">
               {models.models.length === 0
                 ? 'model unrecorded by the provider'
                 : `${models.unrecorded} message group${models.unrecorded === 1 ? '' : 's'} without a recorded model`}
@@ -395,7 +395,7 @@ function SessionTranscriptPage({ sessionId }: { sessionId: string }) {
       <Legend trailing={<EvidenceGradeTag grade="EXACT" sourceClass="TRANSCRIPT" />}>
         transcript
       </Legend>
-      <p className="text-3xs leading-snug text-text-muted">
+      <p className="text-sm leading-snug text-text-muted">
         <span className="td-legend text-text-secondary">reasoning</span>{' '}
         <EvidenceGradeTag grade="UNAVAILABLE" className="align-middle" /> private chain-of-thought
         is not a persisted source class; only stored turns and retained summaries are shown.
@@ -457,7 +457,7 @@ function SessionBody({
         onNextPage={onNextPage}
         pageRequest={pageRequest}
       />
-      <p className="td-value break-all text-3xs text-text-muted" title={payload.path}>
+      <p className="td-value break-all text-xs text-text-muted" title={payload.path}>
         {payload.storage_scope} · {payload.path}
       </p>
     </div>
@@ -510,17 +510,17 @@ function SessionCounts({ payload }: { payload: LcmSessionPayloadV1 }) {
         </div>
       </div>
       {compaction != null ? (
-        <p className="text-3xs leading-snug text-text-muted">
+        <p className="text-sm leading-snug text-text-muted">
           Summaries hold {(compaction * 100).toFixed(1)}% of the source tokens they replaced , 
           derived from the two counts above, not a stored ratio.
         </p>
       ) : sourceTokens != null && summaryTokens != null ? (
-        <p className="text-3xs leading-snug text-text-muted">
+        <p className="text-sm leading-snug text-text-muted">
           No source tokens are recorded against this session&apos;s summaries, so no compaction
           ratio exists to report.
         </p>
       ) : (
-        <p className="text-3xs leading-snug text-text-muted">
+        <p className="text-sm leading-snug text-text-muted">
           Compaction token counts are unavailable, so no ratio exists to report.
         </p>
       )}
@@ -538,7 +538,7 @@ function CompactionBoundaries({ payload }: { payload: LcmSessionPayloadV1 }) {
       <Legend
         trailing={
           <>
-            <span className="shrink-0 text-3xs text-text-muted tabular">
+            <span className="shrink-0 text-xs text-text-muted tabular">
               {nodes.length} of {payload.counts.summary_node_count.toLocaleString()}
             </span>
             <EvidenceGradeTag grade="EXPLICIT" sourceClass="RETAINED SUMMARY" />
@@ -570,7 +570,7 @@ function CompactionBoundaries({ payload }: { payload: LcmSessionPayloadV1 }) {
         </ol>
       )}
       {payload.has_more_summary_nodes ? (
-        <p className="text-3xs text-text-muted">
+        <p className="text-sm text-text-muted">
           The store holds more summary nodes than this page carries.
         </p>
       ) : null}
@@ -593,21 +593,21 @@ function SummaryNodeRow({ node }: { node: LcmSummaryNodeV1 }) {
     >
       <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
         <span className="td-legend shrink-0 text-text-secondary">depth {node.depth}</span>
-        <span className="min-w-0 truncate text-3xs text-text-primary">{node.category}</span>
-        <span className="td-value ml-auto shrink-0 text-3xs text-text-muted" data-cell="numeric">
+        <span className="min-w-0 truncate text-sm text-text-primary">{node.category}</span>
+        <span className="td-value ml-auto shrink-0 text-xs text-text-muted" data-cell="numeric">
           {summaryTokens != null ? summaryTokens.toLocaleString() : 'unavailable'} ←{' '}
           {sourceTokens != null ? sourceTokens.toLocaleString() : 'unavailable'} tokens
         </span>
       </span>
       {retained != null ? <Meter fraction={retained} height="row" className="w-full" /> : null}
-      <span className="line-clamp-3 text-3xs leading-snug text-text-secondary">{node.summary}</span>
-      <span className="text-3xs text-text-muted">
+      <span className="line-clamp-3 text-sm leading-snug text-text-secondary">{node.summary}</span>
+      <span className="text-sm text-text-muted">
         {node.source_type} · built {formatStamp(node.created_at)}
         {node.latest_at != null ? ` · latest ${formatStamp(node.latest_at)}` : ''}
       </span>
       {/* The producer's own instruction for recovering what this node replaced,
         * rendered verbatim: the browser does not construct an expansion. */}
-      <span className="td-value break-all text-3xs text-text-muted">{node.expand_hint}</span>
+      <span className="td-value break-all text-xs text-text-muted">{node.expand_hint}</span>
     </li>
   );
 }
@@ -666,13 +666,13 @@ function RawMessages({
         * transcript. A status region so paging announces where the reader now
         * is; `tabIndex={-1}` so the focus repair can land here without adding
         * a tab stop. */}
-      <p ref={range} role="status" tabIndex={-1} className="text-3xs text-text-muted tabular">
+      <p ref={range} role="status" tabIndex={-1} className="text-xs text-text-muted tabular">
         {messages.length} on this page · {payload.counts.message_count.toLocaleString()} in session ·
         page {pageNumber} · page size {limit}
         {payload.next_cursor != null ? ' · more pages follow' : ' · last page'}
       </p>
       {messages.length > 0 ? (
-        <p className="text-3xs text-text-muted tabular" data-page-token-provenance>
+        <p className="text-xs text-text-muted tabular" data-page-token-provenance>
           token provenance on this page: {provenance.counted} counted (o200k approximate) ·{' '}
           {provenance.unavailable} unavailable
         </p>
@@ -740,7 +740,7 @@ function MessageRow({ message }: { message: LcmMessageV1 }) {
     >
       <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
         {message.ordinal != null ? (
-          <span className="td-value shrink-0 text-3xs text-text-muted" data-cell="numeric">
+          <span className="td-value shrink-0 text-xs text-text-muted" data-cell="numeric">
             #{message.ordinal}
           </span>
         ) : null}
@@ -748,26 +748,26 @@ function MessageRow({ message }: { message: LcmMessageV1 }) {
           {message.role ?? 'role unrecorded'}
         </span>
         {message.tool_name ? (
-          <span className="td-value min-w-0 truncate text-3xs text-text-primary">
+          <span className="td-value min-w-0 truncate text-xs text-text-primary">
             {message.tool_name}
           </span>
         ) : null}
-        <span className="ml-auto shrink-0 text-3xs text-text-muted tabular">
+        <span className="ml-auto shrink-0 text-xs text-text-muted tabular">
           {message.timestamp != null ? formatStamp(message.timestamp) : 'no timestamp'}
         </span>
       </span>
       {message.content == null ? (
         // The turn exists; its body does not. Retention offloaded or dropped
         // it, and an empty line here would read as an empty message.
-        <span className="text-3xs italic text-text-muted">
+        <span className="text-sm italic text-text-muted">
           body not held by the store{message.storage_kind ? ` (${message.storage_kind})` : ''}
         </span>
       ) : (
-        <span className="line-clamp-4 whitespace-pre-wrap break-words text-3xs leading-snug text-text-secondary">
+        <span className="line-clamp-4 whitespace-pre-wrap break-words text-sm leading-snug text-text-secondary">
           {message.content}
         </span>
       )}
-      <span className="flex flex-wrap gap-x-2 text-3xs text-text-muted">
+      <span className="flex flex-wrap gap-x-2 text-sm text-text-muted">
         {message.source ? <span>{message.source}</span> : null}
         {message.storage_kind && message.content != null ? <span>{message.storage_kind}</span> : null}
         <span className="tabular">{tokenLabel ?? 'token count unavailable'}</span>
@@ -839,21 +839,21 @@ function Relations({ row, relations }: { row: LoomSessionRowV1; relations: Sessi
               return (
                 <li key={commit.commit_sha} className="flex flex-col gap-0.5" data-commit={commit.commit_sha}>
                   <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-                    <span className="td-value min-w-0 truncate text-3xs text-text-primary" title={commit.commit_sha}>
+                    <span className="td-value min-w-0 truncate text-xs text-text-primary" title={commit.commit_sha}>
                       {commit.commit_sha.slice(0, 12)}
                     </span>
                     {evidence ? (
                       <EvidenceGradeTag grade={evidence.grade} sourceClass={evidence.sourceClass} />
                     ) : (
-                      <span className="text-3xs text-text-muted">grade unmapped · {commit.evidence}</span>
+                      <span className="text-sm text-text-muted">grade unmapped · {commit.evidence}</span>
                     )}
                   </span>
-                  <span className="text-3xs text-text-muted">
+                  <span className="text-sm text-text-muted">
                     {commit.relation} · {commit.evidence}
                     {commit.span_overlap_kind ? ` · ${commit.span_overlap_kind}` : ''} ·{' '}
                     {formatStamp(commit.committed_at)}
                   </span>
-                  <span className="truncate text-3xs text-text-muted">
+                  <span className="truncate text-sm text-text-muted">
                     {commit.branch ?? 'branch unrecorded'}
                     {commit.worktree ? ` · ${commit.worktree}` : ''}
                   </span>
@@ -875,10 +875,10 @@ function Relations({ row, relations }: { row: LoomSessionRowV1; relations: Sessi
           <ul className="flex flex-col gap-1">
             {editedFiles.map((file) => (
               <li key={`${file.path}:${file.change_type ?? ''}`} className="flex gap-2">
-                <span className="min-w-0 flex-1 truncate text-3xs text-text-secondary" title={file.path}>
+                <span className="min-w-0 flex-1 truncate text-sm text-text-secondary" title={file.path}>
                   {file.path}
                 </span>
-                <span className="td-value shrink-0 text-3xs text-text-muted">
+                <span className="td-value shrink-0 text-xs text-text-muted">
                   {file.change_type ?? 'change unrecorded'}
                   {file.hunks != null ? ` · ${file.hunks} ${file.hunks === 1 ? 'hunk' : 'hunks'}` : ''}
                 </span>
@@ -903,12 +903,12 @@ function Relations({ row, relations }: { row: LoomSessionRowV1; relations: Sessi
             {branchSpans.map((span) => (
               <li key={`${span.worktree}:${span.first_at}`} className="flex flex-col">
                 <span className="flex flex-wrap items-baseline gap-x-2">
-                  <span className="truncate text-3xs text-text-secondary">
+                  <span className="truncate text-sm text-text-secondary">
                     {span.branch ?? 'branch unrecorded'} · {span.worktree}
                   </span>
                   <EvidenceGradeTag grade="EXACT" sourceClass={span.source.toUpperCase()} />
                 </span>
-                <span className="text-3xs text-text-muted">
+                <span className="text-sm text-text-muted">
                   {formatStamp(span.first_at)} → {formatStamp(span.last_at)} ·{' '}
                   {formatDurationSeconds(span.last_at - span.first_at)} · {span.event_count}{' '}
                   {span.event_count === 1 ? 'event' : 'events'}
@@ -962,12 +962,12 @@ function RelationGroup({
       <span className="flex flex-wrap items-baseline gap-x-2">
         <span className="td-legend text-text-secondary">{label}</span>
         {status ? (
-          <span className="text-3xs text-text-muted">
+          <span className="text-sm text-text-muted">
             {status.label} · {status.state}
             {status.authority ? ` · ${status.authority}` : ''}
           </span>
         ) : (
-          <span className="text-3xs text-text-muted">source status not served</span>
+          <span className="text-sm text-text-muted">source status not served</span>
         )}
       </span>
       {children}

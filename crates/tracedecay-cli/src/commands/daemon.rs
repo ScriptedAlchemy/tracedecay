@@ -36,7 +36,9 @@ pub(crate) fn retained_tool_payload<T: DeserializeOwned>(
 ) -> tracedecay_domain::errors::Result<T> {
     let payload = match retained_tool_outcome(tool_name, reply)? {
         ApplicationOutcome::Evidence(packet) => packet.payload,
-        ApplicationOutcome::Preview(_) | ApplicationOutcome::Effect(_) => {
+        ApplicationOutcome::Preview(_)
+        | ApplicationOutcome::Effect(_)
+        | ApplicationOutcome::Result(_) => {
             return Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("daemon tool {tool_name} returned a non-evidence outcome"),
             });
@@ -55,7 +57,9 @@ pub(crate) fn retained_effect_payload<T: DeserializeOwned>(
 ) -> tracedecay_domain::errors::Result<T> {
     let payload = match retained_tool_outcome(tool_name, reply)? {
         ApplicationOutcome::Effect(effect) => effect.payload,
-        ApplicationOutcome::Evidence(_) | ApplicationOutcome::Preview(_) => {
+        ApplicationOutcome::Evidence(_)
+        | ApplicationOutcome::Preview(_)
+        | ApplicationOutcome::Result(_) => {
             return Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("daemon tool {tool_name} returned a non-effect outcome"),
             });

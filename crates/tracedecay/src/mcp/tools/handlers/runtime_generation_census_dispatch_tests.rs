@@ -7,7 +7,7 @@ use tempfile::TempDir;
 
 use super::dispatch_test_support::SelectorEnv;
 use super::*;
-use crate::config::lock_user_data_dir_test_env;
+use tracedecay_project::config::lock_user_data_dir_test_env;
 
 #[tokio::test]
 async fn runtime_mcp_marks_missing_generation_census_authority_unavailable() {

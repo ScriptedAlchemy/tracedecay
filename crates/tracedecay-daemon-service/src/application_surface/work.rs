@@ -105,7 +105,7 @@ pub(crate) async fn invoke_work_operation(
             let invocation = tracedecay_daemon_protocol::DaemonInvocationRequest::work_application(
                 request_id.as_str(),
                 WorkApplicationInvocationV1::$variant(decoded),
-                tracedecay_daemon_protocol::invocation_now_micros(),
+                tracedecay_contracts::now_micros(),
                 controls.deadline.clone(),
                 controls.cancellation.context(),
             );
@@ -135,7 +135,7 @@ pub(crate) async fn invoke_work_operation(
             let invocation = tracedecay_daemon_protocol::DaemonInvocationRequest::work_application(
                 request_id.as_str(),
                 WorkApplicationInvocationV1::$variant(decoded),
-                tracedecay_daemon_protocol::invocation_now_micros(),
+                tracedecay_contracts::now_micros(),
                 controls.deadline.clone(),
                 controls.cancellation.context(),
             );

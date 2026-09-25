@@ -10,7 +10,7 @@ use tracedecay_contracts::memory::{
     MemoryOptionalFactPortResult, MemoryReadCoverage, MemoryReadResult, MemoryRetrievalAnchorQuery,
     MemoryUseCaseError, RetrievalAnchorPort,
 };
-use tracedecay_domain::{FactId, FactLineageEventV1, FactOwnerV1, RetrievalAnchorRecordV2};
+use tracedecay_domain::{FactId, FactLineageEventV1, FactOwnerV1, RetrievalAnchorRecord};
 use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactCommitOutcome,
     FactContradictionStateV1 as StoreFactContradictionStateV1, FactCurrentQuery,
@@ -136,7 +136,7 @@ impl<A: FactStore> RetrievalAnchorPort for FactStoreAdapter<'_, A> {
     async fn get_retrieval_anchor(
         &self,
         query: Self::Query,
-    ) -> Result<Option<RetrievalAnchorRecordV2>, Self::Error> {
+    ) -> Result<Option<RetrievalAnchorRecord>, Self::Error> {
         self.0.get_retrieval_anchor(query).await
     }
 }
@@ -228,7 +228,7 @@ impl<A: FactStore> MemoryApplication<A> {
     pub async fn get_retrieval_anchor(
         &self,
         query: RetrievalAnchorQuery,
-    ) -> Result<Option<RetrievalAnchorRecordV2>, MemoryApplicationError> {
+    ) -> Result<Option<RetrievalAnchorRecord>, MemoryApplicationError> {
         let owner = query.owner().clone();
         let anchor_id = query.anchor_id().clone();
         canonical_application(&self.owner, &self.authority)?

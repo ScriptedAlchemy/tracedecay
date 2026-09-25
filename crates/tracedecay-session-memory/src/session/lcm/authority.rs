@@ -14,11 +14,11 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::ManifestDigest;
 
-use crate::context::CancellationToken;
 use crate::session::SessionRequestBinding;
 use tracedecay_lcm::{
     LcmCompressionResponse, LcmPreflightRequest, LcmPreflightResponse, LcmStatus,
 };
+use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 pub const LCM_DAEMON_COMMAND_CAPABILITY: &str = "capability.application.lcm-daemon-command";

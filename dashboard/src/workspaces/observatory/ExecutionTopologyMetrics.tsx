@@ -60,13 +60,13 @@ function ExecutionTopologyReadModel({ model }: { model: ExecutionTopologyMetrics
     <>
       <div className="flex flex-wrap items-center gap-2">
         <StateChip kind={state} detail={`${model.coverage.state} family coverage`} />
-        <span className="text-2xs text-text-muted">
+        <span className="text-body text-text-muted">
           Values, denominators, coverage, and typed omissions are projected by the daemon.
         </span>
       </div>
 
       <dl
-        className="grid gap-x-4 gap-y-1 border border-edge-subtle bg-surface-1 px-3 py-2 text-3xs sm:grid-cols-2 xl:grid-cols-4"
+        className="grid gap-x-4 gap-y-1 border border-edge-subtle bg-surface-1 px-3 py-2 text-sm sm:grid-cols-2 xl:grid-cols-4"
         data-execution-topology-current={model.current ? 'true' : 'false'}
         data-execution-topology-measurements={model.measurements.length}
       >

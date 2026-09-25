@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use tracedecay_code_extraction::{LanguageExtractor, TypeScriptExtractor};
+use tracedecay_domain::blank_json_comments;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tree_sitter::Node;
 
@@ -483,52 +484,7 @@ fn tsconfig_declarations(dir: &Path) -> (Vec<AliasRule>, Vec<PathBuf>, Vec<Strin
 /// Parses a tsconfig, which is JSON with comments in practice.
 fn read_jsonc(path: &Path) -> Option<Value> {
     let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str::<Value>(&strip_json_comments(&text)).ok()
-}
-
-/// Removes `//` and `/* … */` comments without touching string contents.
-fn strip_json_comments(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(current) = chars.next() {
-        match current {
-            '"' => {
-                out.push(current);
-                while let Some(inner) = chars.next() {
-                    out.push(inner);
-                    match inner {
-                        '\\' => {
-                            if let Some(escaped) = chars.next() {
-                                out.push(escaped);
-                            }
-                        }
-                        '"' => break,
-                        _ => {}
-                    }
-                }
-            }
-            '/' if chars.peek() == Some(&'/') => {
-                for inner in chars.by_ref() {
-                    if inner == '\n' {
-                        out.push('\n');
-                        break;
-                    }
-                }
-            }
-            '/' if chars.peek() == Some(&'*') => {
-                chars.next();
-                let mut previous = '\0';
-                for inner in chars.by_ref() {
-                    if previous == '*' && inner == '/' {
-                        break;
-                    }
-                    previous = inner;
-                }
-            }
-            _ => out.push(current),
-        }
-    }
-    out
+    serde_json::from_str::<Value>(&blank_json_comments(&text)).ok()
 }
 
 /// Every static string literal in a config file's syntax tree.
@@ -793,10 +749,8 @@ fn names_javascript(path: &Path) -> bool {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use serde_json::Value;
-
     use super::super::tests::{project, write};
-    use super::{AliasRule, EcosystemAudit, audit, strip_json_comments};
+    use super::{AliasRule, EcosystemAudit, audit};
 
     fn audit_typescript(root: &Path) -> EcosystemAudit {
         audit(&project(root)).expect("TypeScript audit")
@@ -1115,15 +1069,6 @@ mod tests {
         let audit = audit_typescript(root);
         assert!(audit.unmounted.is_empty());
         assert_eq!(audit.unclaimed_file_count, 1);
-    }
-
-    #[test]
-    fn json_comments_are_stripped_without_touching_strings() {
-        let stripped =
-            strip_json_comments("{\n // a\n \"url\": \"http://x/y\", /* b */ \"n\": 1\n}");
-        let parsed = serde_json::from_str::<Value>(&stripped).expect("json");
-        assert_eq!(parsed["url"], Value::from("http://x/y"));
-        assert_eq!(parsed["n"], Value::from(1));
     }
 
     #[test]

@@ -5,7 +5,7 @@ use tracedecay_domain::{
     LogicalCopyRecordV1, MessageOccurrenceRecordV1, SessionId, SessionProjectionGenerationV1,
     TemporalAssertionRecordV1, UtcMicros,
 };
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 use super::common::{
     SessionFrozenWatermarksV1, SessionGenerationActivatePermit,

@@ -342,7 +342,7 @@ mod tests {
                     ..Default::default()
                 },
                 backfill_page_saturated: false,
-                reprojected_legacy_head: false,
+                rebuilt_pre_index_head: false,
             },
         );
 
@@ -357,7 +357,7 @@ mod tests {
                     ..Default::default()
                 },
                 backfill_page_saturated: false,
-                reprojected_legacy_head: false,
+                rebuilt_pre_index_head: false,
             },
         );
         assert!(git_evidence_convergence_deferred(&transient));

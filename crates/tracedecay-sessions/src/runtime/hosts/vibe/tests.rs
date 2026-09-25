@@ -100,8 +100,8 @@ fn pagination_completes_older_work_then_surfaces_finite_new_arrivals() {
 #[test]
 fn vibe_workflow_lookalike_stays_ordinary_message_without_goal_kind() {
     // Vibe has no DurableObservation / WorkflowLifecycle normalizer yet.
-    // Prove lookalike lifecycle bags are not promoted into session_messages
-    // kind=goal (the legacy goals surface) or metadata keys.
+    // Prove lookalike lifecycle bags are not promoted into session
+    // message kind=goal (the legacy goals surface) or metadata keys.
     let input: Value = serde_json::from_str(include_str!(
         "../../../../../../tests/fixtures/provider_normalization/vibe/workflow_lookalike.input.json"
     ))

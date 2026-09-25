@@ -8,7 +8,7 @@ use super::super::token_count::{
 use super::{
     DashboardLcmCanonicalMatchesV1, DashboardLcmCanonicalMessageV1, DashboardLcmCanonicalPageV1,
     DashboardLcmCanonicalSummaryV1, DashboardLcmReadRequestV1, DashboardLcmTimelineBucketV1,
-    LcmTokenCountProvenanceV1,
+    LcmTokenCountProvenanceV1, message_tool_use_id,
 };
 
 pub(super) fn render_canonical_payload<T>(
@@ -566,6 +566,7 @@ fn message_json(
         "message_id": message.message_id,
         "ordinal": message.ordinal,
         "storage_kind": "canonical_temporal",
+        "tool_use_id": message_tool_use_id(message.metadata_json.as_deref()),
         "metadata_json": message.metadata_json,
         "tool_name": message.tool_names,
         "pinned": null,

@@ -125,7 +125,7 @@ impl MaintenanceWake {
 
 /// Park on cancel / wake / cadence, then run the next admitted tick.
 pub async fn run_maintenance_loop<F, Fut>(
-    cancellation: &tracedecay_session_memory::context::CancellationToken,
+    cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
     wake: &MaintenanceWake,
     interval: Duration,
     mut run_tick: F,

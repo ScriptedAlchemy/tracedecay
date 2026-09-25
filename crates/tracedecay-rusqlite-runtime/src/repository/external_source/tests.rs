@@ -603,7 +603,7 @@ fn ten_thousand_receipts_do_not_make_current_read_or_write_scan_history() {
     );
     let mut lookup = connection
         .prepare(
-            "SELECT receipt_json FROM external_source_commit_receipts_v2
+            "SELECT request_digest FROM external_source_commit_receipts_v2
                  WHERE binding_id = ?1 AND idempotency_key = ?2",
         )
         .unwrap();
@@ -840,6 +840,91 @@ fn separate_projection_write_rolls_back_effect_and_checkpoint_together() {
 }
 
 #[test]
+fn projected_history_shrinks_to_replay_summaries() {
+    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
+    let (first, binding) = fixture();
+    let projector = ComponentVersion::new("external-source-projector-v1").unwrap();
+    let write = |connection: &mut rusqlite::Connection, commit: &SourceCommitV1| {
+        let mut transaction = connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        ExternalSourceExecutor::default()
+            .execute_write(&savepoint, commit)
+            .unwrap();
+        savepoint.commit().unwrap();
+        transaction.commit().unwrap();
+    };
+    let project = |connection: &mut rusqlite::Connection| {
+        let pending = load_next_pending_projection(connection, &binding)
+            .unwrap()
+            .unwrap();
+        let projection = build_source_projection(&pending, projector.clone()).unwrap();
+        let mut transaction = connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        ExternalSourceExecutor::default()
+            .execute_projection_write(&savepoint, &projection)
+            .unwrap();
+        savepoint.commit().unwrap();
+        transaction.commit().unwrap();
+    };
+    write(&mut connection, &first);
+    project(&mut connection);
+    for sequence in 2..=20 {
+        let state = load_state(&connection, &binding).unwrap().unwrap();
+        write(&mut connection, &numbered_empty_successor(&state, sequence));
+        project(&mut connection);
+    }
+    let count = |connection: &rusqlite::Connection, sql: &str| -> i64 {
+        connection.query_row(sql, [], |row| row.get(0)).unwrap()
+    };
+    assert_eq!(
+        count(
+            &connection,
+            "SELECT COUNT(*) FROM external_source_commit_receipts_v2"
+        ),
+        20
+    );
+    assert_eq!(
+        count(
+            &connection,
+            "SELECT COUNT(*) FROM external_source_retained_receipts_v1"
+        ),
+        1,
+        "only the current receipt stays hydratable once every commit is projected"
+    );
+    assert_eq!(
+        count(
+            &connection,
+            "SELECT COUNT(*) FROM external_source_projection_publications_v2"
+        ),
+        1
+    );
+    assert!(
+        count(
+            &connection,
+            "SELECT COUNT(*) FROM external_source_frontiers_v1"
+        ) <= 3
+    );
+
+    let summary = load_commit_receipt_summary(&connection, &binding, first.idempotency_key())
+        .unwrap()
+        .expect("a superseded commit keeps its replay identity");
+    assert_eq!(summary.request_digest(), first.request_digest());
+    assert!(summary.committed(&first.mutations()[0]));
+    write(&mut connection, &first);
+    let current = load_state(&connection, &binding).unwrap().unwrap();
+    assert!(current.projection().is_some());
+    assert_eq!(
+        count(
+            &connection,
+            "SELECT COUNT(*) FROM external_source_commit_receipts_v2"
+        ),
+        20,
+        "replaying a superseded commit settles from its summary without a new receipt"
+    );
+}
+
+#[test]
 fn commit_replay_and_restart_read_share_one_durable_state() {
     let temporary = tempfile::tempdir().unwrap();
     let database_path = temporary.path().join("external-source.sqlite");
@@ -926,6 +1011,24 @@ fn commit_replay_and_restart_read_share_one_durable_state() {
         .unwrap();
     assert!(!durable_json.contains("secret"));
     assert!(!durable_json.contains("https://"));
+    let stored_mutation: String = transaction
+        .query_row(
+            "SELECT mutation_json FROM external_source_mutations_v1 WHERE binding_id = ?1",
+            [binding.binding_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mutation = &commit.mutations()[0];
+    for repeated in [
+        binding.binding_id.as_str(),
+        mutation.mutation_digest().as_str(),
+        mutation.observation().native_object().digest().as_str(),
+    ] {
+        assert!(
+            !stored_mutation.contains(repeated),
+            "a history row omits what its columns and binding carry: {stored_mutation}"
+        );
+    }
 }
 
 #[test]
@@ -1464,86 +1567,4 @@ fn reopened_executor_fully_validates_historical_current_rows() {
             .is_err(),
         "a reopened writer must not inherit any prior process verification"
     );
-}
-
-/// A store still being moved off its payload-copying predecessors holds only
-/// part of its history in the current tables. A read there must say so: an
-/// answer composed from the moved subset would understate what the store
-/// knows, and "receipt is missing" would name the wrong cause for a row the
-/// migration simply has not reached. The state clears when the migration
-/// drops the last predecessor, and reads unrelated to that history keep
-/// answering throughout.
-#[test]
-fn history_reads_report_the_migration_instead_of_a_partial_answer() {
-    let temporary = tempfile::tempdir().unwrap();
-    let path = temporary.path().join("external-source-migrating.sqlite");
-    let mut connection = rusqlite::Connection::open(&path).unwrap();
-    connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
-    let (commit, binding) = fixture();
-    let mut transaction = connection.transaction().unwrap();
-    let savepoint = transaction.savepoint().unwrap();
-    ExternalSourceExecutor::default()
-        .execute_write(&savepoint, &commit)
-        .unwrap();
-    savepoint.commit().unwrap();
-    transaction.commit().unwrap();
-
-    let read_state = |connection: &mut rusqlite::Connection| {
-        let snapshot = connection.transaction().unwrap();
-        let result = ExternalSourceExecutor::default().execute_read(
-            &snapshot,
-            &ExternalSourceReadOperationV1::State {
-                binding: binding.clone(),
-            },
-        );
-        snapshot.finish().unwrap();
-        result
-    };
-    let read_pending_count = |connection: &mut rusqlite::Connection| {
-        let snapshot = connection.transaction().unwrap();
-        let result = ExternalSourceExecutor::default().execute_read(
-            &snapshot,
-            &ExternalSourceReadOperationV1::AcquisitionPendingCount,
-        );
-        snapshot.finish().unwrap();
-        result
-    };
-
-    assert!(
-        matches!(
-            read_state(&mut connection),
-            Ok(ExternalSourceReadResultV1::State(Some(_)))
-        ),
-        "a converged store must answer its state read"
-    );
-
-    // Exactly the shape a migration in progress leaves: the predecessor is
-    // still on disk with the rows that have not moved.
-    let (retired_table, _) = RETIRED_MUTATION_COPY_TABLES[0];
-    connection
-        .execute_batch(&format!(
-            "CREATE TABLE {retired_table} (
-                binding_id TEXT NOT NULL, native_object_digest TEXT NOT NULL,
-                partition_digest TEXT NOT NULL, mutation_digest TEXT NOT NULL,
-                mutation_json TEXT NOT NULL,
-                PRIMARY KEY (binding_id, native_object_digest));"
-        ))
-        .unwrap();
-
-    let error = read_state(&mut connection)
-        .expect_err("a half-moved history must not be answered as if it were whole");
-    assert!(
-        error.to_string().contains(retired_table),
-        "the refusal must name the migration that is still running: {error}"
-    );
-    assert!(
-        read_pending_count(&mut connection).is_ok(),
-        "a read that does not touch the migrating history must keep answering"
-    );
-
-    connection
-        .execute_batch(&format!("DROP TABLE {retired_table}"))
-        .unwrap();
-    read_state(&mut connection)
-        .expect("the state read answers again once the migration has retired its predecessor");
 }

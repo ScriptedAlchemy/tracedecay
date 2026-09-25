@@ -67,13 +67,15 @@ export function resolveTemporalPalette(element: HTMLElement): TemporalPalette {
   };
 }
 
+/** The one stroke grammar for the grade ladder on every drawn relation:
+ * solid, dash-dot, dashed, dotted, short dash, sparse dot. */
 const GRADE_DASH: Readonly<Record<EvidenceGrade, readonly number[]>> = {
   exact: [],
-  explicit: [],
-  inferred: [5, 3],
-  ambiguous: [3, 3],
-  stale: [7, 2, 1, 2],
-  unavailable: [1, 4],
+  explicit: [6, 2, 1, 2],
+  inferred: [4, 3],
+  ambiguous: [1, 3],
+  stale: [2, 2],
+  unavailable: [1, 5],
 };
 
 export function gradeStroke(

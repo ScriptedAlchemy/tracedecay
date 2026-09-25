@@ -334,7 +334,6 @@ pub fn assemble_http_application_router(
     let workflow_router = workflow_application_router_with_executor(Arc::clone(&executor))?;
     let handoff_router = handoff_application_router_with_executor(Arc::clone(&executor))?;
     let multi_root_router = multi_root_application_router_with_executor(Arc::clone(&executor))?;
-    let retained_router = retained::router_with_executor(Arc::clone(&executor))?;
     Ok(
         tracedecay_api::application_router(application_invoker_for_surface(
             executor,
@@ -345,7 +344,6 @@ pub fn assemble_http_application_router(
         .merge(workflow_router)
         .merge(handoff_router)
         .merge(multi_root_router)
-        .merge(retained_router)
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&cancellations),
             application_http_context,

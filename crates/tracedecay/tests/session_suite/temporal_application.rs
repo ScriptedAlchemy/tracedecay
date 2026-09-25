@@ -15,9 +15,10 @@ use tracedecay_domain::{
     RepositoryId, RetrievalAnchorId, RetrievalGrainV1, SessionId, SessionSummaryIdV1,
     TemporalCoverageCountsV1, TemporalModeV1, UtcMicros, WorktreeId,
 };
+use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_session_memory::context::{
-    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
-    RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    BranchId, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId, RequestBudgets,
+    ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
     application_observed_at, session_application_grant_digest,
 };
 use tracedecay_session_memory::session::{
@@ -33,12 +34,13 @@ use tracedecay_temporal_query::context::{
     CompactContext, ContextBudget, TokenPolicy, VersionedTokenEstimator,
 };
 use tracedecay_temporal_query::cursor::CursorError;
-use tracedecay_temporal_query::ports::{
-    BindingDigest, ExecutionLimits, KernelVersions, TemporalExecutionSnapshot,
-    TemporalRetrievalScope, TemporalWatermarks,
-};
+use tracedecay_temporal_query::execution::{BindingDigest, ExecutionLimits};
+use tracedecay_temporal_query::ports::TemporalRetrievalScope;
 use tracedecay_temporal_query::ranking::DiversityLimits;
 use tracedecay_temporal_query::resolution::{SummaryLineageRejection, SummaryOmission};
+use tracedecay_temporal_query::snapshot::{
+    KernelVersions, TemporalExecutionSnapshot, TemporalWatermarks,
+};
 use tracedecay_temporal_query::{TemporalKernelError, TemporalKernelResult};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -535,7 +537,7 @@ struct PendingExecutionPort {
 }
 
 struct PendingExecution {
-    control: tracedecay_temporal_query::ports::ExecutionControl,
+    control: tracedecay_temporal_query::execution::ExecutionControl,
     dropped_after_cancel: Arc<AtomicBool>,
 }
 

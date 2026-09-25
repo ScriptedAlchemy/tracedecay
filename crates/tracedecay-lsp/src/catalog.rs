@@ -6,9 +6,7 @@ use tracedecay_contracts::{
     ApplicationContractError, ApplicationHandlerDescriptors, application_catalog_contributions,
     application_handler_descriptors,
 };
-use tracedecay_tool_catalog::{
-    BindingId, BindingStatus, BindingSurface, CatalogContributionV1, SurfaceBindingV1,
-};
+use tracedecay_tool_catalog::{BindingId, BindingSurface, CatalogContributionV1, SurfaceBindingV1};
 
 use crate::dispatch::LspClientMethod;
 
@@ -80,9 +78,7 @@ impl LspCatalogAdmission {
                     operation.to_owned(),
                 ));
             }
-            if matches!(binding.status(), BindingStatus::Current)
-                && !binding.is_alias()
-                && binding.protocol_revisions().contains(1)
+            if binding.protocol_revisions().contains(1)
                 && admit_binding(contribution, binding, handlers).is_err()
             {
                 return Err(LspCatalogAdmissionError::BindingUnavailable(
@@ -123,10 +119,7 @@ fn admit_binding(
     binding: &SurfaceBindingV1,
     handlers: &ApplicationHandlerDescriptors,
 ) -> Result<(), LspCatalogBindingRejection> {
-    if !matches!(binding.status(), BindingStatus::Current)
-        || binding.is_alias()
-        || !binding.protocol_revisions().contains(1)
-    {
+    if !binding.protocol_revisions().contains(1) {
         return Err(LspCatalogBindingRejection::Stale);
     }
     let capability = contribution
@@ -156,8 +149,8 @@ mod tests {
         application_catalog_contributions, application_handler_descriptors,
     };
     use tracedecay_tool_catalog::{
-        BindingDeprecation, BindingStatus, BindingSurface, CatalogContributionInputV1,
-        CatalogContributionV1, SurfaceBindingInputV1, SurfaceBindingV1,
+        BindingSurface, CatalogContributionInputV1, CatalogContributionV1, ProtocolRevisionRange,
+        SurfaceBindingInputV1, SurfaceBindingV1,
     };
 
     use super::{LspCatalogAdmission, LspCatalogBindingRejection};
@@ -178,9 +171,8 @@ mod tests {
 
     #[test]
     fn stale_context_binding_is_rejected() {
-        let contributions = context_binding_fixture(Some(BindingStatus::Deprecated {
-            deprecation: BindingDeprecation::new(2).unwrap(),
-        }));
+        let contributions =
+            context_binding_fixture(Some(ProtocolRevisionRange::new(2, 2).unwrap()));
         let handlers = application_handler_descriptors().unwrap();
         let admission = LspCatalogAdmission::from_parts(&contributions, &handlers).unwrap();
 
@@ -190,7 +182,9 @@ mod tests {
         );
     }
 
-    fn context_binding_fixture(status: Option<BindingStatus>) -> Vec<CatalogContributionV1> {
+    fn context_binding_fixture(
+        protocol_revisions: Option<ProtocolRevisionRange>,
+    ) -> Vec<CatalogContributionV1> {
         let mut contributions = application_catalog_contributions().unwrap();
         let context = contributions
             .iter_mut()
@@ -203,17 +197,15 @@ mod tests {
             .iter()
             .position(|binding| binding.operation().as_str() == CONTEXT_METHOD)
             .unwrap();
-        if let Some(status) = status {
+        if let Some(protocol_revisions) = protocol_revisions {
             let binding = &bindings[index];
             bindings[index] = SurfaceBindingV1::new(SurfaceBindingInputV1 {
                 binding_id: binding.binding_id().clone(),
                 capability_id: binding.capability_id().clone(),
                 surface: BindingSurface::Lsp,
                 operation: binding.operation().clone(),
-                protocol_revisions: binding.protocol_revisions().clone(),
+                protocol_revisions,
                 required_features: binding.required_features().to_vec(),
-                status,
-                alias_of: binding.alias_of().cloned(),
             })
             .unwrap();
         } else {

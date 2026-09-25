@@ -4,7 +4,7 @@ use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracedecay_domain::SessionId;
 use tracedecay_store::SessionRefreshBeginOrJoinRequestV1;
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 use super::history::SessionHistoricalIngestOutcome;
 use tracedecay_session_temporal_store::SessionRefreshRecoveryV1;

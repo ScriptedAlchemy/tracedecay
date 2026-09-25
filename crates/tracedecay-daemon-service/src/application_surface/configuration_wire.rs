@@ -12,8 +12,6 @@ use tracedecay_tool_catalog::{
     TerminalState, TerminalStateContract,
 };
 
-use tracedecay_daemon_protocol::ApplicationSurfaceAdapterError;
-
 pub(super) const CONFIGURATION_WIRE_OPERATIONS: [ApplicationSurfaceOperation; 11] = [
     ApplicationSurfaceOperation::ConfigurationList,
     ApplicationSurfaceOperation::ConfigurationGet,
@@ -51,25 +49,6 @@ pub(super) fn configuration_binding_has_schema(
         })
 }
 
-/// The application invocation payload for a configuration operation is the
-/// operation's own request body, the same shape
-/// `parse_application_surface_request` accepts from every caller surface, not
-/// the `operation`/`request` envelope `ConfigurationWireRequestV1` uses to
-/// carry it across the daemon contract. Sending the envelope made the executor
-/// re-parse a tagged wrapper against a `deny_unknown_fields` request struct,
-/// so every configuration read and write routed through the daemon invocation
-/// executor failed admission as `InvalidRequest`.
-#[hotpath::measure(label = "application_surface.configuration.payload")]
-pub(super) fn configuration_invocation_payload(
-    request: &tracedecay_contracts::ConfigurationWireRequestV1,
-) -> Result<Value, ApplicationSurfaceAdapterError> {
-    let mut wire =
-        serde_json::to_value(request).map_err(ApplicationSurfaceAdapterError::invalid_request)?;
-    wire.get_mut("request").map(Value::take).ok_or_else(|| {
-        ApplicationSurfaceAdapterError::invalid_request("configuration wire request has no body")
-    })
-}
-
 fn payload_decodes<T: DeserializeOwned>(payload: Option<&Value>) -> bool {
     payload.is_none_or(|value| serde_json::from_value::<T>(value.clone()).is_ok())
 }
@@ -98,6 +77,7 @@ fn configuration_cancellation_is_legal(
         ApplicationOutcome::Evidence(packet) => packet.execution.cancellation.as_ref(),
         ApplicationOutcome::Preview(preview) => preview.execution.cancellation.as_ref(),
         ApplicationOutcome::Effect(effect) => effect.execution.cancellation.as_ref(),
+        ApplicationOutcome::Result(_) => return false,
     };
     let Some(observation) = observation else {
         return true;
@@ -116,6 +96,9 @@ fn configuration_cancellation_is_legal(
 
 /// Validate the transport serialization carrier against the concrete result
 /// DTO before an adapter can publish it.
+///
+/// Only configuration and `feedback_get` results have a reviewed DTO here;
+/// every other operation's outcome is published as the daemon assembled it.
 pub(super) fn validate_application_outcome(
     operation: ApplicationSurfaceOperation,
     outcome: &ApplicationOutcome<Value>,
@@ -124,10 +107,16 @@ pub(super) fn validate_application_outcome(
     receipt: ReceiptContract,
     reconciliation: ReconciliationContract,
 ) -> bool {
+    if operation != ApplicationSurfaceOperation::FeedbackGet
+        && !is_configuration_operation(operation)
+    {
+        return true;
+    }
     let termination = match outcome {
         ApplicationOutcome::Evidence(packet) => packet.execution.termination,
         ApplicationOutcome::Preview(preview) => preview.execution.termination,
         ApplicationOutcome::Effect(effect) => effect.execution.termination,
+        ApplicationOutcome::Result(_) => return false,
     };
     let lifecycle_shape_is_legal = matches!(
         (receipt, reconciliation, outcome),
@@ -232,6 +221,27 @@ mod tests {
                     binding_id
                 ));
             }
+        }
+    }
+
+    #[test]
+    fn configuration_cancellation_policy_follows_the_catalog_effect() {
+        let catalog = super::super::application_surface_catalog_ref().unwrap();
+        for operation in CONFIGURATION_WIRE_OPERATIONS {
+            let application_operation = configuration_surface_operation(operation.as_str())
+                .unwrap()
+                .unwrap();
+            let is_effect = catalog
+                .capability(application_operation.capability_id())
+                .unwrap()
+                .effect()
+                .is_effect();
+            assert_eq!(
+                tracedecay_daemon_protocol::application_surface_cancellation_policy(operation)
+                    == tracedecay_daemon_protocol::InvocationCancellationPolicy::AuthoritativeEffect,
+                is_effect,
+                "{operation:?}"
+            );
         }
     }
 

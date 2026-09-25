@@ -1,25 +1,17 @@
-//! The typed internal dispatch envelope shared by every MCP transport.
+//! The typed internal dispatch envelope in front of the handler catalog.
 //!
-//! Two transports reach the same handler catalog: the legacy line-oriented
-//! JSON-RPC connection loop, which parses a [`JsonRpcRequest`] off the wire,
-//! and the `rmcp` adapter, whose server callbacks are handed already-typed
-//! request DTOs. Before this envelope existed the `rmcp` edge re-encoded each
-//! typed DTO into a `serde_json::Value` and rebuilt a second, transport-neutral
-//! [`JsonRpcRequest`] purely to reach dispatch, one full JSON tree built per
-//! request, and for `tools/call` a second deep clone when the handler pulled
-//! `arguments` back out of it.
+//! The `rmcp` adapter's server callbacks are handed already-typed request
+//! DTOs; custom notifications and in-process replay arrive as a raw
+//! [`JsonRpcRequest`]. The envelope carries the request identity, the method,
+//! its classification, and a method-specific payload that is *either* the raw
+//! JSON params or the typed DTO, so no typed DTO is re-encoded into a JSON
+//! tree just to reach dispatch. Internal dispatch reads the payload only
+//! through the accessors below, each of which answers the same question on
+//! both representations, so there is exactly one dispatch authority.
 //!
-//! The envelope removes that bridge without forking the handler catalog. It
-//! carries the request identity, the method, its classification, and a
-//! method-specific payload that is *either* the raw wire params (legacy) or
-//! the typed DTO (`rmcp`). Internal dispatch reads the payload only through
-//! the accessors below, each of which answers the same question on both
-//! representations, so there is exactly one dispatch authority and one place
-//! where a new transport has to be taught anything.
-//!
-//! Response rendering stays at the wire edge: the legacy transport serializes
-//! the handler's [`JsonRpcResponse`], and the `rmcp` adapter materializes it
-//! into the typed result DTO its `ServerHandler` signature requires.
+//! Response rendering stays at the wire edge: the `rmcp` adapter materializes
+//! the handler's [`JsonRpcResponse`] into the typed result DTO its
+//! `ServerHandler` signature requires.
 
 use crate::transport::JsonRpcRequest;
 use rmcp::model::{CallToolRequestParams, InitializeRequestParams, ReadResourceRequestParams};
@@ -30,9 +22,9 @@ use super::protocol::{McpMethod, classify_mcp_method};
 /// The method-specific request payload, in whichever form its transport
 /// already owns.
 pub enum McpDispatchParams<'a> {
-    /// Raw JSON-RPC params, borrowed from the request the legacy transport
-    /// parsed. This is also how `rmcp` delivers hook-event and cancellation
-    /// notifications, which are custom (untyped) methods on that transport.
+    /// Raw JSON-RPC params, borrowed from a parsed request. This is how
+    /// `rmcp` delivers hook-event and cancellation notifications, which are
+    /// custom (untyped) methods on that transport.
     Raw(Option<&'a Value>),
     /// Typed `initialize` params from the `rmcp` server callback.
     Initialize(&'a InitializeRequestParams),
@@ -64,11 +56,12 @@ pub struct McpDispatchRequest<'a> {
 }
 
 impl<'a> McpDispatchRequest<'a> {
-    /// Wraps a request exactly as the legacy JSON-RPC transport parsed it.
+    /// Wraps a raw JSON-RPC request whose params stay untyped JSON, such as a
+    /// custom notification.
     ///
     /// Nothing is copied but the (small) request identity, which dispatch
     /// already cloned before consuming.
-    pub fn from_legacy(request: &'a JsonRpcRequest) -> Self {
+    pub fn raw(request: &'a JsonRpcRequest) -> Self {
         Self::new(
             request.id.clone(),
             &request.method,
@@ -202,9 +195,9 @@ impl McpDispatchParams<'_> {
 /// Whether a request may run concurrently with other in-flight reads on its
 /// connection.
 ///
-/// One authority for both transports: the legacy loop and the `rmcp` adapter
-/// classify the same method the same way, so a read that forks connection
-/// state on one transport can never take the ordered write path on the other.
+/// One authority for both payload forms: a raw and a typed request classify
+/// the same method the same way, so a read that forks connection state in one
+/// form can never take the ordered write path in the other.
 pub fn dispatch_is_independent_read(
     method: McpMethod,
     tool_name: Option<&str>,
@@ -244,7 +237,7 @@ mod tests {
 
     use super::*;
 
-    fn legacy(method: &str, params: Value) -> JsonRpcRequest {
+    fn raw_request_for(method: &str, params: Value) -> JsonRpcRequest {
         JsonRpcRequest {
             jsonrpc: "2.0".to_owned(),
             id: Some(json!(1)),
@@ -259,7 +252,7 @@ mod tests {
             ClientCapabilities::default(),
             Implementation::new("claude-code", "1.2.3"),
         );
-        let raw_request = legacy(
+        let raw_request = raw_request_for(
             "initialize",
             json!({
                 "protocolVersion": "2024-11-05",
@@ -268,7 +261,7 @@ mod tests {
             }),
         );
 
-        let raw = McpDispatchRequest::from_legacy(&raw_request);
+        let raw = McpDispatchRequest::raw(&raw_request);
         let typed = McpDispatchRequest::typed(
             json!(1),
             "initialize",
@@ -310,9 +303,9 @@ mod tests {
     #[test]
     fn typed_and_raw_resources_read_agree_on_the_target_uri() {
         let typed_params = ReadResourceRequestParams::new("tracedecay://schema");
-        let raw_request = legacy("resources/read", json!({"uri": "tracedecay://schema"}));
+        let raw_request = raw_request_for("resources/read", json!({"uri": "tracedecay://schema"}));
         assert_eq!(
-            McpDispatchRequest::from_legacy(&raw_request).resource_uri(),
+            McpDispatchRequest::raw(&raw_request).resource_uri(),
             Some("tracedecay://schema"),
         );
         assert_eq!(
@@ -340,11 +333,11 @@ mod tests {
 
     #[test]
     fn read_concurrency_is_decided_identically_for_both_transports() {
-        let raw_request = legacy(
+        let raw_request = raw_request_for(
             "tools/call",
             json!({"name": "tracedecay_search", "arguments": {}}),
         );
-        let raw = McpDispatchRequest::from_legacy(&raw_request);
+        let raw = McpDispatchRequest::raw(&raw_request);
         let typed = McpDispatchRequest::typed(
             json!(1),
             "tools/call",
@@ -359,11 +352,11 @@ mod tests {
             }),
         );
 
-        let raw_write = legacy(
+        let raw_write = raw_request_for(
             "tools/call",
             json!({"name": "tracedecay_str_replace", "arguments": {}}),
         );
-        let raw_write = McpDispatchRequest::from_legacy(&raw_write);
+        let raw_write = McpDispatchRequest::raw(&raw_write);
         let typed_write = McpDispatchRequest::typed(
             json!(1),
             "tools/call",

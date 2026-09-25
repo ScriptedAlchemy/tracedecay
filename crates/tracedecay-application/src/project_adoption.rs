@@ -256,25 +256,6 @@ fn moved_store_evidence(
             return Ok(MovedStoreEvidence::RecordsPreviousRoot);
         }
     }
-    if layout.config_path.is_file() {
-        let config =
-            tracedecay_configuration::load_config_from_path(previous_root, &layout.config_path)
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!(
-                        "cannot evaluate moved-store adoption evidence from '{}': {error}; \
-                     repair or remove the store config, or re-run `tracedecay init` \
-                     with --fresh to mint a new identity without adoption",
-                        layout.config_path.display()
-                    ),
-                })?;
-        let recorded = PathBuf::from(&config.root_dir);
-        if paths_record_same_root(&recorded, new_root) {
-            return Ok(MovedStoreEvidence::RecordsNewRoot);
-        }
-        if paths_record_same_root(&recorded, previous_root) {
-            return Ok(MovedStoreEvidence::RecordsPreviousRoot);
-        }
-    }
     Ok(MovedStoreEvidence::NoMatch)
 }
 
@@ -290,7 +271,7 @@ fn paths_record_same_root(recorded: &Path, previous_root: &Path) -> bool {
 
 /// Rebinds `candidate` onto `new_root` as a journaled sequence.
 ///
-/// Store-side evidence (shard manifest, then config) is written first: a
+/// Store-side evidence (the shard manifest) is written first: a
 /// manifest recording the new root is the journal record an interrupted remap
 /// resumes from, because it is positive linkage between this store and the
 /// root. The registry upsert commits last, it is what makes the root resolve,
@@ -312,22 +293,6 @@ async fn remap_moved_nongit_project(
         },
     )?;
     storage::write_store_manifest(&layout)?;
-    if layout.config_path.is_file() {
-        let root_dir = new_root
-            .to_str()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: format!(
-                    "moved-project root '{}' is not valid UTF-8 and cannot be recorded \
-                     in the store config",
-                    new_root.display()
-                ),
-            })?
-            .to_owned();
-        let mut config =
-            tracedecay_configuration::load_config_from_path(new_root, &layout.config_path)?;
-        config.root_dir = root_dir;
-        tracedecay_configuration::save_config_to_path(&layout.config_path, &config)?;
-    }
     registry
         .upsert_code_project(&candidate.project_id, new_root, None, None, None)
         .await?;

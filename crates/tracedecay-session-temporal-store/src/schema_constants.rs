@@ -1,6 +1,11 @@
 //! Session-temporal schema identity shared with registered-store admission.
 
-pub const SESSION_TEMPORAL_SCHEMA_VERSION: i64 = 4;
+/// Version 5 stores occurrence text once: `snippet_text` is a virtual alias
+/// of `index_text`, and full-text search indexes only `index_text`. Version 6
+/// makes `session_summary_nodes` the one summary authority: the LCM summary
+/// columns are real columns here, `session_summary_sources` carries the
+/// lineage, and the summary FTS indexes `summary_text` alone.
+pub const SESSION_TEMPORAL_SCHEMA_VERSION: i64 = 6;
 
 pub const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
     (
@@ -12,13 +17,26 @@ pub const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
         &[
             "summary_id",
             "session_id",
+            "provider",
+            "conversation_id",
+            "depth",
             "summary_anchor_id",
             "summary_text",
-            "index_text",
+            "summary_hash",
+            "summary_token_count",
+            "source_token_count",
+            "source_time_start",
+            "source_time_end",
+            "expand_hint",
+            "metadata_json",
             "source_horizon_json",
             "publication_json",
             "created_at",
         ],
+    ),
+    (
+        "session_summary_sources",
+        &["summary_id", "ordinal", "source_kind", "source_id"],
     ),
     (
         "session_relation_receipts",
@@ -236,7 +254,6 @@ pub const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
             "evidence_json",
             "sanitized_content_digest",
             "sanitized_content_bytes",
-            "snippet_text",
             "index_text",
         ],
     ),
@@ -328,6 +345,6 @@ pub const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
             "checked_at",
         ],
     ),
-    ("session_occurrences_fts", &["index_text", "snippet_text"]),
-    ("session_summary_nodes_fts", &["summary_text", "index_text"]),
+    ("session_occurrences_fts", &["index_text"]),
+    ("session_summary_nodes_fts", &["summary_text"]),
 ];

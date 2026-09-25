@@ -142,7 +142,9 @@ fn deep_nesting_is_measured_rather_than_asserted_against() {
 fn extracted_nodes_carry_the_analysis_state() {
     let statements = TRAVERSAL_BUDGET / 4;
     let over_budget = body_with_statements(statements);
-    let result = RustExtractor.extract("huge.rs", &over_budget);
+    let result = RustExtractor
+        .extract_artifact("huge.rs", &over_budget)
+        .result;
     let body = result
         .nodes
         .iter()
@@ -153,7 +155,9 @@ fn extracted_nodes_carry_the_analysis_state() {
         ComplexityAnalysisV1::TraversalBudgetExhausted
     );
 
-    let small = RustExtractor.extract("small.rs", &body_with_statements(3));
+    let small = RustExtractor
+        .extract_artifact("small.rs", &body_with_statements(3))
+        .result;
     let body = small
         .nodes
         .iter()

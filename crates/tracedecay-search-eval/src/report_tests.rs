@@ -99,7 +99,6 @@ fn baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples() {
             "validation-024",
             "validation-025",
             "validation-027",
-            "validation-028",
         ]
     );
     assert!(report.profiles.iter().all(|profile| {

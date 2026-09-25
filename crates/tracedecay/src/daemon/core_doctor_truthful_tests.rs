@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::daemon::{DaemonHandshake, StoreAdministration};
 use crate::mcp::McpServer;
 use crate::mcp::server::McpServerConstructionContext;
-use crate::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_daemon_protocol::DaemonClientIdentity;
+use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 
 static REGISTERED_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 
@@ -64,7 +64,7 @@ fn handshake(
         client_instance_id: "truthful-core-doctor-test".to_string(),
         tool_list_changed_capable: false,
         catalog_version: String::new(),
-        moved_store_adoption: crate::project::MovedStoreAdoption::Never,
+        moved_store_adoption: tracedecay_project::project::MovedStoreAdoption::Never,
     }
 }
 
@@ -111,7 +111,8 @@ async fn live_runtime_snapshot_does_not_fabricate_store_metadata_after_observati
     std::fs::remove_file(&layout.graph_db_path)
         .expect("remove graph file after its retained route has gone live");
 
-    let build_version = crate::product_runtime::register_fixture_product_runtime().build_version();
+    let build_version =
+        tracedecay_project::product_runtime::register_fixture_product_runtime().build_version();
     let value = super::doctor_runtime_value(
         &handshake,
         &store_administration,

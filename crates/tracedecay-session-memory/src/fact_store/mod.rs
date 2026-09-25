@@ -3,7 +3,7 @@
 use tracedecay_runtime_core::db::Database;
 
 use tracedecay_domain::RunId;
-use tracedecay_domain::{FactLineageEventV1, FactOwnerV1, ProvenanceId, RetrievalAnchorRecordV2};
+use tracedecay_domain::{FactLineageEventV1, FactOwnerV1, ProvenanceId, RetrievalAnchorRecord};
 use tracedecay_store::ProjectMemoryAutomationRunReceiptsV1;
 use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactCommitOutcome, FactCurrentQuery,
@@ -313,7 +313,7 @@ impl FactStore for DatabaseFactStore<'_> {
     async fn get_retrieval_anchor(
         &self,
         query: RetrievalAnchorQuery,
-    ) -> FactStoreResult<Option<RetrievalAnchorRecordV2>> {
+    ) -> FactStoreResult<Option<RetrievalAnchorRecord>> {
         let snapshot = self
             .db
             .begin_memory_read_transaction(QUERY_OPERATION)
@@ -968,7 +968,7 @@ impl FactStore for ProjectFactStore<'_> {
         ) -> FactStoreResult<FactLineageResponseV1>;
         fn get_retrieval_anchor(
             query: RetrievalAnchorQuery,
-        ) -> FactStoreResult<Option<RetrievalAnchorRecordV2>>;
+        ) -> FactStoreResult<Option<RetrievalAnchorRecord>>;
     }
 }
 

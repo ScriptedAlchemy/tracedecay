@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::analytics::{HOOK_ANALYTICS_FILENAME, record_hook_invoked};
-use super::tool_hints::HintAgent;
 use super::{EnvGuard, TestDaemonHookActionGuard, daemon_hook_action, lock_test_env};
+use tracedecay_domain::HostIntegrationIdV1;
 use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
 
 fn enroll_project(project_root: &Path, project_id: &str) -> PathBuf {
@@ -54,7 +54,7 @@ fn matrix_rejects_default_success_when_disposition_absent() {
         let _span = record_hook_invoked(
             &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
-            HintAgent::Claude,
+            HostIntegrationIdV1::Claude,
             "noDisposition",
             "{}",
         );
@@ -107,7 +107,7 @@ fn matrix_sticky_failure_survives_later_success_for_unavailable_cancel_backpress
         let span = record_hook_invoked(
             &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
-            HintAgent::Claude,
+            HostIntegrationIdV1::Claude,
             "unavailableThenSuccess",
             "{}",
         );
@@ -118,7 +118,7 @@ fn matrix_sticky_failure_survives_later_success_for_unavailable_cancel_backpress
         let span = record_hook_invoked(
             &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
-            HintAgent::Kiro,
+            HostIntegrationIdV1::Kiro,
             "cancelThenSuccess",
             "{}",
         );
@@ -129,7 +129,7 @@ fn matrix_sticky_failure_survives_later_success_for_unavailable_cancel_backpress
         let span = record_hook_invoked(
             &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
-            HintAgent::Codex,
+            HostIntegrationIdV1::Codex,
             "backpressureThenSuccess",
             "{}",
         );
@@ -140,7 +140,7 @@ fn matrix_sticky_failure_survives_later_success_for_unavailable_cancel_backpress
         let span = record_hook_invoked(
             &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
-            HintAgent::Cursor,
+            HostIntegrationIdV1::Cursor,
             "timeoutThenSuccess",
             "{}",
         );
@@ -189,7 +189,7 @@ fn matrix_daemon_unavailable_transport_does_not_invent_success() {
             let span = record_hook_invoked(
                 &crate::ports::hook_runtime::crate_test_runtime(),
                 Some(&project_root),
-                HintAgent::Cursor,
+                HostIntegrationIdV1::Cursor,
                 "daemonDown",
                 "{}",
             );

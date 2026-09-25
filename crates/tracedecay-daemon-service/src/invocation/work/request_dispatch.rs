@@ -176,19 +176,11 @@ pub(super) async fn dispatch_work_application(
                     request.into(),
                 );
                 if result.is_ok() {
-                    let disposition = match disposition {
-                        tracedecay_contracts::ReviewWorkProposalDispositionV1::Rejected => {
-                            Some(tracedecay_contracts::ReviewProposalDispositionV1::Rejected)
-                        }
-                        tracedecay_contracts::ReviewWorkProposalDispositionV1::Superseded => {
-                            Some(tracedecay_contracts::ReviewProposalDispositionV1::Superseded)
-                        }
-                    };
                     let _ = tracedecay_application::observability::record_reliance_decision(
                         observability_producer.as_deref(),
                         &proposal_ref,
                         &command_ref,
-                        disposition,
+                        Some(disposition),
                         occurred_at,
                     );
                 }

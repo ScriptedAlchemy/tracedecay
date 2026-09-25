@@ -2,7 +2,9 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::{ExactTechnicalTermKindV1, QueryNormalizationRevision, SanitizerRevision};
+use tracedecay_domain::{
+    CodeGenerationId, ExactTechnicalTermKindV1, QueryNormalizationRevision, SanitizerRevision,
+};
 
 use crate::error::ApplicationContractError;
 use crate::result::OpaqueCursor;
@@ -12,6 +14,7 @@ use crate::retrieval::{
     GraphRelationRequest, ImplementationSelector, ImplementationsRequest, PageRequest,
     PhraseSearchRequest, PrimitiveRequest, ResultProjection, RetrievalOrder, RetrievalRequestMeta,
     SignatureSearchRequest, SymbolGraphScope, TypeHierarchyRequest,
+    UNPINNED_LATEST_GENERATION_SENTINEL,
 };
 
 /// Surface-owned query semantics. Page size remains an invocation control, but
@@ -25,6 +28,38 @@ pub struct CallableCodeSurfaceMeta {
     #[serde(default)]
     #[schemars(with = "Option<String>")]
     pub cursor: Option<OpaqueCursor>,
+}
+
+/// First page of full evidence in source order: the navigation reads that
+/// default their meta ignore relevance ranking.
+impl Default for CallableCodeSurfaceMeta {
+    fn default() -> Self {
+        Self {
+            projection: ResultProjection::Evidence,
+            order: RetrievalOrder::SourcePosition,
+            cursor: None,
+        }
+    }
+}
+
+const fn default_call_relation_depth() -> u32 {
+    3
+}
+
+const fn default_type_hierarchy_depth() -> u32 {
+    5
+}
+
+const fn default_resolve_trait_dispatch() -> bool {
+    true
+}
+
+fn unpinned_latest_code_query_scope() -> CodeQueryScope {
+    CodeQueryScope {
+        generation: CodeGenerationId::new(UNPINNED_LATEST_GENERATION_SENTINEL)
+            .unwrap_or_else(|_| panic!("static unpinned-latest generation sentinel is valid")),
+        path_prefix: None,
+    }
 }
 
 impl CallableCodeSurfaceMeta {
@@ -122,9 +157,12 @@ pub struct CodeSymbolSearchSurfaceRequest {
 #[serde(deny_unknown_fields)]
 pub struct CodeSignatureSearchSurfaceRequest {
     pub returns: Option<String>,
+    #[serde(default)]
     pub params: Vec<String>,
     pub is_async: Option<bool>,
+    #[serde(default)]
     pub scope: SymbolGraphScope,
+    #[serde(default)]
     pub meta: CallableCodeSurfaceMeta,
 }
 
@@ -132,7 +170,9 @@ pub struct CodeSignatureSearchSurfaceRequest {
 #[serde(deny_unknown_fields)]
 pub struct CodeImplementationsSurfaceRequest {
     pub selector: ImplementationSelector,
+    #[serde(default)]
     pub scope: SymbolGraphScope,
+    #[serde(default)]
     pub meta: CallableCodeSurfaceMeta,
 }
 
@@ -140,8 +180,11 @@ pub struct CodeImplementationsSurfaceRequest {
 #[serde(deny_unknown_fields)]
 pub struct CodeTypeHierarchySurfaceRequest {
     pub node_id: String,
+    #[serde(default = "default_type_hierarchy_depth")]
     pub maximum_depth: u32,
+    #[serde(default)]
     pub scope: SymbolGraphScope,
+    #[serde(default)]
     pub meta: CallableCodeSurfaceMeta,
 }
 
@@ -149,8 +192,11 @@ pub struct CodeTypeHierarchySurfaceRequest {
 #[serde(deny_unknown_fields)]
 pub struct CodeCallersSurfaceRequest {
     pub node_id: String,
+    #[serde(default = "default_call_relation_depth")]
     pub maximum_depth: u32,
+    #[serde(default)]
     pub scope: SymbolGraphScope,
+    #[serde(default)]
     pub meta: CallableCodeSurfaceMeta,
 }
 
@@ -234,9 +280,13 @@ impl CodeSymbolSearchSurfaceRequest {
 #[serde(deny_unknown_fields)]
 pub struct CodeCalleesSurfaceRequest {
     pub node_id: String,
+    #[serde(default = "default_call_relation_depth")]
     pub maximum_depth: u32,
+    #[serde(default = "default_resolve_trait_dispatch")]
     pub resolve_trait_dispatch: bool,
+    #[serde(default = "unpinned_latest_code_query_scope")]
     pub scope: CodeQueryScope,
+    #[serde(default)]
     pub meta: CallableCodeSurfaceMeta,
 }
 

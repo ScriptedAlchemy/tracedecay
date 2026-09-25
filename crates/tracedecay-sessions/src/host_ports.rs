@@ -6,43 +6,17 @@
 //! spawner (root `src/hooks/`). Depending on either from here would point the
 //! session layer back at the composition root.
 //!
-//! The Hermes pin resolver and the unregistered-admission factory are
-//! process-global slots the composition root fills once during startup; each
-//! reads as "unwired" until then. The session review scheduler is different:
+//! The unregistered-admission factory is a process-global slot the
+//! composition root fills once during startup; it reads as "unwired" until
+//! then. The session review scheduler is different:
 //! it is an explicit [`session_review::SessionReviewPort`] value that a user
 //! ingest pass receives through its `SessionIngestAuthority`, so an unwired
 //! pass is a typed refusal rather than a silent skip.
-//!
-//! Root startup must call [`hermes_profile_pin::register`] before any
-//! transcript ingest runs.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::OnceLock;
-
-/// Reads the pinned TraceDecay project root out of a Hermes profile config.
-///
-/// The parser is a host-bundle concern (`tracedecay-agent-hosts`); only the
-/// answer matters here. An unregistered slot reports "no pin", which makes
-/// legacy Hermes state stores skip rather than mis-attribute.
-pub mod hermes_profile_pin {
-    use super::{OnceLock, Path};
-
-    pub type Resolver = fn(&Path) -> Option<String>;
-
-    static RESOLVER: OnceLock<Resolver> = OnceLock::new();
-
-    /// Installs the host-bundle resolver. First call wins.
-    pub fn register(resolver: Resolver) {
-        let _ = RESOLVER.set(resolver);
-    }
-
-    /// Reads the pinned project root, or `None` when unwired.
-    pub fn resolve(config_path: &Path) -> Option<String> {
-        RESOLVER.get().and_then(|resolver| resolver(config_path))
-    }
-}
 
 /// Schedules the post-ingest user session review.
 ///

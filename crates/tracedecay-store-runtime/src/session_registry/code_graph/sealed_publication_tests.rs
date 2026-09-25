@@ -17,7 +17,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
-use tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1;
+use tracedecay_code_index_retention::code_index_generations::{
+    DurablePublicationPointerV1, code_generation_segments_root,
+};
 use tracedecay_domain::{
     CodeGenerationId, ProjectId, RefId, RepositoryId, WorktreeId, canonical_sha256,
     sha256_hex_suffix,
@@ -58,6 +60,21 @@ fn git(root: &Path, args: &[&str]) {
         "git fixture command failed: {args:?}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// The shared artifact files a scope's bundle manifest names.
+fn read_bundle_artifact_paths(scope: &Path, manifest: &Path) -> Vec<PathBuf> {
+    tracedecay_graph_db::sealed_read_bundle_manifest_artifact_digests(manifest)
+        .expect("read bundle manifest")
+        .expect("a bundle manifest path")
+        .iter()
+        .map(|digest| {
+            code_generation_segments_root(scope).join(format!(
+                "read-bundle-artifact-{}.bin",
+                sha256_hex_suffix(digest).expect("sha256 artifact digest")
+            ))
+        })
+        .collect()
 }
 
 fn with_publication_context<T>(
@@ -351,7 +368,7 @@ async fn unreadable_pending_replay_is_discarded_before_fresh_publication() {
         .join("../tracedecay-code-index/tests/fixtures/partitioned_pre_paging");
     let historical_digest = "6fece830a4b12904018853a467e404edc60ea76e2cab48d4645fbbb4132bd6af";
     let generations_root = scoped_store.join("code-generations-v1");
-    let segments_root = scoped_store.join("code-generation-segments-v1");
+    let segments_root = code_generation_segments_root(&scoped_store);
     std::fs::create_dir_all(&segments_root).expect("historical segment root");
     std::fs::copy(
         historical_fixture.join("manifest.json"),
@@ -867,21 +884,26 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
     );
 }
 
-/// The sealed read bundle journey over the production seal/open path:
-///
-/// - sealing (first successful publication) writes the bundle manifest and
-///   the interactive-catalog artifact next to the sealed generation;
-/// - open loads the digest-verified catalog and installs it WITHOUT running
-///   the projection warm scan (the scan counter proves no warm work ran);
-/// - a tampered artifact is the typed `Stale` state, a removed bundle is the
-///   typed `Absent` state, and in both cases the explicit fallback, the
-///   projection warm scan, still serves the catalog;
-/// - retirement removes every bundle file for the generation's digest.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sealed_read_bundle_serves_catalog_without_warm_and_degrades_typed() {
-    use tracedecay_code_index::graph_projection::CodeGraphProjectionStore;
-    use tracedecay_graph_db::SealedReadBundleArtifactStateV1;
+/// One committed single-file project sealed into a code generation, with the
+/// daemon registry and retained graph runtime that publish its graph. Fields
+/// drop in declaration order, so the runtime goes before its registry, scope,
+/// and directory.
+struct SealedGenerationFixture {
+    runtime: RetainedCodeGraphRuntimeV1,
+    project_database: Arc<tracedecay_runtime_core::db::Database>,
+    registry: DaemonSessionRuntimeRegistryV1,
+    project_id: ProjectId,
+    latest: tracedecay_code_index_runtime::code_index_scheduler::LatestCompleteCodeIndexV1,
+    generation_id: CodeGenerationId,
+    scoped_store: PathBuf,
+    generations_root: PathBuf,
+    sealed_state_digest: SealedGraphStateDigest,
+    digest_hex: String,
+    _database_scope: tracedecay_runtime_core::db::DaemonDatabaseScope,
+    _temporary: tempfile::TempDir,
+}
 
+async fn sealed_generation_fixture(project: &str, source: &str) -> SealedGenerationFixture {
     let temporary = tempfile::tempdir().expect("temporary fixture parent");
     let root = temporary
         .path()
@@ -896,14 +918,13 @@ async fn sealed_read_bundle_serves_catalog_without_warm_and_degrades_typed() {
         &project_root,
         &["config", "user.email", "tracedecay@example.invalid"],
     );
-    std::fs::write(
-        project_root.join("src/lib.rs"),
-        "pub fn sealed_bundle_value() -> usize { 43 }\n",
-    )
-    .expect("project source");
+    std::fs::write(project_root.join("src/lib.rs"), source).expect("project source");
     git(&project_root, &["add", "."]);
-    git(&project_root, &["commit", "-qm", "sealed bundle fixture"]);
-    let project_id = ProjectId::new("project.sealed-read-bundle").expect("project id");
+    git(
+        &project_root,
+        &["commit", "-qm", "sealed generation fixture"],
+    );
+    let project_id = ProjectId::new(project).expect("project id");
     tracedecay_runtime_core::storage::pin_fixture_repository_identity(
         &project_root,
         project_id.as_str(),
@@ -939,15 +960,12 @@ async fn sealed_read_bundle_serves_catalog_without_warm_and_degrades_typed() {
     let digest_hex = sha256_hex_suffix(&pointer.state_digest)
         .expect("sha256 state digest")
         .to_owned();
-    let bundle_manifest_path = generations_root.join(format!("read-bundle-{digest_hex}.json"));
-    let bundle_catalog_path =
-        generations_root.join(format!("read-bundle-{digest_hex}.interactive-catalog.bin"));
 
     let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile_root,
         44,
-        "sealed read bundle",
+        "sealed generation fixture",
     )
     .expect("daemon database scope");
     let registry = DaemonSessionRuntimeRegistryV1::open(identity)
@@ -973,6 +991,53 @@ async fn sealed_read_bundle_serves_catalog_without_warm_and_degrades_typed() {
         )
         .await
         .expect("retain code graph runtime");
+    SealedGenerationFixture {
+        runtime,
+        project_database,
+        registry,
+        project_id,
+        latest,
+        generation_id,
+        scoped_store,
+        generations_root,
+        sealed_state_digest,
+        digest_hex,
+        _database_scope,
+        _temporary: temporary,
+    }
+}
+
+/// The sealed read bundle journey over the production seal/open path:
+///
+/// - sealing (first successful publication) writes the bundle manifest and
+///   the interactive-catalog artifact next to the sealed generation;
+/// - open loads the digest-verified catalog and installs it WITHOUT running
+///   the projection warm scan (the scan counter proves no warm work ran);
+/// - a tampered artifact is the typed `Stale` state, a removed bundle is the
+///   typed `Absent` state, and in both cases the explicit fallback, the
+///   projection warm scan, still serves the catalog;
+/// - retirement removes every bundle file for the generation's digest.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sealed_read_bundle_serves_catalog_without_warm_and_degrades_typed() {
+    use tracedecay_code_index::graph_projection::CodeGraphProjectionStore;
+    use tracedecay_graph_db::SealedReadBundleArtifactStateV1;
+
+    let fixture = sealed_generation_fixture(
+        "project.sealed-read-bundle",
+        "pub fn sealed_bundle_value() -> usize { 43 }\n",
+    )
+    .await;
+    let SealedGenerationFixture {
+        runtime,
+        latest,
+        generation_id,
+        scoped_store,
+        generations_root,
+        sealed_state_digest,
+        digest_hex,
+        ..
+    } = &fixture;
+    let bundle_manifest_path = generations_root.join(format!("read-bundle-{digest_hex}.json"));
 
     assert!(
         !bundle_manifest_path.exists(),
@@ -987,6 +1052,9 @@ async fn sealed_read_bundle_serves_catalog_without_warm_and_degrades_typed() {
         bundle_manifest_path.is_file(),
         "sealing must write the read bundle manifest"
     );
+    let bundle_catalog_path = read_bundle_artifact_paths(scoped_store, &bundle_manifest_path)
+        .pop()
+        .expect("the bundle names its catalog artifact");
     assert!(
         bundle_catalog_path.is_file(),
         "sealing must write the interactive-catalog artifact"
@@ -1032,10 +1100,13 @@ async fn sealed_read_bundle_serves_catalog_without_warm_and_degrades_typed() {
     // Retirement removes the bundle with its generation; the generation then
     // reads as an old, bundle-less seal: typed absent, served by the explicit
     // warm fallback.
-    tracedecay_graph_db::retire_sealed_read_bundle(&generations_root, &sealed_state_digest)
+    tracedecay_graph_db::retire_sealed_read_bundle(generations_root, sealed_state_digest)
         .expect("retire the read bundle");
     assert!(!bundle_manifest_path.exists());
-    assert!(!bundle_catalog_path.exists());
+    assert!(
+        bundle_catalog_path.exists(),
+        "a shared artifact outlives its bundle until the project's sweep collects it"
+    );
     let absent = runtime
         .load_sealed_read_bundle_catalog(&Arc::new(AtomicBool::new(false)))
         .expect("absent load is a typed state, not an error");
@@ -1053,6 +1124,9 @@ async fn sealed_read_bundle_serves_catalog_without_warm_and_degrades_typed() {
         .mark_interactive_catalog_warming()
         .expect("mark warming");
     fallback_store
+        .warm_serving_engine()
+        .expect("activation warms the serving engine before the catalog");
+    fallback_store
         .warm_interactive_catalog_with_cancellation(Arc::new(tracedecay_graph_db::NeverCancelled))
         .expect("the old-generation fallback warm must still serve");
     assert_eq!(
@@ -1066,6 +1140,96 @@ async fn sealed_read_bundle_serves_catalog_without_warm_and_degrades_typed() {
             .expect("fallback catalog state readable"),
         "an old generation without a bundle still serves via the warm"
     );
+}
+
+/// Graph reads are latency bounded. A read that reaches a generation whose
+/// graph engine is not open, here stepped down by the production staging
+/// release sweep, gets the typed warming answer at once and leaves the
+/// corpus-sized open to the serving owner's background warm. Once warmed, the
+/// generation's one open engine serves every read and survives the sweeps
+/// that run between them.
+///
+/// Fails if a reader pays the cold open on the request path again, or if the
+/// sweep steps the warmed serving engine down so the next read must reopen.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_reads_during_engine_warm_up_are_typed_pending_and_share_one_open() {
+    use tracedecay_code_index::graph_projection::{
+        CodeGraphProjectionError, CodeGraphProjectionStore,
+    };
+
+    let fixture = sealed_generation_fixture(
+        "project.graph-engine-warm-up",
+        "pub fn warm_up_value() -> usize { 7 }\n",
+    )
+    .await;
+    let snapshot = fixture
+        .runtime
+        .publish_verified_snapshot(
+            fixture.latest.generation(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("seal the code graph");
+    let store = CodeGraphProjectionStore::from_verified_snapshot(
+        snapshot.clone(),
+        fixture.generation_id.clone(),
+    )
+    .expect("projection store over the sealed snapshot");
+    let sweep = || async {
+        fixture
+            .registry
+            .release_one_sealed_generation_staging_rows(
+                fixture.project_id.clone(),
+                &fixture.project_database,
+                &tracedecay_runtime_core::cancellation::CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("staging release sweep");
+    };
+    sweep().await;
+    assert_eq!(
+        snapshot.serving_engine_resident(),
+        Ok(false),
+        "the sweep steps an unwarmed idle generation down"
+    );
+
+    let started = Instant::now();
+    let pending = store.interactive_reader_with_cancellation(
+        &fixture.generation_id,
+        Arc::new(tracedecay_graph_db::NeverCancelled),
+    );
+    assert!(
+        matches!(
+            &pending,
+            Err(CodeGraphProjectionError::Unavailable(detail)) if detail.contains("warming")
+        ),
+        "a read before the warm must be the typed warming answer, got {pending:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the warming answer must not wait on the engine open"
+    );
+    assert_eq!(
+        snapshot.serving_engine_resident(),
+        Ok(false),
+        "a refused read must not open the engine itself"
+    );
+
+    store.warm_serving_engine().expect("background warm");
+    for _ in 0..3 {
+        store
+            .interactive_reader_with_cancellation(
+                &fixture.generation_id,
+                Arc::new(tracedecay_graph_db::NeverCancelled),
+            )
+            .expect("a warmed generation serves reads");
+        sweep().await;
+        assert_eq!(
+            snapshot.serving_engine_resident(),
+            Ok(true),
+            "the sweep must leave the warmed serving engine open for the next read"
+        );
+    }
 }
 
 /// Stage 1 of `docs/plans/tracedecay-v2/40`: cold activation decodes the sealed
@@ -2130,7 +2294,7 @@ async fn concurrent_worktree_scopes_publish_with_one_corpus_build_and_bounded_rs
             sealed_source: scoped_store
                 .join("code-generations-v1")
                 .join(format!("generation-{digest}.json")),
-            segments_source_root: scoped_store.join("code-generation-segments-v1"),
+            segments_source_root: code_generation_segments_root(&scoped_store),
             sealed_state_digest: tracedecay_graph_db::SealedGraphStateDigest::try_from(
                 pointer.state_digest,
             )

@@ -6,9 +6,6 @@ use serde_json::{Map, Value};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::{ToolDefinition, resolve_property_schema, short_tool_name};
 
-/// Legacy CLI command names that do not match the MCP tool name. The right-hand
-/// side is the canonical MCP suffix (without the `tracedecay_` prefix).
-const NAME_ALIASES: &[(&str, &str)] = &[("query", "search")];
 /// Result of CLI argument parsing: the JSON value to hand to the MCP handler,
 /// plus the reserved-flag side-effects.
 #[cfg_attr(test, derive(Debug))]
@@ -21,17 +18,11 @@ pub(crate) struct ParsedInvocation {
 }
 
 /// Normalize a user-supplied tool name to the canonical `tracedecay_<suffix>`
-/// form used by the MCP registry. Accepts aliases (e.g. `query` → `search`),
-/// strips a leading `tracedecay_` if present, and converts dashes to
-/// underscores so `dead-code` and `dead_code` both work.
+/// form used by the MCP registry. Strips a leading `tracedecay_` if present
+/// and converts dashes to underscores so `dead-code` and `dead_code` both work.
 pub(crate) fn canonical_tool_name(raw: &str) -> String {
     let trimmed = raw.strip_prefix("tracedecay_").unwrap_or(raw);
-    let normalized = trimmed.replace('-', "_");
-    let mapped = NAME_ALIASES
-        .iter()
-        .find(|(k, _)| *k == normalized)
-        .map_or(normalized.as_str(), |(_, v)| *v);
-    format!("tracedecay_{mapped}")
+    format!("tracedecay_{}", trimmed.replace('-', "_"))
 }
 
 /// Parse CLI args against the tool's JSON Schema. Returns the JSON object to

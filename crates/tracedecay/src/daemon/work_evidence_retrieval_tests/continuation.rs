@@ -25,13 +25,14 @@ async fn continuation_resumes_the_same_provider_session_without_repeating_eviden
     let project_id = id::<ProjectId>("project.work-task-session-continuation");
     let repository_id = id::<RepositoryId>("repository.work-task-session-continuation");
     let worktree_id = id::<WorktreeId>("worktree.work-task-session-continuation");
-    let runtime = crate::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
-        profile.path(),
-        &project,
-        project_id.clone(),
-    )
-    .await
-    .expect("registered project session runtime");
+    let runtime =
+        tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
+            profile.path(),
+            &project,
+            project_id.clone(),
+        )
+        .await
+        .expect("registered project session runtime");
     let database = runtime
         .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
         .expect("registered project session database");

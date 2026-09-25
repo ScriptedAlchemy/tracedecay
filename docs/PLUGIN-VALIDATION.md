@@ -173,8 +173,7 @@ command. Rendered-output validation in
 into a temp home and checks the rendered artifacts: the rendered manifest is
 validated against the vendored plugin schema (full draft-07 validation, same
 `jsonschema` crate as layer 1), every source file appears in the rendered install,
-no unresolved `${...}` placeholders survive in rendered JSON (except the
-intentional `${workspaceFolder}` MCP arg), and hook/MCP commands reference
+no unresolved `${...}` placeholders survive in rendered JSON, and hook/MCP commands reference
 the shell-quoted absolute binary path. This complements the byte-copy skill
 parity in layer 2.
 

@@ -2,7 +2,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::retained_surfaces::AutomationTaskV1;
-use crate::retrieval::SessionRetrievalBudgetStageV1;
 
 const MAX_AUTOMATION_TERMINAL_COUNT: u64 = 1_000_000;
 
@@ -28,7 +27,9 @@ macro_rules! automation_skip_reasons {
                 }
             }
 
-            fn from_canonical_token(reason: &str) -> Option<Self> {
+            /// Projects a persisted ledger label into the closed terminal.
+            /// Unknown labels cannot become durable skipped outcomes.
+            pub fn from_ledger_reason(reason: &str) -> Option<Self> {
                 match reason {
                     $($token => Some(Self::$variant),)+
                     _ => None,
@@ -79,7 +80,6 @@ automation_skip_reasons! {
     (SessionEvidenceTimedOut, "session_evidence_timed_out"),
     (SessionEvidenceCancelled, "session_evidence_cancelled"),
     (NoSessionEvidence, "no_session_evidence"),
-    (ShippedFactProposalHistoryRetired, "shipped_fact_proposal_history_retired"),
 }
 
 /// How a skip affects the next cadence decision.
@@ -94,40 +94,6 @@ pub enum AutomationSkipCadenceEffectV1 {
 }
 
 impl AutomationSkipReasonV1 {
-    /// Projects a persisted ledger label into the closed terminal.
-    ///
-    /// Canonical tokens come from [`Self::as_str`]. Historical aliases that
-    /// collapse into one variant (manifest-limit kinds, budget stages, the
-    /// skill-writer empty-evidence label) are parsed only at this boundary.
-    /// Unknown labels cannot become durable skipped outcomes.
-    pub fn from_ledger_reason(reason: &str) -> Option<Self> {
-        if let Some(reason) = Self::from_canonical_token(reason) {
-            return Some(reason);
-        }
-        Some(match reason {
-            "session_cursor_manifest_participants_limit_exceeded"
-            | "session_cursor_manifest_canonical_bytes_limit_exceeded" => {
-                Self::SessionCursorManifestLimitExceeded
-            }
-            reason
-                if reason
-                    .strip_prefix("session_evidence_budget_exhausted_")
-                    .is_some_and(|stage| {
-                        SessionRetrievalBudgetStageV1::deserialize(
-                            serde::de::value::StrDeserializer::<serde::de::value::Error>::new(
-                                stage,
-                            ),
-                        )
-                        .is_ok()
-                    }) =>
-            {
-                Self::SessionEvidenceBudgetExhausted
-            }
-            "no_skill_writer_evidence" => Self::NoSessionEvidence,
-            _ => return None,
-        })
-    }
-
     /// Whether this skip moved cadence and, if it did, whether it is a
     /// transient retrieval timeout. Admission diagnostics must not postpone
     /// the next attempt. A new variant fails compilation until it is classified.
@@ -172,8 +138,7 @@ impl AutomationSkipReasonV1 {
             | Self::SessionCursorManifestLimitExceeded
             | Self::SessionEvidenceBudgetExhausted
             | Self::SessionEvidenceCancelled
-            | Self::NoSessionEvidence
-            | Self::ShippedFactProposalHistoryRetired => AutomationSkipCadenceEffectV1::Effectful,
+            | Self::NoSessionEvidence => AutomationSkipCadenceEffectV1::Effectful,
         }
     }
 
@@ -197,9 +162,9 @@ impl AutomationSkipReasonV1 {
             | Self::SimilarityAuthorityUnavailable
             | Self::PartialCoverageNoCandidates
             | Self::NothingToReview => task == AutomationTaskV1::MemoryCurator,
-            Self::SessionReflectorDisabled
-            | Self::NoNewSessionActivity
-            | Self::ShippedFactProposalHistoryRetired => task == AutomationTaskV1::SessionReflector,
+            Self::SessionReflectorDisabled | Self::NoNewSessionActivity => {
+                task == AutomationTaskV1::SessionReflector
+            }
             // Skill writer and combined review retrieve the same session
             // evidence surface as the reflector. A typed evidence skip must
             // remain a skip for those tasks instead of failing settlement.
@@ -288,15 +253,11 @@ mod tests {
     };
 
     #[test]
-    fn budget_stage_skips_accept_known_stages_only() {
+    fn budget_exhaustion_has_one_ledger_token() {
         assert_eq!(
             AutomationSkipReasonV1::from_ledger_reason(
                 "session_evidence_budget_exhausted_execution_work_exhausted"
             ),
-            Some(AutomationSkipReasonV1::SessionEvidenceBudgetExhausted),
-        );
-        assert_eq!(
-            AutomationSkipReasonV1::from_ledger_reason("session_evidence_budget_exhausted_unknown"),
             None,
         );
     }

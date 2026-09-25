@@ -9,13 +9,13 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_contracts::retained_surfaces::{
     FactCategoryV1, FactProjectionV1, FactSearchHitV1, FactStoreAddCommitV1, FactStoreAddResultV1,
     FactStoreGetResultV1, FactStoreListResultV1, FactStoreSearchResultV1, FactV1,
     MemoryStatusResultV1,
 };
 use tracedecay_domain::FactId;
+use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 
 use crate::common;
 
@@ -115,7 +115,7 @@ impl Fixture {
             .env("USERPROFILE", &self.home_path)
             .env("XDG_CONFIG_HOME", self.home_path.join(".config"))
             .env(
-                tracedecay::config::USER_DATA_DIR_ENV,
+                tracedecay_project::config::USER_DATA_DIR_ENV,
                 self.home_path.join(".tracedecay"),
             )
             .env(

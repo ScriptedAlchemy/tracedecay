@@ -18,7 +18,7 @@ use tracedecay_graph_db::{
     GraphGenerationManifest, GraphGenerationRelation, GraphIdempotencyKey, GraphLabel,
     GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProjectorRevision,
     GraphProperty, GraphPropertyName, GraphRelationId, GraphRelationKind, GraphStoreFailureClass,
-    GraphTraversalDirection, GraphWatermark, SourceGeneration, TraversalRequest,
+    GraphTraversalDirection, GraphWatermark, NeverCancelled, SourceGeneration, TraversalRequest,
     VerifiedGraphSnapshot, classify_graph_store_error,
 };
 
@@ -38,14 +38,6 @@ const PARENT_RELATION: &str = "GitParent";
 const REF_TARGET_RELATION: &str = "GitRefTarget";
 
 pub const GIT_TOPOLOGY_PROJECTOR_REVISION_V1: &str = "git-topology-projector.v1";
-
-struct NeverCancelled;
-
-impl GraphCancellation for NeverCancelled {
-    fn is_cancelled(&self) -> bool {
-        false
-    }
-}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]

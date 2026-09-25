@@ -267,20 +267,14 @@ mod tests {
     use super::*;
     use crate::handlers::CanonicalApplicationDispatcher;
     use crate::{ApplicationOperation, ApplicationProblem, RetryDirective, SafeDiagnostic};
-    use tracedecay_tool_catalog::{
-        BindingStatus, CapabilityId, SurfaceBindingV1, SurfaceOperationName,
-    };
+    use tracedecay_tool_catalog::{CapabilityId, SurfaceBindingV1, SurfaceOperationName};
 
     fn current_bindings_on(surface: BindingSurface) -> Vec<SurfaceBindingV1> {
         application_catalog_contributions()
             .expect("application contributions")
             .into_iter()
             .flat_map(|contribution| contribution.bindings().to_vec())
-            .filter(|binding| {
-                binding.surface() == surface
-                    && matches!(binding.status(), BindingStatus::Current)
-                    && !binding.is_alias()
-            })
+            .filter(|binding| binding.surface() == surface)
             .collect()
     }
 

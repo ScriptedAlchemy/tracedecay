@@ -14,7 +14,7 @@ use tracedecay_domain::{
     CanonicalObservationIdV1, CurrentRemoteAuthorityStateV1, DurableObservationV1,
     EvidenceAvailabilityV1, GenerationBoundRepositoryProvenanceV1, ObservationScopeV1,
     ObservationSourceCursorV1, ProjectionGenerationId, RemoteCapabilityV1, RemoteRepositoryScopeV1,
-    RemoteWriterFenceV1, RetrievalAnchorRecordV2, UtcMicros,
+    RemoteWriterFenceV1, RetrievalAnchorRecord, UtcMicros,
 };
 use tracedecay_tool_catalog::SchemaId;
 
@@ -188,10 +188,10 @@ pub struct RemoteSanitizedObservationV1 {
     pub sequence: u64,
     pub observation: DurableObservationV1,
     pub committed_cursor: ObservationSourceCursorV1,
-    pub retrieval_anchor: RetrievalAnchorRecordV2,
+    pub retrieval_anchor: RetrievalAnchorRecord,
     pub projection_generation: ProjectionGenerationId,
     pub repository_provenance: EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1>,
-    pub repository_anchor: Option<RetrievalAnchorRecordV2>,
+    pub repository_anchor: Option<RetrievalAnchorRecord>,
     pub projection_queued: bool,
 }
 
@@ -603,7 +603,7 @@ impl RemoteExactObservationQueryServiceV1 {
                 &row.repository_provenance,
                 row.repository_anchor
                     .as_ref()
-                    .map(RetrievalAnchorRecordV2::projection_generation),
+                    .map(RetrievalAnchorRecord::projection_generation),
                 request.body.observation_id(),
                 &command.expected_authority.generation_id,
                 &request.body.scope,
@@ -779,7 +779,9 @@ fn query_payload(
 ) -> Option<&RemoteQueryResultV1> {
     match &envelope.outcome {
         ApplicationOutcome::Evidence(packet) => packet.payload.as_ref(),
-        ApplicationOutcome::Preview(_) | ApplicationOutcome::Effect(_) => None,
+        ApplicationOutcome::Preview(_)
+        | ApplicationOutcome::Effect(_)
+        | ApplicationOutcome::Result(_) => None,
     }
 }
 

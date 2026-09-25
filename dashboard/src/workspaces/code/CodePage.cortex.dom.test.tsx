@@ -19,10 +19,6 @@ import { CodePage } from './CodePage.tsx';
 import { useStatusRegistersStore } from '../../data/shell/statusRegisters.ts';
 import { resolveFixture } from '../../../stories/fixtures/data.ts';
 
-vi.mock('../../viz/graph/GraphCanvas.tsx', () => ({
-  GraphCanvas: () => <div data-testid="graph-canvas" />,
-}));
-
 function jsonOk(body: unknown) {
   return { ok: true, status: 200, json: async () => body } as Response;
 }
@@ -87,7 +83,7 @@ describe('the register strip', () => {
       ['layout', 'measured'],
       ['rank', 'measured'],
     ]);
-    expect(within(register).getByText('force-directed')).toBeTruthy();
+    expect(within(register).getByText('module-packed')).toBeTruthy();
     expect(within(register).getByText('degree')).toBeTruthy();
     expect(within(register).queryByText(/eigenvector/i)).toBeNull();
   });

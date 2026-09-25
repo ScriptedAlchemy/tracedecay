@@ -122,10 +122,8 @@ async fn read_mutation_and_evidence_preserve_the_typed_http_work_envelope() {
         let operation = work_operation_for_tool(tool_name).expect("canonical Work name");
         let request_id =
             RequestId::new(format!("request.work-mcp-parity-{index}")).expect("valid request id");
-        let deadline = Deadline::new(UtcMicros(
-            tracedecay_daemon_protocol::invocation_now_micros().0 + 30_000_000,
-        ))
-        .expect("valid deadline");
+        let deadline = Deadline::new(UtcMicros(tracedecay_contracts::now_micros().0 + 30_000_000))
+            .expect("valid deadline");
         let cancellation =
             CancellationSignal::active(format!("cancellation.work-mcp-parity-{index}"))
                 .expect("valid cancellation signal");

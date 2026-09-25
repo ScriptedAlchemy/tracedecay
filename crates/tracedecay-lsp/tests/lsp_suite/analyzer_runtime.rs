@@ -359,13 +359,15 @@ fn broker_exposes_project_scoped_readiness_without_lsp_transport() {
     let readiness = authority.analyzer_readiness();
 
     // The slot is keyed by the canonical project root, so its supervisor names
-    // that root; compare by path, as the gateway admits roots.
+    // that root; compare by path, as the gateway admits roots. A file URL names
+    // the root's identity, never the `\\?\` spelling Windows `canonicalize`
+    // returns.
     assert_eq!(
         url::Url::parse(readiness.root().uri())
             .unwrap()
             .to_file_path()
             .unwrap(),
-        project.path().canonicalize().unwrap()
+        tracedecay_runtime_core::path_safety::canonical_root_identity(project.path())
     );
     assert_eq!(readiness.state(), AnalyzerState::AwaitingStart);
     assert_eq!(readiness.failure_evidence(), None);
@@ -448,10 +450,11 @@ async fn settings_persist_under_dashboard_root() {
         lsp::settings::load_settings(temp.path()).await.unwrap(),
         replacement
     );
-    let backup = lsp::settings::settings_path(temp.path()).with_extension("json.bak");
-    let backup: lsp::settings::CodeDiagnosticsSettings =
-        serde_json::from_slice(&tokio::fs::read(backup).await.unwrap()).unwrap();
-    assert_eq!(backup, settings);
+    assert!(
+        !lsp::settings::settings_path(temp.path())
+            .with_extension("json.bak")
+            .exists()
+    );
 }
 
 #[tokio::test]

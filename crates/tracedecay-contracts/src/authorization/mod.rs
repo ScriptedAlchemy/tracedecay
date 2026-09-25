@@ -1,10 +1,12 @@
-mod non_disclosure;
-mod ports;
-mod service;
+use tracedecay_domain::UtcMicros;
 
-pub use non_disclosure::{ConcealedResourceCause, NonDisclosureHooks};
-pub use ports::{
-    AuthorizationPhase, AuthorizationPort, AuthorizationPortOutcome, AuthorizationRequest,
-    SourceAuthorizationSnapshot,
-};
-pub use service::{AuthorizationAdmission, AuthorizationService};
+use crate::context::RequestContext;
+use crate::handlers::ApplicationOperation;
+
+/// Typed authorization input. It carries no transport-origin authority.
+#[derive(Clone, Copy, Debug)]
+pub struct AuthorizationRequest<'a> {
+    pub context: &'a RequestContext,
+    pub operation: &'a ApplicationOperation,
+    pub observed_at: UtcMicros,
+}

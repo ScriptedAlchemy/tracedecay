@@ -40,12 +40,12 @@
 -- After empty find_symbol: try search_codebase. After empty search_codebase: Read/Grep are allowed for non-indexed files (.prisma, .sql, .graphql, .proto).
 +- Locate (exact name): `tracedecay_find_exact_symbol(name)`. One call. O(log n) index probe.
 +- Locate (ranked, fuzzy): `tracedecay_search(query, limit)`. Use when you don't know the exact name.
-+- Read source of a function/class/struct/etc: `tracedecay_body(symbol, limit=1)`. One call. Returns the full body text.
++- Read source of a function/class/struct/etc: resolve with `tracedecay_find_exact_symbol(name)`, then `tracedecay_source_body(node_id)`. Returns the full body text.
 +- Whole-task context (loc + related code): `tracedecay_context(task="<question>")`. Use this when the prompt is open-ended.
 +- Edit a function/method/class body: `tracedecay_replace_symbol(symbol, new_source)`. The new_source MUST include the symbol's own declaration line (e.g. `def foo(...):`). Reindex is automatic.
 +- Insert near a symbol: `tracedecay_insert_at_symbol(symbol, content, position="before"|"after")`. For non-symbol locations use `tracedecay_insert_at(path, anchor, content)`.
 +- Add a field to a Prisma model or TS interface/type: NO direct tracedecay tool — use `Edit` or `tracedecay_str_replace(path, old_str, new_str)`. Re-run after to verify the edit landed.
-+- Move a symbol across files: NO direct tracedecay tool — combine `tracedecay_body` (read), `tracedecay_str_replace` (delete from source file + paste in target file), and `Edit` for import-site fixups.
++- Move a symbol across files: NO direct tracedecay tool — combine `tracedecay_source_body` (read), `tracedecay_str_replace` (delete from source file + paste in target file), and `Edit` for import-site fixups.
 +- Detect cycles: `tracedecay_circular`. Do not infer manually.
 +- Detect duplicates: `tracedecay_similar(name|file)`. Enumerate the pairs returned. The MCP tool surfaces semantic neighbors, not strict duplicates — interpret accordingly.
 +- Diff between refs/branches: `tracedecay_branch_diff(base, head)` for tracked branches, or `tracedecay_changelog` for commit-based diffs.

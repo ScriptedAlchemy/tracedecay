@@ -40,10 +40,10 @@ use crate::{
     exact_sql::{
         WriterCommand as ExactSqlWriterCommand, reject_writer_command, run_writer_command,
     },
-    read_consistency::CommittedWatermarkPublisher,
     telemetry::{
         LockWorkScope, WalCheckpointSample, WriterTelemetry, duration_micros, take_observed_vm,
     },
+    watermark::CommittedWatermarkPublisher,
 };
 
 use super::{
@@ -859,9 +859,18 @@ impl Worker {
             }
             prefer_auxiliary = true;
         }
-        if self.state.load(Ordering::Acquire) != WriterState::Faulted as u8 {
-            self.state
-                .store(WriterState::Closed as u8, Ordering::Release);
+        if self.state.load(Ordering::Acquire) == WriterState::Faulted as u8 {
+            return;
+        }
+        match checkpoint.truncate_at_shutdown() {
+            Ok(result) => {
+                self.publish_checkpoint_result(result);
+                self.state
+                    .store(WriterState::Closed as u8, Ordering::Release);
+            }
+            Err(_) => self
+                .state
+                .store(WriterState::Faulted as u8, Ordering::Release),
         }
     }
 

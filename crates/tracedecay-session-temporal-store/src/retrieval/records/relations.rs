@@ -4,11 +4,13 @@ use std::sync::Arc;
 use tracedecay_domain::{MessageOccurrenceIdV1, SessionId};
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_temporal_query::candidates::CandidateChannel;
+use tracedecay_temporal_query::execution::ExecutionControl;
+use tracedecay_temporal_query::paging::PageRequest;
 use tracedecay_temporal_query::ports::{
-    ExecutionControl, PageRequest, ReadBudgetAccounting, TemporalExecutionSnapshot,
-    TemporalPortError, TemporalRetrievalScope,
+    ReadBudgetAccounting, TemporalPortError, TemporalRetrievalScope,
 };
 use tracedecay_temporal_query::ranking::RankingCandidate;
+use tracedecay_temporal_query::snapshot::TemporalExecutionSnapshot;
 
 use super::super::super::relations::{
     SessionRelationError, SessionRelationGraphStore, SessionRelationScope, SummarySourceRef,

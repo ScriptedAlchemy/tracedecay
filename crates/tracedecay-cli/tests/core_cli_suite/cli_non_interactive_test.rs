@@ -11,18 +11,17 @@ use crate::provision_host_cli_fixture;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_agent_hosts::PRODUCT_VERSION;
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, append_run_record, write_run_artifact,
 };
 use tracedecay_domain::ProjectId;
 use tracedecay_global_db::StoreInstanceUpsert;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::branch_meta::BranchMeta;
 use tracedecay_runtime_core::storage::{
-    EnrollmentMarker, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
-    StoreKind, StoreManifest, default_profile_project_id, profile_sharded_data_root,
-    profile_sharded_layout, write_repository_identity_marker, write_store_manifest,
+    STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest,
+    default_profile_project_id, profile_sharded_data_root, write_repository_identity_marker,
 };
 use tracedecay_sessions::admission::HostAdmissionScope;
 
@@ -532,7 +531,7 @@ fn write_profile_sharded_fixture(home: &std::path::Path, project: &std::path::Pa
     // mount; a non-empty wrong-shape file trips the workflow persisted-shape
     // gate and is refused as reset-required.
     write_empty_sqlite_fixture(&shard_root.join("sessions.db"));
-    write_branch_meta(&shard_root, &[], false);
+    write_branch_meta(&shard_root, &[]);
     let manifest = StoreManifest {
         schema_version: STORE_MANIFEST_SCHEMA_VERSION,
         project_id: Some("proj_cli".to_string()),
@@ -591,18 +590,10 @@ async fn register_profile_sharded_store(
         .expect("store instance should upsert");
 }
 
-fn write_branch_meta(
-    shard_root: &std::path::Path,
-    tracked_branches: &[(&str, &str)],
-    create_branch_dbs: bool,
-) {
+fn write_branch_meta(shard_root: &std::path::Path, tracked_branches: &[&str]) {
     let mut meta = BranchMeta::new_for_dir(shard_root, "main");
-    for (name, rel_db_path) in tracked_branches {
-        meta.add_branch(name, rel_db_path, "main");
-        if create_branch_dbs {
-            let db_path = shard_root.join(rel_db_path);
-            write_empty_sqlite_fixture(&db_path);
-        }
+    for name in tracked_branches {
+        meta.add_branch(name, "main");
     }
     std::fs::write(
         shard_root.join("branch-meta.json"),
@@ -745,6 +736,40 @@ fn explicit_kimi_install_fails_with_interactive_remediation() {
             .is_file()
     );
     assert!(!kimi_home.join("plugins/installed.json").exists());
+}
+
+#[test]
+fn detected_install_continues_past_a_failing_host_and_reports_it() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_temp_path(home.path());
+    let kimi_home = home_path.join(".kimi-code");
+    std::fs::create_dir_all(&kimi_home).unwrap();
+    std::fs::create_dir_all(home_path.join(".vibe")).unwrap();
+    let mut install = tracedecay_command_without_daemon(home.path(), project.path());
+    let _shim = add_tracedecay_path_shim(&mut install, home.path());
+    install
+        .env(
+            tracedecay_agent_hosts::agents::kimi::KIMI_CODE_HOME_ENV,
+            &kimi_home,
+        )
+        .arg("install");
+
+    let output = run_with_timeout(install, cli_timeout());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "a failed host must fail the pass\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("agent install failed for: kimi"),
+        "{stderr}"
+    );
+    assert!(
+        home_path.join(".vibe/config.toml").is_file(),
+        "Vibe is detected after Kimi and must still be installed\nstderr:\n{stderr}"
+    );
 }
 
 #[test]
@@ -1005,42 +1030,6 @@ fn automation_config_enable_writes_canonical_project_setting_noninteractively() 
     assert_eq!(
         explain_payload["backend_availability"]["backend"],
         "codex_app_server"
-    );
-}
-
-#[test]
-fn automation_config_rejects_retired_global_scope() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    std::fs::create_dir_all(project.path()).unwrap();
-
-    let mut set = tracedecay_command(home.path(), project.path());
-    set.args([
-        "automation",
-        "config",
-        "set",
-        "--scope",
-        "global",
-        "--backend",
-        "codex-app-server",
-        "--timeout-secs",
-        "75",
-        "--session-reflector",
-        "true",
-        "--session-reflector-schedule",
-        "interval",
-        "--session-reflector-interval-secs",
-        "1800",
-    ]);
-    let output = run_with_timeout(set, cli_timeout());
-    assert!(
-        !output.status.success(),
-        "automation config global set should be rejected\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("automation settings are project-scoped")
     );
 }
 
@@ -1453,69 +1442,6 @@ fn status_reports_uninitialized_project_without_creating_it() {
 }
 
 #[tokio::test]
-async fn status_surfaces_split_identity_conflict_without_suggesting_init() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    let project_root = canonical_temp_path(project.path());
-    git(&project_root, &["init", "-b", "main"]);
-
-    for project_id in ["proj_status_selected", "proj_status_legacy"] {
-        let layout = profile_sharded_layout(
-            &project_root,
-            &profile_root(home.path()),
-            &EnrollmentMarker {
-                project_id: project_id.to_string(),
-                storage_mode: StorageMode::ProfileSharded,
-            },
-        )
-        .unwrap();
-        let (db, _) = crate::common::initialize_test_database(&layout.graph_db_path)
-            .await
-            .unwrap();
-        db.checkpoint().await.unwrap();
-        db.close();
-        write_store_manifest(&layout).unwrap();
-    }
-    // Only the repository identity marker, deliberately: an enrollment marker
-    // is a current-generation authority that resolves this checkout outright,
-    // short-circuiting the legacy-candidate scan that detects the split. A
-    // cutover conflict can only exist on a pre-enrollment checkout, so writing
-    // one here would model a state in which the conflict cannot arise.
-    write_repository_identity_marker(&project_root, "proj_status_selected").unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
-        .await
-        .unwrap();
-    register_profile_sharded_store(&runtime, &project_root, "proj_status_selected").await;
-    runtime.checkpoint_profile_database_for_test().await;
-    drop(runtime);
-
-    let selected_db = profile_root(home.path()).join("projects/proj_status_selected/tracedecay.db");
-    let legacy_db = profile_root(home.path()).join("projects/proj_status_legacy/tracedecay.db");
-    let selected_before = std::fs::read(&selected_db).unwrap();
-    let legacy_before = std::fs::read(&legacy_db).unwrap();
-
-    let mut command = tracedecay_command(home.path(), &project_root);
-    command.arg("status");
-    let output = run_with_timeout(command, cli_timeout());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    assert!(
-        !output.status.success(),
-        "status should fail safely\n{stderr}"
-    );
-    assert!(stderr.contains("identity cutover conflict"), "{stderr}");
-    assert!(stderr.contains("proj_status_selected"), "{stderr}");
-    assert!(stderr.contains("proj_status_legacy"), "{stderr}");
-    assert!(
-        stderr.contains("choose one shard and retire the other"),
-        "{stderr}"
-    );
-    assert!(!stderr.contains("run `tracedecay init`"), "{stderr}");
-    assert_eq!(std::fs::read(selected_db).unwrap(), selected_before);
-    assert_eq!(std::fs::read(legacy_db).unwrap(), legacy_before);
-}
-
-#[tokio::test]
 async fn list_all_reports_profile_sharded_store_without_stale_label() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
@@ -1898,14 +1824,6 @@ fn wipe_local_returns_failure_when_a_selected_store_cannot_be_deleted() {
     let blocked = data_root.join("blocked");
     std::fs::create_dir_all(&blocked).unwrap();
     std::fs::write(blocked.join("retry-authority"), b"preserve").unwrap();
-    let marker = EnrollmentMarker {
-        project_id: "proj_cli".to_string(),
-        storage_mode: StorageMode::ProfileSharded,
-    };
-    let marker_path =
-        tracedecay_runtime_core::storage::legacy_enrollment_marker_path(project.path());
-    std::fs::create_dir_all(marker_path.parent().unwrap()).unwrap();
-    std::fs::write(&marker_path, serde_json::to_vec(&marker).unwrap()).unwrap();
     std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).unwrap();
 
     let mut command = tracedecay_command_without_daemon(home.path(), project.path());
@@ -1985,7 +1903,7 @@ fn list_all_reports_orphan_manifest_reconstructable_store() {
 
     let report = tracedecay_global_db::registry_maintenance::inspect_profile_store_orphans(
         &profile_root(home.path()),
-        tracedecay::project::current_timestamp(),
+        tracedecay_runtime_core::tracedecay::current_timestamp(),
     );
     assert_eq!(report.plans.len(), 1, "{report:#?}");
     assert_eq!(
@@ -2113,19 +2031,6 @@ fn write_wedged_generation_debris(shard_root: &Path) {
     std::fs::write(wal.join("segment"), b"graph wal segment").unwrap();
 }
 
-/// Plants the repo-local enrollment marker that makes the profile shard a
-/// local wipe target, exactly as
-/// `wipe_local_returns_failure_when_a_selected_store_cannot_be_deleted` does.
-fn write_profile_sharded_enrollment_marker(project: &Path) {
-    let marker = EnrollmentMarker {
-        project_id: "proj_cli".to_string(),
-        storage_mode: StorageMode::ProfileSharded,
-    };
-    let marker_path = tracedecay_runtime_core::storage::legacy_enrollment_marker_path(project);
-    std::fs::create_dir_all(marker_path.parent().unwrap()).unwrap();
-    std::fs::write(&marker_path, serde_json::to_vec(&marker).unwrap()).unwrap();
-}
-
 /// The #765 operator journey: the managed daemon holds its lifetime shared
 /// lease and is wedged in a terminal activation retry loop, so it never
 /// exits. Without an installed service to stop, the holder never releases.
@@ -2136,7 +2041,6 @@ fn wipe_refuses_within_bound_when_profile_lease_never_releases() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_profile_sharded_fixture(home.path(), project.path());
-    write_profile_sharded_enrollment_marker(project.path());
     let shard_root = profile_shard_root(home.path());
     write_wedged_generation_debris(&shard_root);
     let profile = profile_root(home.path());
@@ -2184,7 +2088,6 @@ fn wipe_completes_within_bound_once_the_wedged_holder_stops() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_profile_sharded_fixture(home.path(), project.path());
-    write_profile_sharded_enrollment_marker(project.path());
     let shard_root = profile_shard_root(home.path());
     write_wedged_generation_debris(&shard_root);
     let profile = profile_root(home.path());
@@ -2377,25 +2280,17 @@ async fn branch_list_reads_profile_sharded_branch_meta() {
 
     let tracked_branches = (0..300)
         .map(|index| {
-            (
-                format!("feature/branch-{index:03}-with-enough-detail-to-exercise-status-bounds"),
-                format!("branches/feature_branch_{index:03}.db"),
-            )
+            format!("feature/branch-{index:03}-with-enough-detail-to-exercise-status-bounds")
         })
         .collect::<Vec<_>>();
-    for (name, _) in &tracked_branches {
+    for name in &tracked_branches {
         git(project.path(), &["branch", name]);
     }
     let tracked_branch_refs = tracked_branches
         .iter()
-        .map(|(name, path)| (name.as_str(), path.as_str()))
+        .map(String::as_str)
         .collect::<Vec<_>>();
-    write_branch_meta(&shard_root, &tracked_branch_refs, false);
-    for (_, path) in &tracked_branches {
-        let db_path = shard_root.join(path);
-        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
-        std::fs::write(db_path, b"branch fixture").unwrap();
-    }
+    write_branch_meta(&shard_root, &tracked_branch_refs);
 
     let mut command = tracedecay_command_without_daemon(home.path(), project.path());
     command.args(["branch", "list"]);
@@ -2596,11 +2491,6 @@ fn branch_add_admits_background_publication_and_remove_retires_its_exact_artifac
         .branches
         .get("feature/new")
         .expect("branch add must track the branch");
-    assert!(
-        entry.served_by_project_store(),
-        "tracked branch must be served by the single project store, found '{}'",
-        entry.db_file
-    );
     let source = entry
         .graph_source
         .as_ref()
@@ -2652,10 +2542,6 @@ fn branch_add_admits_background_publication_and_remove_retires_its_exact_artifac
         source.source_oid,
         String::from_utf8_lossy(&sealed_head.stdout).trim(),
         "the stored OID must belong to the recorded source worktree"
-    );
-    assert!(
-        !shard_root.join("branches").exists(),
-        "branch add must not create a per-branch database"
     );
 
     git(
@@ -2842,7 +2728,7 @@ fn branch_search_serves_a_committed_generation_behind_dirty_worktree_state() {
 }
 
 #[tokio::test]
-async fn branch_remove_deletes_branch_local_memory_without_cutover_receipt() {
+async fn branch_removeall_retires_every_tracked_branch() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_git_fixture(project.path());
@@ -2856,59 +2742,7 @@ async fn branch_remove_deletes_branch_local_memory_without_cutover_receipt() {
     drop(runtime);
     seed_canonical_configuration(home.path(), project.path());
     let shard_root = profile_shard_root(home.path());
-    write_branch_meta(
-        &shard_root,
-        &[("feature/legacy-memory", "branches/feature_legacy_memory.db")],
-        true,
-    );
-    let branch_db = shard_root.join("branches/feature_legacy_memory.db");
-    rusqlite::Connection::open(&branch_db)
-        .unwrap()
-        .execute_batch(
-            "CREATE TABLE memory_facts (fact_id TEXT PRIMARY KEY);
-             INSERT INTO memory_facts (fact_id) VALUES ('branch-local');",
-        )
-        .unwrap();
-
-    let mut command = tracedecay_command(home.path(), project.path());
-    command.args(["branch", "remove", "feature/legacy-memory"]);
-    let output = run_with_timeout(command, cli_timeout());
-
-    assert!(
-        output.status.success(),
-        "branch remove should not require a migration receipt\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        !branch_db.exists(),
-        "branch remove should delete obsolete branch-local memory with its branch database"
-    );
-}
-
-#[tokio::test]
-async fn branch_removeall_deletes_profile_shard_branch_dbs() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    write_git_fixture(project.path());
-    write_profile_sharded_fixture(home.path(), project.path());
-    write_repository_identity_marker(project.path(), "proj_cli").unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
-        .await
-        .unwrap();
-    register_profile_sharded_store(&runtime, project.path(), "proj_cli").await;
-    runtime.checkpoint_profile_database_for_test().await;
-    drop(runtime);
-    seed_canonical_configuration(home.path(), project.path());
-    let shard_root = profile_shard_root(home.path());
-    write_branch_meta(
-        &shard_root,
-        &[
-            ("feature/one", "branches/feature_one.db"),
-            ("feature/two", "branches/feature_two.db"),
-        ],
-        true,
-    );
+    write_branch_meta(&shard_root, &["feature/one", "feature/two"]);
 
     let mut command = tracedecay_command(home.path(), project.path());
     command.args(["branch", "removeall"]);
@@ -2920,11 +2754,13 @@ async fn branch_removeall_deletes_profile_shard_branch_dbs() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        !shard_root.join("branches/feature_one.db").exists()
-            && !shard_root.join("branches/feature_two.db").exists(),
-        "branch removeall should delete all non-default branch DBs from profile shard"
+    let meta = tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root).unwrap();
+    assert_eq!(
+        meta.branches.keys().collect::<Vec<_>>(),
+        vec!["main"],
+        "branch removeall should retire every non-default tracked branch"
     );
+    assert!(shard_root.join("tracedecay.db").exists());
 }
 
 #[tokio::test]
@@ -2942,11 +2778,7 @@ async fn branch_gc_preserves_profile_shard_without_repository_evidence() {
     drop(runtime);
     seed_canonical_configuration(home.path(), project.path());
     let shard_root = profile_shard_root(home.path());
-    write_branch_meta(
-        &shard_root,
-        &[("feature/stale", "branches/feature_stale.db")],
-        true,
-    );
+    write_branch_meta(&shard_root, &["feature/stale"]);
 
     let mut command = tracedecay_command(home.path(), project.path());
     command.args(["branch", "gc"]);
@@ -2959,7 +2791,9 @@ async fn branch_gc_preserves_profile_shard_without_repository_evidence() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        shard_root.join("branches/feature_stale.db").exists(),
+        tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root)
+            .unwrap()
+            .is_tracked("feature/stale"),
         "branch gc must fail closed without repository branch evidence"
     );
 }

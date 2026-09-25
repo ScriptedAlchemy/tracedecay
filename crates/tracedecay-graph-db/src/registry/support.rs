@@ -126,7 +126,7 @@ pub(super) fn open_registered_graph_lazy(
 }
 
 /// Opens the registry-owned database, running the deterministic-corruption
-/// quarantine protocol when a preexisting container reports the typed
+/// deletion protocol when a preexisting container reports the typed
 /// corruption verdict, then reopening the vacated path as a fresh store that
 /// the canonical replay authorities re-project into.
 fn open_registered_database(
@@ -146,26 +146,23 @@ fn open_registered_database(
         Err(GraphDbError::Corrupt { message })
             if persistent_store_state == PersistentGraphStoreState::Existing =>
         {
-            let recovery = crate::store_quarantine::recover_deterministically_corrupt_container(
+            let recovery = crate::corrupt_store::recover_deterministically_corrupt_container(
                 path,
                 &message,
                 &|| open(PersistentGraphStoreState::Existing),
             )?;
             match recovery {
-                crate::store_quarantine::CorruptStoreRecovery::Reopened(database) => {
+                crate::corrupt_store::CorruptStoreRecovery::Reopened(database) => {
                     Ok((database, PersistentGraphStoreState::Existing))
                 }
-                crate::store_quarantine::CorruptStoreRecovery::Quarantined {
-                    quarantine_directory,
-                } => {
+                crate::corrupt_store::CorruptStoreRecovery::Deleted => {
                     let fresh_state = inspect_graph_database_file(path)?;
                     let database = open(fresh_state)?;
                     tracing::info!(
-                        event = "store_rebuilt_after_quarantine",
+                        event = "store_rebuilt_after_corruption",
                         container = %path.display(),
-                        quarantine = %quarantine_directory.display(),
-                        "fresh graph store opened after corruption quarantine; canonical \
-                         replay authorities re-project its generations"
+                        "fresh graph store opened after deleting a corrupt container; \
+                         canonical replay authorities re-project its generations"
                     );
                     Ok((database, fresh_state))
                 }

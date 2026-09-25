@@ -48,7 +48,6 @@ use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
 
 use tracedecay::daemon::call_default_tool_awaiting_project_open;
-use tracedecay::mcp::server::TOKEN_ACCOUNTING_FOOTER_PREFIX;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::{CancellationSignal, Deadline, RetainedSurfaceOperation};
 use tracedecay_daemon_protocol::{
@@ -61,6 +60,9 @@ use tracedecay_daemon_protocol::{
 use tracedecay_daemon_service::application_surface::observe_surface_argument_rejection;
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_mcp::tools::response_trailers::{
+    TOKEN_ACCOUNTING_FOOTER_PREFIX, account_tool_result,
+};
 use tracedecay_mcp::{
     RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions, internal_daemon_tool_definition,
     render_tool_cli_help, short_tool_name,
@@ -184,7 +186,7 @@ fn run_inner(
         let requested_operation = name
             .as_deref()
             .map(canonical_tool_name)
-            .and_then(|canonical| cli_application_operation(&canonical));
+            .and_then(|canonical| ApplicationSurfaceOperation::from_tool_name(&canonical));
         if let Some(operation) = requested_operation
             && let Some(parsed) = parse_whole_payload_invocation(&args)?
         {
@@ -200,6 +202,43 @@ fn run_inner(
                 .checked_add(tool_command_deadline()?)
                 .ok_or_else(tool_deadline_range_error)?;
             let tool_name = operation.mcp_tool_name();
+            if RetainedSurfaceOperation::from_application(operation).is_some() {
+                let mut tool_args = tool_args;
+                let dispatch =
+                    DaemonToolDispatch::for_tool(explicit_project, tool_name, &mut tool_args);
+                if requests_profile_authority(tool_name, &tool_args) {
+                    return dispatch_compatibility_tool(
+                        dispatch, tool_name, tool_args, raw_json, deadline,
+                    )
+                    .await;
+                }
+                return dispatch_cli_retained(operation, tool_args, dispatch, raw_json, deadline)
+                    .await;
+            }
+            if operation.is_graph_tool() {
+                let project_path =
+                    DaemonToolDispatch::project_scoped(explicit_project, tool_name).project_path;
+                return dispatch_cli_graph_tool(
+                    operation,
+                    tool_args,
+                    project_path,
+                    raw_json,
+                    deadline,
+                )
+                .await;
+            }
+            if tracedecay_daemon_protocol::is_source_edit_operation(operation) {
+                let project_path =
+                    DaemonToolDispatch::project_scoped(explicit_project, tool_name).project_path;
+                return dispatch_cli_source_edit(
+                    operation,
+                    tool_args,
+                    project_path,
+                    raw_json,
+                    deadline,
+                )
+                .await;
+            }
             let (request, requested_format) =
                 cli_surface_invocation(tool_name, tool_args, raw_json).map_err(|error| {
                     TraceDecayError::Config {
@@ -277,7 +316,40 @@ fn run_inner(
         let deadline = Instant::now()
             .checked_add(tool_command_deadline()?)
             .ok_or_else(tool_deadline_range_error)?;
-        if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(&def.name) {
+        if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(&def.name)
+            && RetainedSurfaceOperation::from_application(operation).is_some()
+            && !requests_profile_authority(&def.name, &tool_args)
+        {
+            let dispatch =
+                DaemonToolDispatch::for_tool(explicit_project, &def.name, &mut tool_args);
+            return dispatch_cli_retained(operation, tool_args, dispatch, raw_json, deadline).await;
+        }
+        if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(&def.name)
+            && operation.is_graph_tool()
+        {
+            let project_path =
+                DaemonToolDispatch::project_scoped(explicit_project, &def.name).project_path;
+            return dispatch_cli_graph_tool(operation, tool_args, project_path, raw_json, deadline)
+                .await;
+        }
+        if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(&def.name)
+            && tracedecay_daemon_protocol::is_source_edit_operation(operation)
+        {
+            let project_path =
+                DaemonToolDispatch::project_scoped(explicit_project, &def.name).project_path;
+            return dispatch_cli_source_edit(
+                operation,
+                tool_args,
+                project_path,
+                raw_json,
+                deadline,
+            )
+            .await;
+        }
+        // Profile-authority retained calls stay on the daemon's profile route below.
+        if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(&def.name)
+            && RetainedSurfaceOperation::from_application(operation).is_none()
+        {
             let (request, requested_format) =
                 cli_surface_invocation(&def.name, tool_args, raw_json).map_err(|error| {
                     TraceDecayError::Config {
@@ -302,18 +374,6 @@ fn run_inner(
         let dispatch = DaemonToolDispatch::for_tool(explicit_project, &def.name, &mut tool_args);
         dispatch_compatibility_tool(dispatch, &def.name, tool_args, raw_json, deadline).await
     })
-}
-
-/// Resolves a canonicalised `tracedecay tool` name to its application operation.
-///
-/// The CLI answers to both spellings the catalog gives an operation: its CLI
-/// binding name, which is the MCP tool spelling, and its canonical identity,
-/// which every other surface and every rendered envelope reports. They differ
-/// only for `diagnostics` / `diagnostics_read`, so neither spelling needs a
-/// name table of its own.
-fn cli_application_operation(canonical: &str) -> Option<ApplicationSurfaceOperation> {
-    ApplicationSurfaceOperation::from_tool_name(canonical)
-        .or_else(|| ApplicationSurfaceOperation::from_catalog_name(short_tool_name(canonical)))
 }
 
 /// Dispatch one catalogued application-surface operation on behalf of a
@@ -488,6 +548,199 @@ fn dispatch_cli_application_surface_inner(
     })
 }
 
+/// The request deadline and cancellation for one CLI application attempt.
+fn cli_request_controls(
+    request_id: &tracedecay_contracts::RequestId,
+    deadline: Instant,
+) -> Result<(Deadline, CancellationSignal)> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_micros()).unwrap_or(i64::MAX))
+        .unwrap_or(i64::MAX);
+    let request_deadline = Deadline::new(UtcMicros(
+        now.saturating_add(i64::try_from(remaining.as_micros()).unwrap_or(i64::MAX)),
+    ))
+    .map_err(|error| TraceDecayError::Config {
+        message: error.to_string(),
+    })?;
+    let cancellation =
+        CancellationSignal::active(format!("cancellation.cli.{}", request_id.as_str())).map_err(
+            |error| TraceDecayError::Config {
+                message: error.to_string(),
+            },
+        )?;
+    Ok((request_deadline, cancellation))
+}
+
+/// Run one retained memory, session, or workflow tool through the application
+/// surface and print the same tool result its MCP call returns.
+#[hotpath::measure(label = "cli.tool.retained", future = true)]
+async fn dispatch_cli_retained(
+    operation: ApplicationSurfaceOperation,
+    tool_args: Value,
+    dispatch: DaemonToolDispatch,
+    raw_json: bool,
+    deadline: Instant,
+) -> Result<()> {
+    let tool_name = operation.mcp_tool_name();
+    let request_id =
+        mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
+            message: "could not allocate an application surface request id".to_owned(),
+        })?;
+    let client = tracedecay_daemon_identity::invocation_client_for_current(dispatch.handshake()?)?;
+    // The mounting refusal precedes admission; re-send it until the deadline.
+    let execution = loop {
+        let (request_deadline, cancellation) = cli_request_controls(&request_id, deadline)?;
+        let execution = tracedecay::mcp::tools::execute_retained_surface_tool(
+            tracedecay_tool_catalog::BindingSurface::Cli,
+            operation,
+            tool_args.clone(),
+            Some(&client),
+            Some(request_id.clone()),
+            Some(request_deadline),
+            Some(cancellation),
+        )
+        .await?;
+        let Some(delay) = execution
+            .result
+            .as_ref()
+            .err()
+            .and_then(|problem| problem.problem.owner_mount_resend_delay())
+        else {
+            break execution;
+        };
+        if deadline.saturating_duration_since(Instant::now()) <= delay {
+            break execution;
+        }
+        tokio::time::sleep(delay).await;
+    };
+    let mut result = tracedecay::mcp::tools::render_retained_execution(
+        dispatch.project_path.as_deref(),
+        &execution,
+    )?;
+    tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
+    print_tool_output(&result.value, raw_json);
+    tool_result_process_outcome(&result.value, tool_name)
+}
+
+/// Run one source-edit tool through the application surface and print the
+/// same tool result its MCP call returns.
+#[hotpath::measure(label = "cli.tool.source_edit", future = true)]
+async fn dispatch_cli_source_edit(
+    operation: ApplicationSurfaceOperation,
+    tool_args: Value,
+    project: Option<PathBuf>,
+    raw_json: bool,
+    deadline: Instant,
+) -> Result<()> {
+    let tool_name = operation.mcp_tool_name();
+    let request_id =
+        mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
+            message: "could not allocate an application surface request id".to_owned(),
+        })?;
+    let handshake =
+        tracedecay::daemon::handshake_for_current_client(project.clone(), None, false, false)?;
+    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
+    // A cold daemon refuses with the mounting problem while the project open
+    // warms; that refusal precedes admission, so it is re-sent until the CLI
+    // deadline like every other surface.
+    let outcome = loop {
+        let (request_deadline, cancellation) = cli_request_controls(&request_id, deadline)?;
+        let outcome = tracedecay_mcp::handlers::edit::run_source_edit(
+            tracedecay_tool_catalog::BindingSurface::Cli,
+            operation,
+            &tool_args,
+            tracedecay_mcp::handlers::edit::SourceEditInvocationContext {
+                executor: Some(&client),
+                target: tracedecay_contracts::InvocationTarget::CurrentProject,
+                request_id: Some(request_id.clone()),
+                deadline: Some(request_deadline),
+                cancellation: Some(cancellation),
+            },
+        )
+        .await?;
+        let Some(delay) = outcome
+            .as_ref()
+            .err()
+            .and_then(tracedecay_contracts::ApplicationProblemRecord::owner_mount_resend_delay)
+        else {
+            break outcome;
+        };
+        if deadline.saturating_duration_since(Instant::now()) <= delay {
+            break outcome;
+        }
+        tokio::time::sleep(delay).await;
+    };
+    let mut result = tracedecay_mcp::handlers::edit::render_source_edit_outcome(
+        project.as_deref(),
+        operation,
+        &tool_args,
+        outcome,
+    )?;
+    tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
+    print_tool_output(&result.value, raw_json);
+    tool_result_process_outcome(&result.value, tool_name)
+}
+
+/// Run one graph or port read through its project owner and print the same
+/// tool result its MCP call returns.
+#[hotpath::measure(label = "cli.tool.graph_tool", future = true)]
+async fn dispatch_cli_graph_tool(
+    operation: ApplicationSurfaceOperation,
+    tool_args: Value,
+    project: Option<PathBuf>,
+    raw_json: bool,
+    deadline: Instant,
+) -> Result<()> {
+    let tool_name = operation.mcp_tool_name();
+    let request_id =
+        mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
+            message: "could not allocate an application surface request id".to_owned(),
+        })?;
+    let handshake =
+        tracedecay::daemon::handshake_for_current_client(project.clone(), None, false, false)?;
+    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
+    // A cold daemon refuses with the mounting problem while the project open
+    // warms; that refusal precedes admission, so it is re-sent until the CLI
+    // deadline like every other surface.
+    let completion = loop {
+        let (request_deadline, cancellation) = cli_request_controls(&request_id, deadline)?;
+        let outcome = tracedecay::mcp::tools::execute_graph_tool_surface(
+            tracedecay_tool_catalog::BindingSurface::Cli,
+            operation,
+            tool_args.clone(),
+            Some(&client),
+            Some(request_id.clone()),
+            Some(request_deadline),
+            Some(cancellation),
+        )
+        .await;
+        let mounting = outcome.as_ref().err().is_some_and(|error| {
+            error.project_route_context().is_some_and(|(code, _, _)| {
+                code == tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE
+            })
+        });
+        if !mounting
+            || deadline.saturating_duration_since(Instant::now()) <= GRAPH_TOOL_RESEND_DELAY
+        {
+            break outcome?;
+        }
+        tokio::time::sleep(GRAPH_TOOL_RESEND_DELAY).await;
+    };
+    let mut result = tracedecay_mcp::handlers::graph_tool::render_graph_tool(
+        project.as_deref(),
+        &tool_args,
+        completion,
+    )?;
+    account_tool_result(project.as_deref(), &mut result);
+    tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
+    print_tool_output(&result.value, raw_json);
+    tool_result_process_outcome(&result.value, tool_name)
+}
+
+const GRAPH_TOOL_RESEND_DELAY: Duration = Duration::from_millis(250);
+
 fn print_cli_application_surface(
     result: ApplicationSurfaceInvocationResult,
     raw_json: bool,
@@ -654,7 +907,7 @@ fn requests_profile_authority(tool_name: &str, tool_args: &Value) -> bool {
 }
 
 fn implicit_tool_project_path(cwd: &Path) -> Option<PathBuf> {
-    tracedecay::config::discover_project_root(cwd)
+    tracedecay_project::config::discover_project_root(cwd)
 }
 
 /// `project_context` with an explicit uninitialised `--project` and no
@@ -923,21 +1176,15 @@ fn group_for(def: &ToolDefinition) -> &'static str {
         || n == "tracedecay_dependency_depth"
     {
         "health"
-    } else if n == "tracedecay_callers"
-        || n == "tracedecay_callees"
-        || n == "tracedecay_callers_for"
-        || n == "tracedecay_call_chain"
+    } else if n == "tracedecay_call_chain"
         || n == "tracedecay_impact"
         || n == "tracedecay_file_dependents"
         || n == "tracedecay_by_qualified_name"
         || n == "tracedecay_signature"
-        || n == "tracedecay_impls"
-        || n == "tracedecay_implementations"
         || n == "tracedecay_derives"
         || n == "tracedecay_similar"
         || n == "tracedecay_rename_preview"
         || n == "tracedecay_find_exact_symbol"
-        || n == "tracedecay_type_hierarchy"
     {
         "graph"
     } else if n == "tracedecay_diagnose"

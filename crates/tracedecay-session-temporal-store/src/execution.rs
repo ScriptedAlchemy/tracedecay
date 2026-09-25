@@ -25,8 +25,9 @@ use tracedecay_query::retrieval::evidence_lanes::{
     TaskSessionLaneEvidenceV1,
 };
 use tracedecay_temporal_query::context::{ContextBudget, VersionedTokenEstimator};
+use tracedecay_temporal_query::execution::ExecutionLimits;
 use tracedecay_temporal_query::ports::{
-    BudgetObservation, ExecutionLimits, ReadBudgetAccounting, TemporalSnapshotRequest,
+    BudgetObservation, ReadBudgetAccounting, TemporalSnapshotRequest,
 };
 use tracedecay_temporal_query::ranking::DiversityLimits;
 use tracedecay_temporal_query::{TemporalKernelError, TemporalKernelResult};
@@ -129,7 +130,7 @@ impl AuthorizedTemporalExecutionRequest {
 
     pub fn into_kernel_request(
         self,
-        snapshot: tracedecay_temporal_query::ports::TemporalExecutionSnapshot,
+        snapshot: tracedecay_temporal_query::snapshot::TemporalExecutionSnapshot,
     ) -> tracedecay_temporal_query::TemporalKernelRequest {
         tracedecay_temporal_query::TemporalKernelRequest {
             snapshot,

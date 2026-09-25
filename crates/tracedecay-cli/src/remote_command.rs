@@ -337,7 +337,9 @@ fn query_payload(
     match &response.result {
         Ok(envelope) => match &envelope.outcome {
             ApplicationOutcome::Evidence(packet) => packet.payload.as_ref(),
-            ApplicationOutcome::Preview(_) | ApplicationOutcome::Effect(_) => None,
+            ApplicationOutcome::Preview(_)
+            | ApplicationOutcome::Effect(_)
+            | ApplicationOutcome::Result(_) => None,
         },
         Err(_) => None,
     }

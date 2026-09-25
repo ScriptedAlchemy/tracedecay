@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
-use tracedecay_configuration::TraceDecayConfig;
+use tracedecay_configuration::config::RuntimeTraceDecayConfig;
 use tracedecay_contracts::context_scout::ContextScoutAddressV1;
 use tracedecay_domain::errors::Result;
 use tracedecay_graph_query::SourceReadContext;
@@ -44,7 +44,7 @@ pub struct TraceDecay {
     db: Database,
     profile_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     pub store_runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
-    config: TraceDecayConfig,
+    config: RuntimeTraceDecayConfig,
     configuration_runtime: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
     project_root: PathBuf,
     store_layout: StoreLayout,
@@ -154,11 +154,11 @@ impl TraceDecay {
     #[hotpath::skip]
     pub async fn mount_current_context_scout_claim_authority(
         &self,
-        registry: Arc<tracedecay_agent_hosts::agents::context_scout::ports::ProjectContextScoutAddressRegistryV1>,
-        hook: &tracedecay_agent_hosts::agents::context_scout::ports::AdmittedContextScoutHookV1,
-        pin: tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutAuthorityPinV1,
+        registry: Arc<tracedecay_agent_hosts::agents::context_scout::address_registry::ProjectContextScoutAddressRegistryV1>,
+        hook: &tracedecay_agent_hosts::agents::context_scout::address_registry::AdmittedContextScoutHookV1,
+        pin: tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutAuthorityPinV1,
         context: tracedecay_contracts::RequestContext,
-        lifecycle: tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutLifecycleAddressV1,
+        lifecycle: tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutLifecycleAddressV1,
         address: ContextScoutAddressV1,
         input_watermark: [u8; 32],
         observed_at: tracedecay_domain::UtcMicros,
@@ -193,8 +193,8 @@ impl TraceDecay {
     #[hotpath::skip]
     pub async fn resolve_current_context_scout_claim_authority(
         &self,
-        hook: &tracedecay_agent_hosts::agents::context_scout::ports::AdmittedContextScoutHookV1,
-        lifecycle: &tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutLifecycleAddressV1,
+        hook: &tracedecay_agent_hosts::agents::context_scout::address_registry::AdmittedContextScoutHookV1,
+        lifecycle: &tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutLifecycleAddressV1,
         observed_at: tracedecay_domain::UtcMicros,
     ) -> Option<(ContextScoutAddressV1, [u8; 32])> {
         let owner = self.context_scout_owner()?;
@@ -218,7 +218,7 @@ impl TraceDecay {
     /// read inside the bounded hook acknowledgement path.
     pub async fn resolve_mounted_context_scout_claim_authority(
         &self,
-        lifecycle: &tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutLifecycleAddressV1,
+        lifecycle: &tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutLifecycleAddressV1,
     ) -> Option<(ContextScoutAddressV1, [u8; 32])> {
         let owner = self.context_scout_owner()?;
         let pin = owner.mounted_claim_pin(lifecycle).await?;
@@ -234,8 +234,8 @@ impl TraceDecay {
     #[hotpath::skip]
     pub async fn resolve_current_context_scout_session_claim_authority(
         &self,
-        hook: &tracedecay_agent_hosts::agents::context_scout::ports::AdmittedContextScoutHookV1,
-        lifecycle: &tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutLifecycleAddressV1,
+        hook: &tracedecay_agent_hosts::agents::context_scout::address_registry::AdmittedContextScoutHookV1,
+        lifecycle: &tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutLifecycleAddressV1,
         observed_at: tracedecay_domain::UtcMicros,
     ) -> Option<(ContextScoutAddressV1, [u8; 32])> {
         let owner = self.context_scout_owner()?;
@@ -260,7 +260,7 @@ impl TraceDecay {
     #[hotpath::skip]
     async fn context_scout_configuration_is_current(
         &self,
-        pin: &tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutAuthorityPinV1,
+        pin: &tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutAuthorityPinV1,
     ) -> bool {
         self.configuration_runtime
             .client()
@@ -293,16 +293,3 @@ impl TraceDecayOpenOptions {
         storage::default_profile_root()
     }
 }
-
-/// Returns the current UNIX timestamp in seconds.
-///
-/// Defined in `tracedecay_runtime_core::tracedecay` because the memory and
-/// `memory_v2` writers stamp records with it and those layers moved into the
-/// kernel crate.
-pub use tracedecay_runtime_core::tracedecay::current_timestamp;
-
-/// Returns `true` if the file path looks like a test file.
-///
-/// Re-exported from the code-index crate so the segment list has one
-/// definition shared by extraction and the orchestrator's read paths.
-pub use tracedecay_code_index::is_test_file;

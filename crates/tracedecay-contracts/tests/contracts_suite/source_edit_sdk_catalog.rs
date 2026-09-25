@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use tracedecay_contracts::{sdk_executable_binding_registry, source_edit_catalog_contribution};
-use tracedecay_tool_catalog::{BindingStatus, BindingSurface, OperationId, SdkTransportBindingV1};
+use tracedecay_tool_catalog::{BindingSurface, OperationId, SdkTransportBindingV1};
 
 #[test]
 fn sdk_registry_projects_source_edit_with_its_exact_mcp_schemas() {
@@ -9,11 +9,11 @@ fn sdk_registry_projects_source_edit_with_its_exact_mcp_schemas() {
     let registry = sdk_executable_binding_registry().expect("SDK registry");
     let mut projected_capabilities = BTreeSet::new();
 
-    for surface in contribution.bindings().iter().filter(|binding| {
-        binding.surface() == BindingSurface::Mcp
-            && matches!(binding.status(), BindingStatus::Current)
-            && !binding.is_alias()
-    }) {
+    for surface in contribution
+        .bindings()
+        .iter()
+        .filter(|binding| binding.surface() == BindingSurface::Mcp)
+    {
         let operation_id = OperationId::new(format!(
             "operation.application.{}",
             surface.operation().as_str()

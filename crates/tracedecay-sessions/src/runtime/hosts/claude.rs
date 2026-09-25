@@ -6,66 +6,34 @@
 //! (`"user"`/`"assistant"`/…), a `message` object (`role`, `content`, `model`,
 //! `id`), an ISO-8601 `timestamp`, the session `cwd`, and `sessionId`/`uuid`.
 //!
-//! The accounting parser already reads these files for cost `turns`; this source
-//! reuses the **same** append-only byte-offset machinery to also populate the
-//! provider-neutral `session_messages` table. Files are scoped to the current
-//! project by their recorded `cwd`, so a project only ingests its own sessions.
-//!
-//! Beyond `user`/`assistant` conversational turns, a handful of structured
-//! record types carry high-signal telemetry that we surface as marker rows or
-//! metadata (so `message_search`, git correlation, and LCM can find them):
-//! `pr-link` records, `system` compaction boundaries, and model-fallback
-//! records become dedicated marker rows; assistant attribution fields and
-//! `toolUseResult` edited-file facts ride on the owning message row. See the
-//! gate in `message_from_line` for the record types we deliberately drop.
+//! This source discovers transcripts and filters their frames to the current
+//! scope by recorded `cwd`, so a project only ingests its own sessions. Retained
+//! frames are normalized to canonical envelopes and admitted through the
+//! observation pipeline, whose store projector owns the session rows.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
-
-use crate::runtime::shared::{
-    ProjectMembership, ProjectRootMatcherCache, StoredCursor, TranscriptLocationMetadataKeys,
-    TranscriptScopeMatcher,
-};
-use crate::runtime::snapshot_observation::{
-    MAX_SNAPSHOT_METADATA_BYTES, read_snapshot_text_bounded,
-};
+use crate::runtime::shared::{ProjectMembership, ProjectRootMatcherCache, TranscriptScopeMatcher};
 use crate::runtime::source::{
-    FileDiscoveryLimit, FileDiscoveryReport, JsonlFrameDeferral, ParsedTranscript,
-    TranscriptCursorKey, TranscriptDiscoveryBounds, TranscriptSource, bound_path_list,
-    collect_files_with_ext_bounded, path_byte_len,
+    FileDiscoveryLimit, FileDiscoveryReport, JsonlFrameDeferral, TranscriptDiscoveryBounds,
+    bound_path_list, collect_files_with_ext_bounded, path_byte_len,
 };
 use tracedecay_privacy::protect_sensitive_structural_id;
-mod canonical_projection;
 mod cursor;
 mod frames;
-mod parser;
-mod record_metadata;
 mod source_records;
 
-use cursor::{claude_cursor_key, claude_source_component};
+use cursor::claude_source_component;
+#[cfg(test)]
+pub use frames::scan_claude_source_frames;
 pub use frames::{
     ClaudeFrameCoverage, ClaudeSkippedFrame, ClaudeSkippedFrameReason, ClaudeSourceFrame,
     ClaudeSourceFrameScan, identify_claude_source, try_scan_claude_source_frames_with_resume,
 };
-#[cfg(test)]
-pub use frames::{scan_claude_source_frames, try_scan_claude_source_frames};
-#[cfg(test)]
-use record_metadata::{SessionAccumulator, session_metadata};
-#[cfg(test)]
-use source_records::reasoning_from_line;
 use source_records::record_cwd;
 pub use source_records::transcript_cwd;
-pub use source_records::{
-    ClaudeRecordContext, ClaudeRecordDisposition, map_sanitized_claude_record,
-};
 
-#[cfg(test)]
-use record_metadata::append_git_operation_metadata;
-#[cfg(test)]
-use serde_json::Map;
-#[cfg(test)]
-use source_records::message_from_line;
 #[cfg(test)]
 use tracedecay_capture::claude::{
     encode_cursor_key as encode_claude_cursor_key, encode_source_id as encode_claude_source_id,
@@ -73,33 +41,6 @@ use tracedecay_capture::claude::{
 
 const PROVIDER: &str = "claude";
 
-/// Shared cross-source telemetry-row `kind` vocabulary. Cursor/Codex adapters
-/// tag their structured marker rows with the same strings so `message_search`
-/// and LCM can filter marker rows uniformly regardless of which agent produced
-/// the transcript.
-const KIND_PR_LINK: &str = "pr_link";
-const KIND_COMPACT_BOUNDARY: &str = "compact_boundary";
-const KIND_MODEL_FALLBACK: &str = "model_fallback";
-/// A separate reasoning row per assistant message, matching how Codex and Cursor
-/// store the model's thinking as its own `kind="reasoning"` row instead of
-/// leaving it buried inside the serialized assistant-message content blob.
-const KIND_REASONING: &str = "reasoning";
-
-/// Cap on the capped preview text carried on a marker row.
-const MARKER_PREVIEW_BYTES: usize = 2000;
-
-const CLAUDE_SESSION_LOCATION_KEYS: TranscriptLocationMetadataKeys =
-    TranscriptLocationMetadataKeys::new(
-        "claude_session_cwd",
-        "claude_session_worktree",
-        "claude_session_location_provenance",
-    );
-const CLAUDE_MESSAGE_LOCATION_KEYS: TranscriptLocationMetadataKeys =
-    TranscriptLocationMetadataKeys::new(
-        "claude_message_cwd",
-        "claude_message_worktree",
-        "claude_message_location_provenance",
-    );
 /// `~/.claude/projects/<slug>/<…>.jsonl` is at most a few levels deep.
 /// Workflow-nested subagents add `subagents/workflows/wf_<id>/` (three more
 /// components) so the scan must reach deeper than a top-level session.
@@ -108,7 +49,7 @@ const MAX_SCAN_DEPTH: u8 = 9;
 /// `summary`/meta line without one.
 pub const CWD_PROBE_LINES: usize = 8;
 
-/// Claude Code transcript locator + parser.
+/// Claude Code transcript locator and scope filter.
 pub struct ClaudeSource {
     projects_dir: PathBuf,
     user_scope: Option<UserClaudeScope>,
@@ -247,10 +188,25 @@ impl ClaudeSource {
         }
         scan.frames = retained;
         scan.skipped_frames.extend(excluded.iter().copied());
-        scan.scope = Some(frames::ClaudeFrameScope {
-            project_root: project_root.to_path_buf(),
-        });
         Some(excluded)
+    }
+
+    /// Bounded discovery of this source's transcripts: the scoped session
+    /// (and its subagents) for a live ingest, otherwise every project slug.
+    /// Frames are filtered by recorded `cwd` afterwards, so discovery need not
+    /// replicate Claude's slug-encoding scheme.
+    pub fn discover_transcript_paths(
+        &self,
+        bounds: TranscriptDiscoveryBounds,
+    ) -> FileDiscoveryReport {
+        if let Some(session_id) = self
+            .user_scope
+            .as_ref()
+            .and_then(|scope| scope.session_id.as_deref())
+        {
+            return discover_claude_session_scoped_paths(&self.projects_dir, session_id, bounds);
+        }
+        collect_files_with_ext_bounded(&self.projects_dir, "jsonl", MAX_SCAN_DEPTH, bounds)
     }
 }
 
@@ -261,7 +217,7 @@ pub async fn ingest_user_sessions_with_admission(
     registered_roots: Vec<PathBuf>,
     admission: &dyn crate::admission::HostAdmission,
 ) -> crate::runtime::shared::TranscriptIngestStats {
-    match crate::runtime::claude_observation::ingest_user_sessions_with_admission(
+    match crate::runtime::hosts::claude_observation::ingest_user_sessions_with_admission(
         profile_root,
         session_id,
         registered_roots,
@@ -375,89 +331,13 @@ fn discover_claude_session_scoped_paths(
     report
 }
 
-impl TranscriptSource for ClaudeSource {
-    fn provider(&self) -> &'static str {
-        PROVIDER
-    }
-
-    fn transcript_paths(&self, project_root: &Path) -> Vec<PathBuf> {
-        self.discover_transcript_paths(project_root, TranscriptDiscoveryBounds::default_walk())
-            .paths
-    }
-
-    fn discover_transcript_paths(
-        &self,
-        _project_root: &Path,
-        bounds: TranscriptDiscoveryBounds,
-    ) -> FileDiscoveryReport {
-        if let Some(session_id) = self
-            .user_scope
-            .as_ref()
-            .and_then(|scope| scope.session_id.as_deref())
-        {
-            return discover_claude_session_scoped_paths(&self.projects_dir, session_id, bounds);
-        }
-        // Scan every project slug; `parse_new` filters by recorded `cwd` so each
-        // project only ingests its own sessions without us having to replicate
-        // Claude's slug-encoding scheme.
-        collect_files_with_ext_bounded(&self.projects_dir, "jsonl", MAX_SCAN_DEPTH, bounds)
-    }
-
-    fn cursor_key(&self, transcript_path: &Path) -> TranscriptCursorKey {
-        claude_cursor_key(transcript_path)
-    }
-
-    fn parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> Option<ParsedTranscript> {
-        self.try_parse_new(path, prev, project_root, max_new_bytes)
-            .ok()
-            .flatten()
-    }
-
-    fn try_parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> crate::runtime::source::TranscriptIngestResult<Option<ParsedTranscript>> {
-        parser::try_parse_claude_transcript(self, path, prev, project_root, max_new_bytes)
-    }
-}
 struct ClaudeSubagentInfo {
     parent_session_id: String,
-    agent_id: String,
     parent_transcript_path: PathBuf,
-    /// `agentType` from the sibling meta.json (e.g. "Explore", "general").
-    agent_type: Option<String>,
-    /// `description` from the sibling meta.json (the spawn prompt summary).
-    description: Option<String>,
-    /// `toolUseId` from the sibling meta.json: the parent `tool_use` that
-    /// spawned this subagent. Maps to the `parent_tool_use_id` session column.
-    parent_tool_use_id: Option<String>,
-    /// `spawnDepth` from the sibling meta.json (0 for a top-level subagent).
-    spawn_depth: Option<i64>,
-    /// The `wf_<id>` run id when this subagent lives under
-    /// `subagents/workflows/wf_<id>/`; `None` for a directly-spawned subagent.
-    workflow_run_id: Option<String>,
-}
-
-/// Facts folded from `agent-<id>.meta.json` (all optional / fail-open).
-#[derive(Default)]
-struct ClaudeSubagentMeta {
-    agent_type: Option<String>,
-    description: Option<String>,
-    parent_tool_use_id: Option<String>,
-    spawn_depth: Option<i64>,
 }
 
 /// Detect whether `path` is a subagent transcript and, if so, resolve its
-/// identity, parent linkage, optional workflow-run id, and meta.json facts.
+/// parent session linkage.
 ///
 /// A subagent transcript lives somewhere under a `subagents/` directory owned by
 /// its parent session:
@@ -470,8 +350,6 @@ struct ClaudeSubagentMeta {
 /// immediate parent. That immediate-parent assumption was a bug: workflow-nested
 /// subagents failed it and were ingested as orphan standalone sessions.
 fn claude_subagent_identity(path: &Path) -> Option<ClaudeSubagentInfo> {
-    let session_id = claude_source_component(path.file_stem()?);
-
     // Find the `subagents/` ancestor. `ancestors()` yields `path` first, so the
     // file itself can never match the directory name.
     let subagents_dir = path
@@ -479,83 +357,61 @@ fn claude_subagent_identity(path: &Path) -> Option<ClaudeSubagentInfo> {
         .find(|anc| anc.file_name().and_then(|name| name.to_str()) == Some("subagents"))?;
     let parent_session_dir = subagents_dir.parent()?;
     let parent_session_id = claude_source_component(parent_session_dir.file_name()?);
-
-    // Capture the workflow run id (`wf_<run>`) when the subagent is nested under
-    // `subagents/workflows/wf_<run>/`.
-    let workflow_run_id = path
-        .ancestors()
-        .filter_map(|anc| anc.file_name().and_then(|name| name.to_str()))
-        .find(|name| name.starts_with("wf_"))
-        .map(str::to_string);
-
-    let agent_id = session_id
-        .strip_prefix("agent-")
-        .unwrap_or(&session_id)
-        .to_string();
     // The parent transcript is the `<parent>.jsonl` sibling of the `<parent>`
     // directory that owns `subagents/`.
     let mut parent_filename = parent_session_dir.file_name()?.to_os_string();
     parent_filename.push(".jsonl");
     let parent_transcript_path = parent_session_dir.parent()?.join(parent_filename);
-
-    let meta = read_subagent_meta(path);
-    let sanitize = tracedecay_privacy::sanitize_provider_metadata_text;
-    let retain_identifier = |value: Option<String>| {
-        value.and_then(|value| {
-            // The structural pass may already have replaced a credential
-            // before this identifier-specific check. A redaction marker is
-            // safe display text, but it is not authoritative provider
-            // identity and must not become a durable relationship key.
-            (sanitize(&value).as_deref() == Some(value.as_str())
-                && !value.contains("[TraceDecay redacted:"))
-            .then_some(value)
-        })
-    };
-
     Some(ClaudeSubagentInfo {
         parent_session_id,
-        agent_id,
         parent_transcript_path,
-        agent_type: meta.agent_type.as_deref().and_then(sanitize),
-        description: meta.description.as_deref().and_then(sanitize),
-        parent_tool_use_id: retain_identifier(meta.parent_tool_use_id),
-        spawn_depth: meta.spawn_depth,
-        workflow_run_id: retain_identifier(workflow_run_id),
     })
 }
 
-/// Read the sibling `agent-<id>.meta.json` next to a subagent transcript. Fail
-/// open: a missing or malformed file yields empty facts rather than an error.
-fn read_subagent_meta(transcript_path: &Path) -> ClaudeSubagentMeta {
-    let mut meta_filename = transcript_path
-        .file_stem()
-        .unwrap_or_default()
-        .to_os_string();
-    meta_filename.push(".meta.json");
-    let meta_path = transcript_path.with_file_name(meta_filename);
-    let Ok(Some(text)) =
-        read_snapshot_text_bounded(PROVIDER, &meta_path, MAX_SNAPSHOT_METADATA_BYTES)
-    else {
-        return ClaudeSubagentMeta::default();
+/// Largest `agent-<id>.meta.json` sidecar read; real ones are a few hundred
+/// bytes.
+const MAX_SUBAGENT_META_BYTES: u64 = 64 * 1024;
+
+/// The spawn a subagent transcript's sidecar `agent-<id>.meta.json` records:
+/// `toolUseId` is the parent's `tool_use` block id, and `parentAgentId` names
+/// the spawning subagent when one spawned it (its transcript is
+/// `agent-<parentAgentId>.jsonl`); otherwise the session owning `subagents/`
+/// spawned it. A missing or unreadable sidecar keeps the directory parent and
+/// no tool-use id.
+fn claude_spawn_parent(path: &Path) -> Option<(String, Option<String>)> {
+    let info = claude_subagent_identity(path)?;
+    let meta = read_subagent_meta(&path.with_extension("meta.json"));
+    let text = |key: &str| {
+        meta.as_ref()
+            .and_then(|meta| meta.get(key))
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
     };
-    let Some(value) =
-        tracedecay_privacy::sanitize_provider_metadata_json(&text, MAX_SNAPSHOT_METADATA_BYTES)
-    else {
-        return ClaudeSubagentMeta::default();
+    let parent_session_id =
+        text("parentAgentId").map_or(info.parent_session_id, |agent| format!("agent-{agent}"));
+    let parent_session_id = protect_sensitive_structural_id(&parent_session_id).ok()?;
+    Some((parent_session_id, text("toolUseId").map(str::to_owned)))
+}
+
+fn read_subagent_meta(path: &Path) -> Option<serde_json::Value> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::debug!(path = %path.display(), %error, "unreadable Claude subagent sidecar");
+            }
+            return None;
+        }
     };
-    let string_field = |key: &str| {
-        value
-            .get(key)
-            .and_then(Value::as_str)
-            .filter(|text| !text.is_empty())
-            .map(str::to_string)
-    };
-    ClaudeSubagentMeta {
-        agent_type: string_field("agentType"),
-        description: string_field("description"),
-        parent_tool_use_id: string_field("toolUseId"),
-        spawn_depth: value.get("spawnDepth").and_then(Value::as_i64),
+    let mut bytes = Vec::new();
+    file.take(MAX_SUBAGENT_META_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_SUBAGENT_META_BYTES {
+        tracing::debug!(path = %path.display(), "oversized Claude subagent sidecar");
+        return None;
     }
+    serde_json::from_slice(&bytes).ok()
 }
 
 #[cfg(test)]

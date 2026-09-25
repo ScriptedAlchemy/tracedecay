@@ -93,7 +93,7 @@ fn validate_relative_path(path: &Path) -> Result<()> {
     }
     for component in path.components() {
         match component {
-            Component::Normal(part) if !part.to_string_lossy().contains('\\') => {}
+            Component::Normal(_) => {}
             _ => {
                 return Err(config_error(format!(
                     "unsafe support path '{}'",

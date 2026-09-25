@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
+use tracedecay_code_index::chunks::{CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1};
 use tracedecay_code_index::graph_projection::{
     CODE_GRAPH_PROJECTOR_REVISION, CodeGraphProjectionStore, CodeGraphSymbolBindingV1,
     build_code_graph_manifest, code_graph_projection_identity,
@@ -31,11 +32,12 @@ use tracedecay_graph_db::{
     GraphLabel, GraphNamespace, GraphProjectorRevision, GraphProperty, GraphPropertyName,
     GraphRelationId, GraphRelationKind, NeverCancelled, VerifiedGraphSnapshot,
 };
-use tracedecay_temporal_query::ports::{
-    BindingDigest, KernelVersions, TemporalExecutionSnapshot, TemporalSnapshotRequest,
-    TemporalWatermarks,
-};
+use tracedecay_temporal_query::execution::BindingDigest;
+use tracedecay_temporal_query::ports::TemporalSnapshotRequest;
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+use tracedecay_temporal_query::snapshot::{
+    KernelVersions, TemporalExecutionSnapshot, TemporalWatermarks,
+};
 use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
 
 use super::symbol_graph::{
@@ -317,7 +319,12 @@ fn adapter(
         let port: Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1> = scheduler;
         port
     });
-    CanonicalSymbolGraphAdapter::new(fixture.graph.clone(), fixture.cursor.clone(), scheduler)
+    CanonicalSymbolGraphAdapter::new(
+        fixture.graph.clone(),
+        PathBuf::new(),
+        fixture.cursor.clone(),
+        scheduler,
+    )
 }
 
 fn port_context(fixture: &Fixture) -> SymbolGraphPortContext<'_> {
@@ -758,6 +765,7 @@ struct SymbolRecordFixture {
     occurrence: SymbolOccurrenceId,
     binding: Option<CodeGraphSymbolBindingV1>,
     metadata: Option<LineageSymbolRecordV1>,
+    unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -805,6 +813,7 @@ fn symbol_entity(
             file_identity: digest::<FileIdentityDigest>('f'),
             content_digest: digest::<ContentDigest>(content_byte),
         }),
+        unresolved_calls: Vec::new(),
     };
     GraphEntity::new(
         GraphEntityId::new(stable_identity("symbol", occurrence.as_str()))

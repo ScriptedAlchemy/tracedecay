@@ -7,7 +7,7 @@ use tracedecay_store::{
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshFrontierV1, SessionRefreshProgressV1,
     SessionStoreResult, SessionTemporalProjectionBatchReceiptV1, SessionTemporalProjectionBatchV1,
 };
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 use super::query::{PERSIST_OPERATION, storage};
 use super::refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
@@ -28,7 +28,7 @@ pub(super) use materialize::canonical_parent_message_resolver;
 pub(crate) use persist::observation_envelope_from_payload;
 pub(super) use persist::{
     ProjectionProgressBaseline, persist_session_temporal_projection_batch_in_transaction,
-    seed_active_projection_in_transaction, session_temporal_projection_record_count,
+    session_temporal_projection_record_count,
 };
 pub(crate) use receipts::digest_bytes;
 pub use receipts::record_canonical_observation_effect;

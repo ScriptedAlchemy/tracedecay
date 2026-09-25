@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use tracedecay_contracts::retained_surfaces::{
-    AutomationRunProblemV1, AutomationRunResultV1, AutomationRunTerminalV1, AutomationSkipReasonV1,
+    AutomationRunProblemV1, AutomationRunResultV1, AutomationRunTerminalV1,
     RetainedSurfaceOperation, RetainedSurfaceResultV1,
 };
 use tracedecay_contracts::{
@@ -103,25 +103,5 @@ impl AutomationSettledTerminal {
             return false;
         };
         matches!(result.terminal, AutomationRunTerminalV1::Completed { .. })
-    }
-
-    pub fn is_retirement_terminal(&self) -> bool {
-        let Self::Outcome { outcome, .. } = self else {
-            return false;
-        };
-        let ApplicationOutcome::Effect(effect) = outcome.as_ref() else {
-            return false;
-        };
-        let Some(RetainedSurfaceResultV1::FactStoreCurate(result)) = effect.payload.as_ref() else {
-            return false;
-        };
-        matches!(
-            &result.terminal,
-            AutomationRunTerminalV1::Skipped { reason, .. }
-                if Some(*reason)
-                    == AutomationSkipReasonV1::from_ledger_reason(
-                        "shipped_fact_proposal_history_retired"
-                    )
-        ) && result.committed_receipts.is_empty()
     }
 }

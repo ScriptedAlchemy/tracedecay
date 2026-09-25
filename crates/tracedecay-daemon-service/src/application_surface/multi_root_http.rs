@@ -106,7 +106,7 @@ async fn invoke_operation(
         controls,
         body,
     } = request;
-    let observed_at = tracedecay_daemon_protocol::invocation_now_micros();
+    let observed_at = tracedecay_contracts::now_micros();
     match operation {
         MultiRootHttpOperation::ScopeSetRead => {
             let Ok(decoded) = serde_json::from_value::<MultiRootScopeSetReadRequestV1>(body) else {

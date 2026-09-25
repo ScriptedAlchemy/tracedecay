@@ -2,16 +2,14 @@ use std::time::Duration;
 
 use tracedecay_rusqlite_runtime::{
     WriterState,
-    read_consistency::{CommitWatermarkSource, WatermarkSourceState},
     reader::{ReaderAcquireError, ReaderPool, ReaderPoolState},
     runtime::{IntegrityResult, SqliteDoctorHealthLane},
-    watermark::CommittedWatermarkPublisher,
 };
-use tracedecay_store::{OperationPriorityV1, StoreCommitReceiptV1, UnavailableReasonV1};
+use tracedecay_store::{OperationPriorityV1, UnavailableReasonV1};
 
 use super::runtime_test_support::{
     CountExecutor, Probe, TestDatabase, acceptance_reader_budget, read_request, reader_locator,
-    reader_runtime_fixture, seed_acceptance_rows, shard_watermark,
+    reader_runtime_fixture, seed_acceptance_rows,
 };
 
 #[test]
@@ -61,7 +59,7 @@ fn reader_drain_preserves_inflight_and_reserved_health_capacity() {
 }
 
 #[test]
-fn doctor_health_and_commit_watermark_report_the_same_runtime_binding() {
+fn doctor_health_reports_the_runtime_binding() {
     let fixture = reader_runtime_fixture();
     let database = TestDatabase::new("runtime-health.sqlite3");
     seed_acceptance_rows(&database.connect(), false);
@@ -80,35 +78,6 @@ fn doctor_health_and_commit_watermark_report_the_same_runtime_binding() {
     assert_eq!(health.quick_check, IntegrityResult::Healthy);
     assert_eq!(health.integrity_check, Some(IntegrityResult::Healthy));
     assert_eq!(health.available_health_readers, 1);
-
-    let publisher = CommittedWatermarkPublisher::with_initial_watermarks([shard_watermark(
-        &fixture.binding,
-        fixture.initial_commit_sequence,
-    )])
-    .expect("seed committed watermark");
-    let receipt: StoreCommitReceiptV1 = serde_json::from_value(serde_json::json!({
-        "operation_id": "operation.runtime.watermark",
-        "idempotency": {
-            "key": "key.runtime.watermark",
-            "command_digest": format!("sha256:{}", "a".repeat(64))
-        },
-        "shard_id": fixture.binding.shard_id,
-        "incarnation": fixture.binding.incarnation,
-        "authority_epoch": fixture.binding.authority_epoch,
-        "commit_sequence": fixture.published_commit_sequence,
-        "committed_at": 1
-    }))
-    .expect("construct committed receipt");
-    publisher
-        .publish_committed(&receipt)
-        .expect("publish monotonic watermark");
-    assert_eq!(
-        publisher.subscribe().current(&fixture.binding.shard_id),
-        WatermarkSourceState::Available(shard_watermark(
-            &fixture.binding,
-            fixture.published_commit_sequence
-        ))
-    );
 
     let health_request = read_request(&fixture.binding, "health");
     assert_eq!(health_request.priority(), OperationPriorityV1::Health);

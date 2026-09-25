@@ -186,10 +186,9 @@ impl WorktreeChangeClassificationV1 {
 ///
 /// `TraceDecay` no longer writes anything into a checkout, but projects enrolled
 /// before the working-tree cutover may still carry a legacy
-/// `.tracedecay/` directory (e.g. `enrollment.json`, see
-/// `tracedecay_runtime_core::storage::identity::legacy_enrollment_marker_path`).
-/// Those bytes were produced by `TraceDecay`, are never checkout content, and
-/// are not indexable source. Unless the user happens to ignore
+/// `.tracedecay/` directory (e.g. `enrollment.json`). Those bytes were
+/// produced by `TraceDecay`, are never checkout content, and are not
+/// indexable source. Unless the user happens to ignore
 /// `.tracedecay/`, gix reports them as untracked, so treating them as a
 /// worktree change makes *every* legacy checkout look permanently dirty: no
 /// capture can then seal an exact HEAD tree, no published generation carries a
@@ -315,7 +314,8 @@ mod tests {
     #[test]
     fn enrollment_state_does_not_make_a_committed_checkout_dirty() {
         let repo = committed_repo();
-        let repository = gix::open(repo.path()).expect("open repository");
+        let repository =
+            tracedecay_runtime_core::git_open::open(repo.path()).expect("open repository");
         assert!(
             WorktreeChangeClassificationV1::classify(&repository)
                 .expect("classify committed checkout")
@@ -356,7 +356,8 @@ mod tests {
         std::fs::write(repo.path().join(".tracedecay/enrollment.json"), "{}\n").unwrap();
         std::fs::write(repo.path().join("src/extra.rs"), "pub fn b() {}\n").unwrap();
 
-        let repository = gix::open(repo.path()).expect("open repository");
+        let repository =
+            tracedecay_runtime_core::git_open::open(repo.path()).expect("open repository");
         let classification =
             WorktreeChangeClassificationV1::classify(&repository).expect("classify");
         assert_eq!(

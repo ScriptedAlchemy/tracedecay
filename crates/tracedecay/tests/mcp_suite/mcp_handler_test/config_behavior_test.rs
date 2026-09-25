@@ -99,7 +99,7 @@ fn write_config_project(project: &Path) {
     fs::write(project.join("app.toml"), APP_TOML).unwrap();
     fs::write(project.join("tsconfig.json"), TSCONFIG_JSON).unwrap();
     fs::write(project.join("inline.json"), INLINE_JSON).unwrap();
-    fs::write(project.join("App.TOML"), APP_CASE_TOML).unwrap();
+    fs::write(project.join("uppercase.TOML"), APP_CASE_TOML).unwrap();
     fs::write(project.join("nested/left.toml"), LEFT_TOML).unwrap();
     fs::write(project.join("nested/right.toml"), RIGHT_TOML).unwrap();
     fs::write(project.join("mixed/a.toml"), TOML_HIT).unwrap();
@@ -247,6 +247,10 @@ async fn tracedecay_config_reports_literal_values_and_typed_failures() {
         .server(&fixture.project_root)
         .expect("production config server");
     let project_root = server.cg().await.project_root().to_path_buf();
+    assert_eq!(
+        fs::read_to_string(project_root.join("app.toml")).unwrap(),
+        APP_TOML
+    );
 
     let missing_key = config(&server, json!({"path": "app.toml", "format": "json"})).await;
     assert_eq!(
@@ -625,12 +629,12 @@ async fn tracedecay_config_reports_literal_values_and_typed_failures() {
     assert_json(
         &config(
             &server,
-            json!({"key": "title", "path": "App.TOML", "format": "json"}),
+            json!({"key": "title", "path": "uppercase.TOML", "format": "json"}),
         )
         .await,
         &payload(
             1,
-            json!([hit("App.TOML", "title", json!("Upper"), Some(1))]),
+            json!([hit("uppercase.TOML", "title", json!("Upper"), Some(1))]),
         ),
         &[APP_CASE_TOML.len()],
     );

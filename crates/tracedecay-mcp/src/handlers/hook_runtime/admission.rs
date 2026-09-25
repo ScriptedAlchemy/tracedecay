@@ -74,7 +74,7 @@ pub(super) fn hook_v2_catchup_response(action: &str) -> Value {
 /// No migrated database participates.
 pub fn hook_v2_admission_ledger_root(
     data_root: &Path,
-    host: tracedecay_hooks::HookHostV1,
+    host: tracedecay_domain::NativeHostIdentityV1,
 ) -> std::path::PathBuf {
     data_root.join("hook-v2-admissions").join(host.hook_key())
 }
@@ -95,7 +95,7 @@ fn hook_v2_admission_ledgers() -> &'static StdMutex<HookV2AdmissionLedgers> {
 
 fn hook_v2_pending_work_root(
     data_root: &Path,
-    host: tracedecay_hooks::HookHostV1,
+    host: tracedecay_domain::NativeHostIdentityV1,
 ) -> std::path::PathBuf {
     data_root.join("hook-v2-pending-work").join(host.hook_key())
 }
@@ -179,7 +179,7 @@ fn retain_hook_v2_pending_work(
 #[hotpath::measure(label = "mcp.hook_runtime.pending_work")]
 pub fn hook_v2_pending_work_envelopes(
     data_root: &Path,
-    host: tracedecay_hooks::HookHostV1,
+    host: tracedecay_domain::NativeHostIdentityV1,
     now: UtcMicros,
 ) -> Vec<tracedecay_hooks::HookEventEnvelopeV2> {
     let Some(_gate) = hook_v2_pending_work_gate().lock().ok() else {
@@ -235,7 +235,10 @@ pub fn record_hook_v2_admission(
 }
 
 #[cfg(test)]
-fn forget_hook_v2_admission_ledger_for_test(data_root: &Path, host: tracedecay_hooks::HookHostV1) {
+fn forget_hook_v2_admission_ledger_for_test(
+    data_root: &Path,
+    host: tracedecay_domain::NativeHostIdentityV1,
+) {
     hook_v2_admission_ledgers()
         .lock()
         .unwrap()
@@ -347,9 +350,9 @@ fn ready_guidance_from_retained_claim(
 
 fn cursor_stack_wakeup_allowed(
     first_admission: bool,
-    producer: tracedecay_hooks::HookHostV1,
+    producer: tracedecay_domain::NativeHostIdentityV1,
 ) -> bool {
-    first_admission && producer == tracedecay_hooks::HookHostV1::CursorDesktop
+    first_admission && producer == tracedecay_domain::NativeHostIdentityV1::CursorDesktop
 }
 
 /// The project-sessions authority a hook admission may bind a native
@@ -604,7 +607,7 @@ async fn admit_hook_v2_envelope_with_lifecycle_inner(
     let lifecycle = hook_v2_context_scout_lifecycle_for_session(envelope, native_session_id).await;
     let claim_authority = if host_response_available {
         match (
-            tracedecay_agent_hosts::agents::context_scout::ports::AdmittedContextScoutHookV1::new(
+            tracedecay_agent_hosts::agents::context_scout::address_registry::AdmittedContextScoutHookV1::new(
                 envelope.clone(),
                 &snapshot.binding,
             ),
@@ -864,7 +867,7 @@ pub(super) fn hook_v2_profile_admit(
 
 fn profile_hook_v2_binding(
     profile_identity: &dyn tracedecay_contracts::ProfileIdentityReadPort,
-    host: tracedecay_hooks::HookHostV1,
+    host: tracedecay_domain::NativeHostIdentityV1,
 ) -> tracedecay_hooks::HookScopeBindingV1 {
     let profile_key = format!(
         "{}:{}",

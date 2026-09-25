@@ -48,10 +48,11 @@ pub enum HostKindV1 {
     Zed,
     Antigravity,
     Vibe,
+    Pi,
 }
 
 impl HostKindV1 {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::ClaudeCode,
         Self::CursorDesktop,
         Self::CursorCloud,
@@ -70,6 +71,7 @@ impl HostKindV1 {
         Self::Zed,
         Self::Antigravity,
         Self::Vibe,
+        Self::Pi,
     ];
 
     /// Project a stock host surface into the bounded host observation catalog
@@ -93,7 +95,8 @@ impl HostKindV1 {
             | Self::KimiCode
             | Self::OpenCode
             | Self::Gemini
-            | Self::Copilot => None,
+            | Self::Copilot
+            | Self::Pi => None,
         }
     }
 }
@@ -298,6 +301,19 @@ const fn canonical_stock_host_capabilities(host: HostKindV1) -> [HostCapabilityR
             Unavailable(HostApiAbsent),
             Unavailable(HostApiAbsent),
             Supported,
+            Supported,
+        ),
+        // Pi exposes no MCP server route: its extension API registers
+        // model-callable tools and lifecycle hooks directly, and the shipped
+        // extension bridges the code graph through `tracedecay tool` over the
+        // daemon socket. The CLI remains the scripted fallback surface. Its
+        // lifecycle events reach `hook-pi-event` under the Pi native identity,
+        // but no host-integration native fixture evidences that route yet.
+        HostKindV1::Pi => (
+            Unavailable(HostRegistrationUnsupported),
+            Unavailable(HostApiAbsent),
+            Unavailable(CheckedInEvidenceMissing),
+            Unavailable(HostRegistrationUnsupported),
             Supported,
         ),
     };
@@ -542,6 +558,7 @@ impl HostIntegrationCatalogV1 {
             HostKindV1::Zed => &STOCK_HOST_CAPABILITIES[15],
             HostKindV1::Antigravity => &STOCK_HOST_CAPABILITIES[16],
             HostKindV1::Vibe => &STOCK_HOST_CAPABILITIES[17],
+            HostKindV1::Pi => &STOCK_HOST_CAPABILITIES[18],
         }
     }
 
@@ -632,7 +649,7 @@ impl HostIntegrationCatalogV1 {
     }
 }
 
-const STOCK_HOST_CAPABILITIES: [[HostCapabilityRecordV1; 5]; 18] = [
+const STOCK_HOST_CAPABILITIES: [[HostCapabilityRecordV1; 5]; 19] = [
     canonical_stock_host_capabilities(HostKindV1::ClaudeCode),
     canonical_stock_host_capabilities(HostKindV1::CursorDesktop),
     canonical_stock_host_capabilities(HostKindV1::CursorCloud),
@@ -651,6 +668,7 @@ const STOCK_HOST_CAPABILITIES: [[HostCapabilityRecordV1; 5]; 18] = [
     canonical_stock_host_capabilities(HostKindV1::Zed),
     canonical_stock_host_capabilities(HostKindV1::Antigravity),
     canonical_stock_host_capabilities(HostKindV1::Vibe),
+    canonical_stock_host_capabilities(HostKindV1::Pi),
 ];
 
 #[derive(Serialize)]

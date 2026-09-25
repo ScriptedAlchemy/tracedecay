@@ -8,12 +8,13 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use crate::project::TraceDecay;
 use tracedecay_contracts::{
     ProfileIdentityReadPort, remote::status::RemoteOperationalStatusReaderV1,
 };
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
+use tracedecay_dashboard_api::project_graph::RetainedProjectGraphRequest;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_project::project::TraceDecay;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_session_memory::session::SessionRefreshServicePort;
 use tracedecay_sessions::serving::{SessionProjectionServingStatusPort, SessionRefreshWorkerPort};
@@ -57,7 +58,6 @@ pub(crate) type CodeIndexIgnoredDependencyAdmissionPort = Arc<
 /// Concrete route bridge to a project server already mounted by the daemon.
 /// Routed handlers retain the whole server so its graph, query ports, session
 /// stores, application executor, and lifecycle remain one authority.
-pub(crate) use tracedecay_dashboard_api::project_graph::RetainedProjectGraphRequest;
 pub(crate) type RetainedProjectServerFuture = Pin<
     Box<
         dyn Future<Output = tracedecay_domain::errors::Result<Option<Arc<super::McpServer>>>>
@@ -160,17 +160,22 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) code_index_reconcile_sink: Option<super::CodeIndexReconcileSink>,
     pub(crate) code_index_freshness_probe_sink: Option<super::CodeIndexFreshnessProbeSink>,
     pub(crate) code_index_publication_identity: Option<super::CodeIndexPublicationIdentityResolver>,
-    pub(crate) code_index_search_executor: Option<super::CodeIndexSearchExecutor>,
-    pub(crate) code_index_similar_executor: Option<super::CodeIndexSimilarExecutor>,
-    pub(crate) code_index_redundancy_executor: Option<super::CodeIndexRedundancyExecutor>,
-    pub(crate) code_index_branch_diff_executor: Option<super::CodeIndexBranchDiffExecutor>,
+    pub(crate) code_index_search_executor:
+        Option<tracedecay_query::code_search::CodeIndexSearchExecutor>,
+    pub(crate) code_index_similar_executor:
+        Option<tracedecay_query::code_search::CodeIndexSimilarExecutor>,
+    pub(crate) code_index_redundancy_executor:
+        Option<tracedecay_query::code_search::CodeIndexRedundancyExecutor>,
+    pub(crate) code_index_branch_diff_executor:
+        Option<tracedecay_query::code_search::CodeIndexBranchDiffExecutor>,
     pub(crate) code_graph_projection_read_port: Option<CodeGraphProjectionReadPort>,
     pub(crate) code_graph_read_admission_port: Option<CodeGraphReadAdmissionPort>,
     pub(crate) verified_graph_query_port:
         Option<Arc<dyn tracedecay_graph_query::VerifiedGraphQueryPort + 'static>>,
     pub(crate) code_index_ignored_dependency_admission:
         Option<CodeIndexIgnoredDependencyAdmissionPort>,
-    pub(crate) code_index_search_authority: Option<super::CodeIndexSearchAuthorityV1>,
+    pub(crate) code_index_search_authority:
+        Option<tracedecay_query::code_search::CodeIndexSearchAuthorityV1>,
     /// The one checkout this server answers for, resolved once by project open
     /// through the daemon code-index authority. `None` on a direct server and
     /// on the core server that answers before project-open publication.
@@ -188,7 +193,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) project_server_live: Option<Arc<AtomicBool>>,
     #[cfg(any(test, feature = "test-transport"))]
     pub(crate) host_admission_test_runtime:
-        Option<Arc<crate::test_support::host_admission::HostAdmissionTestRuntimeV1>>,
+        Option<Arc<tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1>>,
 }
 
 pub(crate) struct McpServerWriters {
@@ -515,7 +520,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_code_index_search_executor(
         mut self,
-        executor: super::CodeIndexSearchExecutor,
+        executor: tracedecay_query::code_search::CodeIndexSearchExecutor,
     ) -> Self {
         self.code_index_search_executor = Some(executor);
         self
@@ -523,7 +528,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_code_index_similar_executor(
         mut self,
-        executor: super::CodeIndexSimilarExecutor,
+        executor: tracedecay_query::code_search::CodeIndexSimilarExecutor,
     ) -> Self {
         self.code_index_similar_executor = Some(executor);
         self
@@ -531,7 +536,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_code_index_redundancy_executor(
         mut self,
-        executor: super::CodeIndexRedundancyExecutor,
+        executor: tracedecay_query::code_search::CodeIndexRedundancyExecutor,
     ) -> Self {
         self.code_index_redundancy_executor = Some(executor);
         self
@@ -539,7 +544,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_code_index_branch_diff_executor(
         mut self,
-        executor: super::CodeIndexBranchDiffExecutor,
+        executor: tracedecay_query::code_search::CodeIndexBranchDiffExecutor,
     ) -> Self {
         self.code_index_branch_diff_executor = Some(executor);
         self
@@ -579,7 +584,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_code_index_search_authority(
         mut self,
-        authority: super::CodeIndexSearchAuthorityV1,
+        authority: tracedecay_query::code_search::CodeIndexSearchAuthorityV1,
     ) -> Self {
         self.code_index_search_authority = Some(authority);
         self
@@ -721,7 +726,7 @@ mod tests {
 
     #[tokio::test]
     async fn direct_context_installs_only_explicit_code_index_executors() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = tracedecay_project::config::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project");
         let git_init = Command::new("git")
             .args(["init", "--quiet"])
@@ -739,32 +744,31 @@ mod tests {
         )
         .await
         .expect("registered graph");
-        let executor: crate::mcp::server::CodeIndexSearchExecutor = Arc::new(|_| {
+        let executor: tracedecay_query::code_search::CodeIndexSearchExecutor = Arc::new(|_| {
             Box::pin(async {
-                crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Unavailable(
+                    tracedecay_query::code_search::CodeIndexSearchUnavailableV1 {
                         code_generation: None,
-                        reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                        coverage: crate::mcp::server::CodeIndexSearchCoverageV1::unavailable(
+                        reason: tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        coverage: tracedecay_query::code_search::CodeIndexSearchCoverageV1::unavailable(
                             "authority_unavailable",
                         ),
                     },
                 )
             })
         });
-        let branch_diff_executor: crate::mcp::server::CodeIndexBranchDiffExecutor = Arc::new(
-            |_| {
+        let branch_diff_executor: tracedecay_query::code_search::CodeIndexBranchDiffExecutor =
+            Arc::new(|_| {
                 Box::pin(async {
-                    crate::mcp::server::CodeIndexBranchDiffOutcomeV1::Unavailable(
-                        crate::mcp::server::CodeIndexBranchDiffUnavailableV1 {
+                    tracedecay_query::code_search::CodeIndexBranchDiffOutcomeV1::Unavailable(
+                        tracedecay_query::code_search::CodeIndexBranchDiffUnavailableV1 {
                             base_generation: None,
                             head_generation: None,
-                            reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                            reason: tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                         },
                     )
                 })
-            },
-        );
+            });
         let context = McpServerConstructionContext::direct(cg, None)
             .with_code_index_search_executor(executor)
             .with_code_index_branch_diff_executor(branch_diff_executor);

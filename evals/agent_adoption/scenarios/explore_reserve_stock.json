@@ -12,15 +12,14 @@
     "required_first": [
       "tracedecay_context",
       "tracedecay_search",
-      "tracedecay_body",
-      "tracedecay_outline",
-      "tracedecay_read",
+      "tracedecay_find_exact_symbol",
+      "tracedecay_source_body",
+      "tracedecay_source_outline",
       "tracedecay_grep"
     ],
     "acceptable": [
       "tracedecay_callers",
       "tracedecay_callees",
-      "tracedecay_callers_for",
       "Read"
     ],
     "forbidden_first": [

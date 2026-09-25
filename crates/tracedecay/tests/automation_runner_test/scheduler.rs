@@ -1,5 +1,4 @@
 use tempfile::tempdir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_automation_runtime::automation::backend::{AgentTaskFailureClass, AgentTaskKind};
 use tracedecay_automation_runtime::automation::config::{
     AutomationBackend, AutomationConfig, AutomationConfigPatch, AutomationTaskConfig,
@@ -15,6 +14,7 @@ use tracedecay_automation_runtime::automation::scheduler::{
 };
 use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 use tracedecay_domain::ProjectId;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 
 use crate::support::{SeedSessionMessage, scheduler_record_for, seed_session_message_in_db};
@@ -111,6 +111,7 @@ fn host_receipt_bypasses_schedule_but_preserves_enablement_and_idle_gates() {
     assert!(
         host_receipt_decision(
             &config,
+            None,
             AgentTaskKind::SessionReflector,
             &[],
             SessionActivity::at(100),
@@ -122,6 +123,7 @@ fn host_receipt_bypasses_schedule_but_preserves_enablement_and_idle_gates() {
     assert_eq!(
         host_receipt_decision(
             &config,
+            None,
             AgentTaskKind::SessionReflector,
             &[],
             SessionActivity::at(100),
@@ -135,6 +137,7 @@ fn host_receipt_bypasses_schedule_but_preserves_enablement_and_idle_gates() {
     assert_eq!(
         host_receipt_decision(
             &config,
+            None,
             AgentTaskKind::SessionReflector,
             &[],
             SessionActivity::none(),
@@ -181,6 +184,7 @@ fn scheduler_skips_disabled_and_manual_only_tasks() {
     assert_eq!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::MemoryCurator,
             &[],
             SessionActivity::none(),
@@ -195,6 +199,7 @@ fn scheduler_skips_disabled_and_manual_only_tasks() {
     assert_eq!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::MemoryCurator,
             &[],
             SessionActivity::none(),
@@ -219,6 +224,7 @@ fn scheduler_uses_interval_and_latest_successful_ledger_record() {
     assert_eq!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::MemoryCurator,
             &records,
             SessionActivity::none(),
@@ -231,6 +237,7 @@ fn scheduler_uses_interval_and_latest_successful_ledger_record() {
     assert!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::MemoryCurator,
             &records,
             SessionActivity::none(),
@@ -264,6 +271,7 @@ fn scheduler_terminal_skips_advance_the_configured_interval() {
     assert_eq!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::MemoryCurator,
             &records,
             SessionActivity::none(),
@@ -276,6 +284,7 @@ fn scheduler_terminal_skips_advance_the_configured_interval() {
     assert!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::MemoryCurator,
             &records,
             SessionActivity::none(),
@@ -299,6 +308,7 @@ fn scheduler_diagnostic_skips_do_not_advance_the_interval() {
     assert!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::MemoryCurator,
             &[diagnostic],
             SessionActivity::none(),
@@ -328,6 +338,7 @@ fn fresh_session_activity_is_relative_to_the_latest_cadence_terminal() {
     assert_eq!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::SessionReflector,
             &[success, skipped.clone()],
             SessionActivity::at(900),
@@ -340,6 +351,7 @@ fn fresh_session_activity_is_relative_to_the_latest_cadence_terminal() {
     assert!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::SessionReflector,
             &[skipped],
             SessionActivity::at(1_100),
@@ -370,6 +382,7 @@ fn scheduler_ignores_non_terminal_lifecycle_records_for_interval_decisions() {
     assert!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::MemoryCurator,
             &records,
             SessionActivity::none(),
@@ -392,6 +405,7 @@ fn scheduler_respects_configured_interval_field() {
     assert_eq!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::MemoryCurator,
             &records,
             SessionActivity::none(),
@@ -404,6 +418,7 @@ fn scheduler_respects_configured_interval_field() {
     assert!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::MemoryCurator,
             &records,
             SessionActivity::none(),
@@ -426,6 +441,7 @@ fn scheduler_retries_failures_after_cooldown_instead_of_full_interval() {
     assert_eq!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::MemoryCurator,
             &records,
             SessionActivity::none(),
@@ -438,6 +454,7 @@ fn scheduler_retries_failures_after_cooldown_instead_of_full_interval() {
     assert!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::MemoryCurator,
             &records,
             SessionActivity::none(),
@@ -464,6 +481,7 @@ fn scheduler_does_not_retry_explicit_non_retryable_failures() {
     assert_eq!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::MemoryCurator,
             &records,
             SessionActivity::none(),
@@ -493,6 +511,7 @@ fn scheduler_retries_malformed_backend_output_after_cooldown() {
     assert_eq!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::MemoryCurator,
             &records,
             SessionActivity::none(),
@@ -505,6 +524,7 @@ fn scheduler_retries_malformed_backend_output_after_cooldown() {
     assert!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::MemoryCurator,
             &records,
             SessionActivity::none(),
@@ -535,6 +555,7 @@ fn scheduler_uses_latest_record_status_before_failure_cooldown() {
     assert_eq!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::SkillWriter,
             &records,
             SessionActivity::none(),
@@ -571,6 +592,7 @@ fn scheduler_ranks_same_second_terminal_records_by_micros_then_run_id() {
     assert_eq!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::SkillWriter,
             &records,
             SessionActivity::none(),
@@ -585,6 +607,7 @@ fn scheduler_ranks_same_second_terminal_records_by_micros_then_run_id() {
     assert_eq!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::SkillWriter,
             &records,
             SessionActivity::none(),
@@ -601,6 +624,7 @@ fn scheduler_ranks_same_second_terminal_records_by_micros_then_run_id() {
     assert_eq!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::SkillWriter,
             &records,
             SessionActivity::none(),
@@ -614,6 +638,7 @@ fn scheduler_ranks_same_second_terminal_records_by_micros_then_run_id() {
     assert_eq!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::SkillWriter,
             &records,
             SessionActivity::none(),
@@ -626,7 +651,7 @@ fn scheduler_ranks_same_second_terminal_records_by_micros_then_run_id() {
 }
 
 #[test]
-fn scheduler_ranks_legacy_fractional_completions_before_run_id() {
+fn scheduler_ranks_fractional_completions_before_run_id() {
     let config = automation_config(Some("daily"), None);
     let mut later_failure = record(
         "a-failure",
@@ -634,10 +659,8 @@ fn scheduler_ranks_legacy_fractional_completions_before_run_id() {
         AutomationRunStatus::Failed,
         1_000,
     );
-    later_failure.schema_version = 1;
-    later_failure.started_at = "1970-01-01T00:16:39Z".to_string();
-    later_failure.completed_at = "1970-01-01T00:16:40.9Z".to_string();
-    later_failure.completed_at_micros = None;
+    later_failure.started_at = "999".to_string();
+    later_failure.completed_at_micros = Some(1_000_900_000);
     later_failure.error = Some("the request is permanently invalid".to_string());
     later_failure.error_classification = Some(AgentTaskFailureClass::Permanent);
     later_failure.error_retryable = Some(false);
@@ -647,16 +670,15 @@ fn scheduler_ranks_legacy_fractional_completions_before_run_id() {
         AutomationRunStatus::Succeeded,
         1_000,
     );
-    older_success.schema_version = 1;
-    older_success.started_at = "1970-01-01T00:16:39Z".to_string();
-    older_success.completed_at = "1970-01-01T00:16:40.1Z".to_string();
-    older_success.completed_at_micros = None;
+    older_success.started_at = "999".to_string();
+    older_success.completed_at_micros = Some(1_000_100_000);
     let mut records = vec![later_failure, older_success];
 
     for _ in 0..2 {
         assert_eq!(
             schedule_decision(
                 &config,
+                None,
                 AgentTaskKind::SkillWriter,
                 &records,
                 SessionActivity::none(),
@@ -694,6 +716,7 @@ fn scheduler_ranks_latest_success_by_canonical_completion() {
     assert_eq!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::SessionReflector,
             &records,
             SessionActivity::at(999),
@@ -708,6 +731,7 @@ fn scheduler_ranks_latest_success_by_canonical_completion() {
     assert_eq!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::SessionReflector,
             &records,
             SessionActivity::at(999),
@@ -732,6 +756,7 @@ fn scheduler_fails_closed_on_invalid_completion_history() {
     assert_eq!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::SkillWriter,
             &[inconsistent],
             SessionActivity::none(),
@@ -752,6 +777,7 @@ fn scheduler_fails_closed_on_invalid_completion_history() {
     assert_eq!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::SkillWriter,
             &[malformed],
             SessionActivity::none(),
@@ -773,6 +799,7 @@ fn scheduler_fails_closed_on_invalid_completion_history() {
     assert_eq!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::SkillWriter,
             &[overflow],
             SessionActivity::none(),
@@ -792,6 +819,7 @@ fn scheduler_fails_closed_on_invalid_completion_history() {
     assert_eq!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::SkillWriter,
             &[pre_epoch],
             SessionActivity::none(),
@@ -817,6 +845,7 @@ fn scheduler_fails_closed_on_pre_epoch_session_start() {
     assert_eq!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::SessionReflector,
             &[record],
             SessionActivity::at(0),
@@ -829,7 +858,7 @@ fn scheduler_fails_closed_on_pre_epoch_session_start() {
 }
 
 #[test]
-fn scheduler_parses_started_at_by_record_schema() {
+fn scheduler_rejects_rfc3339_started_at() {
     let config = automation_config(Some("daily"), None);
     let mut schema_v2 = record(
         "schema-v2-rfc3339-start",
@@ -837,10 +866,24 @@ fn scheduler_parses_started_at_by_record_schema() {
         AutomationRunStatus::Succeeded,
         1_000,
     );
+    assert_eq!(schema_v2.started_at, "999");
+    assert!(
+        schedule_decision(
+            &config,
+            None,
+            AgentTaskKind::SessionReflector,
+            &[schema_v2.clone()],
+            SessionActivity::at(1_001),
+            1_500,
+        )
+        .is_due()
+    );
+
     schema_v2.started_at = "1970-01-01T00:16:39Z".to_string();
     assert_eq!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::SessionReflector,
             &[schema_v2],
             SessionActivity::at(1_001),
@@ -849,27 +892,6 @@ fn scheduler_parses_started_at_by_record_schema() {
         .skip_reason()
         .map(AutomationSkipReasonV1::as_str),
         Some("scheduler_history_invalid")
-    );
-
-    let mut schema_v1 = record(
-        "schema-v1-rfc3339-start",
-        AgentTaskKind::SessionReflector,
-        AutomationRunStatus::Succeeded,
-        1_000,
-    );
-    schema_v1.schema_version = 1;
-    schema_v1.started_at = "1970-01-01T00:16:39Z".to_string();
-    schema_v1.completed_at = "1970-01-01T00:16:40Z".to_string();
-    schema_v1.completed_at_micros = None;
-    assert!(
-        schedule_decision(
-            &config,
-            AgentTaskKind::SessionReflector,
-            &[schema_v1],
-            SessionActivity::at(1_000),
-            1_500,
-        )
-        .is_due()
     );
 }
 
@@ -895,6 +917,7 @@ fn scheduler_rejects_conflicting_duplicate_canonical_identity_in_either_order() 
         assert_eq!(
             schedule_decision(
                 &config,
+                None,
                 AgentTaskKind::SkillWriter,
                 &records,
                 SessionActivity::none(),
@@ -909,6 +932,7 @@ fn scheduler_rejects_conflicting_duplicate_canonical_identity_in_either_order() 
     assert_eq!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::SkillWriter,
             &[success.clone(), success.clone()],
             SessionActivity::none(),
@@ -932,6 +956,7 @@ fn scheduler_rejects_conflicting_duplicate_canonical_identity_in_either_order() 
         assert_eq!(
             schedule_decision(
                 &config,
+                None,
                 AgentTaskKind::SkillWriter,
                 &records,
                 SessionActivity::none(),
@@ -952,18 +977,36 @@ fn scheduler_idle_window_measures_time_since_session_activity() {
 
     // Activity landed 500s ago: still inside the 600s idle window.
     assert_eq!(
-        schedule_decision(&config, AgentTaskKind::SkillWriter, &[], activity, 1_500)
-            .skip_reason()
-            .map(AutomationSkipReasonV1::as_str),
+        schedule_decision(
+            &config,
+            None,
+            AgentTaskKind::SkillWriter,
+            &[],
+            activity,
+            1_500
+        )
+        .skip_reason()
+        .map(AutomationSkipReasonV1::as_str),
         Some("scheduler_idle_window_active")
     );
     // 600s of quiet have elapsed: the project is idle, the task is due.
-    assert!(schedule_decision(&config, AgentTaskKind::SkillWriter, &[], activity, 1_600).is_due());
+    assert!(
+        schedule_decision(
+            &config,
+            None,
+            AgentTaskKind::SkillWriter,
+            &[],
+            activity,
+            1_600
+        )
+        .is_due()
+    );
     // Unknown activity satisfies the idle duration but cannot authorize a
     // session-evidence task.
     assert_eq!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::SkillWriter,
             &[],
             SessionActivity::none(),
@@ -995,6 +1038,7 @@ fn scheduler_idle_window_ignores_task_run_history() {
     assert!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::MemoryCurator,
             &records,
             SessionActivity::at(100),
@@ -1014,25 +1058,55 @@ fn scheduler_skips_session_evidence_tasks_without_new_activity() {
 
         // Interval elapsed but no session activity has ever been observed.
         assert_eq!(
-            schedule_decision(&config, task, &records, SessionActivity::none(), 1_700)
-                .skip_reason()
-                .map(AutomationSkipReasonV1::as_str),
+            schedule_decision(
+                &config,
+                None,
+                task,
+                &records,
+                SessionActivity::none(),
+                1_700
+            )
+            .skip_reason()
+            .map(AutomationSkipReasonV1::as_str),
             Some("no_new_session_activity")
         );
         // Interval elapsed but the newest activity predates the run.
         assert_eq!(
-            schedule_decision(&config, task, &records, SessionActivity::at(900), 1_700)
-                .skip_reason()
-                .map(AutomationSkipReasonV1::as_str),
+            schedule_decision(
+                &config,
+                None,
+                task,
+                &records,
+                SessionActivity::at(900),
+                1_700
+            )
+            .skip_reason()
+            .map(AutomationSkipReasonV1::as_str),
             Some("no_new_session_activity")
         );
         // Activity landed after the run started: due on the next tick.
         assert!(
-            schedule_decision(&config, task, &records, SessionActivity::at(1_650), 1_700).is_due()
+            schedule_decision(
+                &config,
+                None,
+                task,
+                &records,
+                SessionActivity::at(1_650),
+                1_700
+            )
+            .is_due()
         );
         // Fresh completed-turn evidence bypasses the periodic repair interval.
         assert!(
-            schedule_decision(&config, task, &records, SessionActivity::at(1_050), 1_100).is_due()
+            schedule_decision(
+                &config,
+                None,
+                task,
+                &records,
+                SessionActivity::at(1_050),
+                1_100
+            )
+            .is_due()
         );
     }
 }
@@ -1052,6 +1126,7 @@ fn scheduler_retries_failed_session_evidence_runs_with_existing_activity() {
     assert!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::SessionReflector,
             &records,
             SessionActivity::at(900),
@@ -1062,6 +1137,7 @@ fn scheduler_retries_failed_session_evidence_runs_with_existing_activity() {
     assert_eq!(
         schedule_decision(
             &config,
+            None,
             AgentTaskKind::SessionReflector,
             &records,
             SessionActivity::none(),

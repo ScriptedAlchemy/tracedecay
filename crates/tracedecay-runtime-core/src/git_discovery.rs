@@ -782,7 +782,7 @@ mod tests {
     ///
     /// Live wedge this covers: the topology memo only short-circuited topology
     /// questions. Every route resolution still read HEAD through a complete
-    /// `gix::discover`, so a deferred root on a slow volume was rediscovered
+    /// repository discovery, so a deferred root on a slow volume was rediscovered
     /// from scratch on every retry and the deferral never converged.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_head_read_after_a_published_topology_does_not_walk_again() {

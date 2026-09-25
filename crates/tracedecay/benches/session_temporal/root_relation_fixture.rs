@@ -14,11 +14,11 @@ use tracedecay_store::{
     SessionRefreshCompletionRequestV1, SessionRefreshFrontierV1, SessionRefreshProgressV1,
 };
 use tracedecay_temporal_query::context::ContextBudget;
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 use tracedecay_temporal_query::ranking::DiversityLimits;
 
 use super::{AllowAuthorizer, BenchResult, CONFIG_VERSION, PROJECTOR_VERSION};
-use tracedecay_session_temporal_store::SessionTemporalStore;
+use tracedecay_session_temporal_store::{SessionTemporalAccess, SessionTemporalStore};
 
 pub(super) const ROOT_RELATION_PARTICIPANT_COUNT: usize = 64;
 
@@ -90,12 +90,12 @@ pub(super) async fn refresh_sessions(
 
         let mut projected = 0u64;
         loop {
-            let recovery = db
+            let recovery = SessionTemporalAccess::new(db)
                 .session_refresh_recovery_result(&session)
                 .await
                 .map_err(|error| format!("root refresh recovery: {error:?}"))?
                 .ok_or_else(|| "missing root refresh recovery after begin_or_join".to_owned())?;
-            match db
+            match SessionTemporalAccess::new(db)
                 .materialize_session_temporal_refresh_batch_result(&recovery)
                 .await
                 .map_err(|error| {
@@ -119,7 +119,7 @@ pub(super) async fn refresh_sessions(
                 "root refresh projected zero temporal records for {session_id}"
             ));
         }
-        let recovery = db
+        let recovery = SessionTemporalAccess::new(db)
             .session_refresh_recovery_result(&session)
             .await
             .map_err(|error| format!("root refresh recovery before complete: {error:?}"))?
@@ -135,7 +135,8 @@ pub(super) async fn refresh_sessions(
             *progress.coverage(),
         )
         .map_err(|error| format!("complete root refresh request: {error}"))?;
-        db.complete_session_refresh_result(complete_request.clone(), ExecutionControl::new(None))
+        SessionTemporalAccess::new(db)
+            .complete_session_refresh_result(complete_request.clone(), ExecutionControl::new(None))
             .await
             .map_err(|error| format!("complete root refresh: {error:?}"))?;
         let committed = usize::try_from(progress.committed_records())

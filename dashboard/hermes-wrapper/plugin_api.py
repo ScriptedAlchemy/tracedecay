@@ -669,11 +669,11 @@ def get_capabilities() -> JSONResponse:
 def get_holographic_root(request: Request) -> JSONResponse:
     """Holographic memory overview (proxied).
 
-    Forwards to upstream ``GET /api/plugins/holographic/``. The dashboard
+    Forwards to upstream ``GET /api/plugins/holographic``. The dashboard
     overview payload (provider status, facts, entities, association graph).
     Query parameters (``q``, ``limit``, ``graph_limit``) pass through verbatim.
     """
-    return _proxy("GET", "/api/plugins/holographic/", request, None)
+    return _proxy("GET", "/api/plugins/holographic", request, None)
 
 
 @router.get("/holographic/{path:path}")

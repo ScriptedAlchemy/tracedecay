@@ -28,7 +28,7 @@ fn resolve_layout_defaults_to_profile_shard_without_marker_or_local_db() {
 }
 
 #[tokio::test]
-async fn config_path_uses_profile_shard_when_enrolled() {
+async fn store_layout_uses_profile_shard_when_enrolled() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("repo");
@@ -41,31 +41,8 @@ async fn config_path_uses_profile_shard_when_enrolled() {
     init_repo_with_commit(&project);
     assert!(write_repository_identity_marker(&project, "proj_123").unwrap());
 
-    // A retired legacy config left in the working tree stays ignored.
-    let repo_local_config = TraceDecayConfig {
-        root_dir: "repo-local-config".to_string(),
-        ..TraceDecayConfig::default()
-    };
-    fs::write(
-        project.join(".tracedecay/config.json"),
-        serde_json::to_string_pretty(&repo_local_config).unwrap(),
-    )
-    .unwrap();
-    let shard_config = TraceDecayConfig {
-        root_dir: "profile-shard-config".to_string(),
-        ..TraceDecayConfig::default()
-    };
-    fs::write(
-        shard_root.join("config.json"),
-        serde_json::to_string_pretty(&shard_config).unwrap(),
-    )
-    .unwrap();
-
-    assert_path_eq(get_config_path(&project), shard_root.join("config.json"));
-    assert_eq!(
-        load_config(&project).unwrap().root_dir,
-        "profile-shard-config"
-    );
+    let layout = resolve_layout(&project, &home.join(".tracedecay")).unwrap();
+    assert_path_eq(&layout.data_root, &shard_root);
 }
 
 #[test]

@@ -7,7 +7,7 @@
 
 use tracedecay_domain::code_intelligence::{CodeGenerationId, ContentDigest};
 use tracedecay_domain::configuration::UserProfileId;
-use tracedecay_domain::feedback::{FeedbackCycleId, GitHubReviewIdV1, ProximityWarningIdV1};
+use tracedecay_domain::feedback::{FeedbackCycleId, GitHubReviewIdV1, ProximityContributionIdV1};
 use tracedecay_domain::observation::CanonicalObservationIdV1;
 use tracedecay_domain::research::{DomainError, EntityId, canonical_sha256};
 use tracedecay_domain::retrieval::{PrincipalId, RetrievalContractError};
@@ -38,7 +38,7 @@ fn identity_families_serialize_transparently() {
             "\"cycle-1\"",
         ),
         (
-            serde_json::to_string(&ProximityWarningIdV1::new("warn-1").unwrap()).unwrap(),
+            serde_json::to_string(&ProximityContributionIdV1::new("warn-1").unwrap()).unwrap(),
             "\"warn-1\"",
         ),
         (
@@ -61,7 +61,7 @@ fn identity_families_digest_is_stable() {
         PrincipalId::new("principal-1").unwrap(),
         UserProfileId::new("profile-1").unwrap(),
         FeedbackCycleId::new("cycle-1").unwrap(),
-        ProximityWarningIdV1::new("warn-1").unwrap(),
+        ProximityContributionIdV1::new("warn-1").unwrap(),
         GitHubReviewIdV1::new("review-1").unwrap(),
     ))
     .unwrap();
@@ -149,8 +149,8 @@ fn identity_families_reject_the_same_values() {
             "{bad:?}"
         );
         assert_eq!(
-            ProximityWarningIdV1::new(bad).unwrap_err(),
-            domain("proximity warning id"),
+            ProximityContributionIdV1::new(bad).unwrap_err(),
+            domain("proximity contribution id"),
             "{bad:?}"
         );
         assert_eq!(

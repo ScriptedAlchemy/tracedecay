@@ -12,9 +12,10 @@ use super::*;
 use crate::daemon::maintenance::project_store_maintenance_lease;
 use tracedecay_code_index_retention::code_index_generations::{
     CodeGenerationRetentionErrorV1, MAX_CODE_GENERATION_RETENTION_BATCH_V1,
-    prepare_next_code_generation_retention_cancellable,
+    code_generation_segments_root, prepare_next_code_generation_retention_cancellable,
 };
 use tracedecay_maintenance::tick::{MaintenanceContinuation, MaintenanceTickOutcome};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 fn initialize_git_project(root: &Path) {
     git(root, &["init", "-q", "-b", "main"]);
@@ -101,10 +102,8 @@ async fn mounted_code_generation_retention_continues_capped_segment_reclamation(
     // The scheduler hashes the canonical project root. A non-canonical
     // `project_root()` names a store that is never created, and
     // `latest_generation_id` still answers because it canonicalizes itself.
-    let canonical_root = graph
-        .project_root()
-        .canonicalize()
-        .expect("canonical project root");
+    let canonical_root =
+        canonical_existing_identity(graph.project_root()).expect("canonical project root");
     let first_source = schedulers
         .latest_generation_id(&canonical_root)
         .await
@@ -183,7 +182,7 @@ async fn mounted_code_generation_retention_continues_capped_segment_reclamation(
     assert!(first_source_file.is_file());
 
     let observations = resources.store_administration.store_telemetry_sampling();
-    let cancellation = tracedecay_session_memory::context::CancellationToken::new();
+    let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
     let findings_before =
         tracedecay_daemon_service::doctor_kernel::collect_code_generation_retention_findings(
             schedulers,
@@ -232,7 +231,7 @@ async fn mounted_code_generation_retention_continues_capped_segment_reclamation(
         .expect("serving code generation survives retention");
     assert_eq!(serving, latest);
 
-    let segment_root = code_store_root.join("code-generation-segments-v1");
+    let segment_root = code_generation_segments_root(&code_store_root);
     let orphan_segments = (0..=MAX_CODE_GENERATION_RETENTION_BATCH_V1)
         .map(|index| {
             let bytes = format!("unreferenced production segment {index}");

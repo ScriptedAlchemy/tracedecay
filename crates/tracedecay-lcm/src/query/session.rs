@@ -77,7 +77,7 @@ fn load_session_query(request: &LcmLoadSessionRequest, fetch_limit: usize) -> (S
     let sql = format!(
         "SELECT provider, message_id, session_id, store_id, role, ordinal,
                 timestamp, content, content_hash, storage_kind, payload_ref,
-                snippet_text, legacy_source, legacy_truncated, metadata_json
+                snippet_text, metadata_json
          FROM lcm_raw_messages
          {scope}
            AND store_id > ?
@@ -257,11 +257,14 @@ async fn replay_slice_summary_nodes(
     }
     let mut rows = conn
         .query(
-            "SELECT node_id, depth, created_at, summary_text, summary_hash
-             FROM lcm_summary_nodes
-             WHERE provider = ?1 AND session_id = ?2
-             ORDER BY depth DESC, created_at DESC, node_id
-             LIMIT ?3",
+            &format!(
+                "SELECT n.summary_id, n.depth, n.created_at, n.summary_text, n.summary_hash
+                 FROM session_summary_nodes n
+                 WHERE n.provider = ?1 AND n.session_id = ?2 AND {}
+                 ORDER BY n.depth DESC, n.created_at DESC, n.summary_id
+                 LIMIT ?3",
+                schema::SUMMARY_VISIBLE_SQL
+            ),
             params![
                 request.provider.as_str(),
                 request.session_id.as_str(),
@@ -310,8 +313,6 @@ fn load_message_from_raw(
         content_hash,
         storage_kind,
         payload_ref,
-        legacy_source,
-        legacy_truncated,
         metadata_json,
     } = raw;
     let (content, content_range) = slice_content_owned(content, slice);
@@ -328,8 +329,6 @@ fn load_message_from_raw(
         content_hash,
         storage_kind,
         payload_ref,
-        legacy_source,
-        legacy_truncated,
         metadata_json,
     }
 }

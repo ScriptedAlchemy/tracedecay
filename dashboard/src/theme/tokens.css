@@ -152,6 +152,7 @@
    */
   --raw-graph-substrate: var(--night-substrate);
   --raw-graph-text: oklch(0.84 0.035 248);
+  --raw-graph-ice: oklch(0.9 0.045 222);
   --raw-graph-edge: oklch(0.43 0.075 245);
   --raw-graph-accent: var(--signal-cyan-hot);
   --raw-graph-alert: oklch(0.8 0.15 75);
@@ -336,6 +337,7 @@
   /* The light shell frames the same dark analytical field deliberately. */
   --raw-graph-substrate: oklch(0.105 0.018 268);
   --raw-graph-text: oklch(0.86 0.035 248);
+  --raw-graph-ice: oklch(0.9 0.045 222);
   --raw-graph-edge: oklch(0.47 0.075 245);
   --raw-graph-accent: oklch(0.84 0.16 205);
   --raw-graph-alert: oklch(0.8 0.15 75);
@@ -355,6 +357,93 @@
   /* Paper has no void to set the frame into: the chassis is the next step
    * down the surface ramp, so the frame still reads as a frame. */
   --raw-chassis: var(--raw-surface-3);
+}
+
+/* The optical window keeps its night ink inside the light shell.
+ *
+ * The analytical field stays dark glass in both themes, but the DOM drawn on
+ * it (HUDs, cards, rows, chips, label halos) and every canvas palette sampled
+ * from it read the shell ramp, which the light theme turns into paper ink:
+ * dark text on dark glass wrapped in white halos, near-white graticules. Inside
+ * the window the ramp is the dark theme's again. The `--color-*` names are
+ * restated because the non-inline @theme resolves them once, at :root. High
+ * contrast flattens the window to paper, so there it keeps the shell ramp. */
+[data-theme='light']:not([data-contrast='more']) :is(.td-optic, .td-graph-field, .td-night) {
+  color-scheme: dark;
+  color: var(--ink-primary);
+  --raw-surface-0: var(--night-face);
+  --raw-surface-1: oklch(0.178 0.0035 260);
+  --raw-surface-2: oklch(0.215 0.004 260);
+  --raw-surface-3: oklch(0.262 0.0045 260);
+  --raw-text-primary: var(--ink-primary);
+  --raw-text-secondary: var(--ink-secondary);
+  --raw-text-muted: var(--ink-muted);
+  --raw-edge-subtle: var(--edge-subtle);
+  --raw-edge-strong: var(--edge-strong);
+  --raw-accent: var(--signal-cyan);
+  --raw-accent-emphasis: oklch(0.64 0.16 200);
+  --raw-alert: var(--activity-amber);
+  --raw-alert-emphasis: oklch(0.68 0.16 65);
+  --raw-grid: oklch(0.24 0.004 260);
+  --raw-grid-minor: oklch(0.195 0.003 260);
+  --raw-state-loading: oklch(0.65 0.02 260);
+  --raw-state-ready: var(--state-ready);
+  --raw-state-complete-zero: var(--state-ready);
+  --raw-state-partial: var(--activity-amber);
+  --raw-state-stale: oklch(0.74 0.11 85);
+  --raw-state-locked: var(--state-violet);
+  --raw-state-denied: oklch(0.64 0.16 25);
+  --raw-state-unauthorized: oklch(0.64 0.16 25);
+  --raw-state-redacted: oklch(0.6 0.04 300);
+  --raw-state-conflicting: oklch(0.7 0.14 55);
+  --raw-state-offline: oklch(0.6 0.015 260);
+  --raw-state-unknown: oklch(0.6 0.015 260);
+  --raw-state-cancelled: oklch(0.62 0.04 260);
+  --raw-state-timed-out: oklch(0.7 0.11 55);
+  --raw-state-error: var(--state-danger);
+  --raw-state-unsupported-schema: oklch(0.65 0.1 320);
+  --edge-frame: color-mix(in oklab, var(--raw-accent) 22%, var(--raw-edge-subtle));
+  --raw-well: var(--night-well);
+  --raw-raised: var(--night-raised);
+  --raw-membrane-lift: oklch(0.34 0.016 262 / 0.55);
+  --raw-depth: oklch(0.07 0.012 262 / 0.6);
+  --shadow-well: inset 0 1px 3px var(--raw-depth), inset 0 -1px 0 var(--raw-membrane-lift);
+  --shadow-raised: inset 0 1px 0 var(--raw-membrane-lift), 0 1px 2px var(--raw-depth);
+
+  --color-surface-0: var(--raw-surface-0);
+  --color-surface-1: var(--raw-surface-1);
+  --color-surface-2: var(--raw-surface-2);
+  --color-surface-3: var(--raw-surface-3);
+  --color-text-primary: var(--raw-text-primary);
+  --color-text-secondary: var(--raw-text-secondary);
+  --color-text-muted: var(--raw-text-muted);
+  --color-edge-subtle: var(--raw-edge-subtle);
+  --color-edge-strong: var(--raw-edge-strong);
+  --color-edge-frame: var(--edge-frame);
+  --color-accent: var(--raw-accent);
+  --color-accent-emphasis: var(--raw-accent-emphasis);
+  --color-alert: var(--raw-alert);
+  --color-alert-emphasis: var(--raw-alert-emphasis);
+  --color-grid: var(--raw-grid);
+  --color-grid-minor: var(--raw-grid-minor);
+  --color-well: var(--raw-well);
+  --color-raised: var(--raw-raised);
+  --color-state-loading: var(--raw-state-loading);
+  --color-state-ready: var(--raw-state-ready);
+  --color-state-complete-zero: var(--raw-state-complete-zero);
+  --color-state-partial: var(--raw-state-partial);
+  --color-state-stale: var(--raw-state-stale);
+  --color-state-locked: var(--raw-state-locked);
+  --color-state-denied: var(--raw-state-denied);
+  --color-state-unauthorized: var(--raw-state-unauthorized);
+  --color-state-redacted: var(--raw-state-redacted);
+  --color-state-conflicting: var(--raw-state-conflicting);
+  --color-state-offline: var(--raw-state-offline);
+  --color-state-unknown: var(--raw-state-unknown);
+  --color-state-cancelled: var(--raw-state-cancelled);
+  --color-state-timed-out: var(--raw-state-timed-out);
+  --color-state-error: var(--raw-state-error);
+  --color-state-unsupported-schema: var(--raw-state-unsupported-schema);
 }
 
 [data-contrast='more'] {

@@ -137,37 +137,31 @@ pub(crate) fn local_node_id(
 ) -> String {
     let start = node.start_position();
     let line = start.row as u32;
-    let start_byte = node.start_byte().min(source.len());
-    let line_start = source[..start_byte]
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(0, |newline| newline + 1);
-    let begins_line = source[line_start..start_byte]
-        .iter()
-        .all(|byte| matches!(byte, b' ' | b'\t' | b'\r'));
-    if begins_line {
+    if begins_line(source, node) {
         generate_node_id(file_path, kind, name, line)
     } else {
         generate_node_id_at(file_path, kind, name, line, start.column as u32)
     }
 }
 
-/// Strip comment markers from a single C-style comment text
-/// (`//` line comments and `/* ... */` block comments).
+/// Whether only blanks precede `node` on its first line.
+fn begins_line(source: &[u8], node: TsNode<'_>) -> bool {
+    let start_byte = node.start_byte().min(source.len());
+    let line_start = source[..start_byte]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |newline| newline + 1);
+    source[line_start..start_byte]
+        .iter()
+        .all(|byte| matches!(byte, b' ' | b'\t' | b'\r'))
+}
+
+/// Strip comment markers from a single C-style comment text: `//` and `///`
+/// line comments and `/* ... */` block comments.
 pub(crate) fn clean_c_comment(comment: &str) -> String {
-    clean_c_line_or_block_comment(comment, &["//"])
-}
-
-/// Strip comment markers from a single C-style comment text, including
-/// `///` doc comments.
-pub(crate) fn clean_c_doc_comment(comment: &str) -> String {
-    // Longer prefixes first so `///` is not stripped as `//`.
-    clean_c_line_or_block_comment(comment, &["///", "//"])
-}
-
-fn clean_c_line_or_block_comment(comment: &str, line_prefixes: &[&str]) -> String {
     let trimmed = comment.trim();
-    for prefix in line_prefixes {
+    // Longer prefix first so `///` is not stripped as `//`.
+    for prefix in ["///", "//"] {
         if let Some(stripped) = trimmed.strip_prefix(prefix) {
             return stripped.strip_prefix(' ').unwrap_or(stripped).to_string();
         }
@@ -193,20 +187,33 @@ fn clean_c_line_or_block_comment(comment: &str, line_prefixes: &[&str]) -> Strin
 
 /// Extract a docstring from the run of `comment` siblings immediately
 /// preceding `node`, cleaning each comment with `clean`.
+///
+/// A comment belongs to the run only when it starts its own line and no blank
+/// line separates it from what follows, so a trailing `} // namespace x` or a
+/// detached section banner never documents the next declaration.
 pub(crate) fn docstring_from_preceding_comments(
     source: &[u8],
     node: TsNode<'_>,
     clean: fn(&str) -> String,
 ) -> Option<String> {
     let mut comments = Vec::new();
+    let mut following_row = node.start_position().row;
     let mut current = node.prev_named_sibling();
     while let Some(sibling) = current {
-        if sibling.kind() == "comment" {
-            comments.push(node_text(source, sibling));
-            current = sibling.prev_named_sibling();
+        // Some grammars end a line comment after its newline, at column 0.
+        let end = sibling.end_position();
+        let last_row = if end.column == 0 && end.row > sibling.start_position().row {
+            end.row - 1
         } else {
+            end.row
+        };
+        let adjacent = last_row + 1 >= following_row;
+        if sibling.kind() != "comment" || !adjacent || !begins_line(source, sibling) {
             break;
         }
+        comments.push(node_text(source, sibling));
+        following_row = sibling.start_position().row;
+        current = sibling.prev_named_sibling();
     }
     if comments.is_empty() {
         return None;
@@ -244,6 +251,31 @@ pub(crate) fn docstring_from_hash_comments(source: &[u8], node: TsNode<'_>) -> O
     // Comments were collected in reverse order; reverse them back.
     comments.reverse();
     Some(comments.join("\n"))
+}
+
+/// The full identifier lexeme around `identifier`.
+///
+/// The BASIC grammars lex `_` inside a name as an error token, splitting
+/// `MAX_RETRIES` into sibling fragments and sometimes dropping text, so the
+/// name is recovered from source by extending the node over adjacent
+/// identifier characters. Type suffixes (`$`, `%`) and member access (`.`)
+/// stay outside the lexeme.
+#[cfg(any(
+    feature = "lang-gwbasic",
+    feature = "lang-msbasic2",
+    feature = "lang-qbasic"
+))]
+pub(crate) fn basic_identifier_text<'s>(source: &'s [u8], identifier: TsNode<'_>) -> &'s str {
+    let is_ident = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let mut start = identifier.start_byte().min(source.len());
+    let mut end = identifier.end_byte().min(source.len());
+    while start > 0 && is_ident(source[start - 1]) {
+        start -= 1;
+    }
+    while end < source.len() && is_ident(source[end]) {
+        end += 1;
+    }
+    std::str::from_utf8(&source[start..end]).unwrap_or("<invalid utf8>")
 }
 
 /// Recursively find `call_expression` nodes and create unresolved Calls

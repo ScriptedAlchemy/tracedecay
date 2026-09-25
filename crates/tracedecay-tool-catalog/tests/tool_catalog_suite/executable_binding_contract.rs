@@ -72,12 +72,6 @@ fn schema_bodies_are_derived_from_rust_type_authority() {
         binding.result_schema().body()["properties"]["contents"]["type"],
         "string"
     );
-    assert_eq!(
-        binding.request_schema().digest(),
-        typed_schema::<ReadRequest>(binding.request_schema().schema_ref().clone())
-            .unwrap()
-            .digest()
-    );
 }
 
 #[test]

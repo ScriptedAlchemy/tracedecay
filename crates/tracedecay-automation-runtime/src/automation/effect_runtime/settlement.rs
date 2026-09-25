@@ -36,11 +36,11 @@ use crate::automation::effect_runtime::journal::{
     classify_durable_settlement_blocking, persist_prepared_terminal_blocking,
     persist_recovered_terminal_blocking, persist_terminal_blocking,
     promote_prepared_terminal_blocking, replay_exact_binding_after_error_blocking,
-    reserve_or_replay_indexed_blocking, retained_source_bindings,
+    reserve_or_replay_indexed_blocking,
 };
 use crate::automation::effect_runtime::problem::{
     failed_ledger_problem, indeterminate_external_effect_problem, reset_required_problem,
-    runtime_problem, shipped_proposal_reset_required_problem,
+    runtime_problem,
 };
 use crate::automation::effect_runtime::projection::{
     project_committed_receipts, project_recovered_committed_receipts, project_run_summary,
@@ -50,7 +50,6 @@ use crate::automation::effect_runtime::{
     AutomationSettledProblem, AutomationSettledTerminal, add_pending_blocking, contract_error,
     digest, effect_authority_digest as calculate_effect_authority_digest,
     finalize_terminal_housekeeping, journal, recovered_partial_terminal, remove_pending_blocking,
-    retirement,
 };
 use crate::automation::run_ledger::{
     self, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, ExactRunPublication,
@@ -453,7 +452,6 @@ fn ledger_record_matches_result(
         }
         AutomationRunTerminalV1::Skipped { reason, .. } => {
             record.status == AutomationRunStatus::Skipped
-                && record.error == record.fallback_status
                 && record
                     .error
                     .as_deref()
@@ -1065,50 +1063,6 @@ impl AutomationEffectAuthority {
             journal_key.as_str().trim_start_matches("sha256:")
         ));
         let task = request.task_kind();
-        let (retained_binding, retained_reset_digest) =
-            if task == AutomationTaskV1::SessionReflector {
-                let binding_path = journal_path.clone();
-                tokio::task::spawn_blocking(move || retained_source_bindings(&binding_path))
-                    .await
-                    .map_err(|error| {
-                        contract_error(format!(
-                            "automation retirement binding reader failed: {error}"
-                        ))
-                    })??
-            } else {
-                (None, None)
-            };
-        let classification = if retained_binding.is_some() {
-            // A durable retirement binding owns the exact admitted source.
-            // Current shipped bytes may be a later replacement and must not
-            // override replay/recovery of that retained authority.
-            retirement::RetirementClassification::Absent
-        } else {
-            retirement::classify_for_task(task, &dashboard_root).await?
-        };
-        let (live_retirement, shipped_reset) = match classification {
-            retirement::RetirementClassification::Absent => (None, None),
-            retirement::RetirementClassification::ResetRequired {
-                source_digest,
-                detail,
-            } => (None, Some((source_digest, detail))),
-            retirement::RetirementClassification::Terminal(plan) => (Some(plan), None),
-        };
-        if let (Some(plan), Some(binding)) = (&live_retirement, &retained_binding) {
-            retirement::verify_plan_matches_binding(plan, binding)?;
-        }
-        let retirement_binding =
-            retained_binding.or_else(|| live_retirement.as_ref().map(|plan| plan.binding.clone()));
-        let reset_source_digest = match (retained_reset_digest, shipped_reset.as_ref()) {
-            (Some(stored), Some((live, _))) if stored != *live => {
-                return Err(contract_error(
-                    "unresolved shipped proposal bytes changed after durable admission",
-                ));
-            }
-            (Some(stored), _) => Some(stored),
-            (None, Some((live, _))) => Some(live.clone()),
-            (None, None) => None,
-        };
         let retained_operation = RetainedSurfaceOperation::FactStoreCurate;
         let operation =
             retained_surface_application_operation(retained_operation).map_err(contract_error)?;
@@ -1119,8 +1073,6 @@ impl AutomationEffectAuthority {
             context.scope(),
             &configuration_digest,
             &request,
-            &retirement_binding,
-            &reset_source_digest,
         ))?;
         let execution_cancellation = cancellation.clone();
         let execution = RetainedSurfaceExecutionContextV1 {
@@ -1133,7 +1085,7 @@ impl AutomationEffectAuthority {
             &execution,
             retained_operation,
             &configuration_digest,
-            &(&request, &retirement_binding, &reset_source_digest),
+            &request,
             request.run_id.as_str(),
         )
         .map_err(|_| contract_error("canonical memory automation effect preparation failed"))?;
@@ -1167,15 +1119,8 @@ impl AutomationEffectAuthority {
             AutomationRecoveryBinding::Memory {
                 owner: memory_owner()?,
                 recovery_problem,
-                retirement: retirement_binding,
-                reset_source_digest,
             }
         } else {
-            if retirement_binding.is_some() || reset_source_digest.is_some() {
-                return Err(contract_error(
-                    "external automation admission carried memory retirement state",
-                ));
-            }
             AutomationRecoveryBinding::External { recovery_problem }
         };
         let effect_authority_digest = calculate_effect_authority_digest(
@@ -1261,9 +1206,7 @@ impl AutomationEffectAuthority {
             ReservationResult::Replay {
                 terminal,
                 publication,
-                retirement,
             } => {
-                validate_retirement_binding(&admission, retirement.as_ref())?;
                 if let Some(publication) = publication.as_ref() {
                     let published = run_ledger::publish_staged_run_record_exact(
                         &dashboard_root,
@@ -1296,18 +1239,10 @@ impl AutomationEffectAuthority {
                     )
                     .await?;
                 }
-                finalize_terminal_housekeeping(
-                    &dashboard_root,
-                    &journal_path,
-                    &admission,
-                    &terminal,
-                    live_retirement,
-                )
-                .await?;
+                finalize_terminal_housekeeping(&dashboard_root, &journal_path).await?;
                 Ok(AutomationEffectAdmission::Replay(Box::new(terminal)))
             }
-            ReservationResult::Execute { claim, retirement } => {
-                validate_retirement_binding(&admission, retirement.as_ref())?;
+            ReservationResult::Execute { claim } => {
                 let authority = Self {
                     context,
                     cancellation: cancellation.clone(),
@@ -1318,40 +1253,9 @@ impl AutomationEffectAuthority {
                     dashboard_root: dashboard_root.clone(),
                     _reservation_claim: Some(claim),
                 };
-                if let Some((_digest, _detail)) = shipped_reset {
-                    let problem = shipped_proposal_reset_required_problem(
-                        &authority.operation,
-                        &authority.context,
-                        &authority.admission.request,
-                    )?;
-                    let terminal = authority
-                        .persist_terminal(AutomationSettledTerminal::Problem(problem))
-                        .await?;
-                    finalize_terminal_housekeeping(
-                        &dashboard_root,
-                        &authority.journal_path,
-                        &authority.admission,
-                        &terminal,
-                        None,
-                    )
-                    .await?;
-                    Ok(AutomationEffectAdmission::Replay(Box::new(terminal)))
-                } else if retirement.is_some() {
-                    let terminal = authority.settle_retirement().await?;
-                    finalize_terminal_housekeeping(
-                        &dashboard_root,
-                        &authority.journal_path,
-                        &authority.admission,
-                        &terminal,
-                        live_retirement,
-                    )
-                    .await?;
-                    Ok(AutomationEffectAdmission::Replay(Box::new(terminal)))
-                } else {
-                    Ok(AutomationEffectAdmission::Execute(Box::new(authority)))
-                }
+                Ok(AutomationEffectAdmission::Execute(Box::new(authority)))
             }
-            ReservationResult::Recover { retirement } => {
+            ReservationResult::Recover => {
                 discard_direct_recovery_unbound_spools(&dashboard_root, &journal_path, &admission)
                     .await?;
                 let authority = Self {
@@ -1370,14 +1274,8 @@ impl AutomationEffectAuthority {
                             authority.admission.recovery_problem().clone(),
                         ))
                         .await?;
-                    finalize_terminal_housekeeping(
-                        &dashboard_root,
-                        &authority.journal_path,
-                        &authority.admission,
-                        &terminal,
-                        None,
-                    )
-                    .await?;
+                    finalize_terminal_housekeeping(&dashboard_root, &authority.journal_path)
+                        .await?;
                     let admission = AutomationEffectAdmission::Replay(Box::new(terminal));
                     observe_admission_decision(&admission);
                     return Ok(admission);
@@ -1395,14 +1293,7 @@ impl AutomationEffectAuthority {
                         })?;
                 let committed_receipts =
                     project_recovered_committed_receipts(&authority.admission.request, &recovered)?;
-                if retirement.is_some() && !committed_receipts.is_empty() {
-                    return Err(contract_error(
-                        "proposal retirement recovery found unrelated canonical memory commits",
-                    ));
-                }
-                let terminal = if retirement.is_some() {
-                    authority.settle_recovered_retirement().await?
-                } else if !committed_receipts.is_empty() {
+                let terminal = if !committed_receipts.is_empty() {
                     authority
                         .persist_recovered_terminal(recovered_partial_terminal(
                             &authority.admission,
@@ -1410,42 +1301,19 @@ impl AutomationEffectAuthority {
                             &authority.operation,
                         )?)
                         .await?
-                } else if authority.admission.reset_source_digest().is_some() {
-                    let problem = shipped_proposal_reset_required_problem(
-                        &authority.operation,
-                        &authority.context,
-                        &authority.admission.request,
-                    )?;
-                    authority
-                        .persist_recovered_terminal(AutomationSettledTerminal::Problem(problem))
-                        .await?
                 } else {
                     let terminal = AutomationSettledTerminal::Problem(
                         authority.admission.recovery_problem().clone(),
                     );
                     authority.persist_recovered_terminal(terminal).await?
                 };
-                validate_retirement_binding(&authority.admission, retirement.as_ref())?;
-                finalize_terminal_housekeeping(
-                    &dashboard_root,
-                    &authority.journal_path,
-                    &authority.admission,
-                    &terminal,
-                    live_retirement,
-                )
-                .await?;
+                finalize_terminal_housekeeping(&dashboard_root, &authority.journal_path).await?;
                 Ok(AutomationEffectAdmission::Replay(Box::new(terminal)))
             }
             ReservationResult::RecoverPrepared {
                 terminal,
                 publication,
-                retirement,
             } => {
-                if retirement.is_some() || terminal.is_retirement_terminal() {
-                    return Err(contract_error(
-                        "proposal retirement cannot carry a prepared run publication",
-                    ));
-                }
                 let authority = Self {
                     context,
                     cancellation: cancellation.clone(),
@@ -1515,15 +1383,18 @@ impl AutomationEffectAuthority {
                 )?,
             },
             AutomationRunStatus::Skipped => {
-                if ledger.error != ledger.fallback_status {
+                let reason = project_skip_reason(ledger.error.as_deref().ok_or_else(|| {
+                    contract_error("skipped automation terminal has no exact reason")
+                })?)?;
+                if (reason == AutomationSkipReasonV1::SessionEvidenceBudgetExhausted)
+                    != ledger.session_evidence_budget_stage.is_some()
+                {
                     return Err(contract_error(
-                        "skipped automation ledger reason disagrees with its fallback status",
+                        "a budget-exhausted skip must carry exactly its exhausted stage",
                     ));
                 }
                 AutomationRunTerminalV1::Skipped {
-                    reason: project_skip_reason(ledger.error.as_deref().ok_or_else(|| {
-                        contract_error("skipped automation terminal has no exact reason")
-                    })?)?,
+                    reason,
                     summary: AutomationRunSummaryV1 {
                         reviewed_count: 0,
                         accepted_count: 0,
@@ -1562,53 +1433,6 @@ impl AutomationEffectAuthority {
             ));
         }
         self.success_terminal(result)
-    }
-
-    #[hotpath::skip]
-    async fn settle_retirement(&self) -> Result<AutomationSettledTerminal> {
-        self.persist_success_result(self.retirement_result()?).await
-    }
-
-    #[hotpath::skip]
-    async fn settle_recovered_retirement(&self) -> Result<AutomationSettledTerminal> {
-        let terminal = self.success_terminal(self.retirement_result()?)?;
-        self.persist_recovered_terminal(terminal).await
-    }
-
-    fn retirement_result(&self) -> Result<AutomationRunResultV1> {
-        let reason =
-            AutomationSkipReasonV1::from_ledger_reason("shipped_fact_proposal_history_retired")
-                .ok_or_else(|| {
-                    contract_error("shipped proposal retirement reason is not registered")
-                })?;
-        Ok(AutomationRunResultV1 {
-            run_id: self.admission.request.run_id.clone(),
-            task: self.admission.request.task_kind(),
-            request_digest: self
-                .admission
-                .request
-                .input_digest()
-                .map_err(contract_error)?,
-            terminal: AutomationRunTerminalV1::Skipped {
-                reason,
-                summary: AutomationRunSummaryV1 {
-                    reviewed_count: 0,
-                    accepted_count: 0,
-                    rejected_count: 0,
-                    skipped_count: 1,
-                },
-            },
-            committed_receipts: Vec::new(),
-        })
-    }
-
-    #[hotpath::skip]
-    async fn persist_success_result(
-        &self,
-        result: AutomationRunResultV1,
-    ) -> Result<AutomationSettledTerminal> {
-        let terminal = self.success_terminal(result)?;
-        self.persist_terminal(terminal).await
     }
 
     fn success_terminal(&self, result: AutomationRunResultV1) -> Result<AutomationSettledTerminal> {
@@ -1743,7 +1567,6 @@ impl AutomationEffectAuthority {
             || prior_task_key != reused.task_key
             || reused.prior_record.trigger != AutomationTrigger::Scheduler
             || reused.prior_record.status != AutomationRunStatus::Skipped
-            || reused.prior_record.error != reused.prior_record.fallback_status
             || reused.prior_record.error.as_deref() != Some(reused.reason.as_str())
             || reused.reason.is_empty()
         {
@@ -1834,20 +1657,6 @@ impl AutomationEffectAuthority {
     }
 
     #[hotpath::skip]
-    async fn persist_terminal(
-        &self,
-        terminal: AutomationSettledTerminal,
-    ) -> Result<AutomationSettledTerminal> {
-        let path = self.journal_path.clone();
-        let admission = self.admission.clone();
-        tokio::task::spawn_blocking(move || persist_terminal_blocking(&path, &admission, terminal))
-            .await
-            .map_err(|error| {
-                contract_error(format!("automation terminal writer failed: {error}"))
-            })?
-    }
-
-    #[hotpath::skip]
     async fn promote_prepared_terminal(
         &self,
         terminal: AutomationSettledTerminal,
@@ -1882,14 +1691,7 @@ impl AutomationEffectAuthority {
             &publication,
         )
         .await?;
-        finalize_terminal_housekeeping(
-            &self.dashboard_root,
-            &self.journal_path,
-            &self.admission,
-            &terminal,
-            None,
-        )
-        .await?;
+        finalize_terminal_housekeeping(&self.dashboard_root, &self.journal_path).await?;
         Ok(terminal)
     }
 
@@ -2382,21 +2184,8 @@ fn reservation_conflict_admission(
     _journal_path: &Path,
     _terminal: bool,
 ) -> AutomationEffectAdmission {
-    // A conflicting caller does not own the existing terminal's retirement or
-    // staged-publication cleanup proof. Project recovery may retire an exact
-    // stale index entry, but this admission must not erase that authority.
+    // A conflicting caller does not own the existing terminal's staged-
+    // publication cleanup proof. Project recovery may retire an exact stale
+    // index entry, but this admission must not erase that authority.
     AutomationEffectAdmission::Conflict
-}
-
-fn validate_retirement_binding(
-    admission: &DurableAutomationAdmission,
-    classified: Option<&retirement::RetirementBinding>,
-) -> Result<()> {
-    if admission.retirement() == classified {
-        Ok(())
-    } else {
-        Err(contract_error(
-            "automation retirement classification changed after durable admission",
-        ))
-    }
 }

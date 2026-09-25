@@ -36,6 +36,8 @@ pub struct Diagnostic {
     pub line_start: u32,
     /// 1-based inclusive end line. Equal to `line_start` for single-line spans.
     pub line_end: u32,
+    /// 1-based start column; `1` when the compiler reported none.
+    pub column: u32,
     /// Severity. Common values: `"error"`, `"warning"`, `"note"`. Drivers
     /// pass through whatever the compiler reports.
     pub level: String,
@@ -210,6 +212,7 @@ mod tests {
             file: "src/lib.rs".to_string(),
             line_start: 1,
             line_end: 1,
+            column: 1,
             level: "error".to_string(),
             code: "E0000".to_string(),
             message: message.to_string(),

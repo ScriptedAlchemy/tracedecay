@@ -37,8 +37,8 @@ pub enum DoctorFindingFamilyV1 {
     StorageRuntime,
     /// Storage retention, size, and efficiency over canonical observability
     /// read models. Distinct from [`Self::StorageRuntime`] health: this
-    /// family surfaces over-budget stores, identity-drift orphans, quarantined
-    /// incident debris, and retention backlog. The typed
+    /// family surfaces over-budget stores, identity-drift orphans, incident
+    /// debris, and retention backlog. The typed
     /// subclass vocabulary is [`DoctorStorageFindingKindV1`].
     Storage,
     /// Language-server / analyzer engine status from the LSP gateway's
@@ -68,8 +68,8 @@ pub enum DoctorStorageFindingKindV1 {
     /// A store whose project identity no longer resolves to a live repository
     /// root (identity-drift orphan), reported with age and size.
     OrphanStore,
-    /// Quarantined recovery/corruption artifacts are present and awaiting
-    /// collection.
+    /// Recovery/corruption artifacts are present beside a store and awaiting
+    /// deletion.
     IncidentDebrisPresent,
     /// Retention-eligible rows or stores are past their window and awaiting
     /// offload/collection.

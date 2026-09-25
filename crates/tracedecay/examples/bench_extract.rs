@@ -21,9 +21,9 @@ fn main() {
         || path.ends_with(".hpp")
         || path.ends_with(".hh")
     {
-        CppExtractor.extract(&path, &source)
+        CppExtractor.extract_artifact(&path, &source).result
     } else {
-        CExtractor.extract(&path, &source)
+        CExtractor.extract_artifact(&path, &source).result
     };
     let elapsed = t0.elapsed();
     eprintln!(

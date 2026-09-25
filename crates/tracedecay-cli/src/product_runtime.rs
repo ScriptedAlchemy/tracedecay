@@ -30,17 +30,18 @@ pub(crate) use generated::PRODUCT_FULL_SHA;
 /// fixture may call this unconditionally.
 #[cfg(test)]
 pub(crate) fn register_for_tests() {
-    match tracedecay::register_product_runtime(provider()) {
-        Ok(()) | Err(tracedecay::ProductRuntimeError::ConflictingProvider) => {}
+    match tracedecay_project::product_runtime::register_product_runtime(provider()) {
+        Ok(())
+        | Err(tracedecay_project::product_runtime::ProductRuntimeError::ConflictingProvider) => {}
         Err(error) => panic!("register the CLI product runtime for tests: {error}"),
     }
     crate::cloud::admit_sync_probes();
 }
 
-pub(crate) fn provider() -> tracedecay::ProductRuntimeProvider {
-    tracedecay::ProductRuntimeProvider {
+pub(crate) fn provider() -> tracedecay_project::product_runtime::ProductRuntimeProvider {
+    tracedecay_project::product_runtime::ProductRuntimeProvider {
         release_version: env!("CARGO_PKG_VERSION"),
-        source: tracedecay::ProductSourceProvenance {
+        source: tracedecay_project::product_runtime::ProductSourceProvenance {
             full_sha: generated::PRODUCT_FULL_SHA,
             dirty: generated::PRODUCT_SOURCE_DIRTY,
         },

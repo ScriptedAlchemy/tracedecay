@@ -93,7 +93,7 @@ function OutcomeReadModel({
     <>
       {truth}
       <dl
-        className="mx-4 mt-3 grid gap-x-4 gap-y-1 border border-edge-subtle bg-surface-1 px-3 py-2 text-3xs sm:grid-cols-2 xl:grid-cols-4"
+        className="mx-4 mt-3 grid gap-x-4 gap-y-1 border border-edge-subtle bg-surface-1 px-3 py-2 text-sm sm:grid-cols-2 xl:grid-cols-4"
         data-outcomes-measured={coverage.measured}
         data-outcomes-required={coverage.required}
         data-outcomes-funnel={consistency.kind}
@@ -109,7 +109,7 @@ function OutcomeReadModel({
       </dl>
 
       <div className="flex flex-col gap-4 px-4 py-3">
-        <p className="text-2xs leading-relaxed text-text-secondary" data-outcomes-summary="">
+        <p className="text-body leading-relaxed text-text-secondary" data-outcomes-summary="">
           {coverage.measured} of {coverage.required} required outcome dimensions carry a figure.{' '}
           {coverage.required - coverage.measured} retain the daemon&apos;s unknown or partial state,
           denominator, and reason rather than inferring a browser value.
@@ -149,7 +149,7 @@ function OutcomeReadModel({
                 : undefined
             }
           />
-          <p className="text-3xs leading-snug text-text-muted">
+          <p className="text-sm leading-snug text-text-muted">
             {consistency.kind === 'consistent'
               ? `Every measured stage admits no more units than the stage before it, across ${consistency.measured} stages.`
               : consistency.reason}
@@ -167,7 +167,7 @@ function OutcomeReadModel({
             <h3 className="td-legend truncate">not success outcomes</h3>
             <span aria-hidden className="td-rule" />
           </div>
-          <p className="text-3xs leading-snug text-text-muted">
+          <p className="text-sm leading-snug text-text-muted">
             Plan 26 refuses these nine as success outcomes. Two of them are readable from the
             diagnostics route right now, per-tool invocation counts and tool calls per message,
             which is why the refusal is printed rather than merely honoured. None contributes to
@@ -180,14 +180,14 @@ function OutcomeReadModel({
             {NOT_SUCCESS_OUTCOMES.map((signal) => (
               <li
                 key={signal}
-                className="border border-edge-subtle px-1.5 py-0.5 text-3xs text-text-secondary"
+                className="border border-edge-subtle px-1.5 py-0.5 text-sm text-text-secondary"
                 data-not-outcome={signal}
               >
                 {signal}
               </li>
             ))}
           </ul>
-          <p className="text-3xs leading-snug text-text-muted" data-outcomes-tally="unread">
+          <p className="text-sm leading-snug text-text-muted" data-outcomes-tally="unread">
             {OUTCOME_TALLY_NOT_TERMINAL}.
           </p>
         </section>
@@ -236,7 +236,7 @@ function AdoptionFamilies({
           'suppression floor are withheld rather than printed.'
         }
       />
-      <p className="text-3xs leading-snug text-text-muted" data-outcomes-ledger-note="">
+      <p className="text-sm leading-snug text-text-muted" data-outcomes-ledger-note="">
         These counts say how often the producers wrote, not how many units moved through any
         stage. No stage count above is derived from them.
       </p>

@@ -18,8 +18,9 @@
 //! different question than the caller asked.
 
 use tracedecay_contracts::{
-    AuthorizedWorkProductScopeV1, RequestContext, WorkProductOwnerAuthorizationErrorV1,
-    WorkProductOwnerAuthorizationPortV1, WorkProductSelectionScopeV1, WorkRelationScopeV1,
+    AuthorizedWorkProductScopeV1, RequestContext, WorkProductAuthorizedRelationScopeV1,
+    WorkProductOwnerAuthorizationErrorV1, WorkProductOwnerAuthorizationPortV1,
+    WorkProductSelectionScopeV1,
 };
 use tracedecay_domain::UtcMicros;
 
@@ -58,10 +59,10 @@ fn selection_is_within_resolved_scope(
         WorkProductSelectionScopeV1::Relations { relation_scopes } => {
             !relation_scopes.is_empty()
                 && relation_scopes.iter().all(|scope| match scope {
-                    WorkRelationScopeV1::Project { project_id } => {
+                    WorkProductAuthorizedRelationScopeV1::Project { project_id } => {
                         *project_id == resolved.project_id
                     }
-                    WorkRelationScopeV1::Repository {
+                    WorkProductAuthorizedRelationScopeV1::Repository {
                         project_id,
                         repository_id,
                     } => {

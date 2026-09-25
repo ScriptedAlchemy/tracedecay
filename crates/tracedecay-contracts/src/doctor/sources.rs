@@ -1156,6 +1156,107 @@ pub enum LanguageServerStateV1 {
     Crashed,
 }
 
+/// Live state of one analyzer the daemon resolved for the current project.
+///
+/// `LanguageServerStateV1` is the aggregate the finding is graded on; this is
+/// the per-analyzer evidence behind it, so an operator learns *which*
+/// executable is missing and how to install it, resolved by the daemon
+/// process (the only PATH that matters, since the daemon spawns analyzers)
+/// rather than by whichever shell ran the CLI.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LanguageServerAnalyzerV1 {
+    /// Adapter language (`typescript`, `rust`, …).
+    pub language: String,
+    /// The configured executable, after any operator command override.
+    pub command: String,
+    pub state: LanguageServerAnalyzerStateV1,
+    /// Whether the daemon process finds `command` on its own PATH. For an
+    /// active analyzer `state` is the finer verdict (a rustup proxy whose
+    /// toolchain lacks the component is found yet `Unavailable`); for an
+    /// inactive one this is the only availability evidence.
+    pub executable_found: bool,
+    /// The first install command the adapter advertises, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install: Option<String>,
+    /// The owner's last recorded error for this analyzer, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// State of one analyzer as the daemon owner holds it.
+///
+/// `Inactive` is the one state the aggregate never takes: the language has no
+/// files in the project, so Doctor does not grade it, but `lsp servers` still
+/// lists it from this same read so both surfaces share one authority.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum LanguageServerAnalyzerStateV1 {
+    Ready,
+    Available,
+    Refreshing,
+    Disabled,
+    Unavailable,
+    Crashed,
+    Inactive,
+}
+
+impl LanguageServerAnalyzerStateV1 {
+    /// The aggregate this analyzer contributes to, or `None` for an inactive
+    /// language that the aggregate must not grade.
+    #[must_use]
+    pub const fn aggregate(self) -> Option<LanguageServerStateV1> {
+        match self {
+            Self::Ready => Some(LanguageServerStateV1::Ready),
+            Self::Available => Some(LanguageServerStateV1::Available),
+            Self::Refreshing => Some(LanguageServerStateV1::Refreshing),
+            Self::Disabled => Some(LanguageServerStateV1::Disabled),
+            Self::Unavailable => Some(LanguageServerStateV1::Unavailable),
+            Self::Crashed => Some(LanguageServerStateV1::Crashed),
+            Self::Inactive => None,
+        }
+    }
+}
+
+impl LanguageServerReadV1 {
+    /// Grade the daemon owner's resolved analyzers. Inactive languages are
+    /// carried but never graded; with no active analyzer the read is `Absent`.
+    /// Severity order: crashed, unavailable, disabled, refreshing, then ready
+    /// only when every active analyzer is ready, otherwise available.
+    #[must_use]
+    pub fn observed(analyzers: Vec<LanguageServerAnalyzerV1>) -> Self {
+        let active: Vec<LanguageServerStateV1> = analyzers
+            .iter()
+            .filter_map(|analyzer| analyzer.state.aggregate())
+            .collect();
+        if active.is_empty() {
+            return Self::Absent { analyzers };
+        }
+        let state = [
+            LanguageServerStateV1::Crashed,
+            LanguageServerStateV1::Unavailable,
+            LanguageServerStateV1::Disabled,
+            LanguageServerStateV1::Refreshing,
+        ]
+        .into_iter()
+        .find(|state| active.contains(state))
+        .unwrap_or(
+            if active
+                .iter()
+                .all(|state| *state == LanguageServerStateV1::Ready)
+            {
+                LanguageServerStateV1::Ready
+            } else {
+                LanguageServerStateV1::Available
+            },
+        );
+        Self::Observed {
+            state,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+            analyzers,
+        }
+    }
+}
+
 /// One live read from the daemon language-server/analyzer owner.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -1164,11 +1265,19 @@ pub enum LanguageServerReadV1 {
     Observed {
         state: LanguageServerStateV1,
         coverage: DoctorCoverageCompletenessV1,
+        /// Every analyzer the owner resolved, active or not; the aggregate
+        /// `state` covers the active ones only.
+        #[serde(default)]
+        analyzers: Vec<LanguageServerAnalyzerV1>,
     },
     /// Language-server inspection is unsupported on this build/platform.
     Unsupported,
-    /// No project-active analyzer is configured.
-    Absent,
+    /// No project-active analyzer is configured. The owner's inactive
+    /// analyzers are still carried so `lsp servers` can list them.
+    Absent {
+        #[serde(default)]
+        analyzers: Vec<LanguageServerAnalyzerV1>,
+    },
     /// Authorization to inspect analyzer state was denied.
     Denied,
     /// Analyzer state could not be determined.
@@ -1182,7 +1291,11 @@ pub fn language_server_finding(
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
     let family = DoctorFindingFamilyV1::LanguageServer;
     match read {
-        LanguageServerReadV1::Observed { state, coverage } => match state {
+        LanguageServerReadV1::Observed {
+            state,
+            coverage,
+            analyzers,
+        } => match state {
             LanguageServerStateV1::Ready => clean_finding(
                 family,
                 "language-server.analyzer.ready",
@@ -1208,21 +1321,30 @@ pub fn language_server_finding(
                 DoctorEvidenceStateV1::Degraded,
                 "language-server.analyzer.disabled",
                 *coverage,
-                "at least one project analyzer is disabled",
+                &bounded_statement(&format!(
+                    "project analyzer disabled: {}",
+                    degraded_analyzers_statement(analyzers, *state)
+                )),
             ),
             LanguageServerStateV1::Unavailable => source_finding(
                 family,
                 DoctorEvidenceStateV1::Degraded,
                 "language-server.analyzer.unavailable",
                 *coverage,
-                "at least one project analyzer executable is unavailable",
+                &bounded_statement(&format!(
+                    "project analyzer executable not found on the daemon PATH: {}",
+                    degraded_analyzers_statement(analyzers, *state)
+                )),
             ),
             LanguageServerStateV1::Crashed => source_finding(
                 family,
                 DoctorEvidenceStateV1::Degraded,
                 "language-server.analyzer.crashed",
                 *coverage,
-                "at least one project analyzer process crashed",
+                &bounded_statement(&format!(
+                    "project analyzer process crashed: {}",
+                    degraded_analyzers_statement(analyzers, *state)
+                )),
             ),
         },
         LanguageServerReadV1::Unsupported => unobservable_finding(
@@ -1231,7 +1353,7 @@ pub fn language_server_finding(
             "language-server.unsupported",
             "language-server inspection unsupported on this platform",
         ),
-        LanguageServerReadV1::Absent => unobservable_finding(
+        LanguageServerReadV1::Absent { .. } => unobservable_finding(
             family,
             DoctorEvidenceStateV1::Absent,
             "language-server.absent",
@@ -1249,6 +1371,36 @@ pub fn language_server_finding(
             "language-server.unknown",
             "language-server analyzer state undetermined",
         ),
+    }
+}
+
+/// Name every active analyzer in `state`, with its executable and install
+/// step, so a degraded finding is actionable. A read whose aggregate says
+/// `state` but lists no such analyzer is reported as exactly that gap rather
+/// than as a healthy-looking empty list.
+fn degraded_analyzers_statement(
+    analyzers: &[LanguageServerAnalyzerV1],
+    state: LanguageServerStateV1,
+) -> String {
+    let named: Vec<String> = analyzers
+        .iter()
+        .filter(|analyzer| analyzer.state.aggregate() == Some(state))
+        .map(|analyzer| {
+            let mut entry = format!("{} ({}", analyzer.language, analyzer.command);
+            if let Some(install) = &analyzer.install {
+                entry.push_str(&format!("; install: {install}"));
+            }
+            if let Some(detail) = &analyzer.detail {
+                entry.push_str(&format!("; {detail}"));
+            }
+            entry.push(')');
+            entry
+        })
+        .collect();
+    if named.is_empty() {
+        "analyzer identity not reported by the daemon owner".to_owned()
+    } else {
+        named.join(", ")
     }
 }
 
@@ -1454,10 +1606,15 @@ pub fn ingest_refusal_finding(
             if ordered.len() > MAX_LISTED_PAIRS {
                 breakdown.push(format!("+{} more", ordered.len() - MAX_LISTED_PAIRS));
             }
+            // The cursor-advance ledger keeps only the rows that still support
+            // a source's current frontier, so this counts sources whose newest
+            // covered record was refused, not every refusal ever recorded; the
+            // count is bounded by sources × scopes and cannot grow unbounded.
             let statement = format!(
-                "durable ingest coverage advanced past {total} refused source records ({}); \
-                 refusals are deterministic typed outcomes recorded in the cursor-advance \
-                 ledger, not silently dropped data",
+                "durable ingest coverage rests on {total} refused source records ({}): each is \
+                 the newest covered record of one transcript source and was skipped, not \
+                 silently dropped; the daemon log names each one (WARN `admission refused`, \
+                 fields reason/cause/offset)",
                 breakdown.join(", ")
             );
             source_finding(
@@ -1465,7 +1622,7 @@ pub fn ingest_refusal_finding(
                 DoctorEvidenceStateV1::Degraded,
                 "observability.ingest-coverage.durably-refused",
                 DoctorCoverageCompletenessV1::Complete,
-                &statement,
+                &bounded_statement(&statement),
             )
         }
         IngestRefusalCensusReadV1::Unknown => unobservable_finding(
@@ -1717,10 +1874,89 @@ mod tests {
         let finding = language_server_finding(&LanguageServerReadV1::Observed {
             state: LanguageServerStateV1::Refreshing,
             coverage: DoctorCoverageCompletenessV1::Complete,
+            analyzers: Vec::new(),
         })
         .expect("finding");
         assert_eq!(finding.family(), DoctorFindingFamilyV1::LanguageServer);
         assert_eq!(finding.state(), DoctorEvidenceStateV1::Partial);
+    }
+
+    #[test]
+    fn language_server_unavailable_names_each_missing_analyzer_and_install_step() {
+        let analyzer = |language: &str, command: &str, state, install: Option<&str>| {
+            LanguageServerAnalyzerV1 {
+                language: language.to_owned(),
+                command: command.to_owned(),
+                state,
+                executable_found: state != LanguageServerAnalyzerStateV1::Unavailable,
+                install: install.map(str::to_owned),
+                detail: None,
+            }
+        };
+        let read = LanguageServerReadV1::observed(vec![
+            analyzer(
+                "rust",
+                "rust-analyzer",
+                LanguageServerAnalyzerStateV1::Ready,
+                None,
+            ),
+            analyzer(
+                "typescript",
+                "typescript-language-server",
+                LanguageServerAnalyzerStateV1::Unavailable,
+                Some("npm install -g typescript typescript-language-server"),
+            ),
+            analyzer(
+                "python",
+                "pyright-langserver",
+                LanguageServerAnalyzerStateV1::Unavailable,
+                Some("npm install -g pyright"),
+            ),
+            analyzer(
+                "go",
+                "gopls",
+                LanguageServerAnalyzerStateV1::Inactive,
+                Some("go install golang.org/x/tools/gopls@latest"),
+            ),
+        ]);
+        let finding = language_server_finding(&read).expect("finding");
+        assert_eq!(finding.state(), DoctorEvidenceStateV1::Degraded);
+        assert_eq!(
+            finding.coverage().statement(),
+            "project analyzer executable not found on the daemon PATH: \
+             typescript (typescript-language-server; install: npm install -g typescript typescript-language-server), \
+             python (pyright-langserver; install: npm install -g pyright)"
+        );
+    }
+
+    #[test]
+    fn language_server_degraded_without_analyzer_identity_says_so() {
+        let finding = language_server_finding(&LanguageServerReadV1::Observed {
+            state: LanguageServerStateV1::Crashed,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+            analyzers: Vec::new(),
+        })
+        .expect("finding");
+        assert_eq!(
+            finding.coverage().statement(),
+            "project analyzer process crashed: analyzer identity not reported by the daemon owner"
+        );
+    }
+
+    #[test]
+    fn language_server_observed_grades_only_active_analyzers() {
+        let inactive_only = LanguageServerReadV1::observed(vec![LanguageServerAnalyzerV1 {
+            language: "go".to_owned(),
+            command: "gopls".to_owned(),
+            state: LanguageServerAnalyzerStateV1::Inactive,
+            executable_found: false,
+            install: None,
+            detail: None,
+        }]);
+        assert!(matches!(
+            inactive_only,
+            LanguageServerReadV1::Absent { analyzers } if analyzers.len() == 1
+        ));
     }
 
     #[test]

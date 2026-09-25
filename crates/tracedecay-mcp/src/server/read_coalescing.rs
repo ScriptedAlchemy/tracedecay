@@ -328,7 +328,7 @@ mod tests {
         let coalescer = IdenticalReadCoalescer::default();
         let leader = match coalescer.claim(
             "graph-main",
-            "tracedecay_outline",
+            "tracedecay_source_outline",
             &json!({"file": "src/lib.rs"}),
             None,
         ) {
@@ -337,7 +337,7 @@ mod tests {
         };
         let follower = match coalescer.claim(
             "graph-main",
-            "tracedecay_outline",
+            "tracedecay_source_outline",
             &json!({"file": "src/lib.rs"}),
             None,
         ) {
@@ -350,7 +350,7 @@ mod tests {
         assert!(matches!(
             coalescer.claim(
                 "graph-main",
-                "tracedecay_outline",
+                "tracedecay_source_outline",
                 &json!({"file": "src/lib.rs"}),
                 None
             ),
@@ -363,7 +363,7 @@ mod tests {
         let coalescer = IdenticalReadCoalescer::default();
         let _leader = match coalescer.claim(
             "graph-main",
-            "tracedecay_outline",
+            "tracedecay_source_outline",
             &json!({"file": "src/lib.rs"}),
             None,
         ) {
@@ -372,7 +372,7 @@ mod tests {
         };
         let follower = match coalescer.claim(
             "graph-main",
-            "tracedecay_outline",
+            "tracedecay_source_outline",
             &json!({"file": "src/lib.rs"}),
             None,
         ) {
@@ -418,7 +418,7 @@ mod tests {
             );
         }
         assert!(tool_allows_identical_read_coalescing(
-            "tracedecay_outline",
+            "tracedecay_source_outline",
             |_| true,
         ));
         assert!(!tool_allows_identical_read_coalescing(

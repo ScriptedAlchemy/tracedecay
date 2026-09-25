@@ -422,7 +422,7 @@ impl DaemonNativeWorktreeAuthority {
     }
 
     fn linked_admin_present(&self, worktree_root: &Path) -> Result<bool, WorktreeContractError> {
-        let repository = gix::open(&self.repository_root)
+        let repository = tracedecay_runtime_core::git_open::open(&self.repository_root)
             .map_err(|_| WorktreeContractError::AuthorityUnavailable)?;
         let worktrees = repository
             .worktrees()

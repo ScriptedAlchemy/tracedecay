@@ -24,6 +24,6 @@ pub(crate) use settings::{
     project_configuration_set, report_configuration_receipt,
 };
 pub(crate) use storage::{
-    ProfileOfflineAuthority, handle_list, handle_wipe, join_outcome_and_restore,
-    take_profile_offline, try_admit_profile_registry,
+    ProfileOfflineAuthority, annotate_reset_required, handle_list, handle_wipe,
+    join_outcome_and_restore, take_profile_offline, try_admit_profile_registry,
 };

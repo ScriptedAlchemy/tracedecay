@@ -5,7 +5,6 @@ use std::collections::HashSet;
 use serde_json::{Value, json};
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_code_index::lineage::LineageSymbolRecordV1;
-use tracedecay_domain::code_intelligence::{EdgeKind, NodeKind};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_query::VerifiedGraphQuery;
@@ -156,33 +155,6 @@ pub fn graph_symbol_location_value(symbol: &CodeGraphSymbolSummaryV1) -> Result<
     }))
 }
 
-pub fn graph_name_matches(metadata: &LineageSymbolRecordV1, query: &str) -> bool {
-    let query = query.to_ascii_lowercase();
-    metadata.simple_name.to_ascii_lowercase().contains(&query)
-        || metadata
-            .qualified_name
-            .to_ascii_lowercase()
-            .contains(&query)
-}
-
-pub fn canonical_relation_kind(kind: EdgeKind) -> Result<RelationEdgeKindV1> {
-    match kind {
-        EdgeKind::Calls => Ok(RelationEdgeKindV1::Calls),
-        EdgeKind::Uses => Ok(RelationEdgeKindV1::Uses),
-        EdgeKind::TypeOf => Ok(RelationEdgeKindV1::TypeOf),
-        EdgeKind::Contains => Ok(RelationEdgeKindV1::Contains),
-        EdgeKind::Implements => Ok(RelationEdgeKindV1::Implements),
-        EdgeKind::Extends => Ok(RelationEdgeKindV1::Extends),
-        EdgeKind::Annotates => Ok(RelationEdgeKindV1::Annotates),
-        EdgeKind::Returns => Ok(RelationEdgeKindV1::Returns),
-        EdgeKind::Receives => Ok(RelationEdgeKindV1::Receives),
-        EdgeKind::DerivesMacro => Err(TraceDecayError::Config {
-            message: "derive-macro relations are not published in the verified code graph"
-                .to_owned(),
-        }),
-    }
-}
-
 pub fn single_graph_adjacency_batch<T>(mut batches: Vec<Vec<T>>) -> Result<Vec<T>> {
     if batches.len() != 1 {
         return Err(graph_symbol_corrupt(format!(
@@ -242,90 +214,6 @@ pub fn traverse_verified_neighbors(
         frontier = next;
     }
     Ok(results)
-}
-
-pub fn verified_neighbor_value(result: &VerifiedNeighbor) -> Result<Value> {
-    let metadata = required_graph_metadata(&result.symbol)?;
-    Ok(json!({
-        "node_id": result.symbol.occurrence.as_str(),
-        "name": metadata.simple_name,
-        "kind": metadata.kind,
-        "file": required_graph_file_path(&result.symbol)?,
-        "line": metadata.start_line.saturating_add(1),
-        "edge_kind": result.edge_kind.as_str(),
-        "depth": result.depth,
-    }))
-}
-
-#[hotpath::measure(label = "mcp.graph.trait_dispatch")]
-pub fn verified_trait_dispatch_targets(
-    graph: &VerifiedGraphQuery,
-    method: &CodeGraphSymbolSummaryV1,
-) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
-    let method_metadata = required_graph_metadata(method)?;
-    if !matches!(
-        NodeKind::from_str(&method_metadata.kind),
-        Some(NodeKind::Method | NodeKind::Function)
-    ) {
-        return Ok(Vec::new());
-    }
-    let parents = single_graph_adjacency_batch(graph.callers(
-        std::slice::from_ref(&method.occurrence),
-        &[RelationEdgeKindV1::Contains],
-        GRAPH_RELATION_READ_LIMIT,
-    )?)?;
-    let traits = parents
-        .into_iter()
-        .map(|edge| edge.neighbor)
-        .filter(|parent| {
-            parent.metadata.as_ref().is_some_and(|metadata| {
-                matches!(
-                    NodeKind::from_str(&metadata.kind),
-                    Some(NodeKind::Trait | NodeKind::Interface | NodeKind::InterfaceType)
-                )
-            })
-        })
-        .collect::<Vec<_>>();
-    let trait_occurrences = traits
-        .iter()
-        .map(|node| node.occurrence.clone())
-        .collect::<Vec<_>>();
-    if trait_occurrences.is_empty() {
-        return Ok(Vec::new());
-    }
-    let implementors = graph
-        .callers(
-            &trait_occurrences,
-            &[RelationEdgeKindV1::Implements],
-            GRAPH_RELATION_READ_LIMIT,
-        )?
-        .into_iter()
-        .flatten()
-        .map(|edge| edge.neighbor.occurrence)
-        .collect::<Vec<_>>();
-    if implementors.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut targets = Vec::new();
-    for child in graph
-        .callees(
-            &implementors,
-            &[RelationEdgeKindV1::Contains],
-            GRAPH_RELATION_READ_LIMIT,
-        )?
-        .into_iter()
-        .flatten()
-    {
-        let metadata = required_graph_metadata(&child.neighbor)?;
-        if matches!(
-            NodeKind::from_str(&metadata.kind),
-            Some(NodeKind::Method | NodeKind::Function)
-        ) && metadata.simple_name == method_metadata.simple_name
-        {
-            targets.push(child.neighbor);
-        }
-    }
-    Ok(targets)
 }
 
 pub fn cost_to_expand_verified(

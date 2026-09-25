@@ -87,19 +87,19 @@ async fn each_typed_assertion_relation_authorizes_only_its_matching_kind() {
     for (index, (kind, relation)) in [
         (
             TemporalAssertionKindV1::Corrects,
-            AnchorProvenanceRelationV2::Corrects,
+            AnchorProvenanceRelation::Corrects,
         ),
         (
             TemporalAssertionKindV1::Contradicts,
-            AnchorProvenanceRelationV2::Contradicts,
+            AnchorProvenanceRelation::Contradicts,
         ),
         (
             TemporalAssertionKindV1::Supersedes,
-            AnchorProvenanceRelationV2::Supersedes,
+            AnchorProvenanceRelation::Supersedes,
         ),
         (
             TemporalAssertionKindV1::Supports,
-            AnchorProvenanceRelationV2::Supports,
+            AnchorProvenanceRelation::Supports,
         ),
     ]
     .into_iter()
@@ -167,7 +167,7 @@ async fn mismatched_typed_assertion_relation_is_rejected() {
         &session_id,
         1,
         "subject",
-        AnchorProvenanceRelationV2::Supports,
+        AnchorProvenanceRelation::Supports,
         object.retrieval_anchor_id.clone(),
         None,
     )
@@ -313,7 +313,7 @@ async fn copied_from_requires_explicit_typed_copy_record() {
     let second_observation = persist_custom_observation_with_lineage(
         &observation_store,
         observation_with_message_ids(&session_id, 1, "copy", "message.temporal.copy", None),
-        AnchorProvenanceRelationV2::CopiedFrom,
+        AnchorProvenanceRelation::CopiedFrom,
         first.retrieval_anchor_id.clone(),
     )
     .await;

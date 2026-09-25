@@ -19,9 +19,10 @@ use tracedecay_domain::UtcMicros;
 
 use crate::{
     HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1, HookConfigurationSubscriberV1,
-    HookEventEnvelopeV2, HookHostV1, HookScopeBindingV1, HookSpoolAckDispositionV1, HookSpoolAckV1,
+    HookEventEnvelopeV2, HookScopeBindingV1, HookSpoolAckDispositionV1, HookSpoolAckV1,
     HookSpoolRecordV1, HookSpoolV1, hook_configuration_path, validate_replay_batch,
 };
+use tracedecay_domain::NativeHostIdentityV1;
 
 /// Fair sessions leased per host per pass. The spool caps this at four.
 const REPLAY_SESSIONS_PER_PASS: usize = 4;
@@ -70,14 +71,14 @@ pub enum HookReplayAdmissionOutcomeV1 {
     Unavailable,
 }
 
-pub fn hook_v2_spool_root(data_root: &Path, host: HookHostV1) -> PathBuf {
+pub fn hook_v2_spool_root(data_root: &Path, host: NativeHostIdentityV1) -> PathBuf {
     data_root.join("hook-v2-spool").join(host.hook_key())
 }
 
 pub fn published_hook_scope_binding(
     data_root: &Path,
     worktree_id: [u8; 16],
-    host: HookHostV1,
+    host: NativeHostIdentityV1,
     now: UtcMicros,
 ) -> Option<HookScopeBindingV1> {
     let subscriber = HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(
@@ -317,7 +318,7 @@ where
 }
 
 fn log_tombstone(
-    host: HookHostV1,
+    host: NativeHostIdentityV1,
     record: &HookSpoolRecordV1,
     reason: HookReplayTombstoneReasonV1,
 ) {
@@ -376,7 +377,7 @@ mod tests {
         HookSpoolConfigV1, stock_event_support,
     };
 
-    const HOST: HookHostV1 = HookHostV1::ClaudeCode;
+    const HOST: NativeHostIdentityV1 = NativeHostIdentityV1::ClaudeCode;
     const PROJECT_ID: [u8; 16] = [1; 16];
     const WORKTREE_ID: [u8; 16] = [3; 16];
 
@@ -385,11 +386,11 @@ mod tests {
         let data_root = Path::new("/tmp/tracedecay-hook-v2");
 
         assert_eq!(
-            hook_v2_spool_root(data_root, HookHostV1::CursorDesktop),
+            hook_v2_spool_root(data_root, NativeHostIdentityV1::CursorDesktop),
             data_root.join("hook-v2-spool").join("cursor-desktop")
         );
         assert_eq!(
-            hook_v2_spool_root(data_root, HookHostV1::CursorCloud),
+            hook_v2_spool_root(data_root, NativeHostIdentityV1::CursorCloud),
             data_root.join("hook-v2-spool").join("cursor-cloud")
         );
     }
@@ -541,17 +542,17 @@ mod tests {
         let root = TestRoot::new("lifecycle-suggestion");
         let now = UtcMicros(1_000);
         let mut binding = binding(7);
-        binding.host = HookHostV1::OpenCode;
+        binding.host = NativeHostIdentityV1::OpenCode;
         binding.capabilities = binding
             .capabilities
             .iter()
             .map(|capability| HookCapabilityV1 {
                 family: capability.family,
-                support: stock_event_support(HookHostV1::OpenCode, capability.family),
+                support: stock_event_support(NativeHostIdentityV1::OpenCode, capability.family),
             })
             .collect();
         let mut tool_after = envelope(9, &binding);
-        tool_after.producer = HookHostV1::OpenCode;
+        tool_after.producer = NativeHostIdentityV1::OpenCode;
         tool_after.protected_session_id = protected_session_id("session.native.replay");
         tool_after.event = HookEventV2::ToolLifecycle {
             tool_id: [8; 16],
@@ -565,10 +566,10 @@ mod tests {
         )
         .unwrap();
         publish_binding(root.path(), &binding, now);
-        let spool_root = hook_v2_spool_root(root.path(), HookHostV1::OpenCode);
+        let spool_root = hook_v2_spool_root(root.path(), NativeHostIdentityV1::OpenCode);
         let (mut spool, _) = HookSpoolV1::open(
             &spool_root,
-            HookSpoolConfigV1::stock(HookHostV1::OpenCode),
+            HookSpoolConfigV1::stock(NativeHostIdentityV1::OpenCode),
             now,
         )
         .unwrap();
@@ -582,7 +583,7 @@ mod tests {
         let report = drain_host_spool_once(
             HookSpoolV1::open(
                 &spool_root,
-                HookSpoolConfigV1::stock(HookHostV1::OpenCode),
+                HookSpoolConfigV1::stock(NativeHostIdentityV1::OpenCode),
                 now,
             )
             .unwrap()
@@ -628,7 +629,7 @@ mod tests {
         );
         let (spool, report) = HookSpoolV1::open(
             spool_root,
-            HookSpoolConfigV1::stock(HookHostV1::OpenCode),
+            HookSpoolConfigV1::stock(NativeHostIdentityV1::OpenCode),
             now,
         )
         .unwrap();
@@ -816,8 +817,12 @@ mod tests {
     async fn kimi_and_opencode_replay_preserve_native_session_and_provider_order() {
         let seen = Arc::new(StdMutex::new(Vec::new()));
         for (host, session, sequence) in [
-            (HookHostV1::KimiCode, "session.kimi.replay", 41),
-            (HookHostV1::OpenCode, "session.opencode.replay", 42),
+            (NativeHostIdentityV1::KimiCode, "session.kimi.replay", 41),
+            (
+                NativeHostIdentityV1::OpenCode,
+                "session.opencode.replay",
+                42,
+            ),
         ] {
             let mut host_binding = binding(7);
             host_binding.host = host;
@@ -867,10 +872,10 @@ mod tests {
         }
 
         let seen = seen.lock().unwrap();
-        assert_eq!(seen[0].0, HookHostV1::KimiCode);
+        assert_eq!(seen[0].0, NativeHostIdentityV1::KimiCode);
         assert_eq!(seen[0].1, HookOrderingV1::ProviderSequence(41));
         assert_eq!(seen[0].2.as_str(), "session.kimi.replay");
-        assert_eq!(seen[1].0, HookHostV1::OpenCode);
+        assert_eq!(seen[1].0, NativeHostIdentityV1::OpenCode);
         assert_eq!(seen[1].1, HookOrderingV1::ProviderSequence(42));
         assert_eq!(seen[1].2.as_str(), "session.opencode.replay");
     }

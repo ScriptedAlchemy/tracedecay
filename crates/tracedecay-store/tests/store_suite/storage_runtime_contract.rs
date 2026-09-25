@@ -1,8 +1,5 @@
 use std::fmt::Debug;
-use std::future::Future;
-use std::pin::pin;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
-use std::task::{Context, Poll, Waker};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -146,18 +143,6 @@ fn submit_request(metadata: StoreOperationMetadataV1) -> RuntimeSubmitRequestV1 
         control(),
     )
     .unwrap()
-}
-
-fn block_on<F: Future>(future: F) -> F::Output {
-    let waker = Waker::noop();
-    let mut context = Context::from_waker(waker);
-    let mut future = pin!(future);
-    loop {
-        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
-            return output;
-        }
-        std::thread::yield_now();
-    }
 }
 
 fn commit_receipt(metadata: &StoreOperationMetadataV1) -> StoreCommitReceiptV1 {
@@ -594,37 +579,6 @@ fn runtime_commit_probe_grants_at_most_one_commit() {
     assert!(!cancelled.try_begin_commit());
 }
 
-struct FakeReadPort {
-    calls: AtomicUsize,
-}
-
-impl StorageRuntimeReadPort for FakeReadPort {
-    fn dispatch_read<'a>(
-        &'a self,
-        request: RuntimeReadRequestV1,
-        _probe: &'a dyn RuntimeRequestProbeV1,
-    ) -> StorageRuntimePortFutureV1<'a, RuntimeReadOutcomeV1> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async move {
-            let observed = ShardWatermarkV1 {
-                shard_id: request.binding().shard_id.clone(),
-                incarnation: request.binding().incarnation,
-                authority_epoch: request.binding().authority_epoch,
-                commit_sequence: CommitSequenceV1(9),
-            };
-            RuntimeReadOutcomeV1::new(
-                Some(RuntimeReadResultV1::CurrentWatermark {
-                    watermark: observed.clone(),
-                }),
-                RuntimeReadCoverageV1::Latest {
-                    observed: Some(observed),
-                },
-            )
-            .map_err(StorageRuntimePortErrorV1::InvalidResponse)
-        })
-    }
-}
-
 fn read_request(
     binding: StoreRuntimeBindingV1,
     consistency: ConsistencyModeV1,
@@ -682,51 +636,7 @@ fn runtime_submit_outcomes_validate_request_identity() {
 }
 
 #[test]
-fn typed_async_reads_report_latest_exact_partial_stale_and_unavailable_coverage() {
-    let latest = read_request(
-        binding(project_shard("project.one")),
-        ConsistencyModeV1::LatestAvailable,
-        RuntimeReadOperationV1::CurrentWatermark,
-    );
-    let probe = Probe::new(latest.control(), None);
-    let read_port = FakeReadPort {
-        calls: AtomicUsize::new(0),
-    };
-    let object_safe_port: &dyn StorageRuntimeReadPort = &read_port;
-    assert!(matches!(
-        block_on(object_safe_port.read(latest, &probe))
-            .unwrap()
-            .coverage(),
-        RuntimeReadCoverageV1::Latest { .. }
-    ));
-
-    for (interruption, reason) in [
-        (
-            RuntimeInterruptionV1::Cancelled,
-            UnavailableReasonV1::Cancelled,
-        ),
-        (
-            RuntimeInterruptionV1::DeadlineExceeded,
-            UnavailableReasonV1::DeadlineExceeded,
-        ),
-    ] {
-        let request = read_request(
-            binding(project_shard("project.one")),
-            ConsistencyModeV1::LatestAvailable,
-            RuntimeReadOperationV1::CurrentWatermark,
-        );
-        let probe = Probe::new(request.control(), Some(interruption));
-        let outcome = block_on(object_safe_port.read(request, &probe)).unwrap();
-        assert!(matches!(
-            outcome.coverage(),
-            RuntimeReadCoverageV1::Unavailable {
-                coverage: None,
-                reason: actual,
-            } if *actual == reason
-        ));
-    }
-    assert_eq!(read_port.calls.load(Ordering::SeqCst), 1);
-
+fn read_outcomes_validate_exact_partial_stale_and_unavailable_coverage() {
     let at_least = read_request(
         binding(project_shard("project.one")),
         ConsistencyModeV1::AtLeast {

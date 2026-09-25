@@ -1,6 +1,5 @@
 use std::{
     collections::BTreeSet,
-    io::Cursor,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -144,28 +143,43 @@ impl CodeIndexExecutionControlV1 for ActiveControl {
     }
 }
 
+/// A partitioned sealed generation held in memory: the manifest, its content
+/// address, and every published file segment under its digest.
 struct SealedSourceFixture {
-    sealed: Vec<u8>,
+    manifest: Vec<u8>,
+    segments: Arc<BTreeMap<ManifestDigest, Vec<u8>>>,
     state_digest: ManifestDigest,
     generation: Arc<CodeIndexPublishedGenerationV1>,
 }
 
 impl SealedSourceFixture {
-    fn open(&self) -> VerifiedSealedLexicalPageSourceV1<Cursor<Vec<u8>>> {
+    fn open(&self) -> VerifiedSealedLexicalPageSourceV1 {
         self.open_with_page_chunks(1)
     }
 
     fn open_with_page_chunks(
         &self,
         maximum_page_chunks: usize,
-    ) -> VerifiedSealedLexicalPageSourceV1<Cursor<Vec<u8>>> {
-        VerifiedSealedLexicalPageSourceV1::open(
-            Cursor::new(self.sealed.clone()),
-            u64::try_from(self.sealed.len()).expect("sealed fixture length fits u64"),
+    ) -> VerifiedSealedLexicalPageSourceV1 {
+        self.open_with_bounds(maximum_page_chunks, 1024 * 1024)
+    }
+
+    fn open_with_bounds(
+        &self,
+        maximum_page_chunks: usize,
+        maximum_page_bytes: usize,
+    ) -> VerifiedSealedLexicalPageSourceV1 {
+        let segments = Arc::clone(&self.segments);
+        VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
+            &self.manifest,
             self.state_digest.clone(),
+            move |digest, _, buffer, _control| {
+                buffer.clear();
+                buffer.extend_from_slice(segments.get(digest).expect("sealed segment exists"));
+                Ok(())
+            },
             maximum_page_chunks,
-            1024 * 1024,
-            &ActiveControl,
+            maximum_page_bytes,
         )
         .expect("real sealed fixture source opens")
     }
@@ -188,73 +202,11 @@ fn fixture() -> SealedSourceFixture {
 }
 
 #[test]
-fn published_memory_files_admit_the_same_pages_as_sealed_decode() {
-    let fixture = fixture();
-    let disk = one_page_expectations(&fixture);
-    let mut source = fixture.open();
-    source
-        .attach_published_files(&fixture.generation)
-        .expect("published files attach onto the scanned layout");
-    let mut memory = Vec::new();
-    loop {
-        match source
-            .next_page(&ActiveControl)
-            .expect("memory-admitted page")
-        {
-            VerifiedSealedLexicalPageReadV1::Page(page) => {
-                memory.push(expectation(&page));
-            }
-            VerifiedSealedLexicalPageReadV1::Complete(receipt) => {
-                receipt
-                    .verify_completion(Some(source.cursor()))
-                    .expect("memory-admitted receipt verifies");
-                break;
-            }
-        }
-    }
-    assert_eq!(disk, memory);
-}
-
-#[test]
-fn published_clone_rows_refuse_foreign_generation_authority_before_paging() {
-    let fixture = fixture();
-    let mut generation = (*fixture.generation).clone();
-    let file = Arc::make_mut(&mut generation.files[0]);
-    let body = file
-        .artifacts
-        .clone_bodies
-        .first_mut()
-        .expect("fixture clone body");
-    body.occurrence.project_id = ProjectId::new("project.foreign").expect("foreign project");
-
-    let mut source = fixture.open();
-    source
-        .attach_published_files(&generation)
-        .expect("generation identity still attaches");
-    assert!(matches!(
-        source.next_page(&ActiveControl),
-        Err(CodeIndexProductionErrorV1::Chunk(
-            crate::chunks::ChunkingFailureV1::GenerationMismatch
-        ))
-    ));
-}
-
-#[test]
 fn partitioned_reopen_reports_encoded_byte_progress_and_bounds_prefetch() {
     let fixture =
         fixture_for_source_files(BATCH_FIXTURE_SOURCE, "src/batch_fixture.rs", "rust", 25);
-    let mut segments = BTreeMap::new();
-    let manifest = fixture
-        .generation
-        .encode_partitioned_sealed(|request| {
-            if let super::super::SealedGenerationSegmentPublicationV1::File { digest, bytes } =
-                request
-            {
-                segments.insert(digest.clone(), bytes.to_vec());
-            }
-            Ok(())
-        })
-        .expect("partitioned generation encodes");
+    let manifest = fixture.manifest.clone();
+    let segments = Arc::clone(&fixture.segments);
     let manifest_value: serde_json::Value =
         serde_json::from_slice(&manifest).expect("partitioned manifest envelope");
     let segment_sizes = manifest_value["generation"]["file_segments"]
@@ -267,12 +219,20 @@ fn partitioned_reopen_reports_encoded_byte_progress_and_bounds_prefetch() {
                 .expect("partitioned segment size")
         })
         .collect::<Vec<_>>();
-    let segments = Arc::new(segments);
+    let decoded_segment_bytes = manifest_value["generation"]["file_segments"]
+        .as_array()
+        .expect("partitioned file descriptors")
+        .iter()
+        .map(|descriptor| {
+            descriptor["decoded_size_bytes"]
+                .as_u64()
+                .expect("partitioned decoded segment size")
+        })
+        .sum::<u64>();
     let read_segments = Arc::clone(&segments);
     let reads = Arc::new(AtomicUsize::new(0));
     let read_count = Arc::clone(&reads);
     let mut source = VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
-        Cursor::new(Vec::<u8>::new()),
         &manifest,
         fixture.state_digest.clone(),
         move |digest, _, buffer, _control| {
@@ -284,8 +244,7 @@ fn partitioned_reopen_reports_encoded_byte_progress_and_bounds_prefetch() {
         1,
         1 << 20,
     )
-    .expect("partitioned source opens")
-    .expect("partitioned format");
+    .expect("partitioned source opens");
     let total_segment_bytes = segment_sizes.iter().sum::<u64>();
     assert_eq!(source.total_lexical_units(), total_segment_bytes);
     assert!(source.total_lexical_units() > source.total_files());
@@ -296,8 +255,9 @@ fn partitioned_reopen_reports_encoded_byte_progress_and_bounds_prefetch() {
         "opening a page source must not decode every file before the first page"
     );
     assert!(
-        source.retained_layout_bytes() < fixture.sealed.len() / 8,
-        "compact file identities must remain below an eighth of the decoded corpus encoding"
+        source.retained_layout_bytes()
+            < usize::try_from(decoded_segment_bytes).expect("segment bytes fit usize") / 8,
+        "compact file identities must remain below an eighth of the decoded corpus"
     );
     source.next_page(&ActiveControl).expect("first page admits");
     assert!(
@@ -348,7 +308,6 @@ fn partitioned_reopen_reports_encoded_byte_progress_and_bounds_prefetch() {
         "cancelled reads preserve accepted progress"
     );
     let mut corrupt = VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
-        Cursor::new(Vec::<u8>::new()),
         &manifest,
         fixture.state_digest.clone(),
         move |digest, _, buffer, _control| {
@@ -360,8 +319,7 @@ fn partitioned_reopen_reports_encoded_byte_progress_and_bounds_prefetch() {
         1,
         1 << 20,
     )
-    .expect("lazy source authenticates manifest")
-    .expect("partitioned format");
+    .expect("lazy source authenticates manifest");
     let initial = corrupt.cursor().clone();
     assert!(matches!(
         corrupt.next_page(&ActiveControl),
@@ -478,7 +436,7 @@ fn draining_a_many_file_generation_amortizes_install_calls_by_the_multiplier() {
 }
 
 #[test]
-fn foreign_memory_files_cannot_mint_an_import_cursor_for_a_sealed_source() {
+fn accepted_import_cursor_resumes_a_fresh_source_after_cancellation() {
     let imports = (0..128)
         .map(|ordinal| format!("import type {{ Type{ordinal} }} from \"module-{ordinal}\";\n"))
         .collect::<String>();
@@ -490,78 +448,39 @@ fn foreign_memory_files_cannot_mint_an_import_cursor_for_a_sealed_source() {
             })
             .collect::<String>()
     );
-    let foreign_source =
-        format!("{imports}export function foreignItem(): number {{ return 1; }}\n");
     let target = fixture_for_typescript_source(&target_source);
-    let foreign = fixture_for_typescript_source(&foreign_source);
-    assert!(
-        target
-            .generation
-            .admitted_chunks()
-            .expect("target generation exposes chunks")
-            .len()
-            > foreign
-                .generation
-                .admitted_chunks()
-                .expect("foreign generation exposes chunks")
-                .len(),
-        "the authenticated target must have more chunks than the foreign memory source"
-    );
-    assert!(
-        foreign.generation.imports().len() > 1,
-        "the foreign source must reach a partial import position"
-    );
-    let maximum_page_bytes = [&target.generation, &foreign.generation]
-        .into_iter()
-        .map(|generation| {
-            let admitted = admit_file_generation_artifacts(
-                generation.files[0].as_ref(),
-                &generation.manifest().snapshot_digest,
-                1,
-                &ActiveControl,
-            )
-            .expect("fixture file admits");
-            admitted
-                .serialized_chunks
-                .iter()
-                .zip(&admitted.serialized_displays)
-                .map(|(chunk, display)| {
-                    chunk
-                        .len()
-                        .saturating_add(display.as_ref().map_or(0, Vec::len))
-                })
-                .chain(admitted.serialized_imports.iter().map(Vec::len))
-                .max()
-                .expect("fixture exposes lexical records")
-        })
-        .max()
-        .expect("fixtures expose lexical records")
-        .saturating_add(1);
-    let foreign_import_bytes = foreign.generation.files[0]
-        .artifacts
-        .imports
+    let generation = &target.generation;
+    let admitted = admit_file_generation_artifacts(
+        generation.files[0].as_ref(),
+        &generation.manifest().snapshot_digest,
+        1,
+        &ActiveControl,
+    )
+    .expect("fixture file admits");
+    let maximum_page_bytes = admitted
+        .serialized_chunks
         .iter()
-        .map(|evidence| {
-            serde_json::to_vec(evidence)
-                .expect("import serializes")
+        .zip(&admitted.serialized_displays)
+        .map(|(chunk, display)| {
+            chunk
                 .len()
+                .saturating_add(display.as_ref().map_or(0, Vec::len))
         })
+        .chain(admitted.serialized_imports.iter().map(Vec::len))
+        .max()
+        .expect("fixture exposes lexical records")
+        .saturating_add(1);
+    let import_bytes = admitted
+        .serialized_imports
+        .iter()
+        .map(Vec::len)
         .sum::<usize>();
     assert!(
-        foreign_import_bytes > maximum_page_bytes,
+        import_bytes > maximum_page_bytes,
         "imports must span more than one bounded page"
     );
 
-    let mut source = VerifiedSealedLexicalPageSourceV1::open(
-        Cursor::new(target.sealed.clone()),
-        u64::try_from(target.sealed.len()).expect("target sealed length fits u64"),
-        target.state_digest.clone(),
-        usize::MAX,
-        maximum_page_bytes,
-        &ActiveControl,
-    )
-    .expect("authenticated target source opens");
-    let foreign_was_rejected = source.attach_published_files(&foreign.generation).is_err();
+    let mut source = target.open_with_bounds(usize::MAX, maximum_page_bytes);
 
     let boundary_cursor = loop {
         let previous_cursor = source.cursor().clone();
@@ -604,15 +523,7 @@ fn foreign_memory_files_cannot_mint_an_import_cursor_for_a_sealed_source() {
 
     let restored = VerifiedSealedLexicalCursorV1::restore_persisted(&persisted)
         .expect("accepted import cursor restores");
-    let mut resumed = VerifiedSealedLexicalPageSourceV1::open(
-        Cursor::new(target.sealed.clone()),
-        u64::try_from(target.sealed.len()).expect("target sealed length fits u64"),
-        target.state_digest.clone(),
-        usize::MAX,
-        maximum_page_bytes,
-        &ActiveControl,
-    )
-    .expect("fresh authenticated target source opens");
+    let mut resumed = target.open_with_bounds(usize::MAX, maximum_page_bytes);
     resumed
         .restore_cursor(&restored, &ActiveControl)
         .expect("an accepted cursor must resume its authenticated source");
@@ -630,10 +541,6 @@ fn foreign_memory_files_cannot_mint_an_import_cursor_for_a_sealed_source() {
     assert!(
         resumed_page.next_cursor().next_import_ordinal() > restored.next_import_ordinal(),
         "resumed acceptance must advance the import position"
-    );
-    assert!(
-        foreign_was_rejected,
-        "decoded files from another generation must not replace sealed source authority"
     );
 }
 
@@ -748,19 +655,22 @@ fn fixture_for_source_files(
     let generation = owner
         .build_and_publish(request, &ActiveControl)
         .expect("fixture generation publishes");
-    let sealed = generation
-        .encode_sealed()
+    let mut segments = BTreeMap::new();
+    let manifest = generation
+        .encode_partitioned_sealed(|request| {
+            if let super::super::SealedGenerationSegmentPublicationV1::File { digest, bytes } =
+                request
+            {
+                segments.insert(digest.clone(), bytes.to_vec());
+            }
+            Ok(())
+        })
         .expect("fixture generation seals");
-    let envelope: serde_json::Value =
-        serde_json::from_slice(&sealed).expect("fixture sealed envelope decodes");
-    let state_digest = ManifestDigest::new(
-        envelope["state_digest"]
-            .as_str()
-            .expect("fixture sealed state digest"),
-    )
-    .expect("fixture state digest is canonical");
+    let state_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&manifest))
+        .expect("fixture manifest digest is canonical");
     SealedSourceFixture {
-        sealed,
+        manifest,
+        segments: Arc::new(segments),
         state_digest,
         generation,
     }
@@ -1112,101 +1022,4 @@ fn cancellation_during_staging_keeps_the_exact_pre_batch_cursor() {
             .expect("cancelled cursor persists"),
         cursor_before,
     );
-}
-
-#[test]
-fn layout_scan_preserves_digest_and_file_boundaries_across_escaped_syntax() {
-    let first_file = r#"{"payload":"escaped \\\" quote and { [ ] } syntax"}"#;
-    let second_file = format!(r#"{{"payload":"{}"}}"#, "y".repeat(96 * 1024));
-    let generation = format!(
-        r#"{{"format_revision":{MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION},"files":[{first_file},{second_file}],"tail":"done"}}"#
-    );
-    let state_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(generation.as_bytes()))
-        .expect("synthetic generation digest is canonical");
-    let sealed = format!(
-        r#"{{"state_digest":"{}","generation":{generation}}}"#,
-        state_digest.as_str()
-    )
-    .into_bytes();
-    let file_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&sealed))
-        .expect("synthetic file digest is canonical");
-    let first_file_offset = sealed
-        .windows(first_file.len())
-        .position(|window| window == first_file.as_bytes())
-        .expect("first synthetic file is present");
-    let files_end_offset = first_file_offset + first_file.len() + 1 + second_file.len();
-
-    let layout = scan_layout(
-        &mut Cursor::new(&sealed),
-        u64::try_from(sealed.len()).expect("synthetic seal length fits u64"),
-        Some(&file_digest),
-        &ActiveControl,
-    )
-    .expect("escaped syntax does not alter the authenticated layout");
-
-    assert_eq!(layout.state_digest, state_digest);
-    assert_eq!(layout.file_count, 2);
-    assert_eq!(layout.first_file_offset, first_file_offset as u64);
-    assert_eq!(layout.files_end_offset, files_end_offset as u64);
-    assert_eq!(layout.maximum_file_bytes, second_file.len() as u64);
-    assert_eq!(
-        layout.file_ranges,
-        [
-            (
-                first_file_offset as u64,
-                (first_file_offset + first_file.len()) as u64
-            ),
-            (
-                (first_file_offset + first_file.len() + 1) as u64,
-                files_end_offset as u64
-            )
-        ]
-    );
-}
-
-#[test]
-fn layout_scan_rejects_cancelled_and_corrupted_sources() {
-    let file = format!(r#"{{"payload":"{}"}}"#, "z".repeat(512 * 1024));
-    let generation = format!(
-        r#"{{"format_revision":{MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION},"files":[{file}]}}"#
-    );
-    let state_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(generation.as_bytes()))
-        .expect("synthetic generation digest is canonical");
-    let sealed = format!(
-        r#"{{"state_digest":"{}","generation":{generation}}}"#,
-        state_digest.as_str()
-    )
-    .into_bytes();
-
-    let cancellation = CancelDuringStaging::new();
-    let cancelled = match scan_layout(
-        &mut Cursor::new(&sealed),
-        sealed.len() as u64,
-        None,
-        &cancellation,
-    ) {
-        Ok(_) => panic!("layout opening must honor bounded read checkpoints"),
-        Err(error) => error,
-    };
-    assert!(matches!(
-        cancelled,
-        CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::Cancelled)
-    ));
-
-    let mut corrupted = sealed;
-    let payload = corrupted
-        .windows(b"zzzz".len())
-        .position(|window| window == b"zzzz")
-        .expect("synthetic payload is present");
-    corrupted[payload] = b'x';
-    let error = match scan_layout(
-        &mut Cursor::new(&corrupted),
-        corrupted.len() as u64,
-        None,
-        &ActiveControl,
-    ) {
-        Ok(_) => panic!("payload corruption must fail the exact generation digest"),
-        Err(error) => error,
-    };
-    assert!(matches!(error, CodeIndexProductionErrorV1::Contract(_)));
 }

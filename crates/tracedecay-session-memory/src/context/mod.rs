@@ -1,8 +1,8 @@
 //! Request-context value types and the bounded read cache.
 //!
-//! The code-index-backed source-read helpers (`source_read`, `read_modes`,
-//! `markdown_sections`) stayed in `tracedecay-application`; its `context`
-//! module re-exports this one alongside them.
+//! The code-index-backed source-read helpers (`source_read`, `read_modes`)
+//! live in `tracedecay-graph-query`; its `context` module composes with this
+//! one.
 
 pub mod read_cache;
 mod registered_scope;
@@ -13,6 +13,7 @@ use tracedecay_contracts::now_micros;
 use tracedecay_domain::{
     AccessPolicyDigest, ProjectId, RepositoryId, WorktreeId, sha256_hex_suffix,
 };
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 pub use registered_scope::RegisteredScopeResolver;
 
@@ -301,12 +302,6 @@ impl PolicyDigest {
         Ok(Self::new(bytes))
     }
 }
-
-/// The monotonic deadline and cooperative cancellation token moved into
-/// `tracedecay_runtime_core::cancellation`: the kernel bounds its store-runtime
-/// probes with them. Re-exported so every historical
-/// `application::context::<item>` path keeps resolving.
-pub use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RequestBudgets {

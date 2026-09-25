@@ -59,12 +59,12 @@ function CommandButton({
   reading: ReturnType<typeof commandReading>;
 }) {
   return (
-    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-edge px-2 py-1.5 last:border-b-0">
+    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-edge-subtle px-2 py-1.5 last:border-b-0">
       <button
         type="button"
         onClick={onRun}
         disabled={disabled}
-        className="min-h-[44px] rounded-sm border border-edge px-2 py-1 text-2xs text-text-primary hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:text-text-muted"
+        className="min-h-[44px] rounded-[var(--radius-panel)] border border-edge-subtle px-2 py-1 text-2xs text-text-primary hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:text-text-muted"
       >
         {label}
       </button>
@@ -194,7 +194,7 @@ export function WorkCommands({
         * beside the controls rather than used to hide them: the daemon still
         * adjudicates every prepared command, and a typed refusal is the
         * answer a reader is owed when the two disagree. */}
-      <div className="flex min-w-0 flex-col gap-0.5 border-b border-edge px-2 py-1.5" data-work-legal-actions={projection.legal_actions.length}>
+      <div className="flex min-w-0 flex-col gap-0.5 border-b border-edge-subtle px-2 py-1.5" data-work-legal-actions={projection.legal_actions.length}>
         <p className="text-3xs text-text-muted">
           Prepared by the daemon against graph v{projection.version}. A refusal, conflict, or
           stale result is shown as returned; nothing here is optimistic.
@@ -237,7 +237,7 @@ export function WorkCommands({
       />
 
       {projection.relation_replan === null ? null : (
-        <div className="border-b border-edge px-2 py-1.5 last:border-b-0">
+        <div className="border-b border-edge-subtle px-2 py-1.5 last:border-b-0">
           <p className="text-2xs text-text-secondary">Accepted relation replan</p>
           <p className="font-mono text-3xs text-text-muted">
             {projection.relation_replan.proposal_id} · {projection.relation_replan.dependencies.length} dependencies · {projection.relation_replan.informational_relations.length} informational · {projection.relation_replan.causal_candidates.length} causal
@@ -429,7 +429,7 @@ function CreateField({
         id={id}
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        className={`min-h-[44px] rounded-sm border border-edge bg-surface-1 px-2 text-2xs text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent${mono ? ' font-mono' : ''}`}
+        className={`min-h-[44px] rounded-[var(--radius-panel)] border border-edge-subtle bg-surface-1 px-2 text-2xs text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent${mono ? ' font-mono' : ''}`}
       />
     </label>
   );
@@ -501,7 +501,7 @@ export function WorkCreate({ graph }: { graph: WorkResult<WorkGraphReadV1> | und
         <p className="text-3xs text-text-muted">
           Task relations, evidence, acceptance criteria, and scheduling start empty. UTC microseconds and declared hierarchy are explicit so this browser never fabricates authority data.
         </p>
-        <div className="rounded-sm border border-edge bg-surface-2 px-2 py-1">
+        <div className="rounded-[var(--radius-panel)] border border-edge-subtle bg-surface-2 px-2 py-1">
           <p className="text-2xs text-text-secondary">Current graph selection</p>
           <p className="text-3xs text-text-muted">{selectionDetail(selection)}</p>
         </div>
@@ -523,7 +523,7 @@ export function WorkCreate({ graph }: { graph: WorkResult<WorkGraphReadV1> | und
           <button
             type="submit"
             disabled={draft === undefined || prepare.isPending}
-            className="min-h-[44px] rounded-sm border border-edge px-2 py-1 text-2xs text-text-primary hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:text-text-muted"
+            className="min-h-[44px] rounded-[var(--radius-panel)] border border-edge-subtle px-2 py-1 text-2xs text-text-primary hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:text-text-muted"
           >
             Prepare task creation
           </button>
@@ -532,7 +532,7 @@ export function WorkCreate({ graph }: { graph: WorkResult<WorkGraphReadV1> | und
       </form>
 
       {preparedMutation === undefined ? null : (
-        <section className="border-t border-edge px-2 py-1.5" aria-label="Prepared canonical mutation">
+        <section className="border-t border-edge-subtle px-2 py-1.5" aria-label="Prepared canonical mutation">
           <h3 className="text-2xs text-text-primary">Prepared canonical mutation</h3>
           <dl className="mt-1 grid gap-0.5 text-3xs text-text-muted">
             <div><dt className="inline text-text-secondary">Selection: </dt><dd className="inline">{selectionDetail(preparedMutation.request.selection)}</dd></div>
@@ -547,7 +547,7 @@ export function WorkCreate({ graph }: { graph: WorkResult<WorkGraphReadV1> | und
               type="button"
               onClick={() => void mutateCreate()}
               disabled={mutate.isPending || stalePreparedKey === prepared?.draftKey}
-              className="min-h-[44px] rounded-sm border border-edge px-2 py-1 text-2xs text-text-primary hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:text-text-muted"
+              className="min-h-[44px] rounded-[var(--radius-panel)] border border-edge-subtle px-2 py-1 text-2xs text-text-primary hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:text-text-muted"
             >
               Create prepared task
             </button>
@@ -566,7 +566,7 @@ export function WorkCreate({ graph }: { graph: WorkResult<WorkGraphReadV1> | und
 
 function WorkCreateReceipt({ receipt }: { receipt: WorkProductMutationReceiptV1 }) {
   return (
-    <section className="border-t border-edge px-2 py-1.5" aria-label="Current graph receipt">
+    <section className="border-t border-edge-subtle px-2 py-1.5" aria-label="Current graph receipt">
       <h3 className="text-2xs text-text-primary">Current graph receipt</h3>
       <p className="mt-1 font-mono text-3xs text-text-muted">
         {receipt.event.event_id} · graph version {receipt.verified_graph_version.graph_version} · sequence {receipt.verified_graph_version.event_sequence} · {receipt.replayed ? 'replayed' : 'committed'}

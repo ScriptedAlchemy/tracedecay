@@ -260,6 +260,7 @@ impl Utf8State {
 mod tests {
     use super::*;
     use std::fs;
+    use tracedecay_domain::canonical_text::sha256_hex;
 
     #[test]
     fn utf8_scalar_split_at_verification_window_is_accepted_once() {
@@ -315,7 +316,7 @@ mod tests {
         let path = temp.path().join("payload.payload");
         let content = vec![b'x'; 512 * 1024];
         fs::write(&path, &content).unwrap();
-        let hash = super::super::super::util::sha256_hex(&content);
+        let hash = sha256_hex(&content);
         let mut checkpoints = 0;
         let error = read_verified_payload_file_with_checkpoint(
             &path,

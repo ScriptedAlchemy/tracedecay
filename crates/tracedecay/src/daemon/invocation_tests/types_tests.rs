@@ -999,17 +999,18 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let project = tempfile::tempdir().expect("project root");
     let project_id = ProjectId::new("project.feedback.atomic-publication").expect("project id");
-    let host = crate::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
-        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
-        project.path(),
-        project_id.clone(),
-    )
-    .await
-    .expect("registered project runtime");
+    let host =
+        tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
+            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+            project.path(),
+            project_id.clone(),
+        )
+        .await
+        .expect("registered project runtime");
     let graph = host
         .initialize_project_graph_for_test(
             project.path(),
-            crate::project::TraceDecayOpenOptions::default(),
+            tracedecay_project::project::TraceDecayOpenOptions::default(),
         )
         .await
         .expect("initialized project graph");

@@ -6,10 +6,12 @@ use tracedecay_automation_runtime::automation::managed_skills::{
     save_managed_skill, set_managed_skill_pinned, set_managed_skill_state, update_managed_skill,
 };
 use tracedecay_automation_runtime::automation::skill_usage::{
-    AnalyticsEventRecord, SkillUsageAction, SkillUsageEvent, ingest_analytics_events,
-    load_skill_usage_records, record_skill_usage, record_skill_usage_event,
-    skill_usage_record_path, summarize_skill_usage, summarize_skill_usage_for,
+    SkillUsageAction, SkillUsageEvent, ingest_analytics_events, load_skill_usage_records,
+    record_skill_usage, record_skill_usage_event, skill_usage_record_path, summarize_skill_usage,
+    summarize_skill_usage_for,
 };
+use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_global_db::AnalyticsEventRecord;
 
 fn draft() -> ManagedSkillDraft {
     ManagedSkillDraft {
@@ -336,98 +338,32 @@ async fn managed_skill_store_persists_package_and_lifecycle() {
 }
 
 #[tokio::test]
-async fn managed_skill_load_backfills_missing_timestamps() {
+async fn managed_skill_record_without_timestamps_is_refused_unchanged() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
-    let skill_dir = managed_skill_dir(&profile_root, "legacy-skill").unwrap();
-    std::fs::create_dir_all(&skill_dir).unwrap();
-    std::fs::write(
-        skill_dir.join("skill.json"),
-        r#"{
-  "metadata": {
-    "id": "legacy-skill",
-    "title": "Legacy skill",
-    "summary": "Old record before timestamps.",
-    "category": "maintenance",
-    "state": "active",
-    "pinned": false,
-    "checksum": "sha256:legacy",
-    "provenance": {
-      "source": "import",
-      "actor": "test",
-      "run_id": null
-    }
-  },
-  "body_markdown": "Legacy body.",
-  "support_files": []
-}"#,
-    )
-    .unwrap();
+    create_managed_skill(&profile_root, draft()).await.unwrap();
+    let record_path = managed_skill_dir(&profile_root, "repo-hygiene")
+        .unwrap()
+        .join("skill.json");
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+    let metadata = record["metadata"].as_object_mut().unwrap();
+    metadata.remove("created_at").unwrap();
+    metadata.remove("updated_at").unwrap();
+    let stored = serde_json::to_vec_pretty(&record).unwrap();
+    std::fs::write(&record_path, &stored).unwrap();
 
-    let skill = load_managed_skill(&profile_root, "legacy-skill")
+    let error = load_managed_skill(&profile_root, "repo-hygiene")
         .await
-        .unwrap();
-    assert!(skill.metadata.created_at > 0);
-    assert!(skill.metadata.updated_at > 0);
-
-    std::fs::write(
-        skill_dir.join("skill.json"),
-        r#"{
-  "metadata": {
-    "id": "legacy-skill",
-    "title": "Legacy skill",
-    "summary": "Old record with only creation time.",
-    "category": "maintenance",
-    "state": "active",
-    "pinned": false,
-    "checksum": "sha256:legacy",
-    "created_at": 100,
-    "provenance": {
-      "source": "import",
-      "actor": "test",
-      "run_id": null
-    }
-  },
-  "body_markdown": "Legacy body.",
-  "support_files": []
-}"#,
-    )
-    .unwrap();
-    let skill = load_managed_skill(&profile_root, "legacy-skill")
-        .await
-        .unwrap();
-    assert_eq!(skill.metadata.created_at, 100);
-    assert_eq!(skill.metadata.updated_at, 100);
-
-    std::fs::write(
-        skill_dir.join("skill.json"),
-        r#"{
-  "metadata": {
-    "id": "legacy-skill",
-    "title": "Legacy skill",
-    "summary": "Old record with inconsistent timestamps.",
-    "category": "maintenance",
-    "state": "active",
-    "pinned": false,
-    "checksum": "sha256:legacy",
-    "created_at": 200,
-    "updated_at": 100,
-    "provenance": {
-      "source": "import",
-      "actor": "test",
-      "run_id": null
-    }
-  },
-  "body_markdown": "Legacy body.",
-  "support_files": []
-}"#,
-    )
-    .unwrap();
-    let skill = load_managed_skill(&profile_root, "legacy-skill")
-        .await
-        .unwrap();
-    assert_eq!(skill.metadata.created_at, 200);
-    assert_eq!(skill.metadata.updated_at, 200);
+        .unwrap_err();
+    let TraceDecayError::Config { message } = error else {
+        panic!("a record without timestamps must be a typed Config refusal: {error:?}");
+    };
+    assert!(
+        message.contains("missing field `created_at`"),
+        "unexpected refusal: {message}"
+    );
+    assert_eq!(std::fs::read(&record_path).unwrap(), stored);
 }
 
 #[tokio::test]

@@ -594,7 +594,7 @@ fn delivery_overview_serves_real_git_reads_and_typed_unmounted_authority() {
 #[test]
 fn delivery_contract_exposes_typed_provider_rows_and_source_states() {
     let schema: serde_json::Value = serde_json::from_str(
-        &dashboard::contract_schema::render_dashboard_contract_schema()
+        &tracedecay_dashboard_api::contract_schema::render_dashboard_contract_schema()
             .expect("render dashboard contract schema"),
     )
     .expect("parse dashboard contract schema");

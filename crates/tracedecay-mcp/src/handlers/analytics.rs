@@ -30,7 +30,7 @@ use tracedecay_daemon_service::retained_owner::open_project_retained_memory_targ
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{AnalyticsToolCounts, RegisteredGlobalDb};
 use tracedecay_project::project::TraceDecay;
-use tracedecay_project::project::current_timestamp;
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 use tracedecay_session_memory::fact_store::DatabaseFactStore;
 use tracedecay_store_runtime::retained_memory::MemoryTargetAccessV1;
 
@@ -56,13 +56,11 @@ const NAVIGATION_TOOLS: &[&str] = &[
     "similar",
     "rename_preview",
     "implementations",
-    "callers_for",
     "by_qualified_name",
     "call_chain",
     "file_dependents",
     "find_exact_symbol",
     "signature",
-    "impls",
     "derives",
     "status",
     "active_project",
@@ -71,10 +69,10 @@ const NAVIGATION_TOOLS: &[&str] = &[
     "project_list",
     "project_search",
     "project_context",
-    "body",
+    "source_body",
     "todos",
-    "read",
-    "outline",
+    "source_lines",
+    "source_outline",
     "config",
     "signature_search",
     "port_status",
@@ -667,21 +665,13 @@ fn tools_section(rows: &[AnalyticsToolCounts]) -> Result<Value> {
         "tiers": tiers,
         "top_tools": top_tools,
         "raw_distinct_event_name_count": per_tool.len(),
-        // Deprecated shipped key: this was always a count of raw persisted
-        // event names, not a public-catalog adoption numerator.
-        "distinct_tools_called": per_tool.len(),
         "called_available_defined_tool_count": called_available_defined.len(),
         "available_defined_tool_count": available_defined.len(),
-        // Deprecated shipped key: it remains the current host-available
-        // catalog count, which the explicit field above now names directly.
-        "defined_tool_count": available_defined.len(),
         "maximal_defined_tool_count": maximal_defined.len(),
         "aliased_call_names": aliased_call_names,
         "bound_internal_call_names": bound_internal_call_names,
         "unavailable_public_call_names": unavailable_public_call_names,
         "unknown_or_retired_call_names": unknown_or_retired_call_names,
-        // Deprecated shipped key preserved as an exact object alias.
-        "zero_call_tools": zero_call_tools.clone(),
         "zero_call_available_defined_tools": zero_call_tools,
     }))
 }

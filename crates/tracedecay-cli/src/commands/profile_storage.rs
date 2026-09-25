@@ -22,9 +22,6 @@ pub(crate) async fn handle_profile_storage_action(
         ProfileStorageAction::RehearseProfileBackup { backup, restore } => {
             handle_rehearse_profile_backup(backup, restore)
         }
-        ProfileStorageAction::ResetAuthority { authority, db } => {
-            handle_reset_authority(authority, db, assume_yes)
-        }
         ProfileStorageAction::ResetProjectStore {
             project_root,
             project_id,
@@ -139,7 +136,7 @@ fn project_store_graph_db_paths(
     data_root: &Path,
 ) -> tracedecay_domain::errors::Result<Vec<PathBuf>> {
     let mut candidates = Vec::new();
-    let root_db = data_root.join(tracedecay::config::db_filename(data_root));
+    let root_db = data_root.join(tracedecay_project::config::db_filename(data_root));
     if root_db.is_file() {
         candidates.push(root_db);
     }
@@ -248,7 +245,7 @@ fn reset_refused_project_graph_store(
             message: format!(
                 "no project graph store exists at {}; nothing to reset",
                 data_root
-                    .join(tracedecay::config::db_filename(&data_root))
+                    .join(tracedecay_project::config::db_filename(&data_root))
                     .display()
             ),
         });
@@ -300,97 +297,6 @@ fn reset_refused_project_graph_store(
         reset_graph_dbs: refused,
         canonical_schema_version,
     })
-}
-
-/// Scoped operator recovery for a store whose open failed with the typed
-/// `ResetRequired` state. The daemon cannot open a refused store, so the
-/// reset runs offline under the profile's exclusive maintenance lease; the
-/// next daemon open recreates the authority at the canonical schema and its
-/// content re-derives from the preserved transcripts.
-fn handle_reset_authority(
-    authority: String,
-    db: Option<String>,
-    assume_yes: bool,
-) -> tracedecay_domain::errors::Result<()> {
-    if authority != tracedecay_global_db::observation::OBSERVATION_AUTHORITY {
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!(
-                "no scoped reset exists for authority '{authority}'; the only \
-                 scoped-resettable authority is '{}'",
-                tracedecay_global_db::observation::OBSERVATION_AUTHORITY
-            ),
-        });
-    }
-    if !assume_yes {
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!(
-                "resetting the '{authority}' authority drops its refused tables and \
-                 clears their recoverable derivations; re-run with --yes to confirm"
-            ),
-        });
-    }
-    let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
-    let lifecycle_lease = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
-        &profile_root,
-        "reset-authority",
-    )?;
-    let _database_scope = tracedecay_runtime_core::db::enter_maintenance_database_scope(
-        &lifecycle_lease,
-        &profile_root,
-        "reset-authority",
-    )?;
-    let db_path = match db {
-        Some(path) => PathBuf::from(path),
-        None => tracedecay_sessions::runtime::user_sessions_db_path(&profile_root),
-    };
-    if !db_path.is_file() {
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!(
-                "no sessions store exists at {}; nothing to reset",
-                db_path.display()
-            ),
-        });
-    }
-    let mut connection = rusqlite::Connection::open(&db_path).map_err(|error| {
-        tracedecay_domain::errors::TraceDecayError::Database {
-            operation: "open sessions store for authority reset".to_string(),
-            message: error.to_string(),
-        }
-    })?;
-    let report =
-        tracedecay_global_db::observation::reset_refused_observation_authority(&mut connection)?;
-    println!(
-        "reset the refused '{authority}' authority in {}",
-        db_path.display()
-    );
-    for table in &report.reset_tables {
-        println!("  recreated {table} empty at the canonical schema");
-    }
-    println!(
-        "  cleared {} recoverable session_messages row(s)",
-        report.cleared_session_message_rows
-    );
-    println!(
-        "  cleared {} observation-derived session-temporal row(s)",
-        report.cleared_derived_temporal_rows
-    );
-    println!(
-        "  cleared {} observation-bound retrieval anchor and alias row(s)",
-        report.cleared_retrieval_anchor_rows
-    );
-    println!(
-        "  cleared {} native-source scheduling cursor row(s)",
-        report.cleared_native_source_cursor_rows
-    );
-    println!(
-        "  cleared {} observation-derived external-source receipt row(s)",
-        report.cleared_external_source_rows
-    );
-    println!(
-        "the authority content re-derives from the preserved transcripts at the \
-         next daemon open"
-    );
-    Ok(())
 }
 
 async fn brokered_storage_report(
@@ -708,7 +614,7 @@ mod reset_project_store_tests {
     ) -> PathBuf {
         let data_root =
             tracedecay_runtime_core::storage::profile_sharded_data_root(profile_root, project_id);
-        let db_path = data_root.join(tracedecay::config::db_filename(&data_root));
+        let db_path = data_root.join(tracedecay_project::config::db_filename(&data_root));
         write_graph_db_with_user_version(&db_path, version);
         db_path
     }
@@ -833,9 +739,9 @@ mod reset_project_store_tests {
             "profile storage exact-shape fixture",
         )
         .unwrap();
-        let graph = tracedecay::project::TraceDecay::init_with_exclusive_maintenance(
+        let graph = tracedecay_project::project::TraceDecay::init_with_exclusive_maintenance(
             &project_root,
-            tracedecay::project::TraceDecayOpenOptions {
+            tracedecay_project::project::TraceDecayOpenOptions {
                 profile_root: Some(profile_root.clone()),
                 global_db_path: Some(profile_root.join("global.db")),
             },
@@ -861,7 +767,7 @@ mod reset_project_store_tests {
         );
         std::fs::create_dir_all(&incompatible_root).unwrap();
         let incompatible_db =
-            incompatible_root.join(tracedecay::config::db_filename(&incompatible_root));
+            incompatible_root.join(tracedecay_project::config::db_filename(&incompatible_root));
         let source = rusqlite::Connection::open_with_flags(
             &healthy_db,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -917,7 +823,7 @@ mod reset_project_store_tests {
             "proj_not_sqlite",
         );
         std::fs::create_dir_all(&data_root).unwrap();
-        let db_path = data_root.join(tracedecay::config::db_filename(&data_root));
+        let db_path = data_root.join(tracedecay_project::config::db_filename(&data_root));
         std::fs::write(&db_path, b"not a database").unwrap();
 
         let error =

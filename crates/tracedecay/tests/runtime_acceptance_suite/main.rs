@@ -19,9 +19,8 @@ mod host_event_fixture_test;
 mod lifecycle_production_authority_test;
 mod private_route_restart_acceptance;
 mod runtime_surface_acceptance;
-// Not implied by `test-transport`. An unconditional evaluator dependency
-// unifies `tracedecay-query/search-eval` into every test target of this
-// package, so the transport suites compile the eval-only lexical projection.
+// Not implied by `test-transport`: an unconditional evaluator dependency
+// links the evaluator into every test target of this package.
 #[cfg(feature = "search-eval")]
 #[allow(clippy::option_env_unwrap)]
 mod search_eval_cli_test;

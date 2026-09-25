@@ -764,7 +764,7 @@ fn describe_hydration_state(state: HydrationStateV1) -> LcmDescribeServiceOutcom
         HydrationStateV1::Unauthorized => LcmDescribeServiceOutcome::Denied,
         HydrationStateV1::Available
         | HydrationStateV1::RetainedButUnavailable
-        | HydrationStateV1::UnverifiableLegacy => {
+        | HydrationStateV1::Unverifiable => {
             LcmDescribeServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
                 SessionRetrievalUnavailableReason::HydrationUnavailable,
             ))
@@ -782,7 +782,7 @@ fn expand_hydration_state(state: HydrationStateV1) -> LcmExpandServiceOutcome {
         HydrationStateV1::Unauthorized => LcmExpandServiceOutcome::Denied,
         HydrationStateV1::Available
         | HydrationStateV1::RetainedButUnavailable
-        | HydrationStateV1::UnverifiableLegacy => {
+        | HydrationStateV1::Unverifiable => {
             LcmExpandServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
                 SessionRetrievalUnavailableReason::HydrationUnavailable,
             ))

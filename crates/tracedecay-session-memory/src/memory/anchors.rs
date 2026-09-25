@@ -5,7 +5,7 @@ use std::future::Future;
 
 use thiserror::Error;
 
-use tracedecay_domain::{DomainError, FactOwnerV1, RetrievalAnchorId, RetrievalAnchorRecordV2};
+use tracedecay_domain::{DomainError, FactOwnerV1, RetrievalAnchorId, RetrievalAnchorRecord};
 use tracedecay_store::FactStore;
 
 use crate::anchor_resolution::{EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport};
@@ -17,11 +17,11 @@ use super::error::MemoryApplicationError;
 /// a fact shard. It deliberately reuses the canonical retrieval-anchor model.
 #[derive(Clone, Debug)]
 pub struct ResolvedEvidenceAnchor {
-    record: RetrievalAnchorRecordV2,
+    record: RetrievalAnchorRecord,
 }
 
 impl ResolvedEvidenceAnchor {
-    pub fn new(record: RetrievalAnchorRecordV2) -> Result<Self, DomainError> {
+    pub fn new(record: RetrievalAnchorRecord) -> Result<Self, DomainError> {
         record.validate()?;
         Ok(Self { record })
     }
@@ -30,11 +30,11 @@ impl ResolvedEvidenceAnchor {
         self.record.anchor_id()
     }
 
-    pub fn record(&self) -> &RetrievalAnchorRecordV2 {
+    pub fn record(&self) -> &RetrievalAnchorRecord {
         &self.record
     }
 
-    pub fn into_record(self) -> RetrievalAnchorRecordV2 {
+    pub fn into_record(self) -> RetrievalAnchorRecord {
         self.record
     }
 }
@@ -70,7 +70,7 @@ impl<A: FactStore> MemoryApplication<A> {
         &self,
         resolver: &R,
         anchor_id: RetrievalAnchorId,
-    ) -> Result<RetrievalAnchorRecordV2, MemoryApplicationError> {
+    ) -> Result<RetrievalAnchorRecord, MemoryApplicationError> {
         anchor_id
             .validate()
             .map_err(MemoryApplicationError::InvalidEvidenceAnchor)?;

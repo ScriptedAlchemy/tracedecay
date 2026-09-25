@@ -5,10 +5,13 @@
 //! Unix broker, the portable broker, and the in-process test harness.
 
 use super::*;
+use tracedecay_agent_hosts::agents::context_scout::owner::unregister_registered_context_scout_owner;
+use tracedecay_agent_hosts::hooks::hook_project_id_for_layout;
 use tracedecay_code_index_runtime::code_index_scheduler;
 use tracedecay_daemon_identity::profile_identity;
 use tracedecay_daemon_service::daemon_owned_project_source_access_at;
 use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::path_safety::same_canonical_path;
 use tracedecay_session_runtime::session_sync::DaemonSessionSyncConfig;
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::{
     ProfileSessionHistoricalIngestor, ProjectSessionHistoricalIngestor,
@@ -228,17 +231,24 @@ async fn release_one_idle_project_server_before_open(
     Ok(capacity_admission)
 }
 
-// Gated exactly like the `production_harness` module that owns the isolated
-// layout: an integration test links this crate without `cfg(test)`, so a
-// `cfg(test)`-only pin left `mcp_suite` compositions sweeping the developer's
-// real `$HOME` transcripts.
+/// The one home a composed daemon reads host transcripts from.
+///
+/// Both readers resolve it here: the composition pins it onto the session
+/// refresh schedulers that own the background sweep, and the MCP server scopes
+/// every tool dispatch to it so a hook-triggered ingest cannot resolve a
+/// different one.
+///
+/// Gated exactly like the `production_harness` module that owns the isolated
+/// layout: an integration test links this crate without `cfg(test)`, so a
+/// `cfg(test)`-only pin left `mcp_suite` compositions sweeping the developer's
+/// real `$HOME` transcripts.
 #[cfg(any(test, feature = "test-transport"))]
-pub(super) fn daemon_transcript_source_home(profile_root: &Path) -> Option<PathBuf> {
+pub(crate) fn daemon_transcript_source_home(profile_root: &Path) -> Option<PathBuf> {
     profile_root.parent().map(Path::to_path_buf)
 }
 
 #[cfg(not(any(test, feature = "test-transport")))]
-pub(super) fn daemon_transcript_source_home(_profile_root: &Path) -> Option<PathBuf> {
+pub(crate) fn daemon_transcript_source_home(_profile_root: &Path) -> Option<PathBuf> {
     tracedecay_sessions::runtime::home_dir()
 }
 
@@ -307,56 +317,68 @@ pub(super) async fn production_project_server(
         GraphOpen::Cached(composition) => return Ok(composition),
         GraphOpen::Opened(opened) => opened,
     };
-    let (core_candidate, core) = Box::pin(inputs.compose_core_server(&opened)).await?;
-    let CoreRouteBinding {
-        mut resolved,
-        inserted,
-    } = Box::pin(inputs.bind_core_route(
-        admitted.route,
-        &opened.key,
-        core_candidate,
-        &core.route_registered,
-    ))
-    .await?;
-    if inserted {
-        let activation = Box::pin(inputs.activate_core_route(&opened, &core, &resolved)).await?;
-        let upgrade = match Box::pin(inputs.construct_full_server(&opened, &core, &resolved)).await
-        {
-            Ok(PublishedFullServer { server, session_db }) => {
-                match Box::pin(inputs.finish_full_server(
-                    &opened,
-                    &core,
-                    &activation,
-                    &resolved,
-                    &server,
-                    session_db,
-                ))
-                .await
-                {
-                    Ok(()) => Ok(server),
-                    Err(error) => Err((error, Some(server))),
+    let composed = async {
+        let (core_candidate, core) = Box::pin(inputs.compose_core_server(&opened)).await?;
+        let CoreRouteBinding {
+            mut resolved,
+            inserted,
+        } = Box::pin(inputs.bind_core_route(
+            admitted.route,
+            &opened.key,
+            core_candidate,
+            &core.route_registered,
+        ))
+        .await?;
+        if inserted {
+            let activation =
+                Box::pin(inputs.activate_core_route(&opened, &core, &resolved)).await?;
+            let upgrade =
+                match Box::pin(inputs.construct_full_server(&opened, &core, &resolved)).await {
+                    Ok(PublishedFullServer { server, session_db }) => {
+                        match Box::pin(inputs.finish_full_server(
+                            &opened,
+                            &core,
+                            &activation,
+                            &resolved,
+                            &server,
+                            session_db,
+                        ))
+                        .await
+                        {
+                            Ok(()) => Ok(server),
+                            Err(error) => Err((error, Some(server))),
+                        }
+                    }
+                    Err(error) => Err((error, None)),
+                };
+            match upgrade {
+                Ok(full_server) => resolved = full_server,
+                Err((error, published_full_server)) => {
+                    Box::pin(inputs.settle_failed_full_upgrade(
+                        &opened,
+                        &core,
+                        &activation,
+                        &resolved,
+                        published_full_server,
+                        error,
+                    ))
+                    .await?;
                 }
             }
-            Err(error) => Err((error, None)),
-        };
-        match upgrade {
-            Ok(full_server) => resolved = full_server,
-            Err((error, published_full_server)) => {
-                Box::pin(inputs.settle_failed_full_upgrade(
-                    &opened,
-                    &core,
-                    &activation,
-                    &resolved,
-                    published_full_server,
-                    error,
-                ))
-                .await?;
-            }
+        } else {
+            drop(admitted.foreground_project_open);
+            core.route_registered.store(false, Ordering::Release);
         }
-    } else {
-        drop(admitted.foreground_project_open);
-        core.route_registered.store(false, Ordering::Release);
+        Ok((resolved, inserted))
     }
+    .await;
+    let (resolved, inserted) = match composed {
+        Ok(composed) => composed,
+        Err(error) => {
+            inputs.retire_failed_open_scout_owner(&opened.cg).await;
+            return Err(error);
+        }
+    };
     Ok(ProductionProjectComposition {
         #[cfg(unix)]
         key: opened.key,
@@ -439,7 +461,7 @@ enum GraphOpen {
 
 /// The opened graph and the route-wide choices resolved from its configuration.
 struct OpenedProjectGraph {
-    cg: Arc<crate::project::TraceDecay>,
+    cg: Arc<tracedecay_project::project::TraceDecay>,
     key: ProjectServerKey,
     runtime_configuration: tracedecay_configuration::config::PinnedRuntimeConfiguration,
     project_database_is_read_only: bool,
@@ -490,7 +512,7 @@ impl ComposedCoreServer {
     fn publish_route_ports(
         &self,
         context: crate::mcp::server::McpServerConstructionContext,
-        cg: &Arc<crate::project::TraceDecay>,
+        cg: &Arc<tracedecay_project::project::TraceDecay>,
         invocation: &DaemonInvocationState,
     ) -> crate::mcp::server::McpServerConstructionContext {
         let ports = &self.ports;
@@ -580,6 +602,26 @@ impl ProjectOpenInputs<'_> {
         log_project_open_phase(self.canonical_project_path, phase, detail, since);
     }
 
+    /// Opening the graph started the process-global Context Scout owner, which
+    /// holds that graph's `Database`. A failed open leaves no server to retire
+    /// it, and while registered its lease keeps the store runtime from ever
+    /// closing, so its WAL is never truncated. An owner that another published
+    /// server over the same database still serves stays registered.
+    async fn retire_failed_open_scout_owner(&self, cg: &tracedecay_project::project::TraceDecay) {
+        let graph_db_path = cg.db().canonical_database_path();
+        let served = self
+            .store_administration
+            .project_servers()
+            .lock()
+            .await
+            .servers
+            .keys()
+            .any(|key| same_canonical_path(&key.owner.graph_db_path, graph_db_path));
+        if !served && let Some(project_id) = hook_project_id_for_layout(cg.hook_store_layout()) {
+            unregister_registered_context_scout_owner(project_id, graph_db_path);
+        }
+    }
+
     /// Route admission: registry enrollment, the published-server cache, the
     /// route's single-flight gate, the foreground-open marker, and one graph
     /// admission slot (releasing an idle server when the daemon is at capacity).
@@ -667,6 +709,18 @@ impl ProjectOpenInputs<'_> {
             )
             .await?,
         );
+        let opened = self.admit_opened_graph(route, Arc::clone(&cg)).await;
+        if opened.is_err() {
+            self.retire_failed_open_scout_owner(&cg).await;
+        }
+        opened
+    }
+
+    async fn admit_opened_graph(
+        &self,
+        route: &ProjectRouteKey,
+        cg: Arc<tracedecay_project::project::TraceDecay>,
+    ) -> Result<GraphOpen> {
         let mut key = ProjectServerKey::from_open_project(&cg, self.handshake)?;
         if let Some(shared_root) = shared_primary_checkout_root(self.canonical_project_path) {
             key.project_root = shared_root;
@@ -1015,15 +1069,23 @@ impl ProjectOpenInputs<'_> {
                 .await?,
             )
         };
-        // The source-edit owner is the core's only runtime component, so its
-        // registration is what creates the registry slot this publication
-        // attempt fences. A read-only database registers none.
+        // Graph reads are served from the core onward, read-only or not; the
+        // full server re-registers as their owner once it is swapped in.
+        resolved
+            .register_graph_tool_owner(
+                self.canonical_project_path,
+                core.ports.code_index.scope.clone(),
+            )
+            .await?;
+        // The source-edit and graph-tool owners are the core's runtime
+        // components, so their registration creates the registry slot this
+        // publication attempt fences.
         let publication_attempt = self
             .invocation
             .service
             .project_runtimes
             .begin_publication(self.canonical_project_path);
-        if publication_attempt.is_none() && core_source_edit_mutation.is_some() {
+        if publication_attempt.is_none() {
             return Err(TraceDecayError::Config {
                 message: "project runtime disappeared before its publication began".to_owned(),
             });
@@ -1052,7 +1114,7 @@ impl ProjectOpenInputs<'_> {
     #[hotpath::measure(label = "daemon.project.compose.admit_sessions", future = true)]
     async fn admit_session_databases(
         &self,
-        cg: &Arc<crate::project::TraceDecay>,
+        cg: &Arc<tracedecay_project::project::TraceDecay>,
         project_id: &tracedecay_domain::ProjectId,
         project_database_is_read_only: bool,
     ) -> Result<AdmittedSessionDatabases> {
@@ -1402,6 +1464,12 @@ impl ProjectOpenInputs<'_> {
     ) -> Result<()> {
         let full_setup_started = Instant::now();
         project_open_cancellation_checkpoint(self.cancellation)?;
+        full_server
+            .register_graph_tool_owner(
+                self.canonical_project_path,
+                core.ports.code_index.scope.clone(),
+            )
+            .await?;
         // The shared invocation registry admits one source-edit owner per
         // project root. Core publication already registered it; the full
         // upgrade reuses that owner and marks its mutation gate ready after
@@ -1656,10 +1724,10 @@ struct ProjectCodeIndexAuthorities {
     generation_census_reader: tracedecay_runtime_core::runtime_telemetry::GenerationCensusReader,
     graph_read_admission_port: crate::mcp::server::CodeGraphReadAdmissionPort,
     search_authority: tracedecay_query::code_search::CodeIndexSearchAuthorityV1,
-    search_executor: crate::mcp::server::CodeIndexSearchExecutor,
-    similar_executor: crate::mcp::server::CodeIndexSimilarExecutor,
-    redundancy_executor: crate::mcp::server::CodeIndexRedundancyExecutor,
-    branch_diff_executor: crate::mcp::server::CodeIndexBranchDiffExecutor,
+    search_executor: tracedecay_query::code_search::CodeIndexSearchExecutor,
+    similar_executor: tracedecay_query::code_search::CodeIndexSimilarExecutor,
+    redundancy_executor: tracedecay_query::code_search::CodeIndexRedundancyExecutor,
+    branch_diff_executor: tracedecay_query::code_search::CodeIndexBranchDiffExecutor,
 }
 
 /// Resolve the project's search identity and bind every code-index read port to
@@ -1667,7 +1735,7 @@ struct ProjectCodeIndexAuthorities {
 /// not the handshake path, so a relocated store still binds its own scope.
 fn project_code_index_authorities(
     invocation: &DaemonInvocationState,
-    cg: &Arc<crate::project::TraceDecay>,
+    cg: &Arc<tracedecay_project::project::TraceDecay>,
     canonical_project_path: &Path,
     authoritative_project_id: &str,
     profile_identity: &profile_identity::LocalProfileIdentityAuthorityV1,
@@ -1801,7 +1869,7 @@ fn project_dashboard_pr_autotrack_reader()
 /// never fatal: telemetry must not fail an otherwise healthy project open.
 fn register_route_store_telemetry(
     sampling: &tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry,
-    cg: &Arc<crate::project::TraceDecay>,
+    cg: &Arc<tracedecay_project::project::TraceDecay>,
     scope: &tracedecay_contracts::ResolvedScope,
     session_databases: [&tracedecay_global_db::RegisteredGlobalDb; 3],
 ) {

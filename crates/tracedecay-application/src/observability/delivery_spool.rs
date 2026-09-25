@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -12,6 +12,7 @@ use tracedecay_domain::canonical_text::is_lowercase_hex;
 use tracedecay_domain::{
     DeliverySettlementV1, canonical_json_bytes, canonical_sha256, sha256_hex_suffix,
 };
+use tracedecay_private_fs::FileLease;
 use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, atomic_write, is_owned_temporary_name, read_bounded,
     remove_abandoned_temporaries, sync_directory, validate_regular_or_missing,
@@ -30,11 +31,8 @@ const DIRECTORY_POLICY: DirectorySyncPolicy = DirectorySyncPolicy::Strict;
 pub(super) struct DeliveryRecorderSourceReceiptV1 {
     pub receipt_id: [u8; 16],
     pub settlement: DeliverySettlementV1,
-    /// Exact linked-root emission identity selected at admission. Receipts
-    /// written before policy-specific frontends omit this and replay through
-    /// the recorder's store-core identity.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub emission_identity: Option<ObservabilityProducerIdentityV1>,
+    /// Exact linked-root emission identity selected at admission.
+    pub emission_identity: ObservabilityProducerIdentityV1,
 }
 
 impl DeliveryRecorderSourceReceiptV1 {
@@ -61,7 +59,7 @@ impl DeliveryRecorderSourceReceiptV1 {
         Ok(Self {
             receipt_id,
             settlement,
-            emission_identity: Some(emission_identity),
+            emission_identity,
         })
     }
 
@@ -69,31 +67,12 @@ impl DeliveryRecorderSourceReceiptV1 {
         if self.receipt_id == [0; 16] {
             return Err(DeliveryRecorderSpoolError::InvalidReceipt);
         }
-        self.settlement
-            .validate()
-            .map_err(|_| DeliveryRecorderSpoolError::InvalidReceipt)?;
-        let expected_receipt_id = if let Some(emission_identity) = &self.emission_identity {
-            Self::new(self.settlement.clone(), emission_identity.clone())?.receipt_id
-        } else {
-            legacy_receipt_id(&self.settlement)?
-        };
-        if expected_receipt_id != self.receipt_id {
+        let expected = Self::new(self.settlement.clone(), self.emission_identity.clone())?;
+        if expected.receipt_id != self.receipt_id {
             return Err(DeliveryRecorderSpoolError::InvalidReceipt);
         }
         Ok(())
     }
-}
-
-fn legacy_receipt_id(
-    settlement: &DeliverySettlementV1,
-) -> Result<[u8; 16], DeliveryRecorderSpoolError> {
-    let digest = canonical_sha256(&("tracedecay.delivery-recorder-source-receipt.v1", settlement))
-        .map_err(|_| DeliveryRecorderSpoolError::InvalidReceipt)?;
-    let hex =
-        sha256_hex_suffix(digest.as_str()).ok_or(DeliveryRecorderSpoolError::InvalidReceipt)?;
-    let mut receipt_id = [0_u8; 16];
-    decode_hex_prefix(hex, &mut receipt_id)?;
-    Ok(receipt_id)
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]
@@ -117,7 +96,7 @@ pub(super) enum DeliveryRecorderSpoolError {
 /// One process lease over the durable, bounded source receipts for a project.
 pub(super) struct DeliveryRecorderSpoolV1 {
     root: PathBuf,
-    _lease: File,
+    _lease: FileLease,
     state: Mutex<DeliveryRecorderSpoolState>,
 }
 
@@ -149,6 +128,7 @@ impl DeliveryRecorderSpoolV1 {
             std::fs::TryLockError::WouldBlock => DeliveryRecorderSpoolError::Busy,
             std::fs::TryLockError::Error(_) => DeliveryRecorderSpoolError::Io,
         })?;
+        let lease = FileLease::held(lease, "delivery_recorder.spool");
         // The lease is exclusive now, so every staging temporary still in the
         // root was abandoned by a killed publisher. Sweeping it here is what
         // makes a crashed daemon's project reopenable.
@@ -420,11 +400,7 @@ mod tests {
     fn v2_receipt_refuses_tampered_emission_identity() {
         let mut receipt =
             DeliveryRecorderSourceReceiptV1::new(settlement(), identity()).expect("v2 receipt");
-        receipt
-            .emission_identity
-            .as_mut()
-            .expect("v2 emission identity")
-            .policy_revision = "delivery-spool-tampered-policy.v1".to_owned();
+        receipt.emission_identity.policy_revision = "delivery-spool-tampered-policy.v1".to_owned();
 
         assert_eq!(
             receipt.validate(),

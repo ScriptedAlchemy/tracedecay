@@ -1775,10 +1775,11 @@ struct PendingAdmissionWindow<'window, State> {
 }
 
 enum CaptureWindowError {
-    ScalarFallback(#[allow(dead_code)] HostAdmissionRecovery),
+    /// A frame in the window was refused for its content. Replay one frame at
+    /// a time so the refusal settles on that frame alone.
+    ContentRefusal,
     /// The window compare-and-swap lost, and the durable cursor does not cover
-    /// the last frame. Replay one frame at a time; do not treat that as a
-    /// store-issued batch fallback.
+    /// the last frame. Replay one frame at a time.
     LostCursor,
     Ingest(TranscriptIngestError),
 }
@@ -2022,8 +2023,10 @@ impl ActiveAdmission<'_> {
             {
                 tracing::warn!(
                     provider = self.provider,
+                    session = self.source.session_id().as_str(),
                     offset = checkpoint.offset,
                     reason = outcome.reason_code.unwrap_or("host_admission_refused"),
+                    cause = outcome.cause.as_deref().unwrap_or("unspecified"),
                     "admission refused a record; covering past it"
                 );
                 self.advance_coverage(
@@ -2227,13 +2230,8 @@ impl ActiveAdmission<'_> {
                 if outcome.status == HostAdmissionStatus::Backpressured {
                     hotpath::gauge!("jsonl_admission_backpressure_writer").inc(1.0);
                 }
-                if let Some(recovery) = outcome.recovery {
-                    match recovery {
-                        HostAdmissionRecovery::BatchRequiresScalarFallback(_)
-                        | HostAdmissionRecovery::DeterministicContentRefusal => {
-                            return Err(CaptureWindowError::ScalarFallback(recovery));
-                        }
-                    }
+                if let Some(HostAdmissionRecovery::DeterministicContentRefusal) = outcome.recovery {
+                    return Err(CaptureWindowError::ContentRefusal);
                 }
                 // The batch is atomic: nothing in this window committed. When
                 // the peer that won the CAS is already past the window's last
@@ -2354,7 +2352,7 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
         })
     });
     let had_expected_cursor = expected_cursor.is_some();
-    let (raw, shared_page_hit) = shared_jsonl_page_with_frame_limit_and_cancellation(
+    let (raw, shared_page_hit) = match shared_jsonl_page_with_frame_limit_and_cancellation(
         path,
         previous,
         max_new_bytes,
@@ -2367,7 +2365,18 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
         },
         false,
     )
-    .await?;
+    .await
+    {
+        // A dangling symlink or a source removed between discovery and open
+        // cannot be read on the next pass either. Failing the provider keeps
+        // historical catch-up retrying one missing file forever.
+        Err(TranscriptIngestError::ScanIo { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            return Ok(JsonlObservationAdmissionProgress::default());
+        }
+        other => other?,
+    };
     let mut progress = JsonlObservationAdmissionProgress {
         bytes_consumed: raw.read_through.saturating_sub(raw.start_offset),
         source_deferred: raw.deferred.is_some(),
@@ -2476,7 +2485,7 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
             .await
         {
             Ok(()) => Ok(()),
-            Err(CaptureWindowError::ScalarFallback(_) | CaptureWindowError::LostCursor) => {
+            Err(CaptureWindowError::ContentRefusal | CaptureWindowError::LostCursor) => {
                 for (checkpoint, range, bytes, prepared, hints) in backups {
                     if active.cancellation.is_cancelled() {
                         return Err(TranscriptIngestError::Cancelled {

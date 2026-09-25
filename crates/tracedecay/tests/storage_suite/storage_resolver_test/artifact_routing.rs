@@ -46,9 +46,9 @@ async fn hermes_profile_like_directory_uses_user_profile_shard() {
     let expected = home
         .join(".tracedecay")
         .join(format!("projects/{project_id}/sessions.db"));
-    assert_eq!(
+    assert_path_eq(
         resolve_project_session_db_path(&hermes_home).unwrap(),
-        expected
+        expected,
     );
 }
 

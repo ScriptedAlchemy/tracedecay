@@ -14,7 +14,9 @@ use tracedecay_store::{
 
 use crate::observation::ObservationCancellation;
 use crate::runtime::shared::TranscriptIngestStats;
-use crate::runtime::{SessionProvider, claude_observation, codex, git_correlation, source};
+use crate::runtime::{
+    SessionProvider, git_correlation, hosts::claude_observation, hosts::codex, source,
+};
 
 use super::failure::{
     IngestPassBounds, IngestPassCoverage, allocate_pass_byte_budgets,
@@ -232,7 +234,7 @@ fn still_mounting_admission_failures_keep_the_admission_retryability() {
             retryable: true,
             reason_code: Some("authority_write_failed"),
             recovery: None,
-            storage_cause: None,
+            cause: None,
         },
     );
 
@@ -254,7 +256,7 @@ fn permanent_admission_failures_still_classify_permanent() {
             retryable: false,
             reason_code: Some("invalid_observation_contract"),
             recovery: None,
-            storage_cause: None,
+            cause: None,
         },
     );
 

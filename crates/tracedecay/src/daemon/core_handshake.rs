@@ -28,8 +28,8 @@ pub fn handshake_for_current_client(
 
 pub fn handshake_open_options(
     handshake: &DaemonHandshake,
-) -> crate::project::TraceDecayOpenOptions {
-    crate::project::TraceDecayOpenOptions {
+) -> tracedecay_project::project::TraceDecayOpenOptions {
+    tracedecay_project::project::TraceDecayOpenOptions {
         profile_root: Some(handshake.client_identity.profile_root.clone()),
         global_db_path: Some(handshake.client_identity.global_db_path.clone()),
     }
@@ -44,6 +44,6 @@ pub fn handshake_open_options(
 /// fallible because it reads the registered product runtime: a process whose
 /// entry point never registered one has no truthful version to advertise.
 pub(crate) fn binary_version()
--> std::result::Result<&'static str, crate::product_runtime::ProductRuntimeError> {
-    crate::version::build_version()
+-> std::result::Result<&'static str, tracedecay_project::product_runtime::ProductRuntimeError> {
+    tracedecay_project::version::build_version()
 }

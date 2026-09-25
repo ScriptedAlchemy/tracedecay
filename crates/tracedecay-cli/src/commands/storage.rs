@@ -310,6 +310,45 @@ mod wipe_safety_tests {
     use super::*;
 
     #[test]
+    fn reset_refusals_name_the_authority_and_the_exact_reset_command() {
+        let profile = annotate_reset_required(
+            tracedecay_domain::errors::TraceDecayError::reset_required(
+                "session temporal",
+                "persisted session temporal schema is the published v3 shape",
+            ),
+            None,
+        )
+        .to_string();
+        assert!(profile.contains("session temporal persisted shape requires reset"));
+        assert!(profile.contains("refused authority: session temporal"));
+        assert!(
+            profile.contains("\n  tracedecay wipe --all --yes"),
+            "{profile}"
+        );
+
+        let project = annotate_reset_required(
+            tracedecay_domain::errors::TraceDecayError::reset_required(
+                "project store",
+                "schema v26 is incompatible",
+            ),
+            Some(Path::new("/repo/example")),
+        )
+        .to_string();
+        assert!(
+            project.contains("reset-project-store --project-root /repo/example --yes"),
+            "{project}"
+        );
+
+        let untouched = annotate_reset_required(
+            tracedecay_domain::errors::TraceDecayError::Config {
+                message: "unrelated".to_owned(),
+            },
+            None,
+        );
+        assert_eq!(untouched.to_string(), "config error: unrelated");
+    }
+
+    #[test]
     fn nonterminal_wipe_without_yes_does_not_wait_on_stdin() {
         assert!(wipe_must_not_wait_for_stdin(false, false));
         assert!(!wipe_must_not_wait_for_stdin(true, false));
@@ -435,6 +474,27 @@ fn handle_wipe_inner(
     })
 }
 
+/// Attaches the exact reset command to a typed reset refusal so the operator
+/// never has to translate the authority name into a recovery step.
+pub(crate) fn annotate_reset_required(
+    error: tracedecay_domain::errors::TraceDecayError,
+    project_root: Option<&Path>,
+) -> tracedecay_domain::errors::TraceDecayError {
+    let authority = match &error {
+        tracedecay_domain::errors::TraceDecayError::ResetRequired { authority, .. } => {
+            authority.as_str()
+        }
+        tracedecay_domain::errors::TraceDecayError::ProfileResetRequired { component, .. } => {
+            component
+        }
+        _ => return error,
+    };
+    let remedy = tracedecay_mcp::reset_required_remedy(authority, project_root);
+    tracedecay_domain::errors::TraceDecayError::Config {
+        message: format!("{error}\n\n{remedy}"),
+    }
+}
+
 /// Combines a destructive command's outcome with the daemon-restore outcome
 /// so neither failure can shadow the other.
 pub(crate) fn join_outcome_and_restore(
@@ -497,7 +557,7 @@ async fn wipe_under_profile_offline(
         let project_paths = if all {
             Vec::new()
         } else {
-            global::gather_target_projects(false, home_tracedecay).await?
+            global::gather_target_projects(false).await?
         };
         let mut targets = Vec::new();
         for path in &project_paths {
@@ -632,8 +692,8 @@ fn handle_list_inner(
     Box::pin(async move {
         use tracedecay_runtime_core::text::format_token_count;
 
-        let home_tracedecay = tracedecay::config::user_data_dir();
-        let project_paths = global::gather_target_projects(all, &home_tracedecay).await?;
+        let home_tracedecay = tracedecay_project::config::user_data_dir();
+        let project_paths = global::gather_target_projects(all).await?;
 
         if !all && project_paths.is_empty() {
             println!("No tracedecay projects found in current folder, parents, or children.");
@@ -826,7 +886,7 @@ fn append_orphan_manifest_rows(
         .collect();
     let report = tracedecay_global_db::registry_maintenance::inspect_profile_store_orphans(
         profile_root,
-        tracedecay::project::current_timestamp(),
+        tracedecay_runtime_core::tracedecay::current_timestamp(),
     );
     for plan in report.plans {
         if plan.status

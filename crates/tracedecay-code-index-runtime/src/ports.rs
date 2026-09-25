@@ -8,7 +8,7 @@ use tokio::time::{Duration, timeout};
 
 /// Watcher knobs the git-metadata watcher needs from resolved sync config.
 ///
-/// Root maps `tracedecay::config::SyncConfig` into this type at construction.
+/// Root maps `tracedecay_configuration::SyncConfig` into this type at construction.
 /// The usecases `SyncConfig` is a different, smaller PR-autotrack type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitWatchSyncConfigV1 {
@@ -57,19 +57,6 @@ impl GitWatchMaintenanceWakeV1 {
 impl Default for GitWatchMaintenanceWakeV1 {
     fn default() -> Self {
         Self::new(|| {})
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ApplicationCatalogSnapshotErrorV1 {
-    pub message: String,
-}
-
-impl ApplicationCatalogSnapshotErrorV1 {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
     }
 }
 

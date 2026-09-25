@@ -5,7 +5,7 @@ use tree_sitter::Node as TsNode;
 use super::{CppExtractor, ExtractionState};
 use crate::{
     common::{
-        clean_c_doc_comment, docstring_from_preceding_comments, extract_call_expression_sites,
+        clean_c_comment, docstring_from_preceding_comments, extract_call_expression_sites,
         local_node_id,
     },
     traversal::{find_descendant_by_kind, find_direct_child_by_kind},
@@ -247,7 +247,7 @@ impl CppExtractor {
     }
 
     pub(super) fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        docstring_from_preceding_comments(state.source, node, clean_c_doc_comment)
+        docstring_from_preceding_comments(state.source, node, clean_c_comment)
     }
 
     pub(super) fn has_storage_class(

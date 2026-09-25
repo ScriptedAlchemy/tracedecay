@@ -40,12 +40,6 @@ pub const GIT_CORRELATION_SCHEMA_VERSION: i64 = 5;
 /// projection metadata) re-publishes an unchanged projection under a distinct
 /// generation instead of colliding with the previous shape's rows.
 pub const GIT_EVIDENCE_PROJECTOR_REVISION: &str = "session-git-evidence-projector.v2";
-/// The pre-index projector revision. A verified head that records no projector
-/// revision was published under it. Its span and commit rows are identical to
-/// the current shape, so full recovery still verifies and merges it, but it
-/// carries no query index and answers bounded reads as unavailable until the
-/// next publication re-projects it.
-pub const GIT_EVIDENCE_LEGACY_PROJECTOR_REVISION_V1: &str = "session-git-evidence-projector.v1";
 pub const DEFAULT_SPAN_MERGE_GAP_SECS: i64 = 30 * 60;
 pub const DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS: i64 = 30;
 // The scope value type and session cap are owned by the LCM engine crate so
@@ -700,7 +694,7 @@ pub fn transcript_git_evidence(
             };
             let repo = match &mut repo {
                 Some(repo) => repo,
-                slot => match gix::discover(project_root) {
+                slot => match tracedecay_runtime_core::git_open::discover(project_root) {
                     Ok(discovered) => slot.insert(discovered),
                     Err(_) => {
                         // Keep spans already collected; later messages can
@@ -829,11 +823,12 @@ pub fn canonical_observation_git_evidence(
         })
         .unwrap_or_default();
 
-    let repo = gix::discover(admitted_project_root).map_err(|error| {
-        GitCorrelationError::Unavailable(format!(
-            "admitted repository could not be opened for canonical commit evidence: {error}"
-        ))
-    })?;
+    let repo =
+        tracedecay_runtime_core::git_open::discover(admitted_project_root).map_err(|error| {
+            GitCorrelationError::Unavailable(format!(
+                "admitted repository could not be opened for canonical commit evidence: {error}"
+            ))
+        })?;
     let mut commits = Vec::new();
     for reference in commit_references {
         let Ok(prefix) = gix::hash::Prefix::from_hex(reference.as_str()) else {
@@ -1222,7 +1217,8 @@ pub(crate) use attribution::publish_graph_evidence_controlled;
 pub use attribution::{
     CommitAttributionSweepOutcome, ScannedCommit, SpanScanTarget, SpanWindow, TargetScan,
     commit_overlap_kind, graph_evidence_publication_key, match_commit_to_spans,
-    publish_graph_evidence, publish_transcript_graph_evidence, run_commit_attribution_sweep,
+    publish_graph_evidence, publish_transcript_graph_evidence, rebuild_pre_index_git_evidence,
+    run_commit_attribution_sweep,
 };
 pub use backfill::{
     BackfillOptions, BackfillSkipReason, BackfillStats, BoundedBackfillInterruption,
@@ -1238,12 +1234,10 @@ pub use publication_outbox::{
     enqueue_git_evidence_publication, pending_git_evidence_publication_count,
     replay_pending_git_evidence_publications, replay_pending_git_evidence_publications_outcome,
 };
-#[cfg(any(test, feature = "test-helpers"))]
-pub use store::legacy_git_evidence_manifest_for_test;
 pub use store::{
     AnalyticsSessionTimestamp, AnalyticsSessionTimestampSource, GitCorrelationSessionStore,
     GitCorrelationWriteTxn, GitEvidenceGraphHead, GitEvidenceGraphView, GitEvidenceProjectionStore,
-    GitEvidenceProjectorRevision, build_git_evidence_manifest_checked, git_evidence_generation_id,
+    build_git_evidence_manifest_checked, git_evidence_generation_id,
     git_evidence_projection_identity, open_git_evidence_graph_view,
     publish_git_evidence_projection, recover_git_evidence_projection,
 };

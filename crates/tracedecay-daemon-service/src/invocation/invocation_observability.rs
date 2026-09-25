@@ -100,7 +100,8 @@ pub(super) fn feedback_observation_operation(
         | DaemonInvocationOperation::NativeIntegrationWorktreeReconcile
         | DaemonInvocationOperation::SourceEdit
         | DaemonInvocationOperation::SourceEditReconcile
-        | DaemonInvocationOperation::SourceEditRollback => FeedbackOperationV1::FeedbackCycle,
+        | DaemonInvocationOperation::SourceEditRollback
+        | DaemonInvocationOperation::GraphTool => FeedbackOperationV1::FeedbackCycle,
     }
 }
 
@@ -126,6 +127,7 @@ pub(super) fn invocation_response_outcome(
         | DaemonInvocationOutcome::Configuration { .. }
         | DaemonInvocationOutcome::ContextScout { .. }
         | DaemonInvocationOutcome::RetainedApplication { .. }
+        | DaemonInvocationOutcome::GraphTool { .. }
         | DaemonInvocationOutcome::GitHubStackSignalExpand { .. }
         | DaemonInvocationOutcome::MultiRootScopeSetRead { .. }
         | DaemonInvocationOutcome::MultiRootScopeSetCompareAndSwap { .. }
@@ -245,7 +247,7 @@ pub(super) fn observe_invocation_response(
     started_at: UtcMicros,
     response: &DaemonInvocationResponse,
 ) {
-    let observed_at = current_micros();
+    let observed_at = now_micros();
     let outcome = invocation_response_outcome(response);
     let duration_micros = u64::try_from(observed_at.0.saturating_sub(started_at.0)).ok();
     if let Some(route) = route {

@@ -5,7 +5,7 @@ import type {
   MemoryFactDetailPayloadV1,
   MemoryFactRowV1,
 } from '../../contracts/generated.ts';
-import type { TrustHistoryPayload } from '../../data/query/memory.ts';
+import type { MemoryTrustHistoryPayloadV1 } from '../../contracts/generated.ts';
 import { detailLadder, payloadAccessState, type LadderInput } from './inspector.ts';
 
 function row(over: Partial<MemoryFactRowV1> = {}): MemoryFactRowV1 {
@@ -59,7 +59,7 @@ function envelope<T>(payload: T, domainState: DashboardEnvelopeV1<T>['domain_sta
   } as DashboardEnvelopeV1<T>;
 }
 
-function history(over: Partial<TrustHistoryPayload> = {}): TrustHistoryPayload {
+function history(over: Partial<MemoryTrustHistoryPayloadV1> = {}): MemoryTrustHistoryPayloadV1 {
   return {
     fact_id: 'fact-1',
     trust_history: [],

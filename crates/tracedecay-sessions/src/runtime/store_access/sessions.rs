@@ -9,7 +9,8 @@ use tracedecay_runtime_core::db::engine::{Error as EngineError, FromValue, Row, 
 use tracedecay_store::{SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageRecord, SessionRecord};
 
 use crate::runtime::SessionMessageSearchResult;
-use crate::runtime::codex::codex_cursor_key;
+use crate::runtime::hosts::codex::codex_cursor_key;
+use tracedecay_lcm::raw::{message_body_record_select_columns, message_record_select_columns};
 use tracedecay_lcm::retrieval_content::{
     RelatedMessageCopyIdentity, dedupe_related_message_copies, rerank_fetch_limit,
 };
@@ -35,7 +36,7 @@ pub(crate) const SESSION_MESSAGE_ID_LOOKUP_MAX: usize = 256;
 /// provider ingest batch identity reads without duplicating session schema.
 pub(crate) const EXISTING_SESSION_MESSAGE_IDS_SQL: &str = "SELECT messages.message_id
      FROM json_each(?2) AS requested
-     CROSS JOIN session_messages AS messages
+     CROSS JOIN lcm_raw_messages AS messages
      WHERE requested.type = 'text'
        AND messages.provider = ?1
        AND messages.message_id = requested.value";
@@ -90,7 +91,7 @@ fn descending_timestamp(left: Option<i64>, right: Option<i64>) -> std::cmp::Orde
     }
 }
 pub const SESSION_MESSAGES_AFTER_SQL: &str = "SELECT timestamp, ordinal, kind, tool_names, metadata_json \
-                 FROM session_messages \
+                 FROM lcm_raw_messages \
                  WHERE provider = ?1 AND session_id = ?2 \
                    AND timestamp IS NOT NULL AND timestamp >= ?3 \
                  ORDER BY timestamp, ordinal, message_id \
@@ -268,10 +269,13 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                 .iter()
                 .flat_map(|(path, providers)| {
                     providers.iter().map(move |provider| {
+                        // `set_parse_offset` stores every cursor under its
+                        // identity key, so a Windows location must be looked
+                        // up the same way to find its checkpoint.
                         let key = if provider == "codex" {
                             codex_cursor_key(Path::new(path)).durable_text()
                         } else {
-                            path.clone()
+                            path_identity_key(path)
                         };
                         serde_json::json!({ "path": path, "key": key })
                     })
@@ -364,7 +368,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .read_connection()
             .query(
                 "SELECT EXISTS(
-                    SELECT 1 FROM session_messages
+                    SELECT 1 FROM lcm_raw_messages
                     WHERE provider = ?1 AND message_id = ?2
                  )",
                 tracedecay_runtime_core::db::engine::params![provider, message_id],
@@ -423,7 +427,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     pub async fn session_message_count(&self) -> Result<i64, String> {
         let mut rows = self
             .read_connection()
-            .query("SELECT COUNT(*) FROM session_messages", ())
+            .query("SELECT COUNT(*) FROM lcm_raw_messages", ())
             .await
             .map_err(|error| format!("failed to count session messages: {error}"))?;
         let row = rows
@@ -441,7 +445,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         project_key: &str,
     ) -> Result<i64, String> {
         let mut sql = "SELECT COUNT(*)
-                 FROM session_messages m
+                 FROM lcm_raw_messages m
                  JOIN sessions s ON s.provider = m.provider AND s.session_id = m.session_id
                  WHERE 1 = 1"
             .to_owned();
@@ -532,14 +536,14 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .read_connection()
             .query(
                 "WITH latest_seconds AS (
-                    SELECT timestamp FROM session_messages
+                    SELECT timestamp FROM lcm_raw_messages
                     WHERE timestamp IS NOT NULL
                       AND timestamp < ?1
                     ORDER BY timestamp DESC
                     LIMIT 1
                  ),
                  latest_millis AS (
-                    SELECT timestamp FROM session_messages
+                    SELECT timestamp FROM lcm_raw_messages
                     WHERE timestamp >= ?1
                     ORDER BY timestamp DESC
                     LIMIT 1
@@ -580,11 +584,14 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     ) -> tracedecay_domain::errors::Result<Option<SessionMessageRecord>> {
         const OPERATION: &str = "read registered session message";
         let snapshot = self.read_snapshot().await?;
+        let sql = format!(
+            "SELECT {}
+             FROM lcm_raw_messages AS message WHERE provider = ?1 AND message_id = ?2",
+            message_body_record_select_columns("message")
+        );
         let mut rows = snapshot
             .query(
-                "SELECT provider, message_id, session_id, role, timestamp, ordinal, text, kind,
-                        model, tool_names, source_path, source_offset, metadata_json
-                 FROM session_messages WHERE provider = ?1 AND message_id = ?2",
+                &sql,
                 tracedecay_runtime_core::db::engine::params![provider, message_id],
             )
             .await
@@ -626,18 +633,19 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         let fetch_limit = rerank_fetch_limit(limit, SESSION_MESSAGE_SEARCH_MAX_FETCH);
         let snapshot = self.read_snapshot().await?;
 
-        let mut sql = "SELECT
+        let mut sql = format!(
+            "SELECT
                 s.provider, s.session_id, s.project_key, s.project_path, s.title, s.started_at,
                 s.ended_at, s.transcript_path, s.metadata_json, s.parent_session_id,
                 s.is_subagent, s.agent_id, s.parent_tool_use_id,
-                m.provider, m.message_id, m.session_id, m.role, m.timestamp, m.ordinal, m.text,
-                m.kind, m.model, m.tool_names, m.source_path, m.source_offset, m.metadata_json,
-                bm25(session_messages_fts, 10.0, 2.0, 1.0, 1.0, 1.0) AS rank
-             FROM session_messages_fts
-             JOIN session_messages m ON session_messages_fts.rowid = m.rowid
+                {},
+                bm25(lcm_raw_messages_fts, 10.0, 2.0, 1.0, 1.0, 1.0) AS rank
+             FROM lcm_raw_messages_fts
+             JOIN lcm_raw_messages m ON lcm_raw_messages_fts.rowid = m.store_id
              JOIN sessions s ON s.provider = m.provider AND s.session_id = m.session_id
-             WHERE session_messages_fts MATCH ?1"
-            .to_owned();
+             WHERE lcm_raw_messages_fts MATCH ?1",
+            message_record_select_columns("m")
+        );
         let mut query_params = vec![Value::Text(fts_query), Value::Text(provider.to_owned())];
         let _ = write!(sql, " AND m.provider = ?{}", query_params.len());
         if let Some(project_key) = project_key {
@@ -647,7 +655,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             query_params.push(Value::Text(term.clone()));
             let _ = write!(
                 sql,
-                " AND instr(lower(m.text), ?{}) > 0",
+                " AND instr(lower(m.index_text), ?{}) > 0",
                 query_params.len()
             );
         }
@@ -656,7 +664,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         ));
         let _ = write!(
             sql,
-            " ORDER BY bm25(session_messages_fts, 10.0, 2.0, 1.0, 1.0, 1.0)
+            " ORDER BY bm25(lcm_raw_messages_fts, 10.0, 2.0, 1.0, 1.0, 1.0)
               LIMIT ?{}",
             query_params.len()
         );
@@ -775,58 +783,6 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             });
         }
 
-        let mut legacy_sql = "SELECT
-                s.provider, s.session_id, s.project_key, s.project_path, s.title, s.started_at,
-                s.ended_at, s.transcript_path, s.metadata_json, s.parent_session_id,
-                s.is_subagent, s.agent_id, s.parent_tool_use_id,
-                m.provider, m.message_id, m.session_id, m.role, m.timestamp, m.ordinal, m.text,
-                m.kind, m.model, m.tool_names, m.source_path, m.source_offset, m.metadata_json
-             FROM session_messages m
-             JOIN sessions s ON s.provider = m.provider AND s.session_id = m.session_id
-             WHERE m.kind = 'goal'
-               AND m.ordinal = (
-                   SELECT MAX(m2.ordinal) FROM session_messages m2
-                   WHERE m2.provider = m.provider
-                     AND m2.session_id = m.session_id
-                     AND m2.kind = 'goal'
-               )
-               AND NOT EXISTS (
-                   SELECT 1 FROM observation_workflow_facts w
-                   WHERE w.projector_version = ?1
-                     AND w.provider = m.provider
-                     AND w.session_id = m.session_id
-                     AND w.semantic_kind = 'goal'
-               )"
-        .to_owned();
-        let mut legacy_params = vec![Value::Text(SESSION_MESSAGE_PROJECTOR_VERSION.to_owned())];
-        if let Some(project_key) = project_key {
-            push_project_identity_predicate(&mut legacy_sql, &mut legacy_params, project_key);
-        }
-        legacy_params.push(Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
-        let _ = write!(
-            legacy_sql,
-            " ORDER BY (m.timestamp IS NULL) ASC, m.timestamp DESC, m.ordinal DESC LIMIT ?{}",
-            legacy_params.len()
-        );
-        let mut rows = snapshot
-            .query(&legacy_sql, legacy_params)
-            .await
-            .map_err(|error| session_db_operation_error(OPERATION, error))?;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| session_db_operation_error(OPERATION, error))?
-        {
-            let session = row_to_session(&row)
-                .map_err(|message| session_db_operation_message(OPERATION, message))?;
-            let message = row_to_message(&row, 13)
-                .map_err(|message| session_db_operation_message(OPERATION, message))?;
-            results.push(SessionMessageSearchResult {
-                session,
-                message,
-                score: 0.0,
-            });
-        }
         results.sort_by(|left, right| {
             descending_timestamp(left.message.timestamp, right.message.timestamp)
                 .then_with(|| right.message.ordinal.cmp(&left.message.ordinal))
@@ -1025,7 +981,8 @@ pub fn session_record_from_row(row: &Row) -> Result<SessionRecord, SqlColumnErro
     })
 }
 
-/// `session_messages` row, starting at `offset`, in the shared column order.
+/// Message row read through one of the `tracedecay_lcm::raw` record column
+/// lists, starting at `offset`.
 pub fn message_record_from_row(
     row: &Row,
     offset: i32,

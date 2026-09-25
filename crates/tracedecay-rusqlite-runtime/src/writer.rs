@@ -46,7 +46,7 @@ use crate::{
     maintenance::ExclusiveMaintenancePermit,
     persistence::RuntimeWriterPersistence,
     telemetry::{WriterTelemetry, WriterTelemetrySnapshot},
-    watermark::{CommitWatermarkSubscription, CommittedWatermarkPublisher},
+    watermark::CommittedWatermarkPublisher,
 };
 
 struct UnrestrictedRuntimeWriteAuthority;
@@ -540,7 +540,6 @@ pub struct PersistentWriter {
     join: Option<JoinHandle<()>>,
     admission: Admission,
     telemetry: WriterTelemetry,
-    watermark_source: CommitWatermarkSubscription,
     checkpoint_status: watch::Receiver<CheckpointStatus>,
     checkpoint_pressure: watch::Receiver<CheckpointPressure>,
     opened_file_identity: Option<u64>,
@@ -617,7 +616,6 @@ impl PersistentWriter {
         let expected_file_identity = locator.expected_file_identity();
         let opened_database = locator.opened_database;
         let watermark_publisher = CommittedWatermarkPublisher::new(binding.clone());
-        let watermark_source = watermark_publisher.subscribe();
         let (sender, receiver) = mpsc::channel(capacity);
         // Exact-SQL transactions are serialized by the writer actor. Keep
         // the same bounded admission depth as ordinary writes so a second
@@ -676,7 +674,6 @@ impl PersistentWriter {
                 join: Some(join),
                 admission,
                 telemetry,
-                watermark_source,
                 checkpoint_status,
                 checkpoint_pressure,
                 opened_file_identity,
@@ -718,11 +715,6 @@ impl PersistentWriter {
     }
     pub fn telemetry_snapshot(&self) -> WriterTelemetrySnapshot {
         self.telemetry.snapshot()
-    }
-
-    /// Returns a read-only view of this writer's committed watermark.
-    pub fn commit_watermark_source(&self) -> CommitWatermarkSubscription {
-        self.watermark_source.clone()
     }
 
     pub fn checkpoint_handle(&self) -> CheckpointHandle {

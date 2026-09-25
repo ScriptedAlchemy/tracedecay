@@ -11,6 +11,7 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 cap-fs-ext = "4.0.2"
 cap-std = "4.0.2"
 hotpath.workspace = true
+tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

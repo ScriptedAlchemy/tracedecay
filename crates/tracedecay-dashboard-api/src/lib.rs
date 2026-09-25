@@ -5,7 +5,7 @@
 //! - `/api/plugins/holographic/*`  → canonical project facts, verified Grafeo
 //!   topology, and deterministic FHRR projections derived on read
 //! - `/api/plugins/hermes-lcm/*`   → LCM session store
-//!   (`lcm_raw_messages` / `lcm_summary_nodes` in the resolved active project
+//!   (`lcm_raw_messages` / `session_summary_nodes` in the resolved active project
 //!   store where transcript ingest writes; see [`resolve_lcm_store`] for the
 //!   fail-closed authority selection)
 //!
@@ -73,11 +73,11 @@ pub(crate) mod test_support {
             Vec::new()
         }
 
-        fn write_text(path: &Path, contents: &str, _: Option<&Path>) -> Result<()> {
+        fn write_text(path: &Path, contents: &str) -> Result<()> {
             Ok(std::fs::write(path, contents)?)
         }
 
-        fn write_json(path: &Path, value: &serde_json::Value, _: Option<&Path>) -> Result<()> {
+        fn write_json(path: &Path, value: &serde_json::Value) -> Result<()> {
             Ok(std::fs::write(path, serde_json::to_vec_pretty(value)?)?)
         }
 
@@ -180,7 +180,6 @@ pub use settings_api::{
     DashboardCodeIndexWorkerSettingsFuture, DashboardProfileCodeIndexWorkerSettingsPort,
     PrAutoTrackManagedSummaryEntryV1, PrAutoTrackManagedSummaryReader,
 };
-mod storage_findings_api;
 mod storage_telemetry_api;
 mod token_count;
 mod util;
@@ -210,7 +209,7 @@ use tracedecay_automation_runtime::automation::backend;
 use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationHostMode};
 use tracedecay_automation_runtime::automation::host_io::HostIo;
 use tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader;
-use tracedecay_contracts::doctor::DoctorReportV1;
+use tracedecay_contracts::doctor::{DoctorReportV1, LanguageServerReadV1};
 use tracedecay_contracts::storage::{SchemaConvergenceFindingV1, TableGrowthDoctorEvidenceV1};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
@@ -369,6 +368,9 @@ pub struct AdmittedDoctorReportV1 {
     pub report: DoctorReportV1,
     pub table_growth_evidence: Vec<TableGrowthDoctorEvidenceV1>,
     pub schema_convergences: Vec<SchemaConvergenceFindingV1>,
+    /// The daemon owner's per-analyzer read behind the `LanguageServer`
+    /// finding, so `lsp servers` lists exactly what Doctor graded.
+    pub language_servers: LanguageServerReadV1,
 }
 
 impl AdmittedDoctorReportV1 {
@@ -377,7 +379,13 @@ impl AdmittedDoctorReportV1 {
             report,
             table_growth_evidence: Vec::new(),
             schema_convergences: Vec::new(),
+            language_servers: LanguageServerReadV1::Unknown,
         }
+    }
+
+    pub fn with_language_servers(mut self, read: LanguageServerReadV1) -> Self {
+        self.language_servers = read;
+        self
     }
 
     pub fn with_table_growth_evidence(
@@ -477,8 +485,6 @@ pub struct DashboardState {
     pub storage_mode: String,
     /// Resolved active project store root.
     pub store_root: PathBuf,
-    /// Resolved `config.json` path for the active project store.
-    pub config_path: PathBuf,
     /// Resolved dashboard sidecar root inside the active project store.
     pub dashboard_root: PathBuf,
     /// Retention policy resolved with the owning runtime configuration.
@@ -776,7 +782,6 @@ fn resolve_lcm_store_for_layout(
 
 pub fn storage_mode_label(mode: &StorageMode) -> &'static str {
     match mode {
-        StorageMode::ProjectLocal => "project_local",
         StorageMode::ProfileSharded => "profile_sharded",
     }
 }
@@ -844,7 +849,6 @@ async fn build_state_inner(
     let lcm = resolve_lcm_store(cg, registered_project_session_db).await;
     let dashboard_root = cg.store_layout.dashboard_root.clone();
     let store_root = cg.store_layout.data_root.clone();
-    let config_path = cg.store_layout.config_path.clone();
     let storage_mode = storage_mode_label(&cg.store_layout.storage_mode).to_string();
     let code_diagnostics_authority = match (
         code_diagnostics_broker,
@@ -907,7 +911,6 @@ async fn build_state_inner(
         pr_autotrack_reader,
         storage_mode,
         store_root,
-        config_path,
         dashboard_root,
         retention_config: cg.retention_config.clone(),
         user_settings: Arc::clone(&cg.user_settings_client),
@@ -1633,7 +1636,6 @@ fn project_api_router() -> Router<DashboardState> {
         )
         .route("/api/feedback/status", get(feedback_api::status))
         // Holographic memory plugin API (mirrors holographic_plus plugin_api.py)
-        .route("/api/plugins/holographic/", get(memory_api::overview))
         .route("/api/plugins/holographic", get(memory_api::overview))
         .route("/api/plugins/holographic/status", get(memory_api::status))
         .route(
@@ -1788,10 +1790,7 @@ fn project_api_router() -> Router<DashboardState> {
         // Savings & Cost API (savings ledger + session cost accounting)
         .route("/api/plugins/savings/overview", get(savings_api::overview))
         .route("/api/costs", get(savings_api::costs))
-        .route("/api/plugins/savings/ledger", get(savings_api::ledger))
-        .route("/api/plugins/savings/sessions", get(savings_api::sessions))
         .route("/api/plugins/savings/models", get(savings_api::models))
-        .route("/api/plugins/savings/pricing", get(savings_api::pricing))
         // Settings API (aggregated project/user config + read-only env gates)
         .route("/api/settings", get(settings_api::get_settings))
         .route(
@@ -1821,7 +1820,7 @@ fn project_api_router() -> Router<DashboardState> {
         )
         .route("/api/loom/temporal", get(loom_api::temporal))
         // V2 read-model surfaces (DashboardEnvelope<T>). Doctor finding
-        // family, storage telemetry/findings, code-index freshness, and
+        // family, storage telemetry, code-index freshness, and
         // the typed SSE stream. See `read_model` for the normative envelope.
         // Read-only Doctor/health paths come from the API-owned descriptors in
         // `tracedecay_api::doctor` so the mount cannot drift from them.
@@ -1832,10 +1831,6 @@ fn project_api_router() -> Router<DashboardState> {
         .route(
             "/api/storage/telemetry",
             get(storage_telemetry_api::telemetry),
-        )
-        .route(
-            tracedecay_api::doctor::STORAGE_FINDINGS_ROUTE_PATH,
-            get(storage_findings_api::findings),
         )
         .route(
             "/api/code-index/freshness",
@@ -2138,7 +2133,7 @@ async fn capabilities(
     let has_lcm = state.lcm_read_authority.is_some();
     let automation = automation_config_api::effective_automation_config(&state);
     let (automation_configured, automation_mode, automation_payload) = match automation {
-        Ok((configuration_revision_id, config)) => {
+        Ok((configuration_revision_id, config, codex)) => {
             let backend_supported = matches!(config.backend, AutomationBackend::CodexAppServer);
             let configured = config.enabled && backend_supported;
             let mode = if !configured {
@@ -2158,7 +2153,7 @@ async fn capabilities(
                     "mode": mode,
                     "backend": config.backend,
                     "host_mode": config.host_mode,
-                    "availability": backend::backend_availability(&config),
+                    "availability": backend::backend_availability(&config, &codex),
                 }),
             )
         }
@@ -2527,7 +2522,6 @@ mod authority_tests {
                 pr_autotrack_reader: None,
                 storage_mode: storage_mode_label(&layout.storage_mode).to_owned(),
                 store_root: layout.data_root.clone(),
-                config_path: layout.config_path.clone(),
                 dashboard_root: layout.dashboard_root.clone(),
                 retention_config: tracedecay_configuration::RetentionConfig::default(),
                 user_settings: Arc::new(
@@ -2686,18 +2680,18 @@ mod authority_tests {
         let similarity_warm =
             memory_service::similarity_payload(&fixture.state, 0.5, 100, &control).await;
 
-        assert_eq!(projection_before["points"].as_array().unwrap().len(), 0);
-        assert_eq!(similarity_before["count"], 0);
-        assert_eq!(projection_after["scan"]["cache_state"], "miss");
-        assert_eq!(projection_after["scan"]["vector_rows_read"], 1);
-        assert_eq!(projection_after["points"].as_array().unwrap().len(), 1);
-        assert_eq!(similarity_after["scan"]["cache_state"], "miss");
-        assert_eq!(similarity_after["scan"]["vector_rows_read"], 1);
-        assert_eq!(similarity_after["count"], 1);
-        assert_eq!(projection_warm["scan"]["cache_state"], "hit");
-        assert_eq!(projection_warm["scan"]["vector_rows_read"], 0);
-        assert_eq!(similarity_warm["scan"]["cache_state"], "hit");
-        assert_eq!(similarity_warm["scan"]["vector_rows_read"], 0);
+        assert_eq!(projection_before.points.len(), 0);
+        assert_eq!(similarity_before.count, 0);
+        assert_eq!(projection_after.scan.as_ref().unwrap().cache_state, "miss");
+        assert_eq!(projection_after.scan.as_ref().unwrap().vector_rows_read, 1);
+        assert_eq!(projection_after.points.len(), 1);
+        assert_eq!(similarity_after.scan.as_ref().unwrap().cache_state, "miss");
+        assert_eq!(similarity_after.scan.as_ref().unwrap().vector_rows_read, 1);
+        assert_eq!(similarity_after.count, 1);
+        assert_eq!(projection_warm.scan.as_ref().unwrap().cache_state, "hit");
+        assert_eq!(projection_warm.scan.as_ref().unwrap().vector_rows_read, 0);
+        assert_eq!(similarity_warm.scan.as_ref().unwrap().cache_state, "hit");
+        assert_eq!(similarity_warm.scan.as_ref().unwrap().vector_rows_read, 0);
     }
 
     #[tokio::test]
@@ -2710,10 +2704,10 @@ mod authority_tests {
             memory_service::projection_payload(&fixture.state, "", 2_000, &control).await;
         let similarity =
             memory_service::similarity_payload(&fixture.state, 0.5, 100, &control).await;
-        assert_eq!(projection["scan"]["cache_state"], "miss");
-        assert_eq!(projection["points"].as_array().unwrap().len(), 3);
-        assert_eq!(similarity["scan"]["cache_state"], "miss");
-        assert_eq!(similarity["count"], 3);
+        assert_eq!(projection.scan.as_ref().unwrap().cache_state, "miss");
+        assert_eq!(projection.points.len(), 3);
+        assert_eq!(similarity.scan.as_ref().unwrap().cache_state, "miss");
+        assert_eq!(similarity.count, 3);
 
         // The populated caches are owned by the state (and its clones), not by
         // the process: once the last handle to this store's dashboard state is
@@ -2801,11 +2795,13 @@ mod authority_tests {
                 .await;
                 projection_cold.push(started.elapsed());
                 projection_cold_rows.push(
-                    projection["scan"]["vector_rows_read"]
-                        .as_u64()
-                        .expect("projection cold row count"),
+                    projection
+                        .scan
+                        .as_ref()
+                        .expect("projection cold row count")
+                        .vector_rows_read,
                 );
-                assert_eq!(projection["scan"]["cache_state"], "miss");
+                assert_eq!(projection.scan.as_ref().unwrap().cache_state, "miss");
 
                 let started = Instant::now();
                 let (similarity, heartbeat) = if index == 0 {
@@ -2827,11 +2823,13 @@ mod authority_tests {
                 };
                 similarity_cold.push(started.elapsed());
                 similarity_cold_rows.push(
-                    similarity["scan"]["vector_rows_read"]
-                        .as_u64()
-                        .expect("similarity cold row count"),
+                    similarity
+                        .scan
+                        .as_ref()
+                        .expect("similarity cold row count")
+                        .vector_rows_read,
                 );
-                assert_eq!(similarity["scan"]["cache_state"], "miss");
+                assert_eq!(similarity.scan.as_ref().unwrap().cache_state, "miss");
                 if heartbeat.is_some() {
                     similarity_cold_heartbeat = heartbeat;
                 }
@@ -2854,11 +2852,13 @@ mod authority_tests {
                 .await;
                 projection_warm.push(started.elapsed());
                 projection_warm_rows.push(
-                    projection["scan"]["vector_rows_read"]
-                        .as_u64()
-                        .expect("projection warm row count"),
+                    projection
+                        .scan
+                        .as_ref()
+                        .expect("projection warm row count")
+                        .vector_rows_read,
                 );
-                assert_eq!(projection["scan"]["cache_state"], "hit");
+                assert_eq!(projection.scan.as_ref().unwrap().cache_state, "hit");
             }
 
             let ((similarity_warm, similarity_warm_rows), similarity_warm_heartbeat) =
@@ -2879,11 +2879,13 @@ mod authority_tests {
                         .await;
                         timings.push(started.elapsed());
                         rows.push(
-                            similarity["scan"]["vector_rows_read"]
-                                .as_u64()
-                                .expect("similarity warm row count"),
+                            similarity
+                                .scan
+                                .as_ref()
+                                .expect("similarity warm row count")
+                                .vector_rows_read,
                         );
-                        assert_eq!(similarity["scan"]["cache_state"], "hit");
+                        assert_eq!(similarity.scan.as_ref().unwrap().cache_state, "hit");
                     }
                     (timings, rows)
                 })
@@ -3439,7 +3441,6 @@ mod authority_tests {
         for tail in [
             "doctor/findings",
             "storage/telemetry",
-            "storage/findings",
             "code-index/freshness",
             "feedback/status",
         ] {

@@ -817,9 +817,11 @@ async fn validate_message_projection_row(
         resolved.released,
     )? == StoredProvenanceRendering::Current
     {
-        // Convergence supersedes an existing output row; it never inserts one.
-        // A vanished message stays a hard failure. Session repair is only the
-        // uniquely owned current output whose session row is absent.
+        // Convergence supersedes an existing output row, and reinserts a
+        // vanished one only where provenance still names this observation as
+        // its creator. A surviving body that disagrees with the deterministic
+        // output stays a hard failure. Session repair is only the uniquely
+        // owned current output whose session row is absent.
         let owner_message = owner_projection.message();
         let output_row_present = resolved
             .projection_rows
@@ -827,20 +829,49 @@ async fn validate_message_projection_row(
             .is_some();
         match verify_owner_output_rows(conn, resolved, &owner_projection).await {
             Ok(()) => {
-                // Message equality is not the whole output. The raw twin is
-                // derived from the same observation and is not covered by the
-                // digest, so a matching message can still sit on a stale twin.
-                // Protected rows are not this arm: their stored message differs
-                // from the projection, and that compatibility already checked
-                // the twin.
-                if resolved
+                // Message equality is not the whole output. The row's hash and
+                // storage kind are not compared by the message record, so a
+                // matching message can still sit on stale storage columns.
+                // Protected rows are not this arm: they differ from the
+                // projected row, and that compatibility already checked them.
+                let stored_matches = match resolved
                     .projection_rows
                     .message(&owner_message.provider, &owner_message.message_id)
-                    .is_some_and(|stored| stored == owner_message)
-                    && owned_raw_twin_needs_rewrite(&owner_projection, &resolved.projection_rows)?
+                {
+                    Some(stored) => {
+                        crate::observation_projection::stored_row_matches(stored, owner_message)
+                            .map_err(|error| {
+                                authority_violation(format!(
+                                    "projection output rows disagree with deterministic output: \
+                                     {error}"
+                                ))
+                            })?
+                    }
+                    None => false,
+                };
+                if stored_matches
+                    && owned_storage_columns_need_rewrite(
+                        &owner_projection,
+                        &resolved.projection_rows,
+                    )?
                 {
                     resolved.released.record(&owner_projection);
                 }
+            }
+            Err(ProjectionStoreError::OutputCollision {
+                provider,
+                message_id,
+            }) if !output_row_present
+                && owner_provenance.message_created == 1
+                && provider == owner_message.provider
+                && message_id == owner_message.message_id
+                && owner_provenance.output_provider == provider
+                && owner_provenance.output_message_id == message_id =>
+            {
+                // Provenance still says this observation created the row, and
+                // the row is gone. That is an interrupted write, not a retired
+                // output. Restore it from the immutable projection.
+                resolved.released.record(&owner_projection);
             }
             Err(ProjectionStoreError::OutputCollision {
                 provider,
@@ -852,7 +883,15 @@ async fn validate_message_projection_row(
                     .projection_rows
                     .message(&provider, &message_id)
                     .is_some_and(|stored| {
-                        stored_message_is_shipped_release_rendering(&authority.canonical, stored)
+                        // A sanitizer fault is not a match; the row then
+                        // falls through to the named hard failure below.
+                        stored_message_is_shipped_release_rendering(
+                            &authority.canonical,
+                            |released| {
+                                crate::observation_projection::stored_row_matches(stored, released)
+                                    .is_ok_and(|matches| matches)
+                            },
+                        )
                     }) =>
             {
                 // Provenance already carries this binary's digest, and the
@@ -861,6 +900,23 @@ async fn validate_message_projection_row(
                 // not finish. Finish it on the released-rendering ledger. A
                 // body that matches neither rendering is tamper and falls
                 // through to the hard failure below.
+                resolved.released.record(&owner_projection);
+            }
+            Err(ProjectionStoreError::SessionOutputCollision {
+                provider,
+                session_id,
+                field: "row_missing",
+            }) if !output_row_present
+                && owner_provenance.message_created == 1
+                && provider == owner_projection.session().provider
+                && session_id == owner_projection.session().session_id
+                && owner_provenance.output_provider == owner_message.provider
+                && owner_provenance.output_message_id == owner_message.message_id =>
+            {
+                // The message batch is how sessions are loaded. A creator whose
+                // message row is gone therefore looks like a missing session
+                // even when the session row is still there. Restore both from
+                // the immutable projection.
                 resolved.released.record(&owner_projection);
             }
             Err(ProjectionStoreError::SessionOutputCollision {
@@ -914,13 +970,14 @@ async fn verify_owner_output_rows(
     .await
 }
 
-/// Whether the LCM raw twin of a message that already matches this projection
-/// is not the twin a fresh projection write would store.
+/// Whether the storage columns of a message row that already matches this
+/// projection are not the ones a fresh projection write would store.
 ///
-/// Hermes projections have no raw twin. A sanitizer quarantine is itself the
+/// A Hermes body belongs to the Hermes LCM turn authority, not the projector.
+/// A sanitizer quarantine is itself the
 /// current rendering, so the caller records the projection for the same
 /// converge path a fresh capture uses. A sanitizer fault stays a typed refusal.
-fn owned_raw_twin_needs_rewrite(
+fn owned_storage_columns_need_rewrite(
     projection: &SessionMessageProjection,
     rows: &ProjectionRowsBatch,
 ) -> tracedecay_domain::errors::Result<bool> {
@@ -933,11 +990,11 @@ fn owned_raw_twin_needs_rewrite(
         Err(error) if error.is_quarantine_verdict() => return Ok(true),
         Err(error) => {
             return Err(authority_violation(format!(
-                "projection raw twin sanitizer failed: {error}"
+                "projection message sanitizer failed: {error}"
             )));
         }
     };
-    let Some(raw) = rows.raw_twin(&message.provider, &message.message_id) else {
+    let Some(raw) = rows.storage_columns(&message.provider, &message.message_id) else {
         return Ok(true);
     };
     // The derived columns are pure functions of the same sanitized body, so a
@@ -1891,7 +1948,7 @@ mod tests {
         AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjection,
         ObservationProjectionStore, ObservationStore, ObservationWrite,
         SESSION_MESSAGE_PROJECTOR_VERSION, build_observation_resolution_authorization_v1,
-        build_observation_retrieval_anchor_v2,
+        build_observation_retrieval_anchor,
     };
 
     use super::{
@@ -2237,7 +2294,7 @@ mod tests {
         let generation = ProjectionGenerationId::new("projection.audit-test").unwrap();
         let authorization =
             build_observation_resolution_authorization_v1(&observation, "audit-test").unwrap();
-        let anchor = build_observation_retrieval_anchor_v2(
+        let anchor = build_observation_retrieval_anchor(
             &observation,
             generation.clone(),
             UtcMicros(1),
@@ -2603,7 +2660,7 @@ mod tests {
                 "audit-batch",
             )
             .unwrap();
-            let anchor = tracedecay_store::build_observation_retrieval_anchor_v2(
+            let anchor = tracedecay_store::build_observation_retrieval_anchor(
                 write.observation(),
                 generation.clone(),
                 UtcMicros(1),
@@ -2709,7 +2766,7 @@ mod tests {
         let authorization =
             build_observation_resolution_authorization_v1(write.observation(), "cursor-fixture")
                 .unwrap();
-        let anchor = build_observation_retrieval_anchor_v2(
+        let anchor = build_observation_retrieval_anchor(
             write.observation(),
             projection_generation.clone(),
             UtcMicros(1),
@@ -2768,8 +2825,7 @@ mod tests {
             .execute(
                 "UPDATE lcm_raw_messages
                  SET content = ?3, content_hash = ?4, storage_kind = 'inline',
-                     payload_ref = NULL, snippet_text = ?3, index_text = ?3,
-                     metadata_json = ?5
+                     payload_ref = NULL, placeholder_text = NULL, metadata_json = ?5
                  WHERE provider = ?1 AND message_id = ?2",
                 params![
                     "cursor",
@@ -2792,10 +2848,7 @@ mod tests {
             .await
             .expect("read receipt-bound stored message")
             .expect("receipt-bound stored message");
-        assert_eq!(
-            stored_before.text,
-            tracedecay_lcm::retrieval_content::derived_text_for_index(protected.sanitized_text())
-        );
+        assert_eq!(stored_before.text, protected.sanitized_text());
         assert_ne!(stored_before, *projection.message());
 
         super::super::ensure_authority_invariants(database.runtime_database(), true, false)
@@ -2831,10 +2884,45 @@ mod tests {
             .expect("preserved deterministic provenance");
         assert_eq!(
             row.get::<String>(0).unwrap(),
-            projection.output_digest().unwrap().as_str()
+            crate::observation_projection::stored_output_digest(&projection)
+                .unwrap()
+                .as_str()
         );
         assert_eq!(row.get::<i64>(1).unwrap(), 1);
         assert!(rows.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn projection_audit_restores_a_created_cursor_message_whose_row_is_gone() {
+        let directory = TempDir::new().unwrap();
+        let runtime = crate::tests::harness::HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .unwrap();
+        seed_projected_cursor_message(&runtime, "restored cursor message").await;
+        let database = runtime
+            .registered_database(crate::tests::harness::HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        let transaction = database.begin_write_transaction().await.unwrap();
+        let deleted = transaction
+            .execute(
+                "DELETE FROM lcm_raw_messages WHERE provider = ?1 AND message_id = ?2",
+                params!["cursor", CURSOR_COLLISION_MESSAGE_ID],
+            )
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1);
+        transaction.commit().await.unwrap();
+
+        super::super::ensure_authority_invariants(database.runtime_database(), true, false)
+            .await
+            .expect("a created message with surviving provenance must be restored");
+
+        let restored = database
+            .get_session_message("cursor", CURSOR_COLLISION_MESSAGE_ID)
+            .await
+            .expect("read restored message")
+            .expect("restored message row");
+        assert_eq!(restored.text, "restored cursor message");
     }
 
     /// The audit's message path must stay correct while resolving each chunk's
@@ -2895,7 +2983,7 @@ mod tests {
             "projected sessions must reuse the page authority instead of reading per output"
         );
         assert_eq!(
-            counting.issued("FROM session_messages WHERE provider = ?1 AND message_id = ?2"),
+            counting.issued("FROM lcm_raw_messages WHERE provider = ?1 AND message_id = ?2"),
             0,
             "projected messages must reuse the page authority instead of reading per output"
         );

@@ -266,9 +266,11 @@ async fn git_common_dir_aliases_share_one_project_and_store_authority() {
         .unwrap()
         .expect("registered root inventory");
     assert!(
-        inventory
-            .roots
-            .contains(&primary.to_string_lossy().into_owned())
+        inventory.roots.contains(
+            &tracedecay_runtime_core::path_safety::canonical_root_identity(&primary)
+                .to_string_lossy()
+                .into_owned()
+        )
     );
     assert!(
         inventory

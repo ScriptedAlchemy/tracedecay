@@ -1,11 +1,6 @@
 /** Agent-managed curation control plus automation-owned run observability. */
-import {
-  useAutomaticCurator,
-  useAutomationOutcomes,
-  type AutomaticCuratorRun,
-  type AutomaticCuratorResult,
-  type AutomationOutcomesPayload,
-} from "../../data/query/automation.ts";
+import type { AutomationOutcomesPayloadV1 } from "../../contracts/generated.ts";
+import { useAutomaticCurator, useAutomationOutcomes, type AutomaticCuratorRun, type AutomaticCuratorResult } from "../../data/query/automation.ts";
 import { PayloadBoundary } from "../../ui/ReadSection.tsx";
 import { Panel, Readout } from "../../ui/instrument.tsx";
 import { RunHistory } from "../automations/RunHistory.tsx";
@@ -213,7 +208,7 @@ function committedCurationEffect(
   }
 }
 
-function OutcomesBody({ data }: { data: AutomationOutcomesPayload }) {
+function OutcomesBody({ data }: { data: AutomationOutcomesPayloadV1 }) {
   return (
     <div className="flex flex-col gap-2">
       {data.error !== "" ? (

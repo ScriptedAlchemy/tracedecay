@@ -1,6 +1,6 @@
 //! Generation-pinned verified code-graph queries over daemon-resolved
 //! projections, plus the code-index-backed source readers
-//! (`context::{read_modes, source_read, markdown_sections}`) that hydrate
+//! (`context::{read_modes, source_read}`) that hydrate
 //! source evidence for those queries.
 //!
 //! This crate sits below the transport adapters (`tracedecay-mcp`, the root
@@ -31,7 +31,9 @@ pub use projection::{
     application_graph_cancellation, map_code_graph_read_runtime_error, map_projection_error,
     request_graph_cancellation,
 };
-pub use queries::{FileAdjacencyScan, GraphQueryManager, VerifiedHealthFileAggregateV1};
+pub use queries::{
+    FileAdjacencyScan, FileDependentsV1, GraphQueryManager, VerifiedHealthFileAggregateV1,
+};
 pub use verified_query::{
     AdmittedVerifiedGraphQueryPort, VerifiedGraphQuery, VerifiedGraphQueryFuture,
     VerifiedGraphQueryPort, VerifiedGraphQueryRequest,

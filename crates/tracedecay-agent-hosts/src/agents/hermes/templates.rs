@@ -5,7 +5,6 @@
 //! `super::write_plugin_files` focused on filesystem orchestration.
 
 use crate::ports::mcp_tools::{AdvertisedToolV1, format_capable_tool_names};
-use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub(super) fn plugin_manifest(
     generator_commit: &str,
@@ -46,27 +45,6 @@ with Path(__file__).with_name("schemas.json").open("r", encoding="utf-8") as sch
     TOOL_SCHEMAS = json.load(schema_file)
 "#
     .to_string()
-}
-
-pub(super) fn plugin_schemas_json(advertised_tools: &[AdvertisedToolV1]) -> Result<String> {
-    let defs = advertised_tools
-        .iter()
-        .map(|tool| {
-            serde_json::json!({
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.input_schema,
-                // `readOnlyHint`: the plugin derives which tools may be routed
-                // at another registered project from this, not from its own list.
-                "read_only": tool.read_only,
-            })
-        })
-        .collect::<Vec<_>>();
-    serde_json::to_string_pretty(&defs)
-        .map(|json| format!("{json}\n"))
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to serialize Hermes schemas.json: {e}"),
-        })
 }
 
 pub(super) fn plugin_tools(tracedecay_bin: &str) -> String {

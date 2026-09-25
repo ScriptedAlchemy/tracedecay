@@ -22,6 +22,7 @@ pub(crate) enum PlaceholderScanScope<'a> {
 pub(crate) struct PlaceholderTextRow {
     pub store_id: i64,
     pub content: Option<String>,
+    pub placeholder_text: Option<String>,
     pub snippet_text: String,
     pub index_text: String,
     pub metadata_json: Option<String>,
@@ -201,7 +202,8 @@ async fn drive_placeholder_text_scan(
     loop {
         let sql = format!(
             "WITH page AS (
-                 SELECT store_id, content, snippet_text, index_text, metadata_json
+                 SELECT store_id, content, snippet_text, index_text, metadata_json,
+                        placeholder_text
                  FROM lcm_raw_messages
                  WHERE {scope_sql}
                    AND store_id > ?
@@ -211,15 +213,18 @@ async fn drive_placeholder_text_scan(
              ),
              bounded AS (
                  SELECT store_id, content, snippet_text, index_text, metadata_json,
+                        placeholder_text,
                         ROW_NUMBER() OVER (ORDER BY store_id) AS page_row,
                         SUM(length(CAST(COALESCE(content, '') AS BLOB))
                             + length(CAST(COALESCE(snippet_text, '') AS BLOB))
                             + length(CAST(COALESCE(index_text, '') AS BLOB))
-                            + length(CAST(COALESCE(metadata_json, '') AS BLOB)))
+                            + length(CAST(COALESCE(metadata_json, '') AS BLOB))
+                            + length(CAST(COALESCE(placeholder_text, '') AS BLOB)))
                             OVER (ORDER BY store_id) AS cumulative_bytes
                  FROM page
              )
-             SELECT store_id, content, snippet_text, index_text, metadata_json
+             SELECT store_id, content, snippet_text, index_text, metadata_json,
+                    placeholder_text
              FROM bounded
              WHERE cumulative_bytes <= ? OR page_row = 1
              ORDER BY store_id"
@@ -242,10 +247,11 @@ async fn drive_placeholder_text_scan(
             page_rows += 1;
             let visited = PlaceholderTextRow {
                 store_id,
-                content: row.get(1).unwrap_or(None),
+                content: row.get(1)?,
+                placeholder_text: row.get(5)?,
                 snippet_text: row.get(2)?,
                 index_text: row.get(3)?,
-                metadata_json: row.get(4).unwrap_or(None),
+                metadata_json: row.get(4)?,
             };
             if matches!(visit(visited), PlaceholderScanFlow::Stop) {
                 return Ok(());

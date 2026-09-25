@@ -83,7 +83,7 @@ fn clean_snapshot_rejects_cross_snapshot_or_stale_records() {
     ));
 
     let stale = fixture_record(generation.as_str(), "anchor.diagnostic.stale")
-        .supersede(id("generation.clean.2"))
+        .clear(id("generation.clean.2"))
         .unwrap();
     assert!(matches!(
         SanitizedCleanDiagnosticSnapshotV1::new(generation.clone(), vec![stale]),

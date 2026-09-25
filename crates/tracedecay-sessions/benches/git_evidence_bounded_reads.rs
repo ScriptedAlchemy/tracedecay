@@ -287,7 +287,7 @@ fn main() {
                 .expect("open graph view")
             {
                 GitEvidenceGraphHead::Indexed(view) => view,
-                GitEvidenceGraphHead::Unpublished | GitEvidenceGraphHead::Legacy { .. } => {
+                GitEvidenceGraphHead::Unpublished | GitEvidenceGraphHead::PreIndex { .. } => {
                     panic!("seeded head must be indexed")
                 }
             };

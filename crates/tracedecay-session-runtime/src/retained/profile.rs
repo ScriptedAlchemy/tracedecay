@@ -319,6 +319,9 @@ pub async fn execute_profile_retained_application(
                 request_id,
                 scope,
                 outcome,
+                touched_files: Vec::new(),
+                code_graph: None,
+                analytics: None,
             }),
             Err(problem) => Err(application_problem_envelope(
                 operation.result_contract().clone(),
@@ -402,7 +405,7 @@ mod tests {
     use tracedecay_store::{
         AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
         SessionTemporalSnapshotRequestV1, build_observation_resolution_authorization_v1,
-        build_observation_retrieval_anchor_v2,
+        build_observation_retrieval_anchor,
     };
 
     use super::*;
@@ -557,7 +560,7 @@ mod tests {
             tracedecay_store::OBSERVATION_CAPTURE_AUTHORITY_V1,
         )
         .expect("resolution authorization");
-        let anchor = build_observation_retrieval_anchor_v2(
+        let anchor = build_observation_retrieval_anchor(
             write.observation(),
             projection_generation.clone(),
             UtcMicros(1),
@@ -594,7 +597,7 @@ mod tests {
             .materialize_pending_session_refresh_for_test(&session)
             .await
             .expect("materialize canonical temporal occurrence");
-        let snapshot = database
+        let snapshot = tracedecay_session_temporal_store::SessionTemporalAccess::new(database)
             .freeze_session_temporal_snapshot_result(SessionTemporalSnapshotRequestV1::new(session))
             .await
             .expect("activate canonical temporal snapshot");
@@ -1000,7 +1003,6 @@ mod tests {
                 until: None,
                 relation: None,
                 limit: None,
-                format: None,
             }),
             RequestId::new("request.profile-retained-unsupported-sessions-for")
                 .expect("request identity"),

@@ -1968,10 +1968,10 @@ fn generated_skill_mirrors_session_context_retrieval_contract() {
     // the repository skill defers them to the registered tool schemas.
     let hermes_manual_markers = [
         "`provider=all`",
-        "`catch_up=false`",
+        "`require_fresh=false`",
         "`limit=10`",
-        "`temporal_mode=current`",
-        "`temporal_mode=forensic`",
+        "`temporal_mode={\"kind\":\"current\"}`",
+        "`temporal_mode={\"kind\":\"forensic\"}`",
         "same target, source limit, and content slice",
         "needs_synthesis=true",
         "host must synthesize",

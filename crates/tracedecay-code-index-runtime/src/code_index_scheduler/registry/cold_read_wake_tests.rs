@@ -13,6 +13,7 @@ use super::super::{
 };
 use super::{CodeIndexReconcileAdmissionV1, CodeIndexSchedulerRegistryV1};
 use crate::code_index::production::CodeIndexExecutionControlV1;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 #[tokio::test]
 async fn cold_read_wakes_do_not_cancel_an_in_flight_reconcile_snapshot() {
@@ -36,7 +37,7 @@ async fn cold_read_wakes_do_not_cancel_an_in_flight_reconcile_snapshot() {
         .mount_worktree(project_id.clone(), &project, fixture.path().join("store"))
         .await
         .expect("mount scheduler");
-    let canonical_project = project.canonicalize().expect("canonical project");
+    let canonical_project = canonical_existing_identity(&project).expect("canonical project");
 
     let (scope, scheduler, hints, epoch, shutting_down, reconcile_in_progress) = {
         let mounted = registry.mounted.lock().await;

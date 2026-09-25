@@ -185,6 +185,7 @@ pub struct ProjectRuntime {
     retained: Option<RegisteredRetainedRuntime>,
     lsp_owner: Option<DaemonLspInvocationOwner>,
     source_edit: Option<Arc<crate::project_owner_registration::ProjectSourceEditOwnerV1>>,
+    graph_tool: Option<crate::invocation::RegisteredGraphToolOwnerV1>,
     #[cfg(any(test, feature = "test-helpers"))]
     test_marker: Option<Arc<dyn Any + Send + Sync>>,
     observability: Option<RegisteredObservabilityProducerV1>,
@@ -234,6 +235,7 @@ impl ProjectRuntime {
             || self.retained.is_some()
             || self.lsp_owner.is_some()
             || self.source_edit.is_some()
+            || self.graph_tool.is_some()
             || self.observability.is_some()
             || {
                 #[cfg(any(test, feature = "test-helpers"))]
@@ -313,6 +315,7 @@ project_runtime_components!(
     RegisteredRetainedRuntime => retained,
     DaemonLspInvocationOwner => lsp_owner,
     Arc<crate::project_owner_registration::ProjectSourceEditOwnerV1> => source_edit,
+    crate::invocation::RegisteredGraphToolOwnerV1 => graph_tool,
     RegisteredObservabilityProducerV1 => observability,
 );
 

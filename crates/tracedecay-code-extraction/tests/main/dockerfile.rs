@@ -4,10 +4,14 @@ use tracedecay_code_extraction::DockerfileExtractor;
 use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_domain::*;
 
+include!("support/edges.rs");
+
 #[test]
 fn test_dockerfile_file_node_is_root() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.dockerfile").unwrap();
-    let result = DockerfileExtractor.extract("sample.dockerfile", &source);
+    let result = DockerfileExtractor
+        .extract_artifact("sample.dockerfile", &source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let files: Vec<_> = result
         .nodes
@@ -21,7 +25,9 @@ fn test_dockerfile_file_node_is_root() {
 #[test]
 fn test_dockerfile_extract_from_stages() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.dockerfile").unwrap();
-    let result = DockerfileExtractor.extract("sample.dockerfile", &source);
+    let result = DockerfileExtractor
+        .extract_artifact("sample.dockerfile", &source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let modules: Vec<_> = result
         .nodes
@@ -41,7 +47,9 @@ fn test_dockerfile_extract_from_stages() {
 #[test]
 fn test_dockerfile_extract_env_vars() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.dockerfile").unwrap();
-    let result = DockerfileExtractor.extract("sample.dockerfile", &source);
+    let result = DockerfileExtractor
+        .extract_artifact("sample.dockerfile", &source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let consts: Vec<_> = result
         .nodes
@@ -60,7 +68,9 @@ fn test_dockerfile_extract_env_vars() {
 #[test]
 fn test_dockerfile_extract_arg_vars() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.dockerfile").unwrap();
-    let result = DockerfileExtractor.extract("sample.dockerfile", &source);
+    let result = DockerfileExtractor
+        .extract_artifact("sample.dockerfile", &source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let consts: Vec<_> = result
         .nodes
@@ -76,7 +86,9 @@ fn test_dockerfile_extract_arg_vars() {
 #[test]
 fn test_dockerfile_extract_expose_ports() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.dockerfile").unwrap();
-    let result = DockerfileExtractor.extract("sample.dockerfile", &source);
+    let result = DockerfileExtractor
+        .extract_artifact("sample.dockerfile", &source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     // EXPOSE -> Field node (port declaration)
     let fields: Vec<_> = result
@@ -93,7 +105,9 @@ fn test_dockerfile_extract_expose_ports() {
 #[test]
 fn test_dockerfile_extract_labels() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.dockerfile").unwrap();
-    let result = DockerfileExtractor.extract("sample.dockerfile", &source);
+    let result = DockerfileExtractor
+        .extract_artifact("sample.dockerfile", &source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fields: Vec<_> = result
         .nodes
@@ -110,23 +124,32 @@ fn test_dockerfile_extract_labels() {
 #[test]
 fn test_dockerfile_contains_edges() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.dockerfile").unwrap();
-    let result = DockerfileExtractor.extract("sample.dockerfile", &source);
+    let result = DockerfileExtractor
+        .extract_artifact("sample.dockerfile", &source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(
-        !contains.is_empty(),
-        "should have Contains edges from file/stage to children"
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Contains),
+        [
+            ("sample.dockerfile", "builder"),
+            ("builder", "APP_VERSION"),
+            ("builder", "CARGO_HOME"),
+            ("builder", "8080"),
+            ("sample.dockerfile", "runtime"),
+            ("runtime", "maintainer"),
+            ("runtime", "version"),
+            ("runtime", "APP_PORT"),
+            ("runtime", "LOG_LEVEL")
+        ]
     );
 }
 
 #[test]
 fn test_dockerfile_copy_from_creates_uses_edge() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.dockerfile").unwrap();
-    let result = DockerfileExtractor.extract("sample.dockerfile", &source);
+    let result = DockerfileExtractor
+        .extract_artifact("sample.dockerfile", &source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let builder = result
         .nodes
@@ -139,10 +162,7 @@ fn test_dockerfile_copy_from_creates_uses_edge() {
         .iter()
         .filter(|e| e.kind == EdgeKind::Uses && e.target == builder.id)
         .collect();
-    assert!(
-        !uses_edges.is_empty(),
-        "COPY --from=builder should create a Uses edge to the builder stage node"
-    );
+    assert_eq!(uses_edges.len(), 1);
 }
 
 #[test]
@@ -153,7 +173,9 @@ RUN apk add --no-cache curl
 FROM scratch
 COPY --from=0 /bin/curl /bin/curl
 "#;
-    let result = DockerfileExtractor.extract("Dockerfile", source);
+    let result = DockerfileExtractor
+        .extract_artifact("Dockerfile", source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let first_stage = result
@@ -189,7 +211,9 @@ fn test_dockerfile_copy_from_external_image_creates_backed_use_node() {
 FROM alpine AS runtime
 COPY --from=nginx:alpine /etc/nginx/nginx.conf /tmp/nginx.conf
 "#;
-    let result = DockerfileExtractor.extract("Dockerfile", source);
+    let result = DockerfileExtractor
+        .extract_artifact("Dockerfile", source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let external = result
         .nodes

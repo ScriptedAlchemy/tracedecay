@@ -2,27 +2,14 @@
 //!
 //! Candidate discovery and validation belong to the automation run receipt.
 //! This module records and reads only terminal applied or quarantined effects.
-//! It also recognizes the independently shipped v1 proposal sidecar for a
-//! explicit retirement boundary. This crate only classifies the exact shipped
-//! bytes. The daemon journals terminal-history retirement before archive and
-//! removal; unresolved records are never approved or imported.
 
 use std::collections::HashSet;
-use std::io::Read;
-use std::path::{Path, PathBuf};
 
-#[cfg(unix)]
-use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
-#[cfg(unix)]
-use cap_std::{
-    ambient_authority,
-    fs::{Dir, MetadataExt, OpenOptions as CapOpenOptions},
-};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
-use tracedecay_domain::{ActorId, Confidence, FactCategoryV1, ProvenanceId, RunId};
+use tracedecay_domain::{ActorId, ProvenanceId, RunId};
 use tracedecay_store::{
     FactReadControl, MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS,
     ProjectMemoryAutomaticFactApplyResultV1, ProjectMemoryAutomaticFactEvidenceV1,
@@ -37,76 +24,7 @@ use tracedecay_session_memory::memory::{
 };
 use tracedecay_session_memory::memory::{MemoryMutationError, ProjectMemoryFactAddRequest};
 
-const SHIPPED_FACT_PROPOSALS_FILENAME: &str = "fact_proposals.json";
-
-/// The shipped v1 store is one JSON document that retirement copies byte-exact
-/// into one archive. A 16 MiB whole-record ceiling preserves generously sized
-/// historical display metadata while bounding both parse allocation and copy.
-pub const MAX_SHIPPED_FACT_PROPOSAL_BYTES: usize = 16 * 1024 * 1024;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ShippedFactProposalStateV1 {
-    PendingApproval,
-    Applied,
-    Rejected,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ShippedAddFactRequestV1 {
-    content: String,
-    category: FactCategoryV1,
-    #[serde(rename = "source", alias = "source_label")]
-    source_label: Option<String>,
-    tags: Vec<String>,
-    entities: Vec<String>,
-    trust: Option<Confidence>,
-    metadata: Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ShippedFactProposalRecordV1 {
-    schema_version: u32,
-    proposal_id: String,
-    run_id: String,
-    #[serde(default)]
-    evidence_hash: Option<String>,
-    state: ShippedFactProposalStateV1,
-    #[serde(default)]
-    add_fact_request: Option<ShippedAddFactRequestV1>,
-    #[serde(default)]
-    proposal: Option<Value>,
-    #[serde(default)]
-    validation_reason: Option<String>,
-    #[serde(default)]
-    validation: Option<Value>,
-    #[serde(default)]
-    reviewer: Option<String>,
-    #[serde(default)]
-    applied_fact_id: Option<i64>,
-    #[serde(default)]
-    apply_outcome: Option<Value>,
-    created_at: i64,
-    updated_at: i64,
-    #[serde(default)]
-    duplicate_count: u32,
-    #[serde(default)]
-    last_duplicate_run_id: Option<String>,
-    #[serde(default)]
-    folded_contents: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ShippedFactProposalStoreV1 {
-    schema_version: u32,
-    #[serde(default)]
-    proposals: Vec<ShippedFactProposalRecordV1>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AutomaticFactState {
     Applied,
@@ -125,7 +43,7 @@ impl AutomaticFactState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AutomaticFactReceipt {
     pub schema_version: u32,
@@ -267,238 +185,6 @@ pub async fn record_session_automatic_facts<A: ProjectMemoryFactStore>(
         retry_error: None,
         settled_receipts,
     })
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ShippedFactProposalDisposition {
-    Absent,
-    TerminalHistory {
-        source_path: PathBuf,
-        source_digest: String,
-        source_bytes: Vec<u8>,
-    },
-    ResetRequired {
-        source_path: PathBuf,
-        source_digest: String,
-        reason: String,
-    },
-}
-
-pub async fn inspect_shipped_fact_proposals(
-    dashboard_root: &Path,
-) -> Result<ShippedFactProposalDisposition> {
-    let source_path = dashboard_root.join(SHIPPED_FACT_PROPOSALS_FILENAME);
-    let bytes = match read_shipped_fact_proposal_bytes(&source_path)? {
-        Some(bytes) => bytes,
-        None => {
-            return Ok(ShippedFactProposalDisposition::Absent);
-        }
-    };
-    let source_digest = encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&bytes));
-    let store = match serde_json::from_slice::<ShippedFactProposalStoreV1>(&bytes) {
-        Ok(store) => store,
-        Err(error) => {
-            return Ok(shipped_fact_proposal_reset_required(
-                source_path,
-                source_digest,
-                format!("the shipped v1 JSON is malformed: {error}"),
-            ));
-        }
-    };
-    if store.schema_version != 1 {
-        return Ok(shipped_fact_proposal_reset_required(
-            source_path,
-            source_digest,
-            format!(
-                "root schema version {} is not the shipped version 1",
-                store.schema_version
-            ),
-        ));
-    }
-    if let Some(record) = store
-        .proposals
-        .iter()
-        .find(|record| record.schema_version != 1)
-    {
-        return Ok(shipped_fact_proposal_reset_required(
-            source_path,
-            source_digest,
-            format!(
-                "proposal '{}' has unsupported schema version {}",
-                record.proposal_id, record.schema_version
-            ),
-        ));
-    }
-
-    let mut proposal_ids = HashSet::new();
-    for record in &store.proposals {
-        if !proposal_ids.insert(record.proposal_id.as_str()) {
-            return Ok(shipped_fact_proposal_reset_required(
-                source_path,
-                source_digest,
-                format!(
-                    "proposal identity '{}' occurs more than once",
-                    record.proposal_id
-                ),
-            ));
-        }
-        if record.state == ShippedFactProposalStateV1::PendingApproval {
-            return Ok(shipped_fact_proposal_reset_required(
-                source_path,
-                source_digest,
-                format!(
-                    "unresolved proposal '{}' cannot be imported because final-V2 has no fact approval authority",
-                    record.proposal_id
-                ),
-            ));
-        }
-    }
-    Ok(ShippedFactProposalDisposition::TerminalHistory {
-        source_path,
-        source_digest,
-        source_bytes: bytes,
-    })
-}
-
-/// Reads an exact shipped proposal source or archive through a no-follow,
-/// owner-private handle and rejects any file that changes length while read.
-///
-/// `None` means the exact leaf was absent. Every other namespace, privacy, or
-/// byte-bound failure remains typed so retirement cannot digest, archive, or
-/// delete bytes that were not read from the admitted regular file.
-#[hotpath::measure(label = "automation.automatic_facts.read_proposal")]
-pub fn read_shipped_fact_proposal_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
-    let file = match open_shipped_fact_proposal_file(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(config_error(format!(
-                "failed to open shipped fact proposal file '{}': {error}",
-                path.display()
-            )));
-        }
-    };
-    let initial = file.metadata().map_err(|error| {
-        config_error(format!(
-            "failed to inspect shipped fact proposal file '{}': {error}",
-            path.display()
-        ))
-    })?;
-    if !initial.is_file() || initial.len() > MAX_SHIPPED_FACT_PROPOSAL_BYTES as u64 {
-        return Err(config_error(format!(
-            "shipped fact proposal file '{}' is not a regular file within the {}-byte limit",
-            path.display(),
-            MAX_SHIPPED_FACT_PROPOSAL_BYTES
-        )));
-    }
-
-    read_opened_shipped_fact_proposal_bytes(path, file, initial).map(Some)
-}
-
-fn read_opened_shipped_fact_proposal_bytes(
-    path: &Path,
-    mut file: std::fs::File,
-    initial: std::fs::Metadata,
-) -> Result<Vec<u8>> {
-    let mut bytes = Vec::with_capacity(initial.len() as usize);
-    (&mut file)
-        .take(MAX_SHIPPED_FACT_PROPOSAL_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| {
-            config_error(format!(
-                "failed to read shipped fact proposal file '{}': {error}",
-                path.display()
-            ))
-        })?;
-    if bytes.len() > MAX_SHIPPED_FACT_PROPOSAL_BYTES {
-        return Err(config_error(format!(
-            "shipped fact proposal file '{}' grew beyond the {}-byte limit",
-            path.display(),
-            MAX_SHIPPED_FACT_PROPOSAL_BYTES
-        )));
-    }
-    let final_metadata = file.metadata().map_err(|error| {
-        config_error(format!(
-            "failed to reinspect shipped fact proposal file '{}': {error}",
-            path.display()
-        ))
-    })?;
-    if !final_metadata.is_file()
-        || final_metadata.len() > MAX_SHIPPED_FACT_PROPOSAL_BYTES as u64
-        || final_metadata.len() != initial.len()
-        || bytes.len() as u64 != final_metadata.len()
-    {
-        return Err(config_error(format!(
-            "shipped fact proposal file '{}' changed length while being read",
-            path.display()
-        )));
-    }
-    Ok(bytes)
-}
-
-#[cfg(unix)]
-fn open_shipped_fact_proposal_file(path: &Path) -> std::io::Result<std::fs::File> {
-    tracedecay_runtime_core::storage::reject_symlink_components(
-        path,
-        "shipped fact proposal file",
-    )?;
-    let parent = path.parent().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "shipped fact proposal file has no parent directory",
-        )
-    })?;
-    let name = path.file_name().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "shipped fact proposal file has no filename",
-        )
-    })?;
-    let directory = Dir::open_ambient_dir(parent, ambient_authority())?;
-    let directory_metadata = directory.dir_metadata()?;
-    let mut options = CapOpenOptions::new();
-    options.read(true).follow(FollowSymlinks::No);
-    let file = directory.open_with(name, &options)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file()
-        || metadata.mode() & 0o777 != 0o600
-        || metadata.uid() != directory_metadata.uid()
-    {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "shipped fact proposal file is not private to its directory owner",
-        ));
-    }
-    Ok(file.into_std())
-}
-
-#[cfg(windows)]
-fn open_shipped_fact_proposal_file(path: &Path) -> std::io::Result<std::fs::File> {
-    tracedecay_runtime_core::storage::reject_symlink_components(
-        path,
-        "shipped fact proposal file",
-    )?;
-    tracedecay_runtime_core::windows_security::open_private_file(path)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn open_shipped_fact_proposal_file(_path: &Path) -> std::io::Result<std::fs::File> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "bounded no-follow shipped proposal reads are unavailable on this platform",
-    ))
-}
-
-fn shipped_fact_proposal_reset_required(
-    source_path: PathBuf,
-    source_digest: String,
-    reason: impl Into<String>,
-) -> ShippedFactProposalDisposition {
-    ShippedFactProposalDisposition::ResetRequired {
-        source_path,
-        source_digest,
-        reason: reason.into(),
-    }
 }
 
 pub async fn list_automatic_fact_receipts<A: ProjectMemoryFactStore>(

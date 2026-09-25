@@ -21,8 +21,8 @@ use tracedecay_daemon_protocol::{
 };
 
 use super::super::administrative_effect::administrative_command_effect;
-use super::super::current_micros;
 use super::{RegisteredWorkRuntime, application_problem};
+use tracedecay_contracts::now_micros;
 
 pub(super) fn offer_work_blocked_interval_receipts(
     durable_write_signal: &super::WorkDurableWriteSignalV1,
@@ -142,9 +142,7 @@ pub(crate) fn work_background_context(
         identity.attempt_id().as_str()
     ))?;
     let deadline = Deadline::new(UtcMicros(
-        current_micros()
-            .0
-            .saturating_add(BACKGROUND_DEADLINE_MICROS),
+        now_micros().0.saturating_add(BACKGROUND_DEADLINE_MICROS),
     ))?;
     let cancellation = CancellationContext::active(format!(
         "work-attempt-exec-{}",
@@ -170,9 +168,7 @@ pub(crate) fn work_blocked_interval_recovery_context(
     const BACKGROUND_DEADLINE_MICROS: i64 = 86_400_000_000;
     let request_id = RequestId::new("work-blocked-interval-recovery")?;
     let deadline = Deadline::new(UtcMicros(
-        current_micros()
-            .0
-            .saturating_add(BACKGROUND_DEADLINE_MICROS),
+        now_micros().0.saturating_add(BACKGROUND_DEADLINE_MICROS),
     ))?;
     let cancellation = CancellationContext::active("cancel.work-blocked-interval-recovery")?;
     RequestContext::new(
@@ -384,7 +380,7 @@ where
         })?;
     let execution = OperationReceipt::completed(
         observed_at,
-        current_micros(),
+        now_micros(),
         deadline,
         OperationBudgetUsage::default(),
     )?;

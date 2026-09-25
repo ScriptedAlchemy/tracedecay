@@ -31,7 +31,7 @@ use super::{
 use serde_json::{Value, json};
 use tracedecay_domain::{
     ActorId, Confidence, FactCurationActionV1, FactEventId, FactId, FactLineageEventKindV1,
-    FactLineageEventV1, FactOwnerV1, ProvenanceId, RetrievalAnchorRecordV2, UtcMicros,
+    FactLineageEventV1, FactOwnerV1, ProvenanceId, RetrievalAnchorRecord, UtcMicros,
 };
 use tracedecay_privacy::sanitize_provider_metadata_text;
 use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
@@ -577,7 +577,7 @@ async fn inspect_project_memory_fact_inner_tx(
         if let Some(read_control) = read_control {
             ensure_project_memory_read_active(read_control)?;
         }
-        let anchor = from_json::<RetrievalAnchorRecordV2>(
+        let anchor = from_json::<RetrievalAnchorRecord>(
             &row_string(&row, 0, PROJECT_MEMORY_READ_OPERATION)?,
             PROJECT_MEMORY_READ_OPERATION,
         )?;

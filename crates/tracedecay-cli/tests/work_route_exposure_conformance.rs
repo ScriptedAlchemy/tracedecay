@@ -57,7 +57,6 @@ use axum::http::{Request, StatusCode};
 use serde_json::{Map, Value};
 use tempfile::TempDir;
 use tower::ServiceExt;
-use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay_application::operation_stream::OperationEventAuthority;
 use tracedecay_contracts::{
     EXECUTION_TOPOLOGY_DESCRIPTOR_REVISION_V1, EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1,
@@ -65,6 +64,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_daemon_service::application_surface::http_application_router;
 use tracedecay_domain::ProjectId;
+use tracedecay_project::config::USER_DATA_DIR_ENV;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_tool_catalog::RouteExposureV1;
 
@@ -888,25 +888,6 @@ fn the_work_surface_answers_real_requests_on_both_published_mounts() {
         .as_i64()
         .expect("created event observation time");
     work_evidence::assert_live_task_rooted_retrieval(&agent, &fixture, &dashboard, observed_at);
-
-    for retired in ["snapshot", "delta", "replan-dependencies", "accept-task"] {
-        let (status, body) = post_envelope(
-            &agent,
-            &fixture.external_url(&format!("/application/work/{retired}")),
-            &fixture,
-            &serde_json::json!({}),
-        );
-        assert_eq!(status, 404, "retired daemon Work route {retired}: {body}");
-        let (status, body) = post_dashboard_envelope(
-            &agent,
-            &format!("{}/api/work/{retired}", dashboard.base_url),
-            &serde_json::json!({}),
-        );
-        assert_eq!(
-            status, 404,
-            "retired dashboard Work route {retired}: {body}"
-        );
-    }
 
     // -- Product publication binds an empty attempt page. --------------------
     // Once a product task exists, the product graph supplies the canonical

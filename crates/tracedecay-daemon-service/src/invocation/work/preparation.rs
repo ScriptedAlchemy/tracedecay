@@ -254,10 +254,12 @@ pub(super) fn current_work_product_snapshot(
         CapabilityId::new(capability).map_err(|_| work_product_authority_unavailable())?;
     let binding = tracedecay_contracts::WorkProductBindingV1::new(capability, use_case.clone());
     let selection = tracedecay_contracts::WorkProductSelectionScopeV1::relations(
-        std::collections::BTreeSet::from([tracedecay_contracts::WorkRelationScopeV1::Repository {
-            project_id: context.scope().project_id.clone(),
-            repository_id: context.scope().repository_id.clone(),
-        }]),
+        std::collections::BTreeSet::from([
+            tracedecay_contracts::WorkProductAuthorizedRelationScopeV1::Repository {
+                project_id: context.scope().project_id.clone(),
+                repository_id: context.scope().repository_id.clone(),
+            },
+        ]),
     )
     .map_err(|_| work_product_authority_unavailable())?;
     let read =

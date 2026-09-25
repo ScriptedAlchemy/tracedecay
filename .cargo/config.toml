@@ -70,8 +70,8 @@ rustflags = ["-C", "split-debuginfo=unpacked"]
 # results, 8 threads, slow-timeout termination), the root fixture feature and
 # `search-eval`, which is what compiles the evaluator acceptance suites (the
 # root crate's dependency on the evaluator is optional so the Linux transport
-# partition does not build the eval-only lexical projection; a `--workspace`
-# run resolves the evaluator anyway). `.github/workflows/ci.yml` runs this
+# partition does not link it; a `--workspace` run resolves the evaluator
+# anyway). `.github/workflows/ci.yml` runs this
 # exact alias, and its support binaries/archives are built with `--profile
 # perf` so they share artifacts with it. Extra flags append: `cargo test-ci
 # --locked -E 'binary(=x)'`.

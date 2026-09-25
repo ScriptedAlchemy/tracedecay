@@ -181,7 +181,7 @@ impl McpServer {
     pub(crate) async fn run_hook_incremental_sync(
         &self,
         cg: Arc<TraceDecay>,
-        agent: HookAgent,
+        agent: HostIntegrationIdV1,
     ) -> HostAdmissionOutcome {
         match self.accept_debounced_code_index_reconcile(&cg, agent).await {
             Ok(changed) => HostAdmissionOutcome::replay_completed(changed, !changed),
@@ -193,10 +193,10 @@ impl McpServer {
     async fn accept_debounced_code_index_reconcile(
         &self,
         cg: &TraceDecay,
-        agent: HookAgent,
+        agent: HostIntegrationIdV1,
     ) -> std::result::Result<bool, HostAdmissionOutcome> {
         let marker = hook_events::sync_marker_path(&cg.store_layout().data_root, agent);
-        let now = crate::project::current_timestamp();
+        let now = tracedecay_runtime_core::tracedecay::current_timestamp();
         if !hook_events::should_run_sync(&marker, now, 3) {
             return Ok(false);
         }

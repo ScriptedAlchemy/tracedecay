@@ -125,7 +125,7 @@ async fn dirty_worktree_serves_exact_and_typed_symbol_reads_without_a_source_rev
     let mut daemon = spawn_tracedecay_daemon_with(environment.home(), |_| {});
     let project_id = initialize_tracedecay(environment.home(), &project);
     let identity = exact_identity(&project, project_id);
-    tracedecay::product_runtime::register_fixture_product_runtime();
+    tracedecay_project::product_runtime::register_fixture_product_runtime();
     let handshake =
         tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
             .expect("production daemon handshake");

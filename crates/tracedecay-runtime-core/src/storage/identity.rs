@@ -1,47 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::config::TRACEDECAY_DIR;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
-    ENROLLMENT_FILENAME, EnrollmentMarker, PrivateStoreIo, REPOSITORY_IDENTITY_FILENAME,
-    REPOSITORY_IDENTITY_SCHEMA_VERSION, RepositoryIdentityMarker, validate_enrollment_marker,
-    validate_project_id,
+    PrivateStoreIo, REPOSITORY_IDENTITY_FILENAME, REPOSITORY_IDENTITY_SCHEMA_VERSION,
+    RepositoryIdentityMarker, validate_project_id,
 };
-
-/// Location of the retired repo-local enrollment marker.
-///
-/// `TraceDecay` never creates files inside a project's working tree. This path
-/// exists only so legacy identity can be adopted (read once, ingested into
-/// the home-profile registry) and so cleanup flows can recognize the debris.
-/// Users may delete the file at any time.
-pub fn legacy_enrollment_marker_path(project_root: &Path) -> PathBuf {
-    project_root.join(TRACEDECAY_DIR).join(ENROLLMENT_FILENAME)
-}
-
-/// Reads the retired repo-local enrollment marker, if the user still has one.
-///
-/// Read-only legacy adoption source: registry-aware resolution ingests the
-/// identity it names exactly once (when the project is not otherwise
-/// resolvable) and never consults the file again. Nothing writes it.
-pub fn read_legacy_enrollment_marker(project_root: &Path) -> Result<Option<EnrollmentMarker>> {
-    let path = legacy_enrollment_marker_path(project_root);
-    if !path.is_file() {
-        return Ok(None);
-    }
-    let text = fs::read_to_string(&path).map_err(|e| TraceDecayError::Config {
-        message: format!("failed to read enrollment marker '{}': {e}", path.display()),
-    })?;
-    let marker = serde_json::from_str(&text).map_err(|e| TraceDecayError::Config {
-        message: format!(
-            "failed to parse enrollment marker '{}': {e}",
-            path.display()
-        ),
-    })?;
-    validate_enrollment_marker(&marker, &path)?;
-    Ok(Some(marker))
-}
 
 /// The repository-wide identity marker shared by every checkout of a
 /// repository, including detached linked worktrees.

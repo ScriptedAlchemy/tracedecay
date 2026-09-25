@@ -17,7 +17,8 @@ use tracedecay_domain::{
 use super::context::VersionedTokenEstimator;
 use super::context::assembly::assemble_context_with_frames_controlled;
 use super::hydration::{TemporalHydrationPort, hydrate_selected};
-use super::ports::{TemporalParticipantGeneration, TemporalPortError, TemporalSourceAccess};
+use super::ports::TemporalPortError;
+use super::snapshot::{TemporalParticipantGeneration, TemporalSourceAccess};
 use super::{
     TemporalCandidateExport, TemporalHydratedResult, TemporalKernelError, TemporalKernelRequest,
     TemporalKernelResult, check_control, map_context_error, map_hydration_error,
@@ -295,8 +296,7 @@ fn participant_freshness(
             | TemporalSourceAccess::Locked
             | TemporalSourceAccess::RetentionWithheld
             | TemporalSourceAccess::Deleted
-            | TemporalSourceAccess::Redacted
-            | TemporalSourceAccess::LegacyUnauthorized => FreshnessCompatibilityV1::Missing,
+            | TemporalSourceAccess::Redacted => FreshnessCompatibilityV1::Missing,
         },
         policy_revision,
     }

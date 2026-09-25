@@ -27,7 +27,8 @@ use super::wake::{
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_runtime_core::db::engine::Error as EngineError;
 use tracedecay_session_temporal_store::{
-    SessionRefreshRecoveryV1, SessionRefreshRestartStateV1, SessionTemporalStore,
+    SessionRefreshRecoveryV1, SessionRefreshRestartStateV1, SessionTemporalAccess,
+    SessionTemporalStore,
 };
 
 const HISTORY_IDLE_RECHECK_INTERVAL: Duration = Duration::from_mins(1);
@@ -723,7 +724,7 @@ pub async fn begin_admitted_session_refreshes(
     }
     let active_after = state.projection_discovery_after();
     let active_scan_slots = state.projection_discovery_active_slots(limit);
-    let page = match database
+    let page = match SessionTemporalAccess::new(database)
         .pending_session_temporal_refresh_page_result(
             limit,
             active_scan_slots,
@@ -1000,22 +1001,15 @@ async fn project_running_refresh(
     if state.cancelled.load(Ordering::Acquire) {
         return;
     }
-    let deadline = hotpath::future!(
-        tokio::time::sleep_until(deadline_at),
-        label = "daemon.scheduler.session_temporal.effect_apply_deadline"
-    );
-    tokio::pin!(deadline);
+    // The generation seed commits each page. Dropping this apply at the
+    // projector deadline rolled back only the in-flight page, then the next
+    // pass never recorded progress because the batch itself had not committed.
     tokio::select! {
         biased;
         () = hotpath::future!(
             state.wait_for_cancellation(),
             label = "daemon.scheduler.session_temporal.effect_apply_cancel"
         ) => {}
-        () = &mut deadline => {
-            report.last_error = Some("effect_apply_deadline_exceeded".to_string());
-            report.deadline_errors += 1;
-            report.observe_retry(SessionTemporalRefreshRetryClass::Deadline);
-        }
         () = apply_refresh_effect(store, state, recovery, effect, report) => {}
     }
 }

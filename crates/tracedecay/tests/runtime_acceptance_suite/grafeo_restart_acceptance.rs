@@ -522,7 +522,7 @@ async fn request_authoritative_reconcile(handshake: &DaemonHandshake, label: &st
     let result = call_default_tool(
         handshake,
         "tracedecay_admin_sync",
-        json!({ "force": true, "format": "json" }),
+        json!({ "format": "json" }),
     )
     .await
     .unwrap_or_else(|error| panic!("{label} admin_sync failed: {error}"));

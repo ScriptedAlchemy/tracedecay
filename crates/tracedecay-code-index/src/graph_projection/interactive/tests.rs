@@ -16,6 +16,7 @@ use tracedecay_graph_db::{
     NeverCancelled, VerifiedGraphSnapshot,
 };
 
+use crate::chunks::CodeIndexUnresolvedReferenceV1;
 use crate::graph_projection::builder::ProductionCodeGraphInputs;
 use crate::graph_projection::schema::SYMBOL_LABEL;
 use crate::graph_projection::{
@@ -222,6 +223,12 @@ fn fixture_symbols() -> GenerationSymbolIndexV1 {
 }
 
 fn production_manifest() -> GraphGenerationManifest {
+    production_manifest_with_unresolved_calls(&[])
+}
+
+fn production_manifest_with_unresolved_calls(
+    unresolved_calls: &[CodeIndexUnresolvedReferenceV1],
+) -> GraphGenerationManifest {
     let projection =
         code_graph_projection_identity(GraphNamespace::new("code-graph").expect("namespace"))
             .expect("projection identity");
@@ -236,6 +243,7 @@ fn production_manifest() -> GraphGenerationManifest {
             files: &files,
             symbols: &symbols,
             imports: &[],
+            unresolved_calls,
         }),
         &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())
             .expect("projector revision"),
@@ -274,6 +282,7 @@ fn large_production_manifest(symbol_count: usize) -> GraphGenerationManifest {
             files: &files,
             symbols: &symbols,
             imports: &[],
+            unresolved_calls: &[],
         }),
         &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())
             .expect("projector revision"),
@@ -713,23 +722,71 @@ fn retrieval_only_publication_serves_no_names_truthfully() {
     assert_eq!(summary.metadata, None, "absent metadata stays absent");
 }
 
-/// A ranking over a prefix of the graph must never be reported as the graph's
-/// ranking, the examination budget bounds the scan, and reaching it is
-/// truthful truncation rather than a silent partial answer.
+/// Ranking reads the degrees the catalog tallied from the relation rows: the
+/// same totals adjacency reports, over the whole generation, and no adjacency
+/// fan-out per examined symbol, so its cost does not scale with graph size.
 #[test]
-fn an_exhausted_ranking_budget_is_reported_not_hidden() {
+fn degree_ranking_serves_catalog_degrees_without_adjacency_reads() {
     let reader = reader(&store_for(production_manifest()));
+    reader
+        .symbols_page(None, 1, request())
+        .expect("warm catalog");
+    tracedecay_graph_db::take_graph_db_traversal_counters();
 
-    let ranking = reader
-        .degree_ranking(16, 2, request())
-        .expect("budget-truncated ranking");
+    let ranking = reader.degree_ranking(3, request()).expect("ranking");
 
-    assert!(
-        !ranking.complete,
-        "a scan stopped by its examination budget is not a complete ranking"
+    let counters = tracedecay_graph_db::take_graph_db_traversal_counters();
+    assert_eq!(
+        counters.adjacency_index_hits + counters.adjacency_index_builds,
+        0,
+        "ranking must not fan out per symbol: {counters:?}"
     );
-    assert_eq!(ranking.symbols_examined, 2);
-    assert_eq!(ranking.ranked.len(), 2);
+    assert_eq!(ranking.symbol_count, 4);
+    assert_eq!(
+        ranking
+            .ranked
+            .iter()
+            .map(|ranked| (
+                ranked.summary.occurrence.as_str(),
+                ranked.outgoing,
+                ranked.incoming
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("sym.alpha.run", 1, 1),
+            ("sym.beta.run", 0, 2),
+            ("sym.beta.runner", 1, 0),
+        ],
+        "total degree descending, then qualified name"
+    );
+    assert_eq!(
+        ranking.ranked[0]
+            .summary
+            .metadata
+            .as_ref()
+            .map(|m| m.qualified_name.as_str()),
+        Some("alpha::run"),
+        "ranked entries carry their catalog summary"
+    );
+    let occurrences: Vec<_> = ranking
+        .ranked
+        .iter()
+        .map(|ranked| ranked.summary.occurrence.clone())
+        .collect();
+    assert_eq!(
+        reader
+            .degrees(&occurrences, request())
+            .expect("adjacency degrees")
+            .iter()
+            .map(|degree| (degree.outgoing, degree.incoming))
+            .collect::<Vec<_>>(),
+        ranking
+            .ranked
+            .iter()
+            .map(|ranked| (ranked.outgoing, ranked.incoming))
+            .collect::<Vec<_>>(),
+        "catalog degrees must equal adjacency degrees"
+    );
 }
 
 #[test]
@@ -737,11 +794,7 @@ fn degree_ranking_refuses_zero_sized_requests() {
     let reader = reader(&store_for(production_manifest()));
 
     assert!(matches!(
-        reader.degree_ranking(0, 16, request()),
-        Err(CodeGraphProjectionError::Contract(_))
-    ));
-    assert!(matches!(
-        reader.degree_ranking(16, 0, request()),
+        reader.degree_ranking(0, request()),
         Err(CodeGraphProjectionError::Contract(_))
     ));
 }
@@ -751,7 +804,7 @@ fn degree_ranking_denies_a_cancelled_read() {
     let reader = reader(&store_for(production_manifest()));
 
     assert!(matches!(
-        reader.degree_ranking(4, 16, Arc::new(CancelledNow)),
+        reader.degree_ranking(4, Arc::new(CancelledNow)),
         Err(CodeGraphProjectionError::Cancelled)
     ));
 }

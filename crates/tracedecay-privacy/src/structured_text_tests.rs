@@ -862,3 +862,36 @@ fn wire_contract_rejects_heuristic_and_rank_claims_without_their_scale_or_set() 
         );
     }
 }
+
+/// `tsconfig.json` is JSON with comments in practice. The document still has
+/// to parse whole once its comments are blanked; a sensitive value inside it is
+/// located in the raw text and redacted, so a JSONC config is sanitized, not
+/// quarantined and dropped from the index.
+#[test]
+fn code_source_json_with_comments_is_sanitized_as_json() {
+    let raw = format!(
+        "{{\n  // base config\n  \"extends\": \"../../tsconfig.base.json\",\n  \
+         /* options */ \"compilerOptions\": {{ \"paths\": {{ \"~/*\": [\"./src/*\"] }} }},\n  \
+         \"vault_passphrase\": \"{PLACEHOLDER}\"\n}}\n"
+    );
+    let sanitized = sanitize_code_source_bytes(raw.as_bytes(), CodeSourceShapeV1::StructuredData)
+        .expect("JSONC parses whole");
+    let text = String::from_utf8(sanitized.into_parts().0).unwrap();
+    assert!(
+        text.contains("// base config"),
+        "comments stay in the sanitized bytes: {text}"
+    );
+    assert!(text.contains("\"~/*\": [\"./src/*\"]"), "{text}");
+    assert!(
+        !text.contains(PLACEHOLDER),
+        "sensitive value is redacted: {text}"
+    );
+
+    let error = sanitize_code_source_bytes(
+        b"{\n // comment\n \"broken\": [1, 2\n}\n",
+        CodeSourceShapeV1::StructuredData,
+    )
+    .map(|_| ())
+    .expect_err("a JSONC document that still does not parse is quarantined");
+    assert_eq!(error, DetectionError::StructuredQuarantine);
+}

@@ -45,16 +45,20 @@ import {
 
 // Imports live at the top of a module; a `lazy` dynamic import is the
 // documented exception, because the point is that the module is NOT fetched
-// until it is needed. The trace drill-in is a thousand lines plus the whole of
-// `viz/trace`, canvas renderer, spring integrator, palette, and most visits
-// to this workspace never open it, so it is its own chunk rather than dead
-// weight in the spine's. The `TraceFocus` import above stays a normal
+// until it is needed. The trace drill-in is the whole of `viz/trace` (the
+// anatomy plate, its model and readouts), and most visits to this workspace
+// never open it, so it is its own chunk rather than dead weight in the spine's. The `TraceFocus` import above stays a normal
 // top-level type import: types are erased, so it costs nothing at runtime.
 const TraceView = lazy(() =>
   import('./TraceView.tsx').then((m) => ({ default: m.TraceView })),
 );
 
 const BASE = '/api/plugins/graph';
+
+/** The subgraph route's own ceilings (`coerce_limit` in graph_api.rs). The
+ * field aggregates by directory, so it asks for the most the daemon serves
+ * rather than the 80/120 default. */
+const SLICE_LIMITS = 'limit_nodes=250&limit_edges=500';
 
 /** What the inspector is previewing, if anything: a row the pointer or focus
  * is on. The row itself rides along when the source had one, so a caller
@@ -112,7 +116,7 @@ export function CodePage() {
   const focusId = location.focusId;
   const subgraph = useEnvelope(
     ['graph', 'subgraph', focusId ?? ''],
-    `${BASE}/subgraph${focusId ? `?node_id=${encodeURIComponent(focusId)}` : ''}`,
+    `${BASE}/subgraph?${SLICE_LIMITS}${focusId ? `&node_id=${encodeURIComponent(focusId)}` : ''}`,
     GraphSubgraphPayloadV1Schema,
   );
   const subgraphPayload = envelopePayload(subgraph.data);
@@ -133,25 +137,6 @@ export function CodePage() {
     },
     [location.focusId, resolvedFocus, searchParams, setSearchParams],
   );
-  const canvasNodes = useMemo(() => {
-    const payload = envelopePayload(subgraph.data);
-    if (!payload) return [];
-    return payload.nodes.map((node) => ({
-      id: node.id,
-      label: node.name ?? node.qualified_name ?? node.id,
-      kind: node.kind,
-      degree: node.degree ?? undefined,
-    }));
-  }, [subgraph.data]);
-  const canvasEdges = useMemo(() => {
-    const payload = envelopePayload(subgraph.data);
-    if (!payload) return [];
-    return payload.edges.map((edge) => ({
-      source: edge.source,
-      target: edge.target,
-      kind: edge.kind,
-    }));
-  }, [subgraph.data]);
   const activation = useActivationField(3200);
   // Search results strike their nodes: querying the graph makes it fire.
   useEffect(() => {
@@ -341,8 +326,6 @@ export function CodePage() {
               <CortexField
                 pending={subgraph.isPending}
                 result={subgraph.data}
-                nodes={canvasNodes}
-                edges={canvasEdges}
                 selectedId={resolvedFocus?.id ?? null}
                 inspectedId={inspection?.id ?? highlight}
                 onSelect={selectFromCanvas}
@@ -462,7 +445,7 @@ function CortexLens({
           <div
             role="tablist"
             aria-label="Ledger reading"
-            className="flex h-8 shrink-0 items-center gap-1 border-b border-edge-subtle bg-surface-1 px-1"
+            className="flex shrink-0 items-center gap-1 border-b border-edge-subtle bg-surface-1 px-1"
           >
             <LedgerTabButton
               tab="symbols"
@@ -544,7 +527,7 @@ function LedgerTabButton({
       }}
       title={note}
       className={cn(
-        'flex h-full items-center gap-2 border-b-2 px-3 text-2xs uppercase tracking-[0.12em]',
+        'flex min-h-[var(--touch-target-min)] items-center gap-2 border-b-2 px-3 text-2xs uppercase tracking-[0.12em]',
         'focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
         selected
           ? 'border-accent text-text-primary'

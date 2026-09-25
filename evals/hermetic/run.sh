@@ -371,7 +371,7 @@ PY
 
 # Index a project, tolerating re-staging: `init` refuses when the project is
 # already registered in the isolated data dir (it advises `sync`), so fall
-# back to a forced sync to rebuild the index for the fresh copy.
+# back to `sync` to reconcile the index for the fresh copy.
 reindex_project() {
   local env_dir="$1" staged_bin="$2" project="$3"
   if HOME="${env_dir}/home" \
@@ -381,12 +381,12 @@ reindex_project() {
        "${staged_bin}" init "${project}" >&2; then
     return 0
   fi
-  log "init refused for ${project} (already registered); running sync --force"
+  log "init refused for ${project} (already registered); running sync"
   HOME="${env_dir}/home" \
   TRACEDECAY_DATA_DIR="${env_dir}/tracedecay-data" \
   TRACEDECAY_DAEMON_SOCKET="${env_dir}/tracedecay-data/daemon.sock" \
   PATH="${env_dir}/bin:${PATH}" \
-    "${staged_bin}" sync "${project}" --force >&2 \
+    "${staged_bin}" sync "${project}" >&2 \
     || die "re-indexing failed for ${project}"
 }
 

@@ -5,7 +5,7 @@ use tracedecay_domain::*;
 #[test]
 fn test_astro_file_node() {
     let source = "---\nconst x = 1;\n---\n<h1>hi</h1>";
-    let result = AstroExtractor.extract("page.astro", source);
+    let result = AstroExtractor.extract_artifact("page.astro", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let files: Vec<_> = result
         .nodes
@@ -24,7 +24,7 @@ export function formatTitle(t: string): string {
 }
 ---
 <html></html>"#;
-    let result = AstroExtractor.extract("page.astro", source);
+    let result = AstroExtractor.extract_artifact("page.astro", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fmt = result
         .nodes
@@ -38,7 +38,9 @@ export function formatTitle(t: string): string {
 fn test_astro_line_numbers_are_original_file_positions() {
     // `greet` is on line 2 (0-indexed) in the full .astro file.
     let source = "---\n\nexport function greet(): void {}\n---\n<p>hi</p>";
-    let result = AstroExtractor.extract("greet.astro", source);
+    let result = AstroExtractor
+        .extract_artifact("greet.astro", source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let greet = result.nodes.iter().find(|n| n.name == "greet").unwrap();
     assert_eq!(
@@ -51,7 +53,9 @@ fn test_astro_line_numbers_are_original_file_positions() {
 #[test]
 fn test_astro_no_frontmatter_returns_file_node_only() {
     let source = "<html><body><h1>Static</h1></body></html>";
-    let result = AstroExtractor.extract("static.astro", source);
+    let result = AstroExtractor
+        .extract_artifact("static.astro", source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let non_file: Vec<_> = result
         .nodes
@@ -65,7 +69,7 @@ fn test_astro_no_frontmatter_returns_file_node_only() {
 fn test_astro_template_markup_does_not_produce_symbols() {
     // HTML after the closing `---` must not leak TypeScript symbols.
     let source = "---\nconst greeting = 'hello';\n---\n<p class=\"text-lg\">{greeting}</p>\n<script>window.foo = 1;</script>";
-    let result = AstroExtractor.extract("page.astro", source);
+    let result = AstroExtractor.extract_artifact("page.astro", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fns: Vec<_> = result
         .nodes
@@ -82,7 +86,9 @@ fn test_astro_template_markup_does_not_produce_symbols() {
 #[test]
 fn test_astro_fixture() {
     let source = include_str!("../../fixtures/sample.astro");
-    let result = AstroExtractor.extract("sample.astro", source);
+    let result = AstroExtractor
+        .extract_artifact("sample.astro", source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let names: Vec<_> = result.nodes.iter().map(|n| n.name.as_str()).collect();
     assert!(

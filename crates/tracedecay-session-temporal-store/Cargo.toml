@@ -39,24 +39,24 @@ thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt", "sync"] }
 tracing = "0.1"
 zeroize = "1.9.0"
-tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
-tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }
-tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
-tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
-tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
-tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
-tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
-tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
-tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
+tracedecay-contracts = { path = "../tracedecay-contracts" }
+tracedecay-capture = { path = "../tracedecay-capture" }
+tracedecay-domain = { path = "../tracedecay-domain" }
+tracedecay-graph-db = { path = "../tracedecay-graph-db" }
+tracedecay-query = { path = "../tracedecay-query" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
+tracedecay-lcm = { path = "../tracedecay-lcm" }
+tracedecay-sessions = { path = "../tracedecay-sessions" }
+tracedecay-store = { path = "../tracedecay-store" }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query" }
 
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time", "test-util"] }
-tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", features = ["test-helpers"] }
 # Dev-dep cycle is allowed: this crate's unit tests need the registered
 # global-db fixture surface; production never depends on global-db.
-tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
-tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
-tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-global-db = { path = "../tracedecay-global-db", features = ["test-helpers"] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }
+tracedecay-sessions = { path = "../tracedecay-sessions", features = ["test-helpers"] }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query", features = ["test-helpers"] }

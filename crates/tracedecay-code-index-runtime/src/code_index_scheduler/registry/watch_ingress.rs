@@ -7,6 +7,7 @@
 //! remain distinct typed retry states.
 
 use tracedecay_runtime_core::git_discovery::GitRepositoryIdentity;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 use super::super::CodeIndexCadenceTriggerV1;
 use super::CodeIndexSchedulerRegistryV1;
@@ -59,11 +60,17 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         identity: &GitRepositoryIdentity,
     ) -> GitStateChangeRequestV1 {
+        // Discovery spells the worktree through `canonicalize` (verbatim on
+        // Windows); mounts are keyed by the product root identity.
+        let Ok(mount_key) = canonical_existing_identity(&identity.worktree_root) else {
+            hotpath::gauge!("daemon.code_index.watch.ingress.unmounted_total").inc(1_u64);
+            return GitStateChangeRequestV1::Unmounted;
+        };
         let Ok(mounted) = self.mounted.try_lock() else {
             hotpath::gauge!("daemon.code_index.watch.ingress.busy_total").inc(1_u64);
             return GitStateChangeRequestV1::Busy;
         };
-        let Some(worktree) = mounted.get(&identity.worktree_root) else {
+        let Some(worktree) = mounted.get(&mount_key) else {
             hotpath::gauge!("daemon.code_index.watch.ingress.unmounted_total").inc(1_u64);
             return GitStateChangeRequestV1::Unmounted;
         };

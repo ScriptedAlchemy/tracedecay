@@ -52,7 +52,7 @@ pub struct StoreContentInventory {
     pub entries: Vec<StoreContentEntry>,
 }
 
-/// Exact content identity carried from census to post-quarantine verification.
+/// Exact content identity carried from census to the delete boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreContentFence {
     Missing,
@@ -219,8 +219,8 @@ fn capture_store_content_fence_impl(
         .map_err(|error| failure_from_io(error, control))
 }
 
-/// Captures an inventory from an already-open directory; quarantine uses this
-/// after its same-parent rename so the proof applies to the moved bytes.
+/// Captures an inventory from an already-open directory so the proof applies
+/// to the exact handle collection later deletes.
 pub(super) fn capture_store_content_fence_in_dir_controlled(
     root: &Dir,
     control: Option<CollectionControl<'_>>,

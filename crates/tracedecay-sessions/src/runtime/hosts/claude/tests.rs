@@ -1,5 +1,5 @@
 use super::*;
-use crate::runtime::SessionMessageRecord;
+use crate::runtime::shared::StoredCursor;
 use serde_json::json;
 use tracedecay_capture::claude as canonical;
 use tracedecay_runtime_core::git_discovery::{
@@ -113,213 +113,6 @@ fn bounded_scan_exposes_whitespace_ranges_without_parsing_them() {
 }
 
 #[test]
-fn compact_pair_projection_keeps_pairing_evidence() {
-    let fixtures = format!(
-        "{}/../../tests/fixtures/provider_normalization/claude",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    let context = ClaudeRecordContext {
-        session_id: "claude-compact-pair-session",
-        project_key: "project-1",
-        project_path: "/project-1",
-        file_generation: 1,
-        offset: 0,
-        session_cwd: Some(Path::new("/project-1")),
-        source_path: None,
-        raw_message_id: None,
-        raw_tool_event_ids: &[],
-        raw_hook_tool_use_id: None,
-    };
-    let boundary = map_checked_in_claude_fixture(
-        &format!("{fixtures}/compact_summary_pair.boundary.input.json"),
-        &context,
-    );
-    let summary = map_checked_in_claude_fixture(
-        &format!("{fixtures}/compact_summary_pair.summary.input.json"),
-        &context,
-    );
-    assert_eq!(
-        boundary.message_id,
-        "compact_boundary:ffffffff-0000-1111-2222-333333333333"
-    );
-    let boundary_metadata: Value =
-        serde_json::from_str(boundary.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(
-        boundary_metadata["canonical_envelope"]["facts"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find_map(|fact| fact.pointer("/summary/preservedSegment/anchorUuid"))
-            .and_then(Value::as_str),
-        Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
-    );
-    assert_eq!(summary.message_id, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
-    let summary_metadata: Value =
-        serde_json::from_str(summary.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(
-        summary_metadata["canonical_envelope"]["relations"]["parent_message_id"],
-        "ffffffff-0000-1111-2222-333333333333"
-    );
-}
-
-fn map_checked_in_claude_fixture(
-    path: &str,
-    context: &ClaudeRecordContext<'_>,
-) -> SessionMessageRecord {
-    let bytes = std::fs::read(path).unwrap();
-    let range = tracedecay_domain::ObservationSourceRangeV1::new(0, bytes.len() as u64).unwrap();
-    let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
-        &bytes,
-        range,
-        tracedecay_domain::ObservationOrderingDomainV1::FileBytes,
-        |native| {
-            let stable = canonical::stable_record_id(&native, context.session_id, 0)?;
-            canonical::normalize(&native, context.session_id, stable, range)
-        },
-    )
-    .unwrap();
-    let ClaudeRecordDisposition::Message { message, .. } =
-        map_sanitized_claude_record(parsed.value(), context)
-    else {
-        panic!("{} must map to a persisted row", path);
-    };
-    *message
-}
-
-#[test]
-fn legacy_trait_parse_only_folds_sanitizer_issued_values() {
-    let dir = tempfile::tempdir().unwrap();
-    let secret = "password = p@ssw0rd!";
-    let project_root = dir.path().join(secret);
-    std::fs::create_dir_all(&project_root).unwrap();
-    let transcript = dir.path().join("session-sanitized.jsonl");
-    let record = json!({
-        "type": "user",
-        "uuid": "user-sanitized",
-        "cwd": project_root,
-        "message": {"role": "user", "content": secret},
-    });
-    std::fs::write(
-        &transcript,
-        format!("{}\n", serde_json::to_string(&record).unwrap()),
-    )
-    .unwrap();
-
-    let parsed = ClaudeSource::with_home(Path::new("/unused"))
-        .parse_new(&transcript, StoredCursor::default(), &project_root, None)
-        .expect("legacy trait parse");
-    let mut durable = parsed.draft.metadata_json.clone().unwrap_or_default();
-    for message in &parsed.messages {
-        durable.push_str(&message.text);
-        durable.push_str(message.metadata_json.as_deref().unwrap_or_default());
-    }
-
-    assert!(!durable.contains("p@ssw0rd!"), "{durable}");
-    assert!(durable.contains("[TraceDecay redacted:"), "{durable}");
-    assert_eq!(parsed.messages.len(), 1);
-}
-
-#[test]
-fn subagent_provider_metadata_is_sanitized_before_persistence() {
-    let dir = tempfile::tempdir().unwrap();
-    let raw_secret = "abcdefghijklmnopqrstuvwxyz0123456789";
-    let credential = format!("Bearer {raw_secret}");
-    let workflow = format!("wf_ {credential}");
-    let transcript = dir
-        .path()
-        .join("parent-session")
-        .join("subagents")
-        .join("workflows")
-        .join(&workflow)
-        .join("agent-child.jsonl");
-    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-    std::fs::write(&transcript, "").unwrap();
-    std::fs::write(
-        transcript.with_file_name("agent-child.meta.json"),
-        serde_json::to_vec(&json!({
-            "agentType": format!("Explore {credential}"),
-            "description": format!("Inspect {credential}"),
-            "toolUseId": format!("tool {credential}"),
-            "spawnDepth": 2,
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-
-    let info = claude_subagent_identity(&transcript).expect("subagent identity");
-    let durable = serde_json::to_string(&session_metadata(
-        None,
-        Some(&info),
-        &SessionAccumulator::default(),
-        None,
-    ))
-    .unwrap();
-
-    assert!(!durable.contains(raw_secret), "{durable}");
-    assert_eq!(info.parent_tool_use_id, None);
-    assert_eq!(info.workflow_run_id, None);
-    assert!(durable.contains("[TraceDecay redacted:"));
-    assert_eq!(info.spawn_depth, Some(2));
-
-    let other_secret = "0123456789abcdefghijklmnopqrstuvwxyz";
-    let other_credential = format!("Bearer {other_secret}");
-    let other_workflow = format!("wf_ {other_credential}");
-    let other_transcript = dir
-        .path()
-        .join("parent-session")
-        .join("subagents")
-        .join("workflows")
-        .join(&other_workflow)
-        .join("agent-other.jsonl");
-    std::fs::create_dir_all(other_transcript.parent().unwrap()).unwrap();
-    std::fs::write(&other_transcript, "").unwrap();
-    std::fs::write(
-        other_transcript.with_file_name("agent-other.meta.json"),
-        serde_json::to_vec(&json!({
-            "toolUseId": format!("tool {other_credential}"),
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-
-    let other = claude_subagent_identity(&other_transcript).expect("other identity");
-    assert_eq!(other.parent_tool_use_id, None);
-    assert_eq!(other.workflow_run_id, None);
-}
-
-#[test]
-fn subagent_metadata_exceeding_structural_limits_is_denied_as_a_whole() {
-    let dir = tempfile::tempdir().unwrap();
-    let transcript = dir
-        .path()
-        .join("parent-session")
-        .join("subagents")
-        .join("agent-deep.jsonl");
-    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-    std::fs::write(&transcript, "").unwrap();
-
-    let mut nested = json!(true);
-    for _ in 0..=tracedecay_capture::ParseLimits::default_policy().depth {
-        nested = json!({"next": nested});
-    }
-    std::fs::write(
-        transcript.with_file_name("agent-deep.meta.json"),
-        serde_json::to_vec(&json!({
-            "agentType": "must-not-survive-partial-scan",
-            "nested": nested,
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-
-    let info = claude_subagent_identity(&transcript).expect("subagent identity");
-
-    assert_eq!(info.agent_type, None);
-    assert_eq!(info.description, None);
-    assert_eq!(info.spawn_depth, None);
-}
-
-#[test]
 fn cursor_key_round_trips_native_bytes_without_collisions() {
     let native_path: Vec<u8> = r"C:\Users\zack\.claude\projects\session.jsonl"
         .encode_utf16()
@@ -362,10 +155,9 @@ fn non_utf8_paths_that_render_identically_have_distinct_cursor_keys() {
     let second = PathBuf::from(OsString::from_vec(b"session-\xfe.jsonl".to_vec()));
     assert_eq!(first.to_string_lossy(), second.to_string_lossy());
 
-    let source = ClaudeSource::with_home(Path::new("/unused"));
     assert_ne!(
-        source.cursor_key(&first).durable_text(),
-        source.cursor_key(&second).durable_text()
+        cursor::claude_cursor_key(&first).durable_text(),
+        cursor::claude_cursor_key(&second).durable_text()
     );
     let first_identity = identify_claude_source(&first).unwrap();
     let second_identity = identify_claude_source(&second).unwrap();
@@ -415,239 +207,6 @@ fn observation_source_ids_are_private_and_follow_native_transcript_identity() {
             "tracedecay-claude-observation-source-v1-sha256-".len() + 64
         );
     }
-}
-
-#[test]
-fn structured_git_operation_becomes_host_commit_evidence() {
-    let mut metadata = Map::new();
-    append_git_operation_metadata(
-        &mut metadata,
-        &json!({
-            "gitBranch": "feature/attribution",
-            "toolUseResult": {
-                "gitOperation": {
-                    "commit": {"sha": "ABCDEF12", "kind": "commit"}
-                }
-            }
-        }),
-    );
-    assert_eq!(metadata["produced_commit_candidates"], json!(["abcdef12"]));
-    assert_eq!(metadata["produced_commit_evidence"], "host_event");
-    assert_eq!(metadata["git_branch"], "feature/attribution");
-}
-
-#[test]
-fn unstructured_user_content_cannot_spoof_commit_evidence() {
-    let mut metadata = Map::new();
-    append_git_operation_metadata(
-        &mut metadata,
-        &json!({"message": {"content": "gitOperation commit abcdef12"}}),
-    );
-    assert!(metadata.is_empty());
-}
-
-fn assistant_record(content: &Value) -> Value {
-    json!({
-        "type": "assistant",
-        "sessionId": "sess",
-        "uuid": "u-assistant",
-        "timestamp": "2026-01-01T00:00:05.000Z",
-        "message": {
-            "id": "msg_1",
-            "role": "assistant",
-            "model": "claude-opus-4-8",
-            "content": content.clone(),
-        }
-    })
-}
-
-fn record_context(raw_message_id: Option<&str>, offset: u64) -> ClaudeRecordContext<'_> {
-    ClaudeRecordContext {
-        session_id: "sess",
-        project_key: "project",
-        project_path: "/project",
-        file_generation: 7,
-        offset,
-        session_cwd: None,
-        source_path: None,
-        raw_message_id,
-        raw_tool_event_ids: &[],
-        raw_hook_tool_use_id: None,
-    }
-}
-
-#[test]
-fn thinking_blocks_are_split_from_the_visible_message_row() {
-    let record = assistant_record(&json!([
-        {"type": "thinking", "thinking": "First I inspect the parser."},
-        {"type": "thinking", "thinking": "Then I add the row."},
-        {"type": "tool_use", "name": "Read", "input": {"file_path": "src/lib.rs"}},
-        {"type": "text", "text": "Done."}
-    ]));
-    let path = Path::new("/tmp/sess.jsonl");
-
-    let mut accumulator = SessionAccumulator::default();
-    let message = message_from_line(&record, "sess", path, 10, None, &mut accumulator, None)
-        .expect("assistant message row");
-    assert_eq!(message.message_id, "msg_1");
-    assert_eq!(message.kind.as_deref(), Some("message"));
-    assert!(!message.text.contains("First I inspect the parser"));
-    assert!(!message.text.contains("Then I add the row"));
-    assert!(message.text.contains("src/lib.rs"));
-    assert!(message.text.contains("Done."));
-    assert_eq!(message.tool_names.as_deref(), Some("Read"));
-
-    let context = record_context(Some("msg_1"), 10);
-    let reasoning = reasoning_from_line(&record, path, &context, Some(message.message_id.as_str()))
-        .expect("reasoning row for thinking");
-    assert_eq!(reasoning.message_id, "msg_1:thinking");
-    assert_eq!(reasoning.kind.as_deref(), Some("reasoning"));
-    assert_eq!(reasoning.role, "assistant");
-    assert_eq!(reasoning.model.as_deref(), Some("claude-opus-4-8"));
-    assert_eq!(reasoning.ordinal, 10);
-    assert_eq!(reasoning.timestamp, Some(1_767_225_605));
-    assert_eq!(
-        reasoning.text,
-        "First I inspect the parser.\n\nThen I add the row."
-    );
-    let metadata: Value = serde_json::from_str(reasoning.metadata_json.as_deref().unwrap())
-        .expect("reasoning metadata json");
-    assert_eq!(metadata["source"], "claude_thinking");
-    assert_eq!(metadata["parent_message_id"], "msg_1");
-    assert_eq!(metadata["thinking_blocks"], 2);
-    assert!(metadata.get("redacted_thinking_blocks").is_none());
-}
-
-#[test]
-fn redacted_only_thinking_records_no_reasoning_row() {
-    // Matches Codex's encrypted-reasoning convention: no plaintext, no row.
-    let record = assistant_record(&json!([
-        {"type": "redacted_thinking", "data": "ENCRYPTED_SHOULD_NOT_INDEX"},
-        {"type": "text", "text": "Answer."}
-    ]));
-    assert!(
-        reasoning_from_line(
-            &record,
-            Path::new("/tmp/sess.jsonl"),
-            &record_context(Some("msg_1"), 3),
-            None,
-        )
-        .is_none()
-    );
-}
-
-#[test]
-fn mixed_thinking_and_redacted_records_the_redacted_count_but_no_plaintext() {
-    let record = assistant_record(&json!([
-        {"type": "thinking", "thinking": "Visible reasoning."},
-        {"type": "redacted_thinking", "data": "ENCRYPTED_SHOULD_NOT_INDEX"}
-    ]));
-    let reasoning = reasoning_from_line(
-        &record,
-        Path::new("/tmp/sess.jsonl"),
-        &record_context(Some("msg_1"), 4),
-        Some("msg_1"),
-    )
-    .expect("reasoning row for the plaintext block");
-    assert_eq!(reasoning.text, "Visible reasoning.");
-    assert!(!reasoning.text.contains("ENCRYPTED"));
-    let metadata: Value =
-        serde_json::from_str(reasoning.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(metadata["thinking_blocks"], 1);
-    assert_eq!(metadata["redacted_thinking_blocks"], 1);
-}
-
-#[test]
-fn reasoning_row_id_falls_back_to_record_uuid_when_message_id_is_absent() {
-    let record = json!({
-        "type": "assistant",
-        "sessionId": "sess",
-        "uuid": "u-fallback",
-        "timestamp": "2026-01-01T00:00:05.000Z",
-        "message": {
-            "role": "assistant",
-            "content": [{"type": "thinking", "thinking": "Reasoning without a message id."}]
-        }
-    });
-    let reasoning = reasoning_from_line(
-        &record,
-        Path::new("/tmp/sess.jsonl"),
-        &record_context(Some("u-fallback"), 9),
-        None,
-    )
-    .expect("reasoning row");
-    assert_eq!(reasoning.message_id, "u-fallback:thinking");
-    let metadata: Value =
-        serde_json::from_str(reasoning.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(metadata["parent_message_id"], "u-fallback");
-}
-
-#[test]
-fn redacted_identity_uses_generation_offset_for_message_and_reasoning() {
-    let marker = "[TraceDecay redacted:credential]";
-    let record = json!({
-        "type": "assistant",
-        "uuid": marker,
-        "message": {
-            "id": marker,
-            "role": "assistant",
-            "content": [
-                {"type": "thinking", "thinking": "private chain"},
-                {"type": "text", "text": "answer"}
-            ]
-        }
-    });
-    let context = record_context(Some("raw-sensitive-id"), 19);
-    let ClaudeRecordDisposition::Message { message, .. } =
-        map_sanitized_claude_record(&record, &context)
-    else {
-        panic!("assistant row must map");
-    };
-    assert_eq!(message.message_id, "sess:7:19");
-
-    let reasoning = reasoning_from_line(
-        &record,
-        Path::new("/tmp/sess.jsonl"),
-        &context,
-        Some(message.message_id.as_str()),
-    )
-    .expect("reasoning row");
-    let metadata: Value =
-        serde_json::from_str(reasoning.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(reasoning.message_id, "sess:7:19:thinking");
-    assert_eq!(metadata["parent_message_id"], "sess:7:19");
-}
-
-#[test]
-fn redacted_marker_ids_do_not_collide() {
-    let record = json!({
-        "type": "pr-link",
-        "uuid": "[TraceDecay redacted:credential]",
-        "prNumber": 5,
-    });
-    let mut accumulator = SessionAccumulator::default();
-    let first = record_metadata::pr_link_row(
-        &record,
-        "sess",
-        7,
-        Path::new("/tmp/sess.jsonl"),
-        10,
-        &mut accumulator,
-    )
-    .unwrap();
-    let second = record_metadata::pr_link_row(
-        &record,
-        "sess",
-        7,
-        Path::new("/tmp/sess.jsonl"),
-        20,
-        &mut accumulator,
-    )
-    .unwrap();
-
-    assert_eq!(first.message_id, "sess:7:10");
-    assert_eq!(second.message_id, "sess:7:20");
-    assert_ne!(first.message_id, second.message_id);
 }
 
 #[test]
@@ -982,62 +541,6 @@ fn retrying_identity(path: &Path) -> GitRepositoryIdentityOutcome {
 }
 
 #[test]
-fn claude_message_metadata_reuses_worktree_for_repeated_cwd() {
-    let temp = tempfile::TempDir::new().expect("temp dir");
-    let project_root = temp.path().join("repo");
-    let nested_cwd = project_root.join("packages/app");
-    std::fs::create_dir_all(&nested_cwd).expect("nested cwd");
-    let status = std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(&project_root)
-        .status()
-        .expect("git init");
-    assert!(status.success());
-
-    let cache = crate::runtime::shared::ProjectRootMatcherCache::default();
-    let record = json!({
-        "type": "user",
-        "sessionId": "sess",
-        "cwd": nested_cwd,
-        "message": {"role": "user", "content": "hello"}
-    });
-    let path = Path::new("/tmp/sess.jsonl");
-
-    let mut accumulator = SessionAccumulator::default();
-    let first = message_from_line(
-        &record,
-        "sess",
-        path,
-        10,
-        Some(&nested_cwd),
-        &mut accumulator,
-        Some(&cache),
-    )
-    .expect("first message");
-    let first_metadata: serde_json::Value =
-        serde_json::from_str(first.metadata_json.as_deref().unwrap()).unwrap();
-    let first_worktree = first_metadata["claude_message_worktree"].clone();
-    assert!(first_worktree.is_string());
-
-    std::fs::rename(project_root.join(".git"), project_root.join(".git.hidden"))
-        .expect("hide git metadata after first lookup");
-
-    let second = message_from_line(
-        &record,
-        "sess",
-        path,
-        20,
-        Some(&nested_cwd),
-        &mut accumulator,
-        Some(&cache),
-    )
-    .expect("second message");
-    let second_metadata: serde_json::Value =
-        serde_json::from_str(second.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(second_metadata["claude_message_worktree"], first_worktree);
-}
-
-#[test]
 fn claude_unknown_membership_retries_without_advancing_cursor() {
     use std::sync::atomic::Ordering;
     UNKNOWN_PATH_ATTEMPTS.store(0, Ordering::SeqCst);
@@ -1063,18 +566,30 @@ fn claude_unknown_membership_retries_without_advancing_cursor() {
     source.project_matchers =
         crate::runtime::shared::ProjectRootMatcherCache::with_identity_resolver(retrying_identity);
 
-    let previous = StoredCursor::default();
+    let scan = || {
+        try_scan_claude_source_frames_with_resume(
+            identify_claude_source(&transcript).unwrap(),
+            StoredCursor::default(),
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap()
+    };
+
+    let mut first = scan();
     assert!(
         source
-            .parse_new(&transcript, previous, &project_root, None)
+            .retain_scoped_frames(&mut first, &project_root)
             .is_none(),
-        "unknown membership must abort before a new cursor can be persisted"
+        "unknown membership must defer the scan before a cursor or skip range can be persisted"
     );
 
-    let retried = source
-        .parse_new(&transcript, previous, &project_root, None)
+    let mut retried = scan();
+    let excluded = source
+        .retain_scoped_frames(&mut retried, &project_root)
         .expect("unknown membership must be resolved again on retry");
-    assert_eq!(retried.messages.len(), 1);
-    assert!(retried.new_cursor.position > previous.position);
+    assert!(excluded.is_empty());
+    assert_eq!(retried.frames.len(), 1);
     assert_eq!(UNKNOWN_PATH_ATTEMPTS.load(Ordering::SeqCst), 3);
 }

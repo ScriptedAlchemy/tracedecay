@@ -434,7 +434,7 @@ pub fn incident_debris_finding(
                 scan.artifact_count(),
                 scan.total_bytes().get()
             ),
-            "quarantine-eligible incident artifacts present beside a live store",
+            "incident artifacts awaiting deletion beside a live store",
         )?
     } else if scan.listing_complete {
         clean_finding(

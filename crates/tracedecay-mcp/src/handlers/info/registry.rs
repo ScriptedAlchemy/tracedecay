@@ -344,11 +344,18 @@ mod tests {
             "unexpected refusal: {error}"
         );
 
+        // Git identity is reserved for a host-absolute path; `/srv/other` is
+        // drive-relative on Windows.
+        let other = if cfg!(windows) {
+            r"C:\srv\other"
+        } else {
+            "/srv/other"
+        };
         assert_eq!(
-            project_context_selector(None, &json!({"path": "/srv/other"}))
+            project_context_selector(None, &json!({"path": other}))
                 .expect("explicit path selector"),
             ProjectRegistrySelector::Path {
-                path: Path::new("/srv/other").to_path_buf(),
+                path: Path::new(other).to_path_buf(),
                 allow_git_identity: true,
             }
         );

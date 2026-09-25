@@ -1,7 +1,8 @@
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
-use axum::response::Json;
-use serde::Deserialize;
+use axum::response::{IntoResponse, Json, Response};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::util::{JsonQuery, coerce_limit, json_error};
@@ -22,16 +23,26 @@ pub struct ListParams {
     limit: Option<i64>,
 }
 
+/// `GET /api/automation/automatic-fact-receipts`, newest first under `limit`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct AutomaticFactReceiptsPayloadV1 {
+    receipts: Vec<AutomaticFactReceipt>,
+    count: usize,
+    limit: usize,
+}
+
 #[hotpath::measure(label = "dashboard_api.receipts.list", future = true)]
 pub async fn list(
     State(state): State<DashboardState>,
     RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<ListParams>,
-) -> (StatusCode, Json<Value>) {
+) -> Response {
     let receipt_state = match params.state.as_deref() {
         Some(value) => match AutomaticFactState::parse(value) {
             Ok(state) => Some(state),
-            Err(err) => return json_error(StatusCode::BAD_REQUEST, err.to_string()),
+            Err(err) => {
+                return json_error(StatusCode::BAD_REQUEST, err.to_string()).into_response();
+            }
         },
         None => None,
     };
@@ -42,31 +53,26 @@ pub async fn list(
     ) as usize;
     let memory = match open_receipt_memory(&state) {
         Ok(memory) => memory,
-        Err(error) => return error,
+        Err(error) => return error.into_response(),
     };
     let result =
         list_automatic_fact_receipts(&memory, receipt_state, limit, &fact_read_control(&control))
             .await;
     if let Some(state) = request_terminal_state(&control) {
-        return terminal_read_response(state);
+        return terminal_read_response(state).into_response();
     }
     match result {
-        Ok(receipts) => {
-            let count = receipts.len();
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "receipts": receipts,
-                    "count": count,
-                    "limit": limit,
-                    "error": "",
-                })),
-            )
-        }
+        Ok(receipts) => Json(AutomaticFactReceiptsPayloadV1 {
+            count: receipts.len(),
+            receipts,
+            limit,
+        })
+        .into_response(),
         Err(err) => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to load automatic fact receipts: {err}"),
-        ),
+        )
+        .into_response(),
     }
 }
 

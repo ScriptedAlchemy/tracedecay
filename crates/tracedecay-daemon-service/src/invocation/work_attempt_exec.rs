@@ -72,7 +72,7 @@ use tracedecay_domain::{
     WorkAttemptIdentityV1, WorkAttemptV1, WorkExecutableReference, WorkFallbackTopology,
     WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteV1, WorktreeId,
 };
-use tracedecay_sessions::runtime::codex_app_server::{
+use tracedecay_sessions::runtime::hosts::codex_app_server::{
     CodexAppServerCancellation, CodexAppServerLaunchReceipt, CodexAppServerSummaryConfig,
     CodexAppServerWorkExecution, run_work_with_codex_app_server,
 };
@@ -83,7 +83,8 @@ use tracedecay_configuration::config::work_executable_binding::{
 
 use super::types::RegisteredWorkRuntime;
 use super::work::work_background_context;
-use super::{Arc, RequestContext, current_micros};
+use super::{Arc, RequestContext};
+use tracedecay_contracts::now_micros;
 
 mod operation_resource;
 mod provider_output;
@@ -427,7 +428,8 @@ impl WorkAttemptProcessRegistryV1 {
             process.cancellation.notify_waiters();
             process.lifecycle.cancel();
         }
-        let deadline = tokio::time::Instant::now() + crate::TASK_ABORT_DEADLINE;
+        let deadline =
+            tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
         let mut clean = true;
         for process in processes.into_values() {
             let Some(mut handle) = process.handle else {
@@ -789,7 +791,7 @@ fn settle_unstarted<S>(
 ) where
     S: tracedecay_contracts::WorkAttemptStoragePort,
 {
-    let observed_at = current_micros();
+    let observed_at = now_micros();
     if let Err(problem) = attempts.mark_provider_unavailable(context, identity, observed_at) {
         tracing::warn!(
             task = identity.task_id().as_str(),
@@ -841,7 +843,7 @@ where
         context,
         attempt.identity().clone(),
         attempt.execution().effect_state(),
-        current_micros(),
+        now_micros(),
         attempt.execution().deadline(),
     ) {
         Ok(WorkAttemptEffectDispatchOutcomeV1::Recorded(_)) => EffectDispatchAdmission::Recorded,
@@ -879,8 +881,7 @@ where
     } else {
         WorkAttemptEffectResolutionV1::Unknown
     };
-    if let Err(problem) = effects.settle(context, attempt.identity(), resolution, current_micros())
-    {
+    if let Err(problem) = effects.settle(context, attempt.identity(), resolution, now_micros()) {
         tracing::warn!(
             task = attempt.identity().task_id().as_str(),
             ?problem,
@@ -1025,7 +1026,7 @@ async fn execute_provider_with_environment<S>(
         tokio::spawn(async move { read_capped(stderr, budget.max_stderr_bytes()).await });
 
     let deadline_micros =
-        u64::try_from(envelope.deadline().0.saturating_sub(current_micros().0)).unwrap_or(0);
+        u64::try_from(envelope.deadline().0.saturating_sub(now_micros().0)).unwrap_or(0);
     let wall = std::time::Duration::from_micros(deadline_micros);
 
     let outcome = tokio::select! {
@@ -1073,7 +1074,7 @@ async fn execute_provider_with_environment<S>(
         stderr,
         provider_session,
         provider_fallback: selection.fallback.clone(),
-        observed_at: current_micros(),
+        observed_at: now_micros(),
     };
     if !settle_effect_dispatch(attempt_effects, context, attempt, true) {
         return;
@@ -1118,7 +1119,7 @@ struct AppServerSessionOutput {
 /// The transport itself is not reimplemented here: process spawn, the
 /// `initialize` handshake, ephemeral thread lifecycle, turn collection and
 /// process-tree cancellation all live in
-/// `tracedecay_sessions::runtime::codex_app_server`, which the row-56 rework
+/// `tracedecay_sessions::runtime::hosts::codex_app_server`, which the row-56 rework
 /// already built for exactly this call
 /// ([`run_work_with_codex_app_server`] takes the cwd, wall budget and
 /// cancellation handle a Work attempt needs and had no other caller).
@@ -1182,7 +1183,7 @@ async fn execute_app_server<S>(
     };
     let attempt_started = std::time::Instant::now();
     let deadline_micros =
-        u64::try_from(envelope.deadline().0.saturating_sub(current_micros().0)).unwrap_or(0);
+        u64::try_from(envelope.deadline().0.saturating_sub(now_micros().0)).unwrap_or(0);
     let wall = std::time::Duration::from_micros(deadline_micros);
     let cancellation = CodexAppServerCancellation::default();
     let config = CodexAppServerSummaryConfig {
@@ -1268,7 +1269,7 @@ async fn execute_app_server<S>(
             // whole process tree, so the ladder acknowledges and stops there
             // rather than pretending an interrupt was survived.
             if let Err(problem) =
-                attempts.acknowledge_cancellation(context, &identity, current_micros())
+                attempts.acknowledge_cancellation(context, &identity, now_micros())
             {
                 tracing::warn!(
                     task = identity.task_id().as_str(),
@@ -1337,7 +1338,7 @@ async fn execute_app_server<S>(
         stderr: None,
         provider_session,
         provider_fallback: selection.fallback.clone(),
-        observed_at: current_micros(),
+        observed_at: now_micros(),
     };
     if !settle_effect_dispatch(
         attempt_effects,
@@ -1401,7 +1402,7 @@ fn offer_no_progress_observation(
             concurrency_policy_revision: topology_policy_digest.0.as_str(),
             configured_timeout_micros,
             elapsed_stall_micros,
-            observed_at: current_micros(),
+            observed_at: now_micros(),
         },
     );
     if result != WorkOwnerObservationResultV1::Enqueued {
@@ -1425,7 +1426,7 @@ async fn cancel_ladder<S>(
 where
     S: tracedecay_contracts::WorkAttemptStoragePort,
 {
-    if let Err(problem) = attempts.acknowledge_cancellation(context, identity, current_micros()) {
+    if let Err(problem) = attempts.acknowledge_cancellation(context, identity, now_micros()) {
         tracing::warn!(
             task = identity.task_id().as_str(),
             ?problem,
@@ -1437,7 +1438,7 @@ where
         .await
         .is_err()
     {
-        if let Err(problem) = attempts.escalate_cancellation(context, identity, current_micros()) {
+        if let Err(problem) = attempts.escalate_cancellation(context, identity, now_micros()) {
             tracing::warn!(
                 task = identity.task_id().as_str(),
                 ?problem,

@@ -1,9 +1,4 @@
-use std::{
-    collections::BTreeMap,
-    io::{Read, Seek, SeekFrom},
-    num::NonZeroUsize,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
 
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
@@ -17,10 +12,6 @@ use crate::{
 };
 
 use super::partitioned_codec::PartitionedLexicalFileSourceV1;
-use super::sealed_codec::{
-    MINIMUM_SEALED_GENERATION_FORMAT_REVISION, MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION,
-    PersistedFileGenerationArtifactsV1, superseded_sealed_generation_revision,
-};
 use super::{FileGenerationArtifactsV1, *};
 
 const PAGE_DIGEST_DOMAIN: &[u8] = b"tracedecay.sealed-lexical-page.v1\0";
@@ -37,15 +28,13 @@ const IMPORT_DICTIONARY_CHAIN_RECORD_DOMAIN: &[u8] =
 const CURSOR_DIGEST_DOMAIN: &[u8] = b"tracedecay.sealed-lexical-cursor.v1\0";
 const INVALID_CURSOR_POSITION_DETAIL: &str =
     "sealed lexical cursor is not a valid position in its next file";
-const LAYOUT_PROGRESS_INTERVAL_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_LEXICAL_GENERATION_METADATA_BYTES: u64 = 64 * 1024 * 1024;
 /// Concurrent exact-read/decode window. Same 64 MiB retain cap as one
 /// lexical page batch, so prefetch cannot exceed a window the builder
 /// already admits for staged pages.
 /// Bound on the sealed file bytes read ahead of one decode window: the
 /// lexical source's admitted-file prefetch and the partitioned decoder's
-/// segment window share it so neither holds more than this in raw segment
-/// bytes while the pool decodes them.
+/// segment window share it so neither holds more than this in decoded
+/// segment bytes while the pool decodes them.
 pub(super) const LEXICAL_FILE_PREFETCH_BYTES_V1: u64 = 64 * 1024 * 1024;
 /// Files admitted per worker in one restore window, mirroring the encode
 /// side's `SEALED_ENCODE_WINDOW_FILES_PER_WORKER_V1`. A bare `workers`-sized
@@ -1124,22 +1113,20 @@ enum StagedSealedLexicalPageBatchReadV1 {
     },
 }
 
-/// Seekable, bounded lexical projection source over a verified v5/v6 seal.
+/// Bounded lexical projection source over an authenticated partitioned
+/// sealed generation.
 ///
-/// Opening performs a streaming structural scan and verifies the exact raw
-/// generation digest. Layout records every file byte range so source_scan
-/// can exact-read and decode on the indexing pool instead of walking the
-/// files array a second time one byte at a time. Page minting stays serial
-/// because the cumulative digest is a chain. Raw sealed bytes never cross
-/// this interface.
+/// Opening authenticates the manifest; file segments are read and verified
+/// one bounded admission window at a time and decoded on the indexing pool.
+/// File ranges are file ordinals. Page minting stays serial because the
+/// cumulative digest is a chain. Raw sealed bytes never cross this interface.
 #[derive(Debug)]
-pub struct VerifiedSealedLexicalPageSourceV1<R> {
-    reader: R,
+pub struct VerifiedSealedLexicalPageSourceV1 {
     file_count: u64,
     first_file_offset: u64,
     files_end_offset: u64,
     file_ranges: Vec<(u64, u64)>,
-    partitioned_lexical_byte_offsets: Option<Vec<u64>>,
+    lexical_byte_offsets: Vec<u64>,
     total_lexical_units: u64,
     maximum_file_bytes: u64,
     source_state_digest: ManifestDigest,
@@ -1149,29 +1136,22 @@ pub struct VerifiedSealedLexicalPageSourceV1<R> {
     maximum_page_bytes: usize,
     cursor: VerifiedSealedLexicalCursorV1,
     admitted_window: BTreeMap<u64, Arc<AdmittedSealedLexicalFileV1>>,
-    /// Durable partitioned descriptors or same-process published file authority.
-    /// Partitioned sources load only the next bounded admission window; their
-    /// cursors retain stable file ordinals across process restarts.
-    file_source: Option<SealedLexicalFilesV1>,
-}
-
-#[derive(Debug)]
-pub(super) enum SealedLexicalFilesV1 {
-    Published(Vec<Arc<FileGenerationArtifactsV1>>),
-    Partitioned(PartitionedLexicalFileSourceV1),
+    /// Durable partitioned descriptors. Only the next bounded admission
+    /// window is loaded; cursors retain stable file ordinals across process
+    /// restarts.
+    file_source: PartitionedLexicalFileSourceV1,
 }
 
 /// Authenticated generation metadata needed by exact and lexical serving.
 ///
 /// The full sealed generation can be gigabytes. This projection retains only
-/// the manifest and sanitized snapshot header that precede the files array;
-/// the layout scan authenticates the complete content-addressed seal before
-/// this value becomes observable.
+/// the manifest, sanitized snapshot, and statistics the partitioned manifest
+/// carries; the manifest is authenticated before this value is observable.
 #[derive(Clone, Debug)]
 pub struct VerifiedSealedTextGenerationMetadataV1 {
     manifest: CodeGenerationManifestV1,
     snapshot: SanitizedCodeSnapshotV1,
-    statistics: Option<CodeIndexGenerationStatisticsV1>,
+    statistics: CodeIndexGenerationStatisticsV1,
 }
 
 impl VerifiedSealedTextGenerationMetadataV1 {
@@ -1179,14 +1159,14 @@ impl VerifiedSealedTextGenerationMetadataV1 {
         Self {
             manifest: generation.manifest().clone(),
             snapshot: generation.snapshot().clone(),
-            statistics: Some(generation.statistics.clone()),
+            statistics: generation.statistics.clone(),
         }
     }
 
     pub(super) fn from_partitioned_manifest(
         manifest: CodeGenerationManifestV1,
         snapshot: SanitizedCodeSnapshotV1,
-        statistics: Option<CodeIndexGenerationStatisticsV1>,
+        statistics: CodeIndexGenerationStatisticsV1,
     ) -> Result<Self, CodeIndexProductionErrorV1> {
         if manifest.source_commitments.is_none() {
             return Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable);
@@ -1239,16 +1219,28 @@ impl VerifiedSealedTextGenerationMetadataV1 {
         &self.snapshot
     }
 
-    pub fn generation_statistics(&self) -> Option<&CodeIndexGenerationStatisticsV1> {
-        self.statistics.as_ref()
+    pub fn generation_statistics(&self) -> &CodeIndexGenerationStatisticsV1 {
+        &self.statistics
     }
 }
 
-impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
+impl VerifiedSealedLexicalPageSourceV1 {
+    /// The content key of what this source emits: its format and the
+    /// content-only identity of every file it reads. Two sources with one
+    /// key emit the same records apart from route identity, which a lexical
+    /// artifact keeps out of its rows.
+    pub fn content_key(&self) -> Result<ManifestDigest, CodeIndexProductionErrorV1> {
+        let mut hasher = Sha256::new();
+        hasher.update(b"tracedecay.sealed-lexical-source-content.v1\0");
+        hasher.update(self.format_revision.to_le_bytes());
+        self.file_source.content_digest(&mut hasher);
+        ManifestDigest::from_sha256_bytes(&hasher.finalize())
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
+    }
+
     // Every argument is a distinct authority the constructor binds together
-    // exactly once: the reader, the manifest, the sanitized snapshot, the
-    // optional statistics, the partitioned file source, its state digest, and
-    // the two page bounds. Grouping any of them into a parameter struct would
+    // exactly once: the manifest, the sanitized snapshot, the statistics, the
+    // partitioned file source, its state digest, and the two page bounds. Grouping any of them into a parameter struct would
     // invent a type with one construction site and hide which authority a
     // caller failed to supply.
     #[allow(
@@ -1256,10 +1248,9 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         reason = "each argument is a separate authority bound once at construction"
     )]
     pub(super) fn open_partitioned_parts(
-        reader: R,
         manifest: CodeGenerationManifestV1,
         snapshot: SanitizedCodeSnapshotV1,
-        statistics: Option<CodeIndexGenerationStatisticsV1>,
+        statistics: CodeIndexGenerationStatisticsV1,
         source: PartitionedLexicalFileSourceV1,
         source_state_digest: ManifestDigest,
         maximum_page_chunks: usize,
@@ -1281,24 +1272,20 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         let file_ranges = (0..file_count)
             .map(|file| (file, file.saturating_add(1)))
             .collect::<Vec<_>>();
-        let partitioned_lexical_byte_offsets = source.lexical_byte_offsets()?;
-        let total_lexical_units = partitioned_lexical_byte_offsets
-            .last()
-            .copied()
-            .ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract(
-                    "partitioned lexical byte offsets are empty".to_owned(),
-                )
-            })?;
+        let lexical_byte_offsets = source.lexical_byte_offsets()?;
+        let total_lexical_units = lexical_byte_offsets.last().copied().ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract(
+                "partitioned lexical byte offsets are empty".to_owned(),
+            )
+        })?;
         let maximum_file_bytes = source.maximum_file_bytes();
         let cursor = VerifiedSealedLexicalCursorV1::initial(source_state_digest.clone(), 0)?;
         Ok(Self {
-            reader,
             file_count,
             first_file_offset: 0,
             files_end_offset: file_count,
             file_ranges,
-            partitioned_lexical_byte_offsets: Some(partitioned_lexical_byte_offsets),
+            lexical_byte_offsets,
             total_lexical_units,
             maximum_file_bytes,
             source_state_digest,
@@ -1308,153 +1295,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             maximum_page_bytes,
             cursor,
             admitted_window: BTreeMap::new(),
-            file_source: Some(SealedLexicalFilesV1::Partitioned(source)),
-        })
-    }
-
-    #[hotpath::measure(label = "code_index.restore.open")]
-    pub fn open(
-        mut reader: R,
-        admitted_len: u64,
-        expected_state_digest: ManifestDigest,
-        maximum_page_chunks: usize,
-        maximum_page_bytes: usize,
-        control: &dyn CodeIndexExecutionControlV1,
-    ) -> Result<Self, CodeIndexProductionErrorV1> {
-        if maximum_page_chunks == 0 || maximum_page_bytes == 0 {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed lexical page bounds must be non-zero".to_owned(),
-            ));
-        }
-        let layout = scan_layout(&mut reader, admitted_len, None, control)?;
-        if layout.state_digest != expected_state_digest {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed generation state digest does not match the admitted source".to_owned(),
-            ));
-        }
-        let cursor = VerifiedSealedLexicalCursorV1::initial(
-            layout.state_digest.clone(),
-            layout.first_file_offset,
-        )?;
-        let total_lexical_units = layout
-            .files_end_offset
-            .checked_sub(layout.first_file_offset)
-            .ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed lexical files array has an invalid byte span".to_owned(),
-                )
-            })?;
-        let metadata = read_verified_text_metadata(&mut reader, &layout, control)?;
-        Ok(Self {
-            reader,
-            file_count: layout.file_count,
-            first_file_offset: layout.first_file_offset,
-            files_end_offset: layout.files_end_offset,
-            file_ranges: layout.file_ranges,
-            partitioned_lexical_byte_offsets: None,
-            total_lexical_units,
-            maximum_file_bytes: layout.maximum_file_bytes,
-            source_state_digest: layout.state_digest,
-            format_revision: layout.format_revision,
-            metadata,
-            maximum_page_chunks,
-            maximum_page_bytes,
-            cursor,
-            admitted_window: BTreeMap::new(),
-            file_source: None,
-        })
-    }
-
-    /// Open a durable sealed source through its content address.
-    ///
-    /// Unlike [`Self::open`], whose caller already holds the envelope's inner
-    /// state digest, this journey binds the complete file bytes to the digest
-    /// in the durable generation index while the same bounded scan discovers
-    /// the lexical layout. The caller can therefore pass a `File` directly;
-    /// no whole-generation `Vec` is required merely to authenticate it.
-    #[hotpath::measure(label = "code_index.restore.open_content_addressed")]
-    pub fn open_content_addressed(
-        reader: R,
-        admitted_len: u64,
-        expected_file_digest: ManifestDigest,
-        maximum_page_chunks: usize,
-        maximum_page_bytes: usize,
-        control: &dyn CodeIndexExecutionControlV1,
-    ) -> Result<Self, CodeIndexProductionErrorV1> {
-        if maximum_page_chunks == 0 || maximum_page_bytes == 0 {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed lexical page bounds must be non-zero".to_owned(),
-            ));
-        }
-        Self::open_content_addressed_with_progress(
-            reader,
-            admitted_len,
-            expected_file_digest,
-            maximum_page_chunks,
-            maximum_page_bytes,
-            control,
-            |_, _| {},
-        )
-    }
-
-    /// Open a content-addressed source while reporting authenticated scan
-    /// bytes. The callback is invoked at zero, bounded byte intervals, and
-    /// exactly once with the admitted total before metadata is exposed.
-    #[hotpath::measure(label = "code_index.restore.open_content_addressed")]
-    pub fn open_content_addressed_with_progress<F>(
-        mut reader: R,
-        admitted_len: u64,
-        expected_file_digest: ManifestDigest,
-        maximum_page_chunks: usize,
-        maximum_page_bytes: usize,
-        control: &dyn CodeIndexExecutionControlV1,
-        mut progress: F,
-    ) -> Result<Self, CodeIndexProductionErrorV1>
-    where
-        F: FnMut(u64, u64),
-    {
-        if maximum_page_chunks == 0 || maximum_page_bytes == 0 {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed lexical page bounds must be non-zero".to_owned(),
-            ));
-        }
-        let layout = scan_layout_with_progress(
-            &mut reader,
-            admitted_len,
-            Some(&expected_file_digest),
-            control,
-            &mut progress,
-        )?;
-        let cursor = VerifiedSealedLexicalCursorV1::initial(
-            layout.state_digest.clone(),
-            layout.first_file_offset,
-        )?;
-        let total_lexical_units = layout
-            .files_end_offset
-            .checked_sub(layout.first_file_offset)
-            .ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed lexical files array has an invalid byte span".to_owned(),
-                )
-            })?;
-        let metadata = read_verified_text_metadata(&mut reader, &layout, control)?;
-        Ok(Self {
-            reader,
-            file_count: layout.file_count,
-            first_file_offset: layout.first_file_offset,
-            files_end_offset: layout.files_end_offset,
-            file_ranges: layout.file_ranges,
-            partitioned_lexical_byte_offsets: None,
-            total_lexical_units,
-            maximum_file_bytes: layout.maximum_file_bytes,
-            source_state_digest: layout.state_digest,
-            format_revision: layout.format_revision,
-            metadata,
-            maximum_page_chunks,
-            maximum_page_bytes,
-            cursor,
-            admitted_window: BTreeMap::new(),
-            file_source: None,
+            file_source: source,
         })
     }
 
@@ -1464,68 +1305,6 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
 
     pub fn format_revision(&self) -> u32 {
         self.format_revision
-    }
-
-    /// Admit later pages from an already-decoded published generation.
-    ///
-    /// The sealed file remains the layout and cursor authority. This only
-    /// replaces per-file JSON decode when the in-memory files match the
-    /// scanned ranges one-for-one. Partitioned sources validate the supplied
-    /// identity but keep their bounded durable reader, avoiding retention of
-    /// the complete decoded generation. Mismatches are rejected.
-    pub fn attach_published_files(
-        &mut self,
-        generation: &CodeIndexPublishedGenerationV1,
-    ) -> Result<(), CodeIndexProductionErrorV1> {
-        if generation.manifest() != self.metadata.manifest()
-            || generation.snapshot() != self.metadata.snapshot()
-        {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "published generation does not match the authenticated sealed lexical source"
-                    .to_owned(),
-            ));
-        }
-        if generation.files.len() != self.file_ranges.len() {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "published generation file count does not match the sealed lexical layout"
-                    .to_owned(),
-            ));
-        }
-        // Partitioned readers keep bounded durable file authority after the
-        // supplied generation's identity has been checked above.
-        if matches!(self.file_source, Some(SealedLexicalFilesV1::Partitioned(_))) {
-            return Ok(());
-        }
-        generation.validate()?;
-        self.file_source = Some(SealedLexicalFilesV1::Published(generation.files.clone()));
-        Ok(())
-    }
-
-    /// Reopen an authenticated durable source at an accepted persisted cursor.
-    ///
-    /// The layout scan authenticates the raw content address but does not
-    /// deserialize file artifacts. Resume validates only the cursor's next
-    /// artifact and emits that page first; previously admitted artifacts are
-    /// never decoded or replayed on the reopen path.
-    pub fn open_content_addressed_at(
-        reader: R,
-        admitted_len: u64,
-        expected_file_digest: ManifestDigest,
-        cursor: VerifiedSealedLexicalCursorV1,
-        maximum_page_chunks: usize,
-        maximum_page_bytes: usize,
-        control: &dyn CodeIndexExecutionControlV1,
-    ) -> Result<Self, CodeIndexProductionErrorV1> {
-        let mut source = Self::open_content_addressed(
-            reader,
-            admitted_len,
-            expected_file_digest,
-            maximum_page_chunks,
-            maximum_page_bytes,
-            control,
-        )?;
-        source.restore_cursor(&cursor, control)?;
-        Ok(source)
     }
 
     /// Adopt a persisted cursor after binding it to this source and validating
@@ -1647,24 +1426,17 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
     /// cursor. A partially consumed file counts only after its final chunk and
     /// imports are committed, matching `completed_files`.
     pub fn completed_lexical_units(&self) -> Result<u64, CodeIndexProductionErrorV1> {
-        if let Some(offsets) = &self.partitioned_lexical_byte_offsets {
-            let completed = usize::try_from(self.cursor.next_file_ordinal()).map_err(|_| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed lexical completed file count exceeds usize".to_owned(),
-                )
-            })?;
-            return offsets.get(completed).copied().ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed lexical cursor exceeds partitioned byte bounds".to_owned(),
-                )
-            });
-        }
-        self.cursor
-            .next_file_offset
-            .checked_sub(self.first_file_offset)
+        let completed = usize::try_from(self.cursor.next_file_ordinal()).map_err(|_| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed lexical completed file count exceeds usize".to_owned(),
+            )
+        })?;
+        self.lexical_byte_offsets
+            .get(completed)
+            .copied()
             .ok_or_else(|| {
                 CodeIndexProductionErrorV1::Contract(
-                    "sealed lexical cursor precedes the files-array start".to_owned(),
+                    "sealed lexical cursor exceeds partitioned byte bounds".to_owned(),
                 )
             })
     }
@@ -1721,13 +1493,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
     /// Compact retained file positions and partitioned content identities.
     /// These scale with file count; decoded chunks only occupy the admission window.
     pub fn retained_layout_bytes(&self) -> usize {
-        let source_bytes = match &self.file_source {
-            Some(SealedLexicalFilesV1::Published(files)) => files
-                .capacity()
-                .saturating_mul(std::mem::size_of::<Arc<FileGenerationArtifactsV1>>()),
-            Some(SealedLexicalFilesV1::Partitioned(source)) => source.retained_layout_bytes(),
-            None => 0,
-        };
+        let source_bytes = self.file_source.retained_layout_bytes();
         std::mem::size_of::<u64>()
             .saturating_mul(4)
             .saturating_add(
@@ -1736,13 +1502,9 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                     .saturating_mul(std::mem::size_of::<(u64, u64)>()),
             )
             .saturating_add(
-                self.partitioned_lexical_byte_offsets
-                    .as_ref()
-                    .map_or(0, |offsets| {
-                        offsets
-                            .capacity()
-                            .saturating_mul(std::mem::size_of::<u64>())
-                    }),
+                self.lexical_byte_offsets
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<u64>()),
             )
             .saturating_add(source_bytes)
     }
@@ -2210,147 +1972,18 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         // A rejected batch or restored cursor may revisit a range before the
         // current prefetch window. Keep one window, including during retries.
         self.admitted_window.clear();
-        match self.file_source {
-            Some(SealedLexicalFilesV1::Published(_)) => {
-                self.fill_admitted_window_from_memory(file_offset, control)
-            }
-            Some(SealedLexicalFilesV1::Partitioned(_)) => {
-                self.fill_admitted_window_from_segments(file_offset, control)
-            }
-            None => self.fill_admitted_window(file_offset, control),
-        }
+        self.fill_admitted_window(file_offset, control)
     }
 
+    #[hotpath::measure(label = "code_index.restore.partitioned_window")]
     fn fill_admitted_window(
         &mut self,
         file_offset: u64,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<(), CodeIndexProductionErrorV1> {
         let snapshot_digest = self.metadata.manifest().snapshot_digest.clone();
-        let start_index = self.file_range_index(file_offset)?;
-        let workers = crate::parallelism::indexing_workers().max(1);
-        let window_files = workers.saturating_mul(LEXICAL_DECODE_WINDOW_FILES_PER_WORKER_V1);
-        let mut prefetch_bytes = 0u64;
-        let mut inputs = Vec::new();
-        for (index, &(start, end)) in self.file_ranges[start_index..].iter().enumerate() {
-            let file_bytes = end.checked_sub(start).ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed lexical file byte range is invalid".to_owned(),
-                )
-            })?;
-            if index > 0
-                && (inputs.len() >= window_files
-                    || prefetch_bytes
-                        .checked_add(file_bytes)
-                        .is_some_and(|total| total > LEXICAL_FILE_PREFETCH_BYTES_V1))
-            {
-                break;
-            }
-            checkpoint(control)?;
-            let bytes = read_file_bytes_at_range(
-                &mut self.reader,
-                start,
-                end,
-                self.files_end_offset,
-                self.maximum_file_bytes,
-                control,
-            )?;
-            let next_file_offset = self
-                .file_ranges
-                .get(start_index + index + 1)
-                .map(|(next_start, _)| *next_start)
-                .unwrap_or(self.files_end_offset);
-            prefetch_bytes = prefetch_bytes.saturating_add(file_bytes);
-            inputs.push((start, bytes, next_file_offset));
-        }
-        if inputs.is_empty() {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed lexical file range produced no readable files".to_owned(),
-            ));
-        }
-        let admitted =
-            super::collect_bounded_ordered(&inputs, |(_start, bytes, next_offset), _| {
-                admit_persisted_file_bytes(bytes, &snapshot_digest, *next_offset, control)
-            })?;
-        for ((start, _, _), admitted) in inputs.into_iter().zip(admitted) {
-            self.admitted_window.insert(start, Arc::new(admitted));
-        }
-        Ok(())
-    }
-
-    fn fill_admitted_window_from_memory(
-        &mut self,
-        file_offset: u64,
-        control: &dyn CodeIndexExecutionControlV1,
-    ) -> Result<(), CodeIndexProductionErrorV1> {
-        let snapshot_digest = self.metadata.manifest().snapshot_digest.clone();
-        let Some(SealedLexicalFilesV1::Published(files)) = self.file_source.as_ref() else {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed lexical memory admit ran without published files".to_owned(),
-            ));
-        };
-        let start_index = self.file_range_index(file_offset)?;
-        let workers = crate::parallelism::indexing_workers().max(1);
-        let window_files = workers.saturating_mul(LEXICAL_DECODE_WINDOW_FILES_PER_WORKER_V1);
-        let mut prefetch_bytes = 0u64;
-        let mut inputs = Vec::new();
-        for (index, file) in files[start_index..].iter().enumerate() {
-            let &(start, end) = self.file_ranges.get(start_index + index).ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract(
-                    "published generation file is missing a sealed lexical range".to_owned(),
-                )
-            })?;
-            let file_bytes = end.checked_sub(start).ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed lexical file byte range is invalid".to_owned(),
-                )
-            })?;
-            if index > 0
-                && (inputs.len() >= window_files
-                    || prefetch_bytes
-                        .checked_add(file_bytes)
-                        .is_some_and(|total| total > LEXICAL_FILE_PREFETCH_BYTES_V1))
-            {
-                break;
-            }
-            checkpoint(control)?;
-            let next_file_offset = self
-                .file_ranges
-                .get(start_index + index + 1)
-                .map(|(next_start, _)| *next_start)
-                .unwrap_or(self.files_end_offset);
-            prefetch_bytes = prefetch_bytes.saturating_add(file_bytes);
-            inputs.push((start, Arc::clone(file), next_file_offset));
-        }
-        if inputs.is_empty() {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed lexical memory range produced no published files".to_owned(),
-            ));
-        }
-        let admitted =
-            super::collect_bounded_ordered(&inputs, |(_start, file, next_offset), _| {
-                admit_file_generation_artifacts(file, &snapshot_digest, *next_offset, control)
-            })?;
-        for ((start, _, _), admitted) in inputs.into_iter().zip(admitted) {
-            self.admitted_window.insert(start, Arc::new(admitted));
-        }
-        Ok(())
-    }
-
-    #[hotpath::measure(label = "code_index.restore.partitioned_window")]
-    fn fill_admitted_window_from_segments(
-        &mut self,
-        file_offset: u64,
-        control: &dyn CodeIndexExecutionControlV1,
-    ) -> Result<(), CodeIndexProductionErrorV1> {
-        let snapshot_digest = self.metadata.manifest().snapshot_digest.clone();
         let start = self.file_range_index(file_offset)?;
-        let Some(SealedLexicalFilesV1::Partitioned(source)) = self.file_source.as_mut() else {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed lexical segment admit ran without segment authority".to_owned(),
-            ));
-        };
-        let files = source.read_window(
+        let files = self.file_source.read_window(
             start,
             crate::parallelism::indexing_workers()
                 .max(1)
@@ -2520,762 +2153,6 @@ struct AdmittedSealedLexicalFileV1 {
     clone_bodies: Vec<CodeIndexCloneBodyV1>,
     serialized_clone_bodies: Vec<Vec<u8>>,
     next_file_offset: u64,
-}
-
-pub(super) struct SealedLexicalLayoutV1 {
-    pub(super) state_digest: ManifestDigest,
-    pub(super) format_revision: u32,
-    file_count: u64,
-    first_file_offset: u64,
-    files_end_offset: u64,
-    file_ranges: Vec<(u64, u64)>,
-    maximum_file_bytes: u64,
-    manifest_range: Option<(u64, u64)>,
-    snapshot_range: Option<(u64, u64)>,
-}
-
-#[hotpath::measure(label = "code_index.restore.scan")]
-pub(super) fn scan_layout<R: Read + Seek>(
-    reader: &mut R,
-    admitted_len: u64,
-    expected_file_digest: Option<&ManifestDigest>,
-    control: &dyn CodeIndexExecutionControlV1,
-) -> Result<SealedLexicalLayoutV1, CodeIndexProductionErrorV1> {
-    scan_layout_with_progress(
-        reader,
-        admitted_len,
-        expected_file_digest,
-        control,
-        &mut |_, _| {},
-    )
-}
-
-fn scan_layout_with_progress<R: Read + Seek>(
-    reader: &mut R,
-    admitted_len: u64,
-    expected_file_digest: Option<&ManifestDigest>,
-    control: &dyn CodeIndexExecutionControlV1,
-    progress: &mut dyn FnMut(u64, u64),
-) -> Result<SealedLexicalLayoutV1, CodeIndexProductionErrorV1> {
-    if admitted_len > MAX_SEALED_CODE_GENERATION_BYTES_V1 {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "sealed generation exceeds the canonical byte limit".to_owned(),
-        ));
-    }
-    reader.seek(SeekFrom::Start(0)).map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!("sealed lexical source seek failed: {error}"))
-    })?;
-    hotpath::gauge!("code_index_lexical_layout_scan_attempts").inc(1);
-    hotpath::gauge!("code_index_lexical_layout_bytes_total").set(admitted_len);
-    hotpath::gauge!("code_index_lexical_layout_bytes_scanned").set(0);
-    progress(0, admitted_len);
-    let mut scanner = LayoutScanner::default();
-    let mut file_hasher = expected_file_digest.map(|_| Sha256::new());
-    let read_limit = admitted_len.checked_add(1).ok_or_else(|| {
-        CodeIndexProductionErrorV1::Contract("sealed generation length overflowed".to_owned())
-    })?;
-    let mut remaining = read_limit;
-    let mut observed = 0u64;
-    let mut next_progress = LAYOUT_PROGRESS_INTERVAL_BYTES;
-    let mut buffer = [0u8; 64 * 1024];
-    while remaining > 0 {
-        checkpoint(control)?;
-        let requested = usize::try_from(remaining.min(buffer.len() as u64)).map_err(|_| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed lexical read window exceeds the platform limit".to_owned(),
-            )
-        })?;
-        let read = reader.read(&mut buffer[..requested]).map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed lexical source read failed: {error}"
-            ))
-        })?;
-        if read == 0 {
-            break;
-        }
-        let read_bytes = u64::try_from(read).map_err(|_| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed lexical source read exceeds u64".to_owned(),
-            )
-        })?;
-        // Only bytes below the admitted length are hashed and scanned; split
-        // the buffer at that boundary and feed whole slices, not single bytes.
-        let admitted = usize::try_from(read_bytes.min(admitted_len.saturating_sub(observed)))
-            .map_err(|_| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed lexical read window exceeds the platform limit".to_owned(),
-                )
-            })?;
-        if admitted > 0 {
-            if let Some(hasher) = file_hasher.as_mut() {
-                hasher.update(&buffer[..admitted]);
-            }
-            scanner.observe_slice(&buffer[..admitted], observed)?;
-        }
-        observed = observed.checked_add(read_bytes).ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed lexical source length overflowed".to_owned(),
-            )
-        })?;
-        let admitted_observed = observed.min(admitted_len);
-        if admitted_observed >= next_progress || admitted_observed == admitted_len {
-            hotpath::gauge!("code_index_lexical_layout_bytes_scanned").set(admitted_observed);
-            progress(admitted_observed, admitted_len);
-            next_progress = admitted_observed.saturating_add(LAYOUT_PROGRESS_INTERVAL_BYTES);
-        }
-        remaining -= read_bytes;
-    }
-    if observed != admitted_len {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "sealed generation length does not match its admitted length".to_owned(),
-        ));
-    }
-    if let (Some(expected), Some(hasher)) = (expected_file_digest, file_hasher)
-        && digest_hasher(hasher)? != *expected
-    {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "sealed lexical source bytes do not match their durable content address".to_owned(),
-        ));
-    }
-    scanner.finish()
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LayoutKey {
-    StateDigest,
-    Generation,
-    Files,
-    FormatRevision,
-    Manifest,
-    Snapshot,
-}
-
-impl LayoutKey {
-    fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        match bytes {
-            b"state_digest" => Some(Self::StateDigest),
-            b"generation" => Some(Self::Generation),
-            b"files" => Some(Self::Files),
-            b"format_revision" => Some(Self::FormatRevision),
-            b"manifest" => Some(Self::Manifest),
-            b"snapshot" => Some(Self::Snapshot),
-            _ => None,
-        }
-    }
-}
-
-struct LayoutScanner {
-    brace_depth: usize,
-    bracket_depth: usize,
-    in_string: bool,
-    escaped: bool,
-    string: [u8; 128],
-    string_len: usize,
-    string_overflowed: bool,
-    completed_key: Option<LayoutKey>,
-    pending_key: Option<LayoutKey>,
-    capture_state_digest: bool,
-    state_digest: Option<ManifestDigest>,
-    format_revision: Option<u32>,
-    generation_depth: Option<usize>,
-    generation_hasher: Option<Sha256>,
-    generation_digest: Option<ManifestDigest>,
-    files_depth: Option<usize>,
-    current_file_start: Option<u64>,
-    first_file_offset: Option<u64>,
-    files_end_offset: Option<u64>,
-    file_count: u64,
-    file_ranges: Vec<(u64, u64)>,
-    maximum_file_bytes: u64,
-    captured_metadata_object: Option<(LayoutKey, u64, usize)>,
-    manifest_range: Option<(u64, u64)>,
-    snapshot_range: Option<(u64, u64)>,
-}
-
-impl Default for LayoutScanner {
-    fn default() -> Self {
-        Self {
-            brace_depth: 0,
-            bracket_depth: 0,
-            in_string: false,
-            escaped: false,
-            string: [0; 128],
-            string_len: 0,
-            string_overflowed: false,
-            completed_key: None,
-            pending_key: None,
-            capture_state_digest: false,
-            state_digest: None,
-            format_revision: None,
-            generation_depth: None,
-            generation_hasher: None,
-            generation_digest: None,
-            files_depth: None,
-            current_file_start: None,
-            first_file_offset: None,
-            files_end_offset: None,
-            file_count: 0,
-            file_ranges: Vec::new(),
-            maximum_file_bytes: 0,
-            captured_metadata_object: None,
-            manifest_range: None,
-            snapshot_range: None,
-        }
-    }
-}
-
-/// Transition of the generation-payload hash span produced by one observed
-/// byte.
-enum GenerationSpanEvent {
-    None,
-    Opened,
-    Closed,
-}
-
-impl LayoutScanner {
-    /// Observe one contiguous run of admitted bytes starting at `base_offset`.
-    ///
-    /// The generation hasher receives one update per contiguous in-generation
-    /// byte range instead of one update per byte; the hashed bytes and their
-    /// order are identical.
-    fn observe_slice(
-        &mut self,
-        bytes: &[u8],
-        base_offset: u64,
-    ) -> Result<(), CodeIndexProductionErrorV1> {
-        let mut active_from = self.generation_hasher.is_some().then_some(0usize);
-        let mut index = 0usize;
-        while index < bytes.len() {
-            if self.in_string && !self.escaped {
-                let relative_end = first_json_string_control(&bytes[index..]);
-                let end = relative_end.map_or(bytes.len(), |relative| index + relative);
-                if end > index {
-                    self.observe_string_run(&bytes[index..end]);
-                    index = end;
-                    if index == bytes.len() {
-                        break;
-                    }
-                }
-            }
-            let offset = u64::try_from(index)
-                .ok()
-                .and_then(|index| base_offset.checked_add(index))
-                .ok_or_else(|| {
-                    CodeIndexProductionErrorV1::Contract(
-                        "sealed lexical source length overflowed".to_owned(),
-                    )
-                })?;
-            match self.observe(bytes[index], offset)? {
-                GenerationSpanEvent::None => {}
-                GenerationSpanEvent::Opened => active_from = Some(index),
-                GenerationSpanEvent::Closed => {
-                    let start = active_from.take().ok_or_else(|| {
-                        CodeIndexProductionErrorV1::Contract(
-                            "sealed generation digest state is missing".to_owned(),
-                        )
-                    })?;
-                    let mut hasher = self.generation_hasher.take().ok_or_else(|| {
-                        CodeIndexProductionErrorV1::Contract(
-                            "sealed generation digest state is missing".to_owned(),
-                        )
-                    })?;
-                    hasher.update(&bytes[start..=index]);
-                    self.generation_digest = Some(digest_hasher(hasher)?);
-                }
-            }
-            index += 1;
-        }
-        if let Some(hasher) = self.generation_hasher.as_mut() {
-            let start = active_from.ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed generation digest state is missing".to_owned(),
-                )
-            })?;
-            hasher.update(&bytes[start..]);
-        }
-        Ok(())
-    }
-
-    /// Consume bytes that cannot alter JSON string state in one bounded step.
-    /// Only a key or the envelope state digest is retained, and both are
-    /// capped at the scanner's existing 128-byte contract.
-    fn observe_string_run(&mut self, bytes: &[u8]) {
-        let remaining = self.string.len().saturating_sub(self.string_len);
-        let retained = remaining.min(bytes.len());
-        let retained_end = self.string_len + retained;
-        self.string[self.string_len..retained_end].copy_from_slice(&bytes[..retained]);
-        self.string_len = retained_end;
-        if retained < bytes.len() {
-            self.string_overflowed = true;
-        }
-    }
-
-    fn observe_string_byte(&mut self, byte: u8) {
-        if self.string_len < self.string.len() {
-            self.string[self.string_len] = byte;
-            self.string_len += 1;
-        } else {
-            self.string_overflowed = true;
-        }
-    }
-
-    fn observe(
-        &mut self,
-        byte: u8,
-        offset: u64,
-    ) -> Result<GenerationSpanEvent, CodeIndexProductionErrorV1> {
-        if self.in_string {
-            if self.escaped {
-                self.escaped = false;
-                self.observe_string_byte(byte);
-                return Ok(GenerationSpanEvent::None);
-            }
-            match byte {
-                b'\\' => self.escaped = true,
-                b'"' => {
-                    self.in_string = false;
-                    if self.capture_state_digest {
-                        let value = String::from_utf8(self.string[..self.string_len].to_vec())
-                            .map_err(|_| {
-                                CodeIndexProductionErrorV1::Contract(
-                                    "sealed generation state digest is not UTF-8".to_owned(),
-                                )
-                            })?;
-                        self.state_digest = Some(ManifestDigest::new(value).map_err(|error| {
-                            CodeIndexProductionErrorV1::Contract(error.to_string())
-                        })?);
-                        self.capture_state_digest = false;
-                        self.pending_key = None;
-                    } else if !self.string_overflowed {
-                        std::str::from_utf8(&self.string[..self.string_len]).map_err(|_| {
-                            CodeIndexProductionErrorV1::Contract(
-                                "sealed generation key is not UTF-8".to_owned(),
-                            )
-                        })?;
-                        self.completed_key = LayoutKey::from_bytes(&self.string[..self.string_len]);
-                    } else {
-                        self.completed_key = None;
-                    }
-                    self.string_len = 0;
-                    self.string_overflowed = false;
-                }
-                _ => self.observe_string_byte(byte),
-            }
-            return Ok(GenerationSpanEvent::None);
-        }
-
-        let mut event = GenerationSpanEvent::None;
-        match byte {
-            b'"' => {
-                self.in_string = true;
-                self.string_len = 0;
-                self.string_overflowed = false;
-                self.capture_state_digest =
-                    self.pending_key == Some(LayoutKey::StateDigest) && self.brace_depth == 1;
-            }
-            b':' => {
-                self.pending_key = self.completed_key.take();
-                if self.pending_key == Some(LayoutKey::FormatRevision)
-                    && self.generation_depth == Some(self.brace_depth)
-                {
-                    self.format_revision = None;
-                }
-            }
-            b'{' => {
-                if self.pending_key == Some(LayoutKey::Generation) && self.brace_depth == 1 {
-                    self.generation_depth = Some(self.brace_depth + 1);
-                    self.generation_hasher = Some(Sha256::new());
-                    event = GenerationSpanEvent::Opened;
-                }
-                if matches!(
-                    self.pending_key,
-                    Some(LayoutKey::Manifest | LayoutKey::Snapshot)
-                ) && self.generation_depth == Some(self.brace_depth)
-                {
-                    let key = self.pending_key.ok_or_else(|| {
-                        CodeIndexProductionErrorV1::Contract(
-                            "sealed text metadata key disappeared".to_owned(),
-                        )
-                    })?;
-                    if self.captured_metadata_object.is_some() {
-                        return Err(CodeIndexProductionErrorV1::Contract(
-                            "sealed text metadata objects overlap".to_owned(),
-                        ));
-                    }
-                    self.captured_metadata_object = Some((key, offset, self.brace_depth + 1));
-                }
-                if self.files_depth == Some(self.bracket_depth)
-                    && self.generation_depth == Some(self.brace_depth)
-                    && self.current_file_start.is_none()
-                {
-                    self.current_file_start = Some(offset);
-                }
-                self.brace_depth += 1;
-                self.pending_key = None;
-            }
-            b'}' => {
-                if let Some((key, start, depth)) = self.captured_metadata_object
-                    && depth == self.brace_depth
-                {
-                    let end = offset.checked_add(1).ok_or_else(|| {
-                        CodeIndexProductionErrorV1::Contract(
-                            "sealed text metadata end offset overflowed".to_owned(),
-                        )
-                    })?;
-                    match key {
-                        LayoutKey::Manifest => self.manifest_range = Some((start, end)),
-                        LayoutKey::Snapshot => self.snapshot_range = Some((start, end)),
-                        _ => {
-                            return Err(CodeIndexProductionErrorV1::Contract(
-                                "sealed text metadata capture has an invalid key".to_owned(),
-                            ));
-                        }
-                    }
-                    self.captured_metadata_object = None;
-                }
-                if let Some(start) = self.current_file_start
-                    && self
-                        .generation_depth
-                        .is_some_and(|depth| self.brace_depth == depth + 1)
-                {
-                    let end = offset.checked_add(1).ok_or_else(|| {
-                        CodeIndexProductionErrorV1::Contract(
-                            "sealed lexical file end offset overflowed".to_owned(),
-                        )
-                    })?;
-                    let byte_len = end.checked_sub(start).ok_or_else(|| {
-                        CodeIndexProductionErrorV1::Contract(
-                            "sealed lexical file byte range is invalid".to_owned(),
-                        )
-                    })?;
-                    self.first_file_offset.get_or_insert(start);
-                    self.maximum_file_bytes = self.maximum_file_bytes.max(byte_len);
-                    self.file_count = self.file_count.checked_add(1).ok_or_else(|| {
-                        CodeIndexProductionErrorV1::Contract(
-                            "sealed lexical file count overflowed".to_owned(),
-                        )
-                    })?;
-                    self.file_ranges.push((start, end));
-                    self.current_file_start = None;
-                }
-                if self.generation_depth == Some(self.brace_depth) {
-                    event = GenerationSpanEvent::Closed;
-                }
-                self.brace_depth = self.brace_depth.checked_sub(1).ok_or_else(|| {
-                    CodeIndexProductionErrorV1::Contract(
-                        "sealed generation object nesting is invalid".to_owned(),
-                    )
-                })?;
-                self.pending_key = None;
-            }
-            b'[' => {
-                if self.pending_key == Some(LayoutKey::Files)
-                    && self.generation_depth == Some(self.brace_depth)
-                {
-                    self.files_depth = Some(self.bracket_depth + 1);
-                }
-                self.bracket_depth += 1;
-                self.pending_key = None;
-            }
-            b']' => {
-                if self.files_depth == Some(self.bracket_depth) {
-                    self.files_end_offset = Some(offset);
-                    self.files_depth = None;
-                }
-                self.bracket_depth = self.bracket_depth.checked_sub(1).ok_or_else(|| {
-                    CodeIndexProductionErrorV1::Contract(
-                        "sealed generation array nesting is invalid".to_owned(),
-                    )
-                })?;
-                self.pending_key = None;
-            }
-            b'0'..=b'9'
-                if self.pending_key == Some(LayoutKey::FormatRevision)
-                    && self.generation_depth == Some(self.brace_depth) =>
-            {
-                self.format_revision = Some(
-                    self.format_revision
-                        .unwrap_or_default()
-                        .checked_mul(10)
-                        .and_then(|revision| revision.checked_add(u32::from(byte - b'0')))
-                        .ok_or_else(|| {
-                            CodeIndexProductionErrorV1::Contract(
-                                "sealed generation format revision exceeds u32".to_owned(),
-                            )
-                        })?,
-                );
-            }
-            b',' => {
-                self.completed_key = None;
-                self.pending_key = None;
-            }
-            byte if byte.is_ascii_whitespace() => {}
-            _ => self.completed_key = None,
-        }
-        Ok(event)
-    }
-
-    fn finish(self) -> Result<SealedLexicalLayoutV1, CodeIndexProductionErrorV1> {
-        if self.in_string
-            || self.brace_depth != 0
-            || self.bracket_depth != 0
-            || self.current_file_start.is_some()
-            || self.captured_metadata_object.is_some()
-        {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed lexical source has incomplete JSON structure".to_owned(),
-            ));
-        }
-        let state_digest = self.state_digest.ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed generation state digest is missing".to_owned(),
-            )
-        })?;
-        let generation_digest = self.generation_digest.ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract("sealed generation payload is missing".to_owned())
-        })?;
-        if generation_digest != state_digest {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed generation state digest does not match its payload".to_owned(),
-            ));
-        }
-        let format_revision = self.format_revision.ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed generation format revision is missing".to_owned(),
-            )
-        })?;
-        // A superseded envelope is refused, not scanned: the caller rebuilds
-        // the generation instead of falling through to another decoder that
-        // would report these bytes as corrupt.
-        if format_revision < MINIMUM_SEALED_GENERATION_FORMAT_REVISION {
-            return Err(superseded_sealed_generation_revision(format_revision));
-        }
-        if format_revision != MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed generation format revision is incompatible".to_owned(),
-            ));
-        }
-        let files_end_offset = self.files_end_offset.ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed generation files array is missing".to_owned(),
-            )
-        })?;
-        let first_file_offset = self.first_file_offset.unwrap_or(files_end_offset);
-        if u64::try_from(self.file_ranges.len()).unwrap_or(u64::MAX) != self.file_count {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed lexical file ranges do not match the admitted file count".to_owned(),
-            ));
-        }
-        Ok(SealedLexicalLayoutV1 {
-            state_digest,
-            format_revision,
-            file_count: self.file_count,
-            first_file_offset,
-            files_end_offset,
-            file_ranges: self.file_ranges,
-            maximum_file_bytes: self.maximum_file_bytes,
-            manifest_range: self.manifest_range,
-            snapshot_range: self.snapshot_range,
-        })
-    }
-}
-
-/// Locate the next quote or escape marker with eight-byte candidate probes.
-/// Every input byte is still authenticated by the outer SHA-256 stream; this
-/// helper only avoids interpreting ordinary string payload bytes one by one.
-fn first_json_string_control(bytes: &[u8]) -> Option<usize> {
-    const LOW_BITS: u64 = 0x0101_0101_0101_0101;
-    const HIGH_BITS: u64 = 0x8080_8080_8080_8080;
-    const QUOTES: u64 = u64::from_ne_bytes([b'"'; 8]);
-    const ESCAPES: u64 = u64::from_ne_bytes([b'\\'; 8]);
-
-    fn contains_zero_byte(value: u64) -> bool {
-        value.wrapping_sub(LOW_BITS) & !value & HIGH_BITS != 0
-    }
-
-    let mut chunks = bytes.chunks_exact(8);
-    for (chunk_index, chunk) in chunks.by_ref().enumerate() {
-        let word = u64::from_ne_bytes([
-            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-        ]);
-        if contains_zero_byte(word ^ QUOTES) || contains_zero_byte(word ^ ESCAPES) {
-            let base = chunk_index * 8;
-            return chunk
-                .iter()
-                .position(|byte| matches!(*byte, b'"' | b'\\'))
-                .map(|relative| base + relative);
-        }
-    }
-    let tail_base = bytes.len() - chunks.remainder().len();
-    chunks
-        .remainder()
-        .iter()
-        .position(|byte| matches!(*byte, b'"' | b'\\'))
-        .map(|relative| tail_base + relative)
-}
-
-#[hotpath::measure(label = "code_index.restore.metadata")]
-fn read_verified_text_metadata<R: Read + Seek>(
-    reader: &mut R,
-    layout: &SealedLexicalLayoutV1,
-    control: &dyn CodeIndexExecutionControlV1,
-) -> Result<VerifiedSealedTextGenerationMetadataV1, CodeIndexProductionErrorV1> {
-    fn decode_range<T: serde::de::DeserializeOwned, R: Read + Seek>(
-        reader: &mut R,
-        range: (u64, u64),
-        label: &'static str,
-        control: &dyn CodeIndexExecutionControlV1,
-    ) -> Result<T, CodeIndexProductionErrorV1> {
-        checkpoint(control)?;
-        let length = range.1.checked_sub(range.0).ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed {label} metadata range is invalid"
-            ))
-        })?;
-        if length == 0 || length > MAX_LEXICAL_GENERATION_METADATA_BYTES {
-            return Err(CodeIndexProductionErrorV1::Contract(format!(
-                "sealed {label} metadata exceeds its byte bound"
-            )));
-        }
-        let length = usize::try_from(length).map_err(|_| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed {label} metadata exceeds the platform limit"
-            ))
-        })?;
-        reader.seek(SeekFrom::Start(range.0)).map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed {label} metadata seek failed: {error}"
-            ))
-        })?;
-        let mut bytes = vec![0; length];
-        reader.read_exact(&mut bytes).map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed {label} metadata read failed: {error}"
-            ))
-        })?;
-        checkpoint(control)?;
-        serde_json::from_slice(&bytes).map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed {label} metadata decoding failed: {error}"
-            ))
-        })
-    }
-
-    let manifest: CodeGenerationManifestV1 = hotpath::measure_block!(
-        "code_index.restore.metadata.manifest_decode",
-        decode_range(
-            reader,
-            layout.manifest_range.ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed generation manifest metadata is missing".to_owned(),
-                )
-            })?,
-            "manifest",
-            control,
-        )
-    )?;
-    if manifest.source_commitments.is_none() {
-        return Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable);
-    }
-    let snapshot: SanitizedCodeSnapshotV1 = hotpath::measure_block!(
-        "code_index.restore.metadata.snapshot_decode",
-        decode_range(
-            reader,
-            layout.snapshot_range.ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed generation snapshot metadata is missing".to_owned(),
-                )
-            })?,
-            "snapshot",
-            control,
-        )
-    )?;
-    hotpath::measure_block!("code_index.restore.metadata.snapshot_validate", {
-        snapshot
-            .validate()
-            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
-    })?;
-    hotpath::measure_block!("code_index.restore.metadata.digest_verify", {
-        let snapshot_digest = canonical_sha256(&(INTAKE_DIGEST_SEPARATOR, &snapshot))
-            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-        if snapshot_digest != manifest.snapshot_digest {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed text metadata snapshot digest does not match the manifest".to_owned(),
-            ));
-        }
-        let seal_digest = expected_seal_digest(&manifest)
-            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-        if seal_digest != manifest.seal.expected_digest {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed text metadata manifest seal is invalid".to_owned(),
-            ));
-        }
-        Ok::<_, CodeIndexProductionErrorV1>(())
-    })?;
-    VerifiedSealedTextGenerationMetadataV1::from_partitioned_manifest(manifest, snapshot, None)
-}
-
-fn read_file_bytes_at_range<R: Read + Seek>(
-    reader: &mut R,
-    start: u64,
-    end: u64,
-    files_end_offset: u64,
-    maximum_file_bytes: u64,
-    control: &dyn CodeIndexExecutionControlV1,
-) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
-    checkpoint(control)?;
-    if start >= files_end_offset || end > files_end_offset || end <= start {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "sealed lexical file range is outside the admitted source".to_owned(),
-        ));
-    }
-    let file_bytes = end - start;
-    if file_bytes > maximum_file_bytes {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "sealed lexical file exceeds its admitted decode window".to_owned(),
-        ));
-    }
-    let len = usize::try_from(file_bytes).map_err(|_| {
-        CodeIndexProductionErrorV1::Contract(
-            "sealed lexical file window exceeds the platform limit".to_owned(),
-        )
-    })?;
-    reader.seek(SeekFrom::Start(start)).map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!("sealed lexical source seek failed: {error}"))
-    })?;
-    let mut bytes = vec![0u8; len];
-    reader.read_exact(&mut bytes).map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!("sealed lexical file read failed: {error}"))
-    })?;
-    Ok(bytes)
-}
-
-fn admit_persisted_file_bytes(
-    bytes: &[u8],
-    snapshot_digest: &ManifestDigest,
-    next_file_offset: u64,
-    control: &dyn CodeIndexExecutionControlV1,
-) -> Result<AdmittedSealedLexicalFileV1, CodeIndexProductionErrorV1> {
-    checkpoint(control)?;
-    let file: PersistedFileGenerationArtifactsV1 =
-        hotpath::measure_block!("code_index.restore.file_decode", {
-            serde_json::from_slice(bytes).map_err(|error| {
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed lexical file decoding failed: {error}"
-                ))
-            })
-        })?;
-    let exact_authority = ExactExtractionAuthorityV1::restore(&file.artifacts.chunks)
-        .map_err(CodeIndexProductionErrorV1::Chunk)?;
-    admit_validated_file_parts(
-        &file.authority,
-        &file.extraction,
-        &file.artifacts,
-        &exact_authority,
-        snapshot_digest,
-        next_file_offset,
-        control,
-    )
 }
 
 fn admit_file_generation_artifacts(

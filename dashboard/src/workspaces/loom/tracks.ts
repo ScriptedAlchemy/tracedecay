@@ -90,25 +90,37 @@ const TICK_STEPS = [
   30 * 86_400, 90 * 86_400, 180 * 86_400, 365 * 86_400,
 ] as const;
 
+/** Ruler labels are 10px text; a glyph is at most this wide, plus a gap. */
+const LABEL_CHAR_PX = 6.5;
+const LABEL_GAP_PX = 16;
+/** A late-December afternoon, the widest date and clock a label can print. */
+const WIDEST_LABEL_EPOCH = Date.UTC(2026, 11, 28, 12, 58, 58) / 1000;
+
+/** The pitch a step's own label format needs so neighbours never overprint. */
+function labelPitch(step: number): number {
+  return tickLabel(WIDEST_LABEL_EPOCH, step).length * LABEL_CHAR_PX + LABEL_GAP_PX;
+}
+
+function labelsFit(step: number, spanSeconds: number, width: number): boolean {
+  return (width * step) / spanSeconds >= labelPitch(step);
+}
+
 export function tickStepFor(spanSeconds: number, width: number): number {
   const maxTicks = Math.min(Math.max(Math.floor(width / 96), 2), 14);
   const target = spanSeconds / maxTicks;
   const step =
-    TICK_STEPS.find((candidate) => candidate >= target) ??
+    TICK_STEPS.find((candidate) => candidate >= target && labelsFit(candidate, spanSeconds, width)) ??
     TICK_STEPS[TICK_STEPS.length - 1]!;
   // The two axis tiers must never say the same thing twice: the fine row wants
   // to sit below whatever the calendar band row is showing. That preference
-  // never outranks legibility, though, dropping under the band unit can cost
-  // several rungs, and a bare "one rung below the band" rule prints 64 ticks
-  // across a two-year window. Take the LARGEST rung under the band (fewest
-  // ticks), and only if it still keeps ticks no closer than a ~48px pitch;
-  // otherwise the tiers share a unit and the band row carries the coarser one.
+  // never outranks legibility, though: take the LARGEST rung under the band
+  // (fewest ticks), and only if its own label format fits its pitch; otherwise
+  // the tiers share a unit and the band row carries the coarser one.
   const ceiling = bandCeiling(spanSeconds);
   if (step < ceiling) return step;
-  const denseLimit = Math.max(maxTicks, Math.floor(width / 48));
   const finer = [...TICK_STEPS]
     .reverse()
-    .find((candidate) => candidate < ceiling && spanSeconds / candidate <= denseLimit);
+    .find((candidate) => candidate < ceiling && labelsFit(candidate, spanSeconds, width));
   return finer ?? step;
 }
 
@@ -140,32 +152,23 @@ export function axisTicks(view: LoomWindow, width: number): AxisTick[] {
   return ticks;
 }
 
+// `toLocale*String` builds a formatter per call; a dense page formats
+// hundreds of moments per redraw, so each format is built once.
+const SECONDS_FORMAT = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+const CLOCK_FORMAT = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' });
+const MOMENT_FORMAT = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+const DAY_FORMAT = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
+const MONTH_FORMAT = new Intl.DateTimeFormat(undefined, { month: 'short', year: '2-digit' });
+
 function tickLabel(epochSeconds: number, step: number): string {
   const date = new Date(epochSeconds * 1000);
-  if (step < 60) {
-    return date.toLocaleTimeString(undefined, {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    });
-  }
-  if (step < 6 * 3600) {
-    return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-  }
+  if (step < 60) return SECONDS_FORMAT.format(date);
+  if (step < 6 * 3600) return CLOCK_FORMAT.format(date);
   // A window ticking every six hours or more spans days: a bare clock time
   // would repeat "12:00 AM" across the ruler with nothing to tell them apart.
-  if (step < 86_400) {
-    return date.toLocaleString(undefined, {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  }
-  if (step < 30 * 86_400) {
-    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-  }
-  return date.toLocaleDateString(undefined, { month: 'short', year: '2-digit' });
+  if (step < 86_400) return MOMENT_FORMAT.format(date);
+  if (step < 30 * 86_400) return DAY_FORMAT.format(date);
+  return MONTH_FORMAT.format(date);
 }
 
 /* -------------------------------------------------------------------------
@@ -194,10 +197,5 @@ export function formatDurationSeconds(seconds: number): string {
 }
 
 export function formatMoment(epochSeconds: number): string {
-  return new Date(epochSeconds * 1000).toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+  return MOMENT_FORMAT.format(new Date(epochSeconds * 1000));
 }

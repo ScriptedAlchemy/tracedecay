@@ -21,10 +21,9 @@ pub(super) fn user_turn_locations(
     }
     let mut locations = HashSet::new();
     for session_rows in by_session.into_values() {
-        let has_fallback = source.legacy_project_pin.is_some()
-            || session_rows
-                .iter()
-                .any(|row| Path::new(row.session_cwd.as_deref().unwrap_or_default()).is_absolute())
+        let has_fallback = session_rows
+            .iter()
+            .any(|row| Path::new(row.session_cwd.as_deref().unwrap_or_default()).is_absolute())
             || source.state_db.parent().is_some();
         let mut turn = Vec::new();
         for row in session_rows {
@@ -55,7 +54,6 @@ fn assign_user_turn(rows: &[&HermesRow], has_fallback: bool, locations: &mut Has
 pub(super) fn turn_project_locations(
     rows: &[HermesRow],
     project_root: &Path,
-    source: &HermesProfileSource,
 ) -> HashMap<i64, &'static str> {
     let mut by_session: HashMap<&str, Vec<&HermesRow>> = HashMap::new();
     for row in rows {
@@ -66,11 +64,8 @@ pub(super) fn turn_project_locations(
     for session_rows in by_session.into_values() {
         let has_fallback = session_rows
             .iter()
-            .any(|row| session_is_candidate_for_project(row, &project_matcher, source));
-        let fallback_provenance = source
-            .legacy_project_pin
-            .as_ref()
-            .map_or("session_cwd", |_| "profile_pin");
+            .any(|row| session_is_candidate_for_project(row, &project_matcher));
+        let fallback_provenance = "session_cwd";
         let mut turn = Vec::new();
         for row in session_rows {
             if row.role == "user" && !turn.is_empty() {
@@ -111,7 +106,6 @@ pub(super) enum DestinationRoutingError {
 pub(super) fn turn_project_locations_for_destinations(
     rows: &[HermesRow],
     destination_matchers: &[ProjectRootMatcher],
-    source: &HermesProfileSource,
     destination_routes: &mut HashMap<PathBuf, Vec<usize>>,
 ) -> Result<Vec<DestinationTurnLocations>, DestinationRoutingError> {
     let mut by_session: HashMap<&str, Vec<&HermesRow>> = HashMap::new();
@@ -124,22 +118,15 @@ pub(super) fn turn_project_locations_for_destinations(
         })
         .collect::<Vec<_>>();
     for session_rows in by_session.into_values() {
-        let fallback_provenance = source
-            .legacy_project_pin
-            .as_ref()
-            .map_or("session_cwd", |_| "profile_pin");
-        let fallback_candidates = if let Some(pin) = source.legacy_project_pin.as_ref() {
-            vec![pin.clone()]
-        } else {
-            let mut seen = BTreeSet::new();
-            session_rows
-                .iter()
-                .filter_map(|row| {
-                    let cwd = PathBuf::from(row.session_cwd.as_deref()?.trim());
-                    (cwd.is_absolute() && seen.insert(cwd.clone())).then_some(cwd)
-                })
-                .collect::<Vec<_>>()
-        };
+        let fallback_provenance = "session_cwd";
+        let mut seen = BTreeSet::new();
+        let fallback_candidates = session_rows
+            .iter()
+            .filter_map(|row| {
+                let cwd = PathBuf::from(row.session_cwd.as_deref()?.trim());
+                (cwd.is_absolute() && seen.insert(cwd.clone())).then_some(cwd)
+            })
+            .collect::<Vec<_>>();
         let mut fallbacks = vec![false; destination_matchers.len()];
         for cwd in fallback_candidates {
             for destination_index in
@@ -308,14 +295,9 @@ fn structured_tool_project_paths(row: &HermesRow) -> Vec<PathBuf> {
     paths
 }
 
-fn session_is_candidate_for_project(
-    row: &HermesRow,
-    project_matcher: &ProjectRootMatcher,
-    source: &HermesProfileSource,
-) -> bool {
-    source.legacy_project_pin.is_some()
-        || row.session_cwd.as_deref().is_some_and(|cwd| {
-            let cwd = Path::new(cwd.trim());
-            cwd.is_absolute() && project_matcher.contains(cwd)
-        })
+fn session_is_candidate_for_project(row: &HermesRow, project_matcher: &ProjectRootMatcher) -> bool {
+    row.session_cwd.as_deref().is_some_and(|cwd| {
+        let cwd = Path::new(cwd.trim());
+        cwd.is_absolute() && project_matcher.contains(cwd)
+    })
 }

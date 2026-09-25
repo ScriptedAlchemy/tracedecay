@@ -9,6 +9,11 @@
 //! sorted strict-first under stable tie-breakers, and every surviving candidate
 //! keeps a receipt naming the routes that ranked it.
 //!
+//! Caller anchors are must-have evidence, not a soft boost: a candidate that
+//! matched an anchor outranks every candidate that matched none, each anchor
+//! with matches keeps at least its best sites through the lane cap, and the
+//! receipt names every anchor's outcome, including "no matches".
+//!
 //! Routes are ranked retrieval, not exhaustive grep; they never widen the
 //! lane cap and never mint exact-tier admission.
 
@@ -37,6 +42,20 @@ pub const MAX_LEXICAL_ALIAS_BYTES_V1: usize = 128;
 /// Maximum identifier-shaped tokens the preferred-symbol route ranks; the
 /// tokens are taken in query order so the bound is deterministic.
 pub const MAX_PREFERRED_SYMBOL_TOKENS_V1: usize = 8;
+
+/// Lexical score added per distinct caller anchor a merged candidate matched.
+///
+/// Composition calibrates the lexical domain into `[0, 1]` and saturates
+/// well below any BM25 sum, so among lexical candidates only the raw score
+/// orders the page. Anchors are the caller's statement of what the answer is
+/// about, so one anchor match must outrank any sum of incidental query-word
+/// matches. The bound is provable from the request contract: one
+/// `(term, field)` BM25 score is below 2^28 micros (idf of a 2^32-row corpus
+/// times the saturated term-frequency factor times the strongest field
+/// weight), a route matches at most nine fields times the ~2^11 terms a
+/// 4 KiB query can carry, and at most 19 routes merge, which keeps every
+/// unanchored merged score below 2^47.
+pub const LEXICAL_ANCHOR_MATCH_SCORE_MICROS_V1: u64 = 1 << 48;
 
 /// Query words that look like identifiers but name what the caller is asking
 /// about rather than a symbol. Compared case-insensitively.
@@ -126,13 +145,6 @@ pub struct LexicalAliasV1 {
     pub strict_query: String,
     pub alternative: String,
 }
-
-/// The admitted lexical lane batch plus the per-anchor route matches that
-/// produced it.
-type MergedLexicalBatch = (
-    RetrieverBatch<LexicalLaneEvidence>,
-    BTreeMap<RetrievalAnchorId, Vec<LexicalRouteMatchV1>>,
-);
 
 impl LexicalAnchorV1 {
     fn validate(value: &str, index: usize) -> Result<(), LexicalRouteErrorV1> {
@@ -521,6 +533,29 @@ pub struct LexicalRouteMatchV1 {
     pub spelling_variants: Vec<super::LexicalSpellingVariantV1>,
 }
 
+/// What one caller anchor contributed to the merged lexical lane.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum LexicalAnchorOutcomeV1 {
+    /// `matched` rows in the served generation carried the anchor and
+    /// `admitted` of them survived the lane cap.
+    Matched { matched: u64, admitted: u64 },
+    /// The anchor route served and found no row carrying the anchor.
+    Unmatched,
+    /// The anchor route did not serve; the lane outcome names why.
+    NotServed,
+}
+
+/// One caller anchor's outcome, in caller order. Serialized flat
+/// (`{"anchor", "outcome", ...}`), which is why it is not
+/// `deny_unknown_fields`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LexicalAnchorReceiptV1 {
+    pub anchor: LexicalAnchorV1,
+    #[serde(flatten)]
+    pub outcome: LexicalAnchorOutcomeV1,
+}
+
 /// Route evidence for one composed lexical lane, keyed by candidate anchor so
 /// the response can attach it to each ranked result. It is additive
 /// presentation metadata: never part of ranking identity, fallback bytes, or
@@ -530,12 +565,28 @@ pub struct LexicalRouteMatchV1 {
 pub struct LexicalRouteReceiptV1 {
     pub routes: Vec<LexicalRouteKindV1>,
     pub matches_by_anchor: BTreeMap<RetrievalAnchorId, Vec<LexicalRouteMatchV1>>,
+    pub anchors: Vec<LexicalAnchorReceiptV1>,
 }
 
 impl LexicalRouteReceiptV1 {
     pub fn has_disclosure(&self) -> bool {
         self.routes.len() > 1 || !self.matches_by_anchor.is_empty()
     }
+}
+
+/// Every caller anchor among `routes` with the given outcome; used when the
+/// query route did not serve and no anchor route could contribute.
+fn anchor_receipts_not_served(routes: &[LexicalRouteKindV1]) -> Vec<LexicalAnchorReceiptV1> {
+    routes
+        .iter()
+        .filter_map(|route| match route {
+            LexicalRouteKindV1::Anchor { anchor } => Some(LexicalAnchorReceiptV1 {
+                anchor: anchor.clone(),
+                outcome: LexicalAnchorOutcomeV1::NotServed,
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Merge the executed routes into the one lexical lane input composition
@@ -572,11 +623,13 @@ pub fn merge_lexical_routes(
         RetrieverOutcome::Complete(batch) => (batch, None),
         RetrieverOutcome::Partial { value, reason } => (value, Some(reason)),
         other => {
+            let anchors = anchor_receipts_not_served(&descriptors);
             return Ok((
                 other,
                 LexicalRouteReceiptV1 {
                     routes: descriptors,
                     matches_by_anchor: BTreeMap::new(),
+                    anchors,
                 },
             ));
         }
@@ -606,6 +659,7 @@ pub fn merge_lexical_routes(
         let receipt = LexicalRouteReceiptV1 {
             routes: descriptors,
             matches_by_anchor,
+            anchors: Vec::new(),
         };
         let outcome = match partial_reason {
             Some(reason) => RetrieverOutcome::Partial {
@@ -628,15 +682,24 @@ pub fn merge_lexical_routes(
             }
             other => {
                 merged.exhausted = false;
+                if let LexicalRouteKindV1::Anchor { anchor } = &route.kind {
+                    merged.anchors.push(AnchorRoute {
+                        anchor: anchor.clone(),
+                        served: false,
+                        matched: 0,
+                        ranking: Vec::new(),
+                    });
+                }
                 partial_reason.get_or_insert_with(|| additive_route_failure(&route.kind, other));
             }
         }
     }
-    let (batch, matches_by_anchor) =
+    let (batch, matches_by_anchor, anchors) =
         merged.into_batch(generation, lane_candidate_cap(lane_budget, base_budget))?;
     let receipt = LexicalRouteReceiptV1 {
         routes: descriptors,
         matches_by_anchor,
+        anchors,
     };
     let outcome = match partial_reason {
         Some(reason) => RetrieverOutcome::Partial {
@@ -708,6 +771,19 @@ struct MergedCandidate {
     evidence: LexicalLaneEvidence,
     matches: Vec<LexicalRouteMatchV1>,
     strict: bool,
+    /// Distinct caller anchors whose routes ranked this occurrence.
+    anchors: BTreeSet<LexicalAnchorV1>,
+}
+
+/// One caller anchor route's contribution, in caller order.
+struct AnchorRoute {
+    anchor: LexicalAnchorV1,
+    served: bool,
+    /// Rows the route found eligible before its own cap.
+    matched: u64,
+    /// The route's committed prefix as `(fused anchor, occurrence)` in the
+    /// route's own score order; the reservation walks it site by site.
+    ranking: Vec<(RetrievalAnchorId, SourceOccurrenceId)>,
 }
 
 #[derive(Default)]
@@ -716,6 +792,34 @@ struct MergedRoutes {
     coverage: RetrieverCoverage,
     exhausted: bool,
     absorbed_routes: usize,
+    anchors: Vec<AnchorRoute>,
+}
+
+/// The merged lane's admitted batch, its per-candidate route matches, and the
+/// per-anchor receipts.
+type MergedLexicalLane = (
+    RetrieverBatch<LexicalLaneEvidence>,
+    BTreeMap<RetrievalAnchorId, Vec<LexicalRouteMatchV1>>,
+    Vec<LexicalAnchorReceiptV1>,
+);
+
+/// Canonical merged order: strict routes before alternatives, then the
+/// anchor-tiered score, then stable occurrence identity.
+fn merged_candidate_cmp(left: &MergedCandidate, right: &MergedCandidate) -> std::cmp::Ordering {
+    right
+        .strict
+        .cmp(&left.strict)
+        .then_with(|| right.candidate.raw_score.cmp(&left.candidate.raw_score))
+        .then_with(|| {
+            left.candidate
+                .source_occurrence_id
+                .cmp(&right.candidate.source_occurrence_id)
+        })
+        .then_with(|| {
+            left.candidate
+                .retriever_evidence_anchor
+                .cmp(&right.candidate.retriever_evidence_anchor)
+        })
 }
 
 impl MergedRoutes {
@@ -729,6 +833,23 @@ impl MergedRoutes {
             LexicalRouteKindV1::IdentifierSplit { .. } | LexicalRouteKindV1::Alias { .. }
         );
         batch.validate().map_err(contract_error)?;
+        if let LexicalRouteKindV1::Anchor { anchor } = kind {
+            self.anchors.push(AnchorRoute {
+                anchor: anchor.clone(),
+                served: true,
+                matched: batch.coverage.eligible,
+                ranking: batch
+                    .candidates
+                    .iter()
+                    .map(|candidate| {
+                        (
+                            candidate.anchor_id.clone(),
+                            candidate.source_occurrence_id.clone(),
+                        )
+                    })
+                    .collect(),
+            });
+        }
         let route_exhausted = batch
             .continuation
             .as_ref()
@@ -764,6 +885,10 @@ impl MergedRoutes {
                 matched_terms: matched_terms(evidence),
                 spelling_variants: evidence.spelling_variants.clone(),
             };
+            let route_anchor = match kind {
+                LexicalRouteKindV1::Anchor { anchor } => Some(anchor.clone()),
+                _ => None,
+            };
             match self.by_occurrence.get_mut(&candidate.source_occurrence_id) {
                 Some(existing) => {
                     if existing.candidate.anchor_id != candidate.anchor_id
@@ -787,6 +912,7 @@ impl MergedRoutes {
                         .map_err(contract_error)?;
                     merge_evidence(&mut existing.evidence, evidence)?;
                     existing.matches.push(route_match);
+                    existing.anchors.extend(route_anchor);
                 }
                 None => {
                     self.by_occurrence.insert(
@@ -796,6 +922,7 @@ impl MergedRoutes {
                             evidence: evidence.clone(),
                             matches: vec![route_match],
                             strict: !is_alternative,
+                            anchors: route_anchor.into_iter().collect(),
                         },
                     );
                 }
@@ -804,31 +931,88 @@ impl MergedRoutes {
         Ok(())
     }
 
+    /// Occurrences every anchor keeps through the cap: walking each served
+    /// anchor route in its own score order, the best row of each of its first
+    /// `cap / (anchors + 1)` distinct sites (fused anchors). One row per site
+    /// keeps the reservation within the cap even when a site is an oversized
+    /// symbol split into many chunks; the query route keeps the same share, so
+    /// no anchor, common or rare, starves another.
+    fn reserved_occurrences(&self, cap: usize) -> BTreeSet<SourceOccurrenceId> {
+        let served = self.anchors.iter().filter(|route| route.served).count();
+        let sites_per_anchor = cap.div_ceil(served.saturating_add(1)).max(1);
+        let mut reserved = BTreeSet::new();
+        for route in &self.anchors {
+            let mut sites = BTreeSet::new();
+            for (site, occurrence) in &route.ranking {
+                if sites.len() >= sites_per_anchor {
+                    break;
+                }
+                if sites.insert(site.clone()) {
+                    reserved.insert(occurrence.clone());
+                }
+            }
+        }
+        reserved
+    }
+
     fn into_batch(
         self,
         generation: &CodeGenerationId,
         cap: usize,
-    ) -> Result<MergedLexicalBatch, RetrievalPortError> {
+    ) -> Result<MergedLexicalLane, RetrievalPortError> {
+        let reserved = self.reserved_occurrences(cap);
         let mut admitted: Vec<MergedCandidate> = self.by_occurrence.into_values().collect();
-        admitted.sort_by(|left, right| {
-            right
-                .strict
-                .cmp(&left.strict)
-                .then_with(|| right.candidate.raw_score.cmp(&left.candidate.raw_score))
-                .then_with(|| {
-                    left.candidate
-                        .source_occurrence_id
-                        .cmp(&right.candidate.source_occurrence_id)
-                })
-                .then_with(|| {
-                    left.candidate
-                        .retriever_evidence_anchor
-                        .cmp(&right.candidate.retriever_evidence_anchor)
-                })
-        });
+        for merged in &mut admitted {
+            let tier = FixedPointScore(
+                (merged.anchors.len() as u64)
+                    .checked_mul(LEXICAL_ANCHOR_MATCH_SCORE_MICROS_V1)
+                    .ok_or_else(|| {
+                        RetrievalPortError::Contract(
+                            "lexical anchor tier overflowed the fixed-point score".to_owned(),
+                        )
+                    })?,
+            );
+            merged.candidate.raw_score = merged
+                .candidate
+                .raw_score
+                .checked_add(tier)
+                .map_err(contract_error)?;
+        }
+        admitted.sort_by(merged_candidate_cmp);
         let eligible = admitted.len() as u64;
         let truncated = admitted.len().saturating_sub(cap);
-        admitted.truncate(cap);
+        if truncated > 0 {
+            // Reserved anchor sites take seats first, in canonical order and
+            // never beyond the cap; the remaining seats go to the best of the
+            // rest. Re-sorting after the cut keeps the committed prefix
+            // canonical.
+            let mut seats = cap;
+            let (mut kept, rest): (Vec<_>, Vec<_>) = admitted.into_iter().partition(|merged| {
+                let keep = seats > 0 && reserved.contains(&merged.candidate.source_occurrence_id);
+                seats -= usize::from(keep);
+                keep
+            });
+            kept.extend(rest.into_iter().take(seats));
+            kept.sort_by(merged_candidate_cmp);
+            admitted = kept;
+        }
+        let mut anchors = self
+            .anchors
+            .iter()
+            .map(|route| LexicalAnchorReceiptV1 {
+                anchor: route.anchor.clone(),
+                outcome: if !route.served {
+                    LexicalAnchorOutcomeV1::NotServed
+                } else if route.matched == 0 {
+                    LexicalAnchorOutcomeV1::Unmatched
+                } else {
+                    LexicalAnchorOutcomeV1::Matched {
+                        matched: route.matched,
+                        admitted: 0,
+                    }
+                },
+            })
+            .collect::<Vec<_>>();
         let mut candidates = Vec::with_capacity(admitted.len());
         let mut evidence_by_occurrence = BTreeMap::new();
         let mut matches_by_anchor: BTreeMap<RetrievalAnchorId, Vec<LexicalRouteMatchV1>> =
@@ -836,6 +1020,13 @@ impl MergedRoutes {
         for (ordinal, merged) in admitted.into_iter().enumerate() {
             let mut candidate = merged.candidate;
             candidate.ordinal_rank = ordinal as u32;
+            for receipt in &mut anchors {
+                if let LexicalAnchorOutcomeV1::Matched { admitted, .. } = &mut receipt.outcome
+                    && merged.anchors.contains(&receipt.anchor)
+                {
+                    *admitted += 1;
+                }
+            }
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), merged.evidence);
             matches_by_anchor
                 .entry(candidate.anchor_id.clone())
@@ -861,7 +1052,7 @@ impl MergedRoutes {
             }),
         };
         batch.validate().map_err(contract_error)?;
-        Ok((batch, matches_by_anchor))
+        Ok((batch, matches_by_anchor, anchors))
     }
 }
 

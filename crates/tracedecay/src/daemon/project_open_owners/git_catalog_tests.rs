@@ -1,12 +1,15 @@
-use crate::runtime_ports::compose_application_catalog_snapshot;
 use crate::test_support::git::GIT_FIXTURE_CONFIG;
 use tracedecay_application::git_intelligence::NativeGitIntelligence;
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
+use tracedecay_contracts::catalog_composition::{
+    CatalogCompositionError, build_application_catalog_snapshot,
+};
 use tracedecay_contracts::git::GitIndexTransactionPortError;
 use tracedecay_contracts::{
-    AuthorityReceipt, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
-    DisclosureClass, GitIndexOperationBindingV1, GitIndexPreviewRequestV1, GitIndexTransactionPort,
-    IdempotencyKey, OperationTermination, PolicyDecisionRef, RequestContext, RequestId,
+    ApplicationContractError, AuthorityReceipt, CancellationContext, CapabilityGrantId,
+    CapabilityGrantSnapshot, Deadline, DisclosureClass, GitIndexOperationBindingV1,
+    GitIndexPreviewRequestV1, GitIndexTransactionPort, IdempotencyKey, OperationTermination,
+    PolicyDecisionRef, RequestContext, RequestId,
 };
 use tracedecay_daemon_service::{GRANT_HORIZON, daemon_owned_project_source_access_at};
 use tracedecay_domain::git::{
@@ -20,15 +23,13 @@ use tracedecay_domain::{
 };
 use tracedecay_domain::{ProjectId, UtcMicros};
 
-fn unavailable_catalog() -> Result<
-    tracedecay_tool_catalog::CatalogSnapshotV1,
-    tracedecay_code_index_runtime::ApplicationCatalogSnapshotErrorV1,
-> {
-    Err(
-        tracedecay_code_index_runtime::ApplicationCatalogSnapshotErrorV1::new(
-            "catalog unavailable for this independently constructed owner",
+fn unavailable_catalog()
+-> Result<tracedecay_tool_catalog::CatalogSnapshotV1, CatalogCompositionError> {
+    Err(CatalogCompositionError::Application(
+        ApplicationContractError::Catalog(
+            "catalog unavailable for this independently constructed owner".to_owned(),
         ),
-    )
+    ))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -42,17 +43,18 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
     git(&project_root, &["add", "."]);
     git(&project_root, &["commit", "-m", "fixture"]);
     let project_id = ProjectId::new("project.git-catalog").unwrap();
-    let fixture = crate::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
-        &profile_root,
-        &project_root,
-        project_id.clone(),
-    )
-    .await
-    .unwrap();
+    let fixture =
+        tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
+            &profile_root,
+            &project_root,
+            project_id.clone(),
+        )
+        .await
+        .unwrap();
     let graph = fixture
         .initialize_project_graph_for_test(
             &project_root,
-            crate::project::TraceDecayOpenOptions {
+            tracedecay_project::project::TraceDecayOpenOptions {
                 profile_root: Some(profile_root),
                 global_db_path: None,
             },
@@ -81,7 +83,7 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
         .await
         .unwrap();
     let registry =
-        DaemonGitIndexTransactionServiceRegistry::new(compose_application_catalog_snapshot);
+        DaemonGitIndexTransactionServiceRegistry::new(build_application_catalog_snapshot);
     registry
         .ensure(
             database.clone(),
@@ -109,7 +111,7 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
     let initial = owner.current_authority(operation).unwrap();
     assert_eq!(
         initial.catalog_digest.as_str(),
-        compose_application_catalog_snapshot()
+        build_application_catalog_snapshot()
             .unwrap()
             .digest()
             .to_string()

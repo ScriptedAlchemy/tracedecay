@@ -1656,7 +1656,7 @@ def _translate_lcm_args(native_name: str, args: dict) -> dict:
             translated.setdefault("scope", "current")
         translated.setdefault("sort", "relevance")
         translated.setdefault("include_summaries", False)
-        translated.setdefault("temporal_mode", "current")
+        translated.setdefault("temporal_mode", {"kind": "current"})
         if "time_from" in translated:
             translated["start_time"] = translated.pop("time_from")
         if "time_to" in translated:
@@ -1665,7 +1665,7 @@ def _translate_lcm_args(native_name: str, args: dict) -> dict:
     if native_name == "lcm_load_session":
         translated.setdefault("limit", 100)
         translated.setdefault("content_limit", 4000)
-        translated.setdefault("temporal_mode", "forensic")
+        translated.setdefault("temporal_mode", {"kind": "forensic"})
         if "max_content_chars" in translated:
             translated["content_limit"] = translated.pop("max_content_chars")
         if "time_from" in translated:

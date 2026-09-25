@@ -20,13 +20,17 @@
 import { describe, expect, it } from 'vitest';
 import { z, type ZodType } from 'zod';
 
-import { resolveFixture } from './data.ts';
+import { resolveFixture, subagentTreeFixture } from './data.ts';
 import {
   AnalyticsOverviewPayloadV1Schema,
   AnalyticsAgentsPayloadV1Schema,
   AnalyticsSubagentTreePayloadV1Schema,
   AnalyticsUsageSummaryV1Schema,
+  AutomaticFactReceiptsPayloadV1Schema,
+  AutomationJobsPayloadV1Schema,
+  AutomationRunsPayloadV1Schema,
   AutomationSchedulerStatusV1Schema,
+  AutomationSkillsPayloadV1Schema,
   CodeIndexFreshnessPayloadV1Schema,
   CostsReadModelV1Schema,
   DeliveryInboxV1Schema,
@@ -41,10 +45,12 @@ import {
   RevisionPairUnionLayoutV1Schema,
   SimilarResultV1Schema,
   LcmOverviewPayloadV1Schema,
+  LcmSessionPayloadV1Schema,
   LcmTimelinePayloadV1Schema,
   LoomTemporalPayloadV1Schema,
   MemoryFactDetailPayloadV1Schema,
   MemoryOverviewPayloadV1Schema,
+  MemorySimilarityPayloadV1Schema,
   AutomationRunResultV1Schema,
   MemoryStatusPayloadV1Schema,
   ObservatoryReadModelV1Schema,
@@ -53,9 +59,7 @@ import {
   RemoteOperationalStatusPayloadV1Schema,
   SavingsModelsPayloadV1Schema,
   SavingsOverviewPayloadV1Schema,
-  SavingsSessionsPayloadV1Schema,
   SettingsPayloadV1Schema,
-  StorageFindingsPayloadV1Schema,
   StorageTelemetryPayloadV1Schema,
   StructureReadV12Schema,
   ListTaskHandoffsResultV1Schema,
@@ -64,7 +68,11 @@ import {
   WorkGraphReadV1Schema,
 } from '../../src/contracts/generated.ts';
 import { workPayload } from '../../src/workspaces/work/workApi.ts';
-import { TrustHistoryPayloadSchema } from '../../src/data/query/memory.ts';
+import { AutomationOutcomesPayloadSchema } from '../../src/data/query/automation.ts';
+import {
+  ProjectionPayloadSchema,
+  TrustHistoryPayloadSchema,
+} from '../../src/data/query/memory.ts';
 
 /** Parse one resolved fixture, surfacing zod's issues on failure. The same
  * reporting shape `endpoint-fixtures.test.ts` uses, so a drift report reads the
@@ -93,15 +101,9 @@ function expectValue(schema: ZodType<unknown>, value: unknown, what: string): vo
 const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
   '/api/projects': DashboardEnvelopeV1Schema(ProjectsPayloadV1Schema),
   '/api/storage/telemetry': DashboardEnvelopeV1Schema(StorageTelemetryPayloadV1Schema),
-  '/api/storage/findings': DashboardEnvelopeV1Schema(StorageFindingsPayloadV1Schema),
   '/api/doctor/findings': DashboardEnvelopeV1Schema(DoctorFindingsPayloadV1Schema),
   '/api/settings': DashboardEnvelopeV1Schema(SettingsPayloadV1Schema),
-  // `memory_api::overview` is bound at both the trailing-slash and bare paths.
-  // The `/overview` key is a fixture convenience with no route behind it; it
-  // holds the same payload, so it is held to the same contract.
-  '/api/plugins/holographic/': DashboardEnvelopeV1Schema(MemoryOverviewPayloadV1Schema),
   '/api/plugins/holographic': DashboardEnvelopeV1Schema(MemoryOverviewPayloadV1Schema),
-  '/api/plugins/holographic/overview': DashboardEnvelopeV1Schema(MemoryOverviewPayloadV1Schema),
   '/api/plugins/holographic/status': DashboardEnvelopeV1Schema(MemoryStatusPayloadV1Schema),
   '/api/plugins/hermes-lcm/overview': DashboardEnvelopeV1Schema(LcmOverviewPayloadV1Schema),
   '/api/plugins/hermes-lcm/timeline': DashboardEnvelopeV1Schema(LcmTimelinePayloadV1Schema),
@@ -119,7 +121,6 @@ const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
   '/api/delivery/overview': DashboardEnvelopeV1Schema(DeliveryOverviewV1Schema),
   '/api/delivery/inbox': DashboardEnvelopeV1Schema(DeliveryInboxV1Schema),
   '/api/plugins/savings/overview': DashboardEnvelopeV1Schema(SavingsOverviewPayloadV1Schema),
-  '/api/plugins/savings/sessions': SavingsSessionsPayloadV1Schema,
   '/api/plugins/savings/models': SavingsModelsPayloadV1Schema,
   '/api/plugins/analytics/overview': DashboardEnvelopeV1Schema(AnalyticsOverviewPayloadV1Schema),
   '/api/plugins/analytics/usage': DashboardEnvelopeV1Schema(AnalyticsUsageSummaryV1Schema),
@@ -128,6 +129,11 @@ const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
     AnalyticsSubagentTreePayloadV1Schema,
   ),
   '/api/automation/scheduler/status': AutomationSchedulerStatusV1Schema,
+  '/api/automation/jobs': AutomationJobsPayloadV1Schema,
+  '/api/automation/skills': AutomationSkillsPayloadV1Schema,
+  '/api/automation/automatic-fact-receipts': AutomaticFactReceiptsPayloadV1Schema,
+  '/api/automation/runs': AutomationRunsPayloadV1Schema,
+  '/api/automation/outcomes': AutomationOutcomesPayloadSchema,
   '/api/application/retained/fact_store_curate': z.object({
     kind: z.literal('success'),
     value: z.object({
@@ -188,9 +194,15 @@ const DYNAMIC: ReadonlyArray<{
     schema: DashboardEnvelopeV1Schema(GraphSubgraphPayloadV1Schema),
   },
   {
+    label: 'loom_api::temporal dense-fanout page',
+    pathname: '/api/loom/temporal',
+    search: '?limit=200&fixture=dense-fanout',
+    schema: DashboardEnvelopeV1Schema(LoomTemporalPayloadV1Schema),
+  },
+  {
     label: 'lcm_api::session',
     pathname: '/api/plugins/hermes-lcm/session/035c8f3c-d4e6-4176-afea-6f52e770501e',
-    schema: DashboardEnvelopeV1Schema(z.null()),
+    schema: DashboardEnvelopeV1Schema(LcmSessionPayloadV1Schema),
   },
   {
     label: 'graph_api::neighbors',
@@ -211,6 +223,24 @@ const DYNAMIC: ReadonlyArray<{
     label: 'memory_api::fact_trust_history',
     pathname: `/api/plugins/holographic/fact/${encodeURIComponent(`fact.${'a'.repeat(64)}.${'0'.repeat(64)}`)}/trust-history`,
     schema: TrustHistoryPayloadSchema,
+  },
+  {
+    label: 'memory_api::projection',
+    pathname: '/api/plugins/holographic/projection',
+    search: '?limit=400',
+    schema: ProjectionPayloadSchema,
+  },
+  {
+    label: 'memory_api::projection filtered',
+    pathname: '/api/plugins/holographic/projection',
+    search: '?limit=400&q=decision',
+    schema: ProjectionPayloadSchema,
+  },
+  {
+    label: 'memory_api::similarity',
+    pathname: '/api/plugins/holographic/similarity',
+    search: '?min_similarity=0.85&limit=25',
+    schema: MemorySimilarityPayloadV1Schema,
   },
   {
     label: 'graph_api::subgraph seeded',
@@ -248,6 +278,12 @@ const DYNAMIC: ReadonlyArray<{
     search: '?range=30d',
     schema: SavingsModelsPayloadV1Schema,
   },
+  {
+    label: 'doctor_findings_api::findings storage family',
+    pathname: '/api/doctor/findings',
+    search: '?family=storage',
+    schema: DashboardEnvelopeV1Schema(DoctorFindingsPayloadV1Schema),
+  },
 ];
 
 describe('fixtures parse against the generated contract for their route', () => {
@@ -272,4 +308,64 @@ describe('fixtures parse against the generated contract for their route', () => 
     },
   );
 
+});
+
+describe('memory geometry fixtures answer the request they were given', () => {
+  it('bounds the projection by its limit and filters by q', () => {
+    const page = ProjectionPayloadSchema.parse(
+      resolveFixture('/api/plugins/holographic/projection', '?limit=400'),
+    );
+    expect(page.points).toHaveLength(400);
+    expect(page.coverage).toEqual({
+      completeness: 'bounded',
+      examined: 400,
+      limit: 400,
+      omission_reasons: ['request_limit_reached'],
+    });
+    const filtered = ProjectionPayloadSchema.parse(
+      resolveFixture('/api/plugins/holographic/projection', '?limit=400&q=decision'),
+    );
+    expect(filtered.points).toHaveLength(67);
+    expect(new Set(filtered.points.map((point) => point.category))).toEqual(new Set(['decision']));
+  });
+
+  it('applies the similarity floor before the cap and bins every scored pair', () => {
+    const at = (floor: number) =>
+      MemorySimilarityPayloadV1Schema.parse(
+        resolveFixture('/api/plugins/holographic/similarity', `?min_similarity=${floor}&limit=25`),
+      );
+    const strict = at(0.95);
+    expect(strict.pairs).toHaveLength(5);
+    expect(new Set(strict.pairs.map((pair) => pair.classification))).toEqual(new Set(['likely_duplicate']));
+    expect(at(0.85).pairs).toHaveLength(16);
+    expect(at(0.6).pairs).toHaveLength(25);
+    expect(strict.total_pairs).toBe(79_800);
+    expect(strict.score_distribution.bins.reduce((sum, bin) => sum + bin.count, 0)).toBe(79_800);
+    expect(strict.score_distribution.bins[0]).toEqual({ start: -0.25, end: -0.188, count: 558 });
+  });
+});
+
+describe('subagent-tree scenarios', () => {
+  const schema = DashboardEnvelopeV1Schema(AnalyticsSubagentTreePayloadV1Schema);
+
+  it('keeps the default tree at five sessions and serves the dense fan-out only when asked', () => {
+    const route = '/api/plugins/analytics/subagent-tree';
+    expect(schema.parse(resolveFixture(route)).payload.nodes).toHaveLength(5);
+    expect(schema.parse(resolveFixture(route, '?fixture=dense-fanout')).payload.nodes).toHaveLength(124);
+  });
+
+  it('decodes the dense fan-out and reconciles its own counts', () => {
+    const payload = schema.parse(subagentTreeFixture('dense-fanout')).payload;
+    const agents = new Set(payload.nodes.map((node) => node.session_id));
+    expect(agents.size).toBe(124);
+    expect(payload.nodes.filter((node) => node.depth === 2)).toHaveLength(96);
+    expect(payload.nodes.filter((node) => node.link === 'missing_parent')).toHaveLength(payload.missing_parent_count);
+    expect(payload.nodes.filter((node) => node.ended_at === null)).toHaveLength(13);
+    // Pre-order: every child follows its parent, and `descendants` counts it.
+    const position = new Map(payload.nodes.map((node, index) => [node.session_id, index]));
+    for (const node of payload.nodes) {
+      if (node.depth > 0) expect(position.get(node.parent_session_id!)!).toBeLessThan(position.get(node.session_id)!);
+    }
+    expect(payload.nodes[0]!.descendants).toBe(120);
+  });
 });

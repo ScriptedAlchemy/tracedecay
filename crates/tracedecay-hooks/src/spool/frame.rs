@@ -6,11 +6,12 @@ use tracedecay_domain::{UtcMicros, framed_log::checksum as frame_checksum};
 use tracedecay_private_fs::framed_log::{append_durable, truncate_file as shared_truncate_file};
 
 use crate::{
-    HOOK_EVENT_SCHEMA_VERSION, HookEventEnvelopeV2, HookHostV1, MAX_HOOK_PAYLOAD_BYTES,
+    HOOK_EVENT_SCHEMA_VERSION, HookEventEnvelopeV2, MAX_HOOK_PAYLOAD_BYTES,
     NativeContextScoutLifecycleV1,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tracedecay_domain::NativeHostIdentityV1;
 
 use super::types::{HookSpoolRecordV1, PendingRecordV1, ScanResult};
 use super::{
@@ -237,7 +238,7 @@ pub(super) fn encode_frame(
 pub(super) fn decode_complete_frame(
     frame: &[u8],
     file_offset: u64,
-    host: HookHostV1,
+    host: NativeHostIdentityV1,
 ) -> Result<HookSpoolRecordV1, HookSpoolError> {
     let minimum = FRAME_LENGTH_BYTES + FRAME_HEADER_BYTES + FRAME_CHECKSUM_BYTES;
     if frame.len() < minimum {

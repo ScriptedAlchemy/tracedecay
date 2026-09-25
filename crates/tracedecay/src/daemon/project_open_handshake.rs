@@ -18,11 +18,11 @@ pub(super) async fn open_project_for_handshake(
     project_path: &Path,
     handshake: &DaemonHandshake,
     store_administration: &StoreAdministration,
-) -> Result<crate::project::TraceDecay> {
+) -> Result<tracedecay_project::project::TraceDecay> {
     let open_options = crate::daemon::handshake_open_options(handshake);
     let registry_database = store_administration.registered_profile_database().await?;
     let (store_layout, first_touch) = match Box::pin(
-        crate::project::TraceDecay::resolve_registered_configuration_layout(
+        tracedecay_project::project::TraceDecay::resolve_registered_configuration_layout(
             project_path,
             &open_options,
             registry_database.as_ref(),
@@ -38,7 +38,7 @@ pub(super) async fn open_project_for_handshake(
         // fallback below bootstrap it.
         Err(err) if handshake.allow_init && is_unregistered_identity_error(&err) => (
             Box::pin(
-                crate::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
+                tracedecay_project::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
                     project_path,
                     &open_options,
                     registry_database.as_ref(),
@@ -89,7 +89,7 @@ pub(super) async fn open_project_for_handshake(
     // and durable store authority; project composition schedules the maintained
     // bounded code-index owner after publication.
     let open_result = Box::pin(
-        crate::project::TraceDecay::open_with_registered_configuration(
+        tracedecay_project::project::TraceDecay::open_with_registered_configuration(
             project_path,
             open_options.clone(),
             store_layout.clone(),
@@ -103,7 +103,7 @@ pub(super) async fn open_project_for_handshake(
         Ok(cg) => Ok(cg),
         Err(open_err) if is_readonly_database_error(&open_err) => {
             match Box::pin(
-                crate::project::TraceDecay::open_read_only_with_registered_configuration(
+                tracedecay_project::project::TraceDecay::open_read_only_with_registered_configuration(
                     project_path,
                     open_options,
                     store_layout,
@@ -127,7 +127,7 @@ pub(super) async fn open_project_for_handshake(
             // activation owner performs indexing after admission, so opening a
             // project never waits for a repository scan or rebuild.
             Box::pin(
-                crate::project::TraceDecay::init_with_registered_configuration(
+                tracedecay_project::project::TraceDecay::init_with_registered_configuration(
                     project_path,
                     open_options,
                     store_layout,
@@ -212,8 +212,13 @@ fn tool_call_open_refusal_response(
     let tool_name = request.params.as_ref()?.get("name")?.as_str()?;
     let request_id =
         tracedecay_contracts::request_identity::mcp_connection_request_id(&id, connection_scope)?;
+    let reset_command = tracedecay_mcp::reset_required_command(authority, None);
     let envelope = tracedecay_daemon_service::application_surface::mcp_project_open_reset_refusal(
-        tool_name, request_id, authority, reason,
+        tool_name,
+        request_id,
+        authority,
+        reason,
+        &reset_command,
     )?;
     let text = serde_json::to_string(&envelope).ok()?;
     let problem = serde_json::to_value(envelope.problem.as_ref()).ok()?;
@@ -227,6 +232,20 @@ fn tool_call_open_refusal_response(
     ))
 }
 
+/// Which route-admission failures turn an MCP `initialize` into an error.
+///
+/// A route the profile has not enrolled is the client's state, not an open
+/// failure: the handshake completes (the host sees the catalog) and every
+/// later `tools/call` re-derives the typed [`PROJECT_NOT_ENROLLED_REASON_CODE`]
+/// refusal until `tracedecay init` or a corrected `--path` makes admission
+/// succeed. Propagating it here used to close the connection with no
+/// response, which the proxy could only report as an unknown transport
+/// outcome. Every other refusal (deferred discovery, remote deletion, reset
+/// required) still answers `initialize` as the typed open error it is.
+pub(super) fn initialize_project_open_error(error: TraceDecayError) -> Option<TraceDecayError> {
+    (!error_is_project_not_enrolled(&error)).then_some(error)
+}
+
 pub(super) fn project_open_error_response(
     id: serde_json::Value,
     error: &TraceDecayError,
@@ -236,7 +255,9 @@ pub(super) fn project_open_error_response(
             reason_code,
             retryable,
             detail,
-        } if project_open_retryable_reason(reason_code) => {
+        } if project_open_retryable_reason(reason_code)
+            || reason_code == PROJECT_NOT_ENROLLED_REASON_CODE =>
+        {
             let mut data = json!({
                 "reason_code": reason_code,
                 "retryable": retryable,
@@ -320,11 +341,16 @@ mod tests {
             envelope["problem"]["legal_actions"],
             serde_json::json!(["reset"])
         );
+        let message = envelope["problem"]["diagnostic"]["message"]
+            .as_str()
+            .expect("diagnostic message");
         assert!(
-            envelope["problem"]["diagnostic"]["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("schema v26 is incompatible")),
+            message.contains("schema v26 is incompatible"),
             "the refusal must carry the store's own reason: {envelope}"
+        );
+        assert!(
+            message.contains("tracedecay storage reset-project-store"),
+            "the refusal must name the exact reset command: {envelope}"
         );
     }
 

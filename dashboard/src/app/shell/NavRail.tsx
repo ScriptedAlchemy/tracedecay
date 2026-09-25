@@ -163,7 +163,7 @@ function RailLink({
             {channelNumber(path)}
           </span>
           <Icon aria-hidden size={14} strokeWidth={1.5} className="shrink-0" />
-          <span className="truncate text-sm">{label}</span>
+          <span className="truncate text-body">{label}</span>
           {health ? <DoctorDot health={health} /> : null}
         </>
       )}
@@ -210,7 +210,7 @@ function useDoctorHealth(): DoctorHealth {
   const findings = useStorageFindings();
   const result = findings.data;
   if (!result || result.outcome === 'transport') return 'unknown';
-  const statuses = result.envelope.payload.kind_statuses;
+  const statuses = result.envelope.payload.storage_kind_statuses;
   // A report naming no producers has established nothing about this store.
   if (statuses.length === 0) return 'unknown';
   const readings = statuses.map(kindHealth);

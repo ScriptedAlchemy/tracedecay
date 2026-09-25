@@ -1,6 +1,6 @@
 use serde_json::{Map, Value, json};
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_capture::claude::normalize as claude_normalize;
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,
@@ -9,10 +9,11 @@ use tracedecay_domain::{
     ObservationSourceRangeV1, ProviderId, RetentionClass, SessionId,
 };
 use tracedecay_privacy::{
-    ClaudeRecordParseErrorV1, ClaudeRecordSanitizerV1, ClaudeSanitizerPolicyV1,
-    PrivacySanitizerError, RecordSanitizerV1, parse_claude_record_v1,
-    parse_normalized_observation_record_v1, parse_observation_record_v1,
+    ClaudeRecordSanitizerV1, ClaudeSanitizerPolicyV1, ObservationRecordParseErrorV1,
+    PrivacySanitizerError, RecordSanitizerV1, parse_normalized_observation_record_v1,
+    parse_observation_record_v1,
 };
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::observation::{
     AdvanceNonDurableSourceCursorRequest, CaptureClaudeObservationOutcome,
@@ -26,6 +27,8 @@ use tracedecay_store::{
     ObservationStore, ProjectionPersistOutcome,
 };
 
+use crate::claude_records;
+
 const GENERATION: u64 = 17;
 const OBSERVATION_TABLES: &[&str] = &[
     "sanitization_receipts",
@@ -36,14 +39,17 @@ const OBSERVATION_TABLES: &[&str] = &[
     "observation_projection_provenance",
     "observation_projection_checkpoints",
     "sessions",
-    "session_messages",
-    "session_messages_fts",
+    "lcm_raw_messages",
+    "lcm_raw_messages_fts",
 ];
 
 fn source(session_id: &str) -> ObservationSourceIdentityV1 {
     ObservationSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap()
 }
 
+/// The capture request the Claude host builds for one transcript record: the
+/// frame is normalized into its canonical envelope while it is parsed, and the
+/// identity carries the host's stable record id.
 fn request(
     session_id: &str,
     record: Value,
@@ -51,18 +57,24 @@ fn request(
 ) -> CaptureClaudeObservationRequest {
     let encoded_frame = serde_json::to_vec(&record).unwrap();
     let frame_end = u64::try_from(encoded_frame.len()).unwrap();
-    let parsed_record = parse_claude_record_v1(
+    let range = ObservationSourceRangeV1::new(0, frame_end).unwrap();
+    let record_id = claude_records::record_id(&record, session_id, 0);
+    let parsed_record = parse_normalized_observation_record_v1(
         &encoded_frame,
-        ObservationSourceRangeV1::new(0, frame_end).unwrap(),
+        range,
+        ObservationOrderingDomainV1::FileBytes,
+        |native| claude_normalize(&native, session_id, record_id.clone(), range),
     )
     .unwrap();
     CaptureClaudeObservationRequest::new(
         parsed_record,
-        ObservationIdentityMaterialV1::new(
+        ObservationIdentityMaterialV1::for_native_record(
             source(session_id),
             ObservationScopeV1::Profile,
             ObservationSourceGenerationV1::new(GENERATION).unwrap(),
-            ObservationSourceRangeV1::new(0, frame_end).unwrap(),
+            range,
+            ObservationOrderingDomainV1::FileBytes,
+            record_id,
         )
         .unwrap(),
         expected_cursor,
@@ -129,11 +141,12 @@ async fn durable_text(runtime: &HostAdmissionTestRuntimeV1) -> Vec<String> {
                  FROM projection_queue
              UNION ALL SELECT provider || session_id || project_key || project_path ||
                  COALESCE(title, '') || COALESCE(metadata_json, '') FROM sessions
-             UNION ALL SELECT provider || message_id || session_id || role || text ||
+             UNION ALL SELECT provider || message_id || session_id || role ||
+                 COALESCE(content, placeholder_text, '') ||
                  COALESCE(kind, '') || COALESCE(model, '') || COALESCE(tool_names, '') ||
-                 COALESCE(metadata_json, '') FROM session_messages
-             UNION ALL SELECT text || role || COALESCE(kind, '') || COALESCE(model, '') ||
-                 COALESCE(tool_names, '') FROM session_messages_fts",
+                 COALESCE(metadata_json, '') FROM lcm_raw_messages
+             UNION ALL SELECT index_text || role || COALESCE(kind, '') || COALESCE(model, '') ||
+                 COALESCE(tool_names, '') FROM lcm_raw_messages_fts",
         )
         .unwrap();
     statement
@@ -419,7 +432,7 @@ async fn native_ordering_domain_survives_authoritative_capture() {
                 }],
                 CanonicalObservationEvidenceV1::new(ordering_domain, range),
             )
-            .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
         })
         .unwrap();
     let request = CaptureObservationRequest::new(
@@ -538,7 +551,7 @@ fn provider_capture_request_with_canonical_provider(
                 }],
                 CanonicalObservationEvidenceV1::new(ordering_domain, range),
             )
-            .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
         })
         .unwrap();
     CaptureObservationRequest::new(

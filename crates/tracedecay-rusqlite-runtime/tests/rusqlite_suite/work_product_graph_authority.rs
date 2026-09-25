@@ -20,9 +20,9 @@ use tracedecay_contracts::{
     AddWorkTaskRequestV1, CancellationContext, CapabilityGrantSnapshot, CreateWorkProductRequestV1,
     Deadline, DisclosureClass, RequestContext, RequestId, ResolvedScope, WorkGraphReadRequestV1,
     WorkGraphReadV1, WorkGraphSelectionCoverageV1, WorkProductApplicationErrorV1,
-    WorkProductBindingV1, WorkProductExpectedAuthorityV1, WorkProductMutationIdentityV1,
-    WorkProductMutationServiceV1, WorkProductReadServiceV1, WorkProductRevisionPinsV1,
-    WorkProductSelectionScopeV1, WorkRelationScopeV1,
+    WorkProductAuthorizedRelationScopeV1, WorkProductBindingV1, WorkProductExpectedAuthorityV1,
+    WorkProductMutationIdentityV1, WorkProductMutationServiceV1, WorkProductReadServiceV1,
+    WorkProductRevisionPinsV1, WorkProductSelectionScopeV1,
 };
 use tracedecay_domain::{
     AcceptanceCriterionId, ActorId, CatalogGenerationId, ConfigurationRevisionId, InitiativeId,
@@ -55,10 +55,12 @@ fn binding() -> WorkProductBindingV1 {
 }
 
 fn repository_selection() -> WorkProductSelectionScopeV1 {
-    WorkProductSelectionScopeV1::relations(BTreeSet::from([WorkRelationScopeV1::Repository {
-        project_id: id(PROJECT),
-        repository_id: id(REPOSITORY),
-    }]))
+    WorkProductSelectionScopeV1::relations(BTreeSet::from([
+        WorkProductAuthorizedRelationScopeV1::Repository {
+            project_id: id(PROJECT),
+            repository_id: id(REPOSITORY),
+        },
+    ]))
     .unwrap()
 }
 
@@ -526,11 +528,11 @@ fn a_selection_naming_another_project_is_refused_rather_than_narrowed() {
     .expect("create the work product");
 
     let foreign = WorkProductSelectionScopeV1::relations(BTreeSet::from([
-        WorkRelationScopeV1::Repository {
+        WorkProductAuthorizedRelationScopeV1::Repository {
             project_id: id(PROJECT),
             repository_id: id(REPOSITORY),
         },
-        WorkRelationScopeV1::Project {
+        WorkProductAuthorizedRelationScopeV1::Project {
             project_id: id::<ProjectId>("project.someone-else"),
         },
     ]))

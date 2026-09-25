@@ -68,7 +68,7 @@ async fn invoke_operation(
                 tracedecay_daemon_protocol::DaemonInvocationRequest::handoff_application(
                     request_id.as_str(),
                     HandoffApplicationInvocationV1::IssueTaskHandoff(decoded),
-                    tracedecay_daemon_protocol::invocation_now_micros(),
+                    tracedecay_contracts::now_micros(),
                     controls.deadline.clone(),
                     controls.cancellation.context(),
                 );
@@ -102,7 +102,7 @@ async fn invoke_operation(
                 tracedecay_daemon_protocol::DaemonInvocationRequest::handoff_application(
                     request_id.as_str(),
                     HandoffApplicationInvocationV1::ListTaskHandoffs(decoded),
-                    tracedecay_daemon_protocol::invocation_now_micros(),
+                    tracedecay_contracts::now_micros(),
                     controls.deadline.clone(),
                     controls.cancellation.context(),
                 );
@@ -140,7 +140,7 @@ async fn invoke_operation(
                 tracedecay_daemon_protocol::DaemonInvocationRequest::handoff_application(
                     request_id.as_str(),
                     HandoffApplicationInvocationV1::OpenInvestigationHandoff(decoded),
-                    tracedecay_daemon_protocol::invocation_now_micros(),
+                    tracedecay_contracts::now_micros(),
                     controls.deadline.clone(),
                     controls.cancellation.context(),
                 );
@@ -174,7 +174,7 @@ async fn invoke_operation(
                 tracedecay_daemon_protocol::DaemonInvocationRequest::handoff_application(
                     request_id.as_str(),
                     HandoffApplicationInvocationV1::OpenTaskHandoff(decoded),
-                    tracedecay_daemon_protocol::invocation_now_micros(),
+                    tracedecay_contracts::now_micros(),
                     controls.deadline.clone(),
                     controls.cancellation.context(),
                 );

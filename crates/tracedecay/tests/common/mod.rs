@@ -28,8 +28,8 @@ use serde_json::Value;
 use tempfile::NamedTempFile;
 use tempfile::TempDir;
 use tokio::sync::OnceCell;
-use tracedecay::config::USER_DATA_DIR_ENV;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_project::config::USER_DATA_DIR_ENV;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionScope};
@@ -74,7 +74,7 @@ static EMPTY_GRAPH_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
 /// from every fixture entry point is safe, idempotent, and always observes the
 /// identical runtime regardless of test order.
 pub fn register_process_product_runtime() {
-    tracedecay::product_runtime::register_fixture_product_runtime();
+    tracedecay_project::product_runtime::register_fixture_product_runtime();
 }
 
 /// Registers the composition root's runtime ports for this test process.
@@ -164,10 +164,107 @@ pub fn lock_global_db_env() -> std::sync::MutexGuard<'static, ()> {
     lock_recovering_poison(&GLOBAL_DB_ENV_LOCK)
 }
 
-/// Serializes [`IsolatedEnv`] users within one test binary: storage isolation
-/// swaps process-wide env vars (`HOME`, `TRACEDECAY_DATA_DIR`, ...), so tests
-/// must not overlap.
-static ISOLATED_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Proof that the holder owns [`PROCESS_ENV_LOCK`], the one lock every
+/// fixture in a binary uses to pin process-wide env vars.
+///
+/// The field is private, so [`lock_process_env`] and
+/// [`lock_process_env_blocking`] are the only ways to obtain one. A fixture
+/// that pins `HOME` takes this by reference, which is what makes "every
+/// `HOME` writer holds the same lock" a compile error to break rather than a
+/// convention: a suite that reached for a lock of its own interleaved with
+/// [`IsolatedEnv`] and read another fixture's home out of `$HOME`.
+pub struct ProcessEnvGuard {
+    root_holder: bool,
+    _guard: tokio::sync::MutexGuard<'static, ()>,
+}
+
+/// Thread whose test body, rather than a task it spawned, holds
+/// [`PROCESS_ENV_LOCK`]. A test body runs as its thread's only root future
+/// (no tokio task id), so that root asking again can never be woken: its
+/// own guard would have to drop first.
+static PROCESS_ENV_ROOT_HOLDER: std::sync::Mutex<Option<std::thread::ThreadId>> =
+    std::sync::Mutex::new(None);
+
+impl ProcessEnvGuard {
+    fn refuse_root_reentry() -> bool {
+        if tokio::task::try_id().is_some() {
+            return false;
+        }
+        let current = std::thread::current().id();
+        assert_ne!(
+            *lock_recovering_poison(&PROCESS_ENV_ROOT_HOLDER),
+            Some(current),
+            "this test already holds PROCESS_ENV_LOCK (an IsolatedEnv or fixture that owns \
+             one is still alive); acquiring it again would deadlock"
+        );
+        true
+    }
+
+    fn held(guard: tokio::sync::MutexGuard<'static, ()>, root_holder: bool) -> Self {
+        if root_holder {
+            *lock_recovering_poison(&PROCESS_ENV_ROOT_HOLDER) = Some(std::thread::current().id());
+        }
+        pin_toolchain_environment();
+        Self {
+            root_holder,
+            _guard: guard,
+        }
+    }
+}
+
+impl Drop for ProcessEnvGuard {
+    fn drop(&mut self) {
+        if self.root_holder {
+            *lock_recovering_poison(&PROCESS_ENV_ROOT_HOLDER) = None;
+        }
+    }
+}
+
+/// Acquires [`PROCESS_ENV_LOCK`] for an async test.
+pub async fn lock_process_env() -> ProcessEnvGuard {
+    let root_holder = ProcessEnvGuard::refuse_root_reentry();
+    ProcessEnvGuard::held(PROCESS_ENV_LOCK.lock().await, root_holder)
+}
+
+/// Sync counterpart of [`lock_process_env`]; panics inside an async context.
+pub fn lock_process_env_blocking() -> ProcessEnvGuard {
+    let root_holder = ProcessEnvGuard::refuse_root_reentry();
+    ProcessEnvGuard::held(PROCESS_ENV_LOCK.blocking_lock(), root_holder)
+}
+
+/// Resolves `RUSTUP_HOME` and `CARGO_HOME` to absolute paths before the first
+/// fixture in this binary swaps `$HOME`.
+///
+/// The rustup shims choose a toolchain through `RUSTUP_HOME`, falling back to
+/// `$HOME/.rustup`. A fixture that swaps `$HOME` therefore breaks `rustc` and
+/// `cargo` for every *other* test running at that moment, including ones that
+/// hold no lock and never touch the environment: five `mcp_suite` tests that
+/// shell out to the toolchain failed with "rustup could not choose a version
+/// of rustc to run" whenever a sibling held a swapped home. Resolving these
+/// once, here, takes `$HOME` out of that lookup for the rest of the run.
+fn pin_toolchain_environment() {
+    static PINNED: std::sync::Once = std::sync::Once::new();
+    PINNED.call_once(|| {
+        let home =
+            std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
+        for (key, directory) in [("RUSTUP_HOME", ".rustup"), ("CARGO_HOME", ".cargo")] {
+            if std::env::var_os(key).is_some() {
+                continue;
+            }
+            let Some(resolved) = home.as_ref().map(|home| home.join(directory)) else {
+                continue;
+            };
+            if !resolved.is_dir() {
+                continue;
+            }
+            // SAFETY: the process env lock is held, this runs once, and it
+            // runs before any fixture in this binary has swapped `$HOME`.
+            unsafe {
+                std::env::set_var(key, resolved);
+            }
+        }
+    });
+}
 
 /// The canonical way to isolate env-mutating tests: serializes tests within
 /// one binary and keeps every test's project registration, store manifests,
@@ -191,11 +288,11 @@ pub struct IsolatedEnv {
     // cargo `target/test-profile` socket, and a swapped `HOME` emptied the
     // Claude transcript root under a running provider fixture.
     _global_db_env_lock: std::sync::MutexGuard<'static, ()>,
-    _env_lock: tokio::sync::MutexGuard<'static, ()>,
+    _env_lock: ProcessEnvGuard,
 }
 
 impl IsolatedEnv {
-    fn build(env_lock: tokio::sync::MutexGuard<'static, ()>) -> (Self, PathBuf) {
+    fn build(env_lock: ProcessEnvGuard) -> (Self, PathBuf) {
         let global_db_env_lock = lock_global_db_env();
         // Every fixture built on top of this guard eventually asks the shipped
         // daemon for a handshake, which reads the registered product runtime.
@@ -252,7 +349,7 @@ impl IsolatedEnv {
     }
 
     pub async fn acquire() -> (Self, PathBuf) {
-        Self::build(ISOLATED_ENV_LOCK.lock().await)
+        Self::build(lock_process_env().await)
     }
 
     /// Sync counterpart of [`IsolatedEnv::acquire`] for plain `#[test]` fns.
@@ -260,7 +357,7 @@ impl IsolatedEnv {
     /// Warning: this uses `blocking_lock`, which panics if called from within
     /// an async context, use [`IsolatedEnv::acquire`] there instead.
     pub fn acquire_blocking() -> (Self, PathBuf) {
-        Self::build(ISOLATED_ENV_LOCK.blocking_lock())
+        Self::build(lock_process_env_blocking())
     }
 
     pub fn home(&self) -> &Path {
@@ -430,14 +527,14 @@ impl TraceDecayStorageEnvGuard {
 /// the env pin alive until just before the lock is released.
 pub struct AgentEnvLock {
     _pin: EnvVarGuard,
-    _lock: tokio::sync::MutexGuard<'static, ()>,
+    _lock: ProcessEnvGuard,
 }
 
 impl AgentEnvLock {
     /// Pins [`USER_DATA_DIR_ENV`] to `<home>/.tracedecay` while holding
     /// [`PROCESS_ENV_LOCK`].
     pub fn pin(home: impl AsRef<Path>) -> Self {
-        let lock = PROCESS_ENV_LOCK.blocking_lock();
+        let lock = lock_process_env_blocking();
         let pin = EnvVarGuard::set(USER_DATA_DIR_ENV, home.as_ref().join(".tracedecay"));
         Self {
             _pin: pin,
@@ -1003,7 +1100,10 @@ pub fn tracedecay_bin() -> PathBuf {
     // this test process only ever registers the fixture product runtime. The
     // released version is the strongest in-process comparison left, so pin
     // the release and accept any build-metadata suffix.
-    let expected_release = format!("tracedecay {}", tracedecay::version::PACKAGE_VERSION);
+    let expected_release = format!(
+        "tracedecay {}",
+        tracedecay_project::version::PACKAGE_VERSION
+    );
     assert!(
         actual == expected_release || actual.starts_with(&format!("{expected_release}+")),
         "{} reported `{actual}`, not release {expected_release}; rebuild it with `cargo build -p tracedecay-cli --bin tracedecay` or set TRACEDECAY_TEST_BIN",

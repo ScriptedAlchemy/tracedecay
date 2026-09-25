@@ -24,7 +24,8 @@ use tracedecay_domain::{
     SourceOccurrenceId, TemporalLaneEvidenceV1, canonical_sha256,
 };
 use tracedecay_temporal_query::TemporalCandidateExport;
-use tracedecay_temporal_query::ports::{ExecutionControl, TemporalPortError};
+use tracedecay_temporal_query::execution::ExecutionControl;
+use tracedecay_temporal_query::ports::TemporalPortError;
 
 use super::ports::{RetrievalPortError, contract_error};
 

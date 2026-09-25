@@ -11,7 +11,7 @@
 use crate::common::fixture::git_run as git;
 #[cfg(feature = "test-transport")]
 use crate::fixture;
-use crate::support::{GLOBAL_DB_ENV_LOCK, GlobalDbEnvGuard, HomeEnvGuard, extract_text};
+use crate::support::{GlobalDbEnvGuard, HomeEnvGuard, extract_text, lock_process_env};
 use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::Arc;
@@ -19,11 +19,11 @@ use std::time::Duration;
 #[cfg(feature = "test-transport")]
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::mcp::tools::{ToolCallRegistryOptions, handle_tool_call_with_registry_options};
-use tracedecay::project::TraceDecay;
 use tracedecay_contracts::SessionTemporalRefreshWakePort;
 use tracedecay_daemon_identity::profile_identity;
 use tracedecay_daemon_service::DaemonSessionRefreshService;
 use tracedecay_mcp::handlers::SessionAuthorities;
+use tracedecay_project::project::TraceDecay;
 use tracedecay_runtime_core::storage::default_profile_root;
 
 const CANCEL_RESULT_SCHEMA: &str = "schema.application.retained.session-refresh-cancel.result";
@@ -219,11 +219,11 @@ async fn production_call(
 #[cfg(feature = "test-transport")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn production_mcp_cancel_refuses_bad_handles_and_keeps_a_finished_receipt() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
+    let env_lock = lock_process_env().await;
     let root = crate::support::test_temp_dir();
     let isolation = root.path().join("composition");
     let home = root.path().join("home");
-    let _home_guard = HomeEnvGuard::set(&home);
+    let _home_guard = HomeEnvGuard::set(&env_lock, &home);
     let project = isolation.join("project");
     std::fs::create_dir_all(project.join("src")).expect("project source directory");
     fixture::write_indexed_fixture_sources(&project);
@@ -451,10 +451,10 @@ async fn production_mcp_cancel_refuses_bad_handles_and_keeps_a_finished_receipt(
 /// the cancelled receipt and a repeat returns that same receipt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancel_of_an_unfinished_refresh_stores_a_cancelled_receipt() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
+    let env_lock = lock_process_env().await;
     let root = crate::support::test_temp_dir();
     let home = root.path().join("home");
-    let _home_guard = HomeEnvGuard::set(&home);
+    let _home_guard = HomeEnvGuard::set(&env_lock, &home);
     let _global_db = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
     let project = root.path().join("project");
     std::fs::create_dir_all(project.join("src")).expect("project source directory");

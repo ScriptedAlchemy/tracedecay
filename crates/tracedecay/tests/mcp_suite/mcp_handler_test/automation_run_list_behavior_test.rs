@@ -142,6 +142,7 @@ fn record(
         backend_attempt_count: 1,
         backend_attempts: Vec::new(),
         fallback_status: None,
+        session_evidence_budget_stage: None,
         report_ref: None,
         artifacts,
         started_at: STARTED_AT.to_owned(),

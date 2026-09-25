@@ -4,12 +4,12 @@ use std::sync::{
 };
 
 use tracedecay_domain::{
-    AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId, Confidence,
+    AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGeneration, CapabilityId, Confidence,
     CoverageReportV1, EntityId, EntityKind, EntityRef, EvidenceClass, FactAssertionId, FactEventId,
     FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1, ObservationScopeV1,
     PayloadAccessState, PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId,
     ProjectionGenerationId, ResolutionAuthorizationV1, RetentionClass, RetrievalAnchorId,
-    RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, ScopeResolutionId, UtcMicros,
+    RetrievalAnchorRecordParts, RetrievalAnchorTarget, ScopeResolutionId, UtcMicros,
     VectorWatermark,
 };
 use tracedecay_store::{
@@ -172,7 +172,7 @@ impl FactStore for FakeAuthority {
     async fn get_retrieval_anchor(
         &self,
         query: RetrievalAnchorQuery,
-    ) -> FactStoreResult<Option<RetrievalAnchorRecordV2>> {
+    ) -> FactStoreResult<Option<RetrievalAnchorRecord>> {
         self.anchor_queries
             .lock()
             .unwrap()
@@ -632,13 +632,13 @@ fn stored_fact(owner: FactOwnerV1, operation: &str, projected_as_of: UtcMicros) 
     .unwrap()
 }
 
-fn profile_anchor() -> RetrievalAnchorRecordV2 {
+fn profile_anchor() -> RetrievalAnchorRecord {
     const DIGEST_A: &str =
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const DIGEST_B: &str =
         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
-        target: RetrievalAnchorTargetV2::Entity(EntityRef {
+    RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
+        target: RetrievalAnchorTarget::Entity(EntityRef {
             id: EntityId::new("entity.memory.external").unwrap(),
             kind: EntityKind::Document,
         }),
@@ -647,7 +647,7 @@ fn profile_anchor() -> RetrievalAnchorRecordV2 {
         occurred_at: None,
         ingested_at: UtcMicros(1),
         evidence_class: EvidenceClass::Observed,
-        source_generation: AnchorSourceGenerationV2::Unknown,
+        source_generation: AnchorSourceGeneration::Unknown,
         projection_generation: ProjectionGenerationId::new("projection.memory.external").unwrap(),
         projection_watermark: VectorWatermark::default(),
         coverage: CoverageReportV1::default(),

@@ -3,7 +3,8 @@ use std::cmp;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tracedecay_domain::SignedCursorKeyRefV1;
 
-use tracedecay_temporal_query::ports::{PageKey, PageRequest, TemporalPortError};
+use tracedecay_temporal_query::paging::{PageKey, PageRequest};
+use tracedecay_temporal_query::ports::TemporalPortError;
 
 use super::super::sql::TemporalSqlRow;
 use super::rows::*;

@@ -148,7 +148,7 @@ chmod +x "$tmpdir/bin/uname" "$tmpdir/bin/curl"
 run_installer() {
   PATH="$tmpdir/bin:$PATH" \
   TRACEDECAY_INSTALL_DIR="$tmpdir/install" \
-  TEST_RELEASES_JSON="$tmpdir/releases.json" \
+  TEST_RELEASES_JSON="${INSTALLER_RELEASES_JSON:-$tmpdir/releases.json}" \
   TEST_ARCHIVE="$tmpdir/${BETA_ASSET}" \
   TEST_CHECKSUMS="${INSTALLER_CHECKSUMS:-$tmpdir/SHA256SUMS}" \
   TEST_STABLE_ARCHIVE="$tmpdir/${STABLE_ASSET}" \
@@ -166,6 +166,44 @@ rm -rf "$tmpdir/install"
 mkdir -p "$tmpdir/install"
 run_installer env TRACEDECAY_VERSION=stable "$INSTALLER"
 [[ "$("$tmpdir/install/tracedecay")" == "tracedecay 9.8.7" ]]
+
+# The live releases payload is hundreds of KB of pretty-printed lines. With the
+# asset URLs near the front and many lines after them, an early-exiting matcher
+# fed by a pipe leaves the writer to die of SIGPIPE under pipefail.
+write_large_releases() {
+  local path=$1
+  local assets=$2
+  {
+    printf '[\n  {\n    "tag_name": "%s",\n    "prerelease": true,\n' "$BETA_TAG"
+    printf '    "assets": [%s],\n    "padding": [\n' "$assets"
+    printf '      "%064d",\n' $(seq 16000)
+    printf '      ""\n    ]\n  }\n]\n'
+  } >"$path"
+  (($(wc -c <"$path") > 1048576))
+}
+
+write_large_releases "$tmpdir/large-releases.json" "$(
+  printf '{"browser_download_url": "https://github.com/ScriptedAlchemy/tracedecay/releases/download/%s/%s"},' \
+    "$BETA_TAG" "$BETA_ASSET"
+  printf '{"browser_download_url": "https://github.com/ScriptedAlchemy/tracedecay/releases/download/%s/SHA256SUMS"}' \
+    "$BETA_TAG"
+)"
+rm -rf "$tmpdir/install"
+mkdir -p "$tmpdir/install"
+INSTALLER_RELEASES_JSON="$tmpdir/large-releases.json" run_installer "$INSTALLER"
+[[ "$("$tmpdir/install/tracedecay")" == "tracedecay 9.8.7-beta.1" ]]
+
+write_large_releases "$tmpdir/large-releases-without-assets.json" ""
+rm -rf "$tmpdir/install"
+mkdir -p "$tmpdir/install"
+if INSTALLER_RELEASES_JSON="$tmpdir/large-releases-without-assets.json" \
+  run_installer "$INSTALLER" >"$tmpdir/no-assets.log" 2>&1; then
+  echo "installer accepted a release without install assets" >&2
+  exit 1
+fi
+grep -Fq "no published release has install assets for x86_64-linux" \
+  "$tmpdir/no-assets.log"
+[[ -z "$(ls -A "$tmpdir/install")" ]]
 
 expect_installer_failure() {
   local checksums=$1

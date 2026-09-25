@@ -6,7 +6,7 @@ fn extract_sample() -> ExtractionResult {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.nix")
         .expect("failed to read sample.nix");
     let extractor = NixExtractor;
-    extractor.extract("sample.nix", &source)
+    extractor.extract_artifact("sample.nix", &source).result
 }
 
 #[test]
@@ -39,51 +39,23 @@ fn test_nix_nested_functions() {
 #[test]
 fn test_nix_docstrings() {
     let result = extract_sample();
-
-    let dp = result
+    let docs: Vec<(&str, &str)> = result
         .nodes
         .iter()
-        .find(|n| n.name == "defaultPort")
-        .unwrap();
-    assert!(dp.docstring.is_some(), "defaultPort should have docstring");
-    assert!(
-        dp.docstring.as_ref().unwrap().contains("Default port"),
-        "docstring: {:?}",
-        dp.docstring
-    );
-
-    let log_fn = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "log")
-        .unwrap();
-    assert!(
-        log_fn.docstring.is_some(),
-        "log function should have docstring"
-    );
-    assert!(
-        log_fn
-            .docstring
-            .as_ref()
-            .unwrap()
-            .contains("Formats a log message"),
-        "docstring: {:?}",
-        log_fn.docstring
-    );
-
-    let net = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Module && n.name == "networking")
-        .unwrap();
-    assert!(net.docstring.is_some(), "networking should have docstring");
-    assert!(
-        net.docstring
-            .as_ref()
-            .unwrap()
-            .contains("Networking utilities"),
-        "docstring: {:?}",
-        net.docstring
+        .filter_map(|n| Some((n.name.as_str(), n.docstring.as_deref()?)))
+        .collect();
+    assert_eq!(
+        docs,
+        [
+            ("defaultPort", "Default port for the service."),
+            ("maxRetries", "Maximum retry count."),
+            ("log", "Formats a log message."),
+            ("mkConnection", "Builds a connection configuration."),
+            ("networking", "Networking utilities."),
+            ("mkPool", "Creates a connection pool."),
+            ("validateConfig", "Validates a connection config."),
+            ("service", "Package definition."),
+        ]
     );
 }
 
@@ -95,7 +67,6 @@ fn test_nix_call_sites() {
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
-    assert!(!call_refs.is_empty(), "should have call site refs");
     assert!(
         call_refs.iter().any(|r| r.reference_name == "mkConnection"),
         "should find mkConnection call, got: {:?}",
@@ -155,7 +126,7 @@ fn extract_flake() -> ExtractionResult {
     let source = std::fs::read_to_string("../../tests/fixtures/sample-flake.nix")
         .expect("failed to read sample-flake.nix");
     let extractor = NixExtractor;
-    extractor.extract("flake.nix", &source)
+    extractor.extract_artifact("flake.nix", &source).result
 }
 
 // -------------------------------------------------------------------
@@ -165,37 +136,20 @@ fn extract_flake() -> ExtractionResult {
 #[test]
 fn test_nix_import_path_resolution() {
     let result = extract_sample();
-
-    let uses: Vec<_> = result
+    let import_nodes: Vec<(&NodeKind, &str)> = result
         .nodes
         .iter()
-        .filter(|n| n.kind == NodeKind::Use && n.name == "./utils.nix")
+        .filter(|n| n.kind != NodeKind::File && n.name.ends_with(".nix"))
+        .map(|n| (&n.kind, n.name.as_str()))
         .collect();
-    assert!(
-        !uses.is_empty(),
-        "should have Use node for import ./utils.nix, got uses: {:?}",
-        result
-            .nodes
-            .iter()
-            .filter(|n| n.kind == NodeKind::Use)
-            .map(|n| &n.name)
-            .collect::<Vec<_>>()
-    );
-
-    let uses_refs: Vec<_> = result
+    assert_eq!(import_nodes, [(&NodeKind::Use, "./utils.nix")]);
+    let import_refs: Vec<(&EdgeKind, &str)> = result
         .unresolved_refs
         .iter()
-        .filter(|r| r.reference_kind == EdgeKind::Uses && r.reference_name == "./utils.nix")
+        .filter(|r| r.reference_name.ends_with(".nix"))
+        .map(|r| (&r.reference_kind, r.reference_name.as_str()))
         .collect();
-    assert!(
-        !uses_refs.is_empty(),
-        "should have unresolved Uses ref for ./utils.nix, got: {:?}",
-        result
-            .unresolved_refs
-            .iter()
-            .map(|r| (&r.reference_kind, &r.reference_name))
-            .collect::<Vec<_>>()
-    );
+    assert_eq!(import_refs, [(&EdgeKind::Uses, "./utils.nix")]);
 }
 
 // -------------------------------------------------------------------

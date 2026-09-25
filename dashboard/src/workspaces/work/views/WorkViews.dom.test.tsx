@@ -304,6 +304,7 @@ describe('the projection switcher', () => {
     expect(tabs.map((tab) => tab.textContent)).toEqual([
       'Board',
       'DAG',
+      'Matrix',
       'Timeline',
       'Causal',
       'Workload',

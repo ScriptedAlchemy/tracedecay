@@ -29,12 +29,22 @@ pub fn timestamp_secs(value: &Value) -> Option<i64> {
 /// Chrono deliberately accepts RFC3339's space separator and mixed-case
 /// literals, matching the provider timestamp forms capture accepts.
 pub fn parse_rfc3339_timestamp(value: &str) -> Option<i64> {
+    parse_rfc3339(value).map(|timestamp| timestamp.timestamp())
+}
+
+/// Parses RFC3339 timestamps into Unix microseconds, keeping the sub-second
+/// precision hosts record on edit events.
+pub fn parse_rfc3339_timestamp_micros(value: &str) -> Option<i64> {
+    parse_rfc3339(value).map(|timestamp| timestamp.timestamp_micros())
+}
+
+fn parse_rfc3339(value: &str) -> Option<DateTime<FixedOffset>> {
     let bytes = value.as_bytes();
     if bytes.get(17) == Some(&b'6') && bytes.get(18) == Some(&b'0') {
         return None;
     }
-    let timestamp = DateTime::parse_from_rfc3339(value).ok()?.timestamp();
-    (timestamp >= 0).then_some(timestamp)
+    let timestamp = DateTime::parse_from_rfc3339(value).ok()?;
+    (timestamp.timestamp() >= 0).then_some(timestamp)
 }
 
 /// Parses Cursor's human-readable timestamp format into Unix seconds.

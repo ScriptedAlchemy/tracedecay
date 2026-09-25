@@ -144,6 +144,10 @@ function WorkProjectionView({
       return (
         <WorkDagView snapshot={snapshot} graph={graph} selected={selected} onSelect={onSelect} />
       );
+    case 'matrix':
+      return (
+        <WorkDagView snapshot={snapshot} graph={graph} selected={selected} onSelect={onSelect} view="matrix" />
+      );
     case 'timeline':
       return (
         <WorkTimelineView

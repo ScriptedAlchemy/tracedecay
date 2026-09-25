@@ -4,10 +4,11 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use super::HttpApplicationOwnerKind;
 
+/// `None` for operations that have no HTTP binding.
 pub const fn http_application_owner_kind(
     operation: ApplicationSurfaceOperation,
-) -> HttpApplicationOwnerKind {
-    match operation {
+) -> Option<HttpApplicationOwnerKind> {
+    Some(match operation {
         ApplicationSurfaceOperation::GitStatus
         | ApplicationSurfaceOperation::GitDiff
         | ApplicationSurfaceOperation::GitHistory
@@ -90,5 +91,51 @@ pub const fn http_application_owner_kind(
         | ApplicationSurfaceOperation::ContextScoutFeedback => {
             HttpApplicationOwnerKind::ContextScout
         }
-    }
+        ApplicationSurfaceOperation::StrReplace
+        | ApplicationSurfaceOperation::MultiStrReplace
+        | ApplicationSurfaceOperation::InsertAt
+        | ApplicationSurfaceOperation::AstGrepRewrite
+        | ApplicationSurfaceOperation::ReplaceSymbol
+        | ApplicationSurfaceOperation::InsertAtSymbol
+        | ApplicationSurfaceOperation::MoveSymbol
+        | ApplicationSurfaceOperation::RenameSymbol
+        | ApplicationSurfaceOperation::SourceEditReconcile
+        | ApplicationSurfaceOperation::SourceEditRollback
+        | ApplicationSurfaceOperation::Context
+        | ApplicationSurfaceOperation::Node
+        | ApplicationSurfaceOperation::Impact
+        | ApplicationSurfaceOperation::Similar
+        | ApplicationSurfaceOperation::Redundancy
+        | ApplicationSurfaceOperation::RenamePreview
+        | ApplicationSurfaceOperation::PortStatus
+        | ApplicationSurfaceOperation::PortOrder
+        | ApplicationSurfaceOperation::Todos => return None,
+        ApplicationSurfaceOperation::FactStoreCurate
+        | ApplicationSurfaceOperation::FactStoreAdd
+        | ApplicationSurfaceOperation::FactStoreSearch
+        | ApplicationSurfaceOperation::FactStoreProbe
+        | ApplicationSurfaceOperation::FactStoreRelated
+        | ApplicationSurfaceOperation::FactStoreReason
+        | ApplicationSurfaceOperation::FactStoreContradict
+        | ApplicationSurfaceOperation::FactStoreGet
+        | ApplicationSurfaceOperation::FactStoreUpdate
+        | ApplicationSurfaceOperation::FactStoreRemove
+        | ApplicationSurfaceOperation::FactStoreSupersede
+        | ApplicationSurfaceOperation::FactStoreList
+        | ApplicationSurfaceOperation::FactFeedback
+        | ApplicationSurfaceOperation::MemoryStatus
+        | ApplicationSurfaceOperation::SessionRefreshStatus
+        | ApplicationSurfaceOperation::SessionRefreshCancel
+        | ApplicationSurfaceOperation::SessionRefreshBegin
+        | ApplicationSurfaceOperation::MessageSearch
+        | ApplicationSurfaceOperation::SessionsFor
+        | ApplicationSurfaceOperation::Workflows
+        | ApplicationSurfaceOperation::LcmStatus
+        | ApplicationSurfaceOperation::LcmDoctor
+        | ApplicationSurfaceOperation::LcmLoadSession
+        | ApplicationSurfaceOperation::LcmGrep
+        | ApplicationSurfaceOperation::LcmDescribe
+        | ApplicationSurfaceOperation::LcmExpand
+        | ApplicationSurfaceOperation::LcmExpandQuery => HttpApplicationOwnerKind::Retained,
+    })
 }

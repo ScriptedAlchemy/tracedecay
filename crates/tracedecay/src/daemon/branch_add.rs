@@ -19,6 +19,7 @@ use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::logging::log_daemon_event;
 
 use super::{DaemonHandshake, StoreAdministration};
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 const BRANCH_ADD_TOOL_NAME: &str = "tracedecay_admin_branch_add";
 const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";
@@ -144,7 +145,7 @@ pub(super) async fn branch_add_response(
 async fn activate_and_track_manual_branch(
     administration: &StoreAdministration,
     project_root: &Path,
-    graph: &Arc<crate::project::TraceDecay>,
+    graph: &Arc<tracedecay_project::project::TraceDecay>,
     schedulers: &CodeIndexSchedulerRegistryV1,
     branch: &str,
 ) -> Result<BranchAddOutcome, TraceDecayError> {
@@ -312,7 +313,10 @@ async fn mount_published_branch_query_authority(
     let Some(session_db) = sessions.mounted_project_sessions(&project_id).await else {
         return;
     };
-    let cursor_keys = match session_db.load_session_cursor_key_provider_result().await {
+    let cursor_keys = match SessionTemporalAccess::new(&*session_db)
+        .load_session_cursor_key_provider_result()
+        .await
+    {
         Ok(cursor_keys) => cursor_keys,
         Err(error) => {
             tracing::debug!(
@@ -348,7 +352,7 @@ async fn mount_published_branch_query_authority(
 #[hotpath::measure(label = "daemon.branch_add.owner", future = true)]
 pub(super) async fn activate_and_track_manual_branch_owned(
     project_root: std::path::PathBuf,
-    graph: Arc<crate::project::TraceDecay>,
+    graph: Arc<tracedecay_project::project::TraceDecay>,
     schedulers: CodeIndexSchedulerRegistryV1,
     branch: String,
     data_root: std::path::PathBuf,
@@ -432,7 +436,7 @@ pub(super) async fn activate_and_track_manual_branch_owned(
 }
 
 pub(crate) fn branch_publication_context(
-    graph: &crate::project::TraceDecay,
+    graph: &tracedecay_project::project::TraceDecay,
 ) -> Result<BranchPublicationContextV1, TraceDecayError> {
     BranchPublicationContextV1::new(
         graph.store_layout().identity.project_id.as_deref(),
@@ -442,7 +446,7 @@ pub(crate) fn branch_publication_context(
 }
 
 fn graph_matches_project(
-    graph: &crate::project::TraceDecay,
+    graph: &tracedecay_project::project::TraceDecay,
     canonical_root: &std::path::Path,
 ) -> bool {
     graph.project_root() == canonical_root

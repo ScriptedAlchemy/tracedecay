@@ -461,3 +461,93 @@ fn svelte_artifact_wrapper_does_not_drop_script_type_import_evidence() {
     assert_eq!(row.start_line, 1);
     assert_eq!(row.start_column, 14);
 }
+
+/// `export … from` forwards bindings without binding them locally: each
+/// forwarded name is public import evidence (`is_public`), a `*` forward is a
+/// public glob, and the exported name is the local name so a barrel walk can
+/// follow `export { sum as add }` from `add` back to `sum`.
+#[test]
+fn reexport_statements_are_public_import_evidence() {
+    let source = concat!(
+        "export * from \"./format\";\n",
+        "export { sum as add, type Shape } from \"./math\";\n",
+        "export * as ns from \"./ns\";\n",
+        "import { local } from \"./local\";\n",
+        "export { local };\n",
+    );
+    let artifact = TypeScriptExtractor.extract_artifact("packages/shared/src/index.ts", source);
+    assert!(
+        artifact.result.errors.is_empty(),
+        "{:?}",
+        artifact.result.errors
+    );
+    let rows = artifact
+        .imports
+        .iter()
+        .map(|row| {
+            (
+                row.module_specifier.as_str(),
+                row.imported_name.as_deref(),
+                row.local_name.as_deref(),
+                row.is_public,
+                row.is_glob,
+                row.namespace,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "./format",
+                Some("*"),
+                None,
+                true,
+                true,
+                ImportNamespaceV1::Value
+            ),
+            (
+                "./math",
+                Some("sum"),
+                Some("add"),
+                true,
+                false,
+                ImportNamespaceV1::Value
+            ),
+            (
+                "./math",
+                Some("Shape"),
+                Some("Shape"),
+                true,
+                false,
+                ImportNamespaceV1::Type
+            ),
+            (
+                "./ns",
+                Some("*"),
+                Some("ns"),
+                true,
+                false,
+                ImportNamespaceV1::Value
+            ),
+            (
+                "./local",
+                Some("local"),
+                Some("local"),
+                false,
+                false,
+                ImportNamespaceV1::Value
+            ),
+        ]
+    );
+    assert!(
+        artifact
+            .result
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Export)
+            .count()
+            >= 2,
+        "the raw export statement nodes stay in the graph"
+    );
+}

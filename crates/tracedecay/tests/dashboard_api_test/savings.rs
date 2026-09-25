@@ -17,9 +17,9 @@ use crate::runtime::DashboardTestRuntimeV1;
 use serde_json::Value;
 use std::sync::Arc;
 use tempfile::TempDir;
-use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
 use tracedecay_global_db::ParseOffset;
+use tracedecay_project::config::USER_DATA_DIR_ENV;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::SessionRecord;
 
@@ -70,11 +70,6 @@ fn session(session_id: &str, project: &Path, started_at: i64, title: &str) -> Se
     }
 }
 
-/// Chars/4 estimate matching the backend SQL `(LENGTH(text)+3)/4`.
-fn est_tokens(text: &str) -> i64 {
-    (text.len() as i64 + 3) / 4
-}
-
 const TEXT_USER: &str = "Please add a savings and cost accounting tab to the dashboard.";
 const TEXT_ASSISTANT: &str =
     "Done: the new tab reads the savings ledger and prices sessions with OpenRouter data.";
@@ -84,10 +79,6 @@ const TEXT_MIXED: &str = "Second message of the mixed session, no usage record h
 struct SavingsSeed<'a>(&'a DashboardTestRuntimeV1);
 
 impl SavingsSeed<'_> {
-    async fn upsert(&self, project: &Path, tokens_saved: u64) {
-        self.0.upsert(project, tokens_saved).await;
-    }
-
     async fn record_savings(
         &self,
         project: &str,
@@ -138,12 +129,8 @@ impl SavingsSeed<'_> {
     }
 }
 
-async fn seed_ledger_db(runtime: &DashboardTestRuntimeV1, project: &Path, day_start: i64) {
+async fn seed_ledger_db(runtime: &DashboardTestRuntimeV1, day_start: i64) {
     let gdb = SavingsSeed(runtime);
-
-    // Lifetime counter (legacy `projects.tokens_saved`, what `tracedecay
-    // gain` reports as the lifetime number).
-    gdb.upsert(project, 47_000).await;
 
     // Savings ledger: two events today, one yesterday (same shape as
     // tests/gain_test.rs so totals line up with the CLI behavior).
@@ -162,7 +149,7 @@ async fn seed_ledger_db(runtime: &DashboardTestRuntimeV1, project: &Path, day_st
 }
 
 async fn seed_global_db(runtime: &DashboardTestRuntimeV1, project: &Path, day_start: i64) {
-    seed_ledger_db(runtime, project, day_start).await;
+    seed_ledger_db(runtime, day_start).await;
     let gdb = SavingsSeed(runtime);
 
     // S1: transcript metadata carries Anthropic usage fields. The costs
@@ -437,7 +424,7 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
     let cg = host_runtime
         .initialize_project_graph_for_test(
             &project_root,
-            tracedecay::project::TraceDecayOpenOptions {
+            tracedecay_project::project::TraceDecayOpenOptions {
                 profile_root: Some(profile_root.clone()),
                 global_db_path: None,
             },
@@ -446,7 +433,7 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
         .expect("tracedecay init");
     match seed {
         FixtureSeed::Base => seed_global_db(&host_runtime, &project_root, day_start).await,
-        FixtureSeed::LedgerOnly => seed_ledger_db(&host_runtime, &project_root, day_start).await,
+        FixtureSeed::LedgerOnly => seed_ledger_db(&host_runtime, day_start).await,
         FixtureSeed::DailyLimitRegression => {
             seed_daily_limit_regression(&host_runtime, &project_root, day_start).await;
         }
@@ -462,13 +449,15 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
         let _ = dashboard::run_until_shutdown_for_tests_with_host_admission(
             server_graph,
             authority,
-            dashboard::DashboardTestProjectGraphsV1::default(),
-            dashboard::DashboardTestEndpointV1 {
+            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::DashboardTestEndpointV1 {
                 host: "127.0.0.1",
                 port,
             },
-            tracedecay::product_runtime::register_fixture_product_runtime().build_version(),
-            dashboard::spa_router(tracedecay::product_runtime::FIXTURE_DASHBOARD_ASSETS),
+            tracedecay_project::product_runtime::register_fixture_product_runtime().build_version(),
+            tracedecay_api::static_dashboard_router(std::sync::Arc::new(
+                tracedecay_project::product_runtime::FIXTURE_DASHBOARD_ASSETS,
+            )),
             std::future::pending(),
         )
         .await;
@@ -485,15 +474,6 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
     }
 }
 
-fn find_session<'a>(payload: &'a Value, session_id: &str) -> &'a Value {
-    payload["sessions"]
-        .as_array()
-        .expect("sessions array")
-        .iter()
-        .find(|row| row["session_id"] == session_id)
-        .unwrap_or_else(|| panic!("session {session_id} missing from payload"))
-}
-
 fn find_model<'a>(rows: &'a Value, model: &Value) -> &'a Value {
     rows.as_array()
         .expect("model rows array")
@@ -503,7 +483,7 @@ fn find_model<'a>(rows: &'a Value, model: &Value) -> &'a Value {
 }
 
 #[test]
-fn savings_ledger_endpoints_reflect_seeded_ledger() {
+fn savings_overview_reflects_seeded_ledger() {
     let _lock = ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -518,7 +498,7 @@ fn savings_ledger_endpoints_reflect_seeded_ledger() {
         assert_eq!(caps["features"]["savings"], true);
         assert_eq!(caps["dashboards"], serde_json::json!(["tracedecay"]));
 
-        // Overview: ledger totals + lifetime counters.
+        // Overview: ledger window totals.
         let (status, overview) = get_json(
             &agent,
             &format!("{}/api/plugins/savings/overview", fixture.base_url),
@@ -536,56 +516,6 @@ fn savings_ledger_endpoints_reflect_seeded_ledger() {
         assert_eq!(savings["ledger"]["all_time"]["calls"], 3);
         assert_eq!(savings["ledger"]["today"]["saved_tokens"], 14_250);
         assert_eq!(savings["ledger"]["today"]["calls"], 2);
-        assert_eq!(savings["lifetime_counters"]["total_tokens_saved"], 47_000);
-        assert_eq!(savings["lifetime_counters"]["project_total"], 1);
-        assert_eq!(savings["lifetime_counters"]["projects_limit"], 25);
-        assert_eq!(savings["lifetime_counters"]["projects_truncated"], false);
-        assert_eq!(
-            savings["lifetime_counters"]["projects"]
-                .as_array()
-                .expect("projects")
-                .len(),
-            1
-        );
-
-        // Ledger breakdowns (range=all).
-        let (_, ledger) = get_json(
-            &agent,
-            &format!("{}/api/plugins/savings/ledger?range=all", fixture.base_url),
-        );
-        assert_eq!(ledger["total"]["saved_tokens"], 16_150);
-        let by_tool = ledger["by_tool"].as_array().expect("by_tool");
-        let context = by_tool
-            .iter()
-            .find(|row| row["tool"] == "tracedecay_context")
-            .expect("context tool row");
-        assert_eq!(context["saved_tokens"], 14_250);
-        assert_eq!(context["calls"], 2);
-        let search = by_tool
-            .iter()
-            .find(|row| row["tool"] == "tracedecay_search")
-            .expect("search tool row");
-        assert_eq!(search["saved_tokens"], 1_900);
-        let by_project = ledger["by_project"].as_array().expect("by_project");
-        assert_eq!(by_project.len(), 2);
-        assert!(
-            by_project
-                .iter()
-                .any(|row| row["project"] == "/proj/a" && row["saved_tokens"] == 11_400)
-        );
-        let by_day = ledger["by_day"].as_array().expect("by_day");
-        assert_eq!(by_day.len(), 2, "today + yesterday buckets");
-
-        // Range filter narrows to today's events.
-        let (_, today) = get_json(
-            &agent,
-            &format!(
-                "{}/api/plugins/savings/ledger?range=today",
-                fixture.base_url
-            ),
-        );
-        assert_eq!(today["total"]["saved_tokens"], 14_250);
-        assert_eq!(today["total"]["calls"], 2);
     });
 }
 
@@ -687,102 +617,8 @@ fn session_content_counts_ignore_metadata_usage_without_canonical_provider_evide
         let counting = overview["sessions"]["token_counting"] == true;
         let nonusage_basis = if counting { "tokenized" } else { "estimated" };
 
-        let (status, payload) = get_json(
-            &agent,
-            &format!(
-                "{}/api/plugins/savings/sessions?range=all",
-                fixture.base_url
-            ),
-        );
-        assert_eq!(status, 200);
-        assert_eq!(payload["available"], true);
-        assert_eq!(payload["total"], 5);
-
-        // Session metadata is content context, never billing authority.
-        let usage_session = find_session(&payload, "sess-usage");
-        assert_eq!(usage_session["cost_basis"], nonusage_basis);
-        assert_eq!(usage_session["provider_usage_events"], 0);
-        let usage_model = &usage_session["models"][0];
-        assert_eq!(usage_model["model"], "claude-fable-5-thinking-high");
-        assert_eq!(usage_model["cost_basis"], nonusage_basis);
-        assert!(usage_model["provider_actual"].is_null());
-
-        // S2: no usage → tokenized (BPE-counted) when the tokenizer is
-        // compiled in, chars/4 estimated otherwise. gpt-5.5-high maps to
-        // the o200k_base encoder exactly.
-        let nonusage_session = find_session(&payload, "sess-estimated");
-        assert_eq!(nonusage_session["cost_basis"], nonusage_basis);
-        let nonusage_model = &nonusage_session["models"][0];
-        assert_eq!(nonusage_model["model"], "gpt-5.5-high");
-        assert_eq!(nonusage_model["cost_basis"], nonusage_basis);
-        assert!(nonusage_model["provider_actual"].is_null());
-        if counting {
-            assert_eq!(nonusage_model["tokenizer"]["encoder"], "o200k_base");
-            assert_eq!(nonusage_model["tokenizer"]["exact"], true);
-            assert_eq!(nonusage_model["tokenized_messages"], 2);
-            assert_eq!(nonusage_model["estimated_messages"], 0);
-            let bpe_in = nonusage_model["tokenized"]["input_tokens"]
-                .as_i64()
-                .expect("tokenized input");
-            let bpe_out = nonusage_model["tokenized"]["output_tokens"]
-                .as_i64()
-                .expect("tokenized output");
-            assert!(bpe_in > 0 && bpe_in <= TEXT_USER.len() as i64);
-            assert!(bpe_out > 0 && bpe_out <= TEXT_ASSISTANT.len() as i64);
-            assert_eq!(nonusage_model["estimated"]["input_tokens"], 0);
-            assert_eq!(nonusage_model["estimated"]["output_tokens"], 0);
-        } else {
-            assert_eq!(
-                nonusage_model["estimated"]["input_tokens"],
-                est_tokens(TEXT_USER)
-            );
-            assert_eq!(
-                nonusage_model["estimated"]["output_tokens"],
-                est_tokens(TEXT_ASSISTANT)
-            );
-        }
-
-        // S3: no model id → null model, tokens still counted (approximate
-        // o200k when tokenized. There is no tokenizer to be exact with).
-        let unknown_session = find_session(&payload, "sess-unknown");
-        let unknown_model = &unknown_session["models"][0];
-        assert!(unknown_model["model"].is_null());
-        if counting {
-            assert_eq!(unknown_model["tokenizer"]["exact"], false);
-            assert!(unknown_model["tokenized"]["output_tokens"].as_i64() > Some(0));
-        } else {
-            assert_eq!(
-                unknown_model["estimated"]["output_tokens"],
-                est_tokens(TEXT_UNKNOWN)
-            );
-        }
-
-        // Codex-shaped metadata is ignored for the same reason.
-        let codex_session = find_session(&payload, "sess-codex");
-        assert_eq!(codex_session["cost_basis"], nonusage_basis);
-        let codex_model = &codex_session["models"][0];
-        assert_eq!(codex_model["model"], "gpt-5.3-codex-high");
-        assert_eq!(codex_model["cost_basis"], nonusage_basis);
-        assert!(codex_model["provider_actual"].is_null());
-
-        // Mixed metadata/no-metadata rows remain one content-count tier.
-        let mixed_session = find_session(&payload, "sess-mixed");
-        assert_eq!(mixed_session["cost_basis"], nonusage_basis);
-        let mixed_model = &mixed_session["models"][0];
-        assert_eq!(mixed_model["cost_basis"], nonusage_basis);
-        assert!(mixed_model["provider_actual"].is_null());
-        if counting {
-            // claude-* has no public tokenizer → labeled approximation.
-            assert_eq!(mixed_model["tokenizer"]["exact"], false);
-            assert!(mixed_model["tokenized"]["output_tokens"].as_i64() > Some(0));
-        } else {
-            assert_eq!(
-                mixed_model["estimated"]["output_tokens"],
-                est_tokens(TEXT_MIXED)
-            );
-        }
-
         // Models endpoint: per-model content aggregates and canonical provider usage.
+        // Session metadata is content context, never billing authority.
         let (_, models) = get_json(
             &agent,
             &format!("{}/api/plugins/savings/models?range=all", fixture.base_url),
@@ -860,42 +696,32 @@ fn session_content_counts_ignore_metadata_usage_without_canonical_provider_evide
 }
 
 #[test]
-fn pricing_serves_content_addressed_bundled_snapshot() {
+fn overview_pricing_reports_bundled_snapshot_provenance() {
     let _lock = ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(FixtureSeed::Base).await;
-        let agent = http_agent();
 
-        let (status, pricing) = get_json(
-            &agent,
-            &format!("{}/api/plugins/savings/pricing", fixture.base_url),
+        let (status, overview) = get_json(
+            &http_agent(),
+            &format!("{}/api/plugins/savings/overview", fixture.base_url),
         );
         assert_eq!(status, 200);
+        let pricing = &overview["payload"]["pricing"];
         assert_eq!(pricing["source"], "bundled");
         assert_eq!(pricing["offline"], true);
         assert!(pricing["fetched_at"].is_null());
         assert!(
+            pricing["revision"]
+                .as_str()
+                .is_some_and(|revision| revision.starts_with("sha256:")),
+            "bundled snapshot must be content-addressed: {pricing}"
+        );
+        assert!(
             pricing["model_count"].as_i64().expect("model count") > 50,
             "bundled snapshot should carry a broad model set"
         );
-        let fable = &pricing["models"]["anthropic/claude-fable-5"];
-        assert!(fable["prompt_per_mtok"].as_f64().expect("prompt price") > 0.0);
-        assert!(
-            fable["completion_per_mtok"]
-                .as_f64()
-                .expect("completion price")
-                > 0.0
-        );
-
-        // The overview embeds the same provenance block.
-        let (_, overview) = get_json(
-            &agent,
-            &format!("{}/api/plugins/savings/overview", fixture.base_url),
-        );
-        assert_eq!(overview["payload"]["pricing"]["source"], "bundled");
-        assert_eq!(overview["payload"]["pricing"]["offline"], true);
     });
 }

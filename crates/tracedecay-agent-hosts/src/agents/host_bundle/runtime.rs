@@ -14,13 +14,12 @@ use super::planner::{
 };
 use super::{
     HostBundleArtifactContentV1, HostBundleError, HostBundleInstallReceiptV1,
-    HostBundleLifecycleOpV1, HostBundleManifestV1, HostBundleRollbackBoundaryV1,
-    HostBundleVerificationAdapterV1, HostKindV1,
+    HostBundleLifecycleOpV1, HostBundleManifestV1, HostBundleVerificationAdapterV1, HostKindV1,
 };
 
 /// Production-composition seam for independently injected cryptographic and
-/// filesystem authorities. It verifies before it asks storage to recover or
-/// mutate, so an incompatible catalog entry cannot trigger filesystem access.
+/// filesystem authorities. It verifies before it asks storage to mutate, so an
+/// incompatible catalog entry cannot trigger filesystem access.
 pub struct HostBundleLifecycleRuntimeV1<V, S> {
     verifier: V,
     storage: S,
@@ -66,14 +65,13 @@ where
             orphan_observed,
             &self.verifier,
         )?;
-        let backup_relative_paths = plan
+        let replaced_relative_paths = plan
             .mutations
             .iter()
             .filter(|mutation| {
                 matches!(
                     mutation.action,
-                    HostArtifactActionV1::BackupThenReplace
-                        | HostArtifactActionV1::BackupThenRemove
+                    HostArtifactActionV1::Replace | HostArtifactActionV1::Remove
                 )
             })
             .map(|mutation| mutation.relative_path.clone())
@@ -86,15 +84,10 @@ where
                 operation_id: request.operation_id,
                 host: manifest.host,
                 component: manifest.component,
-                backup_relative_paths,
-                interrupted_recovery_required: plan.rollback_required,
+                replaced_relative_paths,
             },
             plan,
         })
-    }
-
-    pub fn recover(&mut self) -> Result<(), HostBundleError> {
-        self.storage.recover_lifecycle()
     }
 
     pub fn execute(
@@ -104,8 +97,6 @@ where
         contents: &[HostBundleArtifactContentV1],
     ) -> Result<HostBundleInstallReceiptV1, HostBundleError> {
         self.verifier.verify_manifest(manifest)?;
-        // execute_lifecycle recovers this manifest's host. Recovering every
-        // host here would roll back an unrelated host's journal.
         self.storage
             .execute_lifecycle(manifest, request, contents, &self.verifier)
     }
@@ -230,9 +221,6 @@ where
             return Err(HostBundleError::ConfirmationRequired);
         }
         validate_receipt(&switch_receipt.apply_receipt)?;
-        if switch_receipt.apply_receipt.rollback_boundary != HostBundleRollbackBoundaryV1::Passed {
-            return Err(HostBundleError::ReceiptCorrupted);
-        }
         if previous_manifest.host != switch_receipt.host
             || previous_manifest.canonical_digest()? != switch_receipt.previous_manifest_digest
             || request.lifecycle.operation != HostBundleLifecycleOpV1::Repair

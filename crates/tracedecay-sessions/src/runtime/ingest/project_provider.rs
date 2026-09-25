@@ -15,8 +15,9 @@ use crate::runtime::source::{
     run_blocking_transcript_section,
 };
 use crate::runtime::{
-    SessionProvider, claude, claude_observation, cline_like, codex, cursor, cursor_composer,
-    hermes, kimi, kiro, opencode, vibe,
+    SessionProvider, hosts::claude, hosts::claude_observation, hosts::cline_like, hosts::codex,
+    hosts::cursor, hosts::cursor_composer, hosts::hermes, hosts::kimi, hosts::kiro,
+    hosts::opencode, hosts::vibe,
 };
 
 use super::failure::{
@@ -817,11 +818,11 @@ async fn ingest_project_claude_observations(
 mod tests {
     use std::collections::BTreeSet;
 
-    use crate::runtime::claude_observation::{
+    use crate::runtime::hosts::claude_observation::{
         ClaudeObservationIngestError, ClaudeObservationIngestStats,
     };
-    use crate::runtime::cursor::{CursorSweepIngestOutcome, CursorTranscriptIngestStats};
-    use crate::runtime::cursor_composer::CursorComposerSweepOutcome;
+    use crate::runtime::hosts::cursor::{CursorSweepIngestOutcome, CursorTranscriptIngestStats};
+    use crate::runtime::hosts::cursor_composer::CursorComposerSweepOutcome;
     use crate::runtime::shared::TranscriptIngestStats;
     use crate::runtime::source::TranscriptIngestError;
 
@@ -830,7 +831,7 @@ mod tests {
         codex_source_failure_saturates_pass, cursor_composer_run_outcome, hermes_run_outcome,
         merge_cursor_sweep_outcome,
     };
-    use crate::runtime::hermes::HermesSweepOutcome;
+    use crate::runtime::hosts::hermes::HermesSweepOutcome;
 
     #[test]
     fn codex_source_failures_bound_each_provider_pass() {

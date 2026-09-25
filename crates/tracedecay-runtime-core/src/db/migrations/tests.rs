@@ -5,11 +5,10 @@ use tracedecay_rusqlite_runtime::exact_sql::{
 };
 
 use crate::db::engine::{Connection, TestConnection};
-use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 
 use super::{
-    PAYLOAD_DIGEST_BACKFILL_RECEIPT_KEY, PAYLOAD_DIGEST_STEP_SOURCE_VERSION, SCHEMA_VERSION,
-    create_schema_connection, ensure_schema_current_connection, verify_final_schema_connection,
+    SCHEMA_VERSION, create_schema_connection, ensure_schema_current_connection,
+    verify_final_schema_connection,
 };
 use crate::db::engine::params;
 
@@ -112,16 +111,6 @@ async fn string_column(conn: &Connection, sql: &str) -> Vec<String> {
     values
 }
 
-async fn scalar_string(conn: &Connection, sql: &str) -> String {
-    let mut rows = conn.query(sql, ()).await.expect("failed to query string");
-    rows.next()
-        .await
-        .expect("failed to read string row")
-        .expect("string query should return a row")
-        .get(0)
-        .expect("failed to read string value")
-}
-
 async fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
     let mut rows = conn
         .query(&format!("PRAGMA table_info({table})"), ())
@@ -140,250 +129,11 @@ async fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
-async fn a_shipped_v35_alias_trigger_is_repaired_without_losing_rows() {
-    let (conn, dir) = create_schema_db().await;
-    let path = dir.path().join("test.db");
-    conn.execute(
-        "INSERT INTO retrieval_anchors(
-             anchor_id, anchor_json, owner_json, projection_generation
-         ) VALUES ('anchor.fixture', '{}', '{}', 'generation.fixture')",
-        (),
-    )
-    .await
-    .unwrap();
-    conn.execute(
-        "INSERT INTO retrieval_anchor_aliases(
-             owner_json, alias_kind, locator_digest, anchor_id
-         ) VALUES ('{}', 'native', 'digest.fixture', 'anchor.fixture')",
-        (),
-    )
-    .await
-    .unwrap();
-    conn.execute_batch("DROP TRIGGER retrieval_anchor_aliases_immutable_update;")
-        .await
-        .unwrap();
-    conn.execute_batch(super::final_shape::SHIPPED_V35_ALIAS_UPDATE_TRIGGER)
-        .await
-        .unwrap();
-    drop(conn);
-
-    let authority = DatabaseAuthority::acquire_test(&path, "shipped-v35 trigger repair fixture")
-        .expect("acquire production-open authority");
-    let (database, _initialized) =
-        Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Existing)
-            .await
-            .expect("the production writer should repair the exact shipped-v35 trigger");
-    drop(database);
-    drop(authority);
-
-    let conn = TestConnection::open(&path);
-
-    assert_eq!(
-        scalar_string(
-            &conn,
-            "SELECT anchor_id FROM retrieval_anchor_aliases WHERE locator_digest = 'digest.fixture'"
-        )
-        .await,
-        "anchor.fixture"
-    );
-    let trigger = scalar_string(
-        &conn,
-        "SELECT sql FROM sqlite_master
-         WHERE type = 'trigger' AND name = 'retrieval_anchor_aliases_immutable_update'",
-    )
-    .await;
-    assert!(trigger.contains("retrieval anchor alias requires exact supersession"));
-    verify_final_schema_connection(&conn)
-        .await
-        .expect("the repaired store must carry the exact final shape");
-    let preserved_alias = scalar_string(
-        &conn,
-        "SELECT anchor_id FROM retrieval_anchor_aliases WHERE locator_digest = 'digest.fixture'",
-    )
-    .await;
-    let canonical_trigger = trigger;
-    drop(conn);
-
-    let authority = DatabaseAuthority::acquire_test(&path, "canonical v35 reopen fixture")
-        .expect("reacquire production-open authority");
-    let (database, _initialized) =
-        Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Existing)
-            .await
-            .expect("a canonical store should reopen without mutation");
-    drop(database);
-    drop(authority);
-    let conn = TestConnection::open(&path);
-    assert_eq!(
-        scalar_string(
-            &conn,
-            "SELECT anchor_id FROM retrieval_anchor_aliases WHERE locator_digest = 'digest.fixture'",
-        )
-        .await,
-        preserved_alias
-    );
-    assert_eq!(
-        scalar_string(
-            &conn,
-            "SELECT sql FROM sqlite_master
-             WHERE type = 'trigger' AND name = 'retrieval_anchor_aliases_immutable_update'",
-        )
-        .await,
-        canonical_trigger
-    );
-    conn.execute(
-        "INSERT INTO retrieval_anchors(
-             anchor_id, anchor_json, owner_json, projection_generation
-         ) VALUES ('anchor.corrected', '{}', '{}', 'generation.fixture')",
-        (),
-    )
-    .await
-    .unwrap();
-    assert!(
-        conn.execute(
-            "UPDATE retrieval_anchor_aliases
-             SET anchor_id = 'anchor.corrected'
-             WHERE locator_digest = 'digest.fixture'",
-            (),
-        )
-        .await
-        .is_err()
-    );
-    conn.execute(
-        "INSERT INTO retrieval_anchor_dispositions(
-             disposition_id, anchor_id, owner_json, state, superseded_by,
-             reason_class, effective_at, record_json
-         ) VALUES (
-             'dis.fixture', 'anchor.fixture', '{}', 'superseded',
-             'anchor.corrected', 'correction', 1, '{}'
-         )",
-        (),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        conn.execute(
-            "UPDATE retrieval_anchor_aliases
-             SET anchor_id = 'anchor.corrected'
-             WHERE locator_digest = 'digest.fixture'",
-            (),
-        )
-        .await
-        .unwrap(),
-        1
-    );
-}
-
-#[tokio::test]
-async fn a_shipped_v35_alias_trigger_with_another_incompatibility_is_refused_unchanged() {
-    let (conn, dir) = create_schema_db().await;
-    let path = dir.path().join("test.db");
-    conn.execute_batch("DROP TRIGGER retrieval_anchor_aliases_immutable_update;")
-        .await
-        .unwrap();
-    conn.execute_batch(super::final_shape::SHIPPED_V35_ALIAS_UPDATE_TRIGGER)
-        .await
-        .unwrap();
-    conn.execute_batch("CREATE TABLE unexpected_v35_object(id INTEGER PRIMARY KEY);")
-        .await
-        .unwrap();
-    let shipped_trigger = scalar_string(
-        &conn,
-        "SELECT sql FROM sqlite_master
-         WHERE type = 'trigger' AND name = 'retrieval_anchor_aliases_immutable_update'",
-    )
-    .await;
-    drop(conn);
-
-    let authority = DatabaseAuthority::acquire_test(&path, "incompatible v35 fixture")
-        .expect("acquire production-open authority");
-    let error =
-        match Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Existing)
-            .await
-        {
-            Ok(_) => panic!("a second incompatibility must prevent the known trigger repair"),
-            Err(error) => error,
-        };
-
-    assert_eq!(
-        error
-            .reset_required_context()
-            .map(|(authority, _reason)| authority),
-        Some("SQLite store")
-    );
-    drop(authority);
-    let conn = TestConnection::open(&path);
-    assert_eq!(
-        scalar_string(
-            &conn,
-            "SELECT sql FROM sqlite_master
-             WHERE type = 'trigger' AND name = 'retrieval_anchor_aliases_immutable_update'",
-        )
-        .await,
-        shipped_trigger
-    );
-    assert!(table_exists(&conn, "unexpected_v35_object").await);
-    drop(conn);
-    drop(dir);
-
-    let (conn, dir) = create_schema_db().await;
-    let path = dir.path().join("test.db");
-    conn.execute_batch(
-        "DROP TRIGGER retrieval_anchor_aliases_immutable_update;
-         CREATE TRIGGER retrieval_anchor_aliases_immutable_update
-         BEFORE UPDATE ON retrieval_anchor_aliases BEGIN
-             SELECT RAISE(ABORT, 'unrecognized alias trigger');
-         END;",
-    )
-    .await
-    .unwrap();
-    let unknown_trigger = scalar_string(
-        &conn,
-        "SELECT sql FROM sqlite_master
-         WHERE type = 'trigger' AND name = 'retrieval_anchor_aliases_immutable_update'",
-    )
-    .await;
-    drop(conn);
-
-    let authority = DatabaseAuthority::acquire_test(&path, "unknown v35 trigger fixture")
-        .expect("acquire production-open authority");
-    let error =
-        match Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Existing)
-            .await
-        {
-            Ok(_) => panic!("an unknown trigger body must remain reset-required"),
-            Err(error) => error,
-        };
-    assert_eq!(
-        error
-            .reset_required_context()
-            .map(|(authority, _reason)| authority),
-        Some("SQLite store")
-    );
-    drop(authority);
-    let conn = TestConnection::open(&path);
-    assert_eq!(
-        scalar_string(
-            &conn,
-            "SELECT sql FROM sqlite_master
-             WHERE type = 'trigger' AND name = 'retrieval_anchor_aliases_immutable_update'",
-        )
-        .await,
-        unknown_trigger
-    );
-}
-
-/// Released v34 and live v35 stores have explicit convergence paths;
-/// unrelated stamps remain refused without mutation.
+/// Every stamp but the current one, including the released v34 and v35
+/// stores, is refused without mutation: nothing upgrades in place.
 #[tokio::test]
 async fn a_store_at_another_schema_version_is_refused_with_a_fresh_start_remedy() {
-    for stamped in [
-        1_u32,
-        18,
-        24,
-        PAYLOAD_DIGEST_STEP_SOURCE_VERSION - 1,
-        SCHEMA_VERSION + 1,
-    ] {
+    for stamped in [1_u32, 18, 24, 33, 34, 35, SCHEMA_VERSION + 1] {
         let (conn, _dir) = create_schema_db().await;
         set_user_version(&conn, stamped).await;
 
@@ -540,9 +290,8 @@ async fn a_current_stamp_with_retired_memory_projection_objects_is_reset_require
 }
 
 /// v36 retired the semantic-vector staging family with dense code retrieval.
-/// A leftover object of that family is refused on the current stamp and on
-/// the shipped v35 stamp alike, by the writer ladder and by the read-only
-/// verifier, and the refusal names the object instead of the stamp.
+/// A leftover object of that family on the current stamp is refused by the
+/// writer ladder and by the read-only verifier, and the refusal names it.
 #[tokio::test]
 async fn a_retired_semantic_vector_staging_object_is_reset_required_on_every_stamp() {
     for (retired, ddl) in [
@@ -558,7 +307,7 @@ async fn a_retired_semantic_vector_staging_object_is_reset_required_on_every_sta
              END;",
         ),
     ] {
-        for stamped in [SCHEMA_VERSION, SCHEMA_VERSION - 1] {
+        for stamped in [SCHEMA_VERSION] {
             let (conn, _dir) = create_schema_db().await;
             conn.execute_batch(ddl).await.unwrap();
             set_user_version(&conn, stamped).await;
@@ -842,33 +591,20 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
 }
 
 // ---------------------------------------------------------------------------
-// v34 -> v35: persisted payload content digests (#834)
+// Persisted payload content digests (#834)
 // ---------------------------------------------------------------------------
 
-const PAYLOAD_DIGEST_OBJECT_DROPS: &str = "DROP TRIGGER memory_v2_payloads_digest_delete;
-    DROP TRIGGER memory_v2_assertion_payload_digests_no_update;
-    DROP INDEX memory_v2_assertion_payload_digests_lookup;
-    DROP TABLE memory_v2_assertion_payload_digests;";
-
-const V34_FIXTURE_CONTENTS: [&str; 3] = [
+const PAYLOAD_FIXTURE_CONTENTS: [&str; 3] = [
     "Unicode café naïve 東京 🚀",
     "JSON escaped quote \" and backslash \\ with\ttab and\nnewline",
     "trailing whitespace ",
 ];
 
-fn expected_payload_digest(content: &str) -> String {
-    use sha2::Digest as _;
-    tracedecay_domain::canonical_text::encode_tagged_lowercase_hex(
-        "sha256:",
-        &sha2::Sha256::digest(content.as_bytes()),
-    )
-}
-
 /// Seeds one profile fact with a single asserted payload through the raw
-/// authority tables, the way a pre-#834 binary left them.
+/// authority tables.
 async fn seed_payload(conn: &Connection, ordinal: usize, content: &str) {
-    let fact_id = format!("fact.v34.{ordinal}");
-    let assertion_id = format!("assertion.v34.{ordinal}");
+    let fact_id = format!("fact.payload.{ordinal}");
+    let assertion_id = format!("assertion.payload.{ordinal}");
     conn.execute(
         "INSERT INTO memory_v2_facts (
             fact_id, owner_kind, project_id, owner_json, identity_json, created_at
@@ -876,7 +612,7 @@ async fn seed_payload(conn: &Connection, ordinal: usize, content: &str) {
         params![fact_id.as_str(), ordinal as i64],
     )
     .await
-    .expect("seed v34 fact");
+    .expect("seed fact");
     conn.execute(
         "INSERT INTO memory_v2_assertions (
             assertion_id, fact_id, owner_kind, project_id, owner_json,
@@ -886,7 +622,7 @@ async fn seed_payload(conn: &Connection, ordinal: usize, content: &str) {
         params![assertion_id.as_str(), fact_id.as_str(), ordinal as i64],
     )
     .await
-    .expect("seed v34 assertion");
+    .expect("seed assertion");
     conn.execute(
         "INSERT INTO memory_v2_assertion_payloads (
             assertion_id, fact_id, owner_kind, project_id, payload_json, content
@@ -894,26 +630,7 @@ async fn seed_payload(conn: &Connection, ordinal: usize, content: &str) {
         params![assertion_id.as_str(), fact_id.as_str(), content],
     )
     .await
-    .expect("seed v34 payload");
-}
-
-/// A v35 store whose payloads were written before the digest objects
-/// existed: the objects are dropped and the stamp rewound, exactly the shape
-/// a pre-#834 binary leaves behind.
-async fn create_v34_db_with_payloads() -> (TestConnection, TempDir) {
-    let (conn, dir) = create_schema_db().await;
-    for (ordinal, content) in V34_FIXTURE_CONTENTS.iter().enumerate() {
-        seed_payload(&conn, ordinal, content).await;
-    }
-    conn.execute_batch(PAYLOAD_DIGEST_OBJECT_DROPS)
-        .await
-        .expect("drop payload digest objects");
-    set_user_version(&conn, PAYLOAD_DIGEST_STEP_SOURCE_VERSION).await;
-    assert!(
-        !table_exists(&conn, "memory_v2_assertion_payload_digests").await,
-        "fixture must start without the digest table"
-    );
-    (conn, dir)
+    .expect("seed payload");
 }
 
 async fn digest_rows(conn: &Connection) -> Vec<(String, String)> {
@@ -935,135 +652,10 @@ async fn digest_rows(conn: &Connection) -> Vec<(String, String)> {
     values
 }
 
-fn expected_digest_rows() -> Vec<(String, String)> {
-    V34_FIXTURE_CONTENTS
-        .iter()
-        .enumerate()
-        .map(|(ordinal, content)| {
-            (
-                format!("fact.v34.{ordinal}"),
-                expected_payload_digest(content),
-            )
-        })
-        .collect()
-}
-
-#[tokio::test]
-async fn a_v34_store_is_stepped_to_the_current_stamp_with_a_digest_for_every_payload() {
-    let (conn, _dir) = create_v34_db_with_payloads().await;
-
-    ensure_schema_current_connection(&conn)
-        .await
-        .expect("a v34 store must step forward in place");
-
-    assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
-    assert_eq!(digest_rows(&conn).await, expected_digest_rows());
-    let receipts = string_column(
-        &conn,
-        &format!("SELECT value FROM metadata WHERE key = '{PAYLOAD_DIGEST_BACKFILL_RECEIPT_KEY}'"),
-    )
-    .await;
-    let receipt: serde_json::Value =
-        serde_json::from_str(receipts.first().expect("step must journal a receipt"))
-            .expect("receipt is JSON");
-    assert_eq!(receipt["from_version"], PAYLOAD_DIGEST_STEP_SOURCE_VERSION);
-    assert_eq!(receipt["to_version"], SCHEMA_VERSION);
-    assert_eq!(receipt["backfilled_rows"], V34_FIXTURE_CONTENTS.len());
-
-    ensure_schema_current_connection(&conn)
-        .await
-        .expect("a stepped store is the exact final shape");
-    assert_eq!(digest_rows(&conn).await.len(), V34_FIXTURE_CONTENTS.len());
-}
-
-#[tokio::test]
-async fn an_interrupted_payload_digest_step_resumes_from_the_rows_still_missing() {
-    let (conn, _dir) = create_v34_db_with_payloads().await;
-    // A previous run created the objects and fingerprinted the first payload
-    // before losing the writer; the stamp never moved.
-    conn.execute_batch(crate::db::memory_v2::PAYLOAD_DIGESTS_SCHEMA)
-        .await
-        .expect("recreate digest objects as an interrupted step left them");
-    conn.execute(
-        "INSERT INTO memory_v2_assertion_payload_digests (
-            payload_rowid, assertion_id, fact_id, owner_kind, project_id, content_digest
-         )
-         SELECT rowid, assertion_id, fact_id, owner_kind, project_id, ?1
-         FROM memory_v2_assertion_payloads WHERE fact_id = 'fact.v34.0'",
-        params![expected_payload_digest(V34_FIXTURE_CONTENTS[0]).as_str()],
-    )
-    .await
-    .expect("seed the partial backfill");
-    assert_eq!(
-        get_user_version(&conn).await,
-        PAYLOAD_DIGEST_STEP_SOURCE_VERSION
-    );
-
-    ensure_schema_current_connection(&conn)
-        .await
-        .expect("an interrupted step must resume");
-
-    assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
-    assert_eq!(digest_rows(&conn).await, expected_digest_rows());
-}
-
-#[tokio::test]
-async fn a_v34_store_is_refused_read_only_with_the_step_pending_remedy() {
-    let (conn, _dir) = create_v34_db_with_payloads().await;
-
-    let error = verify_final_schema_connection(&conn)
-        .await
-        .expect_err("a read-only verifier must not step the store");
-
-    let message = error.to_string();
-    assert!(
-        message.contains("payload digest step is pending"),
-        "read-only refusal must name the pending step: {message}"
-    );
-    assert!(
-        error.reset_required_context().is_none(),
-        "a steppable store must not be reported as reset-required: {message}"
-    );
-    assert_eq!(
-        get_user_version(&conn).await,
-        PAYLOAD_DIGEST_STEP_SOURCE_VERSION
-    );
-    assert!(
-        !table_exists(&conn, "memory_v2_assertion_payload_digests").await,
-        "read-only verification must not create the digest objects"
-    );
-}
-
-#[tokio::test]
-async fn a_v34_stamp_on_a_store_that_is_not_v34_shaped_is_reset_required() {
-    let (conn, _dir) = create_schema_db().await;
-    conn.execute_batch(PAYLOAD_DIGEST_OBJECT_DROPS)
-        .await
-        .expect("drop payload digest objects");
-    conn.execute_batch("DROP TABLE memory_v2_assertion_supersession;")
-        .await
-        .expect("drop an unrelated final-shape table");
-    set_user_version(&conn, PAYLOAD_DIGEST_STEP_SOURCE_VERSION).await;
-
-    let error = ensure_schema_current_connection(&conn)
-        .await
-        .expect_err("the step admits only the exact pre-digest shape");
-    assert_eq!(
-        error
-            .reset_required_context()
-            .map(|(authority, _reason)| authority),
-        Some("SQLite store")
-    );
-    assert_eq!(
-        get_user_version(&conn).await,
-        PAYLOAD_DIGEST_STEP_SOURCE_VERSION
-    );
-}
-
 #[tokio::test]
 async fn deleting_a_payload_drops_its_digest_and_digests_never_update() {
     let (conn, _dir) = create_schema_db().await;
-    for (ordinal, content) in V34_FIXTURE_CONTENTS.iter().enumerate() {
+    for (ordinal, content) in PAYLOAD_FIXTURE_CONTENTS.iter().enumerate() {
         seed_payload(&conn, ordinal, content).await;
     }
     conn.execute_batch(
@@ -1076,7 +668,10 @@ async fn deleting_a_payload_drops_its_digest_and_digests_never_update() {
     )
     .await
     .expect("seed digest rows");
-    assert_eq!(digest_rows(&conn).await.len(), V34_FIXTURE_CONTENTS.len());
+    assert_eq!(
+        digest_rows(&conn).await.len(),
+        PAYLOAD_FIXTURE_CONTENTS.len()
+    );
 
     let update = conn
         .execute_batch(
@@ -1091,9 +686,11 @@ async fn deleting_a_payload_drops_its_digest_and_digests_never_update() {
             .contains("immutable")
     );
 
-    conn.execute_batch("DELETE FROM memory_v2_assertion_payloads WHERE fact_id = 'fact.v34.1';")
-        .await
-        .expect("delete a payload");
+    conn.execute_batch(
+        "DELETE FROM memory_v2_assertion_payloads WHERE fact_id = 'fact.payload.1';",
+    )
+    .await
+    .expect("delete a payload");
     let remaining: Vec<String> = digest_rows(&conn)
         .await
         .into_iter()
@@ -1101,7 +698,7 @@ async fn deleting_a_payload_drops_its_digest_and_digests_never_update() {
         .collect();
     assert_eq!(
         remaining,
-        vec!["fact.v34.0".to_owned(), "fact.v34.2".to_owned()]
+        vec!["fact.payload.0".to_owned(), "fact.payload.2".to_owned()]
     );
 }
 

@@ -34,6 +34,10 @@ impl AgentTaskBackend for TransientThenJsonBackend {
             output_tokens: None,
         })
     }
+
+    fn executable(&self) -> Option<&std::path::Path> {
+        None
+    }
 }
 
 fn normalize_tags_op(facts: &SeededDuplicateFacts) -> Value {

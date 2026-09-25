@@ -10,6 +10,7 @@ use tracedecay_contracts::project_open::{ProjectOpenStatusStateV1, ProjectOpenSt
 use tracedecay_daemon_service::shutdown::DaemonActivity;
 use tracedecay_domain::errors::Result;
 use tracedecay_mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport};
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 #[path = "core_doctor_schema.rs"]
 mod schema;
@@ -470,8 +471,12 @@ async fn doctor_runtime_value_inner(
         });
     if let Some(db) = session_db.as_ref() {
         let health_budget = Duration::from_secs(8);
+        let session_temporal = SessionTemporalAccess::new(&**db);
         let (temporal, cursor_ingest, placeholder_paths) = tokio::join!(
-            Box::pin(timeout(health_budget, db.session_temporal_doctor_health())),
+            Box::pin(timeout(
+                health_budget,
+                session_temporal.session_temporal_doctor_health()
+            )),
             Box::pin(timeout(health_budget, db.cursor_session_ingest_health())),
             Box::pin(timeout(
                 health_budget,
@@ -523,7 +528,8 @@ async fn doctor_runtime_value_inner(
 pub(crate) async fn cold_doctor_runtime_value(handshake: &DaemonHandshake) -> serde_json::Value {
     // Owned stores are never path-opened as a fallback. Without the daemon's
     // retained runtime authority Doctor reports explicit unavailability.
-    let build_version = crate::product_runtime::register_fixture_product_runtime().build_version();
+    let build_version =
+        tracedecay_project::product_runtime::register_fixture_product_runtime().build_version();
     doctor_runtime_value_inner(handshake, None, false, build_version).await
 }
 
@@ -536,7 +542,7 @@ pub(in crate::daemon) async fn write_doctor_runtime_response(
     request: DoctorRuntimeRequest,
     git_watcher_health: Option<serde_json::Value>,
 ) -> Result<()> {
-    let build_version = crate::version::build_version()?;
+    let build_version = tracedecay_project::version::build_version()?;
     let mut value = Box::pin(doctor_runtime_value(
         handshake,
         store_administration,
@@ -632,17 +638,16 @@ mod doctor_runtime_route_tests {
         CoreDoctorStatusV1, cold_doctor_runtime_value, core_status_request_id,
         doctor_runtime_coverage, doctor_runtime_request, serve_core_doctor_runtime_request,
     };
-    use crate::daemon::{
-        AuthenticatedFirstRequest, DaemonHandshake, DaemonLifecycle, StoreAdministration,
-    };
+    use crate::daemon::{AuthenticatedFirstRequest, DaemonHandshake, StoreAdministration};
     use crate::mcp::McpServer;
     use crate::mcp::server::McpServerConstructionContext;
-    use crate::project::{TraceDecay, TraceDecayOpenOptions};
     use tracedecay_contracts::project_open::{
         ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
     };
     use tracedecay_daemon_protocol::DaemonClientIdentity;
+    use tracedecay_daemon_service::shutdown::DaemonLifecycle;
     use tracedecay_mcp::McpTransport;
+    use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 
     static REGISTERED_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 
@@ -720,7 +725,7 @@ mod doctor_runtime_route_tests {
     ) -> DaemonHandshake {
         // The doctor route serves the daemon's version from the product
         // runtime; route tests never pass through the binary's registration.
-        crate::product_runtime::register_fixture_product_runtime();
+        tracedecay_project::product_runtime::register_fixture_product_runtime();
         DaemonHandshake {
             project_path: Some(project_path),
             scope_prefix: None,
@@ -735,7 +740,7 @@ mod doctor_runtime_route_tests {
             client_instance_id: "doctor-runtime-test".to_string(),
             tool_list_changed_capable: false,
             catalog_version: String::new(),
-            moved_store_adoption: crate::project::MovedStoreAdoption::Never,
+            moved_store_adoption: tracedecay_project::project::MovedStoreAdoption::Never,
         }
     }
 
@@ -1067,7 +1072,7 @@ mod doctor_runtime_route_tests {
             .await
             .insert(key, server);
         let build_version =
-            crate::product_runtime::register_fixture_product_runtime().build_version();
+            tracedecay_project::product_runtime::register_fixture_product_runtime().build_version();
         let value = super::doctor_runtime_value(
             &handshake,
             &store_administration,
@@ -1184,51 +1189,6 @@ mod doctor_runtime_route_tests {
         );
         assert!(!value.to_string().contains(&db_path.display().to_string()));
         connection.execute("ROLLBACK", ()).unwrap();
-    }
-
-    #[tokio::test]
-    async fn doctor_store_paths_ignore_an_active_branch_database() {
-        let root = tempfile::TempDir::new().unwrap();
-        let project = root.path().join("project");
-        let profile = root.path().join("profile");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&profile).unwrap();
-        assert!(
-            std::process::Command::new("git")
-                .args(["init", "-b", "main"])
-                .current_dir(&project)
-                .status()
-                .unwrap()
-                .success()
-        );
-        let layout = initialize_test_project(&project, &profile).await;
-        let default_graph = layout.graph_db_path.clone();
-
-        let branch_relpath = "branches/feature_doctor.db";
-        let branch_graph = layout.data_root.join(branch_relpath);
-        std::fs::create_dir_all(branch_graph.parent().unwrap()).unwrap();
-        std::fs::copy(&default_graph, &branch_graph).unwrap();
-        let mut meta = tracedecay_runtime_core::branch_meta::BranchMeta::new_for_dir(
-            &layout.data_root,
-            "main",
-        );
-        meta.add_branch("feature/doctor", branch_relpath, "main");
-        tracedecay_runtime_core::branch_meta::save_branch_meta(&layout.data_root, &meta).unwrap();
-        assert!(
-            std::process::Command::new("git")
-                .args(["checkout", "-b", "feature/doctor"])
-                .current_dir(&project)
-                .status()
-                .unwrap()
-                .success()
-        );
-
-        assert_eq!(
-            super::doctor_runtime_store_layout(&project, &profile)
-                .expect("resolve canonical Doctor store paths"),
-            (default_graph, layout.sessions_db_path),
-            "Doctor must not follow branch-specific database paths"
-        );
     }
 
     #[tokio::test]

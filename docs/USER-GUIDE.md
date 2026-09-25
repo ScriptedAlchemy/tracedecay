@@ -131,16 +131,6 @@ untouched. Run `tracedecay sync`, then re-check `tracedecay status`; do not use
 `storage reset-project-store`, which is reserved for a reported schema reset
 requirement.
 
-### Explicit refresh compatibility
-
-`--force` remains accepted for compatibility and queues the same authoritative
-reconciliation as `tracedecay sync`. It does not delete or fully rebuild the
-project store:
-
-```bash
-tracedecay sync --force
-```
-
 ### Default Skips
 
 TraceDecay respects `.gitignore` by default and skips common generated, vendored, and cache directories such as `node_modules`, `vendor`, `dist`, `build`, `coverage`, `.next`, `.turbo`, `.cache`, virtualenvs, and `__pycache__`.
@@ -193,13 +183,14 @@ tracedecay gitignore on           # enable (default)
 tracedecay gitignore off          # disable, index everything
 ```
 
-TraceDecay never creates files inside your repository's working tree: all
-project data lives under `~/.tracedecay`, and a git repository additionally
+TraceDecay never creates files inside your repository's working tree, so
+`init` leaves `git status` untouched and nothing needs a `.gitignore` entry:
+all project data lives under `~/.tracedecay`, and a git repository additionally
 carries an identity marker inside `.git/` (never committed). If a project was
 enrolled by an older TraceDecay, it may still have a leftover
-`.tracedecay/enrollment.json` in the repository, its identity is adopted into
-the profile registry the first time the project is opened, after which the
-file is ignored and you can safely delete the `.tracedecay/` directory.
+`.tracedecay/enrollment.json` in the repository. Nothing reads that file any
+more; identity comes from `.git/` and the profile registry, so you can safely
+delete the `.tracedecay/` directory.
 
 ---
 
@@ -345,7 +336,7 @@ the config locations and lifecycle details.
 Cursor install is plugin-based:
 
 - `tracedecay install --agent cursor` installs `cursor-plugin/` into `~/.cursor/plugins/local/tracedecay`.
-- The plugin MCP config runs `tracedecay serve --path ${workspaceFolder}`, so the server resolves the active workspace's project store instead of the plugin directory. If a host spawns the server without expanding `${workspaceFolder}`, `serve` warns and falls back to project discovery where possible (details in the plugin's `README.md`).
+- The plugin MCP config runs `tracedecay serve` with no `--path`: Cursor spawns plugin MCP servers with the workspace folder as the working directory and never expands `${workspaceFolder}` for them, so `serve` resolves the active workspace's project store from its cwd and MCP initialize roots. An unenrolled workspace still completes the MCP handshake; tool calls answer with a typed `project_not_enrolled` error until `tracedecay init` runs there (details in the plugin's `README.md`).
 - Cursor install no longer writes `.cursor/mcp.json`, `.cursor/hooks.json`, `.cursor/rules/tracedecay.mdc`, or `.cursor/permissions.json`; approvals are left to Cursor approval/run-mode behavior.
 - The Cursor plugin's daemon-owned native lifecycle journey uses
   `sessionStart`, `preCompact`, `afterFileEdit`, and `stop`. Each hook is
@@ -396,16 +387,14 @@ managed plugin directory or `installed.json`.
 
 The generated MCP entries use the resolved absolute path to the current `tracedecay` executable.
 
-#### Config backups
+#### Config edits
 
 Whenever tracedecay rewrites an agent config file, on `install`, on `uninstall`,
-or an explicitly authorized host-maintenance operation, it first copies the
-original to a sibling `.bak` file in the same directory. Doctor only reports
-configuration findings; it never rewrites hooks. For example:
-
-- `~/.claude.json` → `~/.claude.json.bak`
-
-If anything goes wrong (a typo, an unexpected rewrite, an unknown bug), restore with `cp <path>.bak <path>`. The `.bak` is always the **exact bytes** of whatever was on disk just before the write; tracedecay never deletes or rotates it, so the most recent backup is the file you want.
+or an explicitly authorized host-maintenance operation, it edits only its own
+entries and publishes the result atomically. It never leaves backup or
+"original" copies beside host configs. Uninstall removes TraceDecay's entries
+and leaves every other setting in place. Doctor only reports configuration
+findings and never rewrites hooks.
 
 ### Removing an integration
 
@@ -976,8 +965,7 @@ are separate daemon operations with receipts. Hosts and clients never become a
 storage authority or open a database directly.
 
 A leftover repo-local `.tracedecay/enrollment.json` from an older TraceDecay is
-adopted into the registry on first open and then ignored; you can delete it.
-Do not copy or edit store files.
+not read; you can delete it. Do not copy or edit store files.
 
 An incompatible persisted shape or incomplete privacy remediation returns
 `ResetRequired`/`reset_required`. Follow the daemon's remediation or explicitly

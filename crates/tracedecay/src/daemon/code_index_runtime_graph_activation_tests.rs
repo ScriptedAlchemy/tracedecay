@@ -30,12 +30,14 @@ use tracedecay_graph_query::{
 use tracedecay_runtime_core::runtime_telemetry::{
     GenerationCensusServingFreshness, GenerationCensusSnapshot, GenerationCensusUnavailableReason,
 };
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use tracedecay_code_index_runtime::project_reads::{
     project_code_graph_projection_read_port, project_code_index_generation_census_reader,
 };
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 const ALPHA_LIB_V1: &[(&str, &str)] = &[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")];
 
@@ -171,7 +173,7 @@ async fn failed_cold_mount_graph_replay_preserves_retained_text_generation() {
     let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
     let scoped_store = scoped_code_index_store_root(
         store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
+        &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
     );
     let (scope, seeded_generation_id) = {
         let mut scheduler = scheduler(&fixture, scoped_store, bytes);
@@ -328,7 +330,7 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
     let store = TempDir::new().expect("store root");
     let scoped_store = scoped_code_index_store_root(
         store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
+        &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
     );
     let (latest, replay_binding, repository_id, worktree_id) = {
         let mut scheduler = scheduler(
@@ -374,7 +376,7 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
     // Activation issues verified graph reads; the project graph runtime binds
     // asynchronously after `project_memory` returns, so an unawaited bind
     // races activation into "not ready for verified reads".
-    crate::test_support::host_admission::await_bound_graph_runtime(
+    tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
         &project_database,
         "bind small persistent activation graph runtime",
     )
@@ -450,7 +452,7 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
     let store = TempDir::new().expect("store root");
     let scoped_store = scoped_code_index_store_root(
         store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
+        &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
     );
     let (latest_a, replay_a, scope, hub) = {
         let mut scheduler = scheduler(
@@ -509,7 +511,7 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
         .project_memory(project_id.clone(), [fixture.path().to_path_buf()])
         .await
         .expect("project database");
-    crate::test_support::host_admission::await_bound_graph_runtime(
+    tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
         &project_database,
         "bind persistent historical cursor graph runtime",
     )
@@ -563,7 +565,7 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
         .profile_sessions()
         .await
         .expect("profile session database");
-    let cursor_keys = sessions
+    let cursor_keys = SessionTemporalAccess::new(&*sessions)
         .load_session_cursor_key_provider_result()
         .await
         .expect("cursor keys");
@@ -739,7 +741,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
     let store = TempDir::new().expect("store root");
     let scoped_store = scoped_code_index_store_root(
         store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
+        &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
     );
     let (
         scope,
@@ -812,7 +814,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         .project_memory(project_id.clone(), [fixture.path().to_path_buf()])
         .await
         .expect("writable project database");
-    crate::test_support::host_admission::await_bound_graph_runtime(
+    tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
         &project_database,
         "bind stale graph status projection",
     )
@@ -889,7 +891,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         .project_memory(project_id.clone(), [fixture.path().to_path_buf()])
         .await
         .expect("restarted writable project database");
-    crate::test_support::host_admission::await_bound_graph_runtime(
+    tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
         &project_database,
         "bind restarted graph status projection",
     )
@@ -905,7 +907,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         Some(
             registry
                 .pause_next_retained_graph_recovery_before_successor(
-                    fixture.path().canonicalize().expect("canonical fixture"),
+                    canonical_existing_identity(fixture.path()).expect("canonical fixture"),
                 )
                 .await,
         )
@@ -1261,7 +1263,7 @@ async fn restart_seats_the_retained_graph_while_its_text_owner_still_projects() 
     use tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort;
 
     let fixture = GitFixture::new(ALPHA_LIB_V1);
-    let canonical_fixture = fixture.path().canonicalize().expect("canonical fixture");
+    let canonical_fixture = canonical_existing_identity(fixture.path()).expect("canonical fixture");
     let store = TempDir::new().expect("store root");
     let scoped_store = scoped_code_index_store_root(store.path(), &canonical_fixture);
     let (scope, seeded_generation_id, latest, replay_binding, repository_id, worktree_id) = {
@@ -1322,7 +1324,7 @@ async fn restart_seats_the_retained_graph_while_its_text_owner_still_projects() 
         .project_memory(project_id.clone(), [fixture.path().to_path_buf()])
         .await
         .expect("writable project database");
-    crate::test_support::host_admission::await_bound_graph_runtime(
+    tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
         &project_database,
         "bind graph projection before restart",
     )
@@ -1370,7 +1372,7 @@ async fn restart_seats_the_retained_graph_while_its_text_owner_still_projects() 
         .project_memory(project_id.clone(), [fixture.path().to_path_buf()])
         .await
         .expect("restarted writable project database");
-    crate::test_support::host_admission::await_bound_graph_runtime(
+    tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
         &project_database,
         "bind restarted graph projection",
     )

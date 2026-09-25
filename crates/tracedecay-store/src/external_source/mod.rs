@@ -878,6 +878,83 @@ impl SourceCommitReceiptV1 {
     }
 }
 
+/// The durable identity of a committed receipt, retained after its frontiers
+/// and payload were superseded. It answers idempotent replay: which request
+/// the key committed, under which receipt, carrying which mutations.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceCommitReceiptSummaryV1 {
+    binding: SourceBindingIdentityV1,
+    idempotency_key: ManifestDigest,
+    request_digest: ManifestDigest,
+    receipt_digest: ManifestDigest,
+    mutation_digests: Vec<ManifestDigest>,
+}
+
+impl SourceCommitReceiptSummaryV1 {
+    pub fn new(
+        binding: SourceBindingIdentityV1,
+        idempotency_key: ManifestDigest,
+        request_digest: ManifestDigest,
+        receipt_digest: ManifestDigest,
+        mutation_digests: Vec<ManifestDigest>,
+    ) -> SourceStoreResult<Self> {
+        binding.validate()?;
+        for digest in [&idempotency_key, &request_digest, &receipt_digest]
+            .into_iter()
+            .chain(&mutation_digests)
+        {
+            digest.validate()?;
+        }
+        Ok(Self {
+            binding,
+            idempotency_key,
+            request_digest,
+            receipt_digest,
+            mutation_digests,
+        })
+    }
+
+    pub fn of(receipt: &SourceCommitReceiptV1) -> Self {
+        Self {
+            binding: receipt.source_frontier().binding().clone(),
+            idempotency_key: receipt.idempotency_key().clone(),
+            request_digest: receipt.request_digest().clone(),
+            receipt_digest: receipt.receipt_digest().clone(),
+            mutation_digests: receipt
+                .mutations()
+                .iter()
+                .map(|mutation| mutation.mutation_digest().clone())
+                .collect(),
+        }
+    }
+
+    pub fn binding(&self) -> &SourceBindingIdentityV1 {
+        &self.binding
+    }
+
+    pub fn idempotency_key(&self) -> &ManifestDigest {
+        &self.idempotency_key
+    }
+
+    pub fn request_digest(&self) -> &ManifestDigest {
+        &self.request_digest
+    }
+
+    pub fn receipt_digest(&self) -> &ManifestDigest {
+        &self.receipt_digest
+    }
+
+    pub fn mutation_digests(&self) -> &[ManifestDigest] {
+        &self.mutation_digests
+    }
+
+    /// Whether this receipt committed exactly `mutation`.
+    pub fn committed(&self, mutation: &SourceObjectMutationV1) -> bool {
+        self.mutation_digests.contains(mutation.mutation_digest())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceAuthorityPublicationV1 {

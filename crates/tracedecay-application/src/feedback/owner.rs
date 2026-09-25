@@ -342,6 +342,7 @@ fn project_feedback_evidence<T>(
             request_id,
             scope,
             outcome,
+            ..
         } = envelope;
         let ApplicationOutcome::Evidence(packet) = outcome else {
             unreachable!("feedback reads return evidence outcomes");

@@ -9,11 +9,11 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use tracedecay::mcp::McpServer;
-use tracedecay::project::TraceDecay;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::ProjectId;
 use tracedecay_global_db::{GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert};
 use tracedecay_mcp::McpTransport;
+use tracedecay_project::project::TraceDecay;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 
 use crate::support;
 

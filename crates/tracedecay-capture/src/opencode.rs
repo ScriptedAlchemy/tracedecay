@@ -53,6 +53,11 @@ fn normalize_opencode_record(
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or(&[]);
+    let created_at = timestamp_secs(
+        message
+            .pointer("/time/created")
+            .or_else(|| message.get("time_created")),
+    );
     let mut facts = Vec::new();
     if let Some(content) = message_content(parts) {
         facts.push(CanonicalObservationFactV1::Message {
@@ -64,11 +69,7 @@ fn normalize_opencode_record(
                 .or_else(|| message.get("modelID"))
                 .and_then(Value::as_str)
                 .map(str::to_owned),
-            timestamp: timestamp_secs(
-                message
-                    .pointer("/time/created")
-                    .or_else(|| message.get("time_created")),
-            ),
+            timestamp: created_at,
         });
     }
     if role == "user"
@@ -81,11 +82,7 @@ fn normalize_opencode_record(
             role: CanonicalMessageRoleV1::System,
             content: Value::String(system.to_owned()),
             model: None,
-            timestamp: timestamp_secs(
-                message
-                    .pointer("/time/created")
-                    .or_else(|| message.get("time_created")),
-            ),
+            timestamp: created_at,
         });
     }
     append_usage(
@@ -99,11 +96,7 @@ fn normalize_opencode_record(
         return Err(ObservationRecordParseErrorV1::Empty);
     }
 
-    let timestamp = timestamp_secs(
-        message
-            .pointer("/time/created")
-            .or_else(|| message.get("time_created")),
-    );
+    let timestamp = created_at;
     let mut evidence =
         CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range);
     if let Some(timestamp) = timestamp {

@@ -69,6 +69,12 @@ pub const PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE: &str = "project_server_re
 pub const PROJECT_OPEN_TASK_CAPACITY_REASON_CODE: &str = "project_open_task_capacity_reached";
 /// Typed reason the cached project-server table is full.
 pub const PROJECT_SERVER_CAPACITY_REASON_CODE: &str = "project_server_capacity_reached";
+/// Typed reason a handshake route names a directory the authenticated profile
+/// has not enrolled (no `tracedecay init`, no registry row, no durable store).
+/// It is a client state, not a daemon failure: `initialize` and `tools/list`
+/// still answer, and every `tools/call` re-derives this refusal until
+/// enrollment succeeds.
+pub const PROJECT_NOT_ENROLLED_REASON_CODE: &str = "project_not_enrolled";
 #[cfg(unix)]
 const TOOL_LIST_CHANGED_METHOD: &str = "notifications/tools/list_changed";
 #[cfg(unix)]
@@ -150,6 +156,14 @@ pub(crate) fn error_is_project_warming(error: &TraceDecayError) -> bool {
     matches!(
         error.project_route_context(),
         Some((PROJECT_WARMING_REASON_CODE, true, _))
+    )
+}
+
+/// True when route admission refused the handshake path as not enrolled.
+pub(crate) fn error_is_project_not_enrolled(error: &TraceDecayError) -> bool {
+    matches!(
+        error.project_route_context(),
+        Some((PROJECT_NOT_ENROLLED_REASON_CODE, false, _))
     )
 }
 
@@ -241,13 +255,13 @@ mod connection_serving;
 pub use connection_serving::rmcp_benchmark;
 #[cfg(unix)]
 use connection_serving::serve_authenticated_socket_client_with_class;
-#[cfg(all(unix, test))]
-use connection_serving::serve_socket_client;
+#[cfg(any(test, feature = "test-transport"))]
+pub(crate) use connection_serving::serve_routed_rmcp_connection;
 #[cfg(not(unix))]
 use connection_serving::serve_windows_broker_client_with_class_and_invocation;
 #[cfg(test)]
 use connection_serving::{
-    await_project_owner_or_disconnect, serve_routed_rmcp_connection, serve_windows_broker_client,
+    await_project_owner_or_disconnect, serve_windows_broker_client,
     serve_windows_broker_client_with_class,
 };
 mod core_admission;
@@ -257,10 +271,6 @@ use engine::DaemonEngine;
 use engine::{
     ensure_context_scout_owner_before_advertising,
     ensure_git_index_transactions_for_mutation_owners,
-};
-pub(crate) use tracedecay_daemon_service::automation_observation::{
-    project_run_observation_producer as project_automation_observation_producer,
-    record_project_run as record_project_automation_run,
 };
 mod core_client;
 mod core_doctor;
@@ -287,17 +297,6 @@ pub(crate) use core_doctor::*;
 pub use core_handshake::*;
 pub use core_hooks::*;
 pub use core_proxy::*;
-// Daemon process lifecycle and logging live in `tracedecay-daemon-service`;
-// the root's engine, bootstrap, and connection serving still read them by
-// these names until they move.
-#[cfg(unix)]
-pub(crate) use tracedecay_daemon_service::logging::recent_watcher_events;
-pub(crate) use tracedecay_daemon_service::logging::unavailable_error;
-#[cfg(feature = "hotpath")]
-pub use tracedecay_daemon_service::shutdown::install_hotpath_shutdown_finalizer;
-pub(crate) use tracedecay_daemon_service::shutdown::{
-    DAEMON_CLIENT_DRAIN_DEADLINE, DAEMON_TASK_ABORT_DEADLINE, DaemonLifecycle, ShutdownStatus,
-};
 mod github_credential_lifecycle;
 mod graph_resolution;
 use graph_resolution::retained_project_server_resolver;
@@ -352,6 +351,7 @@ use projectless::{
 };
 mod project_composition;
 mod project_delivery_mount;
+pub(crate) use project_composition::daemon_transcript_source_home;
 use project_composition::{ProductionProjectCompositionRuntime, production_project_server};
 mod project_open_admission;
 #[cfg(test)]
@@ -372,7 +372,8 @@ mod project_open_handshake;
 #[cfg(test)]
 use project_open_handshake::is_missing_index_error;
 use project_open_handshake::{
-    open_project_for_handshake, project_open_error_response, write_project_open_error,
+    initialize_project_open_error, open_project_for_handshake, project_open_error_response,
+    write_project_open_error,
 };
 mod project_open_orchestration;
 mod project_routing;

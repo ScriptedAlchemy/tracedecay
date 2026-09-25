@@ -1,8 +1,7 @@
 //! Immutable research-provenance and retrieval-anchor contracts.
 //!
-//! This module is a compatibility facade. Ownership-aligned implementation
-//! modules remain directly addressable while all existing
-//! `tracedecay_domain::research::Type` imports continue to resolve.
+//! Each contract family lives in its own submodule; this module re-exports
+//! them so `tracedecay_domain::research::Type` is the one import path.
 
 pub mod anchor;
 pub mod branch_stack;

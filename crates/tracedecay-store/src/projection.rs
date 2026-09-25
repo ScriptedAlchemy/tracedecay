@@ -435,9 +435,6 @@ fn workflow_fact_output_digest(
         .clone())
 }
 
-pub type ClaudeObservationProjection = ObservationProjection;
-pub type ClaudeSessionMessageProjection = SessionMessageProjection;
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectionCheckpoint {
     last_sequence: u64,

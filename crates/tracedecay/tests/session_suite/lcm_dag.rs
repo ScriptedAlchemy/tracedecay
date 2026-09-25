@@ -1,10 +1,10 @@
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_lcm::types::{LcmImmutableSummaryPublication, LcmSummaryPublicationDisposition};
 use tracedecay_lcm::{
     LcmDescribeRequest, LcmDescribeTarget, LcmError, LcmGrepRequest, LcmGrepSort, LcmScope,
     LcmSessionBoundaryRequest, LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft,
 };
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 
 use crate::common::{lcm_dag_message as raw_message, lcm_dag_session as sample_session};
@@ -712,10 +712,18 @@ async fn immutable_publication_preserves_order_and_stales_transitive_descendants
         .expect("successor publication")
         .summary;
 
+    // The superseded leaf is stale in the active generation, so no LCM read
+    // returns it; its successor is the one visible summary over these sources.
+    assert_eq!(
+        db.lcm_expand_summary_node_for_test("cursor", "session-1", &leaf.node_id)
+            .await
+            .expect_err("a stale summary must not expand"),
+        LcmError::SummaryNodeNotFound
+    );
     let expanded_leaf = db
-        .lcm_expand_summary_node_for_test("cursor", "session-1", &leaf.node_id)
+        .lcm_expand_summary_node_for_test("cursor", "session-1", &successor.node_id)
         .await
-        .expect("leaf expansion");
+        .expect("successor expansion");
     assert_eq!(
         expanded_leaf
             .sources
@@ -735,7 +743,7 @@ async fn immutable_publication_preserves_order_and_stales_transitive_descendants
             format!("1:anchor:{}", store_ids[1]),
             format!("2:anchor:{}", store_ids[2]),
         ],
-        "the authoritative manifest and compatibility projection preserve source order"
+        "the canonical lineage preserves source order"
     );
     assert_eq!(
         db.lcm_summary_successor_edges_for_test()

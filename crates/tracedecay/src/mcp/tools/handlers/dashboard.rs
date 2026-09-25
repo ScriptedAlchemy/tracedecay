@@ -26,9 +26,9 @@ use tracedecay_domain::configuration::{
 use tracedecay_global_db::configuration::contracts::types::DirectConfigurationMutation;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
-use crate::project::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_project::project::TraceDecay;
 
 use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::handlers::dashboard_lcm::DashboardLcmReadAdapter;
@@ -92,7 +92,7 @@ impl DashboardProfileCodeIndexWorkerSettingsPort
         let database = self.database.clone();
         let profile_id = self.profile_id.clone();
         Box::pin(async move {
-            crate::config::read_or_initialize_profile_code_index_worker_configuration(
+            tracedecay_project::config::read_or_initialize_profile_code_index_worker_configuration(
                 database,
                 &profile_id,
             )
@@ -134,7 +134,7 @@ impl DashboardProfileCodeIndexWorkerSettingsPort
                 }),
                 Err(_) => {
                     let current =
-                        crate::config::read_or_initialize_profile_code_index_worker_configuration(
+                        tracedecay_project::config::read_or_initialize_profile_code_index_worker_configuration(
                             database,
                             &profile_id,
                         )
@@ -805,7 +805,7 @@ pub(super) async fn handle_dashboard(
                     }
                 })?;
             let retained_server = retained_server_resolver(
-                crate::mcp::server::RetainedProjectGraphRequest::for_mounted_root(
+                tracedecay_dashboard_api::project_graph::RetainedProjectGraphRequest::for_mounted_root(
                     cg.project_root().to_path_buf(),
                 ),
             )
@@ -949,7 +949,7 @@ pub(super) async fn handle_dashboard(
             crate::hooks::install_dashboard_hook_readiness_projection()?;
             // One fetch covers the served bundle and the advertised build
             // version; both come from the registered product runtime.
-            let product_runtime = crate::product_runtime::product_runtime()?;
+            let product_runtime = tracedecay_project::product_runtime::product_runtime()?;
             let state = build_state_with_automation_reconciler(
                 retained_cg.clone(),
                 DashboardStateCompositionV1 {
@@ -983,7 +983,7 @@ pub(super) async fn handle_dashboard(
             let app = router(
                 retained_cg.as_ref(),
                 state,
-                crate::dashboard::spa_router(product_runtime.dashboard()),
+                tracedecay_api::static_dashboard_router(Arc::new(product_runtime.dashboard())),
             )
             .await?;
             let (listener, addr) = bind_dashboard(&host, port).await?;

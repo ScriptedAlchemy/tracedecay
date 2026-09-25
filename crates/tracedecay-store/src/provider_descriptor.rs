@@ -23,7 +23,6 @@
 
 use tracedecay_domain::{CanonicalObservationFactV1, ObservationContractError};
 
-use crate::cursor_dispatch::is_subagent_dispatch_tool;
 use crate::{
     ProjectionStoreError, ProjectionStoreResult, codex_goal_context_from_text,
     codex_message_visible_text,
@@ -124,14 +123,14 @@ pub fn tool_metadata_normalizer(source: Option<&str>) -> Option<ToolMetadataNorm
 }
 
 /// Restates a Cursor transcript record's tool invocations as the canonical
-/// cross-provider `tool_calls`, `tool_events`, and `tool_use_id` fields.
+/// cross-provider `tool_calls` and `tool_events` fields. The record's
+/// `tool_use_id` is provider-neutral and written by the reducer itself.
 fn normalize_cursor_tool_metadata(
     metadata: &mut serde_json::Map<String, serde_json::Value>,
     facts: &[CanonicalObservationFactV1],
 ) -> ProjectionStoreResult<()> {
     let mut tool_calls = Vec::new();
     let mut tool_events = Vec::new();
-    let mut first_dispatch_id = None;
     for fact in facts {
         let CanonicalObservationFactV1::ToolInvocation {
             invocation_id,
@@ -160,16 +159,10 @@ fn normalize_cursor_tool_metadata(
             "call_id": invocation_id.as_str(),
             "input_bytes": input_bytes,
         }));
-        if first_dispatch_id.is_none() && is_subagent_dispatch_tool(name) {
-            first_dispatch_id = Some(invocation_id.as_str());
-        }
     }
     if !tool_calls.is_empty() {
         metadata.insert("tool_calls".to_owned(), tool_calls.into());
         metadata.insert("tool_events".to_owned(), tool_events.into());
-    }
-    if let Some(tool_use_id) = first_dispatch_id {
-        metadata.insert("tool_use_id".to_owned(), tool_use_id.into());
     }
     Ok(())
 }

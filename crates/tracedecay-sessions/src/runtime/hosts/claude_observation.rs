@@ -10,9 +10,9 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tracedecay_domain::{
     DomainError, ObservationContractError, ObservationId, ObservationIdentityMaterialV1,
-    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceGenerationV1,
-    ObservationSourceIdentityV1, ObservationSourceRangeV1, RetentionClass, SanitizationReceiptV1,
-    SessionId,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+    RetentionClass, SanitizationReceiptV1, SessionId,
 };
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, NonDurableFrameReason, ObservationCursorAdvance,
@@ -27,16 +27,16 @@ use crate::observation::{
     CaptureClaudeObservationOutcome, CaptureClaudeObservationRequest,
     CaptureClaudeObservationRequestError, ObservationApplicationError, ObservationCancellation,
 };
-use crate::runtime::claude::{
+use crate::runtime::hosts::claude::{
     ClaudeFrameCoverage, ClaudeSkippedFrame, ClaudeSkippedFrameReason, ClaudeSource,
     ClaudeSourceFrame, identify_claude_source, try_scan_claude_source_frames_with_resume,
 };
+use crate::runtime::observation::jsonl_observation_admission::is_deterministic_content_refusal;
 use crate::runtime::shared::{StoredCursor, TranscriptIngestStats};
 use crate::runtime::snapshot_observation::host_admission_error;
 use crate::runtime::source::{
     HostProviderCoverage, JsonlResumeState, STRICT_JSONL_BATCH_BYTES, TranscriptDiscoveryBounds,
-    TranscriptIngestError, TranscriptSource, persist_host_provider_coverage,
-    run_blocking_transcript_section,
+    TranscriptIngestError, persist_host_provider_coverage, run_blocking_transcript_section,
 };
 use tracedecay_privacy::PrivacySanitizerError;
 
@@ -224,6 +224,9 @@ enum FrameCaptureOutcome {
     Persisted(CapturedClaudeFrame),
     Rejected(SanitizationReceiptV1),
     Quarantined(SanitizationReceiptV1),
+    /// A deterministic refusal that will never succeed. The caller covers past
+    /// the frame so the source does not fail every pass.
+    Refused(NonDurableFrameReason),
 }
 
 struct FrameCaptureContext {
@@ -286,7 +289,13 @@ fn cursor_at(
     offset: u64,
     resume_checkpoint: Option<(u64, u64)>,
 ) -> Result<ObservationSourceCursorV1, ObservationContractError> {
-    let cursor = ObservationSourceCursorV1::new(source.clone(), scope.clone(), generation, offset)?;
+    let cursor = ObservationSourceCursorV1::for_ordering(
+        source.clone(),
+        scope.clone(),
+        generation,
+        ObservationOrderingDomainV1::FileBytes,
+        offset,
+    )?;
     Ok(
         resume_checkpoint.map_or(cursor.clone(), |(file_identity, resume_fingerprint)| {
             cursor.with_resume_checkpoint(file_identity, resume_fingerprint)
@@ -399,6 +408,17 @@ async fn capture_frame<A: HostAdmission + ?Sized>(
     let captured = match admission.capture_observation(request).await {
         Ok(captured) => captured,
         Err(error) => {
+            // Same convergence rule as JSONL and Hermes: a refusal that
+            // re-fails identically must cover past the frame. Failing the
+            // source leaves history blocked on a record that cannot commit.
+            if is_deterministic_content_refusal(&error) && !context.cancellation.is_cancelled() {
+                let reason = if error.reason_code == Some("observation_identity_collision") {
+                    NonDurableFrameReason::ObservationIdentityCollision
+                } else {
+                    NonDurableFrameReason::AdmissionRefused
+                };
+                return Ok(FrameCaptureOutcome::Refused(reason));
+            }
             let mapped = host_admission_error("claude", error);
             if let Some(durable) = already_applied_cursor(
                 admission,
@@ -419,20 +439,9 @@ async fn capture_frame<A: HostAdmission + ?Sized>(
         }
     };
     match captured {
-        CaptureClaudeObservationOutcome::Persisted {
-            outcome,
-            sanitized_record,
-            ..
-        }
-        | CaptureClaudeObservationOutcome::AcceptedForReplay {
-            outcome,
-            sanitized_record,
-            ..
-        } => {
+        CaptureClaudeObservationOutcome::Persisted { outcome, .. }
+        | CaptureClaudeObservationOutcome::AcceptedForReplay { outcome, .. } => {
             let receipt = outcome.receipt();
-            if !frame.set_sanitized_record(*sanitized_record) {
-                return Err(ClaudeObservationIngestError::InvalidFrameState);
-            }
             Ok(FrameCaptureOutcome::Persisted(CapturedClaudeFrame {
                 committed_cursor: receipt.committed_cursor().clone(),
                 exact_duplicate: matches!(
@@ -774,6 +783,22 @@ async fn apply_scanned_segment<A: HostAdmission + ?Sized>(
                             covered: range,
                             reason: NonDurableFrameReason::SanitizerRejected,
                             sanitization_receipt: Some(receipt),
+                            resume_fingerprint,
+                        },
+                        stats,
+                    )
+                    .await?;
+                }
+                FrameCaptureOutcome::Refused(reason) => {
+                    stats.records_rejected = stats.records_rejected.saturating_add(1);
+                    advance_non_durable_covered_range(
+                        admission,
+                        capture_context,
+                        observation_cursor,
+                        NonDurableSegment {
+                            covered: range,
+                            reason,
+                            sanitization_receipt: None,
                             resume_fingerprint,
                         },
                         stats,
@@ -1154,17 +1179,34 @@ fn frontier_store_error(
     .into()
 }
 
+/// Sources this pass will not visit.
+///
+/// A list longer than the page is the next rotation, not a failed pass. Once
+/// the frontier has walked the list once, later pages are refresh, and the
+/// unseen tail must not keep history retrying. A truncated discovery still
+/// defers: files the walk never returned are not covered by the frontier.
+fn claude_rotation_deferred(total: usize, byte_offset: u64, discovery_truncated: bool) -> usize {
+    let covered_once = byte_offset >= u64::try_from(total).unwrap_or(u64::MAX);
+    let mut deferred = if covered_once {
+        0
+    } else {
+        total.saturating_sub(MAX_CLAUDE_SOURCES_PER_PASS)
+    };
+    if discovery_truncated {
+        deferred = deferred.max(1);
+    }
+    deferred
+}
+
 async fn scheduled_source_paths<A: HostAdmission + ?Sized>(
     admission: &A,
     scope: &ObservationScopeV1,
     source: &ClaudeSource,
-    project_root: &Path,
 ) -> Result<(Vec<PathBuf>, usize), ClaudeObservationIngestError> {
     let discovery = hotpath::measure_block!(
         "sessions.hosts.claude.discover_blocking",
         run_blocking_transcript_section(|| {
-            source
-                .discover_transcript_paths(project_root, TranscriptDiscoveryBounds::default_walk())
+            source.discover_transcript_paths(TranscriptDiscoveryBounds::default_walk())
         })
     );
     let discovery_truncated = discovery.is_truncated();
@@ -1179,12 +1221,10 @@ async fn scheduled_source_paths<A: HostAdmission + ?Sized>(
         .await
         .map_err(|error| frontier_store_error("read Claude source frontier", error))?
         .unwrap_or_default();
-    let start = usize::try_from(frontier.byte_offset).unwrap_or(usize::MAX) % paths.len();
+    let total = paths.len();
+    let start = usize::try_from(frontier.byte_offset).unwrap_or(usize::MAX) % total;
     paths.rotate_left(start);
-    let mut deferred = paths.len().saturating_sub(MAX_CLAUDE_SOURCES_PER_PASS);
-    if discovery_truncated {
-        deferred = deferred.max(1);
-    }
+    let deferred = claude_rotation_deferred(total, frontier.byte_offset, discovery_truncated);
     paths.truncate(MAX_CLAUDE_SOURCES_PER_PASS);
     Ok((paths, deferred))
 }
@@ -1240,7 +1280,7 @@ where
         scope: &scope,
         cancellation: &cancellation,
     };
-    let (paths, deferred) = scheduled_source_paths(admission, &scope, source, project_root).await?;
+    let (paths, deferred) = scheduled_source_paths(admission, &scope, source).await?;
     let scheduled_source_count = paths.len();
     let mut stats = ClaudeObservationIngestStats {
         deferred_sources: u64::try_from(deferred).unwrap_or(u64::MAX),
@@ -1264,12 +1304,24 @@ where
                     stats = stats.merge(progress.clone());
                 }
                 let failure = crate::runtime::classify_claude_observation_failure(&error);
+                // One source whose ledger cannot prove an advance is not a
+                // reason to freeze every later history pass. The source stays
+                // failed; the pass stays retryable so the others keep moving.
+                let retryable = failure.retryable
+                    || failure.reason_code == "observation_cursor_advance_collision";
                 let summary =
-                    source_failures.get_or_insert((0_u64, failure.reason_code, failure.retryable));
+                    source_failures.get_or_insert((0_u64, failure.reason_code, retryable));
                 summary.0 = summary.0.saturating_add(1);
+                if !retryable {
+                    summary.2 = false;
+                }
                 tracing::warn!(
+                    source = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("unknown"),
                     reason_code = failure.reason_code,
-                    retryable = failure.retryable,
+                    retryable,
                     "Claude observation source ingest failed"
                 );
                 continue;

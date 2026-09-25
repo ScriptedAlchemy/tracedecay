@@ -7,16 +7,14 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_tool_catalog::{
-    AvailabilityContract, BindingId, BindingStatus, BindingSurface, CancellationContract,
-    CancellationPoint, CapabilityId, CapabilityManifestV1, CatalogContributionInputV1,
-    CatalogContributionV1, CodecBindingKey, ContributionId, DeadlineBehavior, DeadlineContract,
-    DeniedDisclosurePolicy, EffectClass, ExecutableBindingAvailabilityV1,
-    ExecutableBindingRegistryV1, ExecutableBindingV1, ExecutableSchemaAuthority, LifecycleClass,
-    OperationId, PaginationContract, PrivacyClass, ProfileId, ProtocolRevisionRange,
-    RevalidationContract, RevalidationPoint, RouteExposureV1, RoutingContractV1, SchemaId,
-    SchemaRef, ScopeDimension, ScopeRequirement, ServiceId, StreamingContract,
-    SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName, TerminalState,
-    TerminalStateContract, UseCaseId,
+    ApplicationSurfaceOperation, AvailabilityContract, BindingId, BindingSurface,
+    CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestV1,
+    CatalogContributionInputV1, CatalogContributionV1, ContributionId, DeadlineBehavior,
+    DeadlineContract, DeniedDisclosurePolicy, EffectClass, ExecutableSchemaAuthority,
+    LifecycleClass, PaginationContract, PrivacyClass, ProfileId, ProtocolRevisionRange,
+    RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef,
+    ScopeDimension, ScopeRequirement, StreamingContract, SurfaceBindingInputV1, SurfaceBindingV1,
+    SurfaceOperationName, TerminalState, TerminalStateContract, UseCaseId,
 };
 
 use crate::capability_manifest::{
@@ -155,6 +153,13 @@ impl RetainedSurfaceOperation {
         }
     }
 
+    /// The retained operation an application-surface operation names.
+    pub fn from_application(operation: ApplicationSurfaceOperation) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|candidate| candidate.as_str() == operation.as_str())
+    }
+
     #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -265,8 +270,6 @@ pub fn retained_surface_catalog_contribution()
                 operation: SurfaceOperationName::new(spec.operation.as_str())?,
                 protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
                 required_features: Vec::new(),
-                status: BindingStatus::Current,
-                alias_of: None,
             })?);
             binding_ids.push(binding_id);
         }
@@ -280,58 +283,6 @@ pub fn retained_surface_catalog_contribution()
     ))?;
     let schemas = retained_surface_executable_schemas(&contribution)?;
     Ok(contribution.with_executable_schemas(schemas)?)
-}
-
-/// Daemon-owned public HTTP bindings for retained V2 operations with a
-/// project-opened execution port and exact raw-handler proof.
-pub fn retained_surface_executable_binding_registry()
--> Result<ExecutableBindingRegistryV1, ApplicationContractError> {
-    let contribution = retained_surface_catalog_contribution()?;
-    let service_id = ServiceId::new("service.application.retained")?;
-    let mut bindings = Vec::with_capacity(RetainedSurfaceOperation::SDK_EXECUTABLE.len());
-    for operation in RetainedSurfaceOperation::SDK_EXECUTABLE {
-        let capability_id = CapabilityId::new(capability_id(operation))?;
-        let manifest = contribution
-            .capabilities()
-            .iter()
-            .find(|manifest| manifest.capability_id() == &capability_id)
-            .ok_or(ApplicationContractError::Inconsistent {
-                field: "retained executable capability",
-            })?;
-        let schema = contribution.executable_schema(&capability_id).ok_or(
-            ApplicationContractError::Inconsistent {
-                field: "retained executable schema",
-            },
-        )?;
-        let http_binding = contribution
-            .bindings()
-            .iter()
-            .find(|binding| {
-                binding.capability_id() == &capability_id
-                    && binding.surface() == BindingSurface::Http
-            })
-            .ok_or(ApplicationContractError::Inconsistent {
-                field: "retained HTTP binding",
-            })?;
-        bindings.push(ExecutableBindingAvailabilityV1::available(
-            ExecutableBindingV1::daemon_owned(
-                manifest,
-                OperationId::new(format!("operation.application.{}", operation.as_str()))?,
-                service_id.clone(),
-                schema.request_schema().clone(),
-                schema.result_schema().clone(),
-                CodecBindingKey::new(format!(
-                    "codec.application.retained.{}.json.v1",
-                    operation.as_str()
-                ))?,
-                RouteExposureV1::Public {
-                    binding_id: http_binding.binding_id().clone(),
-                    route_path: format!("/application/retained/{}", operation.as_str()),
-                },
-            )?,
-        ));
-    }
-    Ok(ExecutableBindingRegistryV1::new(bindings)?)
 }
 
 fn retained_surface_executable_schemas(
@@ -594,7 +545,7 @@ pub fn retained_surface_outcome_matches_terminal(
                 && effect.receipt.operation == *application_operation.use_case_id()
                 && effect.receipt.scope == *scope
         }
-        crate::ApplicationOutcome::Preview(_) => false,
+        crate::ApplicationOutcome::Preview(_) | crate::ApplicationOutcome::Result(_) => false,
     }
 }
 
@@ -724,7 +675,9 @@ fn capability(
 fn handler_descriptor(
     spec: &RetainedSurfaceSpec,
 ) -> Result<ApplicationHandlerDescriptor, ApplicationContractError> {
-    ApplicationHandlerDescriptor::new(
+    ApplicationHandlerDescriptor::for_catalog_operation(
+        spec.operation.as_str(),
+        "service.application.retained",
         application_operation(spec)?,
         schema(spec.operation, "request")?,
         schema(spec.operation, "result")?,
@@ -772,6 +725,8 @@ fn use_case_id(operation: RetainedSurfaceOperation) -> String {
 
 #[cfg(test)]
 mod tests {
+    use tracedecay_tool_catalog::{ExecutableBindingAvailabilityV1, RouteExposureV1};
+
     use super::*;
 
     #[test]
@@ -866,7 +821,7 @@ mod tests {
     #[test]
     fn fact_store_curate_is_the_only_public_automation_launcher() {
         let contribution = retained_surface_catalog_contribution().expect("contribution");
-        let registry = retained_surface_executable_binding_registry().expect("registry");
+        let registry = crate::application_http_executable_binding_registry().expect("registry");
         let operation = RetainedSurfaceOperation::FactStoreCurate;
         let capability = CapabilityId::new(capability_id(operation)).expect("capability id");
         let request_type = "tracedecay_contracts::retained_surfaces::FactStoreCurateRequestV1";
@@ -983,11 +938,7 @@ mod tests {
 
     #[test]
     fn every_mounted_retained_action_is_sdk_executable() {
-        let registry = retained_surface_executable_binding_registry().expect("registry");
-        assert_eq!(
-            registry.iter().count(),
-            RetainedSurfaceOperation::SDK_EXECUTABLE.len()
-        );
+        let registry = crate::application_http_executable_binding_registry().expect("registry");
         for operation in RetainedSurfaceOperation::SDK_EXECUTABLE {
             let operation_id = format!("operation.application.{}", operation.as_str());
             let binding = registry

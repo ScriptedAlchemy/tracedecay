@@ -76,7 +76,6 @@ impl LcmDaemonStore for FakeStore {
                 replay_token_estimate: 0,
                 replay_over_budget: false,
                 compression_attempts: 0,
-                fallback_used: false,
                 context_recovery_hint: None,
                 retry_status: None,
                 relation_projection_status:
@@ -635,10 +634,9 @@ async fn unsupported_pressure_preflight_does_not_create_session_or_raw_messages(
     assert_eq!(response.outcome, LcmAuthorityOutcome::Ready);
     for table in [
         "lcm_raw_messages",
-        "lcm_summary_nodes",
-        "lcm_summary_sources",
         "lcm_lifecycle_state",
         "session_summary_nodes",
+        "session_summary_sources",
     ] {
         assert_eq!(
             table_row_count(&database, table).await,

@@ -72,44 +72,12 @@ struct SealPayload<'a> {
     source_commitments: &'a Option<CodeGenerationSourceCommitmentsV1>,
 }
 
-#[derive(Serialize)]
-struct LegacySealPayload<'a> {
-    separator: &'static str,
-    generation_id: &'a CodeGenerationId,
-    snapshot_digest: &'a ManifestDigest,
-    registry_revision: &'a LanguageRegistryRevision,
-    grammar_revisions: &'a [(LanguageId, GrammarRevision)],
-    extractor_revisions: &'a [(LanguageId, ExtractorRevision)],
-    sanitizer_revision: &'a SanitizerRevision,
-    chunker_revision: &'a ChunkerRevision,
-    privacy_domain: &'a PrivacyDomainId,
-    privacy_key_epoch: u64,
-    parent_generation: &'a Option<CodeGenerationId>,
-    source_commitments: &'a Option<CodeGenerationSourceCommitmentsV1>,
-}
-
 /// The canonical expected digest a generation planner must seal before handing
 /// rows and the expected digest to the store publication port. The emitter
 /// verifies this digest before emitting capabilities for the generation.
 pub fn expected_seal_digest(
     generation: &CodeGenerationManifestV1,
 ) -> Result<ManifestDigest, DomainError> {
-    if generation.uses_legacy_v1_identity()? {
-        return canonical_sha256(&LegacySealPayload {
-            separator: GENERATION_SEAL_SEPARATOR,
-            generation_id: &generation.generation_id,
-            snapshot_digest: &generation.snapshot_digest,
-            registry_revision: &generation.registry_revision,
-            grammar_revisions: &generation.grammar_revisions,
-            extractor_revisions: &generation.extractor_revisions,
-            sanitizer_revision: &generation.sanitizer_revision,
-            chunker_revision: &generation.chunker_revision,
-            privacy_domain: &generation.privacy_domain,
-            privacy_key_epoch: generation.privacy_key_epoch,
-            parent_generation: &generation.parent_generation,
-            source_commitments: &generation.source_commitments,
-        });
-    }
     canonical_sha256(&SealPayload {
         separator: GENERATION_SEAL_SEPARATOR,
         generation_id: &generation.generation_id,
@@ -382,8 +350,11 @@ mod tests {
             .collect();
         let mut manifest = CodeGenerationManifestV1 {
             project_id: tracedecay_domain::ProjectId::new("project.fixture").expect("valid id"),
-            generation_id: CodeGenerationId::new("generation.v1.aaaaaaaa.00000001")
-                .expect("valid id"),
+            generation_id: CodeGenerationId::new(format!(
+                "generation.v1.aaaaaaaa.00000001.{}",
+                "c".repeat(64)
+            ))
+            .expect("valid id"),
             snapshot_digest: digest('a'),
             invalidation_digest: digest('c'),
             registry_revision: registry.registry_revision(),
@@ -401,9 +372,6 @@ mod tests {
                 planner: tracedecay_domain::ComponentVersion::new("planner.v1").expect("valid id"),
             },
         };
-        manifest.invalidation_digest = manifest
-            .expected_legacy_invalidation_digest()
-            .expect("legacy invalidation digest computes");
         manifest.seal.expected_digest =
             expected_seal_digest(&manifest).expect("seal digest computes");
         manifest
@@ -439,10 +407,7 @@ mod tests {
 
         let mut mixed = generation_manifest();
         mixed.parent_generation = Some(mixed.generation_id.clone());
-        // Recompute the integrity inputs so only self-supersession is wrong.
-        mixed.invalidation_digest = mixed
-            .expected_legacy_invalidation_digest()
-            .expect("mixed invalidation digest");
+        // Recompute the seal so only self-supersession is wrong.
         mixed.seal.expected_digest = expected_seal_digest(&mixed).expect("seal");
         assert_eq!(
             emitter().emit(&mixed),

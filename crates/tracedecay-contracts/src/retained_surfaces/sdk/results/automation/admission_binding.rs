@@ -17,7 +17,12 @@ fn zero_effect_completion_and_skip_are_typed_without_partial_receipts() {
 
 #[test]
 fn unknown_skill_skip_reasons_fail_closed() {
-    for reason in ["skill_writer_evidence_unavailable", "skill_writer_not_due"] {
+    for reason in [
+        "skill_writer_evidence_unavailable",
+        "skill_writer_not_due",
+        "no_skill_writer_evidence",
+        "session_cursor_manifest_participants_limit_exceeded",
+    ] {
         assert!(AutomationSkipReasonV1::from_ledger_reason(reason).is_none());
         let mut terminal = zero_terminal("skipped");
         terminal["terminal"]["reason"] = json!(reason);
@@ -82,7 +87,7 @@ fn budget_backoff_suppression_is_a_typed_session_evidence_skip() {
 
 #[test]
 fn skill_writer_empty_evidence_is_a_typed_session_evidence_skip() {
-    let reason = AutomationSkipReasonV1::from_ledger_reason("no_skill_writer_evidence")
+    let reason = AutomationSkipReasonV1::from_ledger_reason("no_session_evidence")
         .expect("skill-writer empty evidence is a registered skip");
     assert_eq!(reason, AutomationSkipReasonV1::NoSessionEvidence);
     assert!(reason.matches_task(AutomationTaskV1::SkillWriter));

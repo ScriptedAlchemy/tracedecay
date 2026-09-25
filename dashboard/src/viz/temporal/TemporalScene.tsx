@@ -1,12 +1,11 @@
 /**
  * Renderer for a laid-out `TemporalSceneModel`.
  *
- * Two layers over one coordinate space. A Canvas2D substrate carries the
- * atmosphere, rails, grid, cluster bodies, glowing threads, the unrevealed
- * hatch, and is painted once per model or palette change; nothing here
- * animates. A crisp SVG overlay carries every selectable mark, every label and
- * every title, so the surface stays complete when the canvas is missing and
- * every pointer action has a keyboard path.
+ * Two layers over one coordinate space. A Canvas2D substrate (`scene/paint`),
+ * painted once per model, density or palette change; nothing there animates.
+ * A crisp SVG overlay carries every selectable mark, every label and every
+ * title, so the surface stays complete when the canvas is missing and every
+ * pointer action has a keyboard path.
  *
  * This component draws. It never lays out, never grades, and never invents a
  * quantity: every coordinate comes from the model. Hover only inspects.
@@ -14,22 +13,18 @@
 import type { JSX, KeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { formatMoment } from '../../workspaces/loom/tracks.ts';
-import { EventGlyph, glyphLabel, TemporalLegend } from './glyphs.tsx';
-import {
-  gradeColorVar,
-  gradeDashArray,
-  gradeStroke,
-  resolveTemporalPalette,
-  type TemporalPalette,
-} from './palette.ts';
+import type { SceneDensity } from './density.ts';
+import { glyphLabel, TemporalLegend } from './glyphs.tsx';
+import { resolveTemporalPalette, type TemporalPalette } from './palette.ts';
+import { focusAlpha, type SceneFrame } from './scene/frame.ts';
+import { ClusterMark, FieldOverlay, LegendEncodings, laneDetail, NODE_CLASS, NodeMark } from './scene/marks.tsx';
+import { paintScene } from './scene/paint.ts';
 import type {
-  FocusTreatment,
   SceneCluster,
   SceneGap,
   SceneInterval,
   SceneLane,
   SceneNode,
-  ScenePath,
   SceneWindow,
   TemporalSceneModel,
 } from './types.ts';
@@ -44,13 +39,13 @@ export interface TemporalSceneProps {
   onWindowChange: (window: SceneWindow) => void;
   /** Pixel width the caller should lay out for; reported when the host resizes. */
   onMeasure?: (width: number) => void;
-  /** Newest loaded record label for the right marker, e.g. 'LOADED END' or 'NOW'. */
-  tailLabel: string;
   reducedMotion: boolean;
   onInspect?: (node: SceneNode | null) => void;
   className?: string;
   /** The whole projection extent, so Fit has somewhere to return to. */
   fullWindow?: SceneWindow;
+  /** Per-lane density over the same window: summaries, totals, recency, NOW. */
+  density?: SceneDensity | null;
 }
 
 /** Height of the time ruler strip across the top of the field. */
@@ -71,22 +66,6 @@ interface DragState {
 }
 
 /* ---- shared encodings ---------------------------------------------------- */
-
-function focusAlpha(focus: FocusTreatment): number {
-  switch (focus) {
-    case 'context':
-      return 0.35;
-    case 'path':
-      return 0.8;
-    case 'selected':
-    case 'neutral':
-      return 1;
-    default: {
-      const exhaustive: never = focus;
-      throw new Error(`unknown focus treatment: ${String(exhaustive)}`);
-    }
-  }
-}
 
 function proximityTone(tone: SceneInterval['tone']): string {
   switch (tone) {
@@ -122,184 +101,6 @@ function sameWindow(a: SceneWindow, b: SceneWindow, tolerance: number): boolean 
   return Math.abs(a.start - b.start) <= tolerance && Math.abs(a.end - b.end) <= tolerance;
 }
 
-/* ---- canvas substrate ---------------------------------------------------- */
-
-function tracePath(ctx: CanvasRenderingContext2D, controls: readonly number[]): void {
-  if (controls.length >= 8) {
-    ctx.moveTo(controls[0]!, controls[1]!);
-    ctx.bezierCurveTo(controls[2]!, controls[3]!, controls[4]!, controls[5]!, controls[6]!, controls[7]!);
-  } else if (controls.length >= 4) {
-    ctx.moveTo(controls[0]!, controls[1]!);
-    ctx.lineTo(controls[2]!, controls[3]!);
-  }
-}
-
-function strokePath(
-  ctx: CanvasRenderingContext2D,
-  path: ScenePath,
-  palette: TemporalPalette,
-  glowWidth: number,
-  coreWidth: number,
-): void {
-  const stroke = gradeStroke(path.grade, palette);
-  const alpha = focusAlpha(path.focus);
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
-
-  ctx.save();
-  if (!palette.light) ctx.globalCompositeOperation = 'lighter';
-  ctx.globalAlpha = 0.1 * alpha;
-  ctx.strokeStyle = stroke.color;
-  ctx.lineWidth = glowWidth;
-  ctx.setLineDash([]);
-  ctx.beginPath();
-  tracePath(ctx, path.controls);
-  ctx.stroke();
-  ctx.restore();
-
-  ctx.globalAlpha = alpha;
-  ctx.strokeStyle = stroke.color;
-  ctx.lineWidth = coreWidth;
-  ctx.setLineDash([...stroke.dash]);
-  ctx.beginPath();
-  tracePath(ctx, path.controls);
-  ctx.stroke();
-  ctx.setLineDash([]);
-}
-
-function drawScene(ctx: CanvasRenderingContext2D, model: TemporalSceneModel, palette: TemporalPalette): void {
-  const { viewport, height } = model;
-  const fieldX0 = viewport.left;
-  const fieldX1 = viewport.width - viewport.right;
-  const fieldWidth = Math.max(1, fieldX1 - fieldX0);
-
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(fieldX0, 0, fieldWidth, height);
-  ctx.clip();
-
-  for (const rail of model.rails) {
-    ctx.globalAlpha = palette.light ? 0.05 : 0.07;
-    ctx.fillStyle = palette.text;
-    ctx.fillRect(fieldX0, rail.y0, fieldWidth, rail.y1 - rail.y0);
-    ctx.globalAlpha = 0.4;
-    ctx.fillStyle = palette.edge;
-    ctx.fillRect(fieldX0, rail.y0, fieldWidth, 1);
-  }
-
-  ctx.globalAlpha = 0.35;
-  ctx.strokeStyle = palette.grid;
-  ctx.lineWidth = 1;
-  ctx.setLineDash([]);
-  for (const tick of model.ticks) {
-    const x = Math.round(tick.x) + 0.5;
-    ctx.beginPath();
-    ctx.moveTo(x, RULER);
-    ctx.lineTo(x, height);
-    ctx.stroke();
-  }
-
-  // Records stop at a dated cursor. The layout already withholds later ones;
-  // this clip keeps a curve's easing from reaching into the unrevealed band.
-  const recordX1 = model.cursor && model.cursor.xBasis === 'time' ? Math.min(fieldX1, model.cursor.x) : fieldX1;
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(fieldX0, 0, Math.max(0, recordX1 - fieldX0), height);
-  ctx.clip();
-
-  for (const cluster of model.clusters) {
-    const alpha = focusAlpha(cluster.focus);
-    const x1 = Math.max(cluster.x1, cluster.x0 + 2);
-    const body = ctx.createLinearGradient(cluster.x0, 0, x1, 0);
-    body.addColorStop(0, 'transparent');
-    body.addColorStop(0.18, palette.signal);
-    body.addColorStop(0.82, palette.signal);
-    body.addColorStop(1, 'transparent');
-    ctx.globalAlpha = 0.18 * alpha;
-    ctx.fillStyle = body;
-    ctx.fillRect(cluster.x0, cluster.y - cluster.height / 2, x1 - cluster.x0, cluster.height);
-    ctx.globalAlpha = 0.7 * alpha;
-    ctx.strokeStyle = palette.signalHot;
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(cluster.x0, cluster.y);
-    ctx.lineTo(x1, cluster.y);
-    ctx.stroke();
-  }
-
-  for (const path of model.paths) {
-    switch (path.kind) {
-      case 'lane': {
-        const weight = path.weight ?? 0;
-        const stroke = gradeStroke(path.grade, palette);
-        strokePath(ctx, path, palette, 6 + weight * 10, stroke.width + weight * 1.4);
-        break;
-      }
-      case 'spawn':
-      case 'handoff':
-      case 'rejoin':
-      case 'result': {
-        const stroke = gradeStroke(path.grade, palette);
-        strokePath(ctx, path, palette, 5, stroke.width);
-        break;
-      }
-      case 'sequence': {
-        ctx.globalAlpha = 0.55 * focusAlpha(path.focus);
-        ctx.strokeStyle = palette.text;
-        ctx.lineWidth = 1;
-        ctx.setLineDash([2, 3]);
-        ctx.beginPath();
-        tracePath(ctx, path.controls);
-        ctx.stroke();
-        ctx.setLineDash([]);
-        break;
-      }
-      default: {
-        const exhaustive: never = path.kind;
-        throw new Error(`unknown path kind: ${String(exhaustive)}`);
-      }
-    }
-  }
-
-  for (const node of model.nodes) {
-    const stroke = gradeStroke(node.grade, palette);
-    const radius = node.selected ? 22 : 13;
-    const halo = ctx.createRadialGradient(node.x, node.y, 1, node.x, node.y, radius);
-    halo.addColorStop(0, stroke.color);
-    halo.addColorStop(1, 'transparent');
-    ctx.save();
-    if (!palette.light) ctx.globalCompositeOperation = 'lighter';
-    ctx.globalAlpha = (node.selected ? 0.42 : 0.26) * focusAlpha(node.focus);
-    ctx.fillStyle = halo;
-    ctx.beginPath();
-    ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-  }
-  ctx.restore();
-
-  if (model.cursor && model.cursor.x < fieldX1) {
-    const x0 = Math.max(fieldX0, model.cursor.x);
-    const bandHeight = height - RULER;
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(x0, RULER, fieldX1 - x0, bandHeight);
-    ctx.clip();
-    ctx.globalAlpha = 0.05;
-    ctx.strokeStyle = palette.text;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    for (let x = x0 - bandHeight; x < fieldX1; x += 8) {
-      ctx.moveTo(x, height);
-      ctx.lineTo(x + bandHeight, RULER);
-    }
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  ctx.restore();
-}
-
 /* ---- component ----------------------------------------------------------- */
 
 export function TemporalScene(props: TemporalSceneProps): JSX.Element {
@@ -312,11 +113,11 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
     onSelectEncounter,
     onWindowChange,
     onMeasure,
-    tailLabel,
     reducedMotion,
     onInspect,
     className,
     fullWindow,
+    density = null,
   } = props;
   const clipId = useId();
   const hostRef = useRef<HTMLElement>(null);
@@ -326,6 +127,7 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
   const [palette, setPalette] = useState<TemporalPalette | null>(null);
   const [layer, setLayer] = useState<SceneLayer>('canvas');
   const [hover, setHover] = useState<string | null>(null);
+  const [cursorId, setCursorId] = useState<string | null>(null);
 
   const { viewport, height } = model;
   const width = viewport.width;
@@ -334,6 +136,10 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
   const fieldX0 = viewport.left;
   const fieldX1 = width - viewport.right;
   const fieldWidth = Math.max(1, fieldX1 - fieldX0);
+  const frame: SceneFrame = useMemo(
+    () => ({ model, density, fieldX0, fieldX1, top: RULER, height }),
+    [model, density, fieldX0, fieldX1, height],
+  );
 
   const lanes = useMemo(() => [...model.lanes].sort((a, b) => a.row - b.row), [model.lanes]);
   const clusterByLane = useMemo(
@@ -381,6 +187,22 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
     return counts;
   }, [lanes]);
   const hoverLaneId = hover === null ? null : model.nodes.find((node) => node.id === hover)?.laneId ?? null;
+  /** Keyboard order: lanes top to bottom, then time within a lane. */
+  const eventOrder = useMemo(() => {
+    const rowOf = new Map(lanes.map((lane) => [lane.id, lane.row]));
+    return [...model.nodes].sort(
+      (a, b) => (rowOf.get(a.laneId) ?? 0) - (rowOf.get(b.laneId) ?? 0) || a.x - b.x || a.id.localeCompare(b.id),
+    );
+  }, [model.nodes, lanes]);
+  const cursorIndex = (() => {
+    const at = cursorId === null ? -1 : eventOrder.findIndex((node) => node.id === cursorId);
+    if (at >= 0) return at;
+    const selected = eventOrder.findIndex((node) => node.selected);
+    return selected >= 0 ? selected : eventOrder.length > 0 ? 0 : -1;
+  })();
+  const cursorNode = cursorIndex >= 0 ? eventOrder[cursorIndex]! : null;
+  const eventPosition = useMemo(() => new Map(eventOrder.map((node, index) => [node.id, index])), [eventOrder]);
+  const eventDomId = (node: SceneNode): string => `${clipId}-event-${eventPosition.get(node.id) ?? 0}`;
 
   useEffect(() => {
     const host = hostRef.current;
@@ -409,8 +231,12 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
     const canvas = canvasRef.current;
     if (!canvas || !palette) return;
     const dpr = globalThis.devicePixelRatio || 1;
-    canvas.width = Math.max(1, Math.round(width * dpr));
-    canvas.height = Math.max(1, Math.round(height * dpr));
+    // Assigning a size reallocates the bitmap even when it is unchanged; a
+    // window change repaints into the one it already has.
+    const pixelWidth = Math.max(1, Math.round(width * dpr));
+    const pixelHeight = Math.max(1, Math.round(height * dpr));
+    if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+    if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
     const ctx = canvas.getContext('2d');
     if (!ctx) {
       setLayer('unavailable');
@@ -419,8 +245,8 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
     setLayer('canvas');
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, width, height);
-    drawScene(ctx, model, palette);
-  }, [model, palette, width, height]);
+    paintScene(ctx, frame, palette);
+  }, [frame, palette, width, height]);
 
   /* ---- window arithmetic ---- */
 
@@ -526,6 +352,55 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
   const leaveNode = (): void => {
     setHover(null);
     onInspect?.(null);
+  };
+
+  /** The nearest event in the next or previous lane that has any, by x. */
+  const acrossLanes = (from: SceneNode, direction: 1 | -1): SceneNode | null => {
+    const rows = [...new Set(eventOrder.map((node) => node.laneId))];
+    const target = rows[rows.indexOf(from.laneId) + direction];
+    if (target === undefined) return null;
+    const candidates = eventOrder.filter((node) => node.laneId === target);
+    return candidates.reduce((best, node) => (Math.abs(node.x - from.x) < Math.abs(best.x - from.x) ? node : best));
+  };
+  const onOverlayKey = (event: KeyboardEvent<SVGSVGElement>): void => {
+    if (cursorNode === null) return;
+    let next: SceneNode | null = null;
+    switch (event.key) {
+      case 'ArrowRight':
+        next = eventOrder[Math.min(eventOrder.length - 1, cursorIndex + 1)]!;
+        break;
+      case 'ArrowLeft':
+        next = eventOrder[Math.max(0, cursorIndex - 1)]!;
+        break;
+      case 'ArrowDown':
+        next = acrossLanes(cursorNode, 1);
+        break;
+      case 'ArrowUp':
+        next = acrossLanes(cursorNode, -1);
+        break;
+      case 'Home':
+        next = eventOrder[0]!;
+        break;
+      case 'End':
+        next = eventOrder[eventOrder.length - 1]!;
+        break;
+      case 'Enter':
+      case ' ':
+        event.preventDefault();
+        onSelectEvent(cursorNode.id);
+        return;
+      default:
+        return;
+    }
+    event.preventDefault();
+    if (next === null) return;
+    setCursorId(next.id);
+    enterNode(next);
+    // Focus follows the cursor when it already sits on a glyph; from the
+    // overlay itself, aria-activedescendant carries it.
+    if (event.target !== event.currentTarget) {
+      (document.getElementById(eventDomId(next)) as SVGGElement | null)?.focus();
+    }
   };
   const laneGroupStyle = (laneId: string) => ({
     opacity: hoverLaneId !== null && hoverLaneId !== laneId ? 0.55 : 1,
@@ -665,21 +540,14 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
   const renderCluster = (cluster: SceneCluster, lane: SceneLane): JSX.Element => {
     const x1 = Math.max(cluster.x1, cluster.x0 + 2);
     const top = cluster.y - cluster.height / 2;
-    const bracket = 6;
     const label = `Expand branch ${lane.label} · ${cluster.counts.sessions} sessions · ${cluster.counts.subagents} subagents · ${cluster.counts.messages} messages`;
-    const outline = [
-      `M ${cluster.x0} ${top + bracket} V ${top} H ${cluster.x0 + bracket}`,
-      `M ${x1 - bracket} ${top} H ${x1} V ${top + bracket}`,
-      `M ${x1} ${top + cluster.height - bracket} V ${top + cluster.height} H ${x1 - bracket}`,
-      `M ${cluster.x0 + bracket} ${top + cluster.height} H ${cluster.x0} V ${top + cluster.height - bracket}`,
-    ].join(' ');
     return (
       <g
         role="button"
         tabIndex={0}
         data-cluster={cluster.id}
         aria-label={label}
-        className="cursor-pointer outline-none [&:focus>path]:stroke-white"
+        className="cursor-pointer outline-none [&:focus-visible>path]:stroke-[var(--raw-graph-accent)] [&:focus-visible>path]:[stroke-width:2]"
         opacity={focusAlpha(cluster.focus)}
         onClick={() => onToggleBranch(cluster.laneId)}
         onKeyDown={(event) => {
@@ -690,75 +558,62 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
         }}
       >
         <title>{label}</title>
-        <rect x={cluster.x0} y={Math.min(top, cluster.y - 22)} width={x1 - cluster.x0} height={Math.max(cluster.height, 44)} fill="transparent" />
-        <rect x={cluster.x0} y={top} width={x1 - cluster.x0} height={cluster.height} fill="none" stroke="var(--raw-graph-accent)" strokeWidth={1} opacity={0.35} strokeDasharray="6 4" />
-        <path d={outline} fill="none" stroke="var(--raw-graph-accent)" strokeWidth={1.4} />
-        <text x={cluster.x0 + bracket + 2} y={top - 3} fontSize={9} fill="var(--raw-graph-text)" pointerEvents="none">
-          {cluster.counts.sessions} sessions
-        </text>
+        <rect
+          x={Math.min(cluster.x0, (cluster.x0 + x1) / 2 - 22)}
+          y={Math.min(top, cluster.y - 22)}
+          width={Math.max(x1 - cluster.x0, 44)}
+          height={Math.max(cluster.height, 44)}
+          fill="transparent"
+        />
+        <ClusterMark cluster={cluster} />
       </g>
     );
   };
 
   const renderNode = (node: SceneNode): JSX.Element => {
-    const hovered = hover === node.id;
-    const color = gradeColorVar(node.grade);
-    const haloRadius = node.selected ? 13 : hovered ? 11 : 0;
     const halfHit = Math.max(1, node.halfHit);
     const title = `${glyphLabel(node.kind)} · ${node.label}${node.detail ? ` · ${node.detail}` : ''} · ${node.grade}${node.xBasis === 'sequence' ? ' · recorded order, timestamp unrecorded' : ''}`;
-    const select = (): void => onSelectEvent(node.id);
+    const select = (): void => {
+      setCursorId(node.id);
+      onSelectEvent(node.id);
+    };
     return (
       <g
         key={node.id}
+        id={eventDomId(node)}
         role="button"
-        tabIndex={0}
+        // One tab stop for the whole scene: the overlay owns it and arrow
+        // keys walk the glyphs, so the hit band stays clear of neighbours.
+        tabIndex={-1}
         data-event={node.id}
+        data-event-current={node === cursorNode || undefined}
         data-lane={node.laneId}
         data-kind={node.kind}
         data-grade={node.grade}
         data-x-basis={node.xBasis}
         aria-label={`Select ${glyphLabel(node.kind)} ${node.label}`}
         aria-pressed={node.selected}
-        className="cursor-pointer outline-none [&:focus>circle.td-focus-ring]:stroke-white"
+        className={NODE_CLASS}
         opacity={focusAlpha(node.focus)}
         onClick={select}
         onKeyDown={(event) => {
           if (isActivation(event)) {
             event.preventDefault();
+            event.stopPropagation();
             select();
           }
         }}
         onMouseEnter={() => enterNode(node)}
-        onFocus={() => enterNode(node)}
+        onFocus={() => {
+          setCursorId(node.id);
+          enterNode(node);
+        }}
         onMouseLeave={leaveNode}
         onBlur={leaveNode}
       >
         <title>{title}</title>
         <rect x={node.x - halfHit} y={node.y - 22} width={Math.max(2, halfHit * 2)} height={44} fill="transparent" />
-        <circle
-          className="td-focus-ring"
-          cx={node.x}
-          cy={node.y}
-          r={haloRadius}
-          fill="none"
-          stroke={node.grade === 'ambiguous' ? 'var(--raw-graph-alert)' : 'var(--raw-graph-accent)'}
-          strokeWidth={1.2}
-          opacity={0.8}
-          pointerEvents="none"
-        />
-        <circle
-          cx={node.x}
-          cy={node.y}
-          r={7}
-          fill="var(--raw-graph-substrate)"
-          stroke={color}
-          strokeWidth={1.2}
-          strokeDasharray={gradeDashArray(node.grade) || undefined}
-          pointerEvents="none"
-        />
-        <g transform={`translate(${node.x} ${node.y})`} color={color} pointerEvents="none">
-          <EventGlyph kind={node.kind} size={12} />
-        </g>
+        <NodeMark node={node} frame={frame} />
       </g>
     );
   };
@@ -770,7 +625,9 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
     const twoLine = lane.height >= 28;
     const toggle = branchToggleFor(lane);
     const bundleCount = clusterByLane.get(lane.id)?.counts.sessions ?? lane.collapsedDescendants;
-    const detailLine = lane.kind === 'bundle' ? `${lane.provider} · bundle · ${bundleCount} sessions` : lane.provider;
+    const detailLine =
+      laneDetail(lane, frame) ??
+      (lane.kind === 'bundle' ? `${lane.provider} · bundle · ${bundleCount} sessions` : lane.provider);
     // Lane rows and toggles are pointer affordances for the same actions the
     // branch navigator table offers as 44px DOM controls; they stay out of the
     // tab order so a dense page does not become hundreds of stops.
@@ -838,7 +695,11 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
   };
 
   return (
-    <section ref={hostRef} aria-label={ariaLabel} className={`td-optic relative min-w-0 ${className ?? ''}`.trim()}>
+    <section
+      ref={hostRef}
+      aria-label={ariaLabel}
+      className={`td-optic relative min-w-0 ${className ?? ''}`.trim()}
+    >
       <div role="toolbar" aria-label="Time window" className="relative z-10 flex min-h-10 flex-wrap items-center gap-1 border-b border-edge-subtle px-1 text-xs">
         <button type="button" className="td-hit" aria-label="Zoom in" onClick={() => scaleWindow(0.5, centre)}>+</button>
         <button type="button" className="td-hit" aria-label="Zoom out" onClick={() => scaleWindow(2, centre)}>−</button>
@@ -858,6 +719,11 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
         <span className="td-value text-3xs" data-window-readout>
           {formatMoment(window.start)} – {formatMoment(window.end)}
         </span>
+        {cursorNode ? (
+          <span className="td-value ml-2 text-3xs text-text-muted" data-event-position>
+            event {cursorIndex + 1} of {eventOrder.length}
+          </span>
+        ) : null}
       </div>
       <div className="relative" data-scene-field>
         <canvas
@@ -878,9 +744,16 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
         <svg
           ref={overlayRef}
           role="group"
-          aria-label="Temporal execution overlay"
+          aria-label="Temporal execution overlay. Arrow keys move between events, Home and End jump to the first and last, Enter selects."
+          aria-activedescendant={cursorNode ? eventDomId(cursorNode) : undefined}
+          tabIndex={eventOrder.length > 0 ? 0 : -1}
           data-scene-layer="overlay"
-          className="relative block touch-none select-none"
+          onKeyDown={onOverlayKey}
+          onBlur={(event) => {
+            const next = event.relatedTarget;
+            if (!(next instanceof Node) || !event.currentTarget.contains(next)) leaveNode();
+          }}
+          className="relative block touch-none select-none outline-none [&:focus-visible_[data-event-current]>.td-focus-ring]:opacity-100"
           width="100%"
           viewBox={`0 0 ${width} ${height}`}
         >
@@ -896,10 +769,6 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
             </text>
           ))}
           <line x1={0} x2={width} y1={RULER - 0.5} y2={RULER - 0.5} stroke="var(--raw-graph-edge)" strokeWidth={1} />
-          <line data-tail-marker x1={fieldX1 + 0.5} x2={fieldX1 + 0.5} y1={RULER - 8} y2={height} stroke="var(--raw-graph-accent)" strokeWidth={1} opacity={0.7} />
-          <text x={fieldX1 - 4} y={11} fontSize={10} textAnchor="end" fill="var(--raw-graph-accent)" pointerEvents="none">
-            {tailLabel}
-          </text>
           <rect
             data-field-background
             x={fieldX0}
@@ -935,21 +804,7 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
                 </text>
               ))}
           </g>
-          {model.cursor && (
-            <g data-cursor-mark pointerEvents="none">
-              <line
-                data-cursor
-                x1={model.cursor.x}
-                x2={model.cursor.x}
-                y1={RULER}
-                y2={height}
-                stroke="var(--raw-graph-text)"
-                strokeWidth={1}
-                opacity={0.7}
-              />
-              <path d={`M ${model.cursor.x - 4} ${RULER - 7} L ${model.cursor.x + 4} ${RULER - 7} L ${model.cursor.x} ${RULER - 1} Z`} fill="var(--raw-graph-text)" />
-            </g>
-          )}
+          <FieldOverlay frame={frame} />
         </svg>
       </div>
       <svg
@@ -1005,7 +860,9 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
           strokeWidth={1}
         />
       </svg>
-      <TemporalLegend gaps={model.gaps} />
+      <TemporalLegend gaps={model.gaps}>
+        <LegendEncodings />
+      </TemporalLegend>
     </section>
   );
 }

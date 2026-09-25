@@ -137,8 +137,7 @@ mod test_runtime {
     /// registered identity authority; this crate's tests seed the markers
     /// directly, so the fixture reads them.
     fn initialized(project_root: &Path) -> bool {
-        tracedecay_runtime_core::config::has_project_database(project_root)
-            || tracedecay_runtime_core::storage::has_repository_identity_marker(project_root)
+        tracedecay_runtime_core::storage::has_repository_identity_marker(project_root)
     }
 
     fn layout(_: &Path) -> Pin<Box<dyn Future<Output = Result<StoreLayout>> + Send + '_>> {

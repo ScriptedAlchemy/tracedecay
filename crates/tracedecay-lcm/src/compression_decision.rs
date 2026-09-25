@@ -360,8 +360,6 @@ mod tests {
             content_hash: "hash".to_string(),
             storage_kind: super::super::LcmStorageKind::Inline,
             payload_ref: None,
-            legacy_source: false,
-            legacy_truncated: false,
             metadata_json: None,
         }];
 

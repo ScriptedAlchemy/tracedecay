@@ -14,13 +14,15 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{CodeGenerationId, UtcMicros};
 use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::path_safety::plain_host_path;
 
 use super::symbol_graph::{SymbolGraphCursorFuture, SymbolGraphCursorPort, SymbolGraphPageClaim};
 use tracedecay_graph_query::SourceReadContext;
 use tracedecay_graph_query::context::read_modes::{LineRange, ReadMode};
 use tracedecay_graph_query::context::source_read::{SourceReadRequest, read_source};
 use tracedecay_temporal_query::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
-use tracedecay_temporal_query::ports::{SessionCursorAuthenticator, TemporalExecutionSnapshot};
+use tracedecay_temporal_query::ports::SessionCursorAuthenticator;
+use tracedecay_temporal_query::snapshot::TemporalExecutionSnapshot;
 
 /// Production source-read adapter bound to one admitted project root.
 ///
@@ -42,7 +44,7 @@ impl SourceReadAdapter {
         code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
         scope: ResolvedScope,
     ) -> Result<Self, ApplicationContractError> {
-        let admitted_project_root = source_runtime.project_root().to_path_buf();
+        let admitted_project_root = plain_host_path(source_runtime.project_root());
         Self::new_bound(source_runtime, code_graph, scope, &admitted_project_root)
     }
 
@@ -57,7 +59,10 @@ impl SourceReadAdapter {
             return Err(source_binding_error());
         }
         let project_root = source_runtime.project_root();
-        if project_root != admitted_project_root {
+        // The admitted root arrives through a file URL, which cannot carry the
+        // Windows `\\?\` verbatim prefix `canonicalize` gives the runtime root,
+        // so the runtime root is compared in the spelling a URL can publish.
+        if plain_host_path(project_root) != admitted_project_root {
             return Err(source_binding_error());
         }
         Ok(Self {
@@ -454,6 +459,7 @@ fn primitive_failure(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     use tracedecay_contracts::{
@@ -473,15 +479,16 @@ mod tests {
 
     use super::{
         AuthenticatedSymbolGraphCursorAdapter, SourceReadAdapter, SymbolGraphCursorSnapshot,
-        SymbolGraphCursorSnapshotAuthority,
+        SymbolGraphCursorSnapshotAuthority, source_binding_error,
     };
     use crate::primitives::SymbolGraphCursorPort;
     use tracedecay_contracts::retrieval::PrimitiveFailureKind;
-    use tracedecay_temporal_query::ports::{
-        BindingDigest, InMemoryCursorAuthenticator, KernelVersions, TemporalExecutionSnapshot,
-        TemporalSnapshotRequest, TemporalWatermarks,
-    };
+    use tracedecay_temporal_query::execution::BindingDigest;
+    use tracedecay_temporal_query::ports::{InMemoryCursorAuthenticator, TemporalSnapshotRequest};
     use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+    use tracedecay_temporal_query::snapshot::{
+        KernelVersions, TemporalExecutionSnapshot, TemporalWatermarks,
+    };
 
     const NOW: UtcMicros = UtcMicros(1_000);
 
@@ -544,6 +551,35 @@ mod tests {
                 &admitted_root,
             )
             .is_err()
+        );
+
+        // A Windows runtime root is spelled `\\?\D:\...` by `canonicalize`,
+        // while the root admitted through its file URL reads `D:\...`.
+        let verbatim_root = |root: &str| {
+            Arc::new(SourceReadContext::new(
+                PathBuf::from(format!(r"\\?\{root}")),
+                database.clone(),
+                true,
+                scope.project_id.as_str().to_owned(),
+            ))
+        };
+        let verbatim = SourceReadAdapter::new_bound(
+            verbatim_root(r"D:\repo"),
+            Arc::clone(&projection),
+            scope.clone(),
+            Path::new(r"D:\repo"),
+        )
+        .expect("a verbatim runtime root binds to its URL spelling");
+        assert_eq!(verbatim.project_root, PathBuf::from(r"\\?\D:\repo"));
+        assert_eq!(
+            SourceReadAdapter::new_bound(
+                verbatim_root(r"D:\foreign"),
+                Arc::clone(&projection),
+                scope.clone(),
+                Path::new(r"D:\repo"),
+            )
+            .err(),
+            Some(source_binding_error())
         );
 
         let matching = Arc::new(SourceReadContext::new(

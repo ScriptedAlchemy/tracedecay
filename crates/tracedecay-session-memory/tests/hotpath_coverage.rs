@@ -4,8 +4,9 @@
 //! alone must not create a report without a process-boundary guard.
 
 use tracedecay_domain::{FactCategoryV1, FactOwnerV1, ProjectId};
+use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_session_memory::context::{
-    CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, RequestBudgets,
+    CapabilityDigest, ConfigurationDigest, PolicyDigest, RequestBudgets,
     session_application_grant_digest,
 };
 use tracedecay_session_memory::memory::{ProjectMemoryFactAddRequest, automatic_fact_add_command};

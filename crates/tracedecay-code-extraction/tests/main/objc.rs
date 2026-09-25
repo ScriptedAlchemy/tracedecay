@@ -2,6 +2,8 @@ use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_code_extraction::ObjcExtractor;
 use tracedecay_domain::*;
 
+include!("support/edges.rs");
+
 #[test]
 fn test_objc_extract_imports() {
     let source = r#"#import <Foundation/Foundation.h>
@@ -9,7 +11,7 @@ fn test_objc_extract_imports() {
 #include <stdio.h>
 "#;
     let extractor = ObjcExtractor;
-    let result = extractor.extract("sample.m", source);
+    let result = extractor.extract_artifact("sample.m", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let includes: Vec<_> = result
         .nodes
@@ -28,7 +30,7 @@ fn test_objc_extract_preprocessor_defines() {
 #define DEFAULT_PORT 8080
 "#;
     let extractor = ObjcExtractor;
-    let result = extractor.extract("sample.m", source);
+    let result = extractor.extract_artifact("sample.m", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let defs: Vec<_> = result
         .nodes
@@ -50,7 +52,7 @@ fn test_objc_extract_ns_enum() {
 };
 "#;
     let extractor = ObjcExtractor;
-    let result = extractor.extract("sample.m", source);
+    let result = extractor.extract_artifact("sample.m", source).result;
     // NS_ENUM may produce parse errors but we still extract useful data
     let enums: Vec<_> = result
         .nodes
@@ -94,7 +96,7 @@ fn test_objc_extract_protocol() {
 @end
 "#;
     let extractor = ObjcExtractor;
-    let result = extractor.extract("sample.m", source);
+    let result = extractor.extract_artifact("sample.m", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let protocols: Vec<_> = result
@@ -141,7 +143,7 @@ fn test_objc_extract_class_interface() {
 @end
 "#;
     let extractor = ObjcExtractor;
-    let result = extractor.extract("sample.m", source);
+    let result = extractor.extract_artifact("sample.m", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let classes: Vec<_> = result
@@ -198,7 +200,7 @@ fn test_objc_extract_class_with_protocol_conformance() {
 @end
 "#;
     let extractor = ObjcExtractor;
-    let result = extractor.extract("sample.m", source);
+    let result = extractor.extract_artifact("sample.m", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let classes: Vec<_> = result
@@ -271,7 +273,7 @@ fn test_objc_extract_implementation() {
 @end
 "#;
     let extractor = ObjcExtractor;
-    let result = extractor.extract("sample.m", source);
+    let result = extractor.extract_artifact("sample.m", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let impls: Vec<_> = result
@@ -312,15 +314,29 @@ fn test_objc_extract_implementation() {
         .unresolved_refs
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
+        .map(|r| r.reference_name.as_str())
         .collect();
-    assert!(!calls.is_empty(), "expected call site refs");
+    assert_eq!(
+        calls,
+        [
+            "super.init",
+            "name.copy",
+            "NSString.stringWithFormat",
+            "NSStringFromClass",
+            "self.class",
+            "NSAssert",
+        ]
+    );
 
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(contains.len() >= 3, "expected >= 3 Contains edges");
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Contains),
+        [
+            ("sample.m", "Base"),
+            ("Base", "initWithName"),
+            ("Base", "description"),
+            ("Base", "validate"),
+        ]
+    );
 }
 
 #[test]
@@ -331,7 +347,7 @@ void logMessage(LogLevel level, NSString *message) {
 }
 "#;
     let extractor = ObjcExtractor;
-    let result = extractor.extract("sample.m", source);
+    let result = extractor.extract_artifact("sample.m", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let fns: Vec<_> = result
@@ -356,8 +372,9 @@ void logMessage(LogLevel level, NSString *message) {
         .unresolved_refs
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
+        .map(|r| r.reference_name.as_str())
         .collect();
-    assert!(!calls.is_empty(), "expected call site refs from NSLog");
+    assert_eq!(calls, ["NSLog"]);
 }
 
 #[test]
@@ -373,7 +390,7 @@ fn test_objc_message_expression_calls() {
 @end
 "#;
     let extractor = ObjcExtractor;
-    let result = extractor.extract("sample.m", source);
+    let result = extractor.extract_artifact("sample.m", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let calls: Vec<_> = result
@@ -381,10 +398,12 @@ fn test_objc_message_expression_calls() {
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
-    assert!(
-        calls.len() >= 3,
-        "expected >= 3 call refs, got {}",
-        calls.len()
+    assert_eq!(
+        calls
+            .iter()
+            .map(|x| x.reference_name.as_str())
+            .collect::<Vec<_>>(),
+        ["self.doSomething", "NSString.stringWithFormat", "NSLog"]
     );
     // Message sends create receiver.method format
     assert!(

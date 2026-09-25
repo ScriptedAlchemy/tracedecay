@@ -2,27 +2,24 @@
 //!
 //! Recovery and corruption artifacts (`*.corrupt-*`, `*.corrupt`,
 //! `*.recovered*`, `recovery-*`) accumulate as loose siblings of live stores with no owner
-//! surface. This module gives them a typed classifier, a single quarantine
-//! location contract with metadata, and a scan read model that a Doctor producer
-//! turns into an `IncidentDebrisPresent` finding. It performs no filesystem
-//! effect: detection consumes already-listed file names, and quarantine is a
-//! declarative record the owning storage operation later enacts.
+//! surface. This module gives them a typed classifier and a scan read model
+//! that a Doctor producer turns into an `IncidentDebrisPresent` finding. It
+//! performs no filesystem effect: detection consumes already-listed file names,
+//! and retention deletes classified debris directly.
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::UtcMicros;
 
 use crate::error::ApplicationContractError;
 
-use super::identity::{
-    QuarantineLocationV1, RelativeArtifactPathV1, StorageByteSizeV1, StoreKeyV1,
-};
+use super::identity::{RelativeArtifactPathV1, StorageByteSizeV1, StoreKeyV1};
 
 /// The class of incident artifact a debris file represents.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum IncidentDebrisKindV1 {
-    /// A `*.corrupt-*` or `*.corrupt` sibling: a store copied aside after
-    /// corruption detection.
+    /// A `*.corrupt-*` sibling: a store copied aside after corruption
+    /// detection.
     Corrupt,
     /// A `*.recovered*` sibling: the output of a recovery pass.
     Recovered,
@@ -36,7 +33,7 @@ impl IncidentDebrisKindV1 {
     ///
     /// Matching is deliberately narrow so a live store (`sessions.db`,
     /// `sessions.db-wal`, `sessions.db-shm`) is never misclassified as debris.
-    /// The patterns mirror the measured evidence: `*.corrupt-*`, `*.corrupt`,
+    /// The patterns mirror the measured evidence: `*.corrupt-*`,
     /// `*.recovered*`, and `recovery-*`.
     #[must_use]
     pub fn classify(file_name: &str) -> Option<Self> {
@@ -45,10 +42,7 @@ impl IncidentDebrisKindV1 {
             return Some(Self::RecoveryScratch);
         }
         // `*.corrupt-<suffix>`: a `.corrupt-` segment somewhere in the name.
-        // The bare `*.corrupt` suffix is the same artifact from an older
-        // quarantine naming convention; profiles upgraded across that change
-        // still carry it, and no live store name ends in `.corrupt`.
-        if file_name.contains(".corrupt-") || file_name.ends_with(".corrupt") {
+        if file_name.contains(".corrupt-") {
             return Some(Self::Corrupt);
         }
         // `*.recovered*`: a `.recovered` segment somewhere in the name.
@@ -90,75 +84,6 @@ impl IncidentDebrisArtifactV1 {
             size_bytes,
             observed_at,
         }))
-    }
-}
-
-/// The single quarantine location debris is collected into, with metadata.
-///
-/// Recovery/corruption artifacts must be written into one quarantined
-/// location with metadata, surfaced by Doctor and collected by the
-/// retention machinery, never left as loose siblings. This contract names
-/// that location (store-relative) and the retention window after which
-/// quarantined artifacts become collection-eligible.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct QuarantineContractV1 {
-    /// The single store-relative directory debris is moved into.
-    pub location: QuarantineLocationV1,
-    /// Micros after which a quarantined artifact is collection-eligible.
-    pub retention_window_micros: i64,
-}
-
-impl QuarantineContractV1 {
-    /// Validate the contract. The retention window must be positive; a
-    /// non-positive window would make every artifact instantly collectible,
-    /// defeating the owner-visible retention guarantee.
-    pub fn validate(&self) -> Result<(), ApplicationContractError> {
-        if self.retention_window_micros <= 0 {
-            return Err(ApplicationContractError::ZeroValue {
-                field: "quarantine retention window",
-            });
-        }
-        Ok(())
-    }
-
-    /// Declare the quarantined placement for an artifact. This is a record, not
-    /// a move: the owning storage operation enacts the relocation and honors the
-    /// window. The eligibility time is `quarantined_at + retention_window`.
-    pub fn quarantine(
-        &self,
-        artifact: IncidentDebrisArtifactV1,
-        quarantined_at: UtcMicros,
-    ) -> Result<QuarantinedArtifactV1, ApplicationContractError> {
-        self.validate()?;
-        Ok(QuarantinedArtifactV1 {
-            collection_eligible_at: UtcMicros(
-                quarantined_at
-                    .0
-                    .saturating_add(self.retention_window_micros),
-            ),
-            location: self.location.clone(),
-            artifact,
-            quarantined_at,
-        })
-    }
-}
-
-/// An artifact declared into the quarantine location with its collection window.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct QuarantinedArtifactV1 {
-    pub artifact: IncidentDebrisArtifactV1,
-    pub location: QuarantineLocationV1,
-    pub quarantined_at: UtcMicros,
-    pub collection_eligible_at: UtcMicros,
-}
-
-impl QuarantinedArtifactV1 {
-    /// True when `now` has reached the collection-eligibility watermark.
-    #[must_use]
-    pub fn is_collection_eligible(&self, now: UtcMicros) -> bool {
-        now.0 >= self.collection_eligible_at.0
     }
 }
 
@@ -226,19 +151,6 @@ mod tests {
         );
     }
 
-    /// The pre-timestamp quarantine naming an upgraded profile still carries.
-    #[test]
-    fn classifier_matches_bare_corrupt_suffix() {
-        assert_eq!(
-            IncidentDebrisKindV1::classify("tracedecay.db.corrupt"),
-            Some(IncidentDebrisKindV1::Corrupt)
-        );
-        assert_eq!(
-            IncidentDebrisKindV1::classify("sessions.db.corrupt"),
-            Some(IncidentDebrisKindV1::Corrupt)
-        );
-    }
-
     #[test]
     fn classifier_never_flags_live_store_files() {
         for name in [
@@ -249,36 +161,6 @@ mod tests {
         ] {
             assert_eq!(IncidentDebrisKindV1::classify(name), None, "{name}");
         }
-    }
-
-    #[test]
-    fn quarantine_computes_eligibility_and_rejects_nonpositive_window() {
-        let location = QuarantineLocationV1::new("quarantine").expect("valid");
-        let contract = QuarantineContractV1 {
-            location,
-            retention_window_micros: 1_000,
-        };
-        let path = RelativeArtifactPathV1::new("sessions.db.corrupt-9").expect("valid");
-        let artifact = IncidentDebrisArtifactV1::classify_path(
-            store(),
-            path,
-            StorageByteSizeV1(10),
-            UtcMicros(1),
-        )
-        .expect("ok")
-        .expect("debris");
-        let quarantined = contract
-            .quarantine(artifact, UtcMicros(500))
-            .expect("quarantined");
-        assert_eq!(quarantined.collection_eligible_at, UtcMicros(1_500));
-        assert!(!quarantined.is_collection_eligible(UtcMicros(1_499)));
-        assert!(quarantined.is_collection_eligible(UtcMicros(1_500)));
-
-        let bad = QuarantineContractV1 {
-            location: QuarantineLocationV1::new("quarantine").expect("valid"),
-            retention_window_micros: 0,
-        };
-        assert!(bad.validate().is_err());
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Project-route selection, tool-dispatch assembly, and identical-read sharing.
 
 use super::*;
+use crate::mcp::tools::handlers::ServedCodeGraphSlot;
 use crate::mcp::tools::{ToolCallRegistryOptions, handle_tool_call_with_registry_options};
 
 use tracedecay_mcp::server::{ReadFlightClaim, tool_allows_identical_read_coalescing};
@@ -36,7 +37,6 @@ impl McpServer {
         let routed_project = match private_route {
             Some(_)
                 if crate::mcp::project_route::arguments_have_project_selector(
-                    tool_name,
                     &handler_arguments,
                 ) =>
             {
@@ -346,7 +346,7 @@ impl McpServer {
                 generation_census_reader: self.generation_census_reader(),
                 retained_project_server_resolver: self.retained_project_server_resolver.clone(),
                 session_sync_service: session_sync_service.as_deref(),
-                served_stale_graph_generation: std::sync::Arc::new(std::sync::OnceLock::new()),
+                served_code_graph: ServedCodeGraphSlot::default(),
                 session_authorities: tracedecay_mcp::handlers::SessionAuthorities::new(
                     self.project_session_db.as_ref(),
                     self.profile_session_db.as_ref(),
@@ -362,6 +362,26 @@ impl McpServer {
                 .with_profile_session_refresh_serving(user_session_refresh_serving.as_ref()),
             },
         );
+        // A composed daemon serves one transcript home. The refresh schedulers
+        // already run their sweep under this pin; scoping the dispatch puts
+        // every hook-triggered ingest on the same reader instead of letting it
+        // resolve the process `$HOME` on its own. A production daemon resolves
+        // `$HOME` here, the value that reader would have found anyway.
+        let dispatch: std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>,
+        > = match self
+            .profile_root
+            .as_deref()
+            .and_then(crate::daemon::daemon_transcript_source_home)
+        {
+            Some(transcript_source_home) => {
+                Box::pin(tracedecay_sessions::runtime::with_transcript_source_home(
+                    transcript_source_home,
+                    dispatch,
+                ))
+            }
+            None => dispatch,
+        };
         if let Some(read_flight) = read_flight {
             match read_flight {
                 ReadFlightClaim::Leader(leader) => match dispatch.await {

@@ -49,7 +49,7 @@ pub fn install_codex_managed_agents(
     for agent in agents {
         let id = generated_agent_id(agent.relative);
         let path = agents_dir.join(agent.relative);
-        host_io.safe_write_text_file(&path, agent.contents, None)?;
+        host_io.safe_write_text_file(&path, agent.contents)?;
         exported.push(ManagedAgentExportEntry {
             id: id.to_string(),
             path,
@@ -63,7 +63,6 @@ pub fn install_codex_managed_agents(
     host_io.safe_write_text_file(
         &agents_dir.join(MANIFEST_FILE),
         &format!("{}\n", serde_json::to_string_pretty(&manifest)?),
-        None,
     )?;
 
     Ok(ManagedAgentInstallSummary {

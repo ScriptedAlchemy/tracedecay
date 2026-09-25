@@ -7,9 +7,9 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use tracedecay_daemon_protocol::DaemonInvocationProblem;
 
-use super::super::current_micros;
 use super::workflow_run_control::workflow_run_problem;
 use super::{RegisteredWorkRuntime, work_background_context};
+use tracedecay_contracts::now_micros;
 
 mod recovery;
 
@@ -587,10 +587,12 @@ pub(crate) fn admit_workflow_child(
     occurred_at: UtcMicros,
 ) -> Result<(), DaemonInvocationProblem> {
     let selection = tracedecay_contracts::WorkProductSelectionScopeV1::relations(
-        [tracedecay_contracts::WorkRelationScopeV1::Repository {
-            project_id: context.scope().project_id.clone(),
-            repository_id: context.scope().repository_id.clone(),
-        }]
+        [
+            tracedecay_contracts::WorkProductAuthorizedRelationScopeV1::Repository {
+                project_id: context.scope().project_id.clone(),
+                repository_id: context.scope().repository_id.clone(),
+            },
+        ]
         .into_iter()
         .collect(),
     )
@@ -851,7 +853,7 @@ pub(crate) fn reconcile_workflow_fan_out_after_attempt(
         &services,
         &context,
         projection,
-        current_micros(),
+        now_micros(),
         attempt_processes,
         project_root,
         observability_producer,

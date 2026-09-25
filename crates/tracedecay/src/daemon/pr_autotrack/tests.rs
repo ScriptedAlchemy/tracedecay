@@ -25,17 +25,12 @@ async fn reconcile_preserves_closed_pr_when_scheduler_retirement_is_unavailable(
     let repo_root = tempfile::tempdir().unwrap(); // not a git repo; git ops no-op
 
     let mut meta = BranchMeta::new("main");
-    meta.add_branch("pr/5", "branches/pr_5.db", "main");
-    std::fs::create_dir_all(data_root.path().join("branches")).unwrap();
-    drop(
-        rusqlite::Connection::open(data_root.path().join("branches/pr_5.db"))
-            .expect("empty branch database"),
-    );
+    meta.add_branch("tracedecay/autotrack/pr/5", "main");
     save_branch_meta(data_root.path(), &meta).unwrap();
 
     let mut state = PrAutotrackState::default();
     state.managed.insert(
-        "pr/5".to_string(),
+        "tracedecay/autotrack/pr/5".to_string(),
         ManagedPr {
             pr: 5,
             head_branch: "feature-5".to_string(),
@@ -86,11 +81,10 @@ async fn reconcile_preserves_closed_pr_when_scheduler_retirement_is_unavailable(
         load_state(data_root.path())
             .expect("load managed PR state")
             .managed
-            .contains_key("pr/5")
+            .contains_key("tracedecay/autotrack/pr/5")
     );
     let reloaded = load_branch_meta(data_root.path()).unwrap();
-    assert!(reloaded.is_tracked("pr/5"));
-    assert!(data_root.path().join("branches/pr_5.db").exists());
+    assert!(reloaded.is_tracked("tracedecay/autotrack/pr/5"));
 }
 
 #[tokio::test]
@@ -309,9 +303,9 @@ async fn reconcile_activates_discovered_pr_head_when_scheduler_is_injected() {
     git(repo.path(), &["branch", "-q", "-D", "feature-11"]);
 
     let graph = Arc::new(
-        crate::project::TraceDecay::open_with_options_for_test(
+        tracedecay_project::project::TraceDecay::open_with_options_for_test(
             repo.path(),
-            crate::project::TraceDecayOpenOptions::default(),
+            tracedecay_project::project::TraceDecayOpenOptions::default(),
         )
         .await
         .expect("open project graph"),
@@ -441,14 +435,12 @@ async fn partial_discovery_suppresses_removals() {
     let repo_root = tempfile::tempdir().unwrap();
 
     let mut meta = BranchMeta::new("main");
-    meta.add_branch("pr/5", "branches/pr_5.db", "main");
-    std::fs::create_dir_all(data_root.path().join("branches")).unwrap();
-    std::fs::write(data_root.path().join("branches/pr_5.db"), b"db").unwrap();
+    meta.add_branch("tracedecay/autotrack/pr/5", "main");
     save_branch_meta(data_root.path(), &meta).unwrap();
 
     let mut state = PrAutotrackState::default();
     state.managed.insert(
-        "pr/5".to_string(),
+        "tracedecay/autotrack/pr/5".to_string(),
         ManagedPr {
             pr: 5,
             head_branch: "feature-5".to_string(),
@@ -485,15 +477,14 @@ async fn partial_discovery_suppresses_removals() {
         load_state(data_root.path())
             .expect("load managed PR state")
             .managed
-            .contains_key("pr/5"),
+            .contains_key("tracedecay/autotrack/pr/5"),
         "managed entry survives a partial discovery"
     );
     assert!(
         load_branch_meta(data_root.path())
             .unwrap()
-            .is_tracked("pr/5")
+            .is_tracked("tracedecay/autotrack/pr/5")
     );
-    assert!(data_root.path().join("branches/pr_5.db").exists());
 }
 
 fn init_manual_branch_repo(repo: &Path, branch: &str) {
@@ -536,9 +527,9 @@ async fn manual_branch_activates_when_scheduler_is_injected() {
     init_manual_branch_repo(repo.path(), "feature-manual");
 
     let graph = Arc::new(
-        crate::project::TraceDecay::open_with_options_for_test(
+        tracedecay_project::project::TraceDecay::open_with_options_for_test(
             repo.path(),
-            crate::project::TraceDecayOpenOptions::default(),
+            tracedecay_project::project::TraceDecayOpenOptions::default(),
         )
         .await
         .expect("open project graph"),
@@ -595,9 +586,9 @@ async fn retained_linked_worktree_honors_parent_native_graph_refusal() {
     let linked = linked_parent.path().join("linked");
     init_manual_branch_repo(repo.path(), "feature-retained-refusal");
 
-    let graph = crate::project::TraceDecay::open_with_options_for_test(
+    let graph = tracedecay_project::project::TraceDecay::open_with_options_for_test(
         repo.path(),
-        crate::project::TraceDecayOpenOptions::default(),
+        tracedecay_project::project::TraceDecayOpenOptions::default(),
     )
     .await
     .expect("open writable parent graph");
@@ -653,9 +644,9 @@ async fn retained_linked_worktree_honors_parent_native_graph_refusal() {
     graph.close();
 
     let graph = Arc::new(
-        crate::project::TraceDecay::open_read_only_with_options_for_test(
+        tracedecay_project::project::TraceDecay::open_read_only_with_options_for_test(
             repo.path(),
-            crate::project::TraceDecayOpenOptions::default(),
+            tracedecay_project::project::TraceDecayOpenOptions::default(),
         )
         .await
         .expect("reopen parent graph from persisted configuration"),
@@ -748,9 +739,9 @@ async fn manual_branch_identity_keeps_slashed_and_underscored_names_disjoint() {
     git(repo.path(), &["checkout", "-q", "main"]);
 
     let graph = Arc::new(
-        crate::project::TraceDecay::open_with_options_for_test(
+        tracedecay_project::project::TraceDecay::open_with_options_for_test(
             repo.path(),
-            crate::project::TraceDecayOpenOptions::default(),
+            tracedecay_project::project::TraceDecayOpenOptions::default(),
         )
         .await
         .unwrap(),
@@ -798,9 +789,9 @@ async fn manual_branch_stages_new_head_without_replacing_published_worktree() {
     let repo = tempfile::tempdir().unwrap();
     init_manual_branch_repo(repo.path(), "feature/advance");
     let graph = Arc::new(
-        crate::project::TraceDecay::open_with_options_for_test(
+        tracedecay_project::project::TraceDecay::open_with_options_for_test(
             repo.path(),
-            crate::project::TraceDecayOpenOptions::default(),
+            tracedecay_project::project::TraceDecayOpenOptions::default(),
         )
         .await
         .unwrap(),
@@ -969,9 +960,9 @@ async fn manual_branch_activation_refuses_exact_lifecycle_contention_before_muta
     let repo = tempfile::tempdir().unwrap();
     init_manual_branch_repo(repo.path(), "feature/contended");
     let graph = Arc::new(
-        crate::project::TraceDecay::open_with_options_for_test(
+        tracedecay_project::project::TraceDecay::open_with_options_for_test(
             repo.path(),
-            crate::project::TraceDecayOpenOptions::default(),
+            tracedecay_project::project::TraceDecayOpenOptions::default(),
         )
         .await
         .unwrap(),
@@ -1013,9 +1004,9 @@ async fn failed_manual_branch_sealing_retires_the_exact_mount_worktree_and_track
     let repo = tempfile::tempdir().unwrap();
     init_manual_branch_repo(repo.path(), "feature/failure-cleanup");
     let graph = Arc::new(
-        crate::project::TraceDecay::open_with_options_for_test(
+        tracedecay_project::project::TraceDecay::open_with_options_for_test(
             repo.path(),
-            crate::project::TraceDecayOpenOptions::default(),
+            tracedecay_project::project::TraceDecayOpenOptions::default(),
         )
         .await
         .unwrap(),
@@ -1075,9 +1066,9 @@ async fn manual_branch_fails_closed_without_scheduler_before_git_or_state_mutati
     init_manual_branch_repo(repo.path(), "feature-denied");
 
     let graph = Arc::new(
-        crate::project::TraceDecay::open_with_options_for_test(
+        tracedecay_project::project::TraceDecay::open_with_options_for_test(
             repo.path(),
-            crate::project::TraceDecayOpenOptions::default(),
+            tracedecay_project::project::TraceDecayOpenOptions::default(),
         )
         .await
         .expect("open project graph"),
@@ -1115,9 +1106,9 @@ async fn manual_branch_missing_ref_is_typed_failure() {
     init_manual_branch_repo(repo.path(), "feature-present");
 
     let graph = Arc::new(
-        crate::project::TraceDecay::open_with_options_for_test(
+        tracedecay_project::project::TraceDecay::open_with_options_for_test(
             repo.path(),
-            crate::project::TraceDecayOpenOptions::default(),
+            tracedecay_project::project::TraceDecayOpenOptions::default(),
         )
         .await
         .expect("open project graph"),
@@ -1167,9 +1158,9 @@ async fn cancelled_activation_keeps_its_lifecycle_owner_bounded_during_stalled_e
     let branch = "feature/stalled-exact-read";
     init_manual_branch_repo(repo.path(), branch);
     let graph = Arc::new(
-        crate::project::TraceDecay::open_with_options_for_test(
+        tracedecay_project::project::TraceDecay::open_with_options_for_test(
             repo.path(),
-            crate::project::TraceDecayOpenOptions::default(),
+            tracedecay_project::project::TraceDecayOpenOptions::default(),
         )
         .await
         .expect("open project graph"),

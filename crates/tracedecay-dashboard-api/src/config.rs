@@ -13,7 +13,6 @@ pub trait DashboardConfigurationReadPort: Send + Sync {
         &self,
         project_root: &Path,
     ) -> Result<PinnedRuntimeConfiguration>;
-    fn is_in_gitignore(&self, project_root: &Path) -> bool;
 }
 
 static CONFIGURATION_READ_PORT: OnceLock<Arc<dyn DashboardConfigurationReadPort>> = OnceLock::new();
@@ -28,12 +27,6 @@ pub fn install_dashboard_configuration_read_port(
 
 pub fn cached_runtime_configuration(project_root: &Path) -> Result<PinnedRuntimeConfiguration> {
     configuration_read_port()?.cached_runtime_configuration(project_root)
-}
-
-pub fn is_in_gitignore(project_root: &Path) -> bool {
-    CONFIGURATION_READ_PORT
-        .get()
-        .is_some_and(|port| port.is_in_gitignore(project_root))
 }
 
 fn configuration_read_port() -> Result<&'static dyn DashboardConfigurationReadPort> {

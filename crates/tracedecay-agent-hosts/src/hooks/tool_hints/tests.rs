@@ -1,4 +1,5 @@
 use super::*;
+use crate::agents::plugin_bundle::claude_files;
 
 #[test]
 fn benign_git_narration_does_not_fire_the_unexpected_change_hint() {
@@ -68,22 +69,29 @@ fn every_category_has_compact_skill_backed_rendering() {
         HintCategory::UnexpectedChanges,
     ];
 
+    let shipped = claude_files();
     for category in categories {
         let hint = hint_for_category(category);
         let visible = format!("{}\n{}", hint.message, hint.context);
-        assert_eq!(hint.category, category);
-        assert!(!hint.message.is_empty(), "{category:?}");
-        assert!(!hint.context.is_empty(), "{category:?}");
         assert!(
             visible.len() <= 850,
             "{category:?} hint is too verbose: {} chars\n{}",
             visible.len(),
             visible
         );
-        let skill = category_skill(category);
+        let skill = visible
+            .split_once("Skill: tracedecay:")
+            .and_then(|(_, rest)| rest.split_once('.'))
+            .map(|(skill, _)| skill)
+            .unwrap_or_else(|| panic!("{category:?} hint names no skill:\n{visible}"));
+        let skill_path = format!("skills/{skill}/SKILL.md");
+        let (_, skill_body) = shipped
+            .iter()
+            .find(|(relative, _)| *relative == skill_path)
+            .unwrap_or_else(|| panic!("{category:?} points at unshipped skill {skill_path}"));
         assert!(
-            visible.contains(&format!("Skill: tracedecay:{skill}.")),
-            "{category:?} missing skill trigger"
+            skill_body.starts_with(&format!("---\nname: {skill}\n")),
+            "{skill_path} frontmatter must name {skill}"
         );
     }
 }
@@ -226,52 +234,6 @@ fn save_writes_versioned_schema() {
 }
 
 #[test]
-fn legacy_store_migrates_to_versioned_schema() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("tool_hints_seen.json");
-    // Legacy v1 file: a bare array of {session_id, category}.
-    std::fs::write(
-        &path,
-        r#"[{"session_id":"s1","category":"search"},{"session_id":"s1","category":"file_read"}]"#,
-    )
-    .unwrap();
-
-    let mut dedupe = ToolHintDedupe::load_or_default(&path);
-    // v1 categories load as already-hinted: they suppress, not re-emit.
-    assert_eq!(
-        dedupe.decide("s1", HintCategory::Search),
-        HintDeliveryDecisionV1::SuppressDuplicate
-    );
-    assert_eq!(
-        dedupe.decide("s1", HintCategory::FileRead),
-        HintDeliveryDecisionV1::SuppressDuplicate
-    );
-    // The two migrated hints already count against s1's budget, so only one
-    // more distinct category can emit before the cap.
-    assert_eq!(
-        dedupe.decide("s1", HintCategory::Impact),
-        HintDeliveryDecisionV1::Deliver
-    );
-    assert_eq!(
-        dedupe.decide("s1", HintCategory::CallGraph),
-        HintDeliveryDecisionV1::SuppressBudget
-    );
-
-    // Persisting rewrites the file in v2 shape.
-    dedupe.save(&path).unwrap();
-    let value: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!(value["version"], 2);
-
-    // Reload from v2 preserves the migrated suppression state.
-    let mut reloaded = ToolHintDedupe::load_or_default(&path);
-    assert_eq!(
-        reloaded.decide("s1", HintCategory::Search),
-        HintDeliveryDecisionV1::SuppressDuplicate
-    );
-}
-
-#[test]
 fn oversized_store_resets() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("tool_hints_seen.json");
@@ -302,6 +264,15 @@ fn dedupe_load_tolerates_missing_and_corrupt_files() {
     let corrupt = dir.path().join("corrupt.json");
     std::fs::write(&corrupt, "not json").unwrap();
     let mut dedupe = ToolHintDedupe::load_or_default(&corrupt);
+    assert_eq!(
+        dedupe.decide("s1", HintCategory::Search),
+        HintDeliveryDecisionV1::Deliver
+    );
+
+    // A pre-versioned bare-array store is not migrated; it starts over.
+    let old_shape = dir.path().join("old-shape.json");
+    std::fs::write(&old_shape, r#"[{"session_id":"s1","category":"search"}]"#).unwrap();
+    let mut dedupe = ToolHintDedupe::load_or_default(&old_shape);
     assert_eq!(
         dedupe.decide("s1", HintCategory::Search),
         HintDeliveryDecisionV1::Deliver

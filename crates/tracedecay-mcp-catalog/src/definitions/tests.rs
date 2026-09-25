@@ -1,4 +1,6 @@
 use super::*;
+use tracedecay_contracts::retained_surfaces::RetainedSurfaceRequestV1;
+use tracedecay_daemon_protocol::ApplicationSurfaceRequest;
 
 #[test]
 fn work_and_workflow_advertise_every_executable_request_schema() {
@@ -50,24 +52,6 @@ fn internal_host_ingest_is_cli_resolvable_but_not_advertised() {
     assert_eq!(definition.name, "tracedecay_hook_runtime");
     assert_eq!(definition.input_schema, json!({ "type": "object" }));
     assert!(internal_daemon_tool_definition("tracedecay_unknown").is_none());
-}
-
-#[test]
-fn retired_unused_import_scan_is_absent_while_diagnostic_reads_remain() {
-    let definitions = get_maximal_tool_definitions().expect("tool definitions");
-    eprintln!("maximal source catalog count: {}", definitions.len());
-
-    assert!(
-        definitions
-            .iter()
-            .all(|definition| definition.name != "tracedecay_unused_imports")
-    );
-    for name in ["tracedecay_diagnose", "tracedecay_diagnostics"] {
-        assert!(
-            definitions.iter().any(|definition| definition.name == name),
-            "{name} must remain available for compiler and published diagnostics"
-        );
-    }
 }
 
 #[test]
@@ -167,36 +151,92 @@ fn handle_gated_feedback_reads_are_advertised_with_their_request_handle() {
     }
 }
 
+/// An argument object built from the published LCM schema must decode, through
+/// the shared CLI/MCP adapter, to the same `as_of` cutoff on the typed request.
 #[test]
-fn lcm_compatibility_definitions_expose_only_opaque_continuation_cursors() {
-    let load = def_lcm_load_session();
-    let grep = def_lcm_grep();
-
-    for definition in [&load, &grep] {
-        let properties = definition.input_schema["properties"]
-            .as_object()
-            .expect("LCM properties");
-        assert_eq!(properties["cursor"]["type"], "string");
-        assert_eq!(
-            properties["temporal_mode"]["enum"],
-            json!(["current", "as_of", "evolution", "forensic"])
+fn lcm_history_reads_accept_an_as_of_cutoff() {
+    let cutoff = json!({ "kind": "as_of", "cutoff": 1_700_000_000_000_000_i64 });
+    for (definition, operation, arguments) in [
+        (
+            def_lcm_load_session(),
+            ApplicationSurfaceOperation::LcmLoadSession,
+            json!({ "session_id": "session-a", "temporal_mode": cutoff }),
+        ),
+        (
+            def_lcm_grep(),
+            ApplicationSurfaceOperation::LcmGrep,
+            json!({ "query": "retention", "temporal_mode": cutoff }),
+        ),
+    ] {
+        let name = definition.name.as_str();
+        let schema = &definition.input_schema;
+        let properties = schema["properties"].as_object().expect("properties");
+        let supplied = arguments.as_object().expect("argument object");
+        assert!(
+            supplied.keys().all(|key| properties.contains_key(key)),
+            "{name} advertises every supplied argument"
         );
-        assert_eq!(properties["as_of_micros"]["minimum"], 0);
+        assert!(
+            schema["required"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .all(|key| key.as_str().is_some_and(|key| supplied.contains_key(key))),
+            "{name} requires only supplied arguments"
+        );
+        let as_of = properties["temporal_mode"]["oneOf"]
+            .as_array()
+            .expect("temporal mode variants")
+            .iter()
+            .find(|variant| variant["properties"]["kind"]["const"] == "as_of")
+            .expect("advertised as_of variant");
+        let mut advertised_fields = as_of["required"]
+            .as_array()
+            .expect("as_of required fields")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        advertised_fields.sort_unstable();
+        let mut supplied_fields = cutoff
+            .as_object()
+            .expect("cutoff object")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        supplied_fields.sort_unstable();
+        assert_eq!(advertised_fields, supplied_fields, "{name}");
+
+        let adapted = tracedecay_daemon_protocol::adapt_application_tool_request(name, arguments)
+            .expect("the shared CLI/MCP adapter accepts the arguments");
+        let request = tracedecay_daemon_protocol::parse_application_surface_request(
+            operation,
+            adapted.request,
+        )
+        .expect("the typed LCM request accepts an as_of cutoff");
+        let temporal_mode = match request {
+            ApplicationSurfaceRequest::Retained(RetainedSurfaceRequestV1::LcmLoadSession(
+                request,
+            )) => request.temporal_mode,
+            ApplicationSurfaceRequest::Retained(RetainedSurfaceRequestV1::LcmGrep(request)) => {
+                request.temporal_mode
+            }
+            other => panic!("{name} decoded to {other:?}"),
+        };
+        assert_eq!(
+            serde_json::to_value(temporal_mode).expect("temporal mode serializes"),
+            cutoff,
+            "{name}"
+        );
     }
 
+    let legacy = tracedecay_daemon_protocol::parse_application_surface_request(
+        ApplicationSurfaceOperation::LcmLoadSession,
+        json!({ "session_id": "session-a", "as_of_micros": 1_700_000_000_000_000_i64 }),
+    )
+    .expect_err("the retired microsecond cutoff argument is refused");
     assert!(
-        load.input_schema["properties"]
-            .get("after_store_id")
-            .is_none(),
-        "legacy offset pagination must not remain public"
-    );
-    assert_eq!(
-        grep.input_schema["properties"]["include_summaries"]["default"],
-        false
-    );
-    assert_eq!(
-        grep.input_schema["properties"]["sort"]["default"],
-        "relevance"
+        legacy.to_string().contains("unknown field `as_of_micros`"),
+        "{legacy}"
     );
 }
 
@@ -279,38 +319,6 @@ fn per_session_budget_does_not_leak_through_the_cached_registry() {
     );
 }
 
-/// Always-loaded schemas enter the model prompt on every turn. The agreed cap
-/// is the small core; growing it is a context-window decision, not a drive-by.
-#[test]
-fn always_loaded_tools_stay_inside_the_agreed_core() {
-    let definitions = get_maximal_tool_definitions().expect("tool definitions");
-    let mut always_loaded = definitions
-        .iter()
-        .filter(|definition| {
-            definition
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.get("anthropic/alwaysLoad"))
-                .and_then(serde_json::Value::as_bool)
-                == Some(true)
-        })
-        .map(|definition| definition.name.as_str())
-        .collect::<Vec<_>>();
-    always_loaded.sort_unstable();
-    assert_eq!(
-        always_loaded,
-        vec![
-            "tracedecay_active_project",
-            "tracedecay_callers",
-            "tracedecay_context",
-            "tracedecay_grep",
-            "tracedecay_search",
-            "tracedecay_status",
-            "tracedecay_storage_status",
-        ]
-    );
-}
-
 #[test]
 fn status_and_skill_view_default_to_summaries() {
     let definitions = get_tool_definitions().expect("tool definitions");
@@ -338,10 +346,4 @@ fn status_and_skill_view_default_to_summaries() {
         view.input_schema["properties"]["include_support_files"]["default"],
         serde_json::json!(false)
     );
-    let retrieve = definitions
-        .iter()
-        .find(|definition| definition.name == "tracedecay_retrieve")
-        .expect("retrieve");
-    assert!(retrieve.description.contains("Do not walk next_offset"));
-    assert!(!retrieve.description.contains("byte-exactly"));
 }

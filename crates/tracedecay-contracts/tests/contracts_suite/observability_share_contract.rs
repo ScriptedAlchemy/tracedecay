@@ -1,3 +1,4 @@
+use serde_json::json;
 use tracedecay_contracts::{
     AggregateCapabilityV1, AggregateShareCellV1, AggregateShareDimensionV1,
     AggregateShareExportRequestV1, AggregateShareMetricV1, AggregateSharePacketV1,
@@ -39,20 +40,30 @@ fn aggregate_share_packet_is_identity_free_and_bounded() {
     };
 
     packet.validate().expect("valid aggregate packet");
-    let json = serde_json::to_value(packet).expect("serialize packet");
-    let object = json.as_object().expect("packet object");
-    for prohibited in [
-        "scope_ref",
-        "trace_id",
-        "event_id",
-        "project_id",
-        "repository",
-        "session_id",
-        "task_id",
-    ] {
-        assert!(!object.contains_key(prohibited));
-        assert!(!json.to_string().contains(prohibited));
-    }
+    assert_eq!(
+        serde_json::to_value(packet).expect("serialize packet"),
+        json!({
+            "schema_revision": 1,
+            "descriptor_revision": "aggregate-share.v1",
+            "horizon": { "since_micros": 10, "until_micros": 20 },
+            "generated_at_micros": 20,
+            "cells": [{
+                "metric": "retrieval_queries",
+                "unit": "events",
+                "dimensions": [{ "kind": "capability", "value": "retrieval" }],
+                "eligible": 100,
+                "observed": 100,
+                "completed": 96,
+                "censored": 2,
+                "unknown": 2,
+                "value": 100.0,
+                "coverage": "partial",
+                "contribution_windows": 100
+            }],
+            "suppressed_cell_count": 0,
+            "capped_cell_count": 0
+        })
+    );
 }
 
 #[test]

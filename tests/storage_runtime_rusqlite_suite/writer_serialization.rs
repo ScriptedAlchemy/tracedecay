@@ -1,14 +1,13 @@
 use std::sync::Arc;
 
-use tracedecay_rusqlite_runtime::read_consistency::{CommitWatermarkSource, WatermarkSourceState};
 use tracedecay_store::RuntimeSubmitOutcomeV1;
 
 use super::runtime_test_support::{
-    Probe, TestDatabase, outbox_request, run, shard_watermark, writer, writer_runtime_fixture,
+    Probe, TestDatabase, outbox_request, run, writer, writer_runtime_fixture,
 };
 
 #[test]
-fn writer_serializes_commit_checkpoints_and_publishes_only_committed_watermarks() {
+fn writer_serializes_concurrent_commits_into_ordered_receipts() {
     let fixture = writer_runtime_fixture();
     let database = TestDatabase::new("writer-serialized.sqlite3");
     let first = outbox_request(
@@ -26,7 +25,6 @@ fn writer_serializes_commit_checkpoints_and_publishes_only_committed_watermarks(
         &format!("{}.second", fixture.ordering_key),
     );
     let writer = Arc::new(writer(&database, &fixture.origin_binding));
-    let watermarks = writer.commit_watermark_source();
 
     let mut sequences = run(async {
         let first_writer = Arc::clone(&writer);
@@ -51,10 +49,6 @@ fn writer_serializes_commit_checkpoints_and_publishes_only_committed_watermarks(
     });
     sequences.sort_unstable();
     assert_eq!(sequences, fixture.commit_sequences.to_vec());
-    assert_eq!(
-        watermarks.current(&fixture.origin_binding.shard_id),
-        WatermarkSourceState::Available(shard_watermark(&fixture.origin_binding, 2))
-    );
 
     Arc::try_unwrap(writer)
         .unwrap_or_else(|_| panic!("submit tasks retained the writer"))

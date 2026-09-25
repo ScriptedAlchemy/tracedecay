@@ -529,11 +529,13 @@ fn attempt_read(
     let daemon_payload = body["value"]["outcome"]["value"]["payload"].clone();
 
     let dashboard_label = format!("dashboard api/work/{operation}");
-    let (status, body) = post_dashboard_envelope(
-        agent,
-        &format!("{}/api/work/{operation}", dashboard.base_url),
-        request,
-    );
+    let (status, body) = super::poll_past_warming(&dashboard_label, &mut || {
+        post_dashboard_envelope(
+            agent,
+            &format!("{}/api/work/{operation}", dashboard.base_url),
+            request,
+        )
+    });
     assert_canonical_envelope(&dashboard_label, status, &body);
     let dashboard_payload = body["value"]["outcome"]["value"]["payload"].clone();
     assert_eq!(
@@ -710,28 +712,34 @@ fn both_mounts_answer(
     // retryable warming. Every answer inside it must hold to the typed
     // contract, so it is polled through rather than slept past.
     let daemon_label = format!("daemon work/retrieve-evidence ({label})");
-    let (status, body) = super::poll_past_warming(&daemon_label, &mut || {
-        post_envelope(
-            agent,
-            &fixture.external_url("/application/work/retrieve-evidence"),
-            fixture,
-            request,
-        )
-    });
-    assert_canonical_envelope(&daemon_label, status, &body);
-    let daemon_answer = body["value"].clone();
+    let daemon_answer = || {
+        let (status, body) = super::poll_past_warming(&daemon_label, &mut || {
+            post_envelope(
+                agent,
+                &fixture.external_url("/application/work/retrieve-evidence"),
+                fixture,
+                request,
+            )
+        });
+        assert_canonical_envelope(&daemon_label, status, &body);
+        body["value"].clone()
+    };
 
     let Some(dashboard) = dashboard else {
-        return daemon_answer;
+        return daemon_answer();
     };
     let dashboard_label = format!("dashboard api/work/retrieve-evidence ({label})");
-    let (status, body) = post_dashboard_envelope(
-        agent,
-        &format!("{}/api/work/retrieve-evidence", dashboard.base_url),
-        request,
-    );
-    assert_canonical_envelope(&dashboard_label, status, &body);
-    let dashboard_answer = body["value"].clone();
+    let dashboard_answer = || {
+        let (status, body) = super::poll_past_warming(&dashboard_label, &mut || {
+            post_dashboard_envelope(
+                agent,
+                &format!("{}/api/work/retrieve-evidence", dashboard.base_url),
+                request,
+            )
+        });
+        assert_canonical_envelope(&dashboard_label, status, &body);
+        body["value"].clone()
+    };
 
     // Only the verdict has to agree. The envelope around it, and the problem's
     // own echo of it, carry per-request identity and timing that are expected
@@ -745,12 +753,29 @@ fn both_mounts_answer(
             answer["problem"]["legal_actions"],
         ])
     };
-    assert_eq!(
-        verdict(&daemon_answer),
-        verdict(&dashboard_answer),
-        "both published mounts must answer the same Work verdict for {label}"
-    );
-    daemon_answer
+    // The TaskSession authority seats asynchronously, so two sequential reads
+    // can straddle its move from the typed `unavailable` omission to the
+    // served relation. The dashboard is therefore graded against a daemon
+    // verdict that held on both sides of its read; a verdict that never
+    // settles exhausts the poll budget instead of passing.
+    let deadline = Instant::now() + POLL_BUDGET;
+    loop {
+        let before = daemon_answer();
+        let dashboard_answer = dashboard_answer();
+        let after = daemon_answer();
+        if verdict(&before) == verdict(&after) {
+            assert_eq!(
+                verdict(&after),
+                verdict(&dashboard_answer),
+                "both published mounts must answer the same Work verdict for {label}"
+            );
+            return after;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the daemon verdict for {label} never settled: {before} then {after}"
+        );
+    }
 }
 
 /// Grades the TaskSession relation against the only two typed states the
@@ -919,6 +944,10 @@ fn mutate(agent: &ureq::Agent, fixture: &ProductionDaemon, label: &str, change: 
 }
 
 /// Posts one operation to the daemon mount and returns its success payload.
+///
+/// Daemon start and a provider-binding write both rebind the project runtime,
+/// and every route answers the typed retryable mounting problem until it is
+/// seated again, so the answer is awaited past that window as a client would.
 fn payload(
     agent: &ureq::Agent,
     fixture: &ProductionDaemon,
@@ -926,7 +955,9 @@ fn payload(
     route_path: &str,
     body: &Value,
 ) -> Value {
-    let (status, answer) = post_envelope(agent, &fixture.external_url(route_path), fixture, body);
+    let (status, answer) = super::poll_past_warming(label, &mut || {
+        post_envelope(agent, &fixture.external_url(route_path), fixture, body)
+    });
     assert_canonical_envelope(label, status, &answer);
     assert_eq!(
         answer["kind"], "success",

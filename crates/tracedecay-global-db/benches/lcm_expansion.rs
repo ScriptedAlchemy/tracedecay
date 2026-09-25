@@ -20,13 +20,14 @@ use tracedecay_lcm::{
 use tracedecay_session_temporal_store::RegisteredGlobalDbSessionTemporalExecution;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
-use tracedecay_temporal_query::ports::{
-    BindingDigest, ExecutionControl, KernelVersions, TemporalExecutionSnapshot,
-    TemporalSnapshotRequest, TemporalWatermarks,
-};
+use tracedecay_temporal_query::execution::{BindingDigest, ExecutionControl};
+use tracedecay_temporal_query::ports::TemporalSnapshotRequest;
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+use tracedecay_temporal_query::snapshot::{
+    KernelVersions, TemporalExecutionSnapshot, TemporalWatermarks,
+};
 
 const PROVIDER: &str = "lcm-benchmark";
 const SESSION_ID: &str = "session.lcm-expansion";
@@ -132,7 +133,7 @@ async fn persist_observation(
     let authorization = build_observation_resolution_authorization_v1(&observation, AUTHORITY)
         .expect("benchmark observation authorization is valid");
     let access_digest = authorization.access_policy_digest.as_str().to_owned();
-    let anchor = build_observation_retrieval_anchor_v2(
+    let anchor = build_observation_retrieval_anchor(
         &observation,
         projection_generation.clone(),
         UtcMicros(1),

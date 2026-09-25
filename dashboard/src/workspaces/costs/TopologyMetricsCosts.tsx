@@ -53,7 +53,7 @@ function topologyReadState(
 function TopologyMetricsReading({ model }: { model: ExecutionTopologyMetricsV1 }) {
   return (
     <div className="flex min-w-0 flex-col gap-4 px-4 pb-4 pt-3">
-      <dl className="grid gap-x-5 gap-y-3 border border-edge-subtle bg-surface-1 p-3 text-3xs sm:grid-cols-2 xl:grid-cols-4">
+      <dl className="grid gap-x-5 gap-y-3 border border-edge-subtle bg-surface-1 p-3 text-sm sm:grid-cols-2 xl:grid-cols-4">
         <Field label="horizon">
           {formatMicrosUtc(model.horizon.since_micros)} → {formatMicrosUtc(model.horizon.until_micros)}
         </Field>
@@ -73,7 +73,7 @@ function TopologyMetricsReading({ model }: { model: ExecutionTopologyMetricsV1 }
       </dl>
 
       {model.measurements.length === 0 ? (
-        <p className="text-2xs text-text-secondary">
+        <p className="text-body text-text-secondary">
           the canonical read returned no topology descriptors
         </p>
       ) : (

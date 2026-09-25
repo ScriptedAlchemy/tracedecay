@@ -4,6 +4,7 @@ use tracedecay_lsp::{LspRuntimeFailure, LspRuntimeFuture};
 
 use super::super::identity::IndexingIdentityV1;
 use super::CodeIndexSchedulerRegistryV1;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 impl tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort
     for CodeIndexSchedulerRegistryV1
@@ -20,8 +21,7 @@ impl tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort
     > {
         let registry = self.clone();
         Box::pin(async move {
-            let root = project_root
-                .canonicalize()
+            let root = canonical_existing_identity(&project_root)
                 .map_err(|_| LspRuntimeFailure::new("lsp-code-index-root-unavailable"))?;
             let identity_root = root.clone();
             let live_identity =

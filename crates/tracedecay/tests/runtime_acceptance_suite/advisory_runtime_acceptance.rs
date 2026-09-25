@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tracedecay::project::TraceDecay;
 use tracedecay_application::advisory::ci_runtime::GitHubCiOfficialResponseDecoderV1;
 #[cfg(feature = "test-transport")]
 use tracedecay_application::advisory::ci_runtime::{
@@ -54,6 +53,7 @@ use tracedecay_domain::{
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::{CanonicalObservationIdV1, canonical_sha256};
+use tracedecay_project::project::TraceDecay;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 #[cfg(feature = "test-transport")]
@@ -71,9 +71,9 @@ use tracedecay_application::feedback::concrete::open_feedback_runtime;
 use tracedecay_contracts::feedback::{
     FeedbackCycleAdvisoryV1, FeedbackCycleControl, FeedbackCycleExecutionRequest,
     FeedbackCycleService, FeedbackDiagnosticsPort, FeedbackDiagnosticsRequest, FeedbackImpactPort,
-    FeedbackImpactPortOutcome, FeedbackImpactRequest, FeedbackObservationPort,
-    FeedbackProximityAccessKindV1, FeedbackProximityEncounterV1, FeedbackProximityIntervalV1,
-    FeedbackProximityParticipantV1, FeedbackProximityRelationV1, FeedbackRuntimeStateV1,
+    FeedbackImpactPortOutcome, FeedbackImpactRequest, FeedbackProximityAccessKindV1,
+    FeedbackProximityEncounterV1, FeedbackProximityIntervalV1, FeedbackProximityParticipantV1,
+    FeedbackProximityRelationV1, FeedbackRuntimeStatePort, FeedbackRuntimeStateV1,
     ProximityEvaluationRequestV1, feedback_surface_operation,
 };
 #[cfg(feature = "test-transport")]
@@ -785,7 +785,7 @@ async fn ci_localization_resolves_generation_symbol_callers_and_tests_from_canon
 
     let mut scope = scope();
     scope.head_commit_id = CommitId::new(head).unwrap();
-    let code_graph = hermetic_ci_code_graph(&scope, &project);
+    let (code_graph, code_index_identity) = hermetic_ci_code_graph(&scope, &project);
     let mut provider_record =
         tracedecay_application::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
             .unwrap()
@@ -822,8 +822,13 @@ async fn ci_localization_resolves_generation_symbol_callers_and_tests_from_canon
             observed_at: now_micros(),
         },
     };
-    let store = ProjectCiCodeAnchorStoreV1::new(project.clone(), scope.clone(), code_graph.clone())
-        .unwrap();
+    let store = ProjectCiCodeAnchorStoreV1::new_with_code_index_identity(
+        project.clone(),
+        scope.clone(),
+        code_graph.clone(),
+        Arc::clone(&code_index_identity),
+    )
+    .unwrap();
     let evidence = store
         .resolve(&ci_context(&scope, now_micros()), &request, &retained)
         .await
@@ -840,7 +845,7 @@ async fn ci_localization_resolves_generation_symbol_callers_and_tests_from_canon
     assert!(evidence.generation.is_some());
     assert_eq!(
         evidence.symbol.as_ref().map(|symbol| symbol.file.as_str()),
-        Some("src/lib.rs")
+        Some("file.advisory.ci.src-lib")
     );
     assert!(!evidence.callers.is_empty());
     assert!(!evidence.tests.is_empty());
@@ -859,15 +864,20 @@ async fn ci_localization_resolves_generation_symbol_callers_and_tests_from_canon
         stale_scope.head_commit_id.as_str().to_owned();
     stale_record.provider_record.check_run.head_sha =
         stale_scope.head_commit_id.as_str().to_owned();
-    let stale = ProjectCiCodeAnchorStoreV1::new(project, stale_scope.clone(), code_graph)
-        .unwrap()
-        .resolve(
-            &ci_context(&stale_scope, now_micros()),
-            &stale_request,
-            &stale_record,
-        )
-        .await
-        .expect("typed partial evidence");
+    let stale = ProjectCiCodeAnchorStoreV1::new_with_code_index_identity(
+        project,
+        stale_scope.clone(),
+        code_graph,
+        code_index_identity,
+    )
+    .unwrap()
+    .resolve(
+        &ci_context(&stale_scope, now_micros()),
+        &stale_request,
+        &stale_record,
+    )
+    .await
+    .expect("typed partial evidence");
     assert_eq!(
         stale.state,
         tracedecay_domain::feedback::CiFailureLocalizationStateV1::Partial
@@ -1470,17 +1480,19 @@ impl FeedbackImpactPort for GraphDerivedImpact {
     }
 }
 
+/// Authoritative runtime state resolved for the generation under evaluation.
 #[cfg(feature = "test-transport")]
-struct SharedFeedbackObservations(Arc<dyn FeedbackObservationPort + Send + Sync>);
+struct ResolvedRuntimeState(FeedbackRuntimeStateV1);
 
 #[cfg(feature = "test-transport")]
-impl FeedbackObservationPort for SharedFeedbackObservations {
-    fn observe(
-        &self,
-        input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
-        observation: tracedecay_domain::feedback::FeedbackCycleObservationV1,
-    ) {
-        self.0.observe(input, observation);
+impl FeedbackRuntimeStatePort for ResolvedRuntimeState {
+    fn resolve<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _input: &'a FeedbackEvaluationInputV1,
+    ) -> FeedbackPortFuture<'a, Option<FeedbackRuntimeStateV1>> {
+        let runtime = self.0.clone();
+        Box::pin(async move { Some(runtime) })
     }
 }
 
@@ -1689,13 +1701,17 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
             observed_at: now,
         },
     };
-    let code_graph = hermetic_ci_code_graph(&scope, &project);
-    let ci_code_evidence =
-        ProjectCiCodeAnchorStoreV1::new(project.clone(), scope.clone(), code_graph)
-            .unwrap()
-            .resolve(&context, &ci_request, &retained)
-            .await
-            .expect("production CI localization over the canonical graph");
+    let (code_graph, code_index_identity) = hermetic_ci_code_graph(&scope, &project);
+    let ci_code_evidence = ProjectCiCodeAnchorStoreV1::new_with_code_index_identity(
+        project.clone(),
+        scope.clone(),
+        code_graph,
+        code_index_identity,
+    )
+    .unwrap()
+    .resolve(&context, &ci_request, &retained)
+    .await
+    .expect("production CI localization over the canonical graph");
     assert_eq!(
         ci_code_evidence.state,
         tracedecay_domain::feedback::CiFailureLocalizationStateV1::Complete,
@@ -2148,9 +2164,7 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
     );
 
     let service = FeedbackCycleService::new(
-        move |_context: &RequestContext, _input: &FeedbackEvaluationInputV1| {
-            Some(runtime_state.clone())
-        },
+        ResolvedRuntimeState(runtime_state),
         SavedGenerationDiagnostics {
             results: vec![
                 DiagnosticProviderResult::new(
@@ -2166,7 +2180,7 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
         },
         GraphDerivedImpact(impact),
         feedback.publication_store(),
-        SharedFeedbackObservations(feedback.observation_port()),
+        feedback.observation_port(),
         feedback.route_authorization(),
         operation,
     );

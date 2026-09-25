@@ -173,13 +173,3 @@ pub fn cursor_after_attempted_units(
         .cloned()
         .or_else(|| prior.map(str::to_owned))
 }
-
-/// Whether any retention or compaction window is configured.
-#[must_use]
-pub fn retention_maintenance_enabled(
-    orphan_store_gc_days: Option<u64>,
-    incident_debris_retention_days: Option<u64>,
-    compaction: bool,
-) -> bool {
-    orphan_store_gc_days.is_some() || incident_debris_retention_days.is_some() || compaction
-}

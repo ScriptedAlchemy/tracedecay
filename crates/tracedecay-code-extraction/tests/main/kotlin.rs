@@ -4,12 +4,14 @@ use tracedecay_domain::*;
 
 fn extract(source: &str) -> ExtractionResult {
     let extractor = KotlinExtractor;
-    extractor.extract("test.kt", source)
+    extractor.extract_artifact("test.kt", source).result
 }
 
 // -----------------------------------------------------------------------
 // File node
 // -----------------------------------------------------------------------
+
+include!("support/edges.rs");
 
 #[test]
 fn test_kt_file_node_is_root() {
@@ -287,14 +289,9 @@ fn test_kt_annotation() {
     assert_eq!(annots[0].name, "Deprecated");
 
     // Should have an Annotates edge.
-    let annotates_edges: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Annotates)
-        .collect();
-    assert!(
-        !annotates_edges.is_empty(),
-        "expected at least one Annotates edge"
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Annotates),
+        [("Deprecated", "oldFunc")]
     );
 }
 
@@ -338,12 +335,7 @@ fn test_kt_kdoc() {
         .filter(|n| n.kind == NodeKind::Function)
         .collect();
     assert_eq!(fns.len(), 1);
-    assert!(fns[0].docstring.is_some(), "expected docstring");
-    assert!(
-        fns[0].docstring.as_ref().unwrap().contains("KDoc comment"),
-        "docstring: {:?}",
-        fns[0].docstring
-    );
+    assert_eq!(fns[0].docstring.as_deref(), Some("This is a KDoc comment"));
 }
 
 // -----------------------------------------------------------------------
@@ -415,7 +407,6 @@ fn test_kt_call_site() {
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
-    assert!(!calls.is_empty(), "expected at least one call site");
     assert!(
         calls.iter().any(|c| c.reference_name == "println"),
         "expected println call, got: {:?}",
@@ -432,16 +423,9 @@ fn test_kt_contains_edges() {
     let source = "class MyClass {\n  fun hello() {}\n}";
     let result = extract(source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let contains_edges: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    // File->Class and Class->Method at minimum
-    assert!(
-        contains_edges.len() >= 2,
-        "expected at least 2 Contains edges, got {}",
-        contains_edges.len()
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Contains),
+        [("test.kt", "MyClass"), ("MyClass", "hello")]
     );
 }
 

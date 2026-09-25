@@ -2,7 +2,6 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, CanonicalWorkflowEvidenceKindV1,
@@ -13,12 +12,13 @@ use tracedecay_domain::{
     RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
     SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
 };
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
     ObservationStore, ObservationWrite, ProjectionPersistOutcome, ProjectionStoreError,
     SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageRecord,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
 
 use crate::common::global_message;
@@ -171,7 +171,7 @@ fn write(
         "observation-workflow-test.v1",
     )
     .unwrap();
-    let retrieval_anchor = build_observation_retrieval_anchor_v2(
+    let retrieval_anchor = build_observation_retrieval_anchor(
         write.observation(),
         projection_generation.clone(),
         UtcMicros(1),
@@ -390,19 +390,20 @@ fn search_session_messages(
         let mut statement = conn
             .prepare(
                 "SELECT message.provider, message.message_id, message.session_id, message.role,
-                        message.timestamp, message.ordinal, message.text, message.kind,
+                        message.timestamp, message.ordinal,
+                        COALESCE(message.content, message.placeholder_text, ''), message.kind,
                         message.model, message.tool_names, message.source_path,
                         message.source_offset, message.metadata_json
-                 FROM session_messages_fts
-                 JOIN session_messages AS message
-                   ON message.rowid = session_messages_fts.rowid
+                 FROM lcm_raw_messages_fts
+                 JOIN lcm_raw_messages AS message
+                   ON message.store_id = lcm_raw_messages_fts.rowid
                  JOIN sessions AS session
                    ON session.provider = message.provider
                   AND session.session_id = message.session_id
-                 WHERE session_messages_fts MATCH ?1
+                 WHERE lcm_raw_messages_fts MATCH ?1
                    AND message.provider = ?2
                    AND (?3 IS NULL OR session.project_key = ?3 OR session.project_path = ?3)
-                 ORDER BY bm25(session_messages_fts)
+                 ORDER BY bm25(lcm_raw_messages_fts)
                  LIMIT ?4",
             )
             .unwrap();
@@ -507,16 +508,17 @@ fn upsert_session_message(database_path: &Path, message: &SessionMessageRecord) 
     rusqlite::Connection::open(database_path)
         .and_then(|conn| {
             conn.execute(
-                "INSERT INTO session_messages
-                     (provider, message_id, session_id, role, timestamp, ordinal, text, kind,
-                      model, tool_names, source_path, source_offset, metadata_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                "INSERT INTO lcm_raw_messages
+                     (provider, message_id, session_id, role, timestamp, ordinal, content, kind,
+                      model, tool_names, source_path, source_offset, metadata_json,
+                      content_hash, storage_kind)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?2, 'inline')
                  ON CONFLICT(provider, message_id) DO UPDATE SET
                     session_id = excluded.session_id,
                     role = excluded.role,
                     timestamp = excluded.timestamp,
                     ordinal = excluded.ordinal,
-                    text = excluded.text,
+                    content = excluded.content,
                     kind = excluded.kind,
                     model = excluded.model,
                     tool_names = excluded.tool_names,

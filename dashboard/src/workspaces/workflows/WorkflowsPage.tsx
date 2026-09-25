@@ -122,7 +122,7 @@ export function WorkflowsPage() {
           <div className="flex min-w-0 flex-col gap-3">
             {selectedDefinition === null || selectedEntry === null ? (
               <Panel legend="Selected definition" bodyClassName="p-3">
-                <p className="text-3xs text-text-muted">
+                <p className="text-sm text-text-muted">
                   {listed === null
                     ? 'The selected definition, its version track and its decoded steps appear here once the registry has answered.'
                     : listed.length === 0
@@ -163,7 +163,7 @@ export function WorkflowsPage() {
             />
             {selectedDefinition === null ? (
               <Panel legend="Lifecycle · daemon-validated CAS" bodyClassName="p-3">
-                <p className="text-3xs text-text-muted">
+                <p className="text-sm text-text-muted">
                   Activate, retire and reject act on one selected immutable version. Nothing is
                   offered until a definition is selected.
                 </p>

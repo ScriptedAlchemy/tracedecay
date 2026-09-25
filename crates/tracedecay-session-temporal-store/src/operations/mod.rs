@@ -2,7 +2,6 @@ mod generation;
 mod message_anchor;
 mod publication;
 mod sources;
-mod summary_projection;
 
 use std::collections::BTreeMap;
 
@@ -37,11 +36,17 @@ pub(super) struct PreparedPayload {
 #[derive(Clone, Debug)]
 pub(super) struct PreparedSource {
     pub canonical: CanonicalSourceBinding,
-    pub compatibility_anchor: bool,
+    pub unobserved_raw_anchor: bool,
     pub timestamp: i64,
     pub payload: Option<PreparedPayload>,
 }
 
+/// The frozen publication manifest stored in `session_summary_nodes.publication_json`.
+///
+/// The summary body, expand hint, and provider metadata are stored once, in
+/// the row's real columns; they are skipped on serialization and
+/// [`load_manifest`] fills them back from those columns so in-memory callers
+/// see one complete manifest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct CanonicalPublicationManifest {
     pub version: u32,
@@ -49,6 +54,7 @@ pub(super) struct CanonicalPublicationManifest {
     pub conversation_id: String,
     pub session_id: String,
     pub depth: i64,
+    #[serde(skip)]
     pub summary_text: String,
     pub summary_hash: String,
     pub source_refs: Vec<LcmSourceRef>,
@@ -57,7 +63,9 @@ pub(super) struct CanonicalPublicationManifest {
     pub summary_token_count: i64,
     pub source_time_start: Option<i64>,
     pub source_time_end: Option<i64>,
+    #[serde(skip)]
     pub expand_hint: Option<String>,
+    #[serde(skip)]
     pub metadata_json: Option<String>,
     pub source_horizon_json: String,
     pub owner_json: String,
@@ -216,7 +224,7 @@ pub(super) async fn load_manifest(
 ) -> Result<Option<(CanonicalPublicationManifest, i64)>, LcmError> {
     let mut rows = conn
         .query(
-            "SELECT publication_json, created_at
+            "SELECT publication_json, created_at, summary_text, expand_hint, metadata_json
              FROM session_summary_nodes WHERE summary_id = ?1",
             params![summary_id],
         )
@@ -225,8 +233,12 @@ pub(super) async fn load_manifest(
         return Ok(None);
     };
     let raw: String = row.get(0)?;
-    let manifest = serde_json::from_str(&raw).map_err(|_| LcmError::ImmutableSummaryConflict {
-        summary_id: summary_id.to_string(),
-    })?;
+    let mut manifest: CanonicalPublicationManifest =
+        serde_json::from_str(&raw).map_err(|_| LcmError::ImmutableSummaryConflict {
+            summary_id: summary_id.to_string(),
+        })?;
+    manifest.summary_text = row.get(2)?;
+    manifest.expand_hint = row.get(3)?;
+    manifest.metadata_json = row.get(4)?;
     Ok(Some((manifest, row.get(1)?)))
 }

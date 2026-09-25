@@ -1,4 +1,4 @@
-use super::super::ports::ExecutionControl;
+use super::super::execution::ExecutionControl;
 use super::{ContextError, TokenPolicy};
 
 pub const TOKEN_SCAN_CHUNK_BYTES: usize = 4 * 1024;

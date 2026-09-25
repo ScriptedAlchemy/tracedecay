@@ -12,6 +12,11 @@ metadata` with cargo's own selection rules and fails unless every test target
 in the workspace is selected by exactly one partition, or is listed under
 `not_run` with a reason.
 
+Windows runs the same partitions as parallel jobs too, one hosted 4-vCPU
+`windows-latest` job each, under the partition's `windows_timeout_minutes`:
+the MSVC toolchain compiles the same selection about 2.5x slower than the Arm
+Linux runner, so the two budgets are measured separately.
+
 macOS runs the same partitions grouped: every partition names one of the
 `macos_groups` under `macos_group`, and each group is one hosted 3-vCPU job
 that runs its partitions' selections in turn against one target directory.
@@ -25,6 +30,7 @@ on.
     linux-test-partitions.py [--metadata FILE] cargo-args <partition>
     linux-test-partitions.py [--metadata FILE] build-args <partition>
     linux-test-partitions.py matrix
+    linux-test-partitions.py windows-matrix
     linux-test-partitions.py macos-matrix
 
 `cargo-args` prints the selection for one partition as a shell-quoted
@@ -32,8 +38,9 @@ argument list. `build-args` prints that selection plus the partition's
 `executables`, the binaries and examples its tests spawn rather than link,
 which a test build does not produce on its own, for a `cargo build` that
 shares the test build's resolution; it prints nothing for a partition with no
-executables. `matrix` and `macos-matrix` print the `strategy.matrix`
-documents the Linux and macOS jobs feed through `fromJSON`.
+executables. `matrix`, `windows-matrix` and `macos-matrix` print the
+`strategy.matrix` documents the Linux, Windows and macOS jobs feed through
+`fromJSON`.
 """
 
 from __future__ import annotations
@@ -152,13 +159,14 @@ def load_manifest(path: Path = MANIFEST_PATH) -> dict[str, Any]:
     if len(set(names)) != len(names):
         raise PartitionError(f"{path}: partition names repeat")
     for partition in partitions:
-        for key in ("packages", "timeout_minutes", "macos_group"):
+        for key in ("packages", "timeout_minutes", "windows_timeout_minutes", "macos_group"):
             if key not in partition:
                 raise PartitionError(f"partition {partition['name']!r} has no {key!r}")
         if not isinstance(partition["packages"], list) or not partition["packages"]:
             raise PartitionError(f"partition {partition['name']!r} selects no packages")
-        if not isinstance(partition["timeout_minutes"], int) or partition["timeout_minutes"] <= 0:
-            raise PartitionError(f"partition {partition['name']!r} needs a positive timeout")
+        for key in ("timeout_minutes", "windows_timeout_minutes"):
+            if not isinstance(partition[key], int) or partition[key] <= 0:
+                raise PartitionError(f"partition {partition['name']!r} needs a positive {key}")
         for selector in partition.get("executables", []):
             kind_name, _, target_name = selector.partition(":")
             if kind_name not in ("bins", "bin", "example") or bool(target_name) != (kind_name != "bins"):
@@ -402,10 +410,11 @@ def build_args(document: dict[str, Any], metadata: dict[str, Any], name: str) ->
     raise PartitionError(f"no partition named {name!r}")
 
 
-def matrix(document: dict[str, Any]) -> dict[str, Any]:
+def matrix(document: dict[str, Any], timeout_key: str = "timeout_minutes") -> dict[str, Any]:
+    """One matrix entry per partition; `timeout_key` selects the host's budget."""
     return {
         "include": [
-            {"partition": partition["name"], "timeout": partition["timeout_minutes"]}
+            {"partition": partition["name"], "timeout": partition[timeout_key]}
             for partition in document["partitions"]
         ]
     }
@@ -435,6 +444,7 @@ def main() -> None:
     for command in ("cargo-args", "build-args"):
         commands.add_parser(command).add_argument("partition")
     commands.add_parser("matrix")
+    commands.add_parser("windows-matrix")
     commands.add_parser("macos-matrix")
     args = parser.parse_args()
 
@@ -442,6 +452,9 @@ def main() -> None:
         document = load_manifest(args.manifest)
         if args.command == "matrix":
             print(json.dumps(matrix(document)))
+            return
+        if args.command == "windows-matrix":
+            print(json.dumps(matrix(document, "windows_timeout_minutes")))
             return
         if args.command == "macos-matrix":
             print(json.dumps(macos_matrix(document)))

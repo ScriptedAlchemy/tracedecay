@@ -45,7 +45,7 @@ export function DoctorInspector() {
       <div className="flex flex-wrap items-center gap-2 px-4 pt-4">
         <Activity aria-hidden size={14} className="text-accent" />
         <h2 className="text-sm font-semibold tracking-tight">Doctor diagnosis</h2>
-        <span className="text-2xs text-text-muted">
+        <span className="text-body text-text-muted">
           canonical evidence and typed diagnostics
         </span>
       </div>
@@ -78,7 +78,7 @@ function ScopeWritabilityNote() {
   return (
     <p
       data-scope-writability={writability.state}
-      className="min-w-0 px-4 pt-1.5 text-2xs leading-relaxed text-text-secondary"
+      className="min-w-0 px-4 pt-1.5 text-body leading-relaxed text-text-secondary"
     >
       {scopeWriteSentence(writability, {
         writable: (target) => `Writes apply to ${target}.`,
@@ -126,7 +126,7 @@ function DoctorFindings({
           ))}
         </OverviewGrid>
       )}
-      <p className="border-t border-edge-subtle px-4 py-2 text-2xs text-text-muted">
+      <p className="border-t border-edge-subtle px-4 py-2 text-body text-text-muted">
         {envelope.payload.note}
       </p>
     </>
@@ -150,7 +150,7 @@ export function SchemaConvergencePanel({
           <li
             key={`${finding.store}:${finding.stage}:${index}`}
             data-convergence-state={finding.state}
-            className="text-2xs text-text-secondary"
+            className="text-body text-text-secondary"
           >
             <span className="font-medium text-text-primary">
               {convergenceStateLabel(finding.state)}
@@ -277,7 +277,7 @@ function EvidenceBadge({ state }: { state: DoctorEvidenceStateV1 }) {
   const Icon = EVIDENCE_ICON[state];
   return (
     <span
-      className="relative inline-flex w-fit items-center gap-1.5 border border-edge-subtle bg-surface-2 py-[3px] pl-2.5 pr-2 text-2xs font-medium"
+      className="relative inline-flex w-fit items-center gap-1.5 border border-edge-subtle bg-surface-2 py-[3px] pl-2.5 pr-2 text-body font-medium"
       data-evidence-state={state}
     >
       <span
@@ -302,7 +302,7 @@ function FindingEvidence({ entry }: { entry: DoctorReportEntryV1 }) {
             // Indexed like the entry cards above: references are
             // server-authored rows, not unique identities.
             key={`${evidence.family}:${evidence.reference}:${index}`}
-            className="flex items-start gap-1.5 text-2xs text-text-secondary"
+            className="flex items-start gap-1.5 text-body text-text-secondary"
           >
             <FileSearch aria-hidden size={11} className="mt-0.5 shrink-0 text-text-muted" />
             <span className="font-mono">{evidence.reference}</span>

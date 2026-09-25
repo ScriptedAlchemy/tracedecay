@@ -16,7 +16,7 @@
       "tracedecay_str_replace"
     ],
     "acceptable": [
-      "tracedecay_body",
+      "tracedecay_source_body",
       "tracedecay_context",
       "Read",
       "Edit"

@@ -2,7 +2,7 @@ mod canonical;
 
 use tracedecay_domain::canonical_text::canonical_framed_sha256;
 
-pub use canonical::{normalize, stable_record_id};
+pub use canonical::{ClaudeSpawnParent, normalize, normalize_spawned, stable_record_id};
 
 const CURSOR_KEY_PREFIX: &str = "tracedecay-claude-cursor-v1";
 const SOURCE_ID_PREFIX: &str = "tracedecay-claude-source-v1";

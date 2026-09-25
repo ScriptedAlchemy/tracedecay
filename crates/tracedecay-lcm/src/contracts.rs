@@ -22,8 +22,6 @@ pub struct LcmRawMessage {
     pub content_hash: String,
     pub storage_kind: LcmStorageKind,
     pub payload_ref: Option<String>,
-    pub legacy_source: bool,
-    pub legacy_truncated: bool,
     pub metadata_json: Option<String>,
 }
 
@@ -39,8 +37,6 @@ pub struct LcmRawMessageMetadata {
     pub content_hash: String,
     pub storage_kind: LcmStorageKind,
     pub payload_ref: Option<String>,
-    pub legacy_source: bool,
-    pub legacy_truncated: bool,
     pub metadata_json: Option<String>,
 }
 
@@ -57,8 +53,6 @@ impl LcmRawMessage {
             content_hash: self.content_hash,
             storage_kind: self.storage_kind,
             payload_ref: self.payload_ref,
-            legacy_source: self.legacy_source,
-            legacy_truncated: self.legacy_truncated,
             metadata_json: self.metadata_json,
         }
     }
@@ -95,8 +89,6 @@ impl LcmRawMessageMetadata {
             content_hash: self.content_hash,
             storage_kind: self.storage_kind,
             payload_ref: self.payload_ref,
-            legacy_source: self.legacy_source,
-            legacy_truncated: self.legacy_truncated,
             metadata_json: self.metadata_json,
         }
     }
@@ -288,11 +280,6 @@ pub struct LcmExpandResponse {
     /// Mirrors hermes-lcm `from_current_session`; raw-message targets only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_current_session: Option<bool>,
-    /// Legacy compatibility note mirrored from hermes-lcm payloads. Modern
-    /// cross-session expansion flows should rely on `payload_ref` +
-    /// `raw_message.session_id` and remain note-free.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub externalized_note: Option<String>,
     /// Source-list coverage metadata (summary-node targets only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_pagination: Option<LcmExpandSourcePagination>,

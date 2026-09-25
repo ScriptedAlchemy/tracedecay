@@ -1,53 +1,7 @@
-//! Server-shaped lifecycle observation ports.
-//!
-//! The concrete daemon lifecycle lives in `tracedecay_daemon_service::shutdown`;
-//! this module adapts it to the port the MCP connection loop observes drain
-//! and request admission through.
+//! Server-shaped lifecycle owners: background tasks, startup catch-up, and
+//! project-server response revocation.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
-
-use tracedecay_daemon_service::shutdown::DaemonLifecycle;
-
-/// Request-activity guard retained while one MCP request is admitted.
-///
-/// Dropping the guard releases the underlying lifecycle seat. The boxed
-/// retainee is the root-implemented activity token.
-pub struct McpRequestActivity {
-    _retain: Box<dyn Send>,
-}
-
-impl McpRequestActivity {
-    pub fn retain<T: Send + 'static>(guard: T) -> Self {
-        Self {
-            _retain: Box::new(guard),
-        }
-    }
-}
-
-pub type McpLifecycleDrainFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
-
-/// Observe daemon drain and admit one request seat without naming daemon types.
-pub trait McpConnectionLifecyclePort: Send + Sync {
-    fn accepting(&self) -> bool;
-    fn try_enter(&self) -> Option<McpRequestActivity>;
-    fn wait_for_draining(&self) -> McpLifecycleDrainFuture<'_>;
-}
-
-impl McpConnectionLifecyclePort for DaemonLifecycle {
-    fn accepting(&self) -> bool {
-        DaemonLifecycle::accepting(self)
-    }
-
-    fn try_enter(&self) -> Option<McpRequestActivity> {
-        DaemonLifecycle::try_enter(self).map(McpRequestActivity::retain)
-    }
-
-    fn wait_for_draining(&self) -> McpLifecycleDrainFuture<'_> {
-        Box::pin(DaemonLifecycle::wait_for_draining(self))
-    }
-}
 
 /// Bound on the join failures retained from tasks reaped during normal
 /// operation. Shutdown reports these alongside anything it drains itself; a
@@ -352,16 +306,16 @@ impl StartupCatchUpMachineV1 {
 #[derive(Clone)]
 pub struct ProjectServerResponseLifecycle {
     response_gate: Arc<tokio::sync::RwLock<()>>,
-    response_revoked: tracedecay_session_memory::context::CancellationToken,
-    request_abort: tracedecay_session_memory::context::CancellationToken,
+    response_revoked: tracedecay_runtime_core::cancellation::CancellationToken,
+    request_abort: tracedecay_runtime_core::cancellation::CancellationToken,
 }
 
 impl Default for ProjectServerResponseLifecycle {
     fn default() -> Self {
         Self {
             response_gate: Arc::new(tokio::sync::RwLock::new(())),
-            response_revoked: tracedecay_session_memory::context::CancellationToken::new(),
-            request_abort: tracedecay_session_memory::context::CancellationToken::new(),
+            response_revoked: tracedecay_runtime_core::cancellation::CancellationToken::new(),
+            request_abort: tracedecay_runtime_core::cancellation::CancellationToken::new(),
         }
     }
 }
@@ -392,7 +346,7 @@ impl ProjectServerResponseLifecycle {
         &self.response_gate
     }
 
-    pub fn response_revoked(&self) -> &tracedecay_session_memory::context::CancellationToken {
+    pub fn response_revoked(&self) -> &tracedecay_runtime_core::cancellation::CancellationToken {
         &self.response_revoked
     }
 }

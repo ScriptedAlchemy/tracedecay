@@ -238,7 +238,8 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     assert_eq!(records.len(), 2);
     for task in [AgentTaskKind::SessionReflector, AgentTaskKind::SkillWriter] {
         let now = current_timestamp();
-        let decision = schedule_decision(&config, task, &records, SessionActivity::none(), now);
+        let decision =
+            schedule_decision(&config, None, task, &records, SessionActivity::none(), now);
         assert_eq!(
             decision.skip_reason().map(AutomationSkipReasonV1::as_str),
             Some("scheduler_interval_not_elapsed"),
@@ -709,7 +710,7 @@ async fn combined_review_preserves_reflector_budget_stage_for_fallback() {
     assert!(matches!(
         dispatch,
         CombinedReviewDispatch::NotCombined {
-            reason: "session_evidence_budget_exhausted_request_candidate_bytes",
+            reason: "session_evidence_budget_exhausted",
         }
     ));
     assert_eq!(retrieval.calls(), 1);
@@ -753,7 +754,7 @@ async fn combined_review_preserves_skill_budget_stage_for_fallback() {
     assert!(matches!(
         dispatch,
         CombinedReviewDispatch::NotCombined {
-            reason: "session_evidence_budget_exhausted_execution_work_exhausted",
+            reason: "session_evidence_budget_exhausted",
         }
     ));
     assert_eq!(retrieval.calls(), 2);

@@ -4,9 +4,9 @@ use serde_json::{Value, json};
 use std::fs;
 #[cfg(feature = "test-transport")]
 use std::path::{Path, PathBuf};
-#[cfg(feature = "test-transport")]
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_mcp::get_tool_definitions;
+#[cfg(feature = "test-transport")]
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
@@ -330,7 +330,7 @@ async fn project_context_surfaces_registry_read_failure_as_tool_error() {
         .execute_batch("DROP TABLE project_aliases")
         .unwrap();
     let server = tracedecay::mcp::McpServer::new_with_host_admission_test_runtime_for_test(
-        tracedecay::project::TraceDecay::open(cg.project_root())
+        tracedecay_project::project::TraceDecay::open(cg.project_root())
             .await
             .unwrap(),
         None,
@@ -387,7 +387,7 @@ async fn project_search_surfaces_registry_read_failure_as_tool_error() {
         .execute_batch("DROP TABLE project_aliases")
         .unwrap();
     let server = tracedecay::mcp::McpServer::new_with_host_admission_test_runtime_for_test(
-        tracedecay::project::TraceDecay::open(cg.project_root())
+        tracedecay_project::project::TraceDecay::open(cg.project_root())
             .await
             .unwrap(),
         None,
@@ -468,7 +468,7 @@ async fn project_registry_tools_prefer_injected_registry_over_process_default() 
         .await
         .unwrap();
     let server = tracedecay::mcp::McpServer::new_with_host_admission_test_runtime_for_test(
-        tracedecay::project::TraceDecay::open(cg.project_root())
+        tracedecay_project::project::TraceDecay::open(cg.project_root())
             .await
             .unwrap(),
         None,
@@ -528,59 +528,6 @@ async fn project_registry_tools_prefer_injected_registry_over_process_default() 
             .display()
             .to_string()
     );
-}
-
-#[cfg(feature = "test-transport")]
-#[tokio::test]
-async fn selected_project_read_skips_cache_write_for_read_only_store() {
-    let fixture = production_composition_fixture().await;
-    let server = fixture
-        .harness
-        .server(&fixture.project_root)
-        .expect("production project server");
-    wait_for_current_graph(&server).await;
-    let storage =
-        handle_real_server_tool_call(&server, "tracedecay_storage_status", json!({})).await;
-    let storage_payload: Value = serde_json::from_str(extract_real_server_text(&storage)).unwrap();
-    let target_project_key = storage_payload["scope"]["project_id"]
-        .as_str()
-        .expect("production project identity")
-        .to_owned();
-    let read_args = json!({
-        "project_selector": {"project_id": target_project_key},
-        "file": "src/main.rs",
-        "mode": "full",
-        "format": "json"
-    });
-    let initial_read =
-        handle_real_server_tool_call(&server, "tracedecay_read", read_args.clone()).await;
-    let initial_payload = extract_first_json_content(&initial_read);
-    assert_eq!(initial_payload["file"], "src/main.rs");
-    assert!(
-        initial_payload["body"]
-            .as_str()
-            .is_some_and(|body| body.contains("fn main()")),
-        "initial selected read should return the mounted file content: {initial_payload}"
-    );
-    let initial_digest = initial_payload["digest"].clone();
-    assert!(initial_digest.is_string(), "{initial_payload}");
-
-    let unchanged_read = handle_real_server_tool_call(&server, "tracedecay_read", read_args).await;
-    let unchanged_payload = extract_first_json_content(&unchanged_read);
-    assert_eq!(unchanged_payload["file"], "src/main.rs");
-    assert_eq!(
-        unchanged_payload["unchanged"], true,
-        "the successful second read must publish the canonical no-write result: {unchanged_payload}"
-    );
-    assert_eq!(
-        unchanged_payload["digest"], initial_digest,
-        "the no-write result must identify the exact content returned initially"
-    );
-    assert!(
-        unchanged_payload["body"].is_null(),
-        "an unchanged read must not duplicate the file body: {unchanged_payload}"
-    );
-    fixture.harness.shutdown().await;
 }
 
 #[test]

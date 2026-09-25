@@ -1,5 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use sha2::Digest as _;
+
 use tracedecay_domain::{
     ChunkerRevision, ExtractorRevision, LanguageId, PrivacyDomainId, ProjectionKeyV1,
     ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1, SanitizationReceiptId,
@@ -211,14 +213,78 @@ fn restored_generation_resolves_seal_references_once() {
             &UninterruptibleCodeIndexControlV1,
         )
         .expect("fresh generation");
-    let sealed = published.encode_sealed().expect("sealed generation bytes");
+    let (manifest, segments) = partitioned_seal(&published);
     super::helpers::take_seal_reference_resolutions();
 
-    let restored =
-        CodeIndexPublishedGenerationV1::decode_sealed(&sealed).expect("restored generation");
+    let restored = partitioned_restore(&manifest, &segments);
 
     assert_eq!(super::helpers::take_seal_reference_resolutions(), 1);
     assert_eq!(restored.edges, published.edges);
+}
+
+/// A generation sealed by one build is reused by the next when only inputs
+/// that do not shape stored bytes differ, and only a stored-shape authority
+/// retires it. Upgrades restart the daemon, so this is what keeps a sealed
+/// generation serving across `tracedecay update`.
+#[test]
+fn sealed_generation_is_reusable_by_a_later_build_with_the_same_stored_shape() {
+    let mut sealing_build = CodeIndexProductionOwnerV1::new(
+        worker_config(),
+        WorkerPublicationStore::default(),
+        WorkerProjectionSink,
+    )
+    .expect("sealing owner");
+    let published = sealing_build
+        .build_and_publish(
+            worker_request_with_source(
+                "file.worker.cross-build",
+                1_100_000,
+                b"pub fn caller() { target(); }\npub fn target() {}\n",
+            ),
+            &UninterruptibleCodeIndexControlV1,
+        )
+        .expect("sealed generation");
+    let (manifest, segments) = partitioned_seal(&published);
+    drop(sealing_build);
+
+    let restored = partitioned_restore(&manifest, &segments);
+    let later_build = CodeIndexProductionConfigV1 {
+        max_snapshot_age_micros: Some(60_000_000),
+        ..worker_config()
+    };
+    let compatibility = restored.compatibility_with(&later_build);
+    assert!(
+        compatibility.is_reusable(),
+        "intake policy is not stored shape: {:?}",
+        compatibility.incompatibilities()
+    );
+
+    let rechunked = restored.compatibility_with(&CodeIndexProductionConfigV1 {
+        chunker_revision: worker_id::<ChunkerRevision>("chunker.v3"),
+        ..later_build.clone()
+    });
+    assert_eq!(
+        rechunked
+            .incompatibilities()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        [CodeIndexGenerationIncompatibilityV1::ChunkerRevision]
+    );
+    assert!(
+        rechunked.may_serve_while_rebuilding(),
+        "a chunker-only change keeps the sealed bytes serving until the successor is ready"
+    );
+
+    let resanitized = restored.compatibility_with(&CodeIndexProductionConfigV1 {
+        sanitizer_revision: worker_id::<SanitizerRevision>("sanitizer.v2"),
+        ..later_build
+    });
+    assert!(!resanitized.is_reusable());
+    assert!(
+        !resanitized.may_serve_while_rebuilding(),
+        "bytes sanitized under another revision must not serve"
+    );
 }
 
 #[test]
@@ -282,9 +348,8 @@ fn arc_share_increment_restores_under_parentless_validate_fresh() {
         "fixture must Arc-share the unchanged file page"
     );
 
-    let sealed = next.encode_sealed().expect("arc-share generation seals");
-    let restored =
-        CodeIndexPublishedGenerationV1::decode_sealed(&sealed).expect("parentless restore");
+    let (manifest, segments) = partitioned_seal(&next);
+    let restored = partitioned_restore(&manifest, &segments);
     assert_eq!(restored.manifest.generation_id, next.manifest.generation_id);
     assert_eq!(
         restored.projection.request().changes.reused_digest,
@@ -357,7 +422,7 @@ fn extractor_revision_change_reextracts_before_validating_retained_import_rows()
 
     assert_eq!(
         rebuilt.files[0].extraction.extractor_revision.as_str(),
-        "extractor.rust.v12"
+        "extractor.rust.v13"
     );
     assert_ne!(
         rebuilt.files[0].extraction.parser_import_rows_digest,
@@ -425,7 +490,7 @@ fn physical_artifact_reuse_rejects_a_stale_extractor_revision() {
 
     assert_eq!(
         rebuilt.files[0].extraction.extractor_revision.as_str(),
-        "extractor.rust.v12"
+        "extractor.rust.v13"
     );
     assert!(
         rebuilt.files[0]
@@ -491,18 +556,86 @@ fn incremental_carry_forward_rejects_a_stale_extractor_revision() {
 
 #[test]
 fn prior_sealed_generation_is_rejected_before_manifest_decode() {
-    let prior = br#"{"generation":{"format_revision":4}}"#;
+    for revision in [4, 9] {
+        let generation = format!(r#"{{"format_revision":{revision}}}"#);
+        let digest =
+            ManifestDigest::from_sha256_bytes(&sha2::Sha256::digest(generation.as_bytes()))
+                .expect("prior generation digest");
+        let prior = format!(
+            r#"{{"state_digest":"{}","generation":{generation}}}"#,
+            digest.as_str()
+        );
+        let error =
+            CodeIndexPublishedGenerationV1::decode_partitioned_sealed(prior.as_bytes(), |_, _| {
+                panic!("a retired manifest must be refused before any segment read")
+            })
+            .expect_err("prior generation must require a rebuild");
+        assert!(
+            matches!(
+                error,
+                CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(refused)
+                    if refused == revision
+            ),
+            "revision {revision} reached the wrong rejection: {error}"
+        );
+        assert!(error.to_string().contains("will be rebuilt from source"));
+    }
+}
 
-    assert!(
-        !CodeIndexPublishedGenerationV1::sealed_format_is_compatible(prior)
-            .expect("prior format probe")
-    );
-    let error = CodeIndexPublishedGenerationV1::decode_sealed_if_compatible(prior)
-        .expect_err("a caller that accepts incompatible durable state must not materialize it");
-    assert!(error.to_string().contains("will be rebuilt from source"));
-    let error = CodeIndexPublishedGenerationV1::decode_sealed(prior)
-        .expect_err("prior generation must require a rebuild");
-    assert!(error.to_string().contains("will be rebuilt from source"));
+/// Seal `generation` partitioned, keeping every segment in memory with the
+/// evidence pages assembled under their pack digest.
+fn partitioned_seal(
+    generation: &CodeIndexPublishedGenerationV1,
+) -> (Vec<u8>, std::collections::BTreeMap<String, Vec<u8>>) {
+    let mut segments = std::collections::BTreeMap::new();
+    let mut evidence_pack = Vec::new();
+    let manifest = generation
+        .encode_partitioned_sealed(|publication| {
+            match publication {
+                SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
+                    segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+                }
+                SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
+                    evidence_pack.extend_from_slice(bytes);
+                }
+                SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
+                    segment_digest,
+                    ..
+                } => {
+                    segments.insert(
+                        segment_digest.as_str().to_owned(),
+                        std::mem::take(&mut evidence_pack),
+                    );
+                }
+            }
+            Ok(())
+        })
+        .expect("generation seals");
+    (manifest, segments)
+}
+
+fn partitioned_restore(
+    manifest: &[u8],
+    segments: &std::collections::BTreeMap<String, Vec<u8>>,
+) -> CodeIndexPublishedGenerationV1 {
+    CodeIndexPublishedGenerationV1::decode_partitioned_sealed(manifest, |request, buffer| {
+        let (digest, offset, length) = match request {
+            SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => (digest, 0, size_bytes),
+            SealedGenerationSegmentReadV1::Range {
+                digest,
+                offset,
+                length,
+                ..
+            } => (digest, offset, length),
+        };
+        let bytes = &segments[digest.as_str()];
+        let start = usize::try_from(offset).expect("segment offset");
+        let end = start + usize::try_from(length).expect("segment length");
+        buffer.clear();
+        buffer.extend_from_slice(&bytes[start..end]);
+        Ok(())
+    })
+    .expect("generation restores")
 }
 
 #[test]

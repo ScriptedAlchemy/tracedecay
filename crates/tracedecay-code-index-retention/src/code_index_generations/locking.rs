@@ -2,16 +2,30 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use tracedecay_private_fs::FileLease;
+
 use super::{
     CodeGenerationRetentionErrorV1, GRAPH_REPLAY_POOL_ACQUIRE_BUDGET,
     GRAPH_REPLAY_POOL_ACQUIRE_POLL, SCOPE_RETENTION_LOCK_FILE, STORE_LOCK_FILE, storage,
 };
+#[cfg(windows)]
+use super::{SCOPE_RETENTION_TRANSACTION_FILE, is_code_index_scope_hash, journal, scope_roots};
+
+const CODE_GENERATION_LEASE_LABEL: &str = "code_index_retention.store";
 
 pub struct CodeGenerationStoreLockV1 {
-    file: File,
+    _file: FileLease,
     store_root: PathBuf,
     generation_store: bool,
     shared: bool,
+}
+
+#[cfg(windows)]
+enum GenerationScopeFence {
+    Unscoped,
+    PassBusy,
+    Pending,
+    Acquired { _file: File },
 }
 
 impl CodeGenerationStoreLockV1 {
@@ -28,12 +42,6 @@ impl CodeGenerationStoreLockV1 {
                 "text-artifact attachment requires the generation-store lock".to_owned(),
             ))
         }
-    }
-}
-
-impl Drop for CodeGenerationStoreLockV1 {
-    fn drop(&mut self) {
-        let _ = self.file.unlock();
     }
 }
 
@@ -68,11 +76,16 @@ pub(super) fn acquire_code_generation_store_lock_checked(
 pub fn try_acquire_code_generation_store_read_lock(
     store_root: &Path,
 ) -> Result<Option<CodeGenerationStoreLockV1>, CodeGenerationRetentionErrorV1> {
+    #[cfg(windows)]
+    let _scope_fence = match try_acquire_generation_scope_fence(store_root)? {
+        GenerationScopeFence::PassBusy | GenerationScopeFence::Pending => return Ok(None),
+        fence => fence,
+    };
     let store_root = canonical_store_root(store_root)?;
     let lock = open_lock_file(&store_root.join(STORE_LOCK_FILE))?;
     match lock.try_lock_shared().map_err(std::io::Error::from) {
         Ok(()) => Ok(Some(CodeGenerationStoreLockV1 {
-            file: lock,
+            _file: FileLease::held(lock, CODE_GENERATION_LEASE_LABEL),
             store_root,
             generation_store: true,
             shared: true,
@@ -85,11 +98,42 @@ pub fn try_acquire_code_generation_store_read_lock(
 pub fn try_acquire_code_generation_store_lock(
     store_root: &Path,
 ) -> Result<Option<CodeGenerationStoreLockV1>, CodeGenerationRetentionErrorV1> {
+    #[cfg(windows)]
+    let _scope_fence = match try_acquire_generation_scope_fence(store_root)? {
+        GenerationScopeFence::PassBusy | GenerationScopeFence::Pending => return Ok(None),
+        fence => fence,
+    };
+    try_acquire_code_generation_store_lock_unfenced(store_root)
+}
+
+pub(super) fn try_acquire_code_generation_store_lock_during_scope_retention(
+    store_root: &Path,
+    scope_retention_lock: &CodeGenerationStoreLockV1,
+) -> Result<Option<CodeGenerationStoreLockV1>, CodeGenerationRetentionErrorV1> {
+    let parent = store_root.parent().ok_or_else(|| {
+        CodeGenerationRetentionErrorV1::UnsafeState(
+            "code-index scope has no parent for retention lock".to_owned(),
+        )
+    })?;
+    if scope_retention_lock.generation_store
+        || scope_retention_lock.shared
+        || canonical_store_root(parent)? != scope_retention_lock.store_root
+    {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope collection requires its exact exclusive parent lock".to_owned(),
+        ));
+    }
+    try_acquire_code_generation_store_lock_unfenced(store_root)
+}
+
+fn try_acquire_code_generation_store_lock_unfenced(
+    store_root: &Path,
+) -> Result<Option<CodeGenerationStoreLockV1>, CodeGenerationRetentionErrorV1> {
     let store_root = canonical_store_root(store_root)?;
     let lock = open_lock_file(&store_root.join(STORE_LOCK_FILE))?;
     match lock.try_lock().map_err(std::io::Error::from) {
         Ok(()) => Ok(Some(CodeGenerationStoreLockV1 {
-            file: lock,
+            _file: FileLease::held(lock, CODE_GENERATION_LEASE_LABEL),
             store_root,
             generation_store: true,
             shared: false,
@@ -113,6 +157,57 @@ pub(super) fn acquire_scope_retention_lock(
     )
 }
 
+/// Exclusive hold on the project's shared generation segments.
+///
+/// It is the project's scope-retention lock: every change that can make a
+/// manifest stop or start naming segments, retiring generations, sweeping
+/// segments, and collecting or restoring whole scopes, runs under it, so a
+/// sweep's mark phase observes every manifest that can still be read.
+pub(super) fn acquire_generation_segments_lock_checked(
+    store_root: &Path,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CodeGenerationStoreLockV1, CodeGenerationRetentionErrorV1> {
+    lock_file(
+        super::generation_segment_project_root(store_root),
+        SCOPE_RETENTION_LOCK_FILE,
+        false,
+        Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET,
+        is_cancelled,
+    )
+}
+
+/// Shared hold a publication keeps from its first segment write until its
+/// manifest is durable, so no sweep can collect a segment a manifest is about
+/// to name. Publications of different worktrees share it; the exclusive
+/// holders are bounded passes, so this waits for them instead of failing the
+/// publication, observing `is_cancelled` between probes.
+pub fn acquire_generation_segments_publication_lock(
+    store_root: &Path,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CodeGenerationStoreLockV1, CodeGenerationRetentionErrorV1> {
+    let project_root = canonical_store_root(super::generation_segment_project_root(store_root))?;
+    loop {
+        if is_cancelled() {
+            return Err(CodeGenerationRetentionErrorV1::Cancelled);
+        }
+        let lock = open_lock_file(&project_root.join(SCOPE_RETENTION_LOCK_FILE))?;
+        match lock.try_lock_shared().map_err(std::io::Error::from) {
+            Ok(()) => {
+                return Ok(CodeGenerationStoreLockV1 {
+                    _file: FileLease::held(lock, CODE_GENERATION_LEASE_LABEL),
+                    store_root: project_root,
+                    generation_store: false,
+                    shared: true,
+                });
+            }
+            Err(error) if tracedecay_private_fs::is_lock_contended(&error) => {
+                std::thread::park_timeout(GRAPH_REPLAY_POOL_ACQUIRE_POLL);
+            }
+            Err(error) => return Err(storage(error)),
+        }
+    }
+}
+
 #[hotpath::measure(label = "code_index_retention.lock")]
 fn lock_file(
     store_root: &Path,
@@ -121,32 +216,105 @@ fn lock_file(
     deadline: Instant,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CodeGenerationStoreLockV1, CodeGenerationRetentionErrorV1> {
-    let store_root = canonical_store_root(store_root)?;
     let deadline = deadline.min(Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET);
     loop {
         if is_cancelled() {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
+        #[cfg(windows)]
+        let scope_fence = if generation_store {
+            match try_acquire_generation_scope_fence(store_root)? {
+                GenerationScopeFence::Pending => {
+                    return Err(CodeGenerationRetentionErrorV1::GenerationStoreBusy);
+                }
+                GenerationScopeFence::PassBusy => {
+                    park_until_retry(deadline)?;
+                    continue;
+                }
+                fence => fence,
+            }
+        } else {
+            GenerationScopeFence::Unscoped
+        };
+        let store_root = canonical_store_root(store_root)?;
         let lock = open_lock_file(&store_root.join(lock_file))?;
         match lock.try_lock().map_err(std::io::Error::from) {
             Ok(()) => {
                 return Ok(CodeGenerationStoreLockV1 {
-                    file: lock,
+                    _file: FileLease::held(lock, CODE_GENERATION_LEASE_LABEL),
                     store_root,
                     generation_store,
                     shared: false,
                 });
             }
             Err(error) if tracedecay_private_fs::is_lock_contended(&error) => {
-                if Instant::now() >= deadline {
-                    return Err(CodeGenerationRetentionErrorV1::GenerationStoreBusy);
-                }
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                std::thread::park_timeout(remaining.min(GRAPH_REPLAY_POOL_ACQUIRE_POLL));
+                #[cfg(windows)]
+                drop(scope_fence);
+                park_until_retry(deadline)?;
             }
             Err(error) => return Err(storage(error)),
         }
     }
+}
+
+#[cfg(windows)]
+fn try_acquire_generation_scope_fence(
+    store_root: &Path,
+) -> Result<GenerationScopeFence, CodeGenerationRetentionErrorV1> {
+    let Some(scope_hash) = store_root.file_name().and_then(std::ffi::OsStr::to_str) else {
+        return Ok(GenerationScopeFence::Unscoped);
+    };
+    if !is_code_index_scope_hash(scope_hash) {
+        return Ok(GenerationScopeFence::Unscoped);
+    }
+    let parent = store_root.parent().ok_or_else(|| {
+        CodeGenerationRetentionErrorV1::UnsafeState(
+            "code-index scope has no parent for retention journal".to_owned(),
+        )
+    })?;
+    let parent = canonical_store_root(parent)?;
+    let lock = open_lock_file(&parent.join(SCOPE_RETENTION_LOCK_FILE))?;
+    match lock.try_lock_shared().map_err(std::io::Error::from) {
+        Ok(()) if scope_retention_pending(&parent, scope_hash)? => {
+            Ok(GenerationScopeFence::Pending)
+        }
+        Ok(()) => Ok(GenerationScopeFence::Acquired { _file: lock }),
+        Err(error) if tracedecay_private_fs::is_lock_contended(&error) => {
+            Ok(GenerationScopeFence::PassBusy)
+        }
+        Err(error) => Err(storage(error)),
+    }
+}
+
+#[cfg(windows)]
+fn scope_retention_pending(
+    parent: &Path,
+    scope_hash: &str,
+) -> Result<bool, CodeGenerationRetentionErrorV1> {
+    match std::fs::symlink_metadata(parent.join(SCOPE_RETENTION_TRANSACTION_FILE)) {
+        Ok(_) => Ok(
+            journal::load_journal(parent, &scope_roots::SCOPE_TRANSACTION_JOURNAL)?.is_some_and(
+                |transaction| {
+                    transaction
+                        .receipt
+                        .collected_scopes
+                        .iter()
+                        .any(|scope| scope.scope_hash == scope_hash)
+                },
+            ),
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(storage(error)),
+    }
+}
+
+fn park_until_retry(deadline: Instant) -> Result<(), CodeGenerationRetentionErrorV1> {
+    if Instant::now() >= deadline {
+        return Err(CodeGenerationRetentionErrorV1::GenerationStoreBusy);
+    }
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    std::thread::park_timeout(remaining.min(GRAPH_REPLAY_POOL_ACQUIRE_POLL));
+    Ok(())
 }
 
 fn canonical_store_root(store_root: &Path) -> Result<PathBuf, CodeGenerationRetentionErrorV1> {

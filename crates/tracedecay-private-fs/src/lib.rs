@@ -6,8 +6,11 @@ use std::fs::File;
 use std::io;
 
 pub mod capability_dir;
+mod file_lease;
 pub mod framed_log;
 mod rename_noreplace;
+
+pub use file_lease::FileLease;
 #[cfg(windows)]
 pub mod windows_file;
 
@@ -49,15 +52,6 @@ impl std::error::Error for PrivateFileCreationFailure {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.error)
     }
-}
-
-/// Receipt from [`make_private_directory`]: the pre-heal state observed on the
-/// exact directory handle that was re-permissioned.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MadePrivateDirectory {
-    /// Unix permission bits observed before re-permissioning; `None` on
-    /// platforms without Unix modes.
-    pub previous_unix_mode: Option<u32>,
 }
 
 #[cfg(windows)]
@@ -175,13 +169,12 @@ mod unix {
     /// opened handle, when the current user owns it.
     ///
     /// The directory analogue of [`make_private_file`]: creation-time privacy
-    /// belongs to [`create_private_directory`], while this converges a legacy
-    /// directory an older binary created under a permissive umask. It never
-    /// follows symlinks, refuses a directory another user owns (ownership is
+    /// belongs to [`create_private_directory`], while this tightens a directory
+    /// the caller created through an ordinary path. It never follows symlinks, refuses a directory another user owns (ownership is
     /// the proof the caller may tighten it), and re-validates the handle after
     /// tightening so a concurrent swap cannot smuggle a non-private object.
     #[hotpath::measure(label = "private_fs.make_private_directory")]
-    pub fn make_private_directory(path: &Path) -> io::Result<crate::MadePrivateDirectory> {
+    pub fn make_private_directory(path: &Path) -> io::Result<()> {
         let mut options = fs::OpenOptions::new();
         options
             .read(true)
@@ -196,12 +189,8 @@ mod unix {
                 "filesystem handle is not owned by the current user",
             ));
         }
-        let previous_mode = metadata.permissions().mode() & 0o777;
         file.set_permissions(fs::Permissions::from_mode(0o700))?;
-        validate_handle(&file, true, 0o700)?;
-        Ok(crate::MadePrivateDirectory {
-            previous_unix_mode: Some(previous_mode),
-        })
+        validate_handle(&file, true, 0o700)
     }
 
     pub fn validate_directory_path(path: &Path) -> io::Result<()> {
@@ -369,6 +358,7 @@ mod lock_contention_tests {
 #[cfg(all(test, unix))]
 mod tests {
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+    use std::path::Path;
 
     use tempfile::tempdir;
 
@@ -414,16 +404,15 @@ mod tests {
     }
 
     #[test]
-    fn owned_permissive_directory_is_healed_through_its_handle() {
+    fn owned_permissive_directory_is_tightened_through_its_handle() {
         let temp = tempdir().unwrap();
-        let directory = temp.path().join("legacy");
+        let directory = temp.path().join("permissive");
         create_private_directory(&directory).unwrap();
         std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o775)).unwrap();
         assert!(open_private_directory(&directory).is_err());
 
-        let receipt = super::make_private_directory(&directory).unwrap();
+        super::make_private_directory(&directory).unwrap();
 
-        assert_eq!(receipt.previous_unix_mode, Some(0o775));
         assert_eq!(
             std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
             0o700
@@ -432,17 +421,31 @@ mod tests {
     }
 
     #[test]
-    fn directory_heal_rejects_symlinks_and_non_directories() {
+    fn directory_tightening_rejects_symlinks_and_non_directories() {
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
         let temp = tempdir().unwrap();
         let directory = temp.path().join("target");
         create_private_directory(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
         let link = temp.path().join("link");
         symlink(&directory, &link).unwrap();
-        assert!(super::make_private_directory(&link).is_err());
+        let refused = super::make_private_directory(&link).unwrap_err();
+        // `O_NOFOLLOW | O_DIRECTORY` on a symlink fails ENOTDIR on Linux and
+        // ELOOP (normalized to InvalidInput) on the BSDs.
+        assert!(
+            matches!(
+                refused.kind(),
+                std::io::ErrorKind::NotADirectory | std::io::ErrorKind::InvalidInput
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(mode(&directory), 0o755, "the link target stays untouched");
 
         let file_path = temp.path().join("regular");
         drop(create_private_file(&file_path).unwrap());
-        assert!(super::make_private_directory(&file_path).is_err());
+        let refused = super::make_private_directory(&file_path).unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::NotADirectory);
+        assert_eq!(mode(&file_path), 0o600, "the file stays untouched");
     }
 
     #[test]

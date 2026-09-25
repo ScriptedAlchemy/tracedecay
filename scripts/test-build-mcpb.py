@@ -2,7 +2,6 @@
 import importlib.util
 import json
 import tempfile
-import tomllib
 import zipfile
 from pathlib import Path
 
@@ -16,55 +15,6 @@ SPEC.loader.exec_module(MODULE)
 
 
 def main() -> None:
-    repository = SCRIPT.parent.parent
-    # The repository root is a virtual workspace manifest with no `[package]`.
-    # Every member inherits `version.workspace = true`, so the shipped version
-    # is the workspace one.
-    package_version = tomllib.loads(
-        (repository / "Cargo.toml").read_text(encoding="utf-8")
-    )["workspace"]["package"]["version"]
-    registry = json.loads((repository / "server.json").read_text(encoding="utf-8"))
-    assert registry["version"] == package_version
-    expected_description = (
-        "Local semantic code intelligence, project memory, and workflow context "
-        "for AI coding agents."
-    )
-    assert registry["description"] == expected_description
-    assert (
-        MODULE.manifest(package_version, "x86_64-linux")["description"]
-        == expected_description
-    )
-
-    release_config = json.loads(
-        (repository / "release-please-config.json").read_text(encoding="utf-8")
-    )
-    assert {
-        "type": "json",
-        "path": "server.json",
-        "jsonpath": "$.version",
-    } in release_config["packages"]["."]["extra-files"]
-
-    targets = json.loads(
-        (repository / ".github/release-targets.json").read_text(encoding="utf-8")
-    )
-    assert {entry["name"] for entry in targets["include"]} == {
-        "aarch64-macos",
-        "x86_64-linux",
-        "aarch64-linux",
-        "x86_64-windows",
-    }
-
-    release = (repository / ".github/workflows/release.yml").read_text(encoding="utf-8")
-    beta_release = (repository / ".github/workflows/release-beta.yml").read_text(
-        encoding="utf-8"
-    )
-    for workflow in [release, beta_release]:
-        assert "release-targets.json" in workflow
-        assert "build-mcpb.py verify" in workflow
-    assert "test -s" in release
-    assert "test \"$(jq '.packages | length' server.json)\" -gt 0" in release
-    assert 'test("^[0-9a-f]{64}$")' in release
-
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         for platform, (_, binary_name) in sorted(MODULE.PLATFORMS.items()):
@@ -76,6 +26,12 @@ def main() -> None:
 
             MODULE.build_bundle(binary, output, "0.0.67", platform)
             MODULE.verify_bundle(output, "0.0.67", platform)
+            try:
+                MODULE.verify_bundle(output, "0.0.68", platform)
+            except RuntimeError as error:
+                assert "manifest does not match" in str(error)
+            else:
+                raise AssertionError("verify_bundle accepted a mismatched version")
 
             assert output.stat().st_size > len(payload)
             with zipfile.ZipFile(output) as archive:

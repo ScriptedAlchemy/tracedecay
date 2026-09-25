@@ -10,23 +10,23 @@ use tracedecay_contracts::feedback::{
     GitHubReviewReadRequestV1,
 };
 use tracedecay_contracts::retrieval::{
-    GitTopologyAnchorAuthorityErrorV2, GitTopologyAnchorAuthorityV2,
-    GitTopologyAnchorPublicationOutcomeV2, GitTopologyAnchorPublicationV2,
-    GitTopologyAnchorResolutionOutcomeV2, GitTopologyAnchorResolutionV2,
+    GitTopologyAnchorAuthority, GitTopologyAnchorAuthorityError, GitTopologyAnchorPublication,
+    GitTopologyAnchorPublicationOutcome, GitTopologyAnchorResolution,
+    GitTopologyAnchorResolutionOutcome,
 };
 use tracedecay_domain::feedback::FeedbackScopeV1;
 use tracedecay_domain::{
-    AccessPolicyDigest, AnchorDurabilityClass, AnchorLineageRefV2, AnchorOwnerBindingV1,
-    AnchorProvenanceRelationV2, AnchorSourceGenerationV2, CapabilityId, CoverageReportV1,
+    AccessPolicyDigest, AnchorDurabilityClass, AnchorLineageRef, AnchorOwnerBindingV1,
+    AnchorProvenanceRelation, AnchorSourceGeneration, CapabilityId, CoverageReportV1,
     EvidenceClass, GitHubStackCapabilityStateV1, GitTopologyAnchorTargetV1,
     GitTopologySourceRoleV1, ObservationScopeV1, OrderedGitTopologySourceV1, PayloadAccessState,
     PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectionGenerationId, ProviderId,
     PullRequestSnapshotAnchorRefV1, RepositoryId, ResolutionAuthorizationV1, RetentionClass,
-    RetrievalAnchorId, RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts,
-    RetrievalAnchorTargetV2, ScopeResolutionId, UserProfileId, UtcMicros, VectorWatermark,
-    canonical_sha256, sha256_hex_suffix,
+    RetrievalAnchorId, RetrievalAnchorRecord, RetrievalAnchorRecordParts, RetrievalAnchorTarget,
+    ScopeResolutionId, UserProfileId, UtcMicros, VectorWatermark, canonical_sha256,
+    sha256_hex_suffix,
 };
-use tracedecay_global_db::{RegisteredGitTopologyAnchorAuthorityV2, RegisteredGlobalDbLeaseV1};
+use tracedecay_global_db::{RegisteredGitTopologyAnchorAuthority, RegisteredGlobalDbLeaseV1};
 use tracedecay_tool_catalog::{CapabilityId as GrantCapabilityId, UseCaseId as GrantUseCaseId};
 
 use super::stack::DecodedGitHubStackSnapshotV1;
@@ -50,7 +50,7 @@ pub enum GitHubStackAnchorPublicationOutcomeV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitHubStackAnchorReadOutcomeV1 {
-    Current(Box<RetrievalAnchorRecordV2>),
+    Current(Box<RetrievalAnchorRecord>),
     Denied,
     Stale,
     Unavailable,
@@ -72,14 +72,14 @@ pub(super) trait GitHubStackReadAuthorityV1: Sync {
 #[serde(deny_unknown_fields)]
 pub struct GitHubStackDurableObservationV1 {
     pub observation: GitHubStackObservationV1,
-    pub capability_anchor: RetrievalAnchorRecordV2,
-    pub snapshot_anchor: Option<RetrievalAnchorRecordV2>,
+    pub capability_anchor: RetrievalAnchorRecord,
+    pub snapshot_anchor: Option<RetrievalAnchorRecord>,
 }
 
 #[derive(Clone)]
 pub struct ProjectGitHubStackAnchorAuthorityV1 {
     database: RegisteredGlobalDbLeaseV1,
-    anchors: Arc<dyn GitTopologyAnchorAuthorityV2>,
+    anchors: Arc<dyn GitTopologyAnchorAuthority>,
     scope: FeedbackScopeV1,
 }
 
@@ -87,9 +87,7 @@ impl ProjectGitHubStackAnchorAuthorityV1 {
     pub fn new(database: RegisteredGlobalDbLeaseV1, scope: FeedbackScopeV1) -> Option<Self> {
         scope.validate().ok()?;
         (database.binding().shard_id.scope.project_id() == Some(&scope.project_id)).then(|| Self {
-            anchors: Arc::new(RegisteredGitTopologyAnchorAuthorityV2::new(
-                database.clone(),
-            )),
+            anchors: Arc::new(RegisteredGitTopologyAnchorAuthority::new(database.clone())),
             database,
             scope,
         })
@@ -131,7 +129,7 @@ impl ProjectGitHubStackAnchorAuthorityV1 {
         .await?;
         if capability_anchor.owner() != &owner
             || capability_anchor.target()
-                != &RetrievalAnchorTargetV2::GitTopology(Box::new(
+                != &RetrievalAnchorTarget::GitTopology(Box::new(
                     GitTopologyAnchorTargetV1::GitHubStackCapability(
                         observation.capability.clone(),
                     ),
@@ -144,7 +142,7 @@ impl ProjectGitHubStackAnchorAuthorityV1 {
                 let record = resolve_v2(self.anchors.as_ref(), &owner, anchor_id).await?;
                 if record.owner() != &owner
                     || record.target()
-                        != &RetrievalAnchorTargetV2::GitTopology(Box::new(
+                        != &RetrievalAnchorTarget::GitTopology(Box::new(
                             GitTopologyAnchorTargetV1::GitHubStackSnapshot(snapshot.clone()),
                         ))
                 {
@@ -245,14 +243,14 @@ impl ProjectGitHubStackAnchorAuthorityV1 {
             let owner = ObservationScopeV1::Project {
                 project_id: self.scope.project_id.clone(),
             };
-            let Ok(publication) = GitTopologyAnchorPublicationV2::new(owner, records) else {
+            let Ok(publication) = GitTopologyAnchorPublication::new(owner, records) else {
                 return GitHubStackAnchorPublicationOutcomeV1::Unavailable;
             };
             let publication = match self.anchors.publish(publication).await {
-                Ok(GitTopologyAnchorPublicationOutcomeV2::Published) => {
+                Ok(GitTopologyAnchorPublicationOutcome::Published) => {
                     GitHubStackAnchorPublicationOutcomeV1::Published
                 }
-                Ok(GitTopologyAnchorPublicationOutcomeV2::Replayed) => {
+                Ok(GitTopologyAnchorPublicationOutcome::Replayed) => {
                     GitHubStackAnchorPublicationOutcomeV1::Replayed
                 }
                 Err(_) => GitHubStackAnchorPublicationOutcomeV1::Unavailable,
@@ -296,17 +294,16 @@ impl ProjectGitHubStackAnchorAuthorityV1 {
             let owner = ObservationScopeV1::Project {
                 project_id: self.scope.project_id.clone(),
             };
-            let Ok(resolution) =
-                GitTopologyAnchorResolutionV2::new(owner.clone(), anchor_id.clone())
+            let Ok(resolution) = GitTopologyAnchorResolution::new(owner.clone(), anchor_id.clone())
             else {
                 return GitHubStackAnchorReadOutcomeV1::Denied;
             };
             let record = match self.anchors.resolve(resolution).await {
-                Ok(GitTopologyAnchorResolutionOutcomeV2::Resolved(record)) => record,
-                Ok(GitTopologyAnchorResolutionOutcomeV2::Unavailable)
-                | Err(GitTopologyAnchorAuthorityErrorV2::Unavailable)
-                | Err(GitTopologyAnchorAuthorityErrorV2::ResetRequired)
-                | Err(GitTopologyAnchorAuthorityErrorV2::Conflict) => {
+                Ok(GitTopologyAnchorResolutionOutcome::Resolved(record)) => record,
+                Ok(GitTopologyAnchorResolutionOutcome::Unavailable)
+                | Err(GitTopologyAnchorAuthorityError::Unavailable)
+                | Err(GitTopologyAnchorAuthorityError::ResetRequired)
+                | Err(GitTopologyAnchorAuthorityError::Conflict) => {
                     return GitHubStackAnchorReadOutcomeV1::Unavailable;
                 }
             };
@@ -453,14 +450,14 @@ fn canonical_stack_position(provider_position: u32) -> Option<u32> {
 }
 
 async fn resolve_v2(
-    authority: &dyn GitTopologyAnchorAuthorityV2,
+    authority: &dyn GitTopologyAnchorAuthority,
     owner: &ObservationScopeV1,
     anchor_id: &RetrievalAnchorId,
-) -> Option<RetrievalAnchorRecordV2> {
-    let resolution = GitTopologyAnchorResolutionV2::new(owner.clone(), anchor_id.clone()).ok()?;
+) -> Option<RetrievalAnchorRecord> {
+    let resolution = GitTopologyAnchorResolution::new(owner.clone(), anchor_id.clone()).ok()?;
     match authority.resolve(resolution).await.ok()? {
-        GitTopologyAnchorResolutionOutcomeV2::Resolved(record) => Some(*record),
-        GitTopologyAnchorResolutionOutcomeV2::Unavailable => None,
+        GitTopologyAnchorResolutionOutcome::Resolved(record) => Some(*record),
+        GitTopologyAnchorResolutionOutcome::Unavailable => None,
     }
 }
 
@@ -470,7 +467,7 @@ fn exact_commit_source_record(
     repository_id: &RepositoryId,
     commit_id: &tracedecay_domain::CommitId,
     ingested_at: UtcMicros,
-) -> Option<RetrievalAnchorRecordV2> {
+) -> Option<RetrievalAnchorRecord> {
     let digest = canonical_sha256(&(
         "tracedecay.github-stack.provider-commit-source.v1",
         owner,
@@ -482,8 +479,8 @@ fn exact_commit_source_record(
     let mut source_authorization = authorization.clone();
     source_authorization.canonical_request_digest =
         PrivacyDomainBoundLocatorDigest::new(digest.as_str()).ok()?;
-    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
-        target: RetrievalAnchorTargetV2::ExactRepositoryCommit {
+    RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
+        target: RetrievalAnchorTarget::ExactRepositoryCommit {
             repository_id: repository_id.clone(),
             commit_id: commit_id.clone(),
         },
@@ -492,7 +489,7 @@ fn exact_commit_source_record(
         occurred_at: None,
         ingested_at,
         evidence_class: EvidenceClass::ProviderDeclared,
-        source_generation: AnchorSourceGenerationV2::Unknown,
+        source_generation: AnchorSourceGeneration::Unknown,
         projection_generation: ProjectionGenerationId::new(format!(
             "generation.github-stack-source.{suffix}"
         ))
@@ -527,7 +524,7 @@ fn build_records(
     context: &RequestContext,
     request: &GitHubReviewReadRequestV1,
     observation: &GitHubStackObservationV1,
-) -> Option<Vec<RetrievalAnchorRecordV2>> {
+) -> Option<Vec<RetrievalAnchorRecord>> {
     let authorization = authorization(profile_id, context, request)?;
     let owner = ObservationScopeV1::Project {
         project_id: observation.scope.project_id.clone(),
@@ -616,8 +613,8 @@ fn build_records(
 }
 
 fn insert_record(
-    records: &mut BTreeMap<RetrievalAnchorId, RetrievalAnchorRecordV2>,
-    record: RetrievalAnchorRecordV2,
+    records: &mut BTreeMap<RetrievalAnchorId, RetrievalAnchorRecord>,
+    record: RetrievalAnchorRecord,
 ) -> Option<()> {
     match records.get(record.anchor_id()) {
         Some(existing) if existing.is_semantic_replay_of(&record) => Some(()),
@@ -634,24 +631,24 @@ fn retrieval_record(
     target: GitTopologyAnchorTargetV1,
     ingested_at: UtcMicros,
     authorization: ResolutionAuthorizationV1,
-) -> Option<RetrievalAnchorRecordV2> {
+) -> Option<RetrievalAnchorRecord> {
     let mut seen = BTreeSet::new();
     let source_anchors = target
         .ordered_sources()
         .iter()
         .filter(|source| seen.insert(source.anchor_id.clone()))
         .map(|source| {
-            AnchorLineageRefV2::new(
-                AnchorProvenanceRelationV2::Observed,
+            AnchorLineageRef::new(
+                AnchorProvenanceRelation::Observed,
                 source.anchor_id.clone(),
                 owner.clone(),
             )
             .ok()
         })
         .collect::<Option<Vec<_>>>()?;
-    let source_generation = AnchorSourceGenerationV2::GitTopology(target.generation());
+    let source_generation = AnchorSourceGeneration::GitTopology(target.generation());
     let projection_generation = match &source_generation {
-        AnchorSourceGenerationV2::GitTopology(
+        AnchorSourceGeneration::GitTopology(
             tracedecay_domain::GitTopologyGenerationRefV1::GitHubStackCapability {
                 generation_id,
                 ..
@@ -661,7 +658,7 @@ fn retrieval_record(
                 ..
             },
         ) => generation_id.clone(),
-        AnchorSourceGenerationV2::GitTopology(
+        AnchorSourceGeneration::GitTopology(
             tracedecay_domain::GitTopologyGenerationRefV1::ProviderCommit {
                 source_anchor_id,
                 commit_id,
@@ -681,8 +678,8 @@ fn retrieval_record(
         }
         _ => return None,
     };
-    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
-        target: RetrievalAnchorTargetV2::GitTopology(Box::new(target)),
+    RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
+        target: RetrievalAnchorTarget::GitTopology(Box::new(target)),
         owner,
         aliases: Vec::new(),
         occurred_at: None,
@@ -749,8 +746,8 @@ fn observation_matches_scope(
         && observation.capability.worktree_id == scope.worktree_id
 }
 
-fn record_matches_scope(record: &RetrievalAnchorRecordV2, scope: &FeedbackScopeV1) -> bool {
-    let RetrievalAnchorTargetV2::GitTopology(target) = record.target() else {
+fn record_matches_scope(record: &RetrievalAnchorRecord, scope: &FeedbackScopeV1) -> bool {
+    let RetrievalAnchorTarget::GitTopology(target) = record.target() else {
         return false;
     };
     target.project_id() == &scope.project_id && target.repository_id() == &scope.repository_id

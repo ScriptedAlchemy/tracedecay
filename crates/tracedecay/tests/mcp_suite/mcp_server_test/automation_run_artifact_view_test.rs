@@ -101,6 +101,7 @@ fn base_record(
         backend_attempt_count: 0,
         backend_attempts: Vec::new(),
         fallback_status: None,
+        session_evidence_budget_stage: None,
         report_ref: None,
         artifacts: Vec::new(),
         started_at: "1782283199".to_owned(),

@@ -167,7 +167,7 @@ export type ReadoutSize = 'sm' | 'md' | 'lg' | 'xl' | 'display';
  * weight for large monospaced figures. The two tiers are different kinds of
  * object, not different sizes of the same one. */
 const VALUE_SIZE: Record<ReadoutSize, string> = {
-  sm: 'td-value text-xs',
+  sm: 'td-value text-sm',
   md: 'td-value text-base font-medium',
   lg: 'td-value text-xl font-medium',
   xl: 'td-display text-2xl',
@@ -232,7 +232,7 @@ export function Readout({
           <span className="td-meter-fill" style={{ width: `${rail * 100}%` }} />
         </span>
       ) : null}
-      {note ? <span className="truncate text-3xs text-text-muted">{note}</span> : null}
+      {note ? <span className="truncate text-sm text-text-muted">{note}</span> : null}
     </div>
   );
 }
@@ -335,7 +335,7 @@ export function MeterRow({
   className?: string;
 }) {
   return (
-    <div className={cn('flex items-center gap-2 text-xs', className)}>
+    <div className={cn('flex items-center gap-2 text-sm', className)}>
       {leading}
       <span className="min-w-0 flex-1 truncate text-text-primary" title={title}>
         {label}
@@ -348,7 +348,7 @@ export function MeterRow({
       />
       <span
         className={cn(
-          'td-value shrink-0 text-right text-2xs text-text-secondary',
+          'td-value shrink-0 text-right text-xs text-text-secondary',
           figureWidth === 'byte' ? 'w-[4.75rem]' : figureWidth === 'wide' ? 'w-14' : 'w-12',
         )}
         data-cell="numeric"
@@ -394,7 +394,7 @@ export function FigureRail({
         className,
       )}
     >
-      <span className="td-value text-2xs leading-none text-text-secondary" data-cell="numeric">
+      <span className="td-value text-xs leading-none text-text-secondary" data-cell="numeric">
         {value}
         {unit ? <span className="td-unit ml-1">{unit}</span> : null}
       </span>
@@ -410,7 +410,7 @@ export function FigureRail({
 export function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="flex min-w-0 flex-col gap-0.5">
-      <dt className="uppercase tracking-[0.08em] text-text-muted">{label}</dt>
+      <dt className="uppercase tracking-[0.08em] text-text-muted text-3xs">{label}</dt>
       <dd className="min-w-0 break-words text-text-secondary tabular">{children}</dd>
     </div>
   );
@@ -436,8 +436,8 @@ export function Fact({
       <dd
         className={
           muted
-            ? 'truncate text-3xs text-text-muted'
-            : 'truncate text-3xs text-text-secondary'
+            ? 'truncate text-sm text-text-muted'
+            : 'truncate text-sm text-text-secondary'
         }
       >
         {value}
@@ -545,7 +545,7 @@ export function WorkspaceHeader({
       <span className="td-value shrink-0 text-3xs text-text-muted" data-cell="numeric">
         {channelNumber(path)}
       </span>
-      <h1 className="shrink-0 text-2xs font-semibold uppercase tracking-[0.2em] text-text-primary">
+      <h1 className="shrink-0 text-xs font-semibold uppercase tracking-[0.2em] text-text-primary">
         {title}
       </h1>
       {/* Withdrawn below `sm`, where the line has no width to spend on filler:
@@ -553,7 +553,7 @@ export function WorkspaceHeader({
        * header overflow at 320 CSS px. Above `sm` it earns its width. */}
       <span aria-hidden className="td-rule max-sm:hidden" />
       {note ? (
-        <span className="min-w-0 truncate text-3xs tracking-[0.04em] text-text-muted">
+        <span className="min-w-0 truncate text-sm text-text-muted">
           {note}
         </span>
       ) : null}

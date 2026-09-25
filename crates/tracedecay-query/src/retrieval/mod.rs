@@ -63,6 +63,17 @@ pub const QUERY_LEXICAL_PROFILE_REVISION_V1: &str = "lexical-profile.daemon.v1";
 pub const QUERY_EXACT_SCORE_DOMAIN_V1: &str = "score.exact.daemon.v1";
 pub const QUERY_LEXICAL_SCORE_DOMAIN_V1: &str = "score.lexical.daemon.v1";
 pub const QUERY_GRAPH_SCORE_DOMAIN_V1: &str = "score.graph.daemon.v1";
+/// Raw lexical score (BM25 micros) that calibrates to the full lexical
+/// feature. Fusion counts one lexical contribution per candidate, so this
+/// range is the only lexical strength utility carries: at a 1.0 ceiling every
+/// hit saturated and the graph lane alone decided between lexical candidates.
+/// Hits above it still order by raw score.
+///
+/// ponytail: one static ceiling for every corpus (about the evaluator
+/// corpus's 25th-percentile top hit); BM25 grows with corpus idf, so
+/// per-query normalization is the upgrade path if larger repositories
+/// saturate.
+pub const QUERY_LEXICAL_CALIBRATION_CEILING_MICROS_V1: u64 = 32_000_000;
 /// Score domain used when the mounted core fallback policy ranks TaskSession.
 ///
 /// It is not part of the exact/lexical/graph fusion profile, so search cursor

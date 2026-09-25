@@ -5,15 +5,16 @@
 //! use it to build the common application envelope without upgrading a
 //! bounded result into fabricated complete evidence.
 
+use tracedecay_domain::TemporalModeV1;
+
 use crate::{
     CoverageCompleteness, EvidenceDomain, FreshnessState, OmissionReason, OpaqueCursor, PageCursor,
 };
 
 use super::{
     HydrationStateResultV1, LcmRetrievalOutcomeV1, LcmTemporalFieldsV1, RetainedOutcomeStatusV1,
-    RetainedSurfaceResultV1, SessionCoverageModeV1, SessionRefreshStatusResultV1,
-    SessionRefreshTerminalStateResultV1, SessionSourceCoverageV1, TemporalFreshnessV1,
-    TemporalMetadataV1, TemporalWatermarksV1,
+    RetainedSurfaceResultV1, SessionRefreshStatusResultV1, SessionRefreshTerminalStateResultV1,
+    SessionSourceCoverageV1, TemporalFreshnessV1, TemporalMetadataV1, TemporalWatermarksV1,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,7 +42,7 @@ pub struct RetainedSurfaceEvidenceOmissionV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RetainedSurfaceTemporalRequestV1 {
     pub source_id: String,
-    pub mode: SessionCoverageModeV1,
+    pub mode: TemporalModeV1,
 }
 
 /// Exact temporal authority carried by retained session results.
@@ -571,7 +572,7 @@ const fn omission_reason(value: HydrationStateResultV1) -> Option<OmissionReason
         | HydrationStateResultV1::Deleted
         | HydrationStateResultV1::RetentionExpired
         | HydrationStateResultV1::Locked
-        | HydrationStateResultV1::UnverifiableLegacy => Some(OmissionReason::Unavailable),
+        | HydrationStateResultV1::Unverifiable => Some(OmissionReason::Unavailable),
     }
 }
 
@@ -612,10 +613,7 @@ mod tests {
         results: Option<Vec<MessageSearchHitV1>>,
     ) -> MessageSearchResultV1 {
         MessageSearchResultV1 {
-            catch_up: false,
-            catch_up_failures: Vec::new(),
-            catch_up_performed: false,
-            catch_up_provider: "all".to_owned(),
+            require_fresh: false,
             count,
             goals: false,
             include_subagents: true,
@@ -638,14 +636,7 @@ mod tests {
             git_filter_applied: None,
             message: None,
             omitted: None,
-            project_scope: None,
-            registry_truncated: None,
-            roots: None,
-            searched_project_count: None,
-            selected_project_root: None,
             service_status: None::<RetrievalWorkerStatusV1>,
-            skipped: None,
-            skipped_project_count: None,
             store_scope: None,
             temporal: None,
             workflow_agent: None,

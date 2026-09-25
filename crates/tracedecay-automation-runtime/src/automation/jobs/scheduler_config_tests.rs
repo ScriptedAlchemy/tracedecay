@@ -150,6 +150,7 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
     let first = super::scheduler_gate::evaluate_and_record_scheduler_skip_at(
         temp.path(),
         &config,
+        None,
         &job,
         "next-occurrence",
         101,
@@ -166,6 +167,7 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
     let repeated = super::scheduler_gate::evaluate_and_record_scheduler_skip_at(
         temp.path(),
         &config,
+        None,
         &job,
         "next-occurrence",
         102,
@@ -194,6 +196,7 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
     let due = super::scheduler_gate::evaluate_and_record_scheduler_skip_at(
         temp.path(),
         &config,
+        None,
         &job,
         "next-occurrence",
         160,
@@ -220,6 +223,7 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
     let next_skip = super::scheduler_gate::evaluate_and_record_scheduler_skip_at(
         temp.path(),
         &config,
+        None,
         &job,
         "following-occurrence",
         161,
@@ -232,6 +236,7 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
     let repeated_next = super::scheduler_gate::evaluate_and_record_scheduler_skip_at(
         temp.path(),
         &config,
+        None,
         &job,
         "following-occurrence",
         162,
@@ -261,6 +266,7 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
     let after_noise = super::scheduler_gate::evaluate_and_record_scheduler_skip_at(
         temp.path(),
         &config,
+        None,
         &job,
         "following-occurrence",
         163,
@@ -290,6 +296,7 @@ async fn scheduler_lock_skip_uses_a_diagnostic_identity_outside_the_effect_occur
     let skip = super::scheduler_gate::record_scheduler_lock_skip(
         temp.path(),
         &config,
+        None,
         &job,
         occurrence,
         &started_at,

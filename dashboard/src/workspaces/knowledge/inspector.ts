@@ -13,12 +13,12 @@ import {
   type MemoryFactDetailPayloadV1,
   type MemoryFactRowV1,
   type MemoryReadStatusV1,
+  type MemoryTrustHistoryPayloadV1,
   type PayloadAccessState,
 } from '../../contracts/generated.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
 import type { PayloadResult } from '../../data/query/payload.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
-import type { TrustHistoryPayload } from '../../data/query/memory.ts';
 
 /** How the reader arrived at this fact. Inspection previews the bounded
  * overview row; selection reads the canonical authorities. */
@@ -76,7 +76,7 @@ export interface LadderInput {
   /** The trust audit read, only issued for a selected fact. */
   readonly history:
     | { pending: true }
-    | { pending: false; result: PayloadResult<TrustHistoryPayload> | undefined }
+    | { pending: false; result: PayloadResult<MemoryTrustHistoryPayloadV1> | undefined }
     | null;
   /** Relations touching this fact in the drawn graph, and the graph sub-read. */
   readonly relations: number | null;

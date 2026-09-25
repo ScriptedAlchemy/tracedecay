@@ -13,9 +13,9 @@ use tempfile::TempDir;
 use tracedecay_mcp::{JsonRpcRequest, JsonRpcResponse};
 
 use super::dispatch_test_support::SelectorEnv;
-use crate::config::lock_user_data_dir_test_env;
 use crate::mcp::McpServer;
-use crate::project::TraceDecay;
+use tracedecay_project::config::lock_user_data_dir_test_env;
+use tracedecay_project::project::TraceDecay;
 
 async fn open_server() -> (TempDir, SelectorEnv, Arc<McpServer>) {
     let dir = TempDir::new().expect("temp dir");
@@ -31,8 +31,9 @@ async fn open_server() -> (TempDir, SelectorEnv, Arc<McpServer>) {
     .expect("enrolled project");
     cg.add_local_counter(41).await.expect("seed local counter");
     cg.set_tokens_saved(12).await.expect("seed saved tokens");
-    let scoped = crate::test_support::host_admission::ProjectScopedTestRuntimeV1::new(runtime)
-        .expect("project-scoped runtime");
+    let scoped =
+        tracedecay_project::test_support::host_admission::ProjectScopedTestRuntimeV1::new(runtime)
+            .expect("project-scoped runtime");
     let server = McpServer::new_with_host_admission_test_runtime_for_test(cg, None, scoped)
         .await
         .expect("project MCP server");

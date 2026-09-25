@@ -169,22 +169,16 @@ impl CodexAppServerLaunchReceipt {
     }
 }
 
-impl Default for CodexAppServerSummaryConfig {
-    fn default() -> Self {
-        Self {
-            codex_bin: "codex".to_string(),
+impl CodexAppServerSummaryConfig {
+    /// Tuning for an executable the caller resolved through configuration
+    /// (`lcm.summarizer_executables.v1`). Only the model and timeout knobs
+    /// come from the environment; the binary is never looked up on `PATH`.
+    pub fn for_executable(codex_bin: &Path) -> Self {
+        let mut config = Self {
+            codex_bin: codex_bin.to_string_lossy().into_owned(),
             model: Some("gpt-5.6-sol".to_owned()),
             timeout: Duration::from_secs(90),
-        }
-    }
-}
-
-impl CodexAppServerSummaryConfig {
-    pub fn from_env() -> Self {
-        let mut config = Self::default();
-        if let Some(bin) = non_empty_env("TRACEDECAY_CODEX_BIN") {
-            config.codex_bin = bin;
-        }
+        };
         if let Some(model) = non_empty_env("TRACEDECAY_CODEX_SUMMARY_MODEL") {
             config.model = Some(model);
         }

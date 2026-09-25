@@ -5,10 +5,8 @@ use tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV
 use tracedecay_domain::errors::Result;
 
 use super::{
-    handle_by_qualified_name, handle_callees, handle_callers, handle_callers_for, handle_context,
-    handle_derives, handle_find_exact_symbol, handle_impact, handle_implementations, handle_impls,
-    handle_node, handle_redundancy, handle_rename_preview, handle_search, handle_signature,
-    handle_similar,
+    handle_by_qualified_name, handle_derives, handle_find_exact_symbol, handle_search,
+    handle_signature,
 };
 use crate::ToolResult;
 use crate::handlers::ast_grep::handle_ast_grep_search;
@@ -18,7 +16,7 @@ use crate::handlers::verified_read::{VerifiedGraphOpen, verified_read_operation 
 use crate::tool_context::McpToolContext;
 
 /// Dispatches one graph-family tool (`tracedecay_search`,
-/// `tracedecay_callers`, ...) onto its handler, opening the verified graph
+/// `tracedecay_impact`, ...) onto its handler, opening the verified graph
 /// through `open` under the operation the catalog registers for it.
 pub async fn dispatch_tool(
     ctx: &McpToolContext<'_>,
@@ -66,29 +64,6 @@ pub async fn dispatch_tool(
             )
             .await
         }
-        "tracedecay_context" => {
-            handle_context(ctx, open(read("context")?), args, scope_prefix).await
-        }
-        "tracedecay_callers" => handle_callers(&open(read("code_callers")?).await?, args).await,
-        "tracedecay_callees" => handle_callees(&open(read("callees")?).await?, args).await,
-        "tracedecay_impact" => handle_impact(&open(read("impact")?).await?, args).await,
-        "tracedecay_node" => handle_node(&open(read("node")?).await?, args).await,
-        "tracedecay_similar" => handle_similar(ctx, args).await,
-        "tracedecay_redundancy" => handle_redundancy(ctx, args).await,
-        "tracedecay_rename_preview" => {
-            handle_rename_preview(ctx, &open(read("rename_preview")?).await?, args).await
-        }
-        "tracedecay_implementations" => {
-            handle_implementations(
-                &open(read("code_implementations")?).await?,
-                args,
-                scope_prefix,
-            )
-            .await
-        }
-        "tracedecay_callers_for" => {
-            handle_callers_for(&open(read("code_callers")?).await?, args).await
-        }
         "tracedecay_find_exact_symbol" => {
             handle_find_exact_symbol(
                 ctx,
@@ -103,9 +78,8 @@ pub async fn dispatch_tool(
             handle_by_qualified_name(&open(read("qualified_name")?).await?, args).await
         }
         "tracedecay_signature" => {
-            handle_signature(&open(read("code_signature_search")?).await?, args).await
+            handle_signature(&open(read("qualified_name")?).await?, args).await
         }
-        "tracedecay_impls" => handle_impls(&open(read("code_implementations")?).await?, args).await,
         "tracedecay_derives" => {
             handle_derives(&open(read("code_type_hierarchy")?).await?, args).await
         }

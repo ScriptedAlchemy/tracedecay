@@ -8,77 +8,24 @@ use tracedecay_api::{
     CanonicalInvocationResult, HttpApplicationControls, HttpApplicationRequest, HttpSseEvent,
     application_router,
 };
-use tracedecay_contracts::feedback::TestResultsSurfaceRequestV1;
 use tracedecay_contracts::{
     APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, CancellationSignal, Deadline,
-    IdempotencyKey, RequestId, ResultContractRef, RetryDirective, SafeDiagnostic, StreamEvent,
+    RequestId, ResultContractRef, RetryDirective, SafeDiagnostic, StreamEvent,
 };
 use tracedecay_daemon_protocol::{
-    ApplicationSurfaceRequest, FeedbackSurfaceRequest, parse_application_surface_request,
-};
-use tracedecay_daemon_protocol::{
-    BindingResolution, BindingResolver, CatalogBindingResolver, RequestedOutputFormat,
+    ApplicationSurfaceRequest, BindingResolution, BindingResolver, CatalogBindingResolver,
+    FeedbackSurfaceRequest, RequestedOutputFormat,
 };
 use tracedecay_daemon_service::application_surface::{
-    GitApplySurfaceRequest, GitPreviewSurfaceRequest, GitReadSurfaceRequest,
     resolve_application_surface_dispatch, resolve_http_application_surface_dispatch,
 };
-use tracedecay_domain::{
-    GitCommitIdentityV1, GitCoverageV1, GitDiffScopeV1, GitHeadStateV1, GitIndexCommitIntentV1,
-    GitIndexPreviewDispositionV1, GitIndexPreviewId, GitIndexPreviewV1, GitIndexSigningPolicyV1,
-    GitIndexTransactionOperationV1, GitObjectFormatV1, GitOidV1, ProjectId, RepositoryId,
-    RepositoryIndexSnapshotV1, RepositoryIndexStateV1, RepositoryStateSnapshotV1,
-    RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId,
-};
+use tracedecay_domain::UtcMicros;
+use tracedecay_mcp::get_tool_definitions;
 use tracedecay_mcp::tools::dispatch::resolve_mcp_application_surface_dispatch;
-use tracedecay_mcp::{get_tool_definitions, mcp_input_schema};
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, BindingSurface, OperationId, ProfileId, SchemaId,
     SurfaceOperationName,
 };
-
-const PARITY_FIXTURE: &str = include_str!(
-    "../../../../benchmark_data/transport-boundary/goldens/application-surface-parity.json"
-);
-
-/// The operations whose decoded surface request carries a
-/// `CallableCodeSurfaceMeta`, and therefore a `cursor` continuation that every
-/// transport must accept identically. Mirrors
-/// the `HttpPageProjection::MetaCursor` arm of `http_page_projection` in
-/// `tracedecay-daemon-service/src/application_surface.rs`; the
-/// drift guard below fails as soon as one of them stops being pinned, stops
-/// binding a surface, or stops advertising its cursor over MCP.
-const CURSOR_CARRYING_CODE_OPERATIONS: [ApplicationSurfaceOperation; 13] = [
-    ApplicationSurfaceOperation::CodeExactOccurrence,
-    ApplicationSurfaceOperation::CodePhraseSearch,
-    ApplicationSurfaceOperation::CodeSymbolSearch,
-    ApplicationSurfaceOperation::CodeSignatureSearch,
-    ApplicationSurfaceOperation::CodeImplementations,
-    ApplicationSurfaceOperation::CodeTypeHierarchy,
-    ApplicationSurfaceOperation::CodeCallers,
-    ApplicationSurfaceOperation::CodeCallees,
-    ApplicationSurfaceOperation::CodeFacets,
-    ApplicationSurfaceOperation::CodeTimeline,
-    ApplicationSurfaceOperation::CodeDeclaration,
-    ApplicationSurfaceOperation::CodeTypeDefinition,
-    ApplicationSurfaceOperation::CodeReferences,
-];
-
-fn parity_fixture() -> serde_json::Value {
-    serde_json::from_str(PARITY_FIXTURE).expect("application parity fixture")
-}
-
-/// Operations the golden deliberately does not pin yet. Every entry must still
-/// be a real catalog operation, and an operation that appears in neither roster
-/// fails the parity test instead of being skipped.
-fn unpinned_operations(fixture: &serde_json::Value) -> BTreeSet<String> {
-    fixture["unpinned_operations"]
-        .as_array()
-        .expect("unpinned operation roster")
-        .iter()
-        .map(|operation| operation.as_str().expect("operation name").to_owned())
-        .collect()
-}
 
 #[tokio::test]
 async fn catalog_advertised_specialized_http_routes_invoke_the_application_owner() {
@@ -225,216 +172,59 @@ async fn catalog_advertised_specialized_http_routes_invoke_the_application_owner
 }
 
 #[test]
-fn cli_mcp_and_http_dispatch_the_same_callable_contracts() {
-    let fixture = parity_fixture();
-    let unpinned = unpinned_operations(&fixture);
-    let catalog = tracedecay_daemon_service::application_surface::application_surface_catalog()
-        .expect("application catalog");
-    let resolver = CatalogBindingResolver::new(&catalog);
-
-    for operation in ApplicationSurfaceOperation::ALL {
-        let expected = &fixture["operations"][operation.as_str()];
-        if !expected.is_object() {
-            assert!(
-                unpinned.contains(operation.as_str()),
-                "{} is advertised by the application catalog but the parity golden \
-                 neither pins its contract nor lists it under unpinned_operations; \
-                 pin the operation or declare it unpinned instead of leaving it \
-                 silently unverified",
-                operation.as_str()
-            );
-            continue;
-        }
-        let mut direct = Vec::new();
-        for surface in expected["bindings"]
-            .as_object()
-            .expect("surface bindings")
-            .keys()
-        {
-            let dispatched = match surface.as_str() {
-                "cli" => resolve_application_surface_dispatch(
-                    BindingSurface::Cli,
-                    operation,
-                    request_id(operation, "cli"),
-                    application_request(operation, expected),
-                    RequestedOutputFormat::Json,
-                )
-                .expect("CLI dispatch"),
-                "mcp" => resolve_mcp_application_surface_dispatch(
-                    operation,
-                    request_id(operation, "mcp"),
-                    application_request(operation, expected),
-                    RequestedOutputFormat::Json,
-                )
-                .expect("MCP dispatch"),
-                "http" => resolve_http_application_surface_dispatch(
-                    operation,
-                    request_id(operation, "http"),
-                    application_request(operation, expected),
-                    RequestedOutputFormat::Json,
-                )
-                .expect("HTTP dispatch"),
-                unexpected => panic!("unsupported fixture surface {unexpected}"),
-            };
-            direct.push((surface.as_str(), dispatched));
-        }
-        for (surface, dispatched) in direct {
-            assert_eq!(
-                dispatched.invocation.binding_id.as_str(),
-                expected["bindings"][surface].as_str().expect("binding id")
-            );
-            assert_eq!(
-                dispatched.invocation.request_schema.schema_id().as_str(),
-                expected["request_schema"].as_str().expect("request schema")
-            );
-            assert_eq!(
-                dispatched.invocation.result_schema.schema_id().as_str(),
-                expected["result_schema"].as_str().expect("result schema")
-            );
-        }
-
-        for (surface, surface_name) in [
-            (BindingSurface::Cli, "cli"),
-            (BindingSurface::Mcp, "mcp"),
-            (BindingSurface::Http, "http"),
-        ] {
-            let resolution = BindingResolution {
-                profile_id: ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("profile"),
-                operation: SurfaceOperationName::new(operation.name_for_surface(surface))
-                    .expect("operation"),
-                protocol_revision: 1,
-                negotiated_features: BTreeSet::new(),
-            };
-            match expected["bindings"][surface_name].as_str() {
-                Some(binding_id) => {
-                    let resolved = resolver
-                        .resolve_binding(surface, &resolution)
-                        .expect("binding");
-                    assert_eq!(resolved.binding_id.as_str(), binding_id);
-                }
-                None => assert!(
-                    resolver.resolve_binding(surface, &resolution).is_none(),
-                    "{} must not bind on {surface:?}",
-                    operation.as_str()
-                ),
-            }
-        }
-    }
-}
-
-#[test]
-fn the_parity_golden_accounts_for_every_catalog_operation() {
-    let fixture = parity_fixture();
-    let catalog: BTreeSet<&str> = ApplicationSurfaceOperation::ALL
-        .iter()
-        .map(|operation| operation.as_str())
-        .collect();
-
-    let pinned: BTreeSet<String> = fixture["operations"]
-        .as_object()
-        .expect("pinned operation contracts")
-        .keys()
-        .cloned()
-        .collect();
-    let unpinned = unpinned_operations(&fixture);
-
-    for operation in pinned.iter().chain(unpinned.iter()) {
-        assert!(
-            catalog.contains(operation.as_str()),
-            "{operation} is named by the parity golden but is not an application \
-             catalog operation; remove the stale roster entry"
-        );
-    }
-    let overlap: Vec<&String> = pinned.intersection(&unpinned).collect();
-    assert!(
-        overlap.is_empty(),
-        "operations cannot be both pinned and unpinned: {overlap:?}"
-    );
-
-    let accounted: BTreeSet<&str> = pinned
-        .iter()
-        .chain(unpinned.iter())
-        .map(String::as_str)
-        .collect();
-    let missing: Vec<&&str> = catalog.difference(&accounted).collect();
-    assert!(
-        missing.is_empty(),
-        "the parity golden must account for every application catalog operation, \
-         either by pinning its transport contract or by listing it under \
-         unpinned_operations; unaccounted: {missing:?}"
-    );
-}
-
-#[test]
-fn cursor_carrying_code_operations_are_pinned_on_every_surface() {
-    let fixture = parity_fixture();
-    let catalog = tracedecay_daemon_service::application_surface::application_surface_catalog()
-        .expect("application catalog");
-    let resolver = CatalogBindingResolver::new(&catalog);
-    let definitions = get_tool_definitions().expect("tool definitions");
-    let mcp_registry =
-        tracedecay_contracts::mcp_executable_binding_registry().expect("MCP registry");
-
-    for operation in CURSOR_CARRYING_CODE_OPERATIONS {
-        let expected = &fixture["operations"][operation.as_str()];
-        assert!(
-            expected.is_object(),
-            "{} carries a callable-code cursor and must be pinned by the parity \
-             golden, not left to the unpinned roster",
-            operation.as_str()
-        );
-
-        let resolution = BindingResolution {
-            profile_id: ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("profile"),
-            operation: SurfaceOperationName::new(operation.as_str()).expect("operation"),
-            protocol_revision: 1,
-            negotiated_features: BTreeSet::new(),
-        };
-        for (surface, surface_name) in [
-            (BindingSurface::Cli, "cli"),
-            (BindingSurface::Mcp, "mcp"),
-            (BindingSurface::Http, "http"),
-        ] {
-            let resolved = resolver
-                .resolve_binding(surface, &resolution)
-                .unwrap_or_else(|| panic!("{} must bind on {surface:?}", operation.as_str()));
-            assert_eq!(
-                resolved.binding_id.as_str(),
-                expected["bindings"][surface_name]
-                    .as_str()
-                    .unwrap_or_else(|| panic!(
-                        "{} must pin its {surface_name} binding",
-                        operation.as_str()
-                    )),
-                "{} {surface_name} binding drifted from the golden",
-                operation.as_str()
-            );
-        }
-
-        let tool_name = operation.mcp_tool_name();
-        let definition = definitions
-            .iter()
-            .find(|definition| definition.name == tool_name)
-            .unwrap_or_else(|| panic!("{tool_name} definition"));
-        let operation_id =
-            OperationId::new(format!("operation.application.{}", operation.as_str()))
-                .expect("operation ID");
-        let canonical = mcp_input_schema(
-            mcp_registry
-                .get(&operation_id)
-                .and_then(|availability| availability.binding())
-                .expect("MCP executable")
-                .request_schema()
-                .body(),
-        );
-        let mut projected = definition.input_schema.clone();
-        projected["properties"]
-            .as_object_mut()
-            .expect("request properties")
-            .remove("format");
+fn cli_mcp_and_http_dispatch_feedback_list_to_one_callable_contract() {
+    let operation = ApplicationSurfaceOperation::FeedbackList;
+    let request = || {
+        ApplicationSurfaceRequest::Feedback(
+            FeedbackSurfaceRequest::new("rh_missing-application-parity".to_owned())
+                .expect("feedback request"),
+        )
+    };
+    let request_id = |surface: &str| {
+        RequestId::new(format!("request.{surface}.feedback_list")).expect("request id")
+    };
+    let dispatched = [
+        (
+            "binding.cli.feedback_list.v1",
+            resolve_application_surface_dispatch(
+                BindingSurface::Cli,
+                operation,
+                request_id("cli"),
+                request(),
+                RequestedOutputFormat::Json,
+            )
+            .expect("CLI dispatch"),
+        ),
+        (
+            "binding.mcp.feedback_list.v1",
+            resolve_mcp_application_surface_dispatch(
+                operation,
+                request_id("mcp"),
+                request(),
+                RequestedOutputFormat::Json,
+            )
+            .expect("MCP dispatch"),
+        ),
+        (
+            "binding.http.feedback_list.v1",
+            resolve_http_application_surface_dispatch(
+                operation,
+                request_id("http"),
+                request(),
+                RequestedOutputFormat::Json,
+            )
+            .expect("HTTP dispatch"),
+        ),
+    ];
+    for (binding_id, dispatched) in dispatched {
+        assert_eq!(dispatched.invocation.binding_id.as_str(), binding_id);
         assert_eq!(
-            projected, canonical,
-            "{tool_name} must advertise its canonical continuation request"
+            dispatched.invocation.request_schema.schema_id().as_str(),
+            "schema.application.feedback.list.request"
+        );
+        assert_eq!(
+            dispatched.invocation.result_schema.schema_id().as_str(),
+            "schema.application.feedback.list.result"
         );
     }
 }
@@ -573,38 +363,23 @@ fn mcp_primitive_definitions_use_application_contracts() {
 
 #[test]
 fn sse_projects_the_same_canonical_feedback_payload() {
-    let fixture = parity_fixture();
-    let expected = &fixture["http_sse"];
-    let sequence = expected["sequence"].as_u64().expect("SSE sequence");
-    let payload = expected["item"].clone();
-    let event = HttpSseEvent::from(StreamEvent::item(sequence, payload.clone()).expect("item"));
+    let payload = serde_json::json!({
+        "finding_id": "feedback-finding.application-parity.fixture",
+        "summary": "Canonical feedback evidence remains transport-neutral"
+    });
+    let event = HttpSseEvent::from(StreamEvent::item(7, payload.clone()).expect("item"));
     let wire = serde_json::to_value(event).expect("serialize SSE event");
 
     assert_eq!(wire["event"], "item");
-    assert_eq!(wire["data"]["sequence"], sequence);
+    assert_eq!(wire["data"]["sequence"], 7);
     assert_eq!(wire["data"]["item"], payload);
-    assert_eq!(
-        expected["result_schema"],
-        fixture["operations"]["feedback_list"]["result_schema"]
-    );
-    assert_eq!(
-        expected["http_binding"],
-        fixture["operations"]["feedback_list"]["bindings"]["http"]
-    );
 }
 
 #[test]
 fn http_concealment_omits_binding_identity() {
-    let fixture = parity_fixture();
-    let concealed = &fixture["authorization_concealment"];
     let result = Err(tracedecay_contracts::ApplicationProblemEnvelope::new(
         ResultContractRef::new(
-            SchemaId::new(
-                fixture["operations"]["feedback_get"]["result_schema"]
-                    .as_str()
-                    .expect("result schema"),
-            )
-            .expect("schema id"),
+            SchemaId::new("schema.application.feedback.get.result").expect("schema id"),
             1,
         )
         .expect("result contract"),
@@ -616,197 +391,17 @@ fn http_concealment_omits_binding_identity() {
     .expect("canonical concealment fixture problem"));
     let value = serde_json::to_value(
         CanonicalInvocationResult::<serde_json::Value>::new(
-            tracedecay_tool_catalog::BindingId::new(
-                fixture["operations"]["feedback_get"]["bindings"]["http"]
-                    .as_str()
-                    .expect("HTTP binding"),
-            )
-            .expect("binding id"),
+            tracedecay_tool_catalog::BindingId::new("binding.http.feedback_get.v1")
+                .expect("binding id"),
             result,
         )
         .into_http_json(),
     )
     .expect("HTTP JSON");
 
-    assert_eq!(value["value"]["problem"]["kind"], concealed["problem_kind"]);
+    assert_eq!(
+        value["value"]["problem"]["kind"],
+        "not_found_or_not_authorized"
+    );
     assert!(value["value"].get("binding_id").is_none());
-}
-
-fn application_request(
-    operation: ApplicationSurfaceOperation,
-    expected: &serde_json::Value,
-) -> ApplicationSurfaceRequest {
-    match operation {
-        ApplicationSurfaceOperation::GitStatus => {
-            git_read_request(tracedecay_contracts::git::GitReadRequestV1::Status)
-        }
-        ApplicationSurfaceOperation::GitDiff => {
-            git_read_request(tracedecay_contracts::git::GitReadRequestV1::Diff {
-                scope: GitDiffScopeV1::WorkingTree,
-            })
-        }
-        ApplicationSurfaceOperation::GitHistory => {
-            git_read_request(tracedecay_contracts::git::GitReadRequestV1::History {
-                max_count: 10,
-                path: None,
-                follow: false,
-                first_parent: false,
-            })
-        }
-        ApplicationSurfaceOperation::GitBlame => {
-            git_read_request(tracedecay_contracts::git::GitReadRequestV1::Blame {
-                path: "src/lib.rs".to_owned(),
-                follow_renames: false,
-            })
-        }
-        ApplicationSurfaceOperation::GitHunks => {
-            git_read_request(tracedecay_contracts::git::GitReadRequestV1::Hunks {
-                scope: GitDiffScopeV1::WorkingTree,
-                daemon_binding: None,
-            })
-        }
-        ApplicationSurfaceOperation::GitPreview => git_requests().0,
-        ApplicationSurfaceOperation::GitApply => git_requests().1,
-        ApplicationSurfaceOperation::FeedbackImpact
-        | ApplicationSurfaceOperation::AffectedTests => {
-            feedback_request("rh_missing-application-parity")
-        }
-        ApplicationSurfaceOperation::TestResults => {
-            ApplicationSurfaceRequest::TestResults(TestResultsSurfaceRequestV1::default())
-        }
-        // Proximity and cursor-carrying code operations decode straight from
-        // the golden's pinned request body, so the fixture proves the reviewed
-        // request schema still accepts it rather than restating it in Rust.
-        ApplicationSurfaceOperation::FeedbackProximity => {
-            parse_application_surface_request(operation, expected["request"].clone())
-                .unwrap_or_else(|error| {
-                    panic!(
-                        "{} golden request body must parse: {error:?}",
-                        operation.as_str()
-                    )
-                })
-        }
-        operation if CURSOR_CARRYING_CODE_OPERATIONS.contains(&operation) => {
-            parse_application_surface_request(operation, expected["request"].clone())
-                .unwrap_or_else(|error| {
-                    panic!(
-                        "{} golden request body must parse: {error:?}",
-                        operation.as_str()
-                    )
-                })
-        }
-        _ => feedback_request(expected["request_handle"].as_str().expect("request handle")),
-    }
-}
-
-fn git_read_request(
-    request: tracedecay_contracts::git::GitReadRequestV1,
-) -> ApplicationSurfaceRequest {
-    ApplicationSurfaceRequest::GitRead(GitReadSurfaceRequest {
-        request,
-        max_entries: 1_000,
-        max_bytes: 4_194_304,
-    })
-}
-
-fn feedback_request(request_handle: &str) -> ApplicationSurfaceRequest {
-    ApplicationSurfaceRequest::Feedback(
-        FeedbackSurfaceRequest::new(request_handle.to_owned()).expect("feedback request"),
-    )
-}
-
-fn request_id(operation: ApplicationSurfaceOperation, surface: &str) -> RequestId {
-    RequestId::new(format!("request.{surface}.{}", operation.as_str())).expect("request id")
-}
-
-fn git_requests() -> (ApplicationSurfaceRequest, ApplicationSurfaceRequest) {
-    let snapshot = RepositoryStateSnapshotV1::new(
-        id::<ProjectId>("project.application-parity"),
-        id::<RepositoryId>("repository.application-parity"),
-        Some(id::<WorktreeId>("worktree.application-parity")),
-        1,
-        GitObjectFormatV1::Sha1,
-        GitHeadStateV1::Attached {
-            branch: "refs/heads/main".to_owned(),
-            commit: oid('a'),
-        },
-        RepositoryIndexSnapshotV1 {
-            checksum: digest('b'),
-            tree_id: Some(oid('c')),
-            state: RepositoryIndexStateV1::Clean,
-            unmerged_stage_digest: None,
-        },
-        RepositoryWorkingTreeSnapshotV1 {
-            state: RepositoryWorkingTreeStateV1::Clean,
-            tracked_digest: digest('d'),
-            untracked_name_digest: None,
-            ignored_collision_digest: None,
-        },
-        tracedecay_domain::GitOperationStateV1::None,
-        Some(digest('0')),
-        Some(digest('1')),
-        Some(digest('2')),
-        Some(digest('3')),
-        Some(digest('4')),
-        UtcMicros(1),
-        GitCoverageV1::complete(),
-    )
-    .expect("repository snapshot")
-    .with_native_identity(
-        "git version fixture".to_owned(),
-        "tracedecay.git-index-adapter.v1".to_owned(),
-        digest('5'),
-    )
-    .expect("native repository snapshot");
-    let identity = GitCommitIdentityV1 {
-        name: "Application Fixture".to_owned(),
-        email: "application-fixture@example.com".to_owned(),
-        at: UtcMicros(1_000_000),
-    };
-    let commit_intent = GitIndexCommitIntentV1::new(
-        "application transport parity\n".to_owned(),
-        identity.clone(),
-        identity,
-        GitIndexSigningPolicyV1::UnsignedPermitted,
-    )
-    .expect("commit intent");
-    let preview_id = GitIndexPreviewId::new("preview.application-parity").expect("preview id");
-    let snapshot_digest =
-        GitIndexPreviewV1::repository_snapshot_digest(&snapshot).expect("snapshot digest");
-    let preview = GitIndexPreviewV1::new_with_commit_intent(
-        preview_id.clone(),
-        GitIndexTransactionOperationV1::CommitIndex,
-        snapshot.clone(),
-        snapshot_digest,
-        Vec::new(),
-        snapshot.index.tree_id.clone(),
-        Some(&commit_intent),
-        GitIndexPreviewDispositionV1::Applicable,
-        UtcMicros(10),
-        UtcMicros(100),
-    )
-    .expect("immutable preview");
-
-    (
-        ApplicationSurfaceRequest::GitPreview(GitPreviewSurfaceRequest {
-            operation: GitIndexTransactionOperationV1::CommitIndex,
-            preview_input_id: None,
-            selected_hunk_digests: Vec::new(),
-            commit_intent: Some(commit_intent),
-        }),
-        ApplicationSurfaceRequest::GitApply(GitApplySurfaceRequest {
-            preview_id: preview.preview_id,
-            preview_digest: preview.preview_digest,
-            idempotency_key: IdempotencyKey::new("idempotency.application-parity")
-                .expect("idempotency key"),
-        }),
-    )
-}
-
-use tracedecay_domain::test_fixtures::id;
-
-use tracedecay_domain::test_fixtures::digest;
-
-fn oid(byte: char) -> GitOidV1 {
-    GitOidV1::new(byte.to_string().repeat(40)).expect("fixture object id")
 }

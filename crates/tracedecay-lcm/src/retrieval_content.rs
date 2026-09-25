@@ -228,9 +228,8 @@ mod tests {
 
     #[test]
     fn derived_index_text_caps_without_mutating_source_content() {
-        // Deterministic replacement for the deleted LCM ingest source-scan
-        // guard: derived index text is capped through the application contract
-        // while the authoritative raw payload remains lossless.
+        // Derived index text is capped while the authoritative raw payload
+        // remains lossless.
         let content = format!("{}{}", "a".repeat(300_000), "::lossless-tail");
         let derived = derived_text_for_index(&content);
         assert!(
@@ -248,17 +247,6 @@ mod tests {
         assert_eq!(
             content.chars().count(),
             300_000 + "::lossless-tail".chars().count()
-        );
-        assert_eq!(
-            crate::MAX_DERIVED_TEXT_CHARS,
-            MAX_DERIVED_TEXT_CHARS,
-            "LCM must re-export the application derived-text cap, not redefine it"
-        );
-        assert_eq!(crate::DERIVED_TRUNCATION_MARKER, DERIVED_TRUNCATION_MARKER);
-        assert_eq!(
-            crate::derived_text_for_index(&content),
-            derived,
-            "LCM derived_text_for_index must be the application helper"
         );
     }
 

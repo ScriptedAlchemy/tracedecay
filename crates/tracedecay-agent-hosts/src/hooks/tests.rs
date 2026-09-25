@@ -146,7 +146,7 @@ fn marker_at_temp_root_does_not_make_descendant_project_like() {
 
 #[test]
 fn direct_hook_owner_identity_is_stable_across_retry_time() {
-    let host = tracedecay_hooks::HookHostV1::Codex;
+    let host = tracedecay_domain::NativeHostIdentityV1::Codex;
     let event = r#"{"session_id":"session-1","hook_event_name":"Stop"}"#;
     let output = r#"{"hookSpecificOutput":{"hookEventName":"Stop"}}"#;
     let first = hook_output_owner_event_id(host, event, output).expect("owner identity");

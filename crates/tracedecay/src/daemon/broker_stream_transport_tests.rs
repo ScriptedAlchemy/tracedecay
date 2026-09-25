@@ -110,12 +110,31 @@ async fn settled_fanout(
     fanout
 }
 
+/// A one-shot client half-closes while its accepted request is still owed a
+/// response: the connection stays open for that response until the peer
+/// fully closes.
 #[tokio::test]
 async fn rmcp_receive_waits_for_full_close_after_request_half_close() {
     let (server, client) = tokio::net::UnixStream::pair().expect("UnixStream pair");
     let mut transport = BrokerStreamTransport::new(BrokerStream::Unix(server));
     let (client_reader, mut client_writer) = client.into_split();
 
+    client_writer
+        .write_all(
+            br#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"tracedecay_files","arguments":{}}}
+"#,
+        )
+        .await
+        .expect("request");
+    client_writer.flush().await.expect("flush request");
+    assert!(
+        <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::receive(
+            &mut transport
+        )
+        .await
+        .is_some(),
+        "the transport must accept the request"
+    );
     client_writer
         .shutdown()
         .await
@@ -124,10 +143,10 @@ async fn rmcp_receive_waits_for_full_close_after_request_half_close() {
         rmcp::RoleServer,
     >>::receive(&mut transport));
     assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(50), &mut receive)
+        tokio::time::timeout(std::time::Duration::from_millis(250), &mut receive)
             .await
             .is_err(),
-        "rmcp receive must not treat a request-half close as full peer loss"
+        "rmcp receive must not treat a request-half close as full peer loss while a response is owed"
     );
 
     drop(client_writer);
@@ -193,6 +212,47 @@ async fn rmcp_receive_closes_after_half_close_once_accepted_requests_settle() {
         .expect("settled connection must close after request half-close")
         .is_none(),
         "a settled half-closed connection carries no further messages"
+    );
+    drop(client_reader);
+}
+
+/// A connection that carried only a notification owes nothing, so a
+/// half-close ends it without waiting for the peer to drop its read half.
+#[tokio::test]
+async fn rmcp_receive_closes_a_request_less_connection_on_half_close() {
+    let (server, client) = tokio::net::UnixStream::pair().expect("UnixStream pair");
+    let mut transport = BrokerStreamTransport::new(BrokerStream::Unix(server));
+    let (client_reader, mut client_writer) = client.into_split();
+
+    client_writer
+        .write_all(
+            br#"{"jsonrpc":"2.0","method":"notifications/initialized"}
+"#,
+        )
+        .await
+        .expect("notification");
+    client_writer
+        .shutdown()
+        .await
+        .expect("half-close client request side");
+    assert!(
+        <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::receive(
+            &mut transport
+        )
+        .await
+        .is_some(),
+        "the transport must forward the notification"
+    );
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::receive(
+                &mut transport,
+            ),
+        )
+        .await
+        .expect("a request-less connection must close after request half-close")
+        .is_none()
     );
     drop(client_reader);
 }

@@ -5,7 +5,6 @@ use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{Mutex, RwLock};
-use tracedecay_automation_runtime::automation::config::AutomationConfig;
 use tracedecay_contracts::RequestContext;
 use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutClaimHandleV1, ContextScoutClaimRequestV1,
@@ -20,11 +19,12 @@ use tracedecay_hooks::{
 };
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
-use super::model::context_scout_model_assistant_from_project_config;
-use super::ports::{
-    AdmittedContextScoutHookV1, ContextScoutAuthorityPinV1, ContextScoutConfigurationPinV1,
-    ContextScoutLifecycleAddressV1, ProjectContextScoutAddressRegistryV1,
+use super::address_registry::{
+    AdmittedContextScoutHookV1, ContextScoutAddressResolveOutcomeV1, ContextScoutAuthorityPinV1,
+    ContextScoutConfigurationPinV1, ContextScoutLifecycleAddressV1,
+    ProjectContextScoutAddressRegistryV1,
 };
+use super::model::{ContextScoutModelConfig, context_scout_model_assistant_from_project_config};
 use super::{
     ContextScoutBudgetStateV1, ContextScoutCapabilityStateV1, ContextScoutControlV1,
     ContextScoutDurableClaimOutcomeV1, ContextScoutDurableRuntimeV1,
@@ -145,7 +145,7 @@ impl ProjectContextScoutOwnerV1 {
         database: Database,
         project_id: [u8; 16],
         now: UtcMicros,
-        model_config: Option<&AutomationConfig>,
+        model_config: Option<ContextScoutModelConfig<'_>>,
     ) -> Option<Arc<Self>> {
         if let Some(existing) = lookup_registered_context_scout_owners(project_id)
             .into_iter()
@@ -212,7 +212,7 @@ impl ProjectContextScoutOwnerV1 {
             || registry
                 .resolve_current_exact(hook, &pin, &lifecycle, &context, observed_at)
                 .await
-                != super::ports::ContextScoutAddressResolveOutcomeV1::Resolved(address)
+                != ContextScoutAddressResolveOutcomeV1::Resolved(address)
         {
             return ContextScoutClaimAdmissionV1::Rejected;
         }
@@ -263,7 +263,7 @@ impl ProjectContextScoutOwnerV1 {
             .registry
             .resolve_current_exact(hook, &mounted.pin, lifecycle, &mounted.context, observed_at)
             .await;
-        (resolved == super::ports::ContextScoutAddressResolveOutcomeV1::Resolved(mounted.address))
+        (resolved == ContextScoutAddressResolveOutcomeV1::Resolved(mounted.address))
             .then_some((mounted.address, mounted.input_watermark))
     }
 
@@ -329,7 +329,7 @@ impl ProjectContextScoutOwnerV1 {
                 observed_at,
             )
             .await;
-        (resolved == super::ports::ContextScoutAddressResolveOutcomeV1::Resolved(mounted.address))
+        (resolved == ContextScoutAddressResolveOutcomeV1::Resolved(mounted.address))
             .then_some((mounted.address, mounted.input_watermark))
     }
 
@@ -612,7 +612,7 @@ impl ProjectContextScoutOwnerV1 {
     pub async fn install_configuration(
         &self,
         pin: ContextScoutConfigurationPinV1,
-        model_config: Option<&AutomationConfig>,
+        model_config: Option<ContextScoutModelConfig<'_>>,
     ) -> Result<(), ContextScoutErrorV1> {
         let control = pin.control();
         let model = model_config.map_or_else(
@@ -1122,13 +1122,14 @@ impl ContextScoutModelAssistantV1 for UnavailableConfiguredContextScoutModelV1 {
 
 #[cfg(test)]
 mod tests {
-    use super::super::ports::ContextScoutAddressBindOutcomeV1;
+    use super::super::address_registry::ContextScoutAddressBindOutcomeV1;
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};
     use tracedecay_contracts::{
         CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
         RequestId, ResolvedScope,
     };
+    use tracedecay_domain::NativeHostIdentityV1;
     use tracedecay_domain::canonical_sha256;
     use tracedecay_domain::configuration::{
         CONTEXT_SCOUT_SETTINGS_SETTING_KEY, CandidateDispositionV1, ConfigurationCandidateV1,
@@ -1139,8 +1140,8 @@ mod tests {
     use tracedecay_domain::{ActorId, RepositoryId, WorktreeId};
     use tracedecay_global_db::configuration::contracts::ConfigurationCurrentStateV1;
     use tracedecay_hooks::{
-        HookCapabilityV1, HookEventFamily, HookHostV1, HookScopeBindingV1,
-        NativeEnvelopeMaterialV1, decode_bound_native_hook_event, stock_event_support,
+        HookCapabilityV1, HookEventFamily, HookScopeBindingV1, NativeEnvelopeMaterialV1,
+        decode_bound_native_hook_event, stock_event_support,
     };
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -1402,7 +1403,7 @@ mod tests {
             ContextScoutAuthorityPinV1::new(&context, feedback_scope, configuration, observed_at)
                 .expect("authority pin");
         let binding = HookScopeBindingV1 {
-            host: HookHostV1::ClaudeCode,
+            host: NativeHostIdentityV1::ClaudeCode,
             project_id: [1; 16],
             repository_id: [2; 16],
             worktree_id: [3; 16],
@@ -1418,12 +1419,12 @@ mod tests {
             .into_iter()
             .map(|family| HookCapabilityV1 {
                 family,
-                support: stock_event_support(HookHostV1::ClaudeCode, family),
+                support: stock_event_support(NativeHostIdentityV1::ClaudeCode, family),
             })
             .collect(),
         };
         let envelope = decode_bound_native_hook_event(
-            HookHostV1::ClaudeCode,
+            NativeHostIdentityV1::ClaudeCode,
             include_bytes!(
                 "../../../../../tests/fixtures/packaged_host_events/claude/post_tool_use_write.json"
             ),

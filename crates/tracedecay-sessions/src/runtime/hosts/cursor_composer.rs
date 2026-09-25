@@ -2,7 +2,7 @@
 //!
 //! Cursor's primary chat history does not live in the
 //! `~/.cursor/projects/<slug>/agent-transcripts/**.jsonl` files that
-//! [`crate::runtime::cursor`] sweeps, those cover only a slice of activity.
+//! [`crate::runtime::hosts::cursor`] sweeps, those cover only a slice of activity.
 //! The bulk lives in two SQLite-backed stores this module reads **strictly
 //! read-only**:
 //!
@@ -39,7 +39,7 @@
 //! the snapshot generation and `SnapshotOrder`, so a sweep replays only
 //! uncovered positions. Because a composer session id equals the stem of its
 //! JSONL transcript for ~94% of sessions, the composer sweep runs *before* the
-//! JSONL [`crate::runtime::cursor::CursorSweepSource`] and hands it the set of
+//! JSONL [`crate::runtime::hosts::cursor::CursorSweepSource`] and hands it the set of
 //! composer-owned session ids to skip, so the richer composer rows win and no
 //! message row is ever double-ingested.
 
@@ -60,10 +60,7 @@ pub use outcome::{
     CursorComposerSweepFailure, CursorComposerSweepOutcome, CursorComposerSweepResult,
 };
 #[cfg(any(test, feature = "test-helpers"))]
-pub use tracedecay_capture::cursor_composer::{
-    normalize_cursor_composer_observation,
-    normalize_cursor_composer_observation_with_projected_message_id,
-};
+pub use tracedecay_capture::cursor_composer::normalize_cursor_composer_observation;
 
 /// Provider id shared with the JSONL Cursor source so both land in the same
 /// per-project `sessions.db` namespace and dedupe by `(provider, message_id)`.

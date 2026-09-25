@@ -21,7 +21,7 @@ import {
 const GRADE_TONE: Record<EvidenceGrade, string> = {
   exact: 'text-accent',
   explicit: 'text-text-primary',
-  inferred: 'text-alert',
+  inferred: 'text-text-secondary',
   ambiguous: 'text-state-conflicting',
   stale: 'text-state-stale',
   unavailable: 'text-state-offline',
@@ -40,7 +40,7 @@ export function GradeMark({
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1.5 whitespace-nowrap font-mono text-3xs tracking-[0.08em]',
+        'td-legend inline-flex items-center gap-1.5 whitespace-nowrap',
         GRADE_TONE[grade],
         className,
       )}
@@ -112,7 +112,7 @@ export function ControlLink({
       href={href}
       {...(external ? { target: '_blank', rel: 'noreferrer noopener' } : {})}
       className={cn(
-        'inline-flex min-h-9 items-center gap-1.5 border border-edge-strong px-3 text-xs text-text-primary hover:bg-surface-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
+        'inline-flex min-h-[var(--touch-target-min)] items-center gap-1.5 border border-edge-strong px-3 text-xs text-text-primary hover:bg-surface-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
         className,
       )}
     >

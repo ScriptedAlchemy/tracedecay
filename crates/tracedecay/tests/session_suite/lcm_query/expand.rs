@@ -472,7 +472,6 @@ async fn expand_allows_cross_session_raw_store_id_with_provenance() {
         .await
         .expect("same-session store_id expand should succeed");
     assert_eq!(same.from_current_session, Some(true));
-    assert_eq!(same.externalized_note, None);
 
     // Cross-provider raw rows stay rejected: providers are a TraceDecay
     // concept with no hermes-lcm equivalent.
@@ -518,7 +517,6 @@ async fn expand_cross_session_external_row_can_hydrate_payload_via_two_step_expa
         .expect("cross-session external row should expand");
     assert_eq!(cross.from_current_session, Some(false));
     assert_eq!(cross.payload_ref.as_deref(), Some(payload_ref.as_str()));
-    assert_eq!(cross.externalized_note, None);
     let rendered = serde_json::to_string(&cross).unwrap();
     assert!(
         !rendered.contains("ZZZZZZZZZZ"),

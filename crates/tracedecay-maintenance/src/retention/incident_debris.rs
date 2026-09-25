@@ -1,54 +1,26 @@
-//! Durable incident-debris quarantine and retention collection (Plan 38 §5).
+//! Incident-debris detection and deletion (Plan 38 §5).
 
-use std::io::{self, Read, Write};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
 
 #[cfg(not(windows))]
 use cap_fs_ext::OpenOptionsMaybeDirExt;
-use cap_fs_ext::{
-    DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt, ambient_authority,
-};
-use cap_std::fs::{Dir, DirBuilder, OpenOptions};
-#[cfg(unix)]
-use cap_std::fs::{DirBuilderExt, OpenOptionsExt};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use cap_fs_ext::ambient_authority;
+use cap_std::fs::Dir;
+#[cfg(not(windows))]
+use cap_std::fs::OpenOptions;
 use tracedecay_contracts::storage::{
     IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1, RelativeArtifactPathV1,
     StorageByteSizeV1, StoreKeyV1,
 };
 use tracedecay_domain::UtcMicros;
-use tracedecay_domain::canonical_text::encode_lowercase_hex;
 
 use super::orphan_stores::StoreCensusEntry;
-
-pub const INCIDENT_DEBRIS_QUARANTINE_DIR: &str = ".incident-debris";
-const METADATA_SCHEMA_V1: &str = "tracedecay.incident-debris.v1";
-const HASH_BUFFER_BYTES: usize = 64 * 1024;
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct IncidentDebrisMetadataV1 {
-    pub schema: String,
-    pub record_id: String,
-    pub store_id: String,
-    pub original_name: String,
-    pub kind: IncidentDebrisKindV1,
-    pub content_sha256: String,
-    pub size_bytes: u64,
-    pub quarantined_at_secs: i64,
-    pub collection_eligible_at_secs: i64,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IncidentDebrisFailureKind {
     OutsideProfile,
     InspectFailed,
-    MetadataInvalid,
-    MetadataWriteFailed,
-    MoveFailed,
-    IntegrityMismatch,
     RemoveFailed,
 }
 
@@ -60,9 +32,7 @@ pub struct IncidentDebrisFailure {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct IncidentDebrisSweepReport {
-    pub quarantined: usize,
     pub collected: usize,
-    pub retained: usize,
     pub reclaimed_bytes: u64,
     pub errors: Vec<IncidentDebrisFailure>,
 }
@@ -97,51 +67,18 @@ impl StoreDebrisCapability {
             root,
         })
     }
-
-    fn quarantine_dir(&self, create: bool) -> io::Result<Option<Dir>> {
-        match self.root.open_dir_nofollow(INCIDENT_DEBRIS_QUARANTINE_DIR) {
-            Ok(directory) => Ok(Some(directory)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound && !create => Ok(None),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                #[allow(unused_mut)]
-                let mut builder = DirBuilder::new();
-                #[cfg(unix)]
-                builder.mode(0o700);
-                match self
-                    .root
-                    .create_dir_with(INCIDENT_DEBRIS_QUARANTINE_DIR, &builder)
-                {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                    Err(error) => return Err(error),
-                }
-                self.root
-                    .open_dir_nofollow(INCIDENT_DEBRIS_QUARANTINE_DIR)
-                    .map(Some)
-            }
-            Err(error) => Err(error),
-        }
-    }
 }
 
+/// Deletes every classified loose debris file beside each census store.
+/// Only regular files reached through the store capability without following
+/// symlinks are removed; directories are never debris.
 #[must_use]
 #[hotpath::measure(label = "maintenance.incident_debris.sweep")]
 pub fn sweep_incident_debris(
     census: &[StoreCensusEntry],
     profile_root: &Path,
-    retention_secs: i64,
-    now: i64,
 ) -> IncidentDebrisSweepReport {
     let mut report = IncidentDebrisSweepReport::default();
-    if retention_secs <= 0 {
-        report
-            .errors
-            .extend(census.iter().map(|entry| IncidentDebrisFailure {
-                store_id: entry.store_id.clone(),
-                kind: IncidentDebrisFailureKind::MetadataInvalid,
-            }));
-        return observed_sweep_report(report);
-    }
     let profile = match canonical_profile_root(profile_root) {
         Ok(profile) => profile,
         Err(kind) => {
@@ -152,31 +89,21 @@ pub fn sweep_incident_debris(
         }
     };
     for entry in census {
-        let capability = match StoreDebrisCapability::open(entry, &profile) {
-            Ok(capability) => capability,
-            Err(kind) => {
-                report.errors.push(failure(entry, kind));
-                continue;
-            }
-        };
-        quarantine_loose(&capability, retention_secs, now, &mut report);
-        collect_due(&capability, now, &mut report);
-        report.retained = report
-            .retained
-            .saturating_add(retained_count(&capability, &mut report.errors));
+        match StoreDebrisCapability::open(entry, &profile) {
+            Ok(capability) => delete_loose_debris(&capability, &mut report),
+            Err(kind) => report.errors.push(failure(entry, kind)),
+        }
     }
     observed_sweep_report(report)
 }
 
-/// Items-moved/removed census for the one outer sweep wall span, including
-/// the fail-closed early exits that touch nothing but report every store.
+/// Items-removed census for the one outer sweep wall span, including the
+/// fail-closed early exits that touch nothing but report every store.
 fn observed_sweep_report(report: IncidentDebrisSweepReport) -> IncidentDebrisSweepReport {
-    hotpath::gauge!("maintenance.incident_debris.quarantined_total").inc(report.quarantined);
     hotpath::gauge!("maintenance.incident_debris.collected_total").inc(report.collected);
     hotpath::gauge!("maintenance.incident_debris.failed_total").inc(report.errors.len());
     hotpath::gauge!("maintenance.incident_debris.reclaimed_bytes_total")
         .inc(report.reclaimed_bytes);
-    hotpath::gauge!("maintenance.incident_debris.retained").set(report.retained);
     report
 }
 
@@ -188,7 +115,7 @@ pub fn scan_incident_debris(
 ) -> Result<IncidentDebrisScanV1, IncidentDebrisFailureKind> {
     let capability = StoreDebrisCapability::open(entry, &canonical_profile_root(profile_root)?)?;
     let store = StoreKeyV1::new(entry.store_id.clone())
-        .map_err(|_| IncidentDebrisFailureKind::MetadataInvalid)?;
+        .map_err(|_| IncidentDebrisFailureKind::InspectFailed)?;
     let observed_at = UtcMicros(now.saturating_mul(1_000_000));
     let mut artifacts = Vec::new();
     let mut listing_complete = true;
@@ -210,9 +137,6 @@ pub fn scan_incident_debris(
             listing_complete = false;
             continue;
         };
-        if name == INCIDENT_DEBRIS_QUARANTINE_DIR {
-            continue;
-        }
         let file_type = match listed.file_type() {
             Ok(file_type) => file_type,
             Err(_) => {
@@ -220,38 +144,24 @@ pub fn scan_incident_debris(
                 continue;
             }
         };
-        let Some(kind) = IncidentDebrisKindV1::classify(name) else {
-            // Ordinary live files and store subdirectories (branches/,
-            // payloads/, ...) are not debris; anything else unclassifiable
-            // makes the listing partial.
-            if !file_type.is_dir() && !file_type.is_file() {
-                listing_complete = false;
-            }
+        // Store subdirectories are never debris; anything that is neither a
+        // directory nor a regular file makes the listing partial.
+        if file_type.is_dir() {
             continue;
-        };
-        let size_bytes = if file_type.is_file() {
-            match listed.metadata() {
-                Ok(metadata) => metadata.len(),
-                Err(_) => {
-                    listing_complete = false;
-                    continue;
-                }
-            }
-        } else if file_type.is_dir() {
-            // A store-quarantine directory (for example the graph mount's
-            // `tracedecay.grafeo.corrupt-<micros>/` family with its WAL and
-            // receipt) is one debris artifact whose recursive payload is the
-            // retained forensic evidence.
-            match capability.root.open_dir_nofollow(name) {
-                Ok(directory) => directory_debris_bytes(&directory, &mut listing_complete),
-                Err(_) => {
-                    listing_complete = false;
-                    continue;
-                }
-            }
-        } else {
+        }
+        if !file_type.is_file() {
             listing_complete = false;
             continue;
+        }
+        let Some(kind) = IncidentDebrisKindV1::classify(name) else {
+            continue;
+        };
+        let size_bytes = match listed.metadata() {
+            Ok(metadata) => metadata.len(),
+            Err(_) => {
+                listing_complete = false;
+                continue;
+            }
         };
         if let Some(artifact) = application_artifact(&store, name, kind, size_bytes, observed_at) {
             artifacts.push(artifact);
@@ -260,85 +170,11 @@ pub fn scan_incident_debris(
         }
     }
 
-    if let Some(quarantine) = capability
-        .quarantine_dir(false)
-        .map_err(|_| IncidentDebrisFailureKind::InspectFailed)?
-    {
-        for metadata_name in metadata_names(&quarantine, &mut listing_complete) {
-            let metadata = match read_metadata(&quarantine, &metadata_name) {
-                Ok(metadata) if validate_metadata(&metadata, &capability.store_id) => metadata,
-                _ => {
-                    listing_complete = false;
-                    continue;
-                }
-            };
-            let artifact_name = artifact_name(&metadata.record_id);
-            match quarantine.symlink_metadata(&artifact_name) {
-                Ok(file) if file.is_file() => {}
-                _ => {
-                    listing_complete = false;
-                    continue;
-                }
-            }
-            if let Some(artifact) = application_artifact(
-                &store,
-                &metadata.original_name,
-                metadata.kind,
-                metadata.size_bytes,
-                UtcMicros(metadata.quarantined_at_secs.saturating_mul(1_000_000)),
-            ) {
-                artifacts.push(artifact);
-            } else {
-                listing_complete = false;
-            }
-        }
-    }
-
     Ok(IncidentDebrisScanV1 {
         store,
         artifacts,
         listing_complete,
     })
-}
-
-/// Recursive byte total of one quarantined debris directory. Symlinks are
-/// never followed; anything unreadable makes the surrounding scan partial so
-/// an incomplete walk can never assert a clean or fully-sized result.
-fn directory_debris_bytes(directory: &Dir, listing_complete: &mut bool) -> u64 {
-    let entries = match directory.read_dir(".") {
-        Ok(entries) => entries,
-        Err(_) => {
-            *listing_complete = false;
-            return 0;
-        }
-    };
-    let mut total = 0_u64;
-    for listed in entries {
-        let Ok(listed) = listed else {
-            *listing_complete = false;
-            continue;
-        };
-        let Ok(file_type) = listed.file_type() else {
-            *listing_complete = false;
-            continue;
-        };
-        if file_type.is_file() {
-            match listed.metadata() {
-                Ok(metadata) => total = total.saturating_add(metadata.len()),
-                Err(_) => *listing_complete = false,
-            }
-        } else if file_type.is_dir() {
-            match directory.open_dir_nofollow(listed.file_name()) {
-                Ok(child) => {
-                    total = total.saturating_add(directory_debris_bytes(&child, listing_complete));
-                }
-                Err(_) => *listing_complete = false,
-            }
-        } else {
-            *listing_complete = false;
-        }
-    }
-    total
 }
 
 fn failure(entry: &StoreCensusEntry, kind: IncidentDebrisFailureKind) -> IncidentDebrisFailure {
@@ -359,12 +195,7 @@ fn push_failure(
     });
 }
 
-fn quarantine_loose(
-    capability: &StoreDebrisCapability,
-    retention_secs: i64,
-    now: i64,
-    report: &mut IncidentDebrisSweepReport,
-) {
+fn delete_loose_debris(capability: &StoreDebrisCapability, report: &mut IncidentDebrisSweepReport) {
     let entries = match capability.root.read_dir(".") {
         Ok(entries) => entries,
         Err(_) => {
@@ -376,7 +207,7 @@ fn quarantine_loose(
             return;
         }
     };
-    let mut names = Vec::new();
+    let mut debris = Vec::new();
     for listed in entries {
         let Ok(listed) = listed else {
             push_failure(
@@ -390,397 +221,42 @@ fn quarantine_loose(
         let Some(name) = name.to_str() else {
             continue;
         };
-        if listed.file_type().is_ok_and(|kind| kind.is_file())
-            && IncidentDebrisKindV1::classify(name).is_some()
-        {
-            names.push(name.to_string());
-        }
-    }
-    names.sort();
-
-    for name in names {
-        let Some(kind) = IncidentDebrisKindV1::classify(&name) else {
-            continue;
-        };
-        let record = match quarantine_record(capability, &name, kind, retention_secs, now) {
-            Ok(record) => record,
-            Err(kind) => {
-                push_failure(report, &capability.store_id, kind);
-                continue;
-            }
-        };
-        let quarantine = match capability.quarantine_dir(true) {
-            Ok(Some(quarantine)) => quarantine,
-            _ => {
-                push_failure(
-                    report,
-                    &capability.store_id,
-                    IncidentDebrisFailureKind::MetadataWriteFailed,
-                );
-                continue;
-            }
-        };
-        let metadata_name = metadata_name(&record.record_id);
-        if write_metadata(&quarantine, &metadata_name, &record).is_err() {
-            push_failure(
-                report,
-                &capability.store_id,
-                IncidentDebrisFailureKind::MetadataWriteFailed,
-            );
+        if IncidentDebrisKindV1::classify(name).is_none() {
             continue;
         }
-        let artifact_name = artifact_name(&record.record_id);
-        if quarantine.symlink_metadata(&artifact_name).is_ok() {
-            push_failure(
-                report,
-                &capability.store_id,
-                IncidentDebrisFailureKind::MoveFailed,
-            );
-            continue;
-        }
-        if capability
-            .root
-            .rename(&name, &quarantine, &artifact_name)
-            .is_err()
-        {
-            let _ = quarantine.remove_file(&metadata_name);
-            let _ = sync_dir(&quarantine);
-            push_failure(
-                report,
-                &capability.store_id,
-                IncidentDebrisFailureKind::MoveFailed,
-            );
-            continue;
-        }
-        if verify_artifact(&quarantine, &artifact_name, &record).is_err() {
-            let _ = quarantine.rename(&artifact_name, &capability.root, &name);
-            let _ = quarantine.remove_file(&metadata_name);
-            let _ = sync_dir(&quarantine);
-            let _ = sync_dir(&capability.root);
-            push_failure(
-                report,
-                &capability.store_id,
-                IncidentDebrisFailureKind::IntegrityMismatch,
-            );
-            continue;
-        }
-        if sync_dir(&quarantine).is_err() || sync_dir(&capability.root).is_err() {
-            push_failure(
-                report,
-                &capability.store_id,
-                IncidentDebrisFailureKind::MoveFailed,
-            );
-            continue;
-        }
-        report.quarantined = report.quarantined.saturating_add(1);
-    }
-}
-
-fn collect_due(
-    capability: &StoreDebrisCapability,
-    now: i64,
-    report: &mut IncidentDebrisSweepReport,
-) {
-    let quarantine = match capability.quarantine_dir(false) {
-        Ok(Some(quarantine)) => quarantine,
-        Ok(None) => return,
-        Err(_) => {
-            push_failure(
+        // `DirEntry` metadata describes the entry itself, so a symlink named
+        // like debris is never treated as a regular file.
+        match listed.metadata() {
+            Ok(metadata) if metadata.is_file() => debris.push((name.to_string(), metadata.len())),
+            Ok(_) => {}
+            Err(_) => push_failure(
                 report,
                 &capability.store_id,
                 IncidentDebrisFailureKind::InspectFailed,
-            );
-            return;
-        }
-    };
-    let mut complete = true;
-    for metadata_name in metadata_names(&quarantine, &mut complete) {
-        let record = match read_metadata(&quarantine, &metadata_name) {
-            Ok(record) if validate_metadata(&record, &capability.store_id) => record,
-            _ => {
-                push_failure(
-                    report,
-                    &capability.store_id,
-                    IncidentDebrisFailureKind::MetadataInvalid,
-                );
-                continue;
-            }
-        };
-        if now < record.collection_eligible_at_secs {
-            continue;
-        }
-        let artifact_name = artifact_name(&record.record_id);
-        match verify_artifact(&quarantine, &artifact_name, &record) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                if quarantine.remove_file(&metadata_name).is_err() || sync_dir(&quarantine).is_err()
-                {
-                    push_failure(
-                        report,
-                        &capability.store_id,
-                        IncidentDebrisFailureKind::RemoveFailed,
-                    );
-                }
-                continue;
-            }
-            Err(_) => {
-                push_failure(
-                    report,
-                    &capability.store_id,
-                    IncidentDebrisFailureKind::IntegrityMismatch,
-                );
-                continue;
-            }
-        }
-        if quarantine.remove_file(&artifact_name).is_err() || sync_dir(&quarantine).is_err() {
-            push_failure(
-                report,
-                &capability.store_id,
-                IncidentDebrisFailureKind::RemoveFailed,
-            );
-            continue;
-        }
-        report.collected = report.collected.saturating_add(1);
-        report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(record.size_bytes);
-        if quarantine.remove_file(&metadata_name).is_err() || sync_dir(&quarantine).is_err() {
-            push_failure(
-                report,
-                &capability.store_id,
-                IncidentDebrisFailureKind::RemoveFailed,
-            );
+            ),
         }
     }
-    if !complete {
+    let mut removed = false;
+    for (name, size_bytes) in debris {
+        if capability.root.remove_file(&name).is_err() {
+            push_failure(
+                report,
+                &capability.store_id,
+                IncidentDebrisFailureKind::RemoveFailed,
+            );
+            continue;
+        }
+        removed = true;
+        report.collected = report.collected.saturating_add(1);
+        report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(size_bytes);
+    }
+    if removed && sync_dir(&capability.root).is_err() {
         push_failure(
             report,
             &capability.store_id,
-            IncidentDebrisFailureKind::InspectFailed,
+            IncidentDebrisFailureKind::RemoveFailed,
         );
     }
-}
-
-fn retained_count(
-    capability: &StoreDebrisCapability,
-    errors: &mut Vec<IncidentDebrisFailure>,
-) -> usize {
-    let quarantine = match capability.quarantine_dir(false) {
-        Ok(Some(quarantine)) => quarantine,
-        Ok(None) => return 0,
-        Err(_) => {
-            errors.push(IncidentDebrisFailure {
-                store_id: capability.store_id.clone(),
-                kind: IncidentDebrisFailureKind::InspectFailed,
-            });
-            return 0;
-        }
-    };
-    let mut complete = true;
-    let count = metadata_names(&quarantine, &mut complete)
-        .into_iter()
-        .filter_map(|name| read_metadata(&quarantine, &name).ok())
-        .filter(|metadata| validate_metadata(metadata, &capability.store_id))
-        .count();
-    if !complete {
-        errors.push(IncidentDebrisFailure {
-            store_id: capability.store_id.clone(),
-            kind: IncidentDebrisFailureKind::InspectFailed,
-        });
-    }
-    count
-}
-
-fn quarantine_record(
-    capability: &StoreDebrisCapability,
-    name: &str,
-    kind: IncidentDebrisKindV1,
-    retention_secs: i64,
-    now: i64,
-) -> Result<IncidentDebrisMetadataV1, IncidentDebrisFailureKind> {
-    if !is_component(name) {
-        return Err(IncidentDebrisFailureKind::InspectFailed);
-    }
-    let mut options = OpenOptions::new();
-    options.read(true).follow(FollowSymlinks::No);
-    let mut file = capability
-        .root
-        .open_with(name, &options)
-        .map_err(|_| IncidentDebrisFailureKind::InspectFailed)?;
-    let metadata = file
-        .metadata()
-        .map_err(|_| IncidentDebrisFailureKind::InspectFailed)?;
-    if !metadata.is_file() {
-        return Err(IncidentDebrisFailureKind::InspectFailed);
-    }
-    let content_sha256 =
-        sha256_reader(&mut file).map_err(|_| IncidentDebrisFailureKind::InspectFailed)?;
-    let modified_nanos = metadata
-        .modified()
-        .ok()
-        .and_then(|modified| modified.into_std().duration_since(UNIX_EPOCH).ok())
-        .map_or(0u128, |elapsed| elapsed.as_nanos());
-    let mut identity = Sha256::new();
-    identity.update(b"tracedecay.incident-debris.record.v1\0");
-    identity.update(capability.store_id.as_bytes());
-    identity.update(b"\0");
-    identity.update(name.as_bytes());
-    identity.update(b"\0");
-    identity.update(metadata.len().to_le_bytes());
-    identity.update(modified_nanos.to_le_bytes());
-    identity.update(content_sha256.as_bytes());
-    let record_id = encode_lowercase_hex(&identity.finalize());
-    Ok(IncidentDebrisMetadataV1 {
-        schema: METADATA_SCHEMA_V1.to_string(),
-        record_id,
-        store_id: capability.store_id.clone(),
-        original_name: name.to_string(),
-        kind,
-        content_sha256,
-        size_bytes: metadata.len(),
-        quarantined_at_secs: now,
-        collection_eligible_at_secs: now.saturating_add(retention_secs),
-    })
-}
-
-fn write_metadata(
-    quarantine: &Dir,
-    name: &str,
-    metadata: &IncidentDebrisMetadataV1,
-) -> io::Result<()> {
-    match quarantine.symlink_metadata(name) {
-        Ok(existing) if existing.is_file() => {
-            return if read_metadata(quarantine, name)? == *metadata {
-                Ok(())
-            } else {
-                Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "incident debris metadata identity collision",
-                ))
-            };
-        }
-        Ok(_) => {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "incident debris metadata is not a regular file",
-            ));
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-    let bytes = serde_json::to_vec_pretty(metadata)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    let temporary = format!(".{}.tmp", metadata.record_id);
-    let _ = remove_regular_file_if_exists(quarantine, &temporary);
-    let mut options = OpenOptions::new();
-    options
-        .write(true)
-        .create_new(true)
-        .follow(FollowSymlinks::No)
-        .sync(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    {
-        let mut file = quarantine.open_with(&temporary, &options)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-    }
-    quarantine.rename(&temporary, quarantine, name)?;
-    sync_dir(quarantine)
-}
-
-fn read_metadata(quarantine: &Dir, name: &str) -> io::Result<IncidentDebrisMetadataV1> {
-    if !is_component(name) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "incident debris metadata name is not a component",
-        ));
-    }
-    let mut options = OpenOptions::new();
-    options.read(true).follow(FollowSymlinks::No);
-    let mut file = quarantine.open_with(name, &options)?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    serde_json::from_slice(&bytes)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
-}
-
-fn metadata_names(quarantine: &Dir, complete: &mut bool) -> Vec<String> {
-    let entries = match quarantine.read_dir(".") {
-        Ok(entries) => entries,
-        Err(_) => {
-            *complete = false;
-            return Vec::new();
-        }
-    };
-    let mut names = Vec::new();
-    for listed in entries {
-        let Ok(listed) = listed else {
-            *complete = false;
-            continue;
-        };
-        let name = listed.file_name();
-        let Some(name) = name.to_str() else {
-            *complete = false;
-            continue;
-        };
-        if name.ends_with(".json") {
-            if listed.file_type().is_ok_and(|kind| kind.is_file()) {
-                names.push(name.to_string());
-            } else {
-                *complete = false;
-            }
-        } else if !name.ends_with(".artifact") && !name.ends_with(".tmp") {
-            *complete = false;
-        }
-    }
-    names.sort();
-    names
-}
-
-fn validate_metadata(metadata: &IncidentDebrisMetadataV1, expected_store_id: &str) -> bool {
-    metadata.schema == METADATA_SCHEMA_V1
-        && metadata.store_id == expected_store_id
-        && is_sha256(&metadata.record_id)
-        && is_sha256(&metadata.content_sha256)
-        && is_component(&metadata.original_name)
-        && IncidentDebrisKindV1::classify(&metadata.original_name) == Some(metadata.kind)
-        && metadata.collection_eligible_at_secs > metadata.quarantined_at_secs
-}
-
-fn verify_artifact(
-    quarantine: &Dir,
-    name: &str,
-    metadata: &IncidentDebrisMetadataV1,
-) -> io::Result<()> {
-    let mut options = OpenOptions::new();
-    options.read(true).follow(FollowSymlinks::No);
-    let mut file = quarantine.open_with(name, &options)?;
-    let observed = file.metadata()?;
-    if !observed.is_file() || observed.len() != metadata.size_bytes {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "incident debris artifact size mismatch",
-        ));
-    }
-    if sha256_reader(&mut file)? != metadata.content_sha256 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "incident debris artifact digest mismatch",
-        ));
-    }
-    Ok(())
-}
-
-fn sha256_reader(mut reader: impl Read) -> io::Result<String> {
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; HASH_BUFFER_BYTES].into_boxed_slice();
-    loop {
-        let read = reader.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(encode_lowercase_hex(&hasher.finalize()))
 }
 
 fn application_artifact(
@@ -800,38 +276,6 @@ fn application_artifact(
     .ok()
     .flatten()
     .filter(|artifact| artifact.kind == kind)
-}
-
-fn metadata_name(record_id: &str) -> String {
-    format!("{record_id}.json")
-}
-
-fn artifact_name(record_id: &str) -> String {
-    format!("{record_id}.artifact")
-}
-
-fn is_sha256(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn is_component(value: &str) -> bool {
-    !value.is_empty()
-        && value != "."
-        && value != ".."
-        && !value.contains('/')
-        && !value.contains('\\')
-}
-
-fn remove_regular_file_if_exists(directory: &Dir, name: &str) -> io::Result<()> {
-    match directory.symlink_metadata(name) {
-        Ok(metadata) if metadata.is_file() => directory.remove_file(name),
-        Ok(_) => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "incident debris path is not a regular file",
-        )),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
 }
 
 fn sync_dir(directory: &Dir) -> io::Result<()> {
@@ -861,7 +305,6 @@ mod tests {
     };
 
     const NOW: i64 = 1_800_000_000;
-    const DAY: i64 = 24 * 60 * 60;
 
     fn entry(store_root: &Path) -> StoreCensusEntry {
         StoreCensusEntry {
@@ -887,137 +330,93 @@ mod tests {
         }
     }
 
-    fn quarantine_files(store_root: &Path) -> Vec<PathBuf> {
-        let quarantine = store_root.join(INCIDENT_DEBRIS_QUARANTINE_DIR);
-        let mut files = std::fs::read_dir(quarantine)
-            .unwrap()
-            .map(|item| item.unwrap().path())
-            .collect::<Vec<_>>();
-        files.sort();
-        files
-    }
-
     #[test]
-    fn sweep_quarantines_loose_debris_with_metadata_and_preserves_live_files() {
+    fn sweep_deletes_loose_debris_immediately_and_preserves_live_files() {
         let profile = tempfile::tempdir().unwrap();
         let store_root = profile.path().join("stores/store.debris");
-        std::fs::create_dir_all(&store_root).unwrap();
+        std::fs::create_dir_all(store_root.join("payloads")).unwrap();
         let debris = store_root.join("sessions.db.corrupt-incident");
+        let scratch = store_root.join("recovery-scratch-incident");
         let live = store_root.join("sessions.db");
+        let live_wal = store_root.join("sessions.db-wal");
         std::fs::write(&debris, b"debris payload").unwrap();
+        std::fs::write(&scratch, b"scratch").unwrap();
         std::fs::write(&live, b"live database").unwrap();
+        std::fs::write(&live_wal, b"live wal").unwrap();
 
-        let report = sweep_incident_debris(&[entry(&store_root)], profile.path(), 7 * DAY, NOW);
-
-        assert_eq!(report.quarantined, 1);
-        assert_eq!(report.collected, 0);
-        assert_eq!(report.retained, 1);
-        assert!(report.errors.is_empty(), "{:?}", report.errors);
-        assert!(!debris.exists(), "loose debris must move into quarantine");
-        assert!(live.exists(), "live store files must remain untouched");
-        let files = quarantine_files(&store_root);
-        assert_eq!(files.len(), 2, "artifact plus durable metadata");
-        let metadata_path = files
+        let before = scan_incident_debris(&entry(&store_root), profile.path(), NOW).unwrap();
+        let mut kinds = before
+            .artifacts
             .iter()
-            .find(|path| {
-                path.extension()
-                    .is_some_and(|extension| extension == "json")
-            })
-            .unwrap();
-        let metadata: IncidentDebrisMetadataV1 =
-            serde_json::from_slice(&std::fs::read(metadata_path).unwrap()).unwrap();
-        assert_eq!(metadata.store_id, "store.debris");
-        assert_eq!(metadata.original_name, "sessions.db.corrupt-incident");
-        assert_eq!(metadata.kind, IncidentDebrisKindV1::Corrupt);
-        assert_eq!(metadata.size_bytes, b"debris payload".len() as u64);
-        assert_eq!(metadata.quarantined_at_secs, NOW);
-        assert_eq!(metadata.collection_eligible_at_secs, NOW + 7 * DAY);
-
-        let scan = scan_incident_debris(&entry(&store_root), profile.path(), NOW).unwrap();
-        assert!(scan.listing_complete);
-        assert_eq!(scan.artifact_count(), 1);
+            .map(|artifact| artifact.kind)
+            .collect::<Vec<_>>();
+        kinds.sort();
         assert_eq!(
-            scan.artifacts[0].path.as_str(),
-            "sessions.db.corrupt-incident"
+            kinds,
+            [
+                IncidentDebrisKindV1::Corrupt,
+                IncidentDebrisKindV1::RecoveryScratch
+            ]
         );
+
+        let report = sweep_incident_debris(&[entry(&store_root)], profile.path());
+
+        assert_eq!(report.collected, 2);
+        assert_eq!(
+            report.reclaimed_bytes,
+            (b"debris payload".len() + b"scratch".len()) as u64
+        );
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(!debris.exists() && !scratch.exists());
+        assert_eq!(std::fs::read(&live).unwrap(), b"live database");
+        assert_eq!(std::fs::read(&live_wal).unwrap(), b"live wal");
+        assert!(store_root.join("payloads").is_dir());
+        let entries = std::fs::read_dir(&store_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 3, "no copy of the debris is left behind");
+
+        let after = scan_incident_debris(&entry(&store_root), profile.path(), NOW).unwrap();
+        assert!(after.listing_complete);
+        assert!(after.is_empty());
     }
 
-    /// The graph mount's corruption quarantine (issue #763) moves the
-    /// container family into a `.corrupt-<micros>` directory beside the
-    /// fresh store. Doctor must surface that directory as one typed Corrupt
-    /// debris artifact sized by its retained forensic payload, and the sweep
-    /// must leave it in place, it is already quarantined evidence, never
-    /// loose debris to relocate or collect.
     #[test]
-    fn scan_surfaces_a_graph_store_quarantine_directory_and_sweep_retains_it() {
+    fn directories_are_never_debris_even_with_a_debris_name() {
         let profile = tempfile::tempdir().unwrap();
         let store_root = profile.path().join("stores/store.debris");
-        let quarantine = store_root.join("tracedecay.grafeo.corrupt-1721692800000000");
-        std::fs::create_dir_all(quarantine.join("tracedecay.grafeo.wal")).unwrap();
-        std::fs::write(store_root.join("sessions.db"), b"live database").unwrap();
-        std::fs::write(quarantine.join("tracedecay.grafeo"), b"corrupt container").unwrap();
-        std::fs::write(
-            quarantine
-                .join("tracedecay.grafeo.wal")
-                .join("wal_00000001.log"),
-            b"torn wal segment",
-        )
-        .unwrap();
-        std::fs::write(quarantine.join("store-quarantined.json"), b"{}").unwrap();
-        let expected_bytes =
-            (b"corrupt container".len() + b"torn wal segment".len() + b"{}".len()) as u64;
+        let named = store_root.join("graph.db.recovered-dir");
+        std::fs::create_dir_all(&named).unwrap();
+        std::fs::write(named.join("payload"), b"store data").unwrap();
 
         let scan = scan_incident_debris(&entry(&store_root), profile.path(), NOW).unwrap();
-
         assert!(scan.listing_complete);
-        assert_eq!(scan.artifact_count(), 1);
-        assert_eq!(
-            scan.artifacts[0].path.as_str(),
-            "tracedecay.grafeo.corrupt-1721692800000000"
-        );
-        assert_eq!(scan.artifacts[0].kind, IncidentDebrisKindV1::Corrupt);
-        assert_eq!(scan.artifacts[0].size_bytes.get(), expected_bytes);
+        assert!(scan.is_empty());
 
-        let report = sweep_incident_debris(&[entry(&store_root)], profile.path(), 7 * DAY, NOW);
-        assert_eq!(
-            report.quarantined, 0,
-            "the directory is already quarantined"
-        );
+        let report = sweep_incident_debris(&[entry(&store_root)], profile.path());
         assert_eq!(report.collected, 0);
         assert!(report.errors.is_empty(), "{:?}", report.errors);
-        assert_eq!(
-            std::fs::read(quarantine.join("tracedecay.grafeo")).unwrap(),
-            b"corrupt container",
-            "forensic evidence must survive the sweep untouched"
-        );
+        assert_eq!(std::fs::read(named.join("payload")).unwrap(), b"store data");
     }
 
+    #[cfg(unix)]
     #[test]
-    fn sweep_collects_only_after_the_quarantine_window() {
+    fn sweep_never_follows_a_debris_named_symlink() {
         let profile = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
         let store_root = profile.path().join("stores/store.debris");
         std::fs::create_dir_all(&store_root).unwrap();
-        std::fs::write(
-            store_root.join("graph.db.recovered-incident"),
-            b"recoverable debris",
-        )
-        .unwrap();
-        let census = [entry(&store_root)];
+        let target = outside.path().join("precious.db");
+        std::fs::write(&target, b"not debris").unwrap();
+        let link = store_root.join("graph.db.recovered-link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
 
-        let first = sweep_incident_debris(&census, profile.path(), 7 * DAY, NOW);
-        assert_eq!(first.quarantined, 1);
-        assert_eq!(first.retained, 1);
-        let early = sweep_incident_debris(&census, profile.path(), 7 * DAY, NOW + 7 * DAY - 1);
-        assert_eq!(early.collected, 0);
-        assert_eq!(early.retained, 1);
-        assert_eq!(quarantine_files(&store_root).len(), 2);
+        let report = sweep_incident_debris(&[entry(&store_root)], profile.path());
 
-        let due = sweep_incident_debris(&census, profile.path(), 7 * DAY, NOW + 7 * DAY);
-        assert_eq!(due.collected, 1);
-        assert_eq!(due.reclaimed_bytes, b"recoverable debris".len() as u64);
-        assert_eq!(due.retained, 0);
-        assert!(due.errors.is_empty(), "{:?}", due.errors);
-        assert!(quarantine_files(&store_root).is_empty());
+        assert_eq!(report.collected, 0);
+        assert!(link.symlink_metadata().is_ok());
+        assert_eq!(std::fs::read(&target).unwrap(), b"not debris");
     }
 
     #[test]
@@ -1027,9 +426,9 @@ mod tests {
         let debris = outside.path().join("sessions.db.corrupt-outside");
         std::fs::write(&debris, b"outside").unwrap();
 
-        let report = sweep_incident_debris(&[entry(outside.path())], profile.path(), 7 * DAY, NOW);
+        let report = sweep_incident_debris(&[entry(outside.path())], profile.path());
 
-        assert_eq!(report.quarantined, 0);
+        assert_eq!(report.collected, 0);
         assert_eq!(
             report.errors,
             vec![IncidentDebrisFailure {
@@ -1038,41 +437,5 @@ mod tests {
             }]
         );
         assert!(debris.exists());
-    }
-
-    #[test]
-    fn collection_refuses_tampered_quarantine_content() {
-        let profile = tempfile::tempdir().unwrap();
-        let store_root = profile.path().join("stores/store.debris");
-        std::fs::create_dir_all(&store_root).unwrap();
-        std::fs::write(
-            store_root.join("recovery-scratch-incident"),
-            b"original debris",
-        )
-        .unwrap();
-        let census = [entry(&store_root)];
-        let first = sweep_incident_debris(&census, profile.path(), DAY, NOW);
-        assert!(first.errors.is_empty());
-        let artifact = quarantine_files(&store_root)
-            .into_iter()
-            .find(|path| {
-                path.extension()
-                    .is_some_and(|extension| extension == "artifact")
-            })
-            .unwrap();
-        std::fs::write(&artifact, b"tampered").unwrap();
-
-        let due = sweep_incident_debris(&census, profile.path(), DAY, NOW + DAY);
-
-        assert_eq!(due.collected, 0);
-        assert_eq!(due.retained, 1);
-        assert_eq!(
-            due.errors,
-            vec![IncidentDebrisFailure {
-                store_id: "store.debris".to_string(),
-                kind: IncidentDebrisFailureKind::IntegrityMismatch,
-            }]
-        );
-        assert!(artifact.exists(), "tampered evidence must fail closed");
     }
 }

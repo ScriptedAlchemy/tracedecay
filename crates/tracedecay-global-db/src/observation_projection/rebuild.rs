@@ -1,9 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1};
-use tracedecay_lcm::retrieval_content::{
-    derived_text_for_index, derived_text_for_snippet, projected_content_hash,
-};
+use tracedecay_lcm::retrieval_content::projected_content_hash;
 use tracedecay_runtime_core::db::{
     Database,
     engine::{Executor, QueryExecutor, Row, params},
@@ -23,10 +21,10 @@ use super::apply::{
 };
 use super::state::{
     canonicalize_session_project_paths, consume_projection_queue_item, decode_observation_row,
-    decode_sequence, ensure_projection_output_state_cache, projection_retry_state, queued_sequence,
-    read_checkpoint, read_message, read_observation, read_session,
-    reaggregate_output_state_for_output, reconcile_session_rows_detailed,
-    schedule_projection_retry, storage, storage_message, write_checkpoint,
+    decode_sequence, ensure_projection_output_state_cache, projected_stored_message,
+    projection_retry_state, queued_sequence, read_checkpoint, read_message, read_observation,
+    read_session, reaggregate_output_state_for_output, reconcile_session_rows_detailed,
+    schedule_projection_retry, storage, storage_message, stored_output_digest, write_checkpoint,
 };
 use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
@@ -59,18 +57,19 @@ const SESSION_JSON_FIELDS: &[&str] = &[
     "parent_tool_use_id",
 ];
 
-const MESSAGE_JSON_FIELDS: &[&str] = &[
+/// Staged message fields stored as same-named `lcm_raw_messages` columns. The
+/// staged `text` and `metadata_json` are the row's body and protected
+/// metadata, which a Hermes row keeps from the Hermes LCM turn authority.
+const MESSAGE_SESSION_JSON_FIELDS: &[&str] = &[
     "session_id",
     "role",
     "timestamp",
     "ordinal",
-    "text",
     "kind",
     "model",
     "tool_names",
     "source_path",
     "source_offset",
-    "metadata_json",
 ];
 
 fn json_extract_expr(column: &str, field: &str) -> String {
@@ -1342,18 +1341,14 @@ async fn write_staged_message(
 ) -> ProjectionStoreResult<()> {
     let json = encode_json(message, "encode staged projection message")?;
     let content_hash = projected_content_hash(&message.text);
-    let snippet = derived_text_for_snippet(&message.text);
-    let index = derived_text_for_index(&message.text);
     conn.execute(
         "INSERT INTO observation_projection_rebuild_messages (
             projector_version, generation, output_provider, output_message_id,
-            message_json, content_hash, snippet_text, index_text
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            message_json, content_hash
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(projector_version, generation, output_provider, output_message_id)
          DO UPDATE SET message_json = excluded.message_json,
-                       content_hash = excluded.content_hash,
-                       snippet_text = excluded.snippet_text,
-                       index_text = excluded.index_text",
+                       content_hash = excluded.content_hash",
         params![
             SESSION_MESSAGE_PROJECTOR_VERSION,
             generation,
@@ -1361,8 +1356,6 @@ async fn write_staged_message(
             message.message_id.as_str(),
             json.as_str(),
             content_hash.as_str(),
-            snippet.as_str(),
-            index.as_str(),
         ],
     )
     .await
@@ -1556,7 +1549,7 @@ async fn stage_rebuild_provenance(
                 provenance.receipt_id(),
                 message.provider.as_str(),
                 message.message_id.as_str(),
-                projection.output_digest()?.as_str(),
+                stored_output_digest(projection)?.as_str(),
                 i64::from(message_created),
             ],
         )
@@ -1606,7 +1599,7 @@ async fn stage_rebuild_provenance(
         provenance.receipt_id().to_owned(),
         message.provider.clone(),
         message.message_id.clone(),
-        projection.output_digest()?.as_str().to_owned(),
+        stored_output_digest(projection)?.as_str().to_owned(),
     );
     if actual == expected {
         Ok(())
@@ -1637,7 +1630,7 @@ async fn stage_rebuild_message(
             state.projector_owned,
         )
     });
-    let (transition, _) = message_transition(
+    let transition = message_transition(
         conn,
         sequence,
         projection,
@@ -1647,7 +1640,7 @@ async fn stage_rebuild_message(
     .await?;
     match transition {
         MessageTransition::Insert | MessageTransition::Supersede => {
-            write_staged_message(conn, generation, message).await?;
+            write_staged_message(conn, generation, &projected_stored_message(message)?).await?;
         }
         MessageTransition::Retain => {}
     }
@@ -1865,7 +1858,7 @@ async fn clear_active_projection(
     .map_err(|error| storage("materialize cleared projection outputs", error))?;
     conn.execute(
         "DELETE FROM lcm_raw_messages
-         WHERE provider <> 'hermes' AND EXISTS (
+         WHERE EXISTS (
            SELECT 1 FROM temp.observation_projection_rebuild_cleared_outputs AS cleared
            WHERE cleared.output_provider = lcm_raw_messages.provider
              AND cleared.output_message_id = lcm_raw_messages.message_id
@@ -1873,17 +1866,7 @@ async fn clear_active_projection(
         (),
     )
     .await
-    .map_err(|error| storage("clear projected LCM raw rows for rebuild", error))?;
-    conn.execute(
-        "DELETE FROM session_messages WHERE EXISTS (
-           SELECT 1 FROM temp.observation_projection_rebuild_cleared_outputs AS cleared
-           WHERE cleared.output_provider = session_messages.provider
-             AND cleared.output_message_id = session_messages.message_id
-         )",
-        (),
-    )
-    .await
-    .map_err(|error| storage("clear projection message rows for rebuild", error))?;
+    .map_err(|error| storage("clear projected message rows for rebuild", error))?;
     conn.execute(
         "DELETE FROM observation_projection_provenance
          WHERE projector_version = ?1 AND NOT EXISTS (
@@ -2145,7 +2128,7 @@ async fn prepare_rebuild_output_activation(
          )
          SELECT staged.output_provider, staged.output_message_id,
                 EXISTS (
-                  SELECT 1 FROM session_messages AS active
+                  SELECT 1 FROM lcm_raw_messages AS active
                   WHERE active.provider = staged.output_provider
                     AND active.message_id = staged.output_message_id
                 ),
@@ -2175,8 +2158,20 @@ async fn prepare_rebuild_output_activation(
     .await
     .map_err(|error| storage("materialize preexisting projection outputs", error))?;
 
-    let message_conflicts =
-        json_extract_neq_predicates("active", STAGED_MESSAGE_JSON_COLUMN, MESSAGE_JSON_FIELDS);
+    let message_conflicts = format!(
+        "{}
+                     OR (active.provider <> 'hermes' AND (
+                         COALESCE(active.content, active.placeholder_text, '') IS NOT {}
+                         OR active.metadata_json IS NOT {}
+                     ))",
+        json_extract_neq_predicates(
+            "active",
+            STAGED_MESSAGE_JSON_COLUMN,
+            MESSAGE_SESSION_JSON_FIELDS
+        ),
+        json_extract_expr(STAGED_MESSAGE_JSON_COLUMN, "text"),
+        json_extract_expr(STAGED_MESSAGE_JSON_COLUMN, "metadata_json"),
+    );
     let mut conflicts = conn
         .query(
             &format!(
@@ -2185,7 +2180,7 @@ async fn prepare_rebuild_output_activation(
              JOIN temp.observation_projection_rebuild_preexisting_outputs AS ownership
                ON ownership.output_provider = staged.output_provider
               AND ownership.output_message_id = staged.output_message_id
-             LEFT JOIN session_messages AS active
+             LEFT JOIN lcm_raw_messages AS active
                ON active.provider = staged.output_provider
               AND active.message_id = staged.output_message_id
              WHERE staged.projector_version = ?1 AND staged.generation = ?2
@@ -2226,88 +2221,65 @@ async fn activate_rebuild_messages(
     conn: &impl Executor,
     generation: &str,
 ) -> ProjectionStoreResult<()> {
-    let message_extracts = json_extract_select_list(MESSAGE_JSON_COLUMN, MESSAGE_JSON_FIELDS);
-    conn.execute(
-        &format!(
-            "INSERT INTO session_messages (
-            provider, message_id, session_id, role, timestamp, ordinal, text, kind,
-            model, tool_names, source_path, source_offset, metadata_json
-         )
-         SELECT output_provider, output_message_id,
-                {message_extracts}
-         FROM observation_projection_rebuild_messages
-         WHERE projector_version = ?1 AND generation = ?2
-         ON CONFLICT(provider, message_id) DO UPDATE SET
-            session_id = excluded.session_id,
-            role = excluded.role,
-            timestamp = excluded.timestamp,
-            ordinal = excluded.ordinal,
-            text = excluded.text,
-            kind = excluded.kind,
-            model = excluded.model,
-            tool_names = excluded.tool_names,
-            source_path = excluded.source_path,
-            source_offset = excluded.source_offset,
-            metadata_json = excluded.metadata_json
-         WHERE session_messages.session_id IS NOT excluded.session_id
-            OR session_messages.role IS NOT excluded.role
-            OR session_messages.timestamp IS NOT excluded.timestamp
-            OR session_messages.ordinal IS NOT excluded.ordinal
-            OR session_messages.text IS NOT excluded.text
-            OR session_messages.kind IS NOT excluded.kind
-            OR session_messages.model IS NOT excluded.model
-            OR session_messages.tool_names IS NOT excluded.tool_names
-            OR session_messages.source_path IS NOT excluded.source_path
-            OR session_messages.source_offset IS NOT excluded.source_offset
-            OR session_messages.metadata_json IS NOT excluded.metadata_json"
-        ),
-        params![SESSION_MESSAGE_PROJECTOR_VERSION, generation],
-    )
-    .await
-    .map_err(|error| storage("activate rebuilt projection messages", error))?;
-    let lcm_session_id = json_extract_expr(MESSAGE_JSON_COLUMN, "session_id");
-    let lcm_role = json_extract_expr(MESSAGE_JSON_COLUMN, "role");
-    let lcm_ordinal = json_extract_expr(MESSAGE_JSON_COLUMN, "ordinal");
-    let lcm_timestamp = json_extract_expr(MESSAGE_JSON_COLUMN, "timestamp");
-    let lcm_text = json_extract_expr(MESSAGE_JSON_COLUMN, "text");
-    let lcm_metadata = json_extract_expr(MESSAGE_JSON_COLUMN, "metadata_json");
+    let session_columns = MESSAGE_SESSION_JSON_FIELDS.join(", ");
+    let session_extracts =
+        json_extract_select_list(MESSAGE_JSON_COLUMN, MESSAGE_SESSION_JSON_FIELDS);
+    let session_updates = MESSAGE_SESSION_JSON_FIELDS
+        .iter()
+        .map(|field| format!("{field} = excluded.{field}"))
+        .collect::<Vec<_>>()
+        .join(",\n            ");
+    let session_changed = MESSAGE_SESSION_JSON_FIELDS
+        .iter()
+        .map(|field| format!("lcm_raw_messages.{field} IS NOT excluded.{field}"))
+        .collect::<Vec<_>>()
+        .join("\n            OR ");
+    let body_update = |column: &str| {
+        format!(
+            "{column} = CASE WHEN lcm_raw_messages.provider = 'hermes'
+                THEN lcm_raw_messages.{column} ELSE excluded.{column} END"
+        )
+    };
+    let body_updates = [
+        "content",
+        "content_hash",
+        "storage_kind",
+        "payload_ref",
+        "placeholder_text",
+        "metadata_json",
+    ]
+    .map(body_update)
+    .join(",\n            ");
+    let text = json_extract_expr(MESSAGE_JSON_COLUMN, "text");
+    let metadata = json_extract_expr(MESSAGE_JSON_COLUMN, "metadata_json");
+    // A Hermes body belongs to the Hermes LCM turn authority, so an existing
+    // Hermes row takes only the rebuilt session columns.
     conn.execute(
         &format!(
             "INSERT INTO lcm_raw_messages (
-            provider, message_id, session_id, role, ordinal, timestamp, content,
-            content_hash, storage_kind, payload_ref, snippet_text, index_text,
-            legacy_source, legacy_truncated, metadata_json
+            provider, message_id, {session_columns}, content, content_hash, storage_kind,
+            payload_ref, placeholder_text, metadata_json
          )
          SELECT output_provider, output_message_id,
-                {lcm_session_id},
-                {lcm_role},
-                {lcm_ordinal},
-                {lcm_timestamp},
-                {lcm_text}, content_hash, 'inline', NULL,
-                snippet_text, index_text, 0, 0,
-                {lcm_metadata}
+                {session_extracts},
+                {text}, content_hash, 'inline', NULL, NULL, {metadata}
          FROM observation_projection_rebuild_messages
-         WHERE projector_version = ?1 AND generation = ?2 AND output_provider <> 'hermes'
+         WHERE projector_version = ?1 AND generation = ?2
          ON CONFLICT(provider, message_id) DO UPDATE SET
-            session_id = excluded.session_id,
-            role = excluded.role,
-            ordinal = excluded.ordinal,
-            timestamp = excluded.timestamp,
-            content = excluded.content,
-            content_hash = excluded.content_hash,
-            storage_kind = excluded.storage_kind,
-            payload_ref = excluded.payload_ref,
-            snippet_text = excluded.snippet_text,
-            index_text = excluded.index_text,
-            legacy_source = 0,
-            legacy_truncated = 0,
-            metadata_json = excluded.metadata_json"
+            {session_updates},
+            {body_updates}
+         WHERE {session_changed}
+            OR (lcm_raw_messages.provider <> 'hermes' AND (
+                COALESCE(lcm_raw_messages.content, lcm_raw_messages.placeholder_text, '')
+                    IS NOT excluded.content
+                OR lcm_raw_messages.metadata_json IS NOT excluded.metadata_json
+            ))"
         ),
         params![SESSION_MESSAGE_PROJECTOR_VERSION, generation],
     )
     .await
     .map(|_| ())
-    .map_err(|error| storage("activate rebuilt projected LCM raw messages", error))
+    .map_err(|error| storage("activate rebuilt projection messages", error))
 }
 
 async fn activate_rebuild_provenance(

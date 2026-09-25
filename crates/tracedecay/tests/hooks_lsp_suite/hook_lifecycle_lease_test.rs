@@ -38,6 +38,10 @@ fn native_hook_commands() -> Vec<(&'static str, Vec<u8>)> {
     );
     let opencode_stop = fixture_request(opencode, "stop");
     let opencode_tool_after = fixture_request(opencode, "post_tool_use");
+    let pi_agent_end = include_bytes!(
+        "../../../../crates/tracedecay-hooks/fixtures/host_events/pi/agent-end.json"
+    )
+    .to_vec();
 
     vec![
         ("hook-prompt-submit", claude_stop.clone()),
@@ -70,6 +74,7 @@ fn native_hook_commands() -> Vec<(&'static str, Vec<u8>)> {
         ("hook-kimi-event", kimi_edit),
         ("hook-opencode-event", opencode_stop),
         ("hook-opencode-tool-after", opencode_tool_after),
+        ("hook-pi-event", pi_agent_end),
     ]
 }
 
@@ -149,7 +154,8 @@ fn native_host_hooks_do_not_create_a_missing_profile() {
             | "hook-cursor-post-tool-use"
             | "hook-kimi-event"
             | "hook-opencode-event"
-            | "hook-opencode-tool-after" => b"",
+            | "hook-opencode-tool-after"
+            | "hook-pi-event" => b"",
             // Cursor sessionStart has a host-specific response even when no
             // project is bound: empty context and no session environment.
             "hook-cursor-session-start" => b"{\"additional_context\":\"\",\"env\":{}}\n",
@@ -304,6 +310,17 @@ fn response_capable_native_hooks_use_each_hosts_stdout_contract() {
             }),
             b"".as_slice(),
         ),
+        (
+            "hook-pi-event",
+            serde_json::json!({
+                "hook_event_name": "session_start",
+                "id": "pi-event",
+                "session_id": "pi-session",
+                "cwd": temp.path(),
+                "reason": "startup",
+            }),
+            b"".as_slice(),
+        ),
     ];
 
     for (hook, payload, expected_stdout) in cases {
@@ -316,7 +333,8 @@ fn response_capable_native_hooks_use_each_hosts_stdout_contract() {
 
 #[test]
 fn native_hook_captures_only_bound_transport_spool_records() {
-    use tracedecay_hooks::{HookHostV1, HookSpoolConfigV1, HookSpoolV1};
+    use tracedecay_domain::NativeHostIdentityV1;
+    use tracedecay_hooks::{HookSpoolConfigV1, HookSpoolV1};
 
     let temp = tempfile::tempdir().unwrap();
     let opencode = include_str!(
@@ -325,7 +343,7 @@ fn native_hook_captures_only_bound_transport_spool_records() {
     let cases = [
         (
             "hook-claude-post-tool-use",
-            HookHostV1::ClaudeCode,
+            NativeHostIdentityV1::ClaudeCode,
             include_bytes!(
                 "../../../../crates/tracedecay-hooks/fixtures/host_events/claude/post_tool_use_write.json"
             )
@@ -333,19 +351,19 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         ),
         (
             "hook-stop",
-            HookHostV1::ClaudeCode,
+            NativeHostIdentityV1::ClaudeCode,
             include_bytes!("../../../../crates/tracedecay-hooks/fixtures/host_events/claude/stop.json")
                 .to_vec(),
         ),
         (
             "hook-codex-stop",
-            HookHostV1::Codex,
+            NativeHostIdentityV1::Codex,
             include_bytes!("../../../../crates/tracedecay-hooks/fixtures/host_events/codex/stop.json")
                 .to_vec(),
         ),
         (
             "hook-cursor-after-file-edit",
-            HookHostV1::CursorDesktop,
+            NativeHostIdentityV1::CursorDesktop,
             include_bytes!(
                 "../../../../crates/tracedecay-hooks/fixtures/host_events/cursor/after-file-edit.json"
             )
@@ -353,7 +371,7 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         ),
         (
             "hook-cursor-stop",
-            HookHostV1::CursorDesktop,
+            NativeHostIdentityV1::CursorDesktop,
             serde_json::to_vec(&serde_json::json!({
                 "hook_event_name": "stop",
                 "conversation_id": "cursor-stop-session",
@@ -366,7 +384,7 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         ),
         (
             "hook-hermes-terminal-receipt",
-            HookHostV1::Hermes,
+            NativeHostIdentityV1::Hermes,
             include_bytes!(
                 "../../../../crates/tracedecay-hooks/fixtures/host_events/hermes/terminal-receipt.json"
             )
@@ -374,7 +392,7 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         ),
         (
             "hook-kimi-event",
-            HookHostV1::KimiCode,
+            NativeHostIdentityV1::KimiCode,
             include_bytes!(
                 "../../../../crates/tracedecay-hooks/fixtures/host_events/kimi/post-tool-use-edit.json"
             )
@@ -382,13 +400,25 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         ),
         (
             "hook-opencode-event",
-            HookHostV1::OpenCode,
+            NativeHostIdentityV1::OpenCode,
             fixture_request(opencode, "stop"),
         ),
         (
             "hook-opencode-tool-after",
-            HookHostV1::OpenCode,
+            NativeHostIdentityV1::OpenCode,
             fixture_request(opencode, "post_tool_use"),
+        ),
+        (
+            "hook-pi-event",
+            NativeHostIdentityV1::Pi,
+            include_bytes!("../../../../crates/tracedecay-hooks/fixtures/host_events/pi/session-start.json")
+                .to_vec(),
+        ),
+        (
+            "hook-pi-event",
+            NativeHostIdentityV1::Pi,
+            include_bytes!("../../../../crates/tracedecay-hooks/fixtures/host_events/pi/agent-end.json")
+                .to_vec(),
         ),
     ];
 
@@ -435,7 +465,8 @@ fn native_hook_captures_only_bound_transport_spool_records() {
             "hook-claude-post-tool-use"
             | "hook-kimi-event"
             | "hook-opencode-event"
-            | "hook-opencode-tool-after" => b"",
+            | "hook-opencode-tool-after"
+            | "hook-pi-event" => b"",
             _ => b"{}\n",
         };
         assert_eq!(output.stdout, expected_stdout, "{hook}: {output:?}");

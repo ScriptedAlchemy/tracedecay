@@ -10,6 +10,7 @@ use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline
 use tracedecay_runtime_core::git_discovery::{
     GitDiscoveryUnknown, GitRepositoryIdentityOutcome, discover_repository_identity,
 };
+use tracedecay_runtime_core::path_safety::{canonical_root_identity, plain_host_path};
 
 use crate::mcp::project_route::{
     HookProjectRouteCache, ProjectRouteFailure, ProjectRouteFailureKind, WorkspaceProjectRoute,
@@ -21,7 +22,7 @@ use tracedecay_global_db::RegisteredGlobalDb;
 /// wire contract or a second routing identity.
 pub(crate) struct SelectedProjectResponseLease {
     _guard: tokio::sync::OwnedRwLockReadGuard<()>,
-    revoked: tracedecay_session_memory::context::CancellationToken,
+    revoked: tracedecay_runtime_core::cancellation::CancellationToken,
     _active: ResponseLeaseGaugeGuard,
 }
 
@@ -43,7 +44,7 @@ impl Drop for ResponseLeaseGaugeGuard {
 impl SelectedProjectResponseLease {
     pub(crate) fn new(
         guard: tokio::sync::OwnedRwLockReadGuard<()>,
-        revoked: tracedecay_session_memory::context::CancellationToken,
+        revoked: tracedecay_runtime_core::cancellation::CancellationToken,
     ) -> Self {
         Self {
             _guard: guard,
@@ -52,20 +53,20 @@ impl SelectedProjectResponseLease {
         }
     }
 
-    pub(crate) fn revoked(&self) -> &tracedecay_session_memory::context::CancellationToken {
+    pub(crate) fn revoked(&self) -> &tracedecay_runtime_core::cancellation::CancellationToken {
         &self.revoked
     }
 }
 
 impl McpResponseLease for SelectedProjectResponseLease {
-    fn revoked(&self) -> &tracedecay_session_memory::context::CancellationToken {
+    fn revoked(&self) -> &tracedecay_runtime_core::cancellation::CancellationToken {
         &self.revoked
     }
 }
 
 /// Per-connection routing and identity context, constructed once per client
 /// connection (or per initialize-replay dispatch) and threaded through
-/// [`McpServer::handle_request_for_connection`]. Bundling these values keeps
+/// [`McpServer::dispatch_envelope`]. Bundling these values keeps
 /// persisted application request correlation and cancellation scoped to the
 /// exact client connection.
 pub(crate) struct ConnectionRouteState {
@@ -78,7 +79,6 @@ pub(crate) struct ConnectionRouteState {
     pub(crate) route_cache: HookProjectRouteCache,
     selected_response_lease: Option<SelectedProjectResponseLease>,
     selected_request_server: Option<std::sync::Arc<super::McpServer>>,
-    connection_owns_dispatch: bool,
 }
 
 impl ConnectionRouteState {
@@ -89,7 +89,6 @@ impl ConnectionRouteState {
             route_cache,
             selected_response_lease: None,
             selected_request_server: None,
-            connection_owns_dispatch: false,
         }
     }
 
@@ -125,18 +124,7 @@ impl ConnectionRouteState {
             route_cache: self.route_cache.clone(),
             selected_response_lease: None,
             selected_request_server: None,
-            connection_owns_dispatch: false,
         }
-    }
-
-    pub(crate) fn fork_for_connection_owned_read(&self) -> Self {
-        let mut fork = self.fork_for_independent_read();
-        fork.connection_owns_dispatch = true;
-        fork
-    }
-
-    pub(crate) fn connection_owns_dispatch(&self) -> bool {
-        self.connection_owns_dispatch
     }
 
     pub(crate) fn install_selected_response_lease(&mut self, lease: SelectedProjectResponseLease) {
@@ -178,10 +166,6 @@ impl McpConnectionState for ConnectionRouteState {
 
     fn fork_for_independent_read(&self) -> Self {
         ConnectionRouteState::fork_for_independent_read(self)
-    }
-
-    fn fork_for_connection_owned_read(&self) -> Self {
-        ConnectionRouteState::fork_for_connection_owned_read(self)
     }
 
     fn take_selected_response_lease(&mut self) -> Option<Self::ResponseLease> {
@@ -391,7 +375,7 @@ async fn resolve_initialize_root_project_path(
     registry_db: &RegisteredGlobalDb,
     discovery: &RepositoryDiscovery,
 ) -> Result<Option<PathBuf>, InitializeRootResolutionError> {
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let root = canonical_root_identity(root);
     let mut candidates = Vec::with_capacity(2);
 
     for candidate in root.ancestors() {
@@ -418,7 +402,10 @@ async fn resolve_initialize_root_project_path(
                 .await
             {
                 Ok(Some(context)) => {
-                    candidates.push((identity.worktree_root, context.project.project_id));
+                    candidates.push((
+                        plain_host_path(&identity.worktree_root),
+                        context.project.project_id,
+                    ));
                 }
                 Ok(None) => {}
                 Err(_) => return Err(InitializeRootResolutionError::AuthorityUnavailable),
@@ -492,7 +479,8 @@ mod tests {
         resolve_initialize_roots_project_path, resolve_initialize_roots_project_route,
         select_initialize_project_path,
     };
-    use crate::test_support::host_admission::HostAdmissionTestRuntimeV1;
+    use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+    use tracedecay_runtime_core::path_safety::canonical_existing_identity;
     use tracedecay_sessions::admission::HostAdmissionScope;
 
     fn run_git(root: &Path, args: &[&str]) {
@@ -631,7 +619,7 @@ mod tests {
 
         assert_eq!(
             resolved,
-            Some(linked_root.canonicalize().expect("canonical linked root"))
+            Some(canonical_existing_identity(&linked_root).expect("canonical linked root"))
         );
     }
 
@@ -664,7 +652,7 @@ mod tests {
 
         assert_eq!(
             resolved,
-            Some(nested_root.canonicalize().expect("canonical nested root"))
+            Some(canonical_existing_identity(&nested_root).expect("canonical nested root"))
         );
     }
 

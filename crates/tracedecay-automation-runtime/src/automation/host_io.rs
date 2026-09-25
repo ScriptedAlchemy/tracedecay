@@ -15,10 +15,6 @@ use serde_json::Value;
 use super::skill_targets::SkillInstallSummary;
 use tracedecay_domain::errors::Result;
 
-/// The unslugged managed-skill start marker. Same literal the agent-hosts
-/// prompt-rules block-splicer stops at.
-pub const SKILL_INDEX_START: &str = "<!-- TRACEDECAY MANAGED SKILLS START -->";
-
 /// Per-agent outcome of a managed-skill export refresh.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManagedSkillExportReport {
@@ -37,8 +33,8 @@ pub struct PluginFile {
 
 pub type ExportToAgents = fn(&Path, &Path) -> Vec<ManagedSkillExportReport>;
 pub type ExportToAgentHosts = fn(&Path, &Path, &Path) -> Vec<ManagedSkillExportReport>;
-pub type WriteText = fn(&Path, &str, Option<&Path>) -> Result<()>;
-pub type WriteJson = fn(&Path, &Value, Option<&Path>) -> Result<()>;
+pub type WriteText = fn(&Path, &str) -> Result<()>;
+pub type WriteJson = fn(&Path, &Value) -> Result<()>;
 pub type RemoveHostFile = fn(&Path) -> std::io::Result<()>;
 pub type CodexAgentFiles = fn() -> &'static [PluginFile];
 
@@ -81,22 +77,12 @@ impl HostIo {
         (self.export_to_agent_hosts)(home, project_root, profile_root)
     }
 
-    pub fn safe_write_text_file(
-        &self,
-        path: &Path,
-        contents: &str,
-        backup: Option<&Path>,
-    ) -> Result<()> {
-        (self.write_text)(path, contents, backup)
+    pub fn safe_write_text_file(&self, path: &Path, contents: &str) -> Result<()> {
+        (self.write_text)(path, contents)
     }
 
-    pub fn safe_write_json_file(
-        &self,
-        path: &Path,
-        value: &Value,
-        backup: Option<&Path>,
-    ) -> Result<()> {
-        (self.write_json)(path, value, backup)
+    pub fn safe_write_json_file(&self, path: &Path, value: &Value) -> Result<()> {
+        (self.write_json)(path, value)
     }
 
     pub fn safe_remove_host_file(&self, path: &Path) -> std::io::Result<()> {

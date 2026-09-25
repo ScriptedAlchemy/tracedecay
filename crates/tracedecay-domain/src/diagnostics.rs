@@ -122,8 +122,8 @@ impl DiagnosticProvenanceV1 {
 }
 
 /// Current-vs-stale typing for a durable diagnostic record. Publication is
-/// version-monotone: a newer clean generation clears or supersedes the prior
-/// publication deterministically, and stale findings cannot cross snapshots.
+/// version-monotone: a newer clean generation clears the prior publication
+/// deterministically, and stale findings cannot cross snapshots.
 /// Stale and historical records remain queryable through
 /// application APIs but are excluded from active publication.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -131,11 +131,6 @@ impl DiagnosticProvenanceV1 {
 pub enum DiagnosticRecordStateV1 {
     /// Current for exactly the clean generation named by the record.
     Current,
-    /// A successor clean generation republished the same logical finding
-    /// space; this record is historical.
-    Superseded {
-        successor_generation: CodeGenerationId,
-    },
     /// A clean generation completed and deterministically removed this
     /// finding (resolution, deletion, source-revision drift, or content or
     /// generation change).
@@ -152,15 +147,6 @@ impl DiagnosticRecordStateV1 {
     fn validate(&self, own_generation: &CodeGenerationId) -> Result<(), DomainError> {
         match self {
             Self::Current => Ok(()),
-            Self::Superseded {
-                successor_generation,
-            } => {
-                successor_generation.validate()?;
-                if successor_generation == own_generation {
-                    return Err(DomainError::SelfSupersession);
-                }
-                Ok(())
-            }
             Self::Cleared {
                 cleared_in_generation,
             } => {
@@ -267,26 +253,6 @@ impl GenerationDiagnosticV1 {
     /// True only while the record is current for its own clean generation.
     pub const fn is_current(&self) -> bool {
         self.state.is_current()
-    }
-
-    /// Returns a copy marked superseded by `successor_generation`. A record
-    /// can only be superseded out of the current state, and a generation can
-    /// never supersede itself (version-monotone publication).
-    pub fn supersede(&self, successor_generation: CodeGenerationId) -> Result<Self, DomainError> {
-        successor_generation.validate()?;
-        if successor_generation == self.generation_id {
-            return Err(DomainError::SelfSupersession);
-        }
-        if !self.state.is_current() {
-            return Err(DomainError::NonCanonical {
-                field: "diagnostic record state transition",
-            });
-        }
-        let mut next = self.clone();
-        next.state = DiagnosticRecordStateV1::Superseded {
-            successor_generation,
-        };
-        Ok(next)
     }
 
     /// Returns a copy marked cleared by a clean generation that completed
@@ -441,20 +407,6 @@ mod tests {
     }
 
     #[test]
-    fn supersession_requires_a_distinct_generation() {
-        let record = fixture_record();
-        assert!(matches!(
-            record.clone().supersede(record.generation_id.clone()),
-            Err(DomainError::SelfSupersession)
-        ));
-        let superseded = record
-            .supersede(id("generation.clean.2"))
-            .expect("distinct successor supersedes");
-        assert!(!superseded.is_current());
-        superseded.validate().expect("superseded record validates");
-    }
-
-    #[test]
     fn clearing_requires_a_distinct_generation() {
         let record = fixture_record();
         assert!(matches!(
@@ -474,16 +426,15 @@ mod tests {
     #[test]
     fn stale_records_cannot_transition_again() {
         let record = fixture_record();
-        let superseded = record.supersede(id("generation.clean.2")).unwrap();
-        assert!(superseded.supersede(id("generation.clean.3")).is_err());
-        assert!(superseded.clear(id("generation.clean.3")).is_err());
+        let cleared = record.clear(id("generation.clean.2")).unwrap();
+        assert!(cleared.clear(id("generation.clean.3")).is_err());
     }
 
     #[test]
     fn state_rejects_self_referencing_generations() {
         let mut record = fixture_record();
-        record.state = DiagnosticRecordStateV1::Superseded {
-            successor_generation: record.generation_id.clone(),
+        record.state = DiagnosticRecordStateV1::Cleared {
+            cleared_in_generation: record.generation_id.clone(),
         };
         assert!(matches!(
             record.validate(),

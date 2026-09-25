@@ -11,7 +11,6 @@
 mod handle;
 mod schema_constants;
 mod support;
-pub use support::derive_projection;
 #[cfg(test)]
 mod test_registered_impls;
 #[cfg(test)]
@@ -78,19 +77,18 @@ use tracedecay_query::retrieval::evidence_lanes::{
 };
 use tracedecay_runtime_core::db::engine::Error as EngineError;
 use tracedecay_sessions::runtime::git_correlation::{
-    GitCorrelationError, GitEvidenceGraphHead, GitScopeFilter, git_evidence_projection_identity,
+    GitCorrelationError, GitScopeFilter, git_evidence_projection_identity,
     open_git_evidence_graph_view,
 };
 use tracedecay_store::{SessionMessageRecord, SessionRecord};
 use tracedecay_temporal_query::context::VersionedTokenEstimator;
 use tracedecay_temporal_query::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
+use tracedecay_temporal_query::execution::{BindingDigest, ExecutionControl};
 use tracedecay_temporal_query::hydrate_temporal_candidate_selection;
 use tracedecay_temporal_query::hydration::hydrate_selected;
-use tracedecay_temporal_query::ports::{
-    BindingDigest, ExecutionControl, KernelVersions, TemporalExecutionSnapshot,
-    TemporalRetrievalScope,
-};
+use tracedecay_temporal_query::ports::TemporalRetrievalScope;
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+use tracedecay_temporal_query::snapshot::{KernelVersions, TemporalExecutionSnapshot};
 use tracedecay_temporal_query::{execute_temporal_candidate_export, execute_temporal_kernel};
 
 pub use self::cursor_keys::{
@@ -150,21 +148,13 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         // Absence is not an authoritative empty projection. Until Git
         // evidence has been published, callers cannot prove that no durable
         // session holds a matching worktree.
-        let view = match open_git_evidence_graph_view(runtime, &identity, Arc::new(NeverCancelled))?
-        {
-            GitEvidenceGraphHead::Indexed(view) => view,
-            GitEvidenceGraphHead::Unpublished => {
-                return Err(GitCorrelationError::Unavailable(
-                    "verified Git-evidence projection has not been published".to_owned(),
-                ));
-            }
-            // A pre-index head cannot be scoped through the graph either; its
-            // next publication re-projects it.
-            GitEvidenceGraphHead::Legacy { generation } => {
-                return Err(GitCorrelationError::Unavailable(format!(
-                    "verified Git-evidence generation `{generation}` predates the indexed projector"
-                )));
-            }
+        let Some(view) =
+            open_git_evidence_graph_view(runtime, &identity, Arc::new(NeverCancelled))?
+                .into_indexed()?
+        else {
+            return Err(GitCorrelationError::Unavailable(
+                "verified Git-evidence projection has not been published".to_owned(),
+            ));
         };
         let session_ids = match maximum {
             Some(maximum) => view.session_ids_for_scope_bounded(filter, maximum),
@@ -671,9 +661,7 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
                     HydrationStateV1::Unauthorized => SessionTemporalExecutionError::Denied,
                     HydrationStateV1::Available
                     | HydrationStateV1::RetainedButUnavailable
-                    | HydrationStateV1::UnverifiableLegacy => {
-                        SessionTemporalExecutionError::Unavailable
-                    }
+                    | HydrationStateV1::Unverifiable => SessionTemporalExecutionError::Unavailable,
                 });
             }
         };

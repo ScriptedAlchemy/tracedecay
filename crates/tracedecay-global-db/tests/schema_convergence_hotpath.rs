@@ -79,9 +79,14 @@ fn authority_fixture(
         payload,
     )
     .expect("durable observation");
-    let cursor =
-        ObservationSourceCursorV1::new(source, ObservationScopeV1::Profile, generation, end)
-            .expect("committed source cursor");
+    let cursor = ObservationSourceCursorV1::for_ordering(
+        source,
+        ObservationScopeV1::Profile,
+        generation,
+        ObservationOrderingDomainV1::FileBytes,
+        end,
+    )
+    .expect("committed source cursor");
     (observation, cursor)
 }
 

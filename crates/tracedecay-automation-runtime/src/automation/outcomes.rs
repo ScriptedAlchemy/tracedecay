@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracedecay_domain::PayloadAccessState;
@@ -50,7 +51,7 @@ pub const SKILL_ACTIVATION_WINDOW_SECS: i64 = 7 * 24 * 60 * 60;
 
 const SECS_PER_DAY: i64 = 24 * 60 * 60;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillOutcomeVerdict {
     Adopted,
@@ -68,7 +69,7 @@ impl SkillOutcomeVerdict {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FactOutcomeVerdict {
     RecalledAndHelpful,
@@ -92,7 +93,7 @@ impl FactOutcomeVerdict {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SkillOutcomeRecord {
     pub skill_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -104,7 +105,7 @@ pub struct SkillOutcomeRecord {
     pub verdict: SkillOutcomeVerdict,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct FactOutcomeRecord {
     /// Immutable identity of the terminal automatic-fact receipt.
     pub apply_id: String,

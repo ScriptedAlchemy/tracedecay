@@ -1477,44 +1477,6 @@ where
                     return unavailable(code_search::CodeIndexSearchUnavailableReasonV1::Internal);
                 }
             }
-            // Clone backfill is retained-worker work after the seat. Kick that
-            // wake before any inline slice so a quiet daemon does not strand
-            // the successor on this request thread. Match the admission,
-            // terminal Corrupt must fail closed before the inline slice.
-            match schedulers.request_query_background_reconcile(&scope).await {
-                code_index_scheduler::CodeIndexReconcileAdmissionV1::Accepted
-                | code_index_scheduler::CodeIndexReconcileAdmissionV1::Unavailable => {}
-                code_index_scheduler::CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(
-                    _,
-                ) => {
-                    return unavailable(
-                        code_search::CodeIndexSearchUnavailableReasonV1::CorruptionResetRequired,
-                    );
-                }
-            }
-            match generation.finish_clone_similarity_warmup_for_request(control.as_ref()) {
-                Ok(code_index_scheduler::CloneSimilarityWarmupForRequestV1::Ready) => {}
-                Ok(code_index_scheduler::CloneSimilarityWarmupForRequestV1::Pending) => {
-                    // One bounded slice ran; retained worker owns the rest.
-                    // Surface warming, not a hard GenerationUnavailable miss.
-                    return unavailable(
-                        code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnverified,
-                    );
-                }
-                // A contended or already-retired staging artifact leaves this
-                // generation's clone projection unfinished. That is the same
-                // state `Pending` reports above, so it keeps `Pending`'s
-                // retryable verdict; `Internal` told callers never to retry a
-                // window that resolves itself within one background pass.
-                Err(RetrievalPortError::AuthorityUnavailable(_)) => {
-                    return unavailable(
-                        code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnverified,
-                    );
-                }
-                Err(_) => {
-                    return unavailable(code_search::CodeIndexSearchUnavailableReasonV1::Internal);
-                }
-            }
             let owners = match generation.production_query_owners_with_budget(
                 &code_index_scheduler::queries::maximum_retrieval_budget(),
             ) {
@@ -1681,38 +1643,6 @@ where
             match generation.finish_query_owner_warmup_for_request(control.as_ref()) {
                 Ok(true) => {}
                 Ok(false) => {
-                    return unavailable(
-                        code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnverified,
-                    );
-                }
-                Err(_) => {
-                    return unavailable(code_search::CodeIndexSearchUnavailableReasonV1::Internal);
-                }
-            }
-            match schedulers.request_query_background_reconcile(&scope).await {
-                code_index_scheduler::CodeIndexReconcileAdmissionV1::Accepted
-                | code_index_scheduler::CodeIndexReconcileAdmissionV1::Unavailable => {}
-                code_index_scheduler::CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(
-                    _,
-                ) => {
-                    return unavailable(
-                        code_search::CodeIndexSearchUnavailableReasonV1::CorruptionResetRequired,
-                    );
-                }
-            }
-            match generation.finish_clone_similarity_warmup_for_request(control.as_ref()) {
-                Ok(code_index_scheduler::CloneSimilarityWarmupForRequestV1::Ready) => {}
-                Ok(code_index_scheduler::CloneSimilarityWarmupForRequestV1::Pending) => {
-                    return unavailable(
-                        code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnverified,
-                    );
-                }
-                // A contended or already-retired staging artifact leaves this
-                // generation's clone projection unfinished. That is the same
-                // state `Pending` reports above, so it keeps `Pending`'s
-                // retryable verdict; `Internal` told callers never to retry a
-                // window that resolves itself within one background pass.
-                Err(RetrievalPortError::AuthorityUnavailable(_)) => {
                     return unavailable(
                         code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnverified,
                     );

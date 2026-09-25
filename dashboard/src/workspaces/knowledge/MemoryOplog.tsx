@@ -12,7 +12,8 @@
 import { PayloadBoundary } from '../../ui/ReadSection.tsx';
 import { formatMicrosUtc } from '../../ui/format.ts';
 import { Panel, Readout } from '../../ui/instrument.tsx';
-import { useMemoryOplog, type OplogEvent, type OplogPayload } from '../../data/query/memory.ts';
+import type { MemoryOplogEventV1, MemoryOplogPayloadV1 } from '../../contracts/generated.ts';
+import { useMemoryOplog } from '../../data/query/memory.ts';
 import { oplogReading } from './memoryModel.ts';
 
 export function MemoryOplog() {
@@ -28,7 +29,7 @@ export function MemoryOplog() {
   );
 }
 
-function OplogBody({ data }: { data: OplogPayload }) {
+function OplogBody({ data }: { data: MemoryOplogPayloadV1 }) {
   const reading = oplogReading(data);
   // The handler answers HTTP 200 with an `error` string when the store cannot
   // be opened, so an unreadable store and a store with no operations arrive
@@ -93,7 +94,7 @@ function OplogBody({ data }: { data: OplogPayload }) {
   );
 }
 
-function OplogRow({ event }: { event: OplogEvent }) {
+function OplogRow({ event }: { event: MemoryOplogEventV1 }) {
   return (
     <li className="flex flex-col gap-0.5 border-l-2 border-edge-subtle pl-2">
       <p className="flex flex-wrap items-baseline gap-x-2 text-3xs text-text-muted">

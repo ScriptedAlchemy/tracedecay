@@ -92,7 +92,7 @@ export function SearchField({
           spellCheck={false}
           autoComplete="off"
           className={cn(
-            'min-w-0 flex-1 self-stretch bg-transparent text-sm text-text-primary outline-none',
+            'min-w-0 flex-1 self-stretch bg-transparent text-body text-text-primary outline-none',
             'placeholder:text-text-muted',
           )}
         />
@@ -115,7 +115,7 @@ export function SearchField({
         </span>
       </div>
       {hint ? (
-        <p id={hintId} className="text-2xs leading-relaxed text-text-muted">
+        <p id={hintId} className="text-sm leading-relaxed text-text-muted">
           {hint}
         </p>
       ) : null}

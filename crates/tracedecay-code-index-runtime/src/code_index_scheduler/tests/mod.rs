@@ -35,6 +35,7 @@ use crate::code_index_scheduler::{
     CodeIndexHintPolicyV1, CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1,
     CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1,
 };
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 #[cfg(feature = "hotpath-alloc")]
 #[global_allocator]
@@ -306,6 +307,47 @@ fn progress_snapshot_for_generation(
         last_progress_micros: 1,
         blocked_reason: None,
     }
+}
+
+/// Rewrite the active pointer to the durable index entry shape every release
+/// before 0.1.0-beta.38 sealed: no `segment_bytes`, no `cardinality`. The
+/// stored `generation_index_digest` is left exactly as that release computed
+/// it over that shape.
+pub(super) fn downgrade_pointer_to_pre_segment_bytes_shape(pointer_path: &Path) {
+    let mut pointer: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(pointer_path).expect("read active pointer"))
+            .expect("decode active pointer");
+    let entries = pointer["generation_index"]
+        .as_array_mut()
+        .expect("durable generation index");
+    assert!(
+        !entries.is_empty(),
+        "the sealed pointer names its generation"
+    );
+    for entry in entries {
+        let entry = entry.as_object_mut().expect("index entry object");
+        assert!(
+            entry.remove("segment_bytes").is_some(),
+            "the current shape records segment bytes"
+        );
+        entry.remove("cardinality");
+    }
+    // The old release digested exactly the trimmed entries; the current
+    // struct re-adds `segment_bytes: 0` on re-serialization, so its digest
+    // over the same file can no longer reproduce this value.
+    let trimmed = tracedecay_domain::canonical_sha256(&(
+        pointer["generation_index"].clone(),
+        pointer["generation_index_truncated"]
+            .as_bool()
+            .unwrap_or(false),
+    ))
+    .expect("trimmed digest");
+    pointer["generation_index_digest"] = serde_json::Value::String(trimmed.as_str().to_owned());
+    std::fs::write(
+        pointer_path,
+        serde_json::to_vec(&pointer).expect("encode downgraded pointer"),
+    )
+    .expect("write downgraded pointer");
 }
 
 fn published(outcome: CodeIndexReconcileOutcomeV1) -> super::CodeIndexPublishEvidenceV1 {
@@ -715,13 +757,6 @@ fn install_verified_graph_store_on_text(
 }
 
 fn query_authority(privacy_domain: PrivacyDomainId) -> Arc<QueryAuthorityV1> {
-    query_authority_with_candidate_cap(privacy_domain, 32)
-}
-
-fn query_authority_with_candidate_cap(
-    privacy_domain: PrivacyDomainId,
-    max_candidates_per_lane: u32,
-) -> Arc<QueryAuthorityV1> {
     let id = |value: &str| value.to_owned();
     let profile = FusionProfile {
         profile_id: id("profile.code-index.fixture")
@@ -790,7 +825,7 @@ fn query_authority_with_candidate_cap(
             .try_into()
             .expect("diversity id"),
         retrieval_budget: RetrievalBudget {
-            max_candidates_per_lane,
+            max_candidates_per_lane: 32,
             max_fused_candidates: 32,
             max_hydrated_results: 32,
             max_hydration_bytes: 32 * 65_536,
@@ -861,14 +896,13 @@ fn active_text_artifact_path(store_root: &Path) -> PathBuf {
     let artifact_file = entry["text_artifact"]["artifact_file"]
         .as_str()
         .expect("attached text artifact descriptor");
-    store_root
-        .join("code-text-artifacts-v1")
+    tracedecay_code_index_retention::code_index_generations::code_text_artifacts_root(store_root)
         .join(artifact_file)
 }
 
 fn rewrite_active_text_artifact_format_revision(store_root: &Path, revision: u64) -> PathBuf {
     use tracedecay_code_index_retention::code_index_generations::{
-        DurablePublicationPointerV1, durable_generation_index_digest,
+        DurablePublicationPointerV1, DurableTextArtifactSlotV1, durable_generation_index_digest,
     };
 
     let pointer_path = store_root.join("active-code-generation-v1.json");
@@ -881,10 +915,9 @@ fn rewrite_active_text_artifact_format_revision(store_root: &Path, revision: u64
         .iter_mut()
         .find(|entry| entry.generation_id == pointer.generation_id)
         .expect("active generation entry");
-    let descriptor = entry
-        .text_artifact
-        .as_mut()
-        .expect("active text artifact descriptor");
+    let Some(DurableTextArtifactSlotV1::Current(descriptor)) = entry.text_artifact.as_mut() else {
+        panic!("active text artifact descriptor");
+    };
     let old_path = store_root
         .join("code-text-artifacts-v1")
         .join(&descriptor.artifact_file);
@@ -1227,17 +1260,21 @@ async fn wait_for_settled_owner(registry: &CodeIndexSchedulerRegistryV1, path: &
     }
 }
 
-/// Drive the seated owner's clone-fingerprint backfill to completion.
+/// Settle the mounted owner's text projection and the worker's owed passes.
 ///
-/// The seat no longer waits for that successor: exact and lexical serve as
-/// soon as the admission artifact is ready and the backfill runs on a later
-/// pass. A query over pending clone work requests that pass, so a test that
-/// pins query admission or wake accounting against a *settled* seat drains
-/// the backfill first with plain wakes.
-async fn drain_clone_backfill(registry: &CodeIndexSchedulerRegistryV1, path: &Path) {
-    let canonical = path.canonicalize().expect("canonical project");
+/// A test that pins query admission or wake accounting against a *settled*
+/// seat waits here with plain wakes. It returns only once the pending-wake
+/// slot reads empty under held admission, so a caller that then seats a
+/// crafted owner cannot lose to a worker tail that was still owed a pass.
+async fn settle_text_projection(registry: &CodeIndexSchedulerRegistryV1, path: &Path) {
+    let canonical = canonical_existing_identity(path).expect("canonical project");
     let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     loop {
+        assert!(
+            Instant::now() <= deadline,
+            "the text projection for {} never settled",
+            path.display()
+        );
         let text = {
             let mounted = registry.mounted.lock().await;
             mounted
@@ -1250,17 +1287,21 @@ async fn drain_clone_backfill(registry: &CodeIndexSchedulerRegistryV1, path: &Pa
         };
         if text.is_none_or(|text| !text.text_projection_needs_work()) {
             let admission = quiesced_background_reconcile_admission(registry, path).await;
+            // A settled owner is not a settled worktree: a worker tail stamps
+            // its continuation in the pending-wake slot, so the slot, not the
+            // pass counter, is what an outstanding tail shows up in. Observe
+            // it empty under held admission. A stamped slot means the worker
+            // still owes the pass that clears it, so hand the permit back and
+            // let it run.
+            if registry.pending_wake_micros_for_root(path).await == Some(0) {
+                return;
+            }
             drop(admission);
-            return;
+        } else {
+            // Complete-generation demand is an ordinary wake; the pass it
+            // starts drives the pending projection on the retained path.
+            registry.request_complete_generation(path).await;
         }
-        assert!(
-            Instant::now() <= deadline,
-            "the clone backfill for {} never finished",
-            path.display()
-        );
-        // Complete-generation demand is an ordinary wake; the pass it starts
-        // drives the pending successor on the retained path.
-        registry.request_complete_generation(path).await;
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
@@ -1429,6 +1470,32 @@ fn caller_star_sources() -> Vec<(String, String)> {
         files.push((format!("src/callers_{file_idx:02}.rs"), body));
     }
     files.insert(0, ("src/lib.rs".to_owned(), mods));
+    files
+}
+
+/// One `fanout` function calling `relations` distinct leaves, one statement
+/// per call so the extractor sees every site, spread over the star's files.
+fn callee_fanout_sources(relations: usize) -> Vec<(String, String)> {
+    let per_file = relations.div_ceil(CALLER_STAR_FILES);
+    let mut lib = String::new();
+    let mut fanout = String::from("pub fn fanout() {\n");
+    let mut files = Vec::new();
+    for (index, chunk) in (0..relations)
+        .collect::<Vec<_>>()
+        .chunks(per_file)
+        .enumerate()
+    {
+        let _ = writeln!(lib, "pub mod leaves_{index:02};");
+        let mut module = String::new();
+        for leaf in chunk {
+            let _ = writeln!(module, "pub fn leaf_{leaf:04}() {{}}");
+            let _ = writeln!(fanout, "    crate::leaves_{index:02}::leaf_{leaf:04}();");
+        }
+        files.push((format!("src/leaves_{index:02}.rs"), module));
+    }
+    fanout.push_str("}\n");
+    lib.push_str(&fanout);
+    files.insert(0, ("src/lib.rs".to_owned(), lib));
     files
 }
 
@@ -1677,10 +1744,9 @@ async fn wait_for_dashboard_ready(registry: &CodeIndexSchedulerRegistryV1, path:
                             && freshness.coverage
                                 == tracedecay_contracts::code_index_freshness::CodeIndexFreshnessCoverageV1::Complete
                     });
-                // A seat can leave a continuation queued (the clone-fingerprint
-                // successor runs on a later pass), and the ladder reports
-                // Verifying for as long as that pass runs. Ready means no pass
-                // is running and none is pending.
+                // A seat can leave a continuation queued, and the ladder
+                // reports Verifying for as long as that pass runs. Ready means
+                // no pass is running and none is pending.
                 if still_ready
                     && !registry.reconcile_in_progress_for_test(path).await
                     && registry.pending_wake_micros_for_root(path).await == Some(0)

@@ -1,12 +1,45 @@
 //! LCM session-store and session health-baseline tool definitions.
 
-use serde_json::json;
+use serde_json::{Value, json};
 use tracedecay_contracts::retained_surfaces::{
     LcmRoleV1, MessageRelationshipScopeV1, MessageTypeFilterV1,
 };
 
 use super::{def, string_property};
 use crate::ToolDefinition;
+
+/// Wire form of the domain `TemporalModeV1`: a `kind`-tagged object whose
+/// `as_of` variant carries its UTC-microsecond `cutoff`.
+fn temporal_mode_schema(description: &str) -> Value {
+    let unit = |kind: &str| {
+        json!({
+            "type": "object",
+            "properties": { "kind": { "const": kind } },
+            "required": ["kind"],
+            "additionalProperties": false
+        })
+    };
+    json!({
+        "description": description,
+        "oneOf": [
+            unit("current"),
+            {
+                "type": "object",
+                "properties": {
+                    "kind": { "const": "as_of" },
+                    "cutoff": {
+                        "type": "integer",
+                        "description": "Inclusive cutoff in UTC microseconds."
+                    }
+                },
+                "required": ["kind", "cutoff"],
+                "additionalProperties": false
+            },
+            unit("evolution"),
+            unit("forensic")
+        ]
+    })
+}
 
 pub(super) fn def_lcm_status() -> ToolDefinition {
     def(
@@ -67,16 +100,9 @@ pub(super) fn def_lcm_load_session() -> ToolDefinition {
                     "minLength": 1,
                     "description": "Authenticated opaque continuation cursor returned as next_cursor."
                 },
-                "temporal_mode": {
-                    "type": "string",
-                    "enum": ["current", "as_of", "evolution", "forensic"],
-                    "description": "Canonical temporal retrieval mode. Defaults to forensic for exact-session loading."
-                },
-                "as_of_micros": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Required cutoff in UTC microseconds when temporal_mode=as_of."
-                },
+                "temporal_mode": temporal_mode_schema(
+                    "Canonical temporal retrieval mode. Defaults to {\"kind\":\"forensic\"} for exact-session loading."
+                ),
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
@@ -213,16 +239,9 @@ pub(super) fn def_lcm_grep() -> ToolDefinition {
                     "minLength": 1,
                     "description": "Authenticated opaque continuation cursor returned as next_cursor."
                 },
-                "temporal_mode": {
-                    "type": "string",
-                    "enum": ["current", "as_of", "evolution", "forensic"],
-                    "description": "Canonical temporal retrieval mode. Defaults to current."
-                },
-                "as_of_micros": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Required cutoff in UTC microseconds when temporal_mode=as_of."
-                },
+                "temporal_mode": temporal_mode_schema(
+                    "Canonical temporal retrieval mode. Defaults to {\"kind\":\"current\"}."
+                ),
                 "branch": string_property("Optional git branch filter: only LCM snippets from sessions active on this branch (via the session-git correlation index)."),
                 "worktree": string_property("Optional git worktree root path filter: only LCM snippets from sessions active in this worktree (via the session-git correlation index)."),
                 "commit": string_property("Optional commit sha filter (full or >=6-char hex prefix): only LCM snippets from sessions attributed to this commit (via the session-git correlation index).")

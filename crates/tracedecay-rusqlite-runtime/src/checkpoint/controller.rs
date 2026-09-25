@@ -149,6 +149,26 @@ impl<D: CheckpointDriver> WriterCheckpointController<D> {
         )
     }
 
+    /// Returns the whole WAL to the database as the writer stops.
+    ///
+    /// Only the writer's own shutdown may call this: its admission is closed,
+    /// its queues are empty, and the attachment released every reader before
+    /// joining it, so the writer holds the exclusivity a maintenance permit
+    /// would otherwise prove. A reader outside this attachment can still keep
+    /// the checkpoint pending; the WAL then stays for the next open.
+    pub(crate) fn truncate_at_shutdown(
+        &mut self,
+    ) -> Result<CheckpointResult, CheckpointError<D::Error>> {
+        let sample = self.driver.sample_wal().map_err(CheckpointError::Driver)?;
+        let decision = self.run_checkpoint(
+            CheckpointMode::Truncate,
+            self.pressure(sample.bytes),
+            sample.bytes,
+            CheckpointBlockers::default(),
+        )?;
+        Ok(CheckpointResult::Decision { sample, decision })
+    }
+
     fn run_exclusive(
         &mut self,
         mode: CheckpointMode,

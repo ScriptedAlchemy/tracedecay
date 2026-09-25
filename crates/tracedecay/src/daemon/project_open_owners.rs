@@ -38,12 +38,14 @@ use tracedecay_daemon_service::{
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_lsp::analyzer::broker::AdmittedLspProvider;
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 mod advisory_runtime;
 mod automation_effect_recovery;
 #[cfg(test)]
 #[path = "project_open_owners/code_index_reads/ignored_dependency_admission_tests.rs"]
 mod code_index_ignored_dependency_admission_tests;
+mod compiler_diagnostics_producer;
 mod primitive_runtime;
 mod query_authority_upgrade;
 
@@ -80,7 +82,7 @@ async fn install_project_open_source_edit_owners(
 
 pub(crate) async fn install_project_open_source_edit_preview_owner(
     server: &McpServer,
-    graph: Arc<crate::project::TraceDecay>,
+    graph: Arc<tracedecay_project::project::TraceDecay>,
     code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     project_root: &Path,
     project_id: &str,
@@ -129,6 +131,11 @@ pub(crate) async fn install_project_open_source_edit_owners_for_test(
     let graph = server.cg().await;
     if server.daemon_invocation_service().is_none() {
         return Ok(false);
+    }
+    if let Some(scope) = server.admitted_project_scope() {
+        server
+            .register_graph_tool_owner(graph.project_root(), scope)
+            .await?;
     }
     let Some(code_graph) = server.code_graph_projection_read_port() else {
         // A directly constructed test server carries no production code-graph
@@ -778,6 +785,19 @@ pub(super) async fn register_project_open_production_owners(
         .await;
     });
 
+    // A TypeScript project with its own compiler gets an automatic diagnostics
+    // producer: bounded background work after each complete generation, so
+    // `tracedecay_diagnostics` has a publication to read without a caller
+    // pasting compiler output first.
+    let _typescript_producer_admitted =
+        compiler_diagnostics_producer::spawn_typescript_diagnostics_producer(
+            server,
+            invocation.clone(),
+            project_root.to_path_buf(),
+            &scope,
+            Arc::clone(&graph),
+        );
+
     tracing::info!(
         event = "project_open_owner_phase",
         project = %project_root.display(),
@@ -812,7 +832,10 @@ async fn register_project_query_authority(
     session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     scope: ResolvedScope,
 ) {
-    let cursor_keys = match session_db.load_session_cursor_key_provider_result().await {
+    let cursor_keys = match SessionTemporalAccess::new(&*session_db)
+        .load_session_cursor_key_provider_result()
+        .await
+    {
         Ok(cursor_keys) => cursor_keys,
         Err(error) => {
             tracing::debug!(

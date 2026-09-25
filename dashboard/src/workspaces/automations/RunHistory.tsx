@@ -3,15 +3,8 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 import { PayloadBoundary } from "../../ui/ReadSection.tsx";
 import { relativeAge } from "../../ui/time.ts";
 import { cn } from "../../ui/cn";
-import {
-  automationRunsReading,
-  useAutomationRunArtifactPayload,
-  useAutomationRunArtifacts,
-  useAutomationRuns,
-  type RunArtifactRow,
-  type RunArtifactsPayload,
-  type RunRow,
-} from "../../data/query/automation.ts";
+import type { AutomationRunArtifact, AutomationRunArtifactsPayloadV1, AutomationRunRowV1 } from "../../contracts/generated.ts";
+import { automationRunsReading, useAutomationRunArtifactPayload, useAutomationRunArtifacts, useAutomationRuns } from "../../data/query/automation.ts";
 import { artifactPayloadBelongsTo, missingArtifactKinds } from "./ledger.ts";
 
 /**
@@ -41,13 +34,13 @@ export function RunHistory() {
           // The ledger route answers an absent ledger file with an empty list,
           // which is the truthful reading: no run has ever been recorded here.
           return reading.complete ? (
-            <p className="text-2xs text-text-muted">
+            <p className="text-body text-text-muted">
               no automation runs are recorded in this project&apos;s ledger
             </p>
           ) : (
             <p
               role="status"
-              className="text-2xs leading-relaxed text-text-secondary"
+              className="text-body leading-relaxed text-text-secondary"
             >
               Showing a partial list: {reading.reason}.
             </p>
@@ -58,7 +51,7 @@ export function RunHistory() {
             {reading.complete ? null : (
               <p
                 role="status"
-                className="pb-1.5 text-2xs leading-relaxed text-text-secondary"
+                className="pb-1.5 text-body leading-relaxed text-text-secondary"
               >
                 Showing a partial list: {reading.reason}.
               </p>
@@ -77,7 +70,7 @@ export function RunHistory() {
 
 /** One run: a disclosure row whose panel holds the artifact reading. The
  * artifact request is issued only when the row first opens. */
-function RunLine({ run }: { run: RunRow }) {
+function RunLine({ run }: { run: AutomationRunRowV1 }) {
   const [open, setOpen] = useState(false);
   const started = Number(run.started_at);
   const age = Number.isFinite(started)
@@ -107,23 +100,23 @@ function RunLine({ run }: { run: RunRow }) {
         <span className="min-w-0 flex-1 truncate text-xs">{run.task}</span>
         <span
           className={cn(
-            "shrink-0 rounded-[var(--radius-chip)] border border-edge-subtle px-1.5 text-2xs",
+            "shrink-0 rounded-[var(--radius-chip)] border border-edge-subtle px-1.5 text-body",
             run.status === "failed" ? "text-state-error" : "text-text-muted",
           )}
         >
           {run.status}
         </span>
-        <span className="tabular shrink-0 text-2xs text-text-muted">
+        <span className="tabular shrink-0 text-sm text-text-muted">
           {run.accepted_count} accepted · {run.rejected_count} rejected
         </span>
         {/* The record's timestamp verbatim when it does not parse as epoch
          * seconds: a raw string is a truthful oddity, a blank is a lie. */}
-        <span className="tabular shrink-0 text-2xs text-text-muted">
+        <span className="tabular shrink-0 text-sm text-text-muted">
           {age ?? run.started_at}
         </span>
       </button>
       {run.error ? (
-        <p className="pb-1.5 pl-5 text-2xs leading-relaxed text-state-error">
+        <p className="pb-1.5 pl-5 text-body leading-relaxed text-state-error">
           {run.error}
         </p>
       ) : null}
@@ -147,7 +140,7 @@ function RunArtifacts({
   return (
     <div className="mb-1.5 ml-5 border-l border-edge-subtle pl-2.5">
       {recordedKinds.length === 0 ? (
-        <p className="py-1 text-2xs text-text-muted">
+        <p className="py-1 text-body text-text-muted">
           this run recorded no artifacts in its ledger entry
         </p>
       ) : (
@@ -163,7 +156,7 @@ function RunArtifacts({
   );
 }
 
-function ArtifactList({ data }: { data: RunArtifactsPayload }) {
+function ArtifactList({ data }: { data: AutomationRunArtifactsPayloadV1 }) {
   const chain = data.artifact_chain;
   const missing = missingArtifactKinds(chain);
   return (
@@ -172,7 +165,7 @@ function ArtifactList({ data }: { data: RunArtifactsPayload }) {
        * matches the published chain. Its words, not a green summary. */}
       <p
         className={cn(
-          "text-2xs leading-relaxed",
+          "text-body leading-relaxed",
           chain.integrity_status === "verified"
             ? "text-text-secondary"
             : "text-state-error",
@@ -193,7 +186,7 @@ function ArtifactLine({
   artifact,
 }: {
   runId: string;
-  artifact: RunArtifactRow;
+  artifact: AutomationRunArtifact;
 }) {
   const [open, setOpen] = useState(false);
   const payload = useAutomationRunArtifactPayload(runId, artifact.kind, open);
@@ -205,15 +198,15 @@ function ArtifactLine({
         onClick={() => setOpen((value) => !value)}
         className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-left"
       >
-        <span className="shrink-0 text-2xs text-text-primary">
+        <span className="shrink-0 text-body text-text-primary">
           {open ? "Hide" : "Inspect"} {artifact.kind.replaceAll("_", " ")}
         </span>
         {artifact.summary ? (
-          <span className="min-w-0 flex-1 truncate text-2xs text-text-muted" title={artifact.summary}>
+          <span className="min-w-0 flex-1 truncate text-body text-text-muted" title={artifact.summary}>
             {artifact.summary}
           </span>
         ) : null}
-        <span className="tabular shrink-0 font-mono text-3xs text-text-muted" title={artifact.sha256}>
+        <span className="tabular shrink-0 font-mono text-xs text-text-muted" title={artifact.sha256}>
           {artifact.sha256.slice(0, 12)}
         </span>
       </button>
@@ -223,12 +216,12 @@ function ArtifactLine({
             artifactPayloadBelongsTo(data, runId, artifact) ? (
               <pre
                 aria-label={`${artifact.kind} artifact payload`}
-                className="max-h-64 overflow-auto whitespace-pre-wrap break-words border border-edge-subtle bg-surface-1 p-2 font-mono text-3xs text-text-secondary"
+                className="max-h-64 overflow-auto whitespace-pre-wrap break-words border border-edge-subtle bg-surface-1 p-2 font-mono text-xs text-text-secondary"
               >
                 {JSON.stringify(data.payload, null, 2)}
               </pre>
             ) : (
-              <p role="status" className="text-2xs text-state-error">
+              <p role="status" className="text-body text-state-error">
                 the artifact payload does not belong to this run and kind
               </p>
             )

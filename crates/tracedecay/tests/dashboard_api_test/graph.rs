@@ -23,7 +23,6 @@ fn assert_ready_verified_generation(body: &Value) {
     );
 }
 use tracedecay::dashboard;
-use tracedecay::project::TraceDecay;
 use tracedecay_code_index::graph_projection::{
     CodeGraphProjectionStore, HermeticCodeGraphProjectionStore,
 };
@@ -54,6 +53,7 @@ use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadAdmissionPort, CodeGraphReadError,
     CodeGraphReadFuture, CodeGraphReadRequest, VerifiedCodeGraphRead,
 };
+use tracedecay_project::project::TraceDecay;
 use tracedecay_session_memory::context::RegisteredScopeResolver;
 
 struct DashboardFixture {
@@ -223,7 +223,7 @@ async fn setup_project(
     let graph = runtime
         .initialize_project_graph_for_test(
             project_root,
-            tracedecay::project::TraceDecayOpenOptions {
+            tracedecay_project::project::TraceDecayOpenOptions {
                 profile_root: Some(profile_root.to_path_buf()),
                 global_db_path: None,
             },
@@ -794,13 +794,15 @@ async fn start_dashboard_fixture_full(
         let _ = dashboard::run_until_shutdown_for_tests_with_host_admission(
             server_graph,
             authority,
-            dashboard::DashboardTestProjectGraphsV1::default(),
-            dashboard::DashboardTestEndpointV1 {
+            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::DashboardTestEndpointV1 {
                 host: "127.0.0.1",
                 port,
             },
-            tracedecay::product_runtime::register_fixture_product_runtime().build_version(),
-            dashboard::spa_router(tracedecay::product_runtime::FIXTURE_DASHBOARD_ASSETS),
+            tracedecay_project::product_runtime::register_fixture_product_runtime().build_version(),
+            tracedecay_api::static_dashboard_router(std::sync::Arc::new(
+                tracedecay_project::product_runtime::FIXTURE_DASHBOARD_ASSETS,
+            )),
             std::future::pending(),
         )
         .await;

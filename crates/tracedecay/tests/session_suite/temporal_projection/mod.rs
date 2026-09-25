@@ -3,20 +3,20 @@ use std::fmt::Write as _;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
-    AnchorProvenanceRelationV2, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
+    AnchorProvenanceRelation, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
     CopyProofV1, DurableObservationV1, MessageId, MessageOccurrenceIdV1, MessageOccurrenceRecordV1,
     ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
     ObservationSourceRangeV1, PayloadReferenceV1, ProjectionGenerationId,
     ProjectionOutputOrdinalV1, ProviderId, RetentionClass, RetrievalAnchorId,
-    RetrievalAnchorRecordV2, SanitizationReceiptId, SanitizationReceiptRefV1,
-    SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId,
-    SessionProjectionGenerationV1, TemporalAssertionKindV1, TemporalAssertionRecordV1,
-    TemporalValidityV1, UtcMicros, derive_exact_observation_anchor_id,
+    RetrievalAnchorRecord, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+    SanitizerDispositionV1, SensitivityV1, SessionId, SessionProjectionGenerationV1,
+    TemporalAssertionKindV1, TemporalAssertionRecordV1, TemporalValidityV1, UtcMicros,
+    derive_exact_observation_anchor_id,
 };
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::{
     AnchoredObservationWrite, MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS,
@@ -25,9 +25,9 @@ use tracedecay_store::{
     SessionGenerationRebuildRequestV1, SessionStoreError, SessionTemporalCapabilitiesV1,
     SessionTemporalCapabilityV1, SessionTemporalProjectionBatchDispositionV1,
     SessionTemporalProjectionBatchV1, SessionTemporalProjectionStore, SessionTemporalSnapshotV1,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 pub(crate) async fn profile_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
     HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
@@ -170,7 +170,7 @@ pub(crate) fn anchored_write(observation: DurableObservationV1) -> AnchoredObser
 
 pub(crate) fn anchored_write_with_lineage(
     observation: DurableObservationV1,
-    lineage: Option<(AnchorProvenanceRelationV2, RetrievalAnchorId)>,
+    lineage: Option<(AnchorProvenanceRelation, RetrievalAnchorId)>,
     occurred_at: Option<i64>,
 ) -> AnchoredObservationWrite {
     let identity = observation.identity();
@@ -187,7 +187,7 @@ pub(crate) fn anchored_write_with_lineage(
     let authorization =
         build_observation_resolution_authorization_v1(write.observation(), "temporal-test")
             .unwrap();
-    let anchor = build_observation_retrieval_anchor_v2(
+    let anchor = build_observation_retrieval_anchor(
         write.observation(),
         projection_generation.clone(),
         UtcMicros(1),
@@ -208,7 +208,7 @@ pub(crate) fn anchored_write_with_lineage(
             "end": valid_at.saturating_add(1),
         });
     }
-    let anchor: RetrievalAnchorRecordV2 = serde_json::from_value(anchor_json).unwrap();
+    let anchor: RetrievalAnchorRecord = serde_json::from_value(anchor_json).unwrap();
     AnchoredObservationWrite::new(write, anchor, projection_generation).unwrap()
 }
 
@@ -254,7 +254,7 @@ where
 async fn persist_custom_observation_with_lineage<S>(
     store: &S,
     observation: DurableObservationV1,
-    relation: AnchorProvenanceRelationV2,
+    relation: AnchorProvenanceRelation,
     object_anchor_id: RetrievalAnchorId,
 ) -> DurableObservationV1
 where
@@ -280,7 +280,7 @@ pub(crate) async fn persist_observation_with_lineage<S>(
     session_id: &SessionId,
     ordinal: u64,
     text: &str,
-    relation: AnchorProvenanceRelationV2,
+    relation: AnchorProvenanceRelation,
     object_anchor_id: RetrievalAnchorId,
     valid_at: Option<i64>,
 ) -> DurableObservationV1

@@ -212,9 +212,11 @@ describe("Doctor findings decoder", () => {
       remediations: [],
       known_families: ["configuration"],
       schema_convergences: [],
+      storage_kind_statuses: [],
       note: "configuration drift observed",
     });
 
+    expect(parsed.entries[0]!.finding.family).toBe("configuration");
     expect(parsed).not.toHaveProperty("remediations");
     expect(parsed.entries[0]!.finding).not.toHaveProperty("remediation");
   });

@@ -126,7 +126,7 @@ fn write_entry_inner(
         file.set_len(FILE_SIZE as u64)?;
     }
 
-    let mut mmap = unsafe { memmap2::MmapMut::map_mut(&file)? };
+    let mut mmap = unsafe { memmap2::MmapMut::map_mut(&*file)? };
 
     let write_idx = u64::from_le_bytes(
         mmap[OFF_WRITE_IDX..OFF_WRITE_IDX + 8]
@@ -151,7 +151,7 @@ fn write_entry_inner(
     mmap[OFF_WRITE_IDX..OFF_WRITE_IDX + 8].copy_from_slice(&new_idx.to_le_bytes());
 
     mmap.flush()?;
-    file.unlock()?;
+    file.release()?;
     Ok(())
 }
 

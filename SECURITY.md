@@ -31,7 +31,7 @@ tracedecay builds a **local** code graph stored in the active project store. Rep
 - Call relationships and dependency edges
 - FTS5 search index
 - Cross-session memory: durable facts, named entities, code-area notes, decisions, and feedback events in the holographic fact store. Those rows are local-only project data.
-- A response cache for `tracedecay_read` (`read_cache` table): the rendered output served to the agent, stored as a BLOB keyed by file path, mode, and arguments. For full/line-range reads this rendered output contains source text. Rows are freshness-gated by file mtime and swept after a period of inactivity.
+- A response cache for mode-aware source reads (`read_cache` table): the rendered output served to the agent, stored as a BLOB keyed by file path, mode, and arguments. For full/line-range reads this rendered output contains source text. Rows are freshness-gated by file mtime and swept after a period of inactivity.
 
 Aside from the `read_cache`, the graph itself does **not** persist raw source code. It stores structural metadata only. The active project store is local-only. There is no cloud sync, remote database, or server-side storage.
 
@@ -148,7 +148,7 @@ The Windows-elevation `unsafe` documented in earlier versions was removed alongs
 ## Best Practices
 
 - Add `.tracedecay/` to your `.gitignore` to avoid committing local store markers or repo-local databases.
-- If your project contains sensitive code, be aware that the database stores symbol names and signatures, and the `read_cache` table can hold rendered source text from `tracedecay_read` responses. Keeping repo-local store directories ignored and treating profile-sharded stores as private user data keeps both out of version control.
+- If your project contains sensitive code, be aware that the database stores symbol names and signatures, and the `read_cache` table can hold rendered source text from source-read responses. Keeping repo-local store directories ignored and treating profile-sharded stores as private user data keeps both out of version control.
 - Keep tracedecay updated (`tracedecay upgrade`) to receive security fixes.
 - Review the [CHANGELOG](CHANGELOG.md) before upgrading to understand what changed.
 

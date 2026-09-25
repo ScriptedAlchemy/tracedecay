@@ -4,8 +4,8 @@ use tracedecay_domain::{FactOwnerV1, RetrievalAnchorId, UtcMicros};
 use tracedecay_store::{
     AnchorDerivativeKindV1, AnchorDispositionAppendOutcomeV1, AnchorDispositionStateV1,
     RetrievalAnchorDerivativeV1, RetrievalAnchorDispositionRecordV1,
-    RetrievalAnchorDispositionStore, RetrievalAnchorOwnerV1, RetrievalAnchorStoreError,
-    RetrievalAnchorStoreResult, RetrievalAnchorTombstoneV1,
+    RetrievalAnchorDispositionStore, RetrievalAnchorStoreError, RetrievalAnchorStoreResult,
+    RetrievalAnchorTombstoneV1,
 };
 
 use crate::db::engine::{Executor, QueryExecutor, params};
@@ -84,7 +84,7 @@ pub(crate) async fn resolve_anchor_derivatives<O>(
     anchor_id: &RetrievalAnchorId,
 ) -> Result<Vec<RetrievalAnchorDerivativeV1>>
 where
-    O: serde::Serialize + Clone + Into<RetrievalAnchorOwnerV1>,
+    O: serde::Serialize + Clone + Into<FactOwnerV1>,
 {
     let owner_json = owner_json(owner)?;
     if !AnchorDispositionStateV1::serves_derivatives(
@@ -421,7 +421,7 @@ impl super::Database {
         anchor_id: &RetrievalAnchorId,
     ) -> Result<Vec<RetrievalAnchorDerivativeV1>>
     where
-        O: serde::Serialize + Clone + Into<RetrievalAnchorOwnerV1>,
+        O: serde::Serialize + Clone + Into<FactOwnerV1>,
     {
         let connection = self.read_connection();
         resolve_anchor_derivatives(&connection, owner, anchor_id).await
@@ -504,7 +504,7 @@ impl RetrievalAnchorDispositionStore for super::Database {
     fn current_disposition(
         &self,
         anchor_id: &RetrievalAnchorId,
-        owner: &RetrievalAnchorOwnerV1,
+        owner: &FactOwnerV1,
     ) -> impl std::future::Future<
         Output = RetrievalAnchorStoreResult<Option<RetrievalAnchorDispositionRecordV1>>,
     > + Send {
@@ -519,7 +519,7 @@ impl RetrievalAnchorDispositionStore for super::Database {
     fn tombstone(
         &self,
         anchor_id: &RetrievalAnchorId,
-        owner: &RetrievalAnchorOwnerV1,
+        owner: &FactOwnerV1,
     ) -> impl std::future::Future<
         Output = RetrievalAnchorStoreResult<Option<RetrievalAnchorTombstoneV1>>,
     > + Send {
@@ -554,7 +554,7 @@ impl RetrievalAnchorDispositionStore for super::Database {
     fn derivatives(
         &self,
         anchor_id: &RetrievalAnchorId,
-        owner: &RetrievalAnchorOwnerV1,
+        owner: &FactOwnerV1,
     ) -> impl std::future::Future<
         Output = RetrievalAnchorStoreResult<Vec<RetrievalAnchorDerivativeV1>>,
     > + Send {

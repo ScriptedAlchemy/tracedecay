@@ -22,7 +22,7 @@ async fn activation_rejects_omitted_canonical_assertion_lineage() {
             &session_id,
             1,
             "second",
-            AnchorProvenanceRelationV2::Supersedes,
+            AnchorProvenanceRelation::Supersedes,
             first.retrieval_anchor_id.clone(),
             None,
         )
@@ -80,7 +80,7 @@ async fn activation_accepts_complete_canonical_graph_and_receipt_coverage() {
             &session_id,
             1,
             "second",
-            AnchorProvenanceRelationV2::Supersedes,
+            AnchorProvenanceRelation::Supersedes,
             first.retrieval_anchor_id.clone(),
             None,
         )
@@ -147,7 +147,7 @@ async fn supersession_derivatives_resolve_transitive_current_state() {
             &session_id,
             1,
             "second",
-            AnchorProvenanceRelationV2::Supersedes,
+            AnchorProvenanceRelation::Supersedes,
             first.retrieval_anchor_id.clone(),
             Some(20),
         )
@@ -163,7 +163,7 @@ async fn supersession_derivatives_resolve_transitive_current_state() {
             &session_id,
             2,
             "third",
-            AnchorProvenanceRelationV2::Supersedes,
+            AnchorProvenanceRelation::Supersedes,
             second.retrieval_anchor_id.clone(),
             Some(30),
         )
@@ -179,7 +179,7 @@ async fn supersession_derivatives_resolve_transitive_current_state() {
             &session_id,
             3,
             "fourth",
-            AnchorProvenanceRelationV2::Supersedes,
+            AnchorProvenanceRelation::Supersedes,
             third.retrieval_anchor_id.clone(),
             Some(40),
         )
@@ -442,7 +442,7 @@ async fn activation_rejects_incomplete_frontier_and_receipt_digest_mismatch() {
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute(
         "UPDATE session_occurrences
-         SET snippet_text = 'tampered'
+         SET index_text = 'tampered'
          WHERE session_id = ?1 AND generation = 3",
         rusqlite::params![session_id.as_str()],
     )

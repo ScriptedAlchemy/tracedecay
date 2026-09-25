@@ -6,7 +6,6 @@ mod final_authority;
 mod payload_digests;
 
 pub(in crate::db) use baseline::create_schema;
-pub(in crate::db) use payload_digests::{PAYLOAD_DIGEST_OBJECTS, PAYLOAD_DIGESTS_SCHEMA};
 pub(in crate::db) const FINAL_SCHEMA_BATCHES: &[&str] = &[
     baseline::BASELINE_SCHEMA,
     payload_digests::PAYLOAD_DIGESTS_SCHEMA,

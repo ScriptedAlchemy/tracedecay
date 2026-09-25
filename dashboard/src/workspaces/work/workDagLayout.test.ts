@@ -84,14 +84,15 @@ describe('workDagLayout', () => {
     const projections = [
       workTaskView({ task_id: 'a', title: 'A' }),
       workTaskView({ task_id: 'aa', title: 'AA', dependencies: ['a'] }),
-      // Same depth as `aa` only because of the cycle it forms with `cb`, which
-      // has no predecessor outside the cycle: no column anchors it.
+      // In the root stratum beside `a` only because of the cycle it forms with
+      // `cb`, which has no predecessor outside the cycle: no column anchors it.
       workTaskView({ task_id: 'ca', title: 'CA', dependencies: ['cb'] }),
       workTaskView({ task_id: 'cb', title: 'CB', dependencies: ['ca'] }),
     ];
     const layout = layoutOf(projections);
     const cycle = layout.strata.find((stratum) => stratum.taskIds.includes('ca'));
-    expect(cycle).toBeDefined();
+    expect(cycle?.taskIds).toEqual(['a', 'ca', 'cb']);
+    expect(layout.byId.get('a')?.cyclic).toBe(false);
     expect(layout.byId.get('ca')?.cyclic).toBe(true);
     expect(layout.byId.get('cb')?.cyclic).toBe(true);
   });

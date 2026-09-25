@@ -132,7 +132,7 @@ describe('SettingsPage effective configuration review', () => {
       'environment.variables.TRACEDECAY_ENABLE_GLOBAL_DB',
     ]);
     // Origin is the group's stated location, or a stated absence.
-    expect(within(row(MAX_FILE_SIZE)).getByTitle('/fast/projects/tracedecay/.tracedecay/config.toml')).toBeTruthy();
+    expect(within(row(MAX_FILE_SIZE)).getByText('origin not served')).toBeTruthy();
     expect(within(row('storage.store_root')).getByText('origin not served')).toBeTruthy();
   });
 
@@ -739,7 +739,7 @@ describe('SettingsPage effective configuration review', () => {
     const filter = screen.getByLabelText('Filter configuration');
     await user.type(filter, 'poll');
     expect([...document.querySelectorAll('[role="row"][data-key]')].map((element) => element.getAttribute('data-key'))).toEqual([POLL_SECS]);
-    expect(screen.getByText('1 of 59 settings')).toBeTruthy();
+    expect(screen.getByText('1 of 54 settings')).toBeTruthy();
 
     await user.clear(filter);
     await user.type(filter, 'zzzz-no-such-key');

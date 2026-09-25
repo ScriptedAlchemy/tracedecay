@@ -56,27 +56,6 @@ pub fn indeterminate_external_effect_problem(
     )
 }
 
-pub fn shipped_proposal_reset_required_problem(
-    operation: &tracedecay_contracts::ApplicationOperation,
-    context: &RequestContext,
-    request: &AutomationRunRequestV1,
-) -> Result<AutomationSettledProblem> {
-    zero_effect_terminal(
-        operation,
-        context,
-        request,
-        ApplicationProblem::ResetRequired {
-            diagnostic: SafeDiagnostic::new(
-                "application.memory-automation-run.shipped-proposals-reset-required",
-                "Unresolved shipped fact-proposal state cannot be imported because final-V2 has no approval authority; preserve it and explicitly reset its exact file.",
-            )
-            .map_err(contract_error)?,
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::Reset],
-        },
-    )
-}
-
 pub fn failed_ledger_problem(
     context: &RequestContext,
     cancellation: &CancellationSignal,
@@ -227,7 +206,7 @@ mod tests {
 
     fn failed_ledger() -> AutomationRunLedgerRecord {
         serde_json::from_value(json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "run_id": "run.failed-ledger-problem",
             "trigger": "scheduler",
             "task": "memory_curator",
@@ -237,8 +216,8 @@ mod tests {
             "rejected_count": 0,
             "error": "backend failed",
             "error_classification": "permanent",
-            "started_at": "2026-08-12T00:00:00Z",
-            "completed_at": "2026-08-12T00:00:01Z"
+            "started_at": "1786492800",
+            "completed_at": "1786492801"
         }))
         .expect("failed ledger")
     }

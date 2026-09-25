@@ -25,7 +25,6 @@ fn run_hydration_render_workload() -> usize {
         summary_sources: Vec::new(),
         payload_ref: None,
         from_current_session: None,
-        externalized_note: None,
         source_pagination: None,
     };
 

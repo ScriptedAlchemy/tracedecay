@@ -1,137 +1,17 @@
-//! The `upgrade` / `update` / `post-update` / `update-plugin` flow: binary
-//! upgrade via subprocess re-exec, generated-plugin refresh, daemon service
-//! refresh, and the full tracked-agent reinstall that keeps config-managed
-//! integrations in sync.
+//! The `upgrade` / `update` / `post-update` flow: binary upgrade via
+//! subprocess re-exec, daemon service refresh, and the tracked-agent
+//! reinstall that keeps every host integration in sync.
 //!
 //! The post-update pass refreshes every already-configured agent integration
-//! through its canonical lifecycle transaction and post-install action, so a
-//! separate `tracedecay reinstall` is not needed after an upgrade. Pass
-//! `--no-reinstall` to skip that agent-integration refresh.
-//!
-//! Hosts that own a canonical first-party component set are refreshed only by
-//! that tracked-agent pass, which routes them through the receipt-backed
-//! component-set transaction. The generated-plugin refresh deliberately skips
-//! them: it is not part of the transaction, so rewriting a receipt-owned
-//! artifact there would leave the receipt stale until the next reseal.
+//! through its receipt-backed component-set transaction, the sole writer of
+//! host artifacts, so a separate `tracedecay reinstall` is not needed after an
+//! upgrade. Pass `--no-reinstall` to skip that agent-integration refresh.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use crate::upgrade::UpgradeOutcome;
 use tracedecay_daemon_control as daemon_control;
 use tracedecay_session_memory::user_config::UserConfig;
-
-// Exceeds the daemon's sequential 15s client drain, 2s task abort, and 45s
-// server-shutdown bounds with margin for service-manager/process-exit latency.
-const DAEMON_RESTART_LEASE_TIMEOUT: Duration = Duration::from_secs(90);
-
-pub(crate) async fn refresh_generated_plugins() -> tracedecay_domain::errors::Result<()> {
-    let home = tracedecay_home_dir()?;
-    let tracedecay_bin = tracedecay_bin_for_generated_artifacts()?;
-    refresh_generated_plugins_at(
-        tracedecay_agent_hosts::agents::all_integrations(),
-        &home,
-        &tracedecay_bin,
-    )
-}
-
-/// Whether a host owns a canonical first-party component set.
-///
-/// For those hosts the receipt-backed component-set transaction is the sole
-/// writer of the deployed artifacts: `reinstall_agent_integrations` routes them
-/// through `apply_default_canonical_component_set` and never calls
-/// `update_plugin`. A second writer outside that transaction (this
-/// generated-artifact refresh) rewrote the very files the receipt claims,
-/// before the transaction resealed them, so every version bump left the
-/// receipt stale and Doctor reported a component-ownership conflict.
-///
-/// `integration_id_for_host` is many-to-one (CursorCloud and CursorDesktop both
-/// map to `cursor`), so an id counts as canonical when ANY host behind it has a
-/// non-empty default component set, the transaction owns that id's artifacts.
-fn host_owns_canonical_component_set(agent_id: &str) -> bool {
-    tracedecay_agent_hosts::agents::host_bundle::stock_host_kinds()
-        .into_iter()
-        .any(|host| {
-            tracedecay_agent_hosts::agents::integration_id_for_host(host) == agent_id
-                && !tracedecay_agent_hosts::agents::host_bundle_registry::default_components(host)
-                    .is_empty()
-        })
-}
-
-fn refresh_generated_plugins_at(
-    integrations: Vec<Box<dyn tracedecay_agent_hosts::agents::AgentIntegration>>,
-    home: &Path,
-    tracedecay_bin: &str,
-) -> tracedecay_domain::errors::Result<()> {
-    eprintln!(
-        "Refreshing tracedecay-generated plugin artifacts (supported user configs are preserved)"
-    );
-
-    // Detection-driven, not `installed_agents`-driven: each integration
-    // decides whether generated artifacts exist on this machine, so stale
-    // tracking state can neither skip a real install nor install anywhere new.
-    let mut refreshed_any = false;
-    let mut failures: Vec<String> = Vec::new();
-    for ag in integrations {
-        if host_owns_canonical_component_set(ag.id()) {
-            eprintln!(
-                "  \x1b[2m·\x1b[0m {}: owned by the receipt-backed component-set transaction; \
-                 skipped here so the receipt is not left stale",
-                ag.id()
-            );
-            continue;
-        }
-        let ctx = tracedecay_agent_hosts::agents::InstallContext {
-            home: home.to_path_buf(),
-            tracedecay_bin: tracedecay_bin.to_string(),
-            tool_permissions: tracedecay_agent_hosts::agents::expected_tool_perms()?,
-            project_root: None,
-            dashboard: true,
-        };
-        let outcome = ag.update_plugin(&ctx);
-        match outcome {
-            Ok(tracedecay_agent_hosts::agents::UpdatePluginOutcome::Refreshed(paths)) => {
-                refreshed_any = true;
-                for path in paths {
-                    eprintln!(
-                        "  \x1b[32m✔\x1b[0m {}: refreshed {}",
-                        ag.id(),
-                        path.display()
-                    );
-                }
-            }
-            Ok(tracedecay_agent_hosts::agents::UpdatePluginOutcome::NotInstalled) => {}
-            // Config-managed integrations (claude, copilot, …) are refreshed by
-            // the tracked-agent reinstall in `run_post_update_tasks`, so there
-            // is nothing to do, and nothing to nag about, here.
-            Ok(tracedecay_agent_hosts::agents::UpdatePluginOutcome::ConfigOnly) => {}
-            Ok(tracedecay_agent_hosts::agents::UpdatePluginOutcome::DeferredUserAction(
-                deferred,
-            )) => {
-                refreshed_any = true;
-                eprintln!(
-                    "  \x1b[33mwarning:\x1b[0m {} plugin activation deferred: {}",
-                    ag.id(),
-                    deferred.remediation
-                );
-                for path in deferred.staged_paths {
-                    eprintln!("    staged: {}", path.display());
-                }
-            }
-            Err(e) => failures.push(format!("{}: {e}", ag.id())),
-        }
-    }
-    if !refreshed_any {
-        eprintln!("No generated plugin installs detected. Nothing to update.");
-    }
-    if !failures.is_empty() {
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("update-plugin failed for {}", failures.join("; ")),
-        });
-    }
-
-    Ok(())
-}
 
 /// Rewrites the installed daemon service while preserving its captured
 /// lifecycle state, returning the service path and socket or `None` when no
@@ -241,9 +121,8 @@ where
 }
 
 pub(crate) fn restart_daemon_service() -> tracedecay_domain::errors::Result<()> {
-    let guard = daemon_control::QuiescedDaemonLifecycle::acquire_with_timeout(
+    let guard = daemon_control::QuiescedDaemonLifecycle::acquire(
         "daemon restart",
-        DAEMON_RESTART_LEASE_TIMEOUT,
         crate::product_runtime::PRODUCT_BUILD_VERSION,
     )?;
     let (stopped_state, desired_state) = match guard.previous_state() {
@@ -284,29 +163,12 @@ pub(crate) fn restart_daemon_service() -> tracedecay_domain::errors::Result<()> 
     }
 }
 
-fn tracedecay_home_dir() -> tracedecay_domain::errors::Result<PathBuf> {
-    tracedecay_agent_hosts::agents::home_dir().ok_or_else(|| {
-        tracedecay_domain::errors::TraceDecayError::Config {
-            message: "could not determine home directory".to_string(),
-        }
-    })
-}
-
 pub(crate) fn tracedecay_bin_on_path() -> tracedecay_domain::errors::Result<String> {
     tracedecay_agent_hosts::agents::which_tracedecay().ok_or_else(|| {
         tracedecay_domain::errors::TraceDecayError::Config {
             message: "tracedecay not found on PATH".to_string(),
         }
     })
-}
-
-fn tracedecay_bin_for_generated_artifacts() -> tracedecay_domain::errors::Result<String> {
-    current_tracedecay_exe().map_or_else(tracedecay_bin_on_path, Ok)
-}
-
-fn current_tracedecay_exe() -> Option<String> {
-    let current = std::env::current_exe().ok()?;
-    current_tracedecay_exe_from(Some(&current))
 }
 
 fn current_tracedecay_exe_from(current: Option<&Path>) -> Option<String> {
@@ -387,17 +249,21 @@ where
     }
 }
 
-#[hotpath::measure(label = "cli.update.run")]
-pub(crate) fn run_update_command(no_reinstall: bool) -> tracedecay_domain::errors::Result<()> {
-    run_update_flow("update", RefreshPolicy::Always, no_reinstall)
+#[hotpath::measure(label = "cli.update.run", future = true)]
+pub(crate) async fn run_update_command(
+    no_reinstall: bool,
+) -> tracedecay_domain::errors::Result<()> {
+    run_update_flow("update", RefreshPolicy::Always, no_reinstall).await
 }
 
-#[hotpath::measure(label = "cli.upgrade.run")]
-pub(crate) fn run_upgrade_command(no_reinstall: bool) -> tracedecay_domain::errors::Result<()> {
-    run_update_flow("upgrade", RefreshPolicy::AfterInstall, no_reinstall)
+#[hotpath::measure(label = "cli.upgrade.run", future = true)]
+pub(crate) async fn run_upgrade_command(
+    no_reinstall: bool,
+) -> tracedecay_domain::errors::Result<()> {
+    run_update_flow("upgrade", RefreshPolicy::AfterInstall, no_reinstall).await
 }
 
-fn run_update_flow(
+async fn run_update_flow(
     operation: &str,
     refresh_policy: RefreshPolicy,
     no_reinstall: bool,
@@ -418,7 +284,79 @@ fn run_update_flow(
                 installed_version,
             })
         },
+    )?;
+    reset_refused_profile_authorities(operation).await
+}
+
+/// What the post-window profile probe decided.
+#[derive(Debug, PartialEq, Eq)]
+enum ProfileResetDecision {
+    /// The restored daemon opens the profile; nothing to reset.
+    Opens,
+    /// The daemon refused the profile with a typed reset state.
+    Reset { authority: String, reason: String },
+    /// The probe could not decide (no reachable daemon, transport failure);
+    /// reported, never acted on.
+    Undecided(String),
+}
+
+fn profile_reset_decision(
+    probe: tracedecay_domain::errors::Result<serde_json::Value>,
+) -> ProfileResetDecision {
+    match probe {
+        Ok(_) => ProfileResetDecision::Opens,
+        Err(error) => match error.reset_required_context() {
+            Some((authority, reason)) => ProfileResetDecision::Reset {
+                authority: authority.to_owned(),
+                reason: reason.to_owned(),
+            },
+            None => ProfileResetDecision::Undecided(error.to_string()),
+        },
+    }
+}
+
+/// The upgrade journey ends with core tools that work, not with a typed
+/// refusal on the first tool call. Once the maintenance window has restored
+/// the daemon on the new binary, a projectless probe asks it to open the
+/// profile registry; a typed reset refusal is acted on here by resetting the
+/// complete profile database state, the one reset authority a profile-scoped
+/// refusal has. Old shapes are deleted, never migrated or backed up.
+async fn reset_refused_profile_authorities(
+    operation: &str,
+) -> tracedecay_domain::errors::Result<()> {
+    if !daemon_control::daemon_reachable() {
+        eprintln!(
+            "No reachable TraceDecay daemon after {operation}; the profile's persisted shape is \
+             checked on the daemon's next open."
+        );
+        return Ok(());
+    }
+    let probe = crate::commands::daemon_tool_json(
+        None,
+        "tracedecay_project_list",
+        serde_json::json!({ "limit": 1, "format": "json" }),
     )
+    .await;
+    match profile_reset_decision(probe) {
+        ProfileResetDecision::Opens => Ok(()),
+        ProfileResetDecision::Reset { authority, reason } => {
+            eprintln!(
+                "\n\x1b[33mThe upgraded daemon refuses the persisted {authority} shape: \
+                 {reason}\x1b[0m\n\
+                 Resetting the complete profile database state so core tools work on this \
+                 binary; refused authorities are never migrated or backed up. Re-run \
+                 `tracedecay init <project-root>` for each project afterwards."
+            );
+            crate::commands::handle_wipe(true, true).await
+        }
+        ProfileResetDecision::Undecided(detail) => {
+            eprintln!(
+                "  \x1b[33mwarning:\x1b[0m could not verify that the profile opens after \
+                 {operation}: {detail}"
+            );
+            Ok(())
+        }
+    }
 }
 
 fn combine_operation_and_restore<T>(
@@ -602,33 +540,26 @@ pub(crate) fn install_pass_covers_tracked_agents(
     tracked.iter().all(|id| refreshed.contains(id))
 }
 
-/// Re-runs the canonical component lifecycle for every tracked agent so tool
-/// permissions, hooks, and MCP config stay in sync with the running binary, a
-/// superset of `refresh_generated_plugins`, which rewrites generated artifacts
-/// only. Mirrors the canonical `handle_reinstall_command` (global scope:
-/// `project_root: None`). Continues past a failing agent; returns
+/// Re-runs the canonical component lifecycle for every tracked agent so
+/// artifacts, tool permissions, hooks, and MCP config stay in sync with the
+/// running binary, exactly as `tracedecay reinstall` does. Continues past a failing agent; returns
 /// [`ReinstallOutcome::PartialFailure`] listing every failure (an empty tracked
 /// list is [`ReinstallOutcome::AllOk`]). If the home or binary cannot be
 /// resolved, no install runs and a descriptive failure is reported so the
 /// version markers stay put.
 async fn reinstall_tracked_agents_under_lease(
-    user_config: &UserConfig,
+    agent_ids: &[String],
+    home: &Path,
     lifecycle_lease: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
 ) -> ReinstallOutcome {
-    let (Some(home), Some(bin)) = (
-        tracedecay_agent_hosts::agents::home_dir(),
-        tracedecay_agent_hosts::agents::which_tracedecay(),
-    ) else {
+    let Some(bin) = tracedecay_agent_hosts::agents::which_tracedecay() else {
         return ReinstallOutcome::PartialFailure {
-            failed: vec![
-                "<environment>: could not resolve home directory or tracedecay binary on PATH"
-                    .to_string(),
-            ],
+            failed: vec!["<environment>: could not resolve tracedecay binary on PATH".to_string()],
         };
     };
     let results = crate::agent_cmd::reinstall_agent_integrations_under_lease(
-        &user_config.installed_agents,
-        &home,
+        agent_ids,
+        home,
         &bin,
         lifecycle_lease,
     )
@@ -653,8 +584,6 @@ async fn run_post_update_mutations(
     no_reinstall: bool,
     lifecycle_lease: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
 ) -> tracedecay_domain::errors::Result<()> {
-    refresh_generated_plugins().await?;
-
     if no_reinstall {
         eprintln!("Skipping agent integration refresh (--no-reinstall).");
         // `--no-reinstall` is a durable opt-out for THIS version, not a
@@ -667,12 +596,10 @@ async fn run_post_update_mutations(
         return Ok(());
     }
 
-    // The generated-artifact refresh above skips config-managed integrations
-    // (claude, copilot, …), but a version bump can change their tool
-    // permissions, hooks, or MCP config too. Run the same full tracked-agent
-    // install pass, then advance the version markers. On failure the markers
-    // stay put so the incomplete explicit lifecycle remains observable.
-    //
+    // A version bump can change any host's artifacts, permissions, hooks, or
+    // MCP config. Run the full tracked-agent pass, then advance the version
+    // markers. On failure the markers stay put so the incomplete explicit
+    // lifecycle remains observable.
     let mut config = UserConfig::load();
     // Prune tracked ids that no longer resolve to an integration (a release
     // renamed/removed one, or a typo landed in `installed_agents`).
@@ -687,17 +614,29 @@ async fn run_post_update_mutations(
     {
         eprintln!("warning: could not save tracedecay config: {err}");
     }
-    if config.installed_agents.is_empty() {
+    let Some(home) = tracedecay_agent_hosts::agents::home_dir() else {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
+            message: "could not determine home directory".to_string(),
+        });
+    };
+    // Detected integrations the config never tracked are refreshed too, so an
+    // upgrade over an older install does not leave doctor reporting stale
+    // rendered versions that no maintenance pass will touch.
+    let agent_ids = crate::agent_cmd::maintenance_sweep_agents(&config.installed_agents, &home);
+    if agent_ids.is_empty() {
         eprintln!("Refreshing agent integrations: nothing to refresh");
     } else {
-        eprintln!(
-            "Refreshing agent integrations: {}",
-            config.installed_agents.join(", ")
-        );
+        eprintln!("Refreshing agent integrations: {}", agent_ids.join(", "));
     }
     let reinstall_result =
-        match reinstall_tracked_agents_under_lease(&config, lifecycle_lease).await {
+        match reinstall_tracked_agents_under_lease(&agent_ids, &home, lifecycle_lease).await {
             ReinstallOutcome::AllOk => {
+                if config.installed_agents != agent_ids {
+                    config.installed_agents = agent_ids;
+                    if let Err(err) = config.save() {
+                        eprintln!("warning: could not save tracedecay config: {err}");
+                    }
+                }
                 if let Err(err) = record_completed_reinstall_pass(&mut config) {
                     eprintln!("warning: {err}");
                 }
@@ -712,32 +651,45 @@ async fn run_post_update_mutations(
                 Ok(())
             }
         };
-    reconcile_materialized_managed_skills_after_update();
+    deploy_managed_skills_after_lifecycle();
     reinstall_result
 }
 
-/// Reconciles already-Active managed skills into every detected host skills
-/// directory on `tracedecay update`, so a skill approved before this binary
-/// shipped (or a body update applied since the last activation) still lands as
-/// a real, host-loadable `SKILL.md`. Fork-protected and best-effort: a failure
-/// here never fails the update.
-fn reconcile_materialized_managed_skills_after_update() {
+/// Redeploys managed skills after a lifecycle pass (`update`, `reinstall`,
+/// `install`), so both halves of a managed skill converge on the store: the
+/// host-loadable `SKILL.md` files and the per-host prompt index blocks.
+///
+/// Reconciling only the materialized files left the prompt index converging
+/// solely as a side effect of a successful store mutation, so a store that
+/// emptied without one kept advertising skills that no longer exist. Deploying
+/// here makes the lifecycle converge the index whatever the store did.
+/// Best-effort: a failure never fails the lifecycle pass.
+pub(crate) fn deploy_managed_skills_after_lifecycle() {
     let Ok(profile_root) = tracedecay_runtime_core::storage::default_profile_root() else {
         return;
     };
-    let start = std::env::current_dir()
-        .ok()
-        .or_else(tracedecay_agent_hosts::agents::home_dir)
-        .unwrap_or_else(|| PathBuf::from("."));
+    let Some(home) = tracedecay_agent_hosts::agents::home_dir() else {
+        return;
+    };
+    let start = std::env::current_dir().ok().unwrap_or_else(|| home.clone());
     let project_root =
         tracedecay_automation_runtime::automation::skill_materialization::resolve_project_root(
             &start,
         );
-    tracedecay_automation_runtime::automation::skill_materialization::reconcile_after_activation(
+    let receipt = tracedecay_automation_runtime::automation::skill_writer::deploy_managed_skills_at(
         &tracedecay_agent_hosts::host_io(),
+        &home,
         &profile_root,
         &project_root,
     );
+    for error in &receipt.errors {
+        tracing::warn!(%error, "managed skill deployment failed");
+    }
+    for report in receipt.exports.iter() {
+        if let Some(error) = &report.error {
+            tracing::warn!(agent = %report.agent, %error, "managed skill export failed");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -746,15 +698,45 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        RefreshPolicy, ReinstallOutcome, current_tracedecay_exe_from,
-        host_owns_canonical_component_set, install_pass_covers_tracked_agents,
-        partition_reinstall_results, post_update_binary, post_update_binary_from,
-        prepare_post_update_lease, refresh_generated_plugins_at, restart_daemon_service_with,
-        run_install_then_refresh,
+        ProfileResetDecision, RefreshPolicy, ReinstallOutcome, current_tracedecay_exe_from,
+        install_pass_covers_tracked_agents, partition_reinstall_results, post_update_binary,
+        post_update_binary_from, prepare_post_update_lease, profile_reset_decision,
+        restart_daemon_service_with, run_install_then_refresh,
     };
     use crate::upgrade::UpgradeOutcome;
     use tempfile::TempDir;
     use tracedecay_daemon_control as daemon_control;
+
+    /// Only the typed reset state authorizes deleting profile data after an
+    /// update; an opening profile is left alone and every other failure is
+    /// reported without acting.
+    #[test]
+    fn post_update_profile_reset_acts_only_on_the_typed_reset_state() {
+        assert_eq!(
+            profile_reset_decision(Ok(serde_json::json!({ "projects": [] }))),
+            ProfileResetDecision::Opens
+        );
+        assert_eq!(
+            profile_reset_decision(Err(
+                tracedecay_domain::errors::TraceDecayError::reset_required(
+                    "session temporal",
+                    "published v3 shape",
+                )
+            )),
+            ProfileResetDecision::Reset {
+                authority: "session temporal".to_owned(),
+                reason: "published v3 shape".to_owned(),
+            }
+        );
+        assert_eq!(
+            profile_reset_decision(Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "daemon tool call failed: storage unavailable".to_owned(),
+            })),
+            ProfileResetDecision::Undecided(
+                "config error: daemon tool call failed: storage unavailable".to_owned()
+            )
+        );
+    }
 
     #[test]
     fn daemon_restart_quiesces_service_before_acquiring_exclusive_lease() {
@@ -787,10 +769,18 @@ mod tests {
 
     #[test]
     fn daemon_restart_forces_stopped_service_running() {
+        let order = RefCell::new(Vec::new());
         let result = restart_daemon_service_with(
-            || Ok(daemon_control::DaemonServiceState::StoppedEnabled),
-            || Ok(()),
+            || {
+                order.borrow_mut().push("quiesce");
+                Ok(daemon_control::DaemonServiceState::StoppedEnabled)
+            },
+            || {
+                order.borrow_mut().push("acquire");
+                Ok(())
+            },
             |state| {
+                order.borrow_mut().push("refresh");
                 assert_eq!(state, daemon_control::DaemonServiceState::RunningEnabled);
                 Ok(Some((PathBuf::from("service"), PathBuf::from("socket"))))
             },
@@ -798,7 +788,11 @@ mod tests {
         )
         .expect("restart orchestration");
 
-        assert!(result.is_some());
+        assert_eq!(
+            result,
+            Some((PathBuf::from("service"), PathBuf::from("socket")))
+        );
+        assert_eq!(order.into_inner(), ["quiesce", "acquire", "refresh"]);
     }
 
     #[test]
@@ -889,91 +883,6 @@ mod tests {
         let current = Path::new("/repo/target/debug/deps/agent_suite-abc123");
 
         assert_eq!(current_tracedecay_exe_from(Some(current)), None);
-    }
-
-    /// Kimi owns a canonical component set, so the receipt-backed transaction
-    /// (`reinstall_agent_integrations` → `apply_default_canonical_component_set`)
-    /// is its sole writer. The generated-artifact refresh must leave it alone.
-    /// including its staging directory, and must still succeed rather than
-    /// treating the skip as a failure that blocks maintenance.
-    #[test]
-    fn deferred_kimi_refresh_does_not_block_maintenance() {
-        let home = TempDir::new().unwrap();
-        let installed_path = home.path().join(".kimi-code/plugins/installed.json");
-        std::fs::create_dir_all(installed_path.parent().unwrap()).unwrap();
-        let original = br#"{"version":1,"plugins":[{"id":"tracedecay","enabled":false}]}
-"#;
-        std::fs::write(&installed_path, original).unwrap();
-
-        let result = refresh_generated_plugins_at(
-            vec![Box::new(
-                tracedecay_agent_hosts::agents::kimi::KimiIntegration,
-            )],
-            home.path(),
-            "new-tracedecay",
-        );
-
-        assert!(result.is_ok());
-        assert_eq!(std::fs::read(installed_path).unwrap(), original);
-        assert!(
-            !home
-                .path()
-                .join(".tracedecay/host-bundle-stage/kimi/tracedecay/.kimi-plugin/plugin.json")
-                .exists(),
-            "the component-set transaction owns the Kimi staging bundle"
-        );
-    }
-
-    /// Post-update writer ordering. Every host with a canonical component set
-    /// is written exclusively by the receipt-backed transaction; a second
-    /// writer running before the transaction reseals the receipt is exactly
-    /// what left Cursor Core's receipt stale on every version bump and made
-    /// Doctor report a component-ownership conflict.
-    ///
-    /// Zed, Antigravity, and Vibe joined the receipt-backed lifecycle
-    /// (`default_components` is non-empty for every stock host except the two
-    /// typed-unavailable kinds, which share an id with a supported host), so
-    /// the roster this refresh is handed in production is now canonical end to
-    /// end. Assert that over the production roster itself rather than a frozen
-    /// copy of it, and keep one negative case so the predicate still has to
-    /// discriminate instead of answering `true` for anything.
-    #[test]
-    fn canonical_component_set_hosts_are_not_refreshed_by_a_second_writer() {
-        for integration in tracedecay_agent_hosts::agents::all_integrations() {
-            assert!(
-                host_owns_canonical_component_set(integration.id()),
-                "{} owns a canonical component set",
-                integration.id()
-            );
-        }
-        assert!(
-            !host_owns_canonical_component_set("not-a-stock-host"),
-            "an id that names no stock host cannot own a canonical component set"
-        );
-    }
-
-    /// Cursor's receipt-owned plugin bundle must not be rewritten outside the
-    /// component-set transaction: `.cursor-plugin/plugin.json` carries the
-    /// stamped manifest version and `hooks/hooks.json` bakes the resolved
-    /// binary path, so a refresh here guarantees byte drift from the receipt.
-    #[test]
-    fn cursor_plugin_bundle_is_left_to_the_component_set_transaction() {
-        let home = TempDir::new().unwrap();
-        let manifest_path = home
-            .path()
-            .join(".cursor/plugins/local/tracedecay/.cursor-plugin/plugin.json");
-        std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
-        let receipt_owned = br#"{"name":"tracedecay","version":"0.0.0-receipt"}"#;
-        std::fs::write(&manifest_path, receipt_owned).unwrap();
-
-        let result = refresh_generated_plugins_at(
-            vec![Box::new(tracedecay_agent_hosts::agents::CursorIntegration)],
-            home.path(),
-            "new-tracedecay",
-        );
-
-        assert!(result.is_ok());
-        assert_eq!(std::fs::read(&manifest_path).unwrap(), receipt_owned);
     }
 
     #[test]

@@ -13,8 +13,8 @@ use serde_json::Value;
 use tracedecay_contracts::{
     ApplicationContractError, ApplicationProblem, ApplicationProblemEnvelope,
     ApplicationProblemKind, CancellationSignal, Deadline, OpaqueCursor, PageRequest,
-    ProblemOwningLayer, RequestId, ResultContractRef, RetainedSurfaceOperation, RetryDirective,
-    SafeDiagnostic, application_operation_default_page_size,
+    ProblemOwningLayer, RequestId, ResultContractRef, RetryDirective, SafeDiagnostic,
+    application_operation_default_page_size,
 };
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, BindingSurface, CapabilityId, CatalogSnapshotV1, FeatureId,
@@ -100,6 +100,7 @@ pub enum HttpApplicationOwnerKind {
     Observatory,
     Configuration,
     ContextScout,
+    Retained,
 }
 
 /// Whether the operation is addressed under `/code/{operation}`.
@@ -183,18 +184,12 @@ pub fn http_route_documents(
         authorized_capabilities,
         available_scope,
     ) {
-        let path =
-            match ApplicationSurfaceOperation::from_catalog_name(binding.operation().as_str()) {
-                Some(operation) => http_application_full_route_path(operation),
-                None => {
-                    let Some(operation) =
-                        RetainedSurfaceOperation::from_operation_name(binding.operation().as_str())
-                    else {
-                        continue;
-                    };
-                    crate::retained::retained_application_route_path(operation)
-                }
-            };
+        let Some(operation) =
+            ApplicationSurfaceOperation::from_catalog_name(binding.operation().as_str())
+        else {
+            continue;
+        };
+        let path = http_application_full_route_path(operation);
         documents.push(HttpRouteDocumentV1 {
             method: "POST",
             path,
@@ -277,6 +272,8 @@ pub trait HttpApplicationOwners: Clone + Send + Sync + 'static {
         &self,
         request: HttpApplicationRequest,
     ) -> HttpApplicationInvocationFuture;
+
+    fn invoke_retained(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture;
 }
 
 impl<F, Fut> HttpApplicationOwners for F
@@ -330,6 +327,10 @@ where
         &self,
         request: HttpApplicationRequest,
     ) -> HttpApplicationInvocationFuture {
+        Box::pin((self)(request))
+    }
+
+    fn invoke_retained(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture {
         Box::pin((self)(request))
     }
 }
@@ -477,6 +478,7 @@ where
             "/native-integration/{operation}",
             post(native_integration_operation::<O>),
         )
+        .route("/retained/{operation}", post(retained_operation::<O>))
         .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES))
         .with_state(owners)
 }
@@ -518,7 +520,7 @@ where
 
 fn parse_git_read_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
     ApplicationSurfaceOperation::from_catalog_name(&format!("git_{operation}")).filter(
-        |operation| http_application_owner_kind(*operation) == HttpApplicationOwnerKind::Git,
+        |operation| http_application_owner_kind(*operation) == Some(HttpApplicationOwnerKind::Git),
     )
 }
 
@@ -528,7 +530,9 @@ fn parse_feedback_read_operation(operation: &str) -> Option<ApplicationSurfaceOp
 
 fn parse_public_feedback_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
     ApplicationSurfaceOperation::from_catalog_name(&format!("feedback_{operation}")).filter(
-        |operation| http_application_owner_kind(*operation) == HttpApplicationOwnerKind::Feedback,
+        |operation| {
+            http_application_owner_kind(*operation) == Some(HttpApplicationOwnerKind::Feedback)
+        },
     )
 }
 
@@ -549,7 +553,7 @@ constant_operation_handlers! {
 
 fn parse_primitive_read_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
     ApplicationSurfaceOperation::from_catalog_name(operation).filter(|operation| {
-        http_application_owner_kind(*operation) == HttpApplicationOwnerKind::Primitive
+        http_application_owner_kind(*operation) == Some(HttpApplicationOwnerKind::Primitive)
             && *operation != ApplicationSurfaceOperation::TestResults
             && !is_callable_code_route(*operation)
     })
@@ -562,13 +566,13 @@ fn parse_callable_code_operation(operation: &str) -> Option<ApplicationSurfaceOp
 
 fn parse_configuration_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
     ApplicationSurfaceOperation::from_catalog_name(operation).filter(|operation| {
-        http_application_owner_kind(*operation) == HttpApplicationOwnerKind::Configuration
+        http_application_owner_kind(*operation) == Some(HttpApplicationOwnerKind::Configuration)
     })
 }
 
 fn parse_context_scout_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
     ApplicationSurfaceOperation::from_catalog_name(operation).filter(|operation| {
-        http_application_owner_kind(*operation) == HttpApplicationOwnerKind::ContextScout
+        http_application_owner_kind(*operation) == Some(HttpApplicationOwnerKind::ContextScout)
     })
 }
 
@@ -613,11 +617,18 @@ parsed_operation_handlers! {
     configuration_operation => parse_configuration_operation;
     context_scout_operation => parse_context_scout_operation;
     native_integration_operation => parse_native_integration_operation;
+    retained_operation => parse_retained_operation;
+}
+
+fn parse_retained_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
+    ApplicationSurfaceOperation::from_catalog_name(operation).filter(|operation| {
+        http_application_owner_kind(*operation) == Some(HttpApplicationOwnerKind::Retained)
+    })
 }
 
 fn parse_native_integration_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
     ApplicationSurfaceOperation::from_catalog_name(operation).filter(|operation| {
-        http_application_owner_kind(*operation) == HttpApplicationOwnerKind::NativeIntegration
+        http_application_owner_kind(*operation) == Some(HttpApplicationOwnerKind::NativeIntegration)
     })
 }
 
@@ -648,7 +659,12 @@ where
         Ok(request) => request,
         Err(response) => return *response,
     };
-    let owner_kind = http_application_owner_kind(request.operation);
+    let Some(owner_kind) = http_application_owner_kind(request.operation) else {
+        return adapter_problem_response(
+            request.request_id,
+            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+        );
+    };
     let invocation = match owner_kind {
         HttpApplicationOwnerKind::Git => owners.invoke_git(request),
         HttpApplicationOwnerKind::Feedback => owners.invoke_feedback(request),
@@ -658,6 +674,7 @@ where
         HttpApplicationOwnerKind::Configuration => owners.invoke_configuration(request),
         HttpApplicationOwnerKind::ContextScout => owners.invoke_context_scout(request),
         HttpApplicationOwnerKind::NativeIntegration => owners.invoke_native_integration(request),
+        HttpApplicationOwnerKind::Retained => owners.invoke_retained(request),
     };
     match hotpath::future!(invocation, label = "api.http.handler").await {
         Ok(result) => result.into_http_response(),

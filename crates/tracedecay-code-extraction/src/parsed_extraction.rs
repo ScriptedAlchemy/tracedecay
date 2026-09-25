@@ -117,14 +117,6 @@ impl ParsedExtractionArtifactV1 {
             metrics: parsed.metrics,
         }
     }
-
-    pub(crate) fn into_parsed(self) -> ParsedExtraction {
-        ParsedExtraction {
-            result: self.artifact.result,
-            disposition: self.disposition,
-            metrics: self.metrics,
-        }
-    }
 }
 
 impl ParsedExtraction {

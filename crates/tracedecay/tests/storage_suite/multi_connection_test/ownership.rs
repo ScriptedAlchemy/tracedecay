@@ -207,7 +207,7 @@ fn twelve_mcp_cli_and_hook_clients_share_one_daemon_profile_store_owner() {
     let project_id = tracedecay_runtime_core::storage::default_profile_project_id(&project_path);
     let data_root =
         tracedecay_runtime_core::storage::profile_sharded_data_root(&profile_root, &project_id);
-    let host = tracedecay_hooks::HookHostV1::CursorDesktop;
+    let host = tracedecay_domain::NativeHostIdentityV1::CursorDesktop;
     let (_, capture_report) = tracedecay_hooks::HookSpoolV1::open(
         data_root.join("hook-v2-spool").join(host.hook_key()),
         tracedecay_hooks::HookSpoolConfigV1::stock(host),

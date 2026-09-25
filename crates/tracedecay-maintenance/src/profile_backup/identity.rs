@@ -79,10 +79,7 @@ pub(super) fn collect_project_identities(
                     manifest_path.display()
                 ))
             })?;
-        if manifest.project_id.as_deref() != Some(project_id)
-            || manifest.storage_mode
-                != tracedecay_runtime_core::storage::StorageMode::ProfileSharded
-        {
+        if manifest.project_id.as_deref() != Some(project_id) {
             return Err(ProfileBackupError::corrupt(format!(
                 "project store manifest '{}' does not match its final enrollment identity",
                 manifest_path.display()

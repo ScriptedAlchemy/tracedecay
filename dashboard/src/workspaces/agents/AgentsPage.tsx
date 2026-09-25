@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from 'react';
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
-import { ReadFailure } from '../../ui/LegacyStates.tsx';
+import { ReadFailure } from '../../ui/ReadFailure.tsx';
 import { ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { StateChip } from '../../ui/StateChip.tsx';
 import { MeterRow, Panel, WorkspaceHeader } from '../../ui/instrument.tsx';
@@ -22,7 +22,8 @@ import { AgentHandoffs } from './AgentHandoffs.tsx';
 import { AgentHandoffTokens } from './AgentHandoffTokens.tsx';
 import { AgentInspector, type DiagnosticsForInspector } from './AgentInspector.tsx';
 import { AgentTelemetryRegister } from './AgentTelemetryRegister.tsx';
-import { DelegationTopology } from './DelegationTopology.tsx';
+import { DelegationTimeline } from './DelegationTimeline.tsx';
+import { DelegationTopology, type TopologyInteraction } from './DelegationTopology.tsx';
 import { SubagentTree } from './SubagentTree.tsx';
 import { resolveSubject } from './agentInspector.ts';
 import { useAgentWorkGraph } from './agentWorkQuery.ts';
@@ -33,11 +34,12 @@ import {
   usageAuthority,
   workAuthority,
 } from './authorityRegister.ts';
-import { fitDelegationTopology, markId } from './delegationTopology.ts';
+import { fitDelegationTopology, markId, type FittedTopology } from './delegationTopology.ts';
 import { readAttemptFailures } from './failure.ts';
 import { readHandoffFrontier } from './handoff.ts';
 import { newestTreeSession, useAgentHandoffTokens } from './handoffTokenQuery.ts';
 import { readHandoffTokens } from './handoffTokens.ts';
+import { AgentsViewSwitcher, agentsViewNote, useAgentsView, type AgentsView } from './agentsView.tsx';
 
 const BASE = '/api/plugins/analytics';
 
@@ -106,6 +108,7 @@ export function AgentsPage() {
   const [inspectedId, setInspectedId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  const [view, setView] = useAgentsView();
   const toggleExpanded = useCallback((id: string) => {
     setExpanded((current) => {
       const next = new Set(current);
@@ -211,8 +214,11 @@ export function AgentsPage() {
       <WorkspaceHeader
         path="agents"
         title="Agents"
-        note="delegation topology from the session store · handoffs, tokens and failures from their own authorities"
+        note={`${view} · ${agentsViewNote(view)} · handoffs, tokens and failures from their own authorities`}
       />
+      <div className="flex flex-wrap items-center gap-2 border-b border-edge-subtle bg-surface-1 pr-2">
+        <AgentsViewSwitcher active={view} onSelect={setView} />
+      </div>
 
       <AgentAuthorityRegister authorities={authorities} />
 
@@ -222,7 +228,7 @@ export function AgentsPage() {
       <section aria-label="Delegation topology" className="flex shrink-0 flex-col lg:flex-row">
         <div className="flex min-w-0 flex-1 flex-col gap-2 p-2">
           <Panel
-            legend="Delegation topology · read-only"
+            legend={view === 'timeline' ? 'Delegation timeline · read-only' : 'Delegation topology · read-only'}
             // Withdrawn below `sm`: the register above already prints this
             // reading, and in a fixed-height header the detail wraps over the
             // legend at 320px.
@@ -253,17 +259,20 @@ export function AgentsPage() {
                 return (
                   <div className="flex min-w-0 flex-col gap-3">
                     {fit !== null && fit.model.marks.length > 0 ? (
-                      <DelegationTopology
-                        fit={fit}
-                        interaction={{
-                          inspectedId,
-                          selectedId,
-                          onInspect: setInspectedId,
-                          onSelect: select,
-                          expanded,
-                          onToggleExpanded: toggleExpanded,
-                        }}
-                      />
+                      <>
+                        <TopologyRenderer
+                          view={view}
+                          fit={fit}
+                          interaction={{
+                            inspectedId,
+                            selectedId,
+                            onInspect: setInspectedId,
+                            onSelect: select,
+                            expanded,
+                            onToggleExpanded: toggleExpanded,
+                          }}
+                        />
+                      </>
                     ) : null}
                     <details
                       className="border-t border-edge-subtle pt-2"
@@ -389,6 +398,27 @@ export function AgentsPage() {
       />
     </div>
   );
+}
+
+function TopologyRenderer({
+  view,
+  fit,
+  interaction,
+}: {
+  view: AgentsView;
+  fit: FittedTopology;
+  interaction: TopologyInteraction;
+}) {
+  switch (view) {
+    case 'topology':
+      return <DelegationTopology fit={fit} interaction={interaction} />;
+    case 'timeline':
+      return <DelegationTimeline fit={fit} interaction={interaction} />;
+    default: {
+      const unhandled: never = view;
+      return unhandled;
+    }
+  }
 }
 
 /** The model the inspector is handed before the tree has been read. */

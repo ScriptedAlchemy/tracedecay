@@ -119,7 +119,7 @@ pub(super) fn fixture_journal(
         effect_id: effect_id(&request.idempotency_key, &input_digest).unwrap(),
         input_digest,
         expected_state: request.expected_state.clone(),
-        predicted_state: None,
+        predicted_state: Some(digest(SHA256_B)),
         candidate_files: vec!["src/lib.rs".to_owned()],
         recovery_files: Vec::new(),
         recovery_digest: None,

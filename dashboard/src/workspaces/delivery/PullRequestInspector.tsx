@@ -78,14 +78,14 @@ export function PullRequestInspector({
         <div className="mt-3 flex flex-wrap gap-2">
           <button
             type="button"
-            className="inline-flex min-h-9 items-center border border-accent px-3 text-xs text-text-primary hover:bg-surface-2"
+            className="inline-flex min-h-[var(--touch-target-min)] items-center border border-accent px-3 text-xs text-text-primary hover:bg-surface-2"
             onClick={() => navigate({ mode: 'journey', pullRequest: row.id })}
           >
             Open journey
           </button>
           <button
             type="button"
-            className="inline-flex min-h-9 items-center border border-edge-strong px-3 text-xs text-text-primary hover:bg-surface-2"
+            className="inline-flex min-h-[var(--touch-target-min)] items-center border border-edge-strong px-3 text-xs text-text-primary hover:bg-surface-2"
             onClick={() => navigate({ mode: 'review', pullRequest: row.id })}
           >
             Open review

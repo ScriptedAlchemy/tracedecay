@@ -313,7 +313,7 @@ impl McpServer {
     /// never await configuration or cloud I/O and shutdown still drains it.
     #[hotpath::measure(label = "mcp.ledger.flush_worldwide")]
     pub(crate) fn maybe_flush_worldwide(self: &Arc<Self>) {
-        let now = crate::project::current_timestamp();
+        let now = tracedecay_runtime_core::tracedecay::current_timestamp();
         let last = self.last_flush_at.load(Ordering::Relaxed);
         if now - last < 30 {
             return;
@@ -399,7 +399,7 @@ impl McpServer {
             response_tokens: 0,
             net_saved_tokens: 0,
             duration_us,
-            timestamp: crate::project::current_timestamp(),
+            timestamp: tracedecay_runtime_core::tracedecay::current_timestamp(),
             request_id,
             arguments,
             internal_analytics: None,
@@ -432,7 +432,7 @@ impl McpServer {
             project_root,
             event,
             current_branch,
-            crate::project::current_timestamp(),
+            tracedecay_runtime_core::tracedecay::current_timestamp(),
             admission_seq,
         ) else {
             return;
@@ -494,7 +494,7 @@ impl McpServer {
         };
         let thread_id = bounded_span_identifier(route.thread_id.as_deref())
             .and_then(|value| tracedecay_privacy::protect_sensitive_structural_id(&value).ok());
-        let ts = crate::project::current_timestamp();
+        let ts = tracedecay_runtime_core::tracedecay::current_timestamp();
         // Session-only pre-debounce: the full key needs branch/worktree, which
         // cost gix/git discovery. A burst for one session almost always shares
         // those, so reject here before paying for derivation. Mid-session
@@ -590,7 +590,7 @@ fn persist_worldwide_delta(delta: u64, upload_enabled: bool) -> bool {
         && tracedecay_dashboard_api::cloud::flush_pending(config.pending_upload).is_some()
     {
         config.pending_upload = 0;
-        config.last_upload_at = crate::project::current_timestamp();
+        config.last_upload_at = tracedecay_runtime_core::tracedecay::current_timestamp();
     }
     match config.save() {
         Ok(()) => true,
@@ -618,9 +618,9 @@ mod tests {
     use super::*;
 
     fn desired_configuration() -> ConfigurationSnapshotV1 {
-        let registry =
-            crate::config::registry::ConfigurationRegistry::core().expect("configuration registry");
-        crate::config::resolver::resolve_configuration(&registry, &[])
+        let registry = tracedecay_project::config::registry::ConfigurationRegistry::core()
+            .expect("configuration registry");
+        tracedecay_project::config::resolver::resolve_configuration(&registry, &[])
             .expect("default desired configuration")
             .snapshot
     }
@@ -695,7 +695,7 @@ mod tests {
 
     #[test]
     fn disabled_upload_records_each_delta_once_after_durable_save() {
-        let _profile = crate::config::PinnedUserDataDir::new();
+        let _profile = tracedecay_project::config::PinnedUserDataDir::new();
         let mut config = tracedecay_session_memory::user_config::UserConfig::load();
         config.pending_upload = 0;
         config.save().expect("initialize isolated user config");

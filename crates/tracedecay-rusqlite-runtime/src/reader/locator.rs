@@ -7,7 +7,7 @@ use std::{
 
 use tracedecay_store::{StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 
-use crate::connection::{OpenedDatabaseFile, OpenedDatabaseFileError};
+use crate::connection::{ConnectionPolicyError, OpenedDatabaseFile, OpenedDatabaseFileError};
 
 /// An existing file whose canonical identity was verified by the daemon.
 ///
@@ -94,8 +94,9 @@ pub enum ReaderStartError {
     LocatorPathIsNotFile,
     ThreadSpawn(std::io::Error),
     StartupChannelClosed,
-    OpenFailed,
-    ReadOnlySetupFailed,
+    OpenFailed(ConnectionPolicyError),
+    ReadOnlySetupFailed(ConnectionPolicyError),
+    SchemaProbeFailed(rusqlite::Error),
     OpenedDatabaseIdentity(OpenedDatabaseFileError),
     OpenedDatabaseIdentityMismatch { expected: u64, actual: u64 },
 }
@@ -116,9 +117,17 @@ impl fmt::Display for ReaderStartError {
             Self::StartupChannelClosed => {
                 f.write_str("SQLite reader exited before reporting startup")
             }
-            Self::OpenFailed => f.write_str("failed to open verified SQLite store read-only"),
-            Self::ReadOnlySetupFailed => {
-                f.write_str("failed to establish query-only SQLite reader")
+            Self::OpenFailed(error) => {
+                write!(f, "failed to open verified SQLite store read-only: {error}")
+            }
+            Self::ReadOnlySetupFailed(error) => {
+                write!(f, "failed to establish query-only SQLite reader: {error}")
+            }
+            Self::SchemaProbeFailed(error) => {
+                write!(
+                    f,
+                    "SQLite reader could not read the schema during startup: {error}"
+                )
             }
             Self::OpenedDatabaseIdentity(error) => {
                 write!(f, "failed to identify opened SQLite reader file: {error}")
@@ -136,6 +145,8 @@ impl Error for ReaderStartError {
         match self {
             Self::InvalidReaderBudget(error) => Some(error),
             Self::ThreadSpawn(error) => Some(error),
+            Self::OpenFailed(error) | Self::ReadOnlySetupFailed(error) => Some(error),
+            Self::SchemaProbeFailed(error) => Some(error),
             Self::OpenedDatabaseIdentity(error) => Some(error),
             _ => None,
         }

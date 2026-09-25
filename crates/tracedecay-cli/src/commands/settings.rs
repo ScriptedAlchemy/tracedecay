@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use tracedecay_contracts::now_micros;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::{
     ApplicationEnvelope, ApplicationOutcome, CancellationSignal, ComponentConfigurationState,
@@ -11,7 +12,7 @@ use tracedecay_contracts::{
     ConfigurationWireRequestV1,
 };
 use tracedecay_daemon_protocol::ApplicationSurfaceRequest;
-use tracedecay_daemon_protocol::{RequestedOutputFormat, invocation_now_micros};
+use tracedecay_daemon_protocol::RequestedOutputFormat;
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationRevisionId,
     ConfigurationValueV1, SettingKey, USER_UPLOAD_ENABLED_SETTING_KEY, UserProfileId,
@@ -99,7 +100,7 @@ async fn invoke_configuration_surface(
 ) -> tracedecay_domain::errors::Result<ApplicationEnvelope<serde_json::Value>> {
     let request_id = mint_global_request_id(GlobalRequestSurface::Cli)
         .map_err(|error| configuration_error(error.to_string()))?;
-    let observed_at = invocation_now_micros();
+    let observed_at = now_micros();
     let deadline = configuration_deadline(operation, observed_at)?;
     let cancellation =
         CancellationSignal::active(format!("cancellation.cli.{}", request_id.as_str()))
@@ -119,7 +120,7 @@ async fn invoke_configuration_surface(
         .await
         .map_err(|error| configuration_error(error.to_string()))?;
         if let Some(delay) = crate::cli::dispatch::surface_retry_delay(&result) {
-            let now = invocation_now_micros();
+            let now = now_micros();
             let remaining_micros = deadline.expires_at.0.saturating_sub(now.0);
             let remaining_micros = u64::try_from(remaining_micros)
                 .map_err(|_| configuration_error("configuration deadline elapsed"))?;

@@ -58,7 +58,7 @@ export function EnvelopeTruth({
           title={refresh}
           data-operation={refresh}
         >
-          <span className="inline-flex h-7 items-center gap-1.5 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 px-2.5 text-2xs font-medium text-text-secondary group-hover:text-text-primary">
+          <span className="inline-flex h-7 items-center gap-1.5 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 px-2.5 text-sm font-medium text-text-secondary group-hover:text-text-primary">
             <RefreshCw aria-hidden size={12} className={refreshing ? 'animate-spin' : undefined} />
             {refreshing ? 'Refreshing' : 'Refresh'}
           </span>
@@ -95,7 +95,7 @@ export function OmissionReasons({ coverage }: { coverage: DashboardCoverageV1 })
       <p className="text-3xs font-medium uppercase tracking-wide text-text-muted">
         Why this read is incomplete
       </p>
-      <ul className="mt-1 space-y-1 text-2xs text-text-secondary">
+      <ul className="mt-1 space-y-1 text-body text-text-secondary">
         {coverage.omission_reasons.map((reason) => (
           <li key={reason}>{reason}</li>
         ))}

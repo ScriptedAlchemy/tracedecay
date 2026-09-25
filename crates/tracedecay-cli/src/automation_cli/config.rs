@@ -1,4 +1,4 @@
-use crate::cli::{AutomationConfigAction, AutomationConfigScope};
+use crate::cli::AutomationConfigAction;
 use crate::resolve_cli_project_root;
 
 pub(crate) fn project_automation_reconcile_args() -> serde_json::Value {
@@ -34,29 +34,17 @@ pub(super) async fn handle_automation_config_command(
         | AutomationConfigAction::Disable { path, .. }
         | AutomationConfigAction::Set { path, .. } => path.clone(),
     };
-    let scope = match &action {
-        AutomationConfigAction::Get { scope, .. }
-        | AutomationConfigAction::Explain { scope, .. }
-        | AutomationConfigAction::Enable { scope, .. }
-        | AutomationConfigAction::Disable { scope, .. }
-        | AutomationConfigAction::Set { scope, .. } => *scope,
-    };
-    if scope != AutomationConfigScope::Project {
-        return Err(config_error(
-            "automation settings are project-scoped in the V2 configuration control plane; use --scope project",
-        ));
-    }
-
     let requested = resolve_cli_project_root(path, None, None).await?;
     let resolved = crate::commands::resolve_project_scope(requested).await?;
     let current = load_canonical_automation_config(&resolved.project_path).await?;
+    let codex = load_canonical_codex_executable(&resolved.project_path).await?;
     let patch = match action {
         AutomationConfigAction::Get { json, .. } => {
-            print_automation_config(&current, json, false)?;
+            print_automation_config(&current, &codex, json, false)?;
             return Ok(());
         }
         AutomationConfigAction::Explain { json, .. } => {
-            print_automation_config(&current, json, true)?;
+            print_automation_config(&current, &codex, json, true)?;
             return Ok(());
         }
         AutomationConfigAction::Enable { .. } => AutomationConfigPatch {
@@ -138,7 +126,7 @@ pub(super) async fn handle_automation_config_command(
     };
 
     let effective = apply_project_automation_patch(&resolved.project_path, patch).await?;
-    print_automation_config(&effective, true, false)
+    print_automation_config(&effective, &codex, true, false)
 }
 
 pub(crate) async fn load_canonical_automation_config(
@@ -158,6 +146,27 @@ pub(crate) async fn load_canonical_automation_config(
         }
         _ => Err(config_error(
             "automation setting has the wrong canonical value kind",
+        )),
+    }
+}
+
+/// The `codex` executable the project's `lcm.summarizer_executables.v1`
+/// setting binds; the automation backend spawns only this path.
+async fn load_canonical_codex_executable(
+    project_path: &std::path::Path,
+) -> tracedecay_domain::errors::Result<tracedecay_domain::configuration::LcmSummarizerExecutableV1>
+{
+    match crate::commands::current_project_setting(
+        project_path,
+        tracedecay_domain::configuration::LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
+    )
+    .await?
+    {
+        tracedecay_domain::configuration::ConfigurationValueV1::LcmSummarizerExecutables(
+            executables,
+        ) => Ok(executables.codex),
+        _ => Err(config_error(
+            "lcm summarizer executables setting has the wrong canonical value kind",
         )),
     }
 }
@@ -257,11 +266,12 @@ fn parse_optional_u64(
 
 fn print_automation_config(
     effective: &tracedecay_automation_runtime::automation::config::AutomationConfig,
+    codex: &tracedecay_domain::configuration::LcmSummarizerExecutableV1,
     json: bool,
     explain: bool,
 ) -> tracedecay_domain::errors::Result<()> {
     let availability =
-        tracedecay_automation_runtime::automation::backend::backend_availability(effective);
+        tracedecay_automation_runtime::automation::backend::backend_availability(effective, codex);
     let trace_decay_backend_calls = effective.enabled
         && effective.backend
             == tracedecay_automation_runtime::automation::config::AutomationBackend::CodexAppServer
@@ -317,7 +327,7 @@ fn parse_automation_backend(
     use tracedecay_automation_runtime::automation::config::AutomationBackend;
     match value {
         "disabled" => Ok(AutomationBackend::Disabled),
-        "codex-app-server" | "codex_app_server" => Ok(AutomationBackend::CodexAppServer),
+        "codex-app-server" => Ok(AutomationBackend::CodexAppServer),
         _ => Err(config_error(format!(
             "unknown automation backend '{value}' (expected disabled, codex-app-server)"
         ))),
@@ -332,7 +342,7 @@ fn parse_automation_host_mode(
     use tracedecay_automation_runtime::automation::config::AutomationHostMode;
     match value {
         "standalone" => Ok(AutomationHostMode::Standalone),
-        "delegated-host" | "delegated_host" => Ok(AutomationHostMode::DelegatedHost),
+        "delegated-host" => Ok(AutomationHostMode::DelegatedHost),
         _ => Err(config_error(format!(
             "unknown automation host mode '{value}' (expected standalone, delegated-host)"
         ))),

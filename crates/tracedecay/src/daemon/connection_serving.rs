@@ -7,10 +7,11 @@
 use super::*;
 use tracedecay_daemon_protocol::DaemonInvocationPayload;
 use tracedecay_daemon_service::ProfileHostAdmissionBootstrapStatus;
+use tracedecay_daemon_service::shutdown::{DaemonActivity, DaemonLifecycle};
 use tracedecay_daemon_service::{DaemonInvocationService, DaemonLspSessionAccess, Lease};
 use tracedecay_mcp::BrokerSelectedResponseLease;
+use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::logging::log_daemon_event;
-use tracedecay_session_memory::context::CancellationToken;
 
 /// Hermetic production-route benchmark support for the typed RMCP transport.
 ///
@@ -85,20 +86,6 @@ fn report_profile_host_admission_bootstrap_status(
     }
 }
 
-#[cfg(all(unix, test))]
-pub(super) async fn serve_socket_client(
-    stream: tokio::net::UnixStream,
-    engine: DaemonEngine,
-) -> Result<()> {
-    Box::pin(serve_broker_socket_client(
-        BrokerStream::Unix(stream),
-        engine,
-        None,
-        DaemonClientAdmissionClass::General,
-    ))
-    .await
-}
-
 #[cfg(unix)]
 pub(super) async fn serve_authenticated_socket_client_with_class(
     stream: BrokerStream,
@@ -109,14 +96,14 @@ pub(super) async fn serve_authenticated_socket_client_with_class(
     Box::pin(serve_broker_socket_client(
         stream,
         engine,
-        Some(auth_token),
+        auth_token,
         admission_class,
     ))
     .await
 }
 
 #[hotpath::measure(label = "daemon.engine.transport.rmcp", future = true)]
-pub(super) async fn serve_routed_rmcp_connection(
+pub(crate) async fn serve_routed_rmcp_connection(
     server: Arc<crate::mcp::McpServer>,
     transport: BrokerStreamTransport,
     first_request_line: String,
@@ -124,6 +111,7 @@ pub(super) async fn serve_routed_rmcp_connection(
     initialize_route: Option<InitializeRouteMetadata>,
     timings_enabled: bool,
     lifecycle: &DaemonLifecycle,
+    activity: Option<DaemonActivity>,
 ) -> Result<()> {
     serve_routed_rmcp_connection_inner(
         server,
@@ -133,6 +121,7 @@ pub(super) async fn serve_routed_rmcp_connection(
         initialize_route,
         timings_enabled,
         lifecycle,
+        activity,
     )
     .await
 }
@@ -145,6 +134,7 @@ fn serve_routed_rmcp_connection_inner(
     initialize_route: Option<InitializeRouteMetadata>,
     timings_enabled: bool,
     lifecycle: &DaemonLifecycle,
+    activity: Option<DaemonActivity>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
     // Erase the deeply nested rmcp service future before it reaches the
     // measured wrapper so every profiling feature can compute its layout.
@@ -162,7 +152,7 @@ fn serve_routed_rmcp_connection_inner(
         }
         let delivery_settlement_recorder = server.delivery_settlement_recorder.clone();
         let adapter = RmcpConnectionAdapter::new(
-            ProductionMcpConnectionContext::new(server),
+            ProductionMcpConnectionContext::with_activity(server, activity),
             timings_enabled,
             initialize_response_decorator,
             delivery_settlement_recorder,
@@ -170,12 +160,17 @@ fn serve_routed_rmcp_connection_inner(
         let transport = transport
             .with_rmcp_selected_project_responses(adapter.selected_project_responses())
             .with_rmcp_work_delivery_settlement(adapter.work_delivery_settlement());
-        let running = adapter
-            .serve(transport)
-            .await
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("rmcp server initialization failed: {error}"),
-            })?;
+        let running = match adapter.serve(transport).await {
+            Ok(running) => running,
+            // The client left before a request settled the handshake; every
+            // frame it sent was already answered or refused on the wire.
+            Err(rmcp::service::ServerInitializeError::ConnectionClosed(_)) => return Ok(()),
+            Err(error) => {
+                return Err(TraceDecayError::Config {
+                    message: format!("rmcp server initialization failed: {error}"),
+                });
+            }
+        };
         let cancellation = running.cancellation_token();
         let waiting = running.waiting();
         tokio::pin!(waiting);
@@ -193,8 +188,32 @@ fn serve_routed_rmcp_connection_inner(
     })
 }
 
-fn is_mcp_initialize_request(request: Option<&JsonRpcRequest>) -> bool {
-    request.is_some_and(|request| request.method == "initialize")
+fn opens_rmcp_session(request: Option<&JsonRpcRequest>) -> bool {
+    request.is_some_and(tracedecay_mcp::server::opens_rmcp_session)
+}
+
+/// Answers a project-routed first request that neither initializes an MCP
+/// session nor carries SEP-2575 per-request context. A notification gets no
+/// frame; an unparseable line is answered with the null id.
+async fn refuse_sessionless_request(
+    transport: &mut (impl McpTransport + Send),
+    request: &AuthenticatedFirstRequest,
+) -> Result<()> {
+    if request.parsed().is_some_and(|request| request.id.is_none()) {
+        return Ok(());
+    }
+    let request_id = request
+        .parsed()
+        .and_then(|request| request.id.clone())
+        .unwrap_or(serde_json::Value::Null);
+    let response = JsonRpcResponse::error(
+        request_id,
+        ErrorCode::InvalidRequest,
+        "a daemon MCP connection must begin with initialize or carry SEP-2575 request _meta \
+         (protocolVersion and clientCapabilities)"
+            .to_owned(),
+    );
+    write_json_rpc_response(transport, &response).await
 }
 
 /// Answer an unparseable handshake with one typed refusal frame and drain
@@ -782,12 +801,51 @@ where
     })
 }
 
+/// A host hook event is fire-and-forget: its client writes the request and
+/// closes the socket without reading a reply, so its close says nothing about
+/// whether the event is still wanted. Routing it is bounded by the profile
+/// binding and project-open deadlines instead of by the peer.
+fn is_fire_and_forget(first_request: Option<&JsonRpcRequest>) -> bool {
+    first_request
+        .is_some_and(|request| classify_mcp_method(&request.method) == McpMethod::HookEvent)
+}
+
+/// Resolves once the peer has fully closed, which abandons any first request
+/// except a fire-and-forget one.
+fn peer_abandoned_first_request(
+    transport: &impl McpTransport,
+    first_request: Option<&JsonRpcRequest>,
+) -> impl std::future::Future<Output = ()> + Send + 'static {
+    let fire_and_forget = is_fire_and_forget(first_request);
+    let peer_full_close = transport.peer_fully_closed_after_eof();
+    async move {
+        if fire_and_forget {
+            std::future::pending::<()>().await;
+        } else {
+            peer_full_close.await;
+        }
+    }
+}
+
+/// Await the project owner for a routed first request, without racing a
+/// fire-and-forget request against its client's close.
+async fn await_project_owner_for_first_request<T: Send>(
+    transport: &mut (impl McpTransport + Send),
+    first_request: Option<&JsonRpcRequest>,
+    open: impl std::future::Future<Output = Result<T>> + Send,
+) -> Result<Option<(T, VecDeque<String>)>> {
+    if is_fire_and_forget(first_request) {
+        return open.await.map(|owner| Some((owner, VecDeque::new())));
+    }
+    await_project_owner_or_disconnect(transport, open).await
+}
+
 #[cfg(unix)]
 #[hotpath::measure(label = "daemon.engine.transport.broker", future = true)]
 async fn serve_broker_socket_client(
     stream: BrokerStream,
     engine: DaemonEngine,
-    auth_token: Option<String>,
+    auth_token: String,
     admission_class: DaemonClientAdmissionClass,
 ) -> Result<()> {
     serve_broker_socket_client_inner(stream, engine, auth_token, admission_class).await
@@ -1036,7 +1094,7 @@ async fn serve_retained_invocation_connection(
 fn serve_broker_socket_client_inner(
     stream: BrokerStream,
     engine: DaemonEngine,
-    auth_token: Option<String>,
+    auth_token: String,
     admission_class: DaemonClientAdmissionClass,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'static>> {
     // Erase the deeply nested broker connection future before it reaches the
@@ -1051,20 +1109,18 @@ fn serve_broker_socket_client_inner(
             _per_client_permit,
         )) = boxed_broker_connection_phase(async move {
             let mut transport = BrokerStreamTransport::new(stream);
-        if let Some(expected_token) = auth_token.as_deref() {
-            let preface_line = tokio::select! {
-                result = read_line_handling_wire_oversized(&mut transport) => result?,
-                () = engine.lifecycle.wait_for_draining() => return Ok(None),
-            };
-            let Some(preface_line) = preface_line else {
-                return Ok(None);
-            };
-            let authenticated = DaemonAuthPreface::from_line(&preface_line)
-                .is_ok_and(|preface| preface.authenticate(expected_token));
-            if !authenticated {
-                refuse_unauthenticated_client(&mut transport, binary_version()?).await;
-                return Ok(None);
-            }
+        let preface_line = tokio::select! {
+            result = read_line_handling_wire_oversized(&mut transport) => result?,
+            () = engine.lifecycle.wait_for_draining() => return Ok(None),
+        };
+        let Some(preface_line) = preface_line else {
+            return Ok(None);
+        };
+        let authenticated = DaemonAuthPreface::from_line(&preface_line)
+            .is_ok_and(|preface| preface.authenticate(&auth_token));
+        if !authenticated {
+            refuse_unauthenticated_client(&mut transport, binary_version()?).await;
+            return Ok(None);
         }
         let line = tokio::select! {
             result = read_line_handling_wire_oversized(&mut transport) => result?,
@@ -1095,7 +1151,7 @@ fn serve_broker_socket_client_inner(
         // Ordered after the first request, exactly as the portable broker does,
         // so a binding that misses its deadline is answered as a typed retry on
         // that request's id instead of closing the socket with no evidence.
-        let peer_full_close = transport.peer_fully_closed_after_eof();
+        let peer_full_close = peer_abandoned_first_request(&transport, first_request.parsed());
         tokio::pin!(peer_full_close);
         let store_administration = tokio::select! {
             result = bind_authenticated_profile_identity_within_deadline(
@@ -1325,10 +1381,19 @@ fn serve_broker_socket_client_inner(
 
                 let bootstrap_handled = boxed_broker_connection_phase(async {
                     if let Some(request) = first_request.parsed() {
-                        let initialized_project_server_ready =
-                            matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
-                                && handshake.project_path.is_some()
-                                && engine.cached_project_server(&handshake).await?.is_some();
+                        let (initialized_project_server_ready, admission_refusal) = if matches!(
+                            classify_mcp_method(&request.method),
+                            McpMethod::Initialize
+                        )
+                            && handshake.project_path.is_some()
+                        {
+                            match engine.cached_project_server(&handshake).await {
+                                Ok(server) => (server.is_some(), None),
+                                Err(error) => (false, Some(error)),
+                            }
+                        } else {
+                            (false, None)
+                        };
                         let project_node_count =
                             if matches!(classify_mcp_method(&request.method), McpMethod::ToolsList)
                             {
@@ -1351,31 +1416,35 @@ fn serve_broker_socket_client_inner(
                                 project_node_count,
                             )
                         {
-                            let project_open_error = if handshake.project_path.is_some()
-                                && matches!(
-                                    classify_mcp_method(&request.method),
-                                    McpMethod::Initialize | McpMethod::ToolsList
-                                ) {
-                                match engine.cached_project_open_failure(&handshake).await {
-                                    Ok(Some(failure)) => Some(failure.to_error()),
-                                    Ok(None)
-                                        if matches!(
-                                            classify_mcp_method(&request.method),
-                                            McpMethod::Initialize
-                                        ) =>
-                                    {
-                                        Box::pin(engine.schedule_project_server_warmup(
-                                            handshake.clone(),
-                                            request.clone(),
-                                        ))
-                                        .await
-                                        .err()
+                            let project_open_error = match admission_refusal {
+                                Some(refusal) => initialize_project_open_error(refusal),
+                                None if handshake.project_path.is_some()
+                                    && matches!(
+                                        classify_mcp_method(&request.method),
+                                        McpMethod::Initialize | McpMethod::ToolsList
+                                    ) =>
+                                {
+                                    match engine.cached_project_open_failure(&handshake).await {
+                                        Ok(Some(failure)) => Some(failure.to_error()),
+                                        Ok(None)
+                                            if matches!(
+                                                classify_mcp_method(&request.method),
+                                                McpMethod::Initialize
+                                            ) =>
+                                        {
+                                            Box::pin(engine.schedule_project_server_warmup(
+                                                handshake.clone(),
+                                                request.clone(),
+                                            ))
+                                            .await
+                                            .err()
+                                            .and_then(initialize_project_open_error)
+                                        }
+                                        Ok(None) => None,
+                                        Err(error) => Some(error),
                                     }
-                                    Ok(None) => None,
-                                    Err(error) => Some(error),
                                 }
-                            } else {
-                                None
+                                None => None,
                             };
                             if let Some(error) = project_open_error {
                                 response = request
@@ -1426,8 +1495,9 @@ fn serve_broker_socket_client_inner(
                 let user_session_request = projectless_user_session_request(first_request.parsed());
                 let project_owner = boxed_broker_connection_phase(async {
                     if handshake.project_path.is_some() && !user_session_request {
-                        match await_project_owner_or_disconnect(
+                        match await_project_owner_for_first_request(
                             &mut transport,
+                            first_request.parsed(),
                             engine.project_server_for_request(
                                 &handshake,
                                 project_server_requirement(first_request.parsed()),
@@ -1455,7 +1525,6 @@ fn serve_broker_socket_client_inner(
                     }
                 })
                 .await?;
-                drop(setup_activity);
                 let Some((server, pending_project_open_lines)) = project_owner else {
                     return Ok(());
                 };
@@ -1474,7 +1543,7 @@ fn serve_broker_socket_client_inner(
                     return Err(error);
                 }
                 if let Some(server) = server {
-                    if is_mcp_initialize_request(first_request.parsed()) {
+                    if opens_rmcp_session(first_request.parsed()) {
                         #[cfg(test)]
                         tests::record_mcp_route(
                             &handshake.client_instance_id,
@@ -1493,32 +1562,15 @@ fn serve_broker_socket_client_inner(
                             initialize_route,
                             handshake.timings,
                             &engine.lifecycle,
+                            Some(setup_activity),
                         ))
                         .await?;
                     } else {
-                        #[cfg(test)]
-                        tests::record_mcp_route(
-                            &handshake.client_instance_id,
-                            tests::ObservedMcpRoute::Legacy,
-                        );
-                        #[cfg(test)]
-                        tests::record_first_request_replay(
-                            &handshake.client_instance_id,
-                            first_request.raw(),
-                        );
-                        let mut transport = ReplayTransport::new(transport);
-                        transport.push_replay(first_request.into_raw())?;
-                        for line in pending_project_open_lines {
-                            transport.push_replay(line)?;
-                        }
-                        Box::pin(server.run_daemon_connection_with_timings(
-                            &mut transport,
-                            handshake.timings,
-                            &engine.lifecycle,
-                        ))
-                        .await?;
+                        drop(setup_activity);
+                        refuse_sessionless_request(&mut transport, &first_request).await?;
                     }
                 } else {
+                    drop(setup_activity);
                     let mut transport = ReplayTransport::new(transport);
                     transport.push_replay(first_request.into_raw())?;
                     for line in pending_project_open_lines {
@@ -1643,7 +1695,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         drop(setup_activity);
         return Ok(());
     }
-    let peer_full_close = transport.peer_fully_closed_after_eof();
+    let peer_full_close = peer_abandoned_first_request(&transport, first_request.parsed());
     tokio::pin!(peer_full_close);
     let store_administration = tokio::select! {
         result = Box::pin(bind_authenticated_profile_identity_within_deadline(
@@ -1840,21 +1892,24 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         return result;
     }
     if let Some(request) = first_request.parsed() {
-        let initialized_project_server_ready =
+        let (initialized_project_server_ready, admission_refusal) =
             if matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
                 && handshake.project_path.is_some()
             {
                 let (project_path, _) = project_route_for_handshake(&handshake)?;
-                Box::pin(portable_cached_project_server(
+                match Box::pin(portable_cached_project_server(
                     &store_administration,
                     &project_path,
                     &handshake,
                     ProjectServerRequirement::Core,
                 ))
-                .await?
-                .is_some()
+                .await
+                {
+                    Ok(server) => (server.is_some(), None),
+                    Err(error) => (false, Some(error)),
+                }
             } else {
-                false
+                (false, None)
             };
         let project_node_count =
             if matches!(classify_mcp_method(&request.method), McpMethod::ToolsList) {
@@ -1870,40 +1925,47 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
             && let Some(mut response) =
                 daemon_bootstrap_response(request, initialize_route.as_ref(), project_node_count)
         {
-            let project_open_error = if handshake.project_path.is_some()
-                && matches!(
-                    classify_mcp_method(&request.method),
-                    McpMethod::Initialize | McpMethod::ToolsList
-                ) {
-                match portable_cached_project_open_failure(project_open_gates.as_ref(), &handshake)
-                    .await
+            let project_open_error = match admission_refusal {
+                Some(refusal) => initialize_project_open_error(refusal),
+                None if handshake.project_path.is_some()
+                    && matches!(
+                        classify_mcp_method(&request.method),
+                        McpMethod::Initialize | McpMethod::ToolsList
+                    ) =>
                 {
-                    Ok(Some(failure)) => Some(failure.to_error()),
-                    Ok(None)
-                        if matches!(
-                            classify_mcp_method(&request.method),
-                            McpMethod::Initialize
-                        ) =>
+                    match portable_cached_project_open_failure(
+                        project_open_gates.as_ref(),
+                        &handshake,
+                    )
+                    .await
                     {
-                        Box::pin(schedule_portable_project_server_warmup(
-                            lifecycle.clone(),
-                            store_administration.clone(),
-                            Arc::clone(&project_open_gates),
-                            invocation.clone(),
-                            http_application_registry.clone(),
-                            handshake.clone(),
-                            request.clone(),
-                            #[cfg(test)]
-                            project_open_attempts.clone(),
-                        ))
-                        .await
-                        .err()
+                        Ok(Some(failure)) => Some(failure.to_error()),
+                        Ok(None)
+                            if matches!(
+                                classify_mcp_method(&request.method),
+                                McpMethod::Initialize
+                            ) =>
+                        {
+                            Box::pin(schedule_portable_project_server_warmup(
+                                lifecycle.clone(),
+                                store_administration.clone(),
+                                Arc::clone(&project_open_gates),
+                                invocation.clone(),
+                                http_application_registry.clone(),
+                                handshake.clone(),
+                                request.clone(),
+                                #[cfg(test)]
+                                project_open_attempts.clone(),
+                            ))
+                            .await
+                            .err()
+                            .and_then(initialize_project_open_error)
+                        }
+                        Ok(None) => None,
+                        Err(error) => Some(error),
                     }
-                    Ok(None) => None,
-                    Err(error) => Some(error),
                 }
-            } else {
-                None
+                None => None,
             };
             if let Some(error) = project_open_error {
                 response = request
@@ -1923,8 +1985,9 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         // Heap-allocate the owner-await composition: embedded by value it
         // dominates this serve future's resident frame and overflows the
         // worker stack in perf-profile layouts.
-        let server = match Box::pin(await_project_owner_or_disconnect(
+        let server = match Box::pin(await_project_owner_for_first_request(
             &mut transport,
+            first_request.parsed(),
             Box::pin(portable_project_server_for_request(
                 lifecycle.clone(),
                 store_administration.clone(),
@@ -1956,9 +2019,8 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
                 return Ok(());
             }
         };
-        drop(setup_activity);
         let (server, pending_lines) = server;
-        if is_mcp_initialize_request(first_request.parsed()) {
+        if opens_rmcp_session(first_request.parsed()) {
             #[cfg(test)]
             tests::record_mcp_route(&handshake.client_instance_id, tests::ObservedMcpRoute::Rmcp);
             #[cfg(test)]
@@ -1971,27 +2033,12 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
                 initialize_route,
                 handshake.timings,
                 lifecycle,
+                Some(setup_activity),
             ))
             .await?;
         } else {
-            #[cfg(test)]
-            tests::record_mcp_route(
-                &handshake.client_instance_id,
-                tests::ObservedMcpRoute::Legacy,
-            );
-            #[cfg(test)]
-            tests::record_first_request_replay(&handshake.client_instance_id, first_request.raw());
-            let mut transport = ReplayTransport::new(transport);
-            transport.push_replay(first_request.into_raw())?;
-            for line in pending_lines {
-                transport.push_replay(line)?;
-            }
-            Box::pin(server.run_daemon_connection_with_timings(
-                &mut transport,
-                handshake.timings,
-                lifecycle,
-            ))
-            .await?;
+            drop(setup_activity);
+            refuse_sessionless_request(&mut transport, &first_request).await?;
         }
     } else {
         drop(setup_activity);

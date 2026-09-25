@@ -1,0 +1,6 @@
+{
+  "hook_event_name": "agent_end",
+  "id": "<EVENT_ID>",
+  "session_id": "<SESSION_ID>",
+  "cwd": "<PROJECT_ROOT>"
+}

@@ -2,7 +2,7 @@ use tracedecay_contracts::feedback::{
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, FeedbackPortFuture,
     GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1, GitHubReviewReadRequestV1, feedback_surface_operation,
 };
-use tracedecay_contracts::{AuthorizationPhase, AuthorizationRequest, ResolvedScope, now_micros};
+use tracedecay_contracts::{AuthorizationRequest, ResolvedScope, now_micros};
 use tracedecay_domain::configuration::SourceKindV1;
 use tracedecay_domain::{LocatorDigest, canonical_sha256};
 
@@ -69,7 +69,6 @@ where
             let authorization = AuthorizationRequest {
                 context,
                 operation: &operation,
-                phase: AuthorizationPhase::Admission,
                 observed_at,
             };
             match project_source_access_snapshot_for_request(
@@ -128,7 +127,6 @@ where
             let authorization = AuthorizationRequest {
                 context,
                 operation: &operation,
-                phase: AuthorizationPhase::Admission,
                 observed_at,
             };
             match project_source_access_snapshot_for_request(

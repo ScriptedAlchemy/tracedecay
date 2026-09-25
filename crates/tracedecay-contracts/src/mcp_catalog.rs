@@ -37,7 +37,7 @@ fn build_mcp_executable_binding_registry()
 mod tests {
     use std::collections::BTreeSet;
 
-    use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingStatus, BindingSurface};
+    use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
     use super::mcp_executable_binding_registry;
     use crate::application_catalog_contributions;
@@ -48,11 +48,7 @@ mod tests {
             .expect("application catalog")
             .iter()
             .flat_map(|contribution| contribution.bindings())
-            .filter(|binding| {
-                binding.surface() == BindingSurface::Mcp
-                    && matches!(binding.status(), BindingStatus::Current)
-                    && !binding.is_alias()
-            })
+            .filter(|binding| binding.surface() == BindingSurface::Mcp)
             .map(|binding| {
                 let operation =
                     ApplicationSurfaceOperation::from_tool_name(binding.operation().as_str())

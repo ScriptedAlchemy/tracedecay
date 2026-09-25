@@ -596,15 +596,22 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
             )
             self.assertEqual(arguments, {"node_id": node_id, "format": "json"}, name)
 
-    def test_legacy_type_hierarchy_uses_the_searched_type_identity(self) -> None:
+    def test_type_hierarchy_uses_the_searched_type_identity(self) -> None:
         runner = load_runner()
 
         arguments = runner.materialize_tool_arguments(
-            {"name": "tracedecay_type_hierarchy"},
+            {
+                "name": "tracedecay_type_hierarchy",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"node_id": {"type": "string"}},
+                    "required": ["node_id"],
+                },
+            },
             {
                 "node_id": "symbol:function",
                 "code_navigation_node_ids": {
-                    "tracedecay_code_type_hierarchy": "symbol:type",
+                    "tracedecay_type_hierarchy": "symbol:type",
                 },
             },
         )
@@ -896,11 +903,11 @@ class DeadlineTests(unittest.TestCase):
         client._wait = lambda _request_id, _deadline_ms: next(waits)
 
         with self.assertRaises(runner.CallDeadlineExceeded) as raised:
-            client.request("tools/call", {"name": "tracedecay_read"}, 10, cancel_on_timeout=True)
+            client.request("tools/call", {"name": "tracedecay_grep"}, 10, cancel_on_timeout=True)
 
         self.assertTrue(raised.exception.cancellation_settled)
         self.assertEqual(sent[-1]["method"], "notifications/cancelled")
-        row = runner._call_failure_row("tool", "tracedecay_read", 10, raised.exception)
+        row = runner._call_failure_row("tool", "tracedecay_grep", 10, raised.exception)
         self.assertEqual(row["problem_code"], "tool_sweep.call_deadline_exceeded")
 
 
@@ -2314,7 +2321,7 @@ class FixturePrimingRetryTests(unittest.TestCase):
             "tracedecay_node": cls.response(
                 '{"node":{"qualified_name":"sweep_anchor","kind":"function"}}'
             ),
-            "tracedecay_read": cls.response('{"handle":"rh_fixture"}'),
+            "tracedecay_grep": cls.response('{"handle":"rh_fixture"}'),
             "tracedecay_retrieve": cls.response("catalog sweep handle source"),
             "tracedecay_code_symbol_search": cls.response(
                 '{"items":['
@@ -2465,7 +2472,7 @@ class FixturePrimingRetryTests(unittest.TestCase):
         names = (
             "tracedecay_by_qualified_name",
             "tracedecay_node",
-            "tracedecay_read",
+            "tracedecay_grep",
             "tracedecay_retrieve",
             "tracedecay_code_symbol_search",
             "tracedecay_git_hunks",
@@ -2532,12 +2539,12 @@ class FixturePrimingRetryTests(unittest.TestCase):
         self.assertEqual(
             fixture["code_navigation_node_ids"],
             {
-                "tracedecay_code_callees": "sym:peer",
-                "tracedecay_code_callers": "sym:anchor",
+                "tracedecay_callees": "sym:peer",
+                "tracedecay_callers": "sym:anchor",
                 "tracedecay_code_declaration": "sym:anchor",
                 "tracedecay_code_references": "sym:anchor",
                 "tracedecay_code_type_definition": "sym:typed",
-                "tracedecay_code_type_hierarchy": "sym:type",
+                "tracedecay_type_hierarchy": "sym:type",
             },
         )
         self.assertNotIn("preview_input_id", fixture)
@@ -2790,12 +2797,12 @@ class FixturePrimingRetryTests(unittest.TestCase):
         self.assertEqual(
             fixture["code_navigation_node_ids"],
             {
-                "tracedecay_code_callees": "sym:peer",
-                "tracedecay_code_callers": "sym:anchor",
+                "tracedecay_callees": "sym:peer",
+                "tracedecay_callers": "sym:anchor",
                 "tracedecay_code_declaration": "sym:anchor",
                 "tracedecay_code_references": "sym:anchor",
                 "tracedecay_code_type_definition": "sym:typed",
-                "tracedecay_code_type_hierarchy": "sym:type",
+                "tracedecay_type_hierarchy": "sym:type",
             },
         )
         self.assertNotIn("preview_input_id", fixture)

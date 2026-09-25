@@ -82,10 +82,10 @@ pub async fn invalidate_raw_summary_revision(
             .map_err(|_| lineage_limit(session_id, "raw_revision_invalidation_budget_exhausted"))?;
         let mut rows = conn
             .query(
-                "SELECT node_id
-                 FROM lcm_summary_sources
-                 WHERE source_kind = ?1 AND source_id = ?2 AND node_id > ?3
-                 ORDER BY node_id
+                "SELECT summary_id
+                 FROM session_summary_sources
+                 WHERE source_kind = ?1 AND source_id = ?2 AND summary_id > ?3
+                 ORDER BY summary_id
                  LIMIT ?4",
                 params![
                     source_kind.as_str(),
@@ -147,8 +147,8 @@ pub async fn invalidate_raw_summary_revision(
             let mut source_rows = conn
                 .query(
                     "SELECT MIN(CAST(source_id AS INTEGER))
-                     FROM lcm_summary_sources
-                     WHERE node_id = ?1 AND source_kind = 'raw_message'",
+                     FROM session_summary_sources
+                     WHERE summary_id = ?1 AND source_kind = 'raw_message'",
                     params![summary_id],
                 )
                 .await?;
@@ -666,8 +666,8 @@ mod tests {
                 generation INTEGER NOT NULL,
                 state TEXT NOT NULL
              );
-             CREATE TABLE lcm_summary_sources (
-                node_id TEXT NOT NULL,
+             CREATE TABLE session_summary_sources (
+                summary_id TEXT NOT NULL,
                 source_kind TEXT NOT NULL,
                 source_id TEXT NOT NULL
              );
@@ -708,9 +708,9 @@ mod tests {
              WITH RECURSIVE ids(value) AS (
                 VALUES(1) UNION ALL SELECT value + 1 FROM ids WHERE value < 4098
              )
-             INSERT INTO lcm_summary_sources(node_id, source_kind, source_id)
+             INSERT INTO session_summary_sources(summary_id, source_kind, source_id)
              SELECT printf('summary-%05d', value), 'raw_message', '100' FROM ids;
-             INSERT INTO lcm_summary_sources(node_id, source_kind, source_id)
+             INSERT INTO session_summary_sources(summary_id, source_kind, source_id)
              VALUES ('summary-00001', 'raw_message', '5');
              WITH RECURSIVE ids(value) AS (
                 VALUES(1) UNION ALL SELECT value + 1 FROM ids WHERE value < 4098
@@ -768,13 +768,13 @@ mod tests {
                 generation INTEGER NOT NULL,
                 state TEXT NOT NULL
              );
-             CREATE TABLE lcm_summary_sources (
-                node_id TEXT NOT NULL,
+             CREATE TABLE session_summary_sources (
+                summary_id TEXT NOT NULL,
                 source_kind TEXT NOT NULL,
                 source_id TEXT NOT NULL
              );
-             CREATE TABLE lcm_summary_nodes (
-                node_id TEXT PRIMARY KEY,
+             CREATE TABLE session_summary_nodes (
+                summary_id TEXT PRIMARY KEY,
                 provider TEXT NOT NULL,
                 conversation_id TEXT NOT NULL,
                 session_id TEXT NOT NULL,
@@ -820,15 +820,15 @@ mod tests {
              INSERT INTO lcm_summary_convergence_dirty_raw(
                  provider, session_id, store_id, rewind_frontier_store_id
              ) VALUES ('cursor', 'diamond', 100, 99);
-             INSERT INTO lcm_summary_sources(node_id, source_kind, source_id) VALUES
+             INSERT INTO session_summary_sources(summary_id, source_kind, source_id) VALUES
                  ('a', 'raw_message', '100'),
                  ('d', 'raw_message', '100'),
                  ('b', 'summary_node', 'a'),
                  ('d', 'summary_node', 'b'),
                  ('e', 'summary_node', 'd'),
                  ('z', 'raw_message', '200');
-             INSERT INTO lcm_summary_nodes(
-                 node_id, provider, conversation_id, session_id, depth,
+             INSERT INTO session_summary_nodes(
+                 summary_id, provider, conversation_id, session_id, depth,
                  summary_text, summary_hash, summary_token_count, source_token_count, created_at
              ) VALUES
                  ('a', 'cursor', 'diamond', 'diamond', 0, 'a', 'a-hash', 1, 1, 1),

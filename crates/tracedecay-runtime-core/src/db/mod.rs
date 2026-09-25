@@ -3,7 +3,6 @@ mod connection;
 pub mod engine;
 mod row_codec;
 pub use row_codec::{decode_stored_json, encode_stored_json, optional_text_column, text_column};
-mod evidence_assembly;
 mod external_source;
 mod file_identity;
 mod graph_publication;
@@ -59,7 +58,7 @@ pub use connection::{
     RegisteredTestRuntimeFixtureV1, RegisteredTestRuntimeRetirementControlV1,
     TestDatabaseRuntimeMode, TestDatabaseRuntimeScope, TestRuntimeProfileIdentityV1,
 };
-pub use external_source::{install_external_source_schema, migrate_retired_mutation_copy_tables};
+pub use external_source::install_external_source_schema;
 pub use file_identity::{
     SqliteFileIdentityError, SqliteFileIdentityErrorCategory, SqliteFileIdentityOperation,
     sqlite_generation_identity,
@@ -76,5 +75,4 @@ pub use sql::{
 pub use tracedecay_store::{
     AnchorDerivativeKindV1, AnchorDispositionAppendOutcomeV1, AnchorDispositionReasonClassV1,
     AnchorDispositionStateV1, RetrievalAnchorDerivativeV1, RetrievalAnchorDispositionRecordV1,
-    RetrievalAnchorOwnerV1,
 };

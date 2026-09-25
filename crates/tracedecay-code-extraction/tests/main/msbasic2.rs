@@ -5,7 +5,7 @@ use tracedecay_domain::*;
 fn extract_fixture() -> ExtractionResult {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.bas").unwrap();
     let extractor = MsBasic2Extractor;
-    let result = extractor.extract("sample.bas", &source);
+    let result = extractor.extract_artifact("sample.bas", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     result
 }
@@ -18,8 +18,6 @@ fn test_msbasic2_gosub_calls() {
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
-    assert!(!calls.is_empty(), "expected call site refs");
-
     assert!(
         calls.iter().any(|r| r.reference_name == "200"),
         "expected GOSUB 200 call, got: {:?}",
@@ -38,49 +36,21 @@ fn test_msbasic2_gosub_calls() {
 #[test]
 fn test_msbasic2_docstrings() {
     let result = extract_fixture();
-
-    let log_fn = result
+    let docs: Vec<(&str, &str)> = result
         .nodes
         .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "LOG_A_MESSAGE")
-        .expect("LOG_A_MESSAGE function not found");
-    assert!(
-        log_fn.docstring.is_some(),
-        "LOG_A_MESSAGE should have docstring"
-    );
-    assert!(
-        log_fn.docstring.as_ref().unwrap().contains("LOG A MESSAGE"),
-        "docstring: {:?}",
-        log_fn.docstring
-    );
-
-    let connect_fn = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "CONNECT_TO_SERVER")
-        .expect("CONNECT_TO_SERVER function not found");
-    assert!(
-        connect_fn.docstring.is_some(),
-        "CONNECT_TO_SERVER should have docstring"
-    );
-    assert!(
-        connect_fn
-            .docstring
-            .as_ref()
-            .unwrap()
-            .contains("CONNECT TO SERVER"),
-        "docstring: {:?}",
-        connect_fn.docstring
-    );
-
-    let disconnect_fn = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "DISCONNECT")
-        .expect("DISCONNECT function not found");
-    assert!(
-        disconnect_fn.docstring.is_some(),
-        "DISCONNECT should have docstring"
+        .filter_map(|n| Some((n.name.as_str(), n.docstring.as_deref()?)))
+        .collect();
+    assert_eq!(
+        docs,
+        [
+            (
+                "LOG_A_MESSAGE",
+                "LOG A MESSAGE\nPARAMS: L$=LEVEL, M$=MESSAGE"
+            ),
+            ("CONNECT_TO_SERVER", "CONNECT TO SERVER"),
+            ("DISCONNECT", "DISCONNECT"),
+        ]
     );
 }
 
@@ -116,4 +86,18 @@ fn test_msbasic2_subroutine_internal_calls() {
         "expected >= 3 GOSUB 200 calls (top-level + connect + disconnect), got {}",
         gosub_200_count
     );
+}
+
+#[test]
+fn test_msbasic2_let_name_keeps_underscores() {
+    let result = MsBasic2Extractor
+        .extract_artifact("names.bas", "10 LET MAX_RETRIES = 3\n20 LET MR = 1\n")
+        .result;
+    let consts: Vec<&str> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Const)
+        .map(|n| n.name.as_str())
+        .collect();
+    assert_eq!(consts, ["MAX_RETRIES", "MR"]);
 }

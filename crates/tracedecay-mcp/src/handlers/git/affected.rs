@@ -42,7 +42,10 @@ impl AffectedTestDependents for VerifiedAffectedTestDependents<'_> {
         Box::pin(async move {
             let mut dependents = FileDependentsByFile::new();
             for file in files {
-                dependents.insert(file.clone(), self.query.get_file_dependents(file).await?);
+                dependents.insert(
+                    file.clone(),
+                    self.query.get_file_dependents(file).await?.files,
+                );
             }
             Ok(dependents)
         })

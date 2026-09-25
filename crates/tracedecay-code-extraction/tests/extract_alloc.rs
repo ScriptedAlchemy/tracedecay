@@ -294,7 +294,7 @@ fn extract_both_and_compare(
     source: &str,
     grammar_key: &str,
 ) -> (ParsedExtraction, usize) {
-    let full = extractor.extract(file_path, source);
+    let full = extractor.extract_artifact(file_path, source).result;
     assert!(full.errors.is_empty(), "extract errors: {:?}", full.errors);
 
     let tree = parse_with_grammar(grammar_key, source);
@@ -653,7 +653,10 @@ fn representative_language_walks_allocate_by_changed_region() {
             case.file_path,
             case.source.len()
         );
-        let cold = case.extractor.extract(case.file_path, &case.source);
+        let cold = case
+            .extractor
+            .extract_artifact(case.file_path, &case.source)
+            .result;
         assert!(
             cold.errors.is_empty(),
             "{} cold errors: {:?}",
@@ -741,7 +744,7 @@ fn representative_language_walks_allocate_by_changed_region() {
 #[test]
 fn bash_changed_region_reset_walk_does_not_copy_source() {
     let source = regional_fixture("kept() { echo kept; }\nkept\ntiny() { echo tiny; }\n");
-    let cold = BashExtractor.extract("region.sh", &source);
+    let cold = BashExtractor.extract_artifact("region.sh", &source).result;
     let tree = parse_with_grammar("bash", &source);
     let region = trailing_region(&source, "tiny()");
     let (incremental, walk_bytes) = measure_allocation(|| {
@@ -1196,7 +1199,10 @@ fn every_migrated_language_walk_allocates_by_changed_region() {
             case.file_path,
             source.len()
         );
-        let cold = case.extractor.extract(case.file_path, &source);
+        let cold = case
+            .extractor
+            .extract_artifact(case.file_path, &source)
+            .result;
         let tree = parse_with_grammar(case.grammar_key, &source);
         let region = trailing_region(&source, case.needle);
         let regions = [region];

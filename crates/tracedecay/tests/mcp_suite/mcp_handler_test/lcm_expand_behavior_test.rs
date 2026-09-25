@@ -273,7 +273,7 @@ async fn lcm_expand_returns_the_seeded_message_and_refuses_the_wrong_target() {
     .await;
     assert_eq!(
         unknown_field["error"]["message"],
-        "tool execution failed: config error: invalid retained application request for tracedecay_lcm_expand: not_a_field: unknown field `not_a_field`, expected one of `provider`, `session_id`, `target`, `content_offset`, `content_limit`, `source_limit`, `cursor`, `format`"
+        "tool execution failed: config error: invalid retained application request for tracedecay_lcm_expand: not_a_field: unknown field `not_a_field`, expected one of `provider`, `session_id`, `target`, `content_offset`, `content_limit`, `source_limit`, `cursor`"
     );
     assert_eq!(unknown_field["error"]["code"], -32603);
 

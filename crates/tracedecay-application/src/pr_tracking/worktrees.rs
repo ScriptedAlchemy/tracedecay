@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use tracedecay_domain::canonical_text::sha256_hex;
+use tracedecay_private_fs::FileLease;
 use tracedecay_runtime_core::branch::BranchAddOutcome;
 
 use super::{
@@ -94,7 +95,7 @@ impl ManualBranchArtifactsV1 {
 /// partially replaced branch route.
 pub struct ManualBranchLifecycleLeaseV1 {
     branch: String,
-    _lock: std::fs::File,
+    _lock: FileLease,
 }
 
 impl ManualBranchLifecycleLeaseV1 {
@@ -141,7 +142,7 @@ pub fn try_acquire_manual_branch_lifecycle(
         })?;
     Ok(ManualBranchLifecycleLeaseV1 {
         branch: branch.to_owned(),
-        _lock: lock,
+        _lock: FileLease::held(lock, "pr_tracking.manual_branch_lifecycle"),
     })
 }
 
@@ -777,7 +778,6 @@ pub fn cleanup_pr_worktree(
     data_root: &Path,
     pr: u64,
     expected_head: &str,
-    remove_synthetic_branch: bool,
     command_control: &PrCommandControlV1,
 ) -> std::result::Result<PrCleanupReceipt, PrCleanupError> {
     let worktree = data_root.join("pr-worktrees").join(format!("pr-{pr}"));
@@ -785,14 +785,11 @@ pub fn cleanup_pr_worktree(
     let label = pr_label(pr);
     let branch_ref = format!("refs/heads/{label}");
     let artifacts = || {
-        let mut artifacts = vec![
+        vec![
             PrCleanupArtifact::Worktree(worktree.clone()),
             PrCleanupArtifact::TrackingRef(tracking_ref.clone()),
-        ];
-        if remove_synthetic_branch {
-            artifacts.push(PrCleanupArtifact::Branch(branch_ref.clone()));
-        }
-        artifacts
+            PrCleanupArtifact::Branch(branch_ref.clone()),
+        ]
     };
     if command_control.is_cancelled() {
         return Err(PrCleanupError::Remaining(artifacts()));
@@ -814,9 +811,7 @@ pub fn cleanup_pr_worktree(
         }
     })?;
     if let Some(owned_head) = owned_head {
-        if remove_synthetic_branch
-            && ref_points_to(repo_root, &branch_ref, &owned_head, command_control)?
-        {
+        if ref_points_to(repo_root, &branch_ref, &owned_head, command_control)? {
             successful_git_with_control(repo_root, &["branch", "-D", &label], command_control)
                 .map_err(|source| PrCleanupError::Command {
                     artifact: PrCleanupArtifact::Branch(branch_ref.clone()),
@@ -839,7 +834,7 @@ pub fn cleanup_pr_worktree(
     let remaining = remaining_pr_artifacts(
         repo_root,
         &worktree,
-        remove_synthetic_branch.then_some(branch_ref.as_str()),
+        &branch_ref,
         &tracking_ref,
         &verification_control,
     )?;
@@ -897,7 +892,7 @@ fn cleanup_artifact_for_ref(reference: &str) -> PrCleanupArtifact {
 fn remaining_pr_artifacts(
     repo_root: &Path,
     worktree: &Path,
-    branch_ref: Option<&str>,
+    branch_ref: &str,
     tracking_ref: &str,
     command_control: &PrCommandControlV1,
 ) -> std::result::Result<Vec<PrCleanupArtifact>, PrCleanupError> {
@@ -926,9 +921,7 @@ fn remaining_pr_artifacts(
     {
         remaining.push(PrCleanupArtifact::Worktree(worktree.to_owned()));
     }
-    if let Some(branch_ref) = branch_ref
-        && ref_sha(repo_root, branch_ref, command_control)?.is_some()
-    {
+    if ref_sha(repo_root, branch_ref, command_control)?.is_some() {
         remaining.push(PrCleanupArtifact::Branch(branch_ref.to_owned()));
     }
     if ref_sha(repo_root, tracking_ref, command_control)?.is_some() {
@@ -1053,21 +1046,13 @@ pub async fn cleanup_pr_worktree_off_runtime(
     data_root: &Path,
     pr: u64,
     expected_head: &str,
-    remove_synthetic_branch: bool,
     command_control: PrCommandControlV1,
 ) -> std::result::Result<PrCleanupReceipt, PrCleanupError> {
     let repo_root = repo_root.to_path_buf();
     let data_root = data_root.to_path_buf();
     let expected_head = expected_head.to_owned();
     tokio::task::spawn_blocking(move || {
-        cleanup_pr_worktree(
-            &repo_root,
-            &data_root,
-            pr,
-            &expected_head,
-            remove_synthetic_branch,
-            &command_control,
-        )
+        cleanup_pr_worktree(&repo_root, &data_root, pr, &expected_head, &command_control)
     })
     .await
     .map_err(|error| PrCleanupError::Join(error.to_string()))?

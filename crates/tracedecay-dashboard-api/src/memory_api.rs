@@ -7,14 +7,11 @@ use std::collections::BTreeMap;
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::response::Json;
+use axum::response::{IntoResponse, Json, Response};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
 
-use super::memory_analysis::{
-    SIMILARITY_DEFAULT_THRESHOLD, SIMILARITY_PAIR_CAP, empty_score_distribution,
-};
+use super::memory_analysis::{SIMILARITY_DEFAULT_THRESHOLD, SIMILARITY_PAIR_CAP};
 use super::memory_service;
 use super::read_model::{
     DashboardCoverageCompletenessV1, DashboardCoverageV1, DashboardDomainStateV1,
@@ -116,6 +113,66 @@ pub(super) struct MemoryFactDetailPayloadV1 {
     error: String,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum MemoryFeedbackActionV1 {
+    Helpful,
+    Unhelpful,
+}
+
+/// How much of a feedback event this store can still account for. Redacted
+/// detail was withheld; unknown detail was never recorded.
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum MemoryFeedbackDetailsAvailabilityV1 {
+    Available,
+    Redacted,
+    Unknown,
+}
+
+/// One append-only feedback event. `source` and `note` are absent when the
+/// event carried none, which differs from an unknown value.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+struct MemoryTrustHistoryEventV1 {
+    event_id: String,
+    timestamp: i64,
+    action: MemoryFeedbackActionV1,
+    old_trust: f64,
+    new_trust: f64,
+    delta: f64,
+    details_availability: MemoryFeedbackDetailsAvailabilityV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum MemoryTrustHistoryCompletenessV1 {
+    Complete,
+    Partial,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MemoryTrustHistoryCursorV1 {
+    occurred_at: i64,
+    event_id: String,
+}
+
+/// `GET /api/plugins/holographic/fact/{fact_id}/trust-history`. `partial`
+/// exactly when `next_after` names the continuation.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(super) struct MemoryTrustHistoryPayloadV1 {
+    fact_id: String,
+    trust_history: Vec<MemoryTrustHistoryEventV1>,
+    limit: usize,
+    completeness: MemoryTrustHistoryCompletenessV1,
+    next_after: Option<MemoryTrustHistoryCursorV1>,
+    error: String,
+}
+
 fn owned_fact_id(state: &DashboardState, raw: String) -> Result<FactId, String> {
     let fact_id = FactId::new(raw).map_err(|error| error.to_string())?;
     fact_id
@@ -214,7 +271,7 @@ async fn fact_trust_history_payload(
     state: &DashboardState,
     fact_id: FactId,
     read_control: &FactReadControl,
-) -> Result<Option<Value>, String> {
+) -> Result<Option<MemoryTrustHistoryPayloadV1>, String> {
     let application = memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
         .map_err(|error| error.to_string())?;
     let Some(_detail) = application
@@ -229,62 +286,59 @@ async fn fact_trust_history_payload(
         .dashboard_feedback_history(fact_id.clone(), HISTORY_LIMIT, read_control)
         .await
         .map_err(|error| error.to_string())?;
-    let trust_history: Vec<Value> = history
+    let trust_history = history
         .events()
         .iter()
-        .map(|event| {
-            let action = match event.action() {
-                tracedecay_store::ProjectMemoryFactFeedbackActionV1::Helpful => "helpful",
-                tracedecay_store::ProjectMemoryFactFeedbackActionV1::Unhelpful => "unhelpful",
-            };
-            let availability = match event.details_availability() {
+        .map(|event| MemoryTrustHistoryEventV1 {
+            event_id: event.event_id().as_str().to_owned(),
+            timestamp: event.occurred_at().0,
+            action: match event.action() {
+                tracedecay_store::ProjectMemoryFactFeedbackActionV1::Helpful => {
+                    MemoryFeedbackActionV1::Helpful
+                }
+                tracedecay_store::ProjectMemoryFactFeedbackActionV1::Unhelpful => {
+                    MemoryFeedbackActionV1::Unhelpful
+                }
+            },
+            old_trust: event.old_trust().as_f64(),
+            new_trust: event.new_trust().as_f64(),
+            delta: event.new_trust().as_f64() - event.old_trust().as_f64(),
+            details_availability: match event.details_availability() {
                 tracedecay_store::ProjectMemoryFactFeedbackDetailsAvailabilityV1::Available => {
-                    "available"
+                    MemoryFeedbackDetailsAvailabilityV1::Available
                 }
                 tracedecay_store::ProjectMemoryFactFeedbackDetailsAvailabilityV1::Redacted => {
-                    "redacted"
+                    MemoryFeedbackDetailsAvailabilityV1::Redacted
                 }
                 tracedecay_store::ProjectMemoryFactFeedbackDetailsAvailabilityV1::Unknown => {
-                    "unknown"
+                    MemoryFeedbackDetailsAvailabilityV1::Unknown
                 }
-            };
-            let mut row = Map::new();
-            row.insert("event_id".into(), json!(event.event_id().as_str()));
-            row.insert("timestamp".into(), json!(event.occurred_at().0));
-            row.insert("action".into(), json!(action));
-            row.insert("old_trust".into(), json!(event.old_trust().as_f64()));
-            row.insert("new_trust".into(), json!(event.new_trust().as_f64()));
-            row.insert(
-                "delta".into(),
-                json!(event.new_trust().as_f64() - event.old_trust().as_f64()),
-            );
-            row.insert("details_availability".into(), json!(availability));
-            if let Some(source) = event.source() {
-                row.insert("source".into(), json!(source));
-            }
-            if let Some(note) = event.note() {
-                row.insert("note".into(), json!(note));
-            }
-            Value::Object(row)
+            },
+            source: event.source().map(ToOwned::to_owned),
+            note: event.note().map(ToOwned::to_owned),
         })
         .collect();
-    let next_after = history.next_after().map(|cursor| {
-        json!({
-            "occurred_at": cursor.occurred_at().0,
-            "event_id": cursor.event_id().as_str(),
-        })
-    });
-    Ok(Some(json!({
-        "fact_id": fact_id.as_str(),
-        "trust_history": trust_history,
-        "limit": HISTORY_LIMIT,
-        "completeness": if next_after.is_some() { "partial" } else { "complete" },
-        "next_after": next_after,
-        "error": "",
-    })))
+    let next_after = history
+        .next_after()
+        .map(|cursor| MemoryTrustHistoryCursorV1 {
+            occurred_at: cursor.occurred_at().0,
+            event_id: cursor.event_id().as_str().to_owned(),
+        });
+    Ok(Some(MemoryTrustHistoryPayloadV1 {
+        fact_id: fact_id.as_str().to_owned(),
+        trust_history,
+        limit: HISTORY_LIMIT,
+        completeness: if next_after.is_some() {
+            MemoryTrustHistoryCompletenessV1::Partial
+        } else {
+            MemoryTrustHistoryCompletenessV1::Complete
+        },
+        next_after,
+        error: String::new(),
+    }))
 }
 
-/// `GET /api/plugins/holographic/`, overview + facts + entities + graph.
+/// `GET /api/plugins/holographic`, overview + facts + entities + graph.
 pub async fn overview(
     State(state): State<DashboardState>,
     RequestControl(control): RequestControl,
@@ -703,7 +757,7 @@ pub async fn fact_trust_history(
     State(state): State<DashboardState>,
     RequestControl(control): RequestControl,
     JsonPath(fact_id): JsonPath<String>,
-) -> (StatusCode, Json<Value>) {
+) -> Response {
     hotpath::future!(
         async move {
             let fact_id = match owned_fact_id(&state, fact_id) {
@@ -712,27 +766,30 @@ pub async fn fact_trust_history(
                     return (
                         StatusCode::BAD_REQUEST,
                         Json(http_detail(&format!("invalid canonical fact id: {error}"))),
-                    );
+                    )
+                        .into_response();
                 }
             };
             let fact_id_label = fact_id.as_str().to_owned();
             let result =
                 fact_trust_history_payload(&state, fact_id, &fact_read_control(&control)).await;
             if let Some(state) = request_terminal_state(&control) {
-                return terminal_read_response(state);
+                return terminal_read_response(state).into_response();
             }
             match result {
-                Ok(Some(payload)) => (StatusCode::OK, Json(payload)),
+                Ok(Some(payload)) => (StatusCode::OK, Json(payload)).into_response(),
                 Ok(None) => (
                     StatusCode::NOT_FOUND,
                     Json(http_detail(&format!("fact not found: {fact_id_label}"))),
-                ),
+                )
+                    .into_response(),
                 Err(e) => (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(http_detail(&format!(
                         "Failed to load trust history for fact {fact_id_label}: {e}"
                     ))),
-                ),
+                )
+                    .into_response(),
             }
         },
         label = "dashboard_api.memory.trust_history"
@@ -746,7 +803,7 @@ pub async fn projection(
     State(state): State<DashboardState>,
     RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<ProjectionParams>,
-) -> Json<Value> {
+) -> Json<memory_service::MemoryProjectionPayloadV1> {
     hotpath::future!(
         async move {
             let limit = coerce_limit(params.limit, 25, memory_service::projection_point_cap());
@@ -759,16 +816,11 @@ pub async fn projection(
             .await;
             if let Some(state) = request_terminal_state(&control) {
                 let (code, error) = terminal_read_code(state);
-                return Json(json!({
-                    "exists": true,
-                    "dim": 0,
-                    "limit": limit,
-                    "method": "none",
-                    "points": [],
-                    "state": state,
-                    "code": code,
-                    "error": error,
-                }));
+                return Json(memory_service::MemoryProjectionPayloadV1 {
+                    state: Some(state),
+                    code: Some(code.to_owned()),
+                    ..memory_service::MemoryProjectionPayloadV1::empty(limit, error)
+                });
             }
             Json(payload)
         },
@@ -783,7 +835,7 @@ pub async fn similarity(
     State(state): State<DashboardState>,
     RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<SimilarityParams>,
-) -> Json<Value> {
+) -> Json<memory_service::MemorySimilarityPayloadV1> {
     hotpath::future!(
         async move {
             let min_similarity = memory_service::coerce_similarity_score(
@@ -800,19 +852,15 @@ pub async fn similarity(
             .await;
             if let Some(state) = request_terminal_state(&control) {
                 let (code, error) = terminal_read_code(state);
-                return Json(json!({
-                    "exists": true,
-                    "dim": 0,
-                    "count": 0,
-                    "limit": pair_cap,
-                    "min_similarity": min_similarity,
-                    "total_pairs": 0,
-                    "score_distribution": empty_score_distribution(),
-                    "pairs": [],
-                    "state": state,
-                    "code": code,
-                    "error": error,
-                }));
+                return Json(memory_service::MemorySimilarityPayloadV1 {
+                    state: Some(state),
+                    code: Some(code.to_owned()),
+                    ..memory_service::MemorySimilarityPayloadV1::empty(
+                        pair_cap,
+                        min_similarity,
+                        error,
+                    )
+                });
             }
             Json(payload)
         },
@@ -827,7 +875,7 @@ pub async fn oplog(
     State(state): State<DashboardState>,
     RequestControl(control): RequestControl,
     JsonQuery(params): JsonQuery<LimitParams>,
-) -> Json<Value> {
+) -> Json<memory_service::MemoryOplogPayloadV1> {
     hotpath::future!(
         async move {
             let limit = coerce_limit(params.limit, 50, 300);
@@ -835,14 +883,11 @@ pub async fn oplog(
                 memory_service::oplog_payload(&state, limit, &fact_read_control(&control)).await;
             if let Some(state) = request_terminal_state(&control) {
                 let (code, error) = terminal_read_code(state);
-                return Json(json!({
-                    "events": [],
-                    "count": 0,
-                    "limit": limit,
-                    "state": state,
-                    "code": code,
-                    "error": error,
-                }));
+                return Json(memory_service::MemoryOplogPayloadV1 {
+                    state: Some(state),
+                    code: Some(code.to_owned()),
+                    ..memory_service::MemoryOplogPayloadV1::empty(limit, error)
+                });
             }
             Json(payload)
         },

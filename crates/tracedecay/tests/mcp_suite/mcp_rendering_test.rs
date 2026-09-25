@@ -58,80 +58,6 @@ async fn resolve_node_id_over_mcp(fixture: &ProductionCompositionFixture, name: 
 }
 
 #[tokio::test]
-async fn read_cache_default_response_stays_markdown() {
-    let fixture = production_composition_fixture().await;
-    let args = json!({"file": "src/main.rs", "mode": "full"});
-
-    call_tool(&fixture, "tracedecay_read", args.clone()).await;
-    let cached = call_tool(&fixture, "tracedecay_read", args).await;
-    let cached_text = extract_text(&cached.value);
-    assert!(cached_text.starts_with("## src/main.rs (full)"));
-    assert!(cached_text.contains("**unchanged:** true"));
-    assert!(!cached_text.trim_start().starts_with('{'));
-    assert!(!cached_text.contains('|'));
-
-    let cached_json = call_tool(
-        &fixture,
-        "tracedecay_read",
-        json!({"file": "src/main.rs", "mode": "full", "format": "json"}),
-    )
-    .await;
-    let cached_json = extract_json(&cached_json.value);
-    assert_eq!(cached_json["unchanged"], true);
-    assert_eq!(cached_json["file"], "src/main.rs");
-    fixture.harness.shutdown().await;
-}
-
-#[tokio::test]
-async fn read_lines_includes_overlapping_symbol_context() {
-    let fixture = production_composition_fixture().await;
-
-    let result = call_tool(
-        &fixture,
-        "tracedecay_read",
-        json!({"file": "src/main.rs", "mode": "lines", "lines": "5-7"}),
-    )
-    .await;
-    let text = extract_text(&result.value);
-
-    assert!(text.contains("### Context"), "got: {text}");
-    assert!(text.contains("fn main()"), "got: {text}");
-    assert!(text.contains("main 5-8"), "got: {text}");
-    assert!(text.contains("let result = helper();"), "got: {text}");
-
-    let json_result = call_tool(
-        &fixture,
-        "tracedecay_read",
-        json!({
-            "file": "src/main.rs",
-            "mode": "lines",
-            "lines": "5-7",
-            "format": "json"
-        }),
-    )
-    .await;
-    let parsed = extract_json(&json_result.value);
-    assert_eq!(parsed["context"]["symbol_count"], 1);
-    assert_eq!(parsed["context"]["symbols"][0]["name"], "main");
-    assert_eq!(parsed["context"]["symbols"][0]["signature"], "fn main()");
-
-    let cached = call_tool(
-        &fixture,
-        "tracedecay_read",
-        json!({"file": "src/main.rs", "mode": "lines", "lines": "5-7"}),
-    )
-    .await;
-    let cached_text = extract_text(&cached.value);
-    assert!(
-        cached_text.contains("**unchanged:** true"),
-        "got: {cached_text}"
-    );
-    assert!(cached_text.contains("### Context"), "got: {cached_text}");
-    assert!(cached_text.contains("fn main()"), "got: {cached_text}");
-    fixture.harness.shutdown().await;
-}
-
-#[tokio::test]
 async fn type_hierarchy_defaults_to_markdown_and_supports_json() {
     let fixture = production_composition_fixture().await;
     let node_id = resolve_node_id_over_mcp(&fixture, "helper").await;
@@ -143,9 +69,18 @@ async fn type_hierarchy_defaults_to_markdown_and_supports_json() {
     )
     .await;
     let markdown = extract_text(&markdown.value);
-    assert!(markdown.starts_with("## Type Hierarchy"));
-    assert!(markdown.contains("```text"));
-    assert!(!markdown.contains("|"));
+    assert!(
+        markdown.starts_with("## code\\_type\\_hierarchy"),
+        "{markdown}"
+    );
+    assert!(
+        markdown.contains("(function) src/utils.rs:") && markdown.contains(&node_id),
+        "the payload leads with the root symbol line: {markdown}"
+    );
+    assert!(
+        !markdown.contains("|- "),
+        "helper has no subtypes: {markdown}"
+    );
     assert!(serde_json::from_str::<Value>(markdown).is_err());
 
     let json_result = call_tool(
@@ -155,7 +90,8 @@ async fn type_hierarchy_defaults_to_markdown_and_supports_json() {
     )
     .await;
     let parsed: Value = serde_json::from_str(extract_text(&json_result.value)).unwrap();
-    assert_eq!(parsed["root"]["name"], "helper");
-    assert!(parsed["tree"].as_str().unwrap().contains("helper"));
+    let items = &parsed["outcome"]["value"]["payload"]["items"];
+    assert_eq!(items[0]["symbol"]["name"], "helper", "{parsed}");
+    assert_eq!(items[0]["edge_kind"], "root", "{parsed}");
     fixture.harness.shutdown().await;
 }

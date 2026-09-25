@@ -5,11 +5,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use tokio::time::Duration;
 
+pub use tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
 pub use tracedecay_session_runtime::DAEMON_CLIENT_DRAIN_DEADLINE;
 
 use super::orchestration::{DaemonShutdownFailures, DaemonShutdownReceipt};
-
-pub const DAEMON_TASK_ABORT_DEADLINE: Duration = crate::TASK_ABORT_DEADLINE;
 
 /// Per-phase shutdown budgets.
 ///

@@ -11,14 +11,57 @@
 //! the prior diagnostic. We don't follow `tsc --build` references because
 //! the resolver only ever asks for definitions on the explicitly opened
 //! tsconfig.
+//!
+//! The compiler is the project's own `node_modules/.bin/tsc`, so the check
+//! runs the TypeScript version the project pins rather than whatever happens
+//! to be on the daemon's `PATH`. A `tsconfig.json` without it is a typed
+//! [`TypeScriptProducerState::CompilerMissing`], not an empty success, because
+//! a caller that asks for diagnostics must learn that nothing checked the
+//! project.
 
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
 
 use super::{Diagnostic, Driver, Scope, is_diagnostic_level};
-use tracedecay_domain::errors::Result;
+use tracedecay_domain::errors::{Result, TraceDecayError};
+
+/// The exact command that installs the project's own compiler where the
+/// producer looks for it.
+pub const TYPESCRIPT_INSTALL_COMMAND: &str = "npm install --save-dev typescript";
+
+/// Whether the TypeScript diagnostics producer can run for a project root.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TypeScriptProducerState {
+    /// `tsconfig.json` is present and the project's own
+    /// `node_modules/.bin/tsc` exists.
+    Configured { compiler: PathBuf },
+    /// `tsconfig.json` is present but the project has no compiler of its own.
+    /// [`TYPESCRIPT_INSTALL_COMMAND`] adds one.
+    CompilerMissing,
+    /// No `tsconfig.json` at the project root; there is nothing to type-check.
+    NoTsconfig,
+}
+
+/// Resolves the producer state for `project_root` from the filesystem alone.
+pub fn typescript_producer_state(project_root: &Path) -> TypeScriptProducerState {
+    if !project_root.join("tsconfig.json").is_file() {
+        return TypeScriptProducerState::NoTsconfig;
+    }
+    match resolve_compiler(project_root) {
+        Some(compiler) => TypeScriptProducerState::Configured { compiler },
+        None => TypeScriptProducerState::CompilerMissing,
+    }
+}
+
+fn resolve_compiler(project_root: &Path) -> Option<PathBuf> {
+    let local = project_root
+        .join("node_modules")
+        .join(".bin")
+        .join(if cfg!(windows) { "tsc.cmd" } else { "tsc" });
+    local.is_file().then_some(local)
+}
 
 pub struct TscDriver;
 
@@ -38,32 +81,87 @@ impl Driver for TscDriver {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Diagnostic>>> + Send + 'a>> {
         Box::pin(hotpath::future!(
             async move {
-                let mut cmd = tokio::process::Command::new("tsc");
-                cmd.arg("--noEmit")
-                    .arg("--pretty")
-                    .arg("false")
-                    .current_dir(project_root)
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::null())
-                    .kill_on_drop(true);
-
-                // Spawn errors (tsc not on PATH) fall through to empty rather
-                // than killing the call. Same reasoning as the Python driver:
-                // a tsconfig.json's presence doesn't guarantee tsc is installed,
-                // and a Rust project with a JS sibling shouldn't be punished.
-                let Ok(output) = cmd.output().await else {
-                    return Ok(Vec::new());
+                let compiler = match typescript_producer_state(project_root) {
+                    TypeScriptProducerState::Configured { compiler } => compiler,
+                    TypeScriptProducerState::CompilerMissing => {
+                        return Err(TraceDecayError::Config {
+                            message: format!(
+                                "no TypeScript compiler for '{}': run `{TYPESCRIPT_INSTALL_COMMAND}`",
+                                project_root.display()
+                            ),
+                        });
+                    }
+                    TypeScriptProducerState::NoTsconfig => {
+                        return Err(TraceDecayError::Config {
+                            message: format!(
+                                "'{}' has no tsconfig.json to type-check",
+                                project_root.display()
+                            ),
+                        });
+                    }
                 };
-
-                // tsc exits with status 1 when there are errors; status 0 means
-                // "no diagnostics." Either way, stdout has the diagnostic stream.
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                Ok(parse_tsc_output(&stdout))
+                run_compiler(&compiler, project_root).await
             },
             label = "compile_diagnostics.typescript.tsc"
         ))
     }
+}
+
+/// Runs one resolved compiler over the project and parses its report.
+///
+/// tsc exits 0 for a clean project and 1 or 2 (`DiagnosticsPresent_*`) when it
+/// reported diagnostics; all three are answers. Any other exit (an invalid
+/// project, a reference cycle), or a diagnostic without a file location (a
+/// `tsconfig.json` that names no inputs, an unreadable option), means the
+/// project was not checked, and that is a typed failure rather than a clean
+/// page.
+pub async fn run_compiler(compiler: &Path, project_root: &Path) -> Result<Vec<Diagnostic>> {
+    let mut cmd = tokio::process::Command::new(compiler);
+    cmd.arg("--noEmit")
+        .arg("--pretty")
+        .arg("false")
+        .current_dir(project_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let output = cmd
+        .output()
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("failed to spawn `{}`: {error}", compiler.display()),
+        })?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if let Some(global) = stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| is_global_error(line))
+    {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "`{}` could not check the project: {global}",
+                compiler.display()
+            ),
+        });
+    }
+    if !matches!(output.status.code(), Some(0..=2)) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "`{}` exited with {}: {}",
+                compiler.display(),
+                output.status,
+                stderr.trim().lines().next().unwrap_or("no output")
+            ),
+        });
+    }
+    Ok(parse_tsc_output(&stdout))
+}
+
+/// A tsc report line that carries no file location (`error TS18003: …`);
+/// such lines describe the check itself failing, not a source finding.
+fn is_global_error(line: &str) -> bool {
+    line.starts_with("error TS")
 }
 
 /// Parse the full tsc stdout into a flat diagnostic list. Top-level so it
@@ -102,7 +200,7 @@ pub fn parse_tsc_line(line: &str) -> Option<Diagnostic> {
     let location = &line[open + 1..close];
     let mut parts = location.splitn(2, ',');
     let line_no: u32 = parts.next()?.trim().parse().ok()?;
-    let _col: u32 = parts.next()?.trim().parse().unwrap_or(0);
+    let column: u32 = parts.next()?.trim().parse().unwrap_or(1);
 
     // after = "error TS2322: Type ..." or "warning TS####: ..."
     let mut tokens = after.splitn(3, ' ');
@@ -118,6 +216,7 @@ pub fn parse_tsc_line(line: &str) -> Option<Diagnostic> {
         file,
         line_start: line_no,
         line_end: line_no,
+        column: column.max(1),
         level,
         code,
         message,
@@ -137,6 +236,7 @@ mod tests {
         let d = parse_tsc_line(line).expect("should parse");
         assert_eq!(d.file, "src/lib.ts");
         assert_eq!(d.line_start, 4);
+        assert_eq!(d.column, 15);
         assert_eq!(d.level, "error");
         assert_eq!(d.code, "TS2322");
         assert!(d.message.contains("not assignable"));
@@ -174,5 +274,82 @@ src/b.ts(2,2): warning TS6133: Second.
         assert_eq!(diags.len(), 2);
         assert_eq!(diags[0].file, "src/a.ts");
         assert_eq!(diags[1].level, "warning");
+    }
+
+    #[test]
+    fn producer_state_distinguishes_no_tsconfig_missing_compiler_and_local_compiler() {
+        let project = tempfile::tempdir().unwrap();
+        assert_eq!(
+            typescript_producer_state(project.path()),
+            TypeScriptProducerState::NoTsconfig
+        );
+
+        std::fs::write(project.path().join("tsconfig.json"), "{}").unwrap();
+        // The state never depends on whatever `tsc` the host happens to have.
+        assert_eq!(
+            typescript_producer_state(project.path()),
+            TypeScriptProducerState::CompilerMissing
+        );
+
+        let bin = project.path().join("node_modules/.bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let local = bin.join(if cfg!(windows) { "tsc.cmd" } else { "tsc" });
+        std::fs::write(&local, "").unwrap();
+        assert_eq!(
+            typescript_producer_state(project.path()),
+            TypeScriptProducerState::Configured { compiler: local },
+        );
+    }
+
+    /// `tsc --noEmit` exits 2 (`DiagnosticsPresent_OutputsGenerated`) for a
+    /// project with errors; treating only 0 and 1 as answers turned every
+    /// real finding into a producer failure.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_compiler_accepts_every_diagnostics_present_exit_code() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for exit in [0, 1, 2] {
+            let project = tempfile::tempdir().unwrap();
+            let compiler = project.path().join("tsc");
+            std::fs::write(
+                &compiler,
+                format!(
+                    "#!/bin/sh\necho \"src/index.ts(3,14): error TS4023: Exported variable 'value' cannot be named.\"\nexit {exit}\n"
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&compiler, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+            let diagnostics = run_compiler(&compiler, project.path())
+                .await
+                .unwrap_or_else(|error| panic!("exit {exit} is a checked project: {error}"));
+            assert_eq!(diagnostics.len(), 1, "exit {exit}");
+            assert_eq!(diagnostics[0].code, "TS4023");
+            assert_eq!((diagnostics[0].line_start, diagnostics[0].column), (3, 14));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_compiler_refuses_a_check_that_named_no_inputs() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let project = tempfile::tempdir().unwrap();
+        let compiler = project.path().join("tsc");
+        std::fs::write(
+            &compiler,
+            "#!/bin/sh\necho \"error TS18003: No inputs were found in config file.\"\nexit 3\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&compiler, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let error = run_compiler(&compiler, project.path())
+            .await
+            .expect_err("a file-less tsc error is not a clean project");
+        assert!(
+            error.to_string().contains("TS18003"),
+            "the refusal names the compiler's own error: {error}"
+        );
     }
 }

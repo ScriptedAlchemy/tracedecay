@@ -5,15 +5,14 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use tracedecay_agent_hosts::agents::host_bundle::{
-    ClineFamilyAdmissionV1, ClineFamilyProviderV1, HostBundleComponentDoctorStateV1,
-    HostBundleError, HostBundleExecutionRequestV1, HostBundleInstallReceiptV1,
-    HostBundleLifecycleOpV1, HostBundleLifecycleRequestV1, HostBundleReceiptArtifactV1,
-    HostBundleRegistrationInspectorV1, HostBundleRegistrationStateV1, HostBundleRollbackBoundaryV1,
-    HostBundleWriterV1, HostCapabilityStateV1, HostCapabilityUnavailableReasonV1, HostCapabilityV1,
-    HostComponentSetExecutionRequestV1, HostComponentSetLifecycleRequestV1,
-    HostComponentSetRegistrationV1, HostComponentSetTransactionV1, HostComponentV1, HostKindV1,
-    HostRegistrationRouteV1, cline_family_evidence,
-    dry_run_host_component_set_lifecycle_with_lifecycle_root_at,
+    ClineFamilyAdmissionV1, ClineFamilyProviderV1, HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
+    HostBundleComponentDoctorStateV1, HostBundleError, HostBundleInstallReceiptV1,
+    HostBundleLifecycleOpV1, HostBundleReceiptArtifactV1, HostBundleRegistrationInspectorV1,
+    HostBundleRegistrationStateV1, HostBundleWriterV1, HostCapabilityStateV1,
+    HostCapabilityUnavailableReasonV1, HostCapabilityV1, HostComponentSetExecutionRequestV1,
+    HostComponentSetLifecycleRequestV1, HostComponentSetRegistrationV1,
+    HostComponentSetTransactionV1, HostComponentV1, HostKindV1, HostRegistrationRouteV1,
+    cline_family_evidence, dry_run_host_component_set_lifecycle_with_lifecycle_root_at,
     inspect_installed_host_bundle_components_at, native_host_edit_stop_conformance_evidence,
     stock_host_kinds, stock_host_registration_evidence,
     supported_host_edit_stop_conformance_evidence,
@@ -25,8 +24,9 @@ use tracedecay_agent_hosts::agents::host_bundle_registry::{
 };
 use tracedecay_agent_hosts::agents::host_component_registration::CatalogHostComponentRegistrationAuthority;
 use tracedecay_agent_hosts::agents::{HealthcheckContext, inspect_receipt_backed_host_components};
+use tracedecay_domain::NativeHostIdentityV1;
 use tracedecay_hooks::{
-    HookHostV1, OpenCodePluginSurfaceV1, decode_native_hook_event, decode_opencode_lsp_event,
+    OpenCodePluginSurfaceV1, decode_native_hook_event, decode_opencode_lsp_event,
     decode_opencode_plugin_event,
 };
 
@@ -61,63 +61,6 @@ impl HostBundleRegistrationInspectorV1 for MissingRegistration {
         _component: HostComponentV1,
     ) -> HostBundleRegistrationStateV1 {
         HostBundleRegistrationStateV1::Missing
-    }
-}
-
-#[test]
-fn embedded_component_backup_restore_runs_through_the_real_lifecycle_writer() {
-    let artifacts = tempfile::tempdir().unwrap();
-    let lifecycle = tempfile::tempdir().unwrap();
-    let bundle = verified_embedded_host_bundle(
-        HostKindV1::Codex,
-        HostComponentV1::Core,
-        0,
-        GENERATOR_COMMIT,
-    )
-    .unwrap();
-    let verifier = bundle.verifier();
-    let mut writer =
-        HostBundleWriterV1::open_with_lifecycle_root(artifacts.path(), lifecycle.path()).unwrap();
-    writer
-        .execute(
-            &bundle.manifest,
-            &HostBundleExecutionRequestV1 {
-                lifecycle: HostBundleLifecycleRequestV1 {
-                    operation: HostBundleLifecycleOpV1::Install,
-                    expected_host: HostKindV1::Codex,
-                    expected_component: HostComponentV1::Core,
-                    explicit_confirmation: true,
-                    hermes_profile_bindings: 0,
-                    adopt_receiptless: false,
-                },
-                operation_id: [81; 16],
-            },
-            &bundle.contents,
-            &verifier,
-        )
-        .unwrap();
-    writer
-        .backup_component(&bundle.manifest, [82; 16], true, &verifier)
-        .unwrap();
-
-    let first = &bundle.contents[0];
-    fs::write(
-        artifacts.path().join(&first.relative_path),
-        b"interrupted-host-edit",
-    )
-    .unwrap();
-    let restored = writer
-        .restore_component_backup([82; 16], [83; 16], true, &verifier)
-        .unwrap();
-    assert_eq!(
-        restored.restored_receipt.rollback_boundary,
-        HostBundleRollbackBoundaryV1::Passed
-    );
-    for content in &bundle.contents {
-        assert_eq!(
-            fs::read(artifacts.path().join(&content.relative_path)).unwrap(),
-            content.bytes
-        );
     }
 }
 
@@ -182,7 +125,7 @@ fn receipt_backed_doctor_checks_deployed_digests_registration_and_repair() {
     )
     .unwrap();
     let receipt = HostBundleInstallReceiptV1 {
-        schema_version: 1,
+        schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
         operation_id: [7; 16],
         host: HostKindV1::KimiCode,
         component: HostComponentV1::Core,
@@ -198,8 +141,6 @@ fn receipt_backed_doctor_checks_deployed_digests_registration_and_repair() {
                 ownership_marker: artifact.ownership_marker.clone(),
             })
             .collect(),
-        rollback_boundary: HostBundleRollbackBoundaryV1::Passed,
-        rollback_history: Vec::new(),
     };
     let control = lifecycle_root.path().join(".tracedecay-host-bundle-v1");
     fs::create_dir_all(&control).unwrap();
@@ -263,7 +204,10 @@ fn receipt_backed_doctor_checks_deployed_digests_registration_and_repair() {
         repair.components[0].state,
         HostBundleComponentDoctorStateV1::Drifted
     );
-    assert!(!repair.components[0].repair_action.is_empty());
+    assert_eq!(
+        repair.components[0].repair_action,
+        "run `tracedecay install --agent kimi` to refresh the staged bundle, then open Kimi Code and run `/plugins install ~/.tracedecay/host-bundle-stage/kimi/tracedecay`; rerun Doctor to verify registration"
+    );
 }
 
 #[test]
@@ -283,7 +227,7 @@ fn cursor_native_extension_receipt_matches_embedded_assets() {
         fs::write(path, &content.bytes).unwrap();
     }
     let receipt = HostBundleInstallReceiptV1 {
-        schema_version: 1,
+        schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
         operation_id: [8; 16],
         host: HostKindV1::CursorDesktop,
         component: HostComponentV1::Agent,
@@ -299,8 +243,6 @@ fn cursor_native_extension_receipt_matches_embedded_assets() {
                 ownership_marker: artifact.ownership_marker.clone(),
             })
             .collect(),
-        rollback_boundary: HostBundleRollbackBoundaryV1::Passed,
-        rollback_history: Vec::new(),
     };
     let extension_prefix = format!(
         ".cursor/extensions/tracedecay.cursor-native-{}/",
@@ -361,7 +303,6 @@ fn component_set_dry_run_retains_analyzers_but_refuses_registration_aliases() {
     let mut clean_registration = CatalogHostComponentRegistrationAuthority::new(
         "opencode",
         home.path(),
-        lifecycle.path(),
         request.lifecycle.operation,
     )
     .unwrap();
@@ -393,7 +334,6 @@ fn component_set_dry_run_retains_analyzers_but_refuses_registration_aliases() {
     let mut retained_registration = CatalogHostComponentRegistrationAuthority::new(
         "opencode",
         home.path(),
-        lifecycle.path(),
         request.lifecycle.operation,
     )
     .unwrap();
@@ -423,7 +363,6 @@ fn component_set_dry_run_retains_analyzers_but_refuses_registration_aliases() {
     let mut conflicting_registration = CatalogHostComponentRegistrationAuthority::new(
         "opencode",
         home.path(),
-        lifecycle.path(),
         request.lifecycle.operation,
     )
     .unwrap();
@@ -663,7 +602,6 @@ fn component_set_dry_run_reports_competing_claims_and_binds_them_to_the_plan() {
         let mut registration = CatalogHostComponentRegistrationAuthority::new(
             "opencode",
             home,
-            lifecycle.path(),
             request.lifecycle.operation,
         )
         .unwrap();
@@ -743,7 +681,6 @@ fn component_set_dry_run_reports_competing_claims_and_binds_them_to_the_plan() {
     let mut registration = CatalogHostComponentRegistrationAuthority::new(
         "opencode",
         home.path(),
-        lifecycle.path(),
         request.lifecycle.operation,
     )
     .unwrap();
@@ -789,7 +726,6 @@ fn unreadable_host_registration_refuses_instead_of_reporting_no_conflict() {
     let mut registration = CatalogHostComponentRegistrationAuthority::new(
         "opencode",
         home.path(),
-        lifecycle.path(),
         request.lifecycle.operation,
     )
     .unwrap();
@@ -1124,11 +1060,11 @@ fn embedded_component_sets_complete_lifecycle_for_all_supported_hosts() {
 /// a second writer outside the transaction guarantees byte drift.
 ///
 /// Drift on a path the receipt still owns must be a warning Doctor reports, not
-/// a blocking ownership conflict, and `Repair` must converge it while backing
-/// the previous bytes up. Nothing under `.cursor` that TraceDecay does not own
-/// may change, including when a run is interrupted before it mutates anything.
+/// a blocking ownership conflict, and `Repair` must converge it. Nothing under
+/// `.cursor` that TraceDecay does not own may change, including when a run is
+/// interrupted before it mutates anything.
 #[test]
-fn cursor_core_drift_warns_and_reinstall_converges_with_a_backup() {
+fn cursor_core_drift_warns_and_reinstall_converges() {
     let artifacts = tempfile::tempdir().unwrap();
     let lifecycle = tempfile::tempdir().unwrap();
     let component_set = verified_embedded_host_component_set(
@@ -1264,84 +1200,55 @@ fn cursor_core_drift_warns_and_reinstall_converges_with_a_backup() {
         HostBundleComponentDoctorStateV1::Current
     );
     assert_eq!(fs::read(&unrelated).unwrap(), unrelated_bytes);
-
-    // The replaced bytes were backed up before the repair overwrote them.
-    let backups = lifecycle
-        .path()
-        .join(".tracedecay-host-bundle-v1")
-        .join("backups");
-    let backed_up = walk_files(&backups)
-        .into_iter()
-        .any(|path| fs::read(&path).is_ok_and(|bytes| bytes == REFRESHED));
-    assert!(
-        backed_up,
-        "repair must back the replaced bytes up before it re-owns the path"
-    );
-}
-
-fn walk_files(root: &Path) -> Vec<std::path::PathBuf> {
-    let mut found = Vec::new();
-    let Ok(entries) = fs::read_dir(root) else {
-        return found;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            found.extend(walk_files(&path));
-        } else {
-            found.push(path);
-        }
-    }
-    found
 }
 
 #[test]
 fn authentic_host_fixtures_use_production_typed_decoders() {
-    let fixtures: &[(HookHostV1, &str)] = &[
+    let fixtures: &[(NativeHostIdentityV1, &str)] = &[
         (
-            HookHostV1::ClaudeCode,
+            NativeHostIdentityV1::ClaudeCode,
             include_str!(
                 "../../../../crates/tracedecay-hooks/fixtures/host_events/claude/post_tool_use_write.json"
             ),
         ),
         (
-            HookHostV1::ClaudeCode,
+            NativeHostIdentityV1::ClaudeCode,
             include_str!(
                 "../../../../crates/tracedecay-hooks/fixtures/host_events/claude/stop.json"
             ),
         ),
         (
-            HookHostV1::Codex,
+            NativeHostIdentityV1::Codex,
             include_str!(
                 "../../../../crates/tracedecay-hooks/fixtures/host_events/codex/stop.json"
             ),
         ),
         (
-            HookHostV1::CursorDesktop,
+            NativeHostIdentityV1::CursorDesktop,
             include_str!(
                 "../../../../crates/tracedecay-hooks/fixtures/host_events/cursor/after-file-edit.json"
             ),
         ),
         (
-            HookHostV1::Hermes,
+            NativeHostIdentityV1::Hermes,
             include_str!(
                 "../../../../crates/tracedecay-hooks/fixtures/host_events/hermes/saved-edit.json"
             ),
         ),
         (
-            HookHostV1::Hermes,
+            NativeHostIdentityV1::Hermes,
             include_str!(
                 "../../../../crates/tracedecay-hooks/fixtures/host_events/hermes/stop.json"
             ),
         ),
         (
-            HookHostV1::KimiCode,
+            NativeHostIdentityV1::KimiCode,
             include_str!(
                 "../../../../crates/tracedecay-hooks/fixtures/host_events/kimi/post-tool-use-edit.json"
             ),
         ),
         (
-            HookHostV1::KimiCode,
+            NativeHostIdentityV1::KimiCode,
             include_str!("../../../../crates/tracedecay-hooks/fixtures/host_events/kimi/stop.json"),
         ),
     ];
@@ -1396,7 +1303,7 @@ fn corrupted_host_identity_fails_typed_decoder() {
     fixture["hook_event_name"] = json!("NotARealEvent");
     assert!(
         decode_native_hook_event(
-            HookHostV1::ClaudeCode,
+            NativeHostIdentityV1::ClaudeCode,
             serde_json::to_vec(&fixture).unwrap().as_slice(),
         )
         .is_err()

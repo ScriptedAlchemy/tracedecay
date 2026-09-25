@@ -100,6 +100,7 @@ impl Driver for CargoDriver {
                             file: rel_file,
                             line_start: span.line_start,
                             line_end: span.line_end,
+                            column: span.column_start.max(1),
                             level: msg.level.clone(),
                             code: code.clone(),
                             message: msg.message.clone(),
@@ -157,6 +158,8 @@ struct CargoSpan {
     file_name: String,
     line_start: u32,
     line_end: u32,
+    #[serde(default)]
+    column_start: u32,
     is_primary: bool,
 }
 

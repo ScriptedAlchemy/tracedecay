@@ -20,7 +20,7 @@ use tracedecay_application::code_index::{
     DaemonCodeIndexControlV1, ProductionCodeIndexOwnerV1, open_production_code_index_owner_v1,
 };
 use tracedecay_code_index_retention::code_index_generations::{
-    DurablePublicationPointerV1, DurableSealedCodeGenerationIdentityV1,
+    CodeIndexScopeStoreResetV1, DurablePublicationPointerV1, DurableSealedCodeGenerationIdentityV1,
 };
 use tracedecay_contracts::{
     code_index_freshness::{
@@ -72,6 +72,7 @@ use super::{
 };
 #[cfg(test)]
 use super::{HeldActiveDecodeV1, reconcile_panic_guard};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 const MAX_PENDING_HINTS: usize = 1_024;
 const MAX_SUPERSEDED_RECONCILE_RETRIES: usize = 4;
@@ -611,8 +612,8 @@ impl SourceFreshnessFenceV1 {
 
     /// Whether the last completed proof was sealed from exactly this snapshot.
     ///
-    /// Clock age is not part of the answer. A seal or clone backfill can
-    /// outlive the admission window without the snapshot changing identity.
+    /// Clock age is not part of the answer. A seal can outlive the admission
+    /// window without the snapshot changing identity.
     pub(super) fn proof_describes_snapshot(
         &self,
         snapshot_content_identity: &ContentDigest,
@@ -949,7 +950,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         byte_pool: Arc<SharedCodeIndexBytePoolV1>,
         policy: CodeIndexHintPolicyV1,
     ) -> Result<Self, CodeIndexSchedulerErrorV1> {
-        let project_root = project_root.canonicalize()?;
+        let project_root = canonical_existing_identity(project_root)?;
         // Resolve exact identity BEFORE any indexing work. Paths located this
         // checkout; identity authorizes what may be reused.
         let identity = identity::IndexingIdentityV1::resolve(&project_root)
@@ -2446,6 +2447,43 @@ impl CodeIndexWorktreeSchedulerV1 {
         Ok(())
     }
 
+    /// Delete this worktree's corrupt derived publication and forget every
+    /// in-memory derivation of it, so the next pass seals from source.
+    ///
+    /// Only the publication authority (`CorruptionResetRequired`) reaches
+    /// this. The scope store is derived data with no authoritative content,
+    /// so the legal action is deletion and rebuild, never repair. Serving
+    /// seats already handed to the registry are left in place; the rebuilt
+    /// generation replaces them through the ordinary swap.
+    pub fn reset_corrupt_publication_authority(
+        &mut self,
+    ) -> Result<CodeIndexScopeStoreResetV1, CodeIndexSchedulerErrorV1> {
+        let receipt = self
+            .publication
+            .reset_corrupt_store()
+            .map_err(CodeIndexProductionErrorV1::Publication)?;
+        self.latest_content_identity = None;
+        self.retained_snapshot_bytes.clear();
+        self._retained_snapshot_memory.clear();
+        *self
+            .active_snapshot_changed_paths
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        *self
+            .query_owners
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        *self
+            .generation_recovery
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        *self
+            .build_progress
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = CodeIndexBuildProgressSlotStateV1::default();
+        Ok(receipt)
+    }
+
     /// Retained-owner activation entry point. Foreground reads never call this.
     #[hotpath::measure(label = "code_index.reconcile.pass")]
     pub fn activate_or_reconcile(
@@ -2509,7 +2547,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             self.validate_generation_identity(&active)?;
             self.adopt_ignored_source_roster(&active);
         }
-        // Capture may advance `.git/index` mtime (gix::open). The post-reconcile
+        // Capture may advance `.git/index` mtime (git_open::open). The post-reconcile
         // witness is sampled at `mark_reconciled`, after that side effect, so
         // the next ready probe does not see this pass as stale.
         let mut overflow_reconciled = false;
@@ -2907,8 +2945,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// Bind a sealed snapshot to the source proof, renewing an expired clock
     /// when the sealed digests still match.
     ///
-    /// The admission window is 30s. This does not move the clone-successor
-    /// copy off the publication advance. It only stops an expired clock, or a
+    /// The admission window is 30s. This only stops an expired clock, or a
     /// predecessor disk witness, from clearing the generation those digests
     /// already name. A hook epoch or a digest mismatch still refuses.
     pub(super) fn currency_witness_for_sealed_snapshot(
@@ -2939,7 +2976,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         if !self.source_witness_matches_worktree(&freshness) {
             return None;
         }
-        // Sample after the walk. `gix::open` inside the digest comparison can
+        // Sample after the walk. `git_open::open` inside the digest comparison can
         // move index metadata; storing the post-walk sample is what keeps the
         // next probe from calling that side effect a new generation.
         let git_metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
@@ -3038,7 +3075,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// did: it proves the authority exists without walking, hashing, or
     /// classifying anything.
     pub fn git_authority_available(&self) -> bool {
-        gix::open(&self.project_root).is_ok()
+        tracedecay_runtime_core::git_open::open(&self.project_root).is_ok()
     }
 
     /// Run the cheap Git/stat ladder, unverified restore, tier-1 git
@@ -3520,7 +3557,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             return Err(cancelled_code_index_reconcile());
         }
         ignored_dependencies::checkpoint_if_present(control)?;
-        let repository = gix::open(&self.project_root)
+        let repository = tracedecay_runtime_core::git_open::open(&self.project_root)
             .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
         // Classify committed/staged/unstaged/untracked/deleted/renamed paths
         // truthfully from gix. Deletions drop out of the present candidate set;
@@ -3764,7 +3801,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                 for receipt in &active.snapshot().sanitization_receipts {
                     if file_occurrence_id(
                         &self.repository_id,
-                        &self.worktree_id,
                         &file.logical_path,
                         &file.content_digest,
                         receipt,
@@ -3780,7 +3816,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                 for file in &files {
                     if file_occurrence_id(
                         &self.repository_id,
-                        &self.worktree_id,
                         &file.logical_path,
                         &file.content_digest,
                         &receipt,

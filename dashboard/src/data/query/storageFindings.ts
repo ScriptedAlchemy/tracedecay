@@ -1,7 +1,7 @@
 /**
  * Doctor storage findings, as one authority.
  *
- * Two surfaces read `/api/storage/findings`: Observatory's findings section and
+ * Two surfaces read `/api/doctor/findings?family=storage`: Observatory's findings section and
  * the nav rail's app-wide Doctor dot. Both spelled the same key and the same
  * URL by hand, and then disagreed about the poll, 30 seconds in Observatory,
  * 60 in the rail.
@@ -16,14 +16,14 @@
  * So the key, the route, the contract, and the period are decided here, once,
  * and both callers take what this returns.
  */
-import { StorageFindingsPayloadV1Schema } from '../../contracts/generated.ts';
+import { DoctorFindingsPayloadV1Schema } from '../../contracts/generated.ts';
 import { fetchEnvelope, type EnvelopeResult } from './envelope.ts';
 import { scopeKey, scopedUrl, useScope, type DashboardScope } from '../scope/store.ts';
 import { useQuery } from '@tanstack/react-query';
-import type { StorageFindingsPayloadV1 } from '../../contracts/generated.ts';
+import type { DoctorFindingsPayloadV1 } from '../../contracts/generated.ts';
 
 /** The route, named once. Scope rewrites it; nothing else may spell it. */
-export const STORAGE_FINDINGS_URL = '/api/storage/findings';
+export const STORAGE_FINDINGS_URL = '/api/doctor/findings?family=storage';
 
 /**
  * How often the shared entry re-reads.
@@ -41,16 +41,16 @@ export function storageFindingsKey(scope: DashboardScope): readonly string[] {
 }
 
 /**
- * `GET /api/storage/findings` for the active scope.
+ * `GET /api/doctor/findings?family=storage` for the active scope.
  *
  * Answers an {@link EnvelopeResult}: a transport outcome is a state to render,
  * never an exception and never a fabricated empty report.
  */
 export function useStorageFindings() {
   const scope = useScope((s) => s.scope);
-  return useQuery<EnvelopeResult<StorageFindingsPayloadV1>>({
+  return useQuery<EnvelopeResult<DoctorFindingsPayloadV1>>({
     queryKey: storageFindingsKey(scope),
-    queryFn: () => fetchEnvelope(scopedUrl(scope, STORAGE_FINDINGS_URL), StorageFindingsPayloadV1Schema),
+    queryFn: () => fetchEnvelope(scopedUrl(scope, STORAGE_FINDINGS_URL), DoctorFindingsPayloadV1Schema),
     refetchInterval: STORAGE_FINDINGS_REFETCH_MS,
   });
 }

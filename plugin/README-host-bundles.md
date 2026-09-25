@@ -36,10 +36,10 @@ never replaced wholesale.
 - **Cursor cloud, Codex, Hermes, and Kiro:** only their evidenced hook, MCP,
   and CLI routes are declared. Missing LSP/native-diagnostics APIs stay typed
   unavailable.
-- **Cline:** the evidenced user MCP path is
-  `~/.cline/data/settings/cline_mcp_settings.json`, honoring
-  `CLINE_DATA_DIR`. The legacy VS Code extension path is migration/removal
-  only. Roo Code and Kilo are not inferred compatible from Cline branding or
+- **Cline:** the lifecycle owns only `mcpServers.tracedecay` in the user MCP
+  registry `~/.cline/mcp.json`; it never writes the VS Code extension's
+  `globalStorage`, which is read only for transcript ingest. Roo Code and
+  Kilo are not inferred compatible from Cline branding or
   transcript shape; native edit/stop delivery remains typed unavailable until
   checked-in host fixtures exist.
 - **Kimi Code:** the managed plugin manifest keeps skills, commands, and
@@ -67,20 +67,22 @@ prompt authority.
 
 ## Capability matrix
 
-The five first-party plugin hosts share one product skill tree and an MCP
-`serve` route. Commands, agents, hooks, LSP, and rules are host-specific.
-Gaps below are the current shipped state, not missed file sync. Do not treat
-Codex commands/agents or Kimi LSP/agents as omitted copies.
+The first-party plugin hosts share one product skill tree and an MCP
+`serve` route where the host admits MCP. Commands, agents, hooks, LSP, and
+rules are host-specific. Gaps below are the current shipped state, not missed
+file sync. Do not treat Codex commands/agents or Kimi LSP/agents as omitted
+copies. Pi is the MCP-free host: its extension registers the catalog tools over
+`tracedecay tool` and forwards its lifecycle events from inside the Pi process.
 
-| Capability | Claude | Cursor | Codex | Kimi | OpenCode |
-|---|---|---|---|---|---|
-| **Skills** (`plugin/skills/`) | yes | yes (same set; the `skills/tracedecay-*` filter is a no-op guard) | yes | yes | yes (Agent component) |
-| **Commands** | yes (`plugin/commands/`) | overlay twins (`overlays/cursor/commands/`), independently authored | **no** (intentional: plugin deploy is manifest + skills + hooks + MCP) | yes (verbatim Claude command Markdown) | yes (Agent; shared command templates) |
-| **Agents** (`plugin/agents/`) | yes (verbatim) | yes (derived Markdown) | generated TOML exists for automation export, **not** in the plugin deploy set (intentional) | **no** (intentional) | yes (schema-adapted, Agent) |
-| **Hooks** | `SessionStart`, `Stop`, `PostToolUse`, `PostCompact`, `SubagentStart` | `sessionStart`, `sessionEnd`, `stop`, `postToolUse`, `preCompact`, `afterFileEdit`, `afterShellExecution`, `workspaceOpen` | install-time table (`hooks-codex.json` seed is empty on purpose): `SessionStart`, `UserPromptSubmit`, `SubagentStart`, `PostToolUse`, `PostCompact`, `Stop` | inline `PostToolUse` + `Stop` in `.kimi-plugin/plugin.json` | `file.edited`, `lsp.updated`, `session.idle` / idle `session.status`, `tool.execute.after` |
-| **MCP** | `.mcp.json` key `graph` | `mcp-cursor.json` key `tracedecay` | same `graph` key | session/user `mcp.json` key `tracedecay` (not in plugin manifest) | key `tracedecay` via `tracedecay-mcp.ts` + `opencode.registration.json` |
-| **LSP** | `.lsp.json` | native VS Code extension (not `.lsp.json`) | **no** (typed unavailable; intentional) | **no** (intentional) | custom LSP in `opencode.registration.json` |
-| **Rules** | **no** (intentional) | yes (`rules/tracedecay.mdc`) | **no** (intentional) | **no** (intentional) | `AGENTS.md` is Core instruction content, not a rules product |
+| Capability | Claude | Cursor | Codex | Kimi | OpenCode | Pi |
+|---|---|---|---|---|---|---|
+| **Skills** (`plugin/skills/`) | yes | yes (same set; the `skills/tracedecay-*` filter is a no-op guard) | yes | yes | yes (Agent component) | `pi/skill/SKILL.md` routing skill (Agent component) |
+| **Commands** | yes (`plugin/commands/`) | overlay twins (`overlays/cursor/commands/`), independently authored | **no** (intentional: plugin deploy is manifest + skills + hooks + MCP) | yes (verbatim Claude command Markdown) | yes (Agent; shared command templates) | `/tracedecay{, -sync, -version}` registered by the extension |
+| **Agents** (`plugin/agents/`) | yes (verbatim) | yes (derived Markdown) | generated TOML exists for automation export, **not** in the plugin deploy set (intentional) | **no** (intentional) | yes (schema-adapted, Agent) | **no** (intentional) |
+| **Hooks** | `SessionStart`, `Stop`, `PostToolUse`, `PostCompact`, `SubagentStart` | `sessionStart`, `sessionEnd`, `stop`, `postToolUse`, `preCompact`, `afterFileEdit`, `afterShellExecution`, `workspaceOpen` | install-time table (`hooks-codex.json` seed is empty on purpose): `SessionStart`, `UserPromptSubmit`, `SubagentStart`, `PostToolUse`, `PostCompact`, `Stop` | inline `PostToolUse` + `Stop` in `.kimi-plugin/plugin.json` | `file.edited`, `lsp.updated`, `session.idle` / idle `session.status`, `tool.execute.after` | extension events: `session_start` and `agent_end` forwarded to `hook-pi-event`; `tool_result` runs a debounced `sync` |
+| **MCP** | `.mcp.json` key `graph` | `mcp-cursor.json` key `tracedecay` | same `graph` key | session/user `mcp.json` key `tracedecay` (not in plugin manifest) | key `tracedecay` via `tracedecay-mcp.ts` + `opencode.registration.json` | **no** (typed unavailable; the extension bridges `tracedecay tool` over the daemon socket) |
+| **LSP** | `.lsp.json` | native VS Code extension (not `.lsp.json`) | **no** (typed unavailable; intentional) | **no** (intentional) | custom LSP in `opencode.registration.json` | **no** (intentional) |
+| **Rules** | **no** (intentional) | yes (`rules/tracedecay.mdc`) | **no** (intentional) | **no** (intentional) | `AGENTS.md` is Core instruction content, not a rules product | routing skill is Core instruction content |
 
 Cursor CLI binaries exist for `hook-cursor-subagent-start` and
 `hook-cursor-before-submit-prompt`; the Cursor bundle does not wire those

@@ -13,13 +13,13 @@ use std::pin::Pin;
 
 use serde_json::{Value, json};
 use tracedecay_contracts::retained_surfaces::{
-    RetainedErrorV1, RetainedOutcomeStatusV1, RetainedOutputFormatV1,
-    SessionRefreshActionRequestV1, SessionRefreshBeginResultV1, SessionRefreshCancelResultV1,
-    SessionRefreshFrontierV1, SessionRefreshGrainV1, SessionRefreshProgressV1,
-    SessionRefreshReceiptV1, SessionRefreshScopeV1, SessionRefreshSessionV1,
-    SessionRefreshSourceV1, SessionRefreshStatusResultV1, SessionRefreshTargetV1,
-    SessionRefreshTemporalModeV1,
+    RetainedErrorV1, RetainedOutcomeStatusV1, SessionRefreshActionRequestV1,
+    SessionRefreshBeginResultV1, SessionRefreshCancelResultV1, SessionRefreshFrontierV1,
+    SessionRefreshGrainV1, SessionRefreshProgressV1, SessionRefreshReceiptV1,
+    SessionRefreshScopeV1, SessionRefreshSessionV1, SessionRefreshSourceV1,
+    SessionRefreshStatusResultV1, SessionRefreshTargetV1,
 };
+use tracedecay_domain::TemporalModeV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use crate::cli::{
@@ -233,12 +233,13 @@ where
     let handle = validated_refresh_handle(operation, handle)?;
 
     let scope = resolve_session_refresh_scope(transport, selectors).await?;
-    let request = session_refresh_request(selectors, &scope, handle);
+    let mut arguments = serde_json::to_value(session_refresh_request(selectors, &scope, handle))?;
+    arguments["format"] = json!("json");
     let reply = transport
         .call(
             scope.project_root.as_deref(),
             operation.tool_name(),
-            serde_json::to_value(&request)?,
+            arguments,
         )
         .await?;
     SessionRefreshOutcomeView::decode(operation, reply)
@@ -359,7 +360,7 @@ fn session_refresh_request(
             scope: selectors.provider.clone(),
         },
         target: SessionRefreshTargetV1 {
-            temporal_mode: SessionRefreshTemporalModeV1::Current,
+            temporal_mode: TemporalModeV1::Current,
             grain: SessionRefreshGrainV1::LogicalMessage,
             frontier: SessionRefreshFrontierV1 {
                 observed_through: selectors.target,
@@ -367,7 +368,6 @@ fn session_refresh_request(
             },
         },
         handle: handle.map(str::to_owned),
-        format: Some(RetainedOutputFormatV1::Json),
     }
 }
 

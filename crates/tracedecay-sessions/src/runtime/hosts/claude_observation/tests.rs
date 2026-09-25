@@ -5,7 +5,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::admission::test_support::MemoryHostAdmission;
-use crate::runtime::claude::{scan_claude_source_frames, try_scan_claude_source_frames};
+use crate::runtime::hosts::claude::scan_claude_source_frames;
 
 #[path = "tests/projection.rs"]
 mod projection;
@@ -213,24 +213,23 @@ async fn production_vertical_persists_only_sanitized_payload_and_searchable_v1_r
     );
     let source = fixture.source("production-session");
     assert_eq!(
-        source.transcript_paths(&fixture.profile),
+        source
+            .discover_transcript_paths(TranscriptDiscoveryBounds::default_walk())
+            .paths,
         vec![fixture.transcript.clone()]
     );
-    let (scheduled, deferred) = scheduled_source_paths(
-        &fixture.admission,
-        &ObservationScopeV1::Profile,
-        &source,
-        &fixture.profile,
-    )
-    .await
-    .unwrap();
+    let (scheduled, deferred) =
+        scheduled_source_paths(&fixture.admission, &ObservationScopeV1::Profile, &source)
+            .await
+            .unwrap();
     assert_eq!(scheduled, vec![fixture.transcript.clone()]);
     assert_eq!(deferred, 0);
     let identity = identify_claude_source(&fixture.transcript).unwrap();
-    let scan = try_scan_claude_source_frames(
+    let scan = try_scan_claude_source_frames_with_resume(
         identity,
         StoredCursor::default(),
         Some(STRICT_JSONL_BATCH_BYTES),
+        None,
     )
     .unwrap()
     .unwrap();
@@ -352,7 +351,7 @@ async fn registered_claude_ingest_api_routes_through_observation_authority() {
     fixture.write_record("legacy API searchable", "legacy-api-secret");
     let stats = crate::runtime::with_transcript_source_home(
         fixture.home.clone(),
-        crate::runtime::claude::ingest_user_sessions_with_admission(
+        crate::runtime::hosts::claude::ingest_user_sessions_with_admission(
             &fixture.profile,
             Some("legacy-api-session".to_string()),
             Vec::new(),
@@ -725,4 +724,20 @@ async fn valid_prefix_commits_once_before_invalid_suffix_without_cursor_drift() 
     ] {
         assert_invalid_suffix_preserves_valid_prefix(session_id, suffix).await;
     }
+}
+
+#[test]
+fn claude_rotation_tail_stops_deferring_after_one_full_walk() {
+    let total = MAX_CLAUDE_SOURCES_PER_PASS + 20;
+    assert_eq!(claude_rotation_deferred(total, 0, false), 20);
+    assert_eq!(
+        claude_rotation_deferred(total, u64::try_from(total).unwrap(), false),
+        0,
+        "a frontier that has already visited every listed source is refresh, not a stall"
+    );
+    assert_eq!(
+        claude_rotation_deferred(total, u64::try_from(total).unwrap(), true),
+        1,
+        "a walk that never listed the rest of the tree is still deferred"
+    );
 }

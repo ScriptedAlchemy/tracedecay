@@ -1,6 +1,7 @@
 //! Stdio MCP proxy: forwards host traffic to the daemon over the broker
 //! transport, tracking initialize-route and tool-catalog metadata.
 
+use std::borrow::Cow;
 #[cfg(unix)]
 use std::collections::VecDeque;
 #[cfg(unix)]
@@ -20,13 +21,12 @@ use super::{
 #[cfg(unix)]
 use super::{binary_version, connect_with_restart_grace};
 #[cfg(unix)]
-use tracedecay_daemon_identity::connection_for_socket_path;
-#[cfg(unix)]
 use tracedecay_daemon_protocol::{DAEMON_TOOL_RESPONSE_GRACE, version_skew_action};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::JsonRpcRequest;
 #[cfg(not(unix))]
 use tracedecay_mcp::McpTransport;
+use tracedecay_mcp::server::attach_stateless_request_context;
 use tracedecay_mcp::transport::StdioTransport;
 #[cfg(unix)]
 use tracedecay_mcp::transport::{McpDuplexTransport, McpTransportReader, McpTransportWriter};
@@ -129,8 +129,7 @@ pub(crate) async fn should_proxy_serve_to_daemon_with(
     if installed_service_socket != Some(socket_path) {
         return false;
     }
-    let connection = connection_for_socket_path(socket_path);
-    connect_with_restart_grace(&connection, grace, poll_interval)
+    connect_with_restart_grace(socket_path, grace, poll_interval)
         .await
         .is_ok()
 }
@@ -216,16 +215,26 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
 /// ([`tool_dispatch_ceiling`](tracedecay_mcp::tools::dispatch_ceiling::tool_dispatch_ceiling)
 /// with an empty name), not a named catalog tool's possibly shorter deadline.
 struct DaemonProxyRequest<'a> {
-    raw: &'a str,
+    raw: Cow<'a, str>,
     parsed: Option<JsonRpcRequest>,
 }
 
 impl<'a> DaemonProxyRequest<'a> {
+    /// Every host request after `initialize` travels on its own daemon
+    /// connection, so it carries this proxy's SEP-2575 per-request context
+    /// instead of an `initialize` session.
     fn new(raw: &'a str) -> Self {
-        Self {
-            raw,
-            parsed: JsonRpcRequest::decode(raw.trim()).ok(),
-        }
+        let mut parsed = JsonRpcRequest::decode(raw.trim()).ok();
+        let attached = parsed
+            .as_mut()
+            .is_some_and(attach_stateless_request_context);
+        let raw = match parsed.as_ref() {
+            Some(request) if attached => {
+                serde_json::to_string(request).map_or(Cow::Borrowed(raw), Cow::Owned)
+            }
+            _ => Cow::Borrowed(raw),
+        };
+        Self { raw, parsed }
     }
 }
 
@@ -508,7 +517,7 @@ pub(crate) async fn resolve_daemon_initialize_route(
             // to discover_project_root / Resolved admission.
             return Err(repository_discovery_deferred(&root, *reason));
         }
-        if let Some(project_path) = crate::config::discover_project_root(&root) {
+        if let Some(project_path) = tracedecay_project::config::discover_project_root(&root) {
             return Ok(Some(InitializeRouteMetadata {
                 project_path,
                 allow_init: false,
@@ -524,11 +533,12 @@ pub(crate) async fn resolve_daemon_initialize_route(
                 // enabled), not fail-closed: treating a missing snapshot as
                 // "disabled" contradicted the config default and left explicit
                 // initialize-roots repos unable to open at all.
-                let allow_init = crate::config::cached_sync_config(&identity.worktree_root)
-                    .map_or_else(
-                        |_| tracedecay_configuration::SyncConfig::default().auto_init,
-                        |config| config.auto_init,
-                    );
+                let allow_init =
+                    tracedecay_project::config::cached_sync_config(&identity.worktree_root)
+                        .map_or_else(
+                            |_| tracedecay_configuration::SyncConfig::default().auto_init,
+                            |config| config.auto_init,
+                        );
                 return Ok(Some(InitializeRouteMetadata {
                     project_path: identity.worktree_root,
                     allow_init,

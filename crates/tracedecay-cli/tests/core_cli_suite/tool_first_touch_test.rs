@@ -278,8 +278,8 @@ fn code_graph_tools_do_not_first_touch_project_store() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("run 'tracedecay init' first")
-            || stderr.contains("run `tracedecay init` first"),
+        stderr.contains("project route error (project_not_enrolled)")
+            && stderr.contains("run 'tracedecay init' in that directory"),
         "expected init guidance, got:\n{stderr}"
     );
     assert!(!target_path.join(".tracedecay").exists());

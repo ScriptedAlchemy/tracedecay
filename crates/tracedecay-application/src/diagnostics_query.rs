@@ -5,28 +5,21 @@
 //! `Truncated`, or `StoreUnavailable`, so a partial or failed read is never
 //! presented as a clean result. All list lanes are bounded by a limit
 //! plus an opaque cursor and are deterministic: records page in ascending
-//! anchor order, chains page in chain order.
-//!
-//! Supersession navigation mirrors the store's logical finding key exactly
-//! (repository, producer, code, file occurrence, span, message digest):
-//! forward walks follow `Superseded { successor_generation }` edges toward
-//! newer records, backward walks invert those edges toward older records.
+//! anchor order.
 //!
 //! The overlay merge composes a session-only [`DirtyDiagnosticOverlay`] with
 //! the durable current set into one deterministic view; the overlay wins on
 //! the same logical finding key and every entry is marked with its
 //! provenance (persisted vs overlay). Overlay state is never persisted.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt;
 
 use tracedecay_domain::{
-    CodeGenerationId, DiagnosticRecordStateV1, FileOccurrenceId, GenerationDiagnosticV1,
-    RetrievalAnchorId,
+    CodeGenerationId, FileOccurrenceId, GenerationDiagnosticV1, RetrievalAnchorId,
 };
 
 use crate::diagnostics_store::{DiagnosticsStore, DirtyDiagnosticOverlay};
-use tracedecay_domain::errors::Result as CrateResult;
 use tracedecay_runtime_core::db::Database;
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::Connection;
@@ -139,37 +132,6 @@ pub struct CurrentDiagnosticGeneration {
     pub coverage: DiagnosticQueryCoverage,
 }
 
-/// One persisted finding republished by a successor generation under a new
-/// anchor: the prior record and its successor share one logical finding key.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DiagnosticSupersessionPair {
-    pub prior: GenerationDiagnosticV1,
-    pub successor: GenerationDiagnosticV1,
-}
-
-/// Generation-aware answer to "what changed for this file between
-/// generations `from_generation` and `to_generation`", computed from the
-/// store's records and supersession chains. Lanes are deterministic
-/// (ascending anchor order; pairs ordered by successor anchor) and each lane
-/// is capped at the request limit.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GenerationDiagnosticDiff {
-    pub from_generation: CodeGenerationId,
-    pub to_generation: CodeGenerationId,
-    pub file_occurrence_id: FileOccurrenceId,
-    /// Findings present in `to_generation` with no same-key record in
-    /// `from_generation`.
-    pub introduced: Vec<GenerationDiagnosticV1>,
-    /// Findings present in both generations: the `from_generation` record
-    /// was superseded (or otherwise carried) into the `to_generation` record
-    /// for the same logical finding key.
-    pub superseded: Vec<DiagnosticSupersessionPair>,
-    /// Findings present in `from_generation` with no same-key record in
-    /// `to_generation`.
-    pub cleared: Vec<GenerationDiagnosticV1>,
-    pub coverage: DiagnosticQueryCoverage,
-}
-
 /// Where one entry of the merged current view came from. The durable lane
 /// and the session-only overlay lane stay typed and separate even after
 /// merging; overlay findings are never published as durable LSP
@@ -221,11 +183,8 @@ impl MergedDiagnosticView {
 /// type, they surface as [`DiagnosticQueryCoverage::StoreUnavailable`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DiagnosticQueryError {
-    /// The cursor is malformed or does not name a record on the chain lane
-    /// it was minted from.
+    /// The cursor is malformed.
     InvalidCursor { cursor: String },
-    /// A generation diff requires two distinct generations.
-    SameGeneration { generation: CodeGenerationId },
     /// The overlay is bound to a different clean generation than the query.
     OverlayGenerationMismatch {
         overlay_generation: CodeGenerationId,
@@ -239,10 +198,6 @@ impl fmt::Display for DiagnosticQueryError {
             Self::InvalidCursor { cursor } => {
                 write!(formatter, "invalid diagnostic query cursor: {cursor}")
             }
-            Self::SameGeneration { generation } => write!(
-                formatter,
-                "a generation diagnostic diff requires two distinct generations, got {generation} twice"
-            ),
             Self::OverlayGenerationMismatch {
                 overlay_generation,
                 query_generation,
@@ -256,10 +211,9 @@ impl fmt::Display for DiagnosticQueryError {
 
 impl std::error::Error for DiagnosticQueryError {}
 
-/// The logical finding key, mirroring the store's supersession successor
-/// match exactly: (repository, producer, code, file occurrence, span,
-/// message digest). Records sharing a key are the same logical finding
-/// republished across generations.
+/// The logical finding key: (repository, producer, code, file occurrence,
+/// span, message digest). A durable record and an overlay entry sharing a
+/// key are the same logical finding.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct LogicalFindingKey {
     repository: String,
@@ -386,46 +340,6 @@ impl<'a> DiagnosticsQuery<'a> {
         }
     }
 
-    /// Stale (superseded or cleared) records bound to `generation`. Stale
-    /// findings remain queryable but never re-enter active publication.
-    #[hotpath::measure(
-        label = "usecases.diagnostics_query.stale_by_generation",
-        future = true
-    )]
-    pub async fn stale_by_generation(
-        &self,
-        generation: &CodeGenerationId,
-        request: &DiagnosticPageRequest,
-    ) -> Result<DiagnosticPage, DiagnosticQueryError> {
-        let operation = "diagnostics query stale_by_generation";
-        match self.store.stale_records(generation).await {
-            Ok(records) => Ok(paginate_sorted(records, request)),
-            Err(error) => Ok(DiagnosticPage::unavailable(operation, error)),
-        }
-    }
-
-    /// Stale (superseded or cleared) records for one file occurrence inside
-    /// `generation`, paged in ascending anchor order.
-    #[hotpath::measure(label = "usecases.diagnostics_query.stale_by_file", future = true)]
-    pub async fn stale_by_file(
-        &self,
-        generation: &CodeGenerationId,
-        file_occurrence_id: &FileOccurrenceId,
-        request: &DiagnosticPageRequest,
-    ) -> Result<DiagnosticPage, DiagnosticQueryError> {
-        let operation = "diagnostics query stale_by_file";
-        match self.store.stale_records(generation).await {
-            Ok(records) => Ok(paginate_sorted(
-                records
-                    .into_iter()
-                    .filter(|record| record.file_occurrence_id == *file_occurrence_id)
-                    .collect(),
-                request,
-            )),
-            Err(error) => Ok(DiagnosticPage::unavailable(operation, error)),
-        }
-    }
-
     /// Fetches one record by its retrieval anchor. A miss is `Complete` with
     /// no record; a store failure is typed `StoreUnavailable`.
     #[hotpath::measure(label = "usecases.diagnostics_query.by_anchor", future = true)]
@@ -450,218 +364,6 @@ impl<'a> DiagnosticsQuery<'a> {
                 },
             }),
         }
-    }
-
-    /// Forward supersession navigation from `anchor`: the chain walks
-    /// `Superseded { successor_generation }` edges toward newer records and
-    /// is returned oldest-first including the starting record. The chain
-    /// ends at a current, cleared, or missing successor.
-    #[hotpath::measure(
-        label = "usecases.diagnostics_query.supersession_forward",
-        future = true
-    )]
-    pub async fn supersession_forward(
-        &self,
-        anchor: &RetrievalAnchorId,
-        request: &DiagnosticPageRequest,
-    ) -> Result<DiagnosticPage, DiagnosticQueryError> {
-        let operation = "diagnostics query supersession_forward";
-        match self.store.supersession_chain(anchor).await {
-            Ok(chain) => paginate_chain(chain, request),
-            Err(error) => Ok(DiagnosticPage::unavailable(operation, error)),
-        }
-    }
-
-    /// Backward supersession navigation from `anchor`: the chain starts at
-    /// the named record and walks toward older records, newest-first, by
-    /// inverting the store's forward edges, one step back is the unique
-    /// same-key record whose `Superseded { successor_generation }` names the
-    /// current record's generation. The walk stops deterministically when
-    /// there is no unique predecessor.
-    #[hotpath::measure(
-        label = "usecases.diagnostics_query.supersession_backward",
-        future = true
-    )]
-    pub async fn supersession_backward(
-        &self,
-        anchor: &RetrievalAnchorId,
-        request: &DiagnosticPageRequest,
-    ) -> Result<DiagnosticPage, DiagnosticQueryError> {
-        let operation = "diagnostics query supersession_backward";
-        let start = match self.store.record_by_anchor(anchor).await {
-            Ok(Some(record)) => record,
-            Ok(None) => {
-                return Ok(DiagnosticPage {
-                    records: Vec::new(),
-                    total: 0,
-                    coverage: DiagnosticQueryCoverage::Complete,
-                    next_cursor: None,
-                });
-            }
-            Err(error) => return Ok(DiagnosticPage::unavailable(operation, error)),
-        };
-        let key = LogicalFindingKey::of(&start);
-        let generations = match self.list_generations().await {
-            Ok(generations) => generations,
-            Err(error) => return Ok(DiagnosticPage::unavailable(operation, error)),
-        };
-        let mut same_key_by_generation: BTreeMap<String, Vec<GenerationDiagnosticV1>> =
-            BTreeMap::new();
-        for generation in &generations {
-            let generation_id = match CodeGenerationId::try_from(generation.clone()) {
-                Ok(generation_id) => generation_id,
-                Err(error) => {
-                    return Ok(DiagnosticPage::unavailable(
-                        operation,
-                        format!("stored generation id {generation}: {error}"),
-                    ));
-                }
-            };
-            let records = match self.store.records_for_generation(&generation_id).await {
-                Ok(records) => records,
-                Err(error) => return Ok(DiagnosticPage::unavailable(operation, error)),
-            };
-            let matching: Vec<GenerationDiagnosticV1> = records
-                .into_iter()
-                .filter(|record| LogicalFindingKey::of(record) == key)
-                .collect();
-            if !matching.is_empty() {
-                same_key_by_generation.insert(generation.clone(), matching);
-            }
-        }
-
-        let mut chain = vec![start.clone()];
-        let mut current = start;
-        let mut visited: BTreeSet<String> = BTreeSet::new();
-        visited.insert(current.diagnostic_anchor.as_str().to_owned());
-        loop {
-            // Ambiguity guard: the current record must be the unique
-            // same-key record of its generation, mirroring the store's
-            // forward-walk ambiguity rule.
-            let unique_current = same_key_by_generation
-                .get(current.generation_id.as_str())
-                .is_some_and(|records| records.len() == 1);
-            if !unique_current {
-                break;
-            }
-            let predecessors: Vec<&GenerationDiagnosticV1> = same_key_by_generation
-                .values()
-                .flatten()
-                .filter(|record| {
-                    matches!(
-                        &record.state,
-                        DiagnosticRecordStateV1::Superseded {
-                            successor_generation
-                        } if *successor_generation == current.generation_id
-                    )
-                })
-                .collect();
-            if predecessors.len() != 1 {
-                break;
-            }
-            let predecessor = (*predecessors[0]).clone();
-            if !visited.insert(predecessor.diagnostic_anchor.as_str().to_owned()) {
-                break;
-            }
-            chain.push(predecessor.clone());
-            current = predecessor;
-        }
-        paginate_chain(chain, request)
-    }
-
-    /// Answers "what changed for `file_occurrence_id` between
-    /// `from_generation` and `to_generation`" from the store's records and
-    /// chains: findings are keyed by the logical finding key, so a finding
-    /// republished under a new anchor in `to_generation` lands in the
-    /// `superseded` lane, a finding with no `from_generation` counterpart
-    /// lands in `introduced`, and a finding with no `to_generation`
-    /// counterpart lands in `cleared`. Each lane is capped at `limit`.
-    #[hotpath::measure(
-        label = "usecases.diagnostics_query.generation_file_diff",
-        future = true
-    )]
-    pub async fn generation_file_diff(
-        &self,
-        from_generation: &CodeGenerationId,
-        to_generation: &CodeGenerationId,
-        file_occurrence_id: &FileOccurrenceId,
-        limit: usize,
-    ) -> Result<GenerationDiagnosticDiff, DiagnosticQueryError> {
-        let operation = "diagnostics query generation_file_diff";
-        if from_generation == to_generation {
-            return Err(DiagnosticQueryError::SameGeneration {
-                generation: from_generation.clone(),
-            });
-        }
-        let limit = normalize_limit(limit);
-        let from_records = match self.store.records_for_generation(from_generation).await {
-            Ok(records) => records,
-            Err(error) => {
-                return Ok(diff_store_unavailable(
-                    operation,
-                    error,
-                    from_generation,
-                    to_generation,
-                    file_occurrence_id,
-                ));
-            }
-        };
-        let to_records = match self.store.records_for_generation(to_generation).await {
-            Ok(records) => records,
-            Err(error) => {
-                return Ok(diff_store_unavailable(
-                    operation,
-                    error,
-                    from_generation,
-                    to_generation,
-                    file_occurrence_id,
-                ));
-            }
-        };
-        // First same-key record wins; store reads are anchor-ordered so this
-        // is deterministic.
-        let from_by_key = key_file_records(from_records, file_occurrence_id);
-        let to_by_key = key_file_records(to_records, file_occurrence_id);
-
-        let mut introduced: Vec<GenerationDiagnosticV1> = Vec::new();
-        let mut superseded: Vec<DiagnosticSupersessionPair> = Vec::new();
-        let mut cleared: Vec<GenerationDiagnosticV1> = Vec::new();
-        for (key, successor) in &to_by_key {
-            match from_by_key.get(key) {
-                Some(prior) => superseded.push(DiagnosticSupersessionPair {
-                    prior: prior.clone(),
-                    successor: successor.clone(),
-                }),
-                None => introduced.push(successor.clone()),
-            }
-        }
-        for (key, prior) in &from_by_key {
-            if !to_by_key.contains_key(key) {
-                cleared.push(prior.clone());
-            }
-        }
-        introduced.sort_by(anchor_cmp);
-        superseded.sort_by(|left, right| anchor_cmp(&left.successor, &right.successor));
-        cleared.sort_by(anchor_cmp);
-
-        let mut coverage = DiagnosticQueryCoverage::Complete;
-        for lane_len in [introduced.len(), superseded.len(), cleared.len()] {
-            if lane_len > limit {
-                coverage = DiagnosticQueryCoverage::Truncated;
-            }
-        }
-        introduced.truncate(limit);
-        superseded.truncate(limit);
-        cleared.truncate(limit);
-        Ok(GenerationDiagnosticDiff {
-            from_generation: from_generation.clone(),
-            to_generation: to_generation.clone(),
-            file_occurrence_id: file_occurrence_id.clone(),
-            introduced,
-            superseded,
-            cleared,
-            coverage,
-        })
     }
 
     /// Composes the durable current set for `generation` with a dirty
@@ -735,33 +437,6 @@ impl<'a> DiagnosticsQuery<'a> {
             next_cursor,
         })
     }
-
-    /// Every published generation id, ascending. Read-only probe over the
-    /// store's publication ledger used to scope backward chain walks.
-    async fn list_generations(&self) -> CrateResult<Vec<String>> {
-        self.store.published_generation_ids().await
-    }
-}
-
-fn diff_store_unavailable(
-    operation: &'static str,
-    error: impl fmt::Display,
-    from_generation: &CodeGenerationId,
-    to_generation: &CodeGenerationId,
-    file_occurrence_id: &FileOccurrenceId,
-) -> GenerationDiagnosticDiff {
-    GenerationDiagnosticDiff {
-        from_generation: from_generation.clone(),
-        to_generation: to_generation.clone(),
-        file_occurrence_id: file_occurrence_id.clone(),
-        introduced: Vec::new(),
-        superseded: Vec::new(),
-        cleared: Vec::new(),
-        coverage: DiagnosticQueryCoverage::StoreUnavailable {
-            operation,
-            reason: error.to_string(),
-        },
-    }
 }
 
 fn normalize_limit(limit: usize) -> usize {
@@ -776,22 +451,6 @@ fn anchor_cmp(left: &GenerationDiagnosticV1, right: &GenerationDiagnosticV1) -> 
     left.diagnostic_anchor
         .as_str()
         .cmp(right.diagnostic_anchor.as_str())
-}
-
-fn key_file_records(
-    records: Vec<GenerationDiagnosticV1>,
-    file_occurrence_id: &FileOccurrenceId,
-) -> BTreeMap<LogicalFindingKey, GenerationDiagnosticV1> {
-    let mut by_key = BTreeMap::new();
-    for record in records {
-        if record.file_occurrence_id != *file_occurrence_id {
-            continue;
-        }
-        by_key
-            .entry(LogicalFindingKey::of(&record))
-            .or_insert(record);
-    }
-    by_key
 }
 
 /// Pages a set of items ordered by ascending anchor. The cursor resumes
@@ -824,22 +483,6 @@ fn paginate_items<T: Clone>(
     (page, coverage, next_cursor)
 }
 
-fn paginate_sorted(
-    records: Vec<GenerationDiagnosticV1>,
-    request: &DiagnosticPageRequest,
-) -> DiagnosticPage {
-    let total = records.len();
-    let (records, coverage, next_cursor) =
-        paginate_items(records, |record| record.diagnostic_anchor.as_str(), request);
-    crate::hotpath_observe::diagnostics_query(records.len(), total);
-    DiagnosticPage {
-        records,
-        total,
-        coverage,
-        next_cursor,
-    }
-}
-
 fn page_from_bounded_records(
     records: Vec<GenerationDiagnosticV1>,
     total: usize,
@@ -865,48 +508,12 @@ fn page_from_bounded_records(
     }
 }
 
-/// Pages a supersession chain in chain order (not anchor order). The cursor
-/// resumes strictly after the chain position it encodes; a cursor whose
-/// anchor is not on the chain is a caller error.
-fn paginate_chain(
-    chain: Vec<GenerationDiagnosticV1>,
-    request: &DiagnosticPageRequest,
-) -> Result<DiagnosticPage, DiagnosticQueryError> {
-    let limit = normalize_limit(request.limit);
-    let start = match &request.cursor {
-        Some(cursor) => chain
-            .iter()
-            .position(|record| record.diagnostic_anchor.as_str() == cursor.anchor())
-            .map(|position| position + 1)
-            .ok_or_else(|| DiagnosticQueryError::InvalidCursor {
-                cursor: cursor.encode().to_owned(),
-            })?,
-        None => 0,
-    };
-    let end = (start + limit).min(chain.len());
-    let page: Vec<GenerationDiagnosticV1> = chain[start..end].to_vec();
-    let (coverage, next_cursor) = if end < chain.len() {
-        let cursor = page
-            .last()
-            .map(|record| DiagnosticQueryCursor::after_anchor(&record.diagnostic_anchor));
-        (DiagnosticQueryCoverage::Truncated, cursor)
-    } else {
-        (DiagnosticQueryCoverage::Complete, None)
-    };
-    Ok(DiagnosticPage {
-        records: page,
-        total: chain.len(),
-        coverage,
-        next_cursor,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use tracedecay_domain::{
         DiagnosticEvidenceClassV1, DiagnosticProducerKindV1, DiagnosticProvenanceV1,
-        DiagnosticSeverityV1, SourceSpan, UtcMicros,
+        DiagnosticRecordStateV1, DiagnosticSeverityV1, SourceSpan, UtcMicros,
     };
     use tracedecay_runtime_core::db::engine::TestConnection;
 
@@ -979,9 +586,9 @@ mod tests {
     const GEN2: &str = "generation.clean.2";
 
     /// Seeds two generations: gen1 publishes A1 (anchor.1, E0308) and B1
-    /// (anchor.2, `dead_code`); gen1 is superseded by gen2; gen2 republishes
-    /// A1's logical finding as A2 (anchor.3) and adds the new finding C2
-    /// (anchor.4, `unused_variables`). B1 has no gen2 successor.
+    /// (anchor.2, `dead_code`); gen2 republishes A1's logical finding as A2
+    /// (anchor.3) and adds the new finding C2 (anchor.4, `unused_variables`).
+    /// Publishing gen2 clears both gen1 records.
     async fn seed_two_generations(conn: &Connection) {
         let store = DiagnosticsStore::new_runtime(conn);
         store
@@ -998,10 +605,6 @@ mod tests {
             )
             .await
             .expect("publish gen1");
-        store
-            .supersede_generation(&id(GEN1), &id(GEN2))
-            .await
-            .expect("supersede gen1");
         store
             .publish_clean_generation(
                 &id(GEN2),
@@ -1102,7 +705,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn current_and_stale_file_lanes_filter_by_file_and_state() {
+    async fn current_file_lane_filters_by_file() {
         let temp = tempfile::tempdir().unwrap();
         let conn = open_store(&temp.path().join("diagnostics.db")).await;
         seed_two_generations(&conn).await;
@@ -1138,40 +741,6 @@ mod tests {
             .unwrap();
         assert!(other_file.records.is_empty());
         assert_eq!(other_file.coverage, DiagnosticQueryCoverage::Complete);
-
-        let stale = query
-            .stale_by_generation(&id(GEN1), &DiagnosticPageRequest::default())
-            .await
-            .unwrap();
-        assert_eq!(
-            anchors(&stale),
-            vec!["anchor.diagnostic.1", "anchor.diagnostic.2"]
-        );
-        assert!(
-            stale
-                .records
-                .iter()
-                .all(|record| !record.state.is_current())
-        );
-
-        let stale_file = query
-            .stale_by_file(
-                &id(GEN1),
-                &id("file.occurrence.1"),
-                &DiagnosticPageRequest::default(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(anchors(&stale_file), anchors(&stale));
-        let stale_other = query
-            .stale_by_file(
-                &id(GEN1),
-                &id("file.occurrence.other"),
-                &DiagnosticPageRequest::default(),
-            )
-            .await
-            .unwrap();
-        assert!(stale_other.records.is_empty());
     }
 
     #[tokio::test]
@@ -1186,9 +755,9 @@ mod tests {
         let record = hit.record.expect("anchor.1 is persisted");
         assert!(matches!(
             &record.state,
-            DiagnosticRecordStateV1::Superseded {
-                successor_generation
-            } if successor_generation.as_str() == GEN2
+            DiagnosticRecordStateV1::Cleared {
+                cleared_in_generation
+            } if cleared_in_generation.as_str() == GEN2
         ));
 
         let miss = query
@@ -1197,202 +766,6 @@ mod tests {
             .unwrap();
         assert_eq!(miss.coverage, DiagnosticQueryCoverage::Complete);
         assert!(miss.record.is_none());
-    }
-
-    #[tokio::test]
-    async fn supersession_navigation_walks_forward_and_backward() {
-        let temp = tempfile::tempdir().unwrap();
-        let conn = open_store(&temp.path().join("diagnostics.db")).await;
-        seed_two_generations(&conn).await;
-        let query = DiagnosticsQuery::new_runtime(&conn);
-
-        // Forward from the gen1 record crosses into its gen2 successor.
-        let forward = query
-            .supersession_forward(
-                &id("anchor.diagnostic.1"),
-                &DiagnosticPageRequest::default(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            anchors(&forward),
-            vec!["anchor.diagnostic.1", "anchor.diagnostic.3"]
-        );
-        assert_eq!(forward.coverage, DiagnosticQueryCoverage::Complete);
-
-        // Backward from the gen2 successor reaches the gen1 record.
-        let backward = query
-            .supersession_backward(
-                &id("anchor.diagnostic.3"),
-                &DiagnosticPageRequest::default(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            anchors(&backward),
-            vec!["anchor.diagnostic.3", "anchor.diagnostic.1"]
-        );
-        assert_eq!(backward.coverage, DiagnosticQueryCoverage::Complete);
-
-        // A finding without a successor (or predecessor) is a one-record chain.
-        let forward_dead_end = query
-            .supersession_forward(
-                &id("anchor.diagnostic.2"),
-                &DiagnosticPageRequest::default(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(anchors(&forward_dead_end), vec!["anchor.diagnostic.2"]);
-        let backward_dead_end = query
-            .supersession_backward(
-                &id("anchor.diagnostic.4"),
-                &DiagnosticPageRequest::default(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(anchors(&backward_dead_end), vec!["anchor.diagnostic.4"]);
-
-        // Chain lanes paginate in chain order with cursor resumption.
-        let page = query
-            .supersession_forward(
-                &id("anchor.diagnostic.1"),
-                &DiagnosticPageRequest::new(1, None),
-            )
-            .await
-            .unwrap();
-        assert_eq!(anchors(&page), vec!["anchor.diagnostic.1"]);
-        assert_eq!(page.coverage, DiagnosticQueryCoverage::Truncated);
-        let rest = query
-            .supersession_forward(
-                &id("anchor.diagnostic.1"),
-                &DiagnosticPageRequest::new(1, page.next_cursor.clone()),
-            )
-            .await
-            .unwrap();
-        assert_eq!(anchors(&rest), vec!["anchor.diagnostic.3"]);
-        assert_eq!(rest.coverage, DiagnosticQueryCoverage::Complete);
-
-        // A cursor from a sorted lane is not valid on a chain lane.
-        let sorted_cursor = DiagnosticQueryCursor::decode("dq1:anchor.diagnostic.9").unwrap();
-        assert!(matches!(
-            query
-                .supersession_forward(
-                    &id("anchor.diagnostic.1"),
-                    &DiagnosticPageRequest::new(1, Some(sorted_cursor)),
-                )
-                .await,
-            Err(DiagnosticQueryError::InvalidCursor { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn generation_diff_reports_introduced_superseded_cleared_lanes() {
-        let temp = tempfile::tempdir().unwrap();
-        let conn = open_store(&temp.path().join("diagnostics.db")).await;
-        seed_two_generations(&conn).await;
-        let query = DiagnosticsQuery::new_runtime(&conn);
-
-        let diff = query
-            .generation_file_diff(&id(GEN1), &id(GEN2), &id("file.occurrence.1"), 0)
-            .await
-            .unwrap();
-        assert_eq!(diff.coverage, DiagnosticQueryCoverage::Complete);
-        assert_eq!(diff.introduced.len(), 1);
-        assert_eq!(
-            diff.introduced[0].diagnostic_anchor.as_str(),
-            "anchor.diagnostic.4"
-        );
-        assert_eq!(diff.superseded.len(), 1);
-        assert_eq!(
-            diff.superseded[0].prior.diagnostic_anchor.as_str(),
-            "anchor.diagnostic.1"
-        );
-        assert_eq!(
-            diff.superseded[0].successor.diagnostic_anchor.as_str(),
-            "anchor.diagnostic.3"
-        );
-        assert_eq!(diff.cleared.len(), 1);
-        assert_eq!(
-            diff.cleared[0].diagnostic_anchor.as_str(),
-            "anchor.diagnostic.2"
-        );
-
-        // Reversing the direction swaps the introduced and cleared lanes.
-        let reverse = query
-            .generation_file_diff(&id(GEN2), &id(GEN1), &id("file.occurrence.1"), 0)
-            .await
-            .unwrap();
-        assert_eq!(
-            reverse.introduced[0].diagnostic_anchor.as_str(),
-            "anchor.diagnostic.2"
-        );
-        assert_eq!(
-            reverse.cleared[0].diagnostic_anchor.as_str(),
-            "anchor.diagnostic.4"
-        );
-        assert_eq!(reverse.superseded.len(), 1);
-
-        // A diff needs two distinct generations.
-        assert!(matches!(
-            query
-                .generation_file_diff(&id(GEN1), &id(GEN1), &id("file.occurrence.1"), 0)
-                .await,
-            Err(DiagnosticQueryError::SameGeneration { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn generation_diff_lane_limit_truncates() {
-        let temp = tempfile::tempdir().unwrap();
-        let conn = open_store(&temp.path().join("diagnostics.db")).await;
-        seed_two_generations(&conn).await;
-        let query = DiagnosticsQuery::new_runtime(&conn);
-
-        // Introduce a second new finding in gen2 so the introduced lane
-        // exceeds a lane limit of 1.
-        let store = DiagnosticsStore::new_runtime(&conn);
-        let extra = with_message(
-            fixture_record(GEN2, "anchor.diagnostic.5"),
-            "unused_imports",
-            "unused import",
-        );
-        store
-            .publish_clean_generation(
-                &id("generation.clean.3"),
-                &[
-                    fixture_record("generation.clean.3", "anchor.diagnostic.6"),
-                    with_message(
-                        fixture_record("generation.clean.3", "anchor.diagnostic.7"),
-                        "unused_variables",
-                        "unused variable: `tmp`",
-                    ),
-                    GenerationDiagnosticV1 {
-                        generation_id: id("generation.clean.3"),
-                        diagnostic_anchor: id("anchor.diagnostic.8"),
-                        ..extra
-                    },
-                ],
-            )
-            .await
-            .expect("publish gen3");
-
-        let diff = query
-            .generation_file_diff(
-                &id(GEN1),
-                &id("generation.clean.3"),
-                &id("file.occurrence.1"),
-                1,
-            )
-            .await
-            .unwrap();
-        assert_eq!(diff.coverage, DiagnosticQueryCoverage::Truncated);
-        assert_eq!(diff.introduced.len(), 1);
-        assert_eq!(diff.superseded.len(), 1);
-        assert_eq!(diff.cleared.len(), 1);
-        assert_eq!(
-            diff.introduced[0].diagnostic_anchor.as_str(),
-            "anchor.diagnostic.7"
-        );
     }
 
     #[tokio::test]
@@ -1529,49 +902,9 @@ mod tests {
             .unwrap();
         assert!(is_unavailable(&page.coverage));
 
-        let page = query
-            .stale_by_generation(&id(GEN1), &DiagnosticPageRequest::default())
-            .await
-            .unwrap();
-        assert!(is_unavailable(&page.coverage));
-
-        let page = query
-            .stale_by_file(
-                &id(GEN1),
-                &id("file.occurrence.1"),
-                &DiagnosticPageRequest::default(),
-            )
-            .await
-            .unwrap();
-        assert!(is_unavailable(&page.coverage));
-
         let lookup = query.by_anchor(&id("anchor.diagnostic.1")).await.unwrap();
         assert!(lookup.record.is_none());
         assert!(is_unavailable(&lookup.coverage));
-
-        let forward = query
-            .supersession_forward(
-                &id("anchor.diagnostic.1"),
-                &DiagnosticPageRequest::default(),
-            )
-            .await
-            .unwrap();
-        assert!(is_unavailable(&forward.coverage));
-
-        let backward = query
-            .supersession_backward(
-                &id("anchor.diagnostic.3"),
-                &DiagnosticPageRequest::default(),
-            )
-            .await
-            .unwrap();
-        assert!(is_unavailable(&backward.coverage));
-
-        let diff = query
-            .generation_file_diff(&id(GEN1), &id(GEN2), &id("file.occurrence.1"), 0)
-            .await
-            .unwrap();
-        assert!(is_unavailable(&diff.coverage));
 
         let overlay = DirtyDiagnosticOverlay::new(id(GEN2));
         let merged = query

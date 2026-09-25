@@ -1,9 +1,9 @@
 //! Generation/content-exact attachment of Plan 35 diagnostic records.
 //!
 //! Plan 35 owns diagnostic identity, producer provenance, persistence, and
-//! clearing/supersession semantics. This module neither stores nor translates
+//! clearing semantics. This module neither stores nor translates
 //! diagnostics. It validates one clean-generation watermark and emits only
-//! exact current attachments; stale, cleared, superseded, incomplete, and
+//! exact current attachments; stale, cleared, incomplete, and
 //! unsupported evidence remains explicitly typed.
 
 use std::collections::BTreeMap;
@@ -69,9 +69,6 @@ pub enum GenerationDiagnosticJoinCoverageV1 {
 pub enum GenerationDiagnosticDispositionV1 {
     Current {
         attachment: GenerationDiagnosticAttachmentV1,
-    },
-    Superseded {
-        successor_generation: CodeGenerationId,
     },
     Cleared {
         cleared_in_generation: CodeGenerationId,
@@ -223,13 +220,6 @@ fn disposition_for(
         return GenerationDiagnosticDispositionV1::StaleScope;
     }
     match &record.state {
-        DiagnosticRecordStateV1::Superseded {
-            successor_generation,
-        } => {
-            return GenerationDiagnosticDispositionV1::Superseded {
-                successor_generation: successor_generation.clone(),
-            };
-        }
         DiagnosticRecordStateV1::Cleared {
             cleared_in_generation,
         } => {

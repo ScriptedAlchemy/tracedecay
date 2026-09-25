@@ -708,7 +708,7 @@ function HollowMark({
       variant="hollow"
       className={cn(
         'max-w-[16rem] border-dashed',
-        selected ? undefined : 'border-edge hover:border-edge-strong',
+        selected ? undefined : 'border-edge-subtle hover:border-edge-strong',
       )}
       data-work-hollow="true"
     >

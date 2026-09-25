@@ -9,7 +9,8 @@ use tracedecay_domain::{
 
 use super::{
     AggregatedProviderUsageCountersV1, ProviderUsageCoverageV1, ProviderUsageIssueKindV1,
-    ProviderUsageScanV1, ScanStep, price_provider_usage, reduce_provider_usage,
+    ProviderUsageScanV1, ScanStep, price_provider_usage, provider_usage_by_session,
+    reduce_provider_usage,
 };
 use crate::provider_pricing::{ModelPrice, PriceTable};
 
@@ -426,6 +427,72 @@ fn cumulative_decrease_is_a_typed_reset_and_never_underflows() {
             .iter()
             .any(|issue| issue.kind == ProviderUsageIssueKindV1::CumulativeReset)
     );
+}
+
+#[test]
+fn per_session_totals_sum_own_deltas_and_flag_issue_sessions_without_zero_fill() {
+    let aggregate = reduce_provider_usage(&[
+        observation(
+            1,
+            0,
+            "codex",
+            "parent",
+            ProviderUsageCounterSemanticsV1::Delta,
+            counters(100, 10),
+        ),
+        observation(
+            2,
+            0,
+            "codex",
+            "child",
+            ProviderUsageCounterSemanticsV1::Delta,
+            counters(7, 3),
+        ),
+        observation(
+            3,
+            0,
+            "codex",
+            "parent",
+            ProviderUsageCounterSemanticsV1::Delta,
+            counters(20, 5),
+        ),
+        observation(
+            4,
+            0,
+            "claude",
+            "broken",
+            ProviderUsageCounterSemanticsV1::Delta,
+            ProviderUsageCountersV1::Unknown {
+                reason: tracedecay_domain::CanonicalUnknownStateV1::Malformed,
+            },
+        ),
+    ]);
+
+    let by_session = provider_usage_by_session(&aggregate);
+
+    let parent = &by_session[&("codex".to_owned(), "parent".to_owned())];
+    assert_eq!(parent.usage_events, 2);
+    assert_eq!(parent.counters, totals(120, 15));
+    assert!(parent.complete);
+
+    let child = &by_session[&("codex".to_owned(), "child".to_owned())];
+    assert_eq!(child.usage_events, 1);
+    assert_eq!(child.counters, totals(7, 3));
+    assert!(child.complete);
+
+    let broken = &by_session[&("claude".to_owned(), "broken".to_owned())];
+    assert_eq!(broken.usage_events, 0);
+    assert_eq!(
+        broken.counters,
+        AggregatedProviderUsageCountersV1::unknown()
+    );
+    assert!(
+        !broken.complete,
+        "an unreducible session is flagged, not zeroed"
+    );
+
+    assert_eq!(by_session.len(), 3);
+    assert_eq!(aggregate.totals, totals(127, 18));
 }
 
 #[test]

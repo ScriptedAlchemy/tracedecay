@@ -84,6 +84,8 @@ mod gwbasic_extractor;
 mod haskell_extractor;
 #[cfg(feature = "lang-hlsl")]
 mod hlsl_extractor;
+#[cfg(feature = "lang-json")]
+mod json_extractor;
 #[cfg(feature = "lang-julia")]
 mod julia_extractor;
 #[cfg(feature = "lang-lean")]
@@ -92,9 +94,6 @@ mod lean_extractor;
 mod lua_extractor;
 #[cfg(feature = "lang-markdown")]
 mod markdown_extractor;
-/// Grammar-free; always compiled so the retrieval layer can read section
-/// structure without linking a tree-sitter bundle.
-pub mod markdown_structure;
 #[cfg(feature = "lang-metal")]
 mod metal_extractor;
 #[cfg(feature = "lang-msbasic2")]
@@ -195,6 +194,8 @@ pub use gwbasic_extractor::GwBasicExtractor;
 pub use haskell_extractor::HaskellExtractor;
 #[cfg(feature = "lang-hlsl")]
 pub use hlsl_extractor::HlslExtractor;
+#[cfg(feature = "lang-json")]
+pub use json_extractor::JsonExtractor;
 #[cfg(feature = "lang-julia")]
 pub use julia_extractor::JuliaExtractor;
 #[cfg(feature = "lang-lean")]
@@ -245,6 +246,13 @@ pub trait LanguageExtractor: Send + Sync {
 
     /// Human-readable language name.
     fn language_name(&self) -> &str;
+
+    /// Whether this extractor indexes configuration documents: manifest and
+    /// settings keys that resolvers read, not executable code that calls or
+    /// is called.
+    fn indexes_configuration(&self) -> bool {
+        matches!(self.language_name(), "JSON" | "TOML")
+    }
 
     /// Grammar key used by the shared retained parser for this path.
     fn retained_grammar_key(&self, file_path: &str) -> String {
@@ -346,12 +354,6 @@ pub trait LanguageExtractor: Send + Sync {
             crate::hotpath_observe::ExtractOutputCounts::from_artifact,
         )
     }
-
-    /// Nodes, edges, and unresolved refs of the whole document, parsed with
-    /// this extractor's own grammar.
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        self.extract_artifact(file_path, source).result
-    }
 }
 
 /// Registry of all available language extractors.
@@ -452,6 +454,8 @@ impl LanguageRegistry {
         extractors.push(Box::new(MetalExtractor));
         #[cfg(feature = "lang-markdown")]
         extractors.push(Box::new(MarkdownExtractor));
+        #[cfg(feature = "lang-json")]
+        extractors.push(Box::new(JsonExtractor));
         #[cfg(feature = "lang-r")]
         extractors.push(Box::new(RExtractor));
         #[cfg(feature = "lang-sql")]
@@ -502,6 +506,12 @@ impl LanguageRegistry {
             crate::hotpath_observe::record_dispatch_no_extractor();
         }
         extractor
+    }
+
+    /// Whether `path` is a configuration document rather than code.
+    pub fn is_configuration_file(&self, path: &str) -> bool {
+        self.extractor_for_file(path)
+            .is_some_and(|extractor| extractor.indexes_configuration())
     }
 
     /// Returns all supported file extensions across all extractors.

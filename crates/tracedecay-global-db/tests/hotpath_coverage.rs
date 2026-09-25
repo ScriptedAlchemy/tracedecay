@@ -51,15 +51,16 @@ fn exercise_measured_hot_paths() {
             .expect("begin coverage transaction");
         transaction
             .execute_batch(&format!(
-                "INSERT INTO session_messages(
-                     provider, message_id, session_id, role, timestamp, ordinal, text,
-                     kind, model, tool_names, source_path, source_offset, metadata_json
+                "INSERT INTO lcm_raw_messages(
+                     provider, message_id, session_id, role, timestamp, ordinal, content,
+                     kind, model, tool_names, source_path, source_offset, metadata_json,
+                     content_hash, storage_kind
                  )
                  VALUES
                      ('{PROVIDER}', 'message-000000', '{SESSION}', 'assistant', 1, 1,
-                      'payload', 'activity', NULL, 'tool', NULL, NULL, NULL),
+                      'payload', 'activity', NULL, 'tool', NULL, NULL, NULL, 'hash', 'inline'),
                      ('{PROVIDER}', 'message-000001', '{SESSION}', 'assistant', 2, 2,
-                      'payload', 'activity', NULL, 'tool', NULL, NULL, NULL);"
+                      'payload', 'activity', NULL, 'tool', NULL, NULL, NULL, 'hash', 'inline');"
             ))
             .await
             .expect("seed coverage session activity");

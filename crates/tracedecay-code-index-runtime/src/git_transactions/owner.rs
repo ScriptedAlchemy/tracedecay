@@ -4,10 +4,10 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_contracts::{
-    GitIndexApplyRequestV1, GitIndexOperationBindingV1, GitIndexTransactionPortError, ResolvedScope,
+    GitIndexApplyRequestV1, GitIndexOperationBindingV1, GitIndexTransactionPortError,
+    ResolvedScope, now_micros,
 };
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, AuthorityRef, CapabilityResolutionContextV1, ConfigurationValueV1,
@@ -27,8 +27,8 @@ use super::{
     GitIndexTransactionStoreRegistry, RepositoryMutationQueue,
     SharedDaemonGitIndexTransactionStore, canonicalize_repository_root,
 };
-use crate::ports::ApplicationCatalogSnapshotErrorV1;
 use tracedecay_application::ProjectSourceAccessSnapshot;
+use tracedecay_contracts::catalog_composition::CatalogCompositionError;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use tracedecay_global_db::configuration::contracts::ConfigurationControlStore;
@@ -38,7 +38,7 @@ const GIT_POLICY_REVISION: u64 = 2;
 type ProfiledStdRwLock<T> = hotpath::rw_locks::RwLock<T>;
 type ProfiledTokioMutex<T> = hotpath::wrap::tokio::sync::Mutex<T>;
 type ApplicationCatalogComposer =
-    Arc<dyn Fn() -> Result<CatalogSnapshotV1, ApplicationCatalogSnapshotErrorV1> + Send + Sync>;
+    Arc<dyn Fn() -> Result<CatalogSnapshotV1, CatalogCompositionError> + Send + Sync>;
 
 #[derive(Clone, Debug)]
 pub struct DaemonGitAuthorityStateV1 {
@@ -83,7 +83,7 @@ impl DaemonGitAuthoritySource for ProductionDaemonGitAuthoritySource {
         &self,
         capability_id: &CapabilityId,
     ) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError> {
-        let evaluated_at = current_micros();
+        let evaluated_at = now_micros();
         if evaluated_at >= self.access.grant_expires_at {
             return Err(GitIndexTransactionPortError::PolicyDenied);
         }
@@ -367,17 +367,6 @@ fn scope_matches_snapshot(
         }
 }
 
-fn current_micros() -> UtcMicros {
-    UtcMicros(
-        i64::try_from(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |duration| duration.as_micros()),
-        )
-        .unwrap_or(i64::MAX),
-    )
-}
-
 pub type DaemonProjectGitIndexTransactionService = DaemonGitIndexTransactionService<
     SharedDaemonGitIndexTransactionStore,
     FixedDaemonGitIndexExecutor<DaemonProjectGitIndexPreviewAssembler>,
@@ -454,10 +443,7 @@ impl DaemonGitIndexTransactionServiceRegistry {
     /// mounts resolves capability manifests through it, so there is no window
     /// in which an owner exists without one.
     pub fn new(
-        catalog: impl Fn() -> Result<CatalogSnapshotV1, ApplicationCatalogSnapshotErrorV1>
-        + Send
-        + Sync
-        + 'static,
+        catalog: impl Fn() -> Result<CatalogSnapshotV1, CatalogCompositionError> + Send + Sync + 'static,
     ) -> Self {
         Self {
             catalog: Arc::new(catalog),

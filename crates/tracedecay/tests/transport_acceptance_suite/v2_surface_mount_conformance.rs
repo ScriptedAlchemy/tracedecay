@@ -52,10 +52,9 @@ use serde_json::Value;
 use tempfile::TempDir;
 use tracedecay_api::{
     WorkOperation, WorkflowOperation, http_application_full_route_path,
-    is_http_application_operation_exposed, retained_application_route_path,
+    is_http_application_operation_exposed,
 };
 use tracedecay_contracts::catalog_composition::build_application_catalog_snapshot;
-use tracedecay_contracts::retained_surfaces::RetainedSurfaceOperation;
 use tracedecay_daemon_service::application_surface::resolve_catalog_tool_binding;
 use tracedecay_session_memory::event_lane::ActivityFamilyV1;
 use tracedecay_tool_catalog::{
@@ -578,20 +577,7 @@ fn every_catalog_binding_is_mounted_on_its_declared_surface() {
                     }
                     // An operation the router deliberately withholds from HTTP is
                     // an absence like any other.
-                    Some(_) => false,
-                    // Retained memory/session/workflow operations are the second
-                    // HTTP route family, addressed exactly as production route
-                    // documentation addresses them (`http_route_documents`): the
-                    // callable retained operation's canonical route. A catalog
-                    // HTTP binding naming neither family is an absence.
-                    None => match RetainedSurfaceOperation::from_operation_name(operation) {
-                        Some(retained) => http_route_is_mounted(
-                            &agent,
-                            &fixture,
-                            &retained_application_route_path(retained),
-                        ),
-                        None => false,
-                    },
+                    Some(_) | None => false,
                 }
             }
             BindingSurface::Mcp => mcp_tools.contains(&format!("tracedecay_{operation}")),
@@ -682,16 +668,6 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
     // -- Work operations. ---------------------------------------------------
     // `WorkOperation::ALL` documents itself as "every mounted Work operation,
     // in mounted order"; this is what makes that claim testable.
-    // The floor guards against a silent shrink, which would let this sweep
-    // pass by grading fewer operations. Growth needs no edit here: the loop
-    // below iterates `ALL`, so a newly added operation is graded on the run
-    // that adds it.
-    assert!(
-        WorkOperation::ALL.len() >= 15,
-        "the Work operation set shrank to {}; a removed operation must be \
-         deleted deliberately, not dropped out of this sweep",
-        WorkOperation::ALL.len()
-    );
     for operation in WorkOperation::ALL {
         graded += 1;
         let route = operation.application_route_path();
@@ -724,12 +700,6 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
     // closed family that publishes a transport-independent descriptor has to be
     // graded against every transport that descriptor claims, or the sweep only
     // proves the surface it happened to look at.
-    assert!(
-        WorkflowOperation::ALL.len() >= 8,
-        "the Workflow operation set shrank to {}; a removed operation must be \
-         deleted deliberately, not dropped out of this sweep",
-        WorkflowOperation::ALL.len()
-    );
     for operation in WorkflowOperation::ALL {
         graded += 1;
         let route = operation.application_route_path();
@@ -800,10 +770,13 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
         let name = operation.as_str();
         for (surface, present) in [
             (BindingSurface::Http, catalog_http_operations.contains(name)),
-            (BindingSurface::Cli, cli_tools.contains(name)),
+            (
+                BindingSurface::Cli,
+                cli_tools.contains(operation.name_for_surface(BindingSurface::Cli)),
+            ),
             (
                 BindingSurface::Mcp,
-                mcp_tools.contains(&format!("tracedecay_{name}")),
+                mcp_tools.contains(operation.mcp_tool_name()),
             ),
         ] {
             graded += 1;

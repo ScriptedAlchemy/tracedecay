@@ -267,7 +267,8 @@ mod tests {
 
     use serde_json::json;
 
-    use crate::hook_events::{HookAgent, HookEvent, HookEventKind};
+    use crate::hook_events::{HookEvent, HookEventKind};
+    use tracedecay_domain::HostIntegrationIdV1;
     use tracedecay_hooks::core_events::HookRouteMetadata;
 
     use super::{
@@ -278,7 +279,7 @@ mod tests {
     #[test]
     fn hook_route_analytics_event_preserves_protected_ids_and_omits_payloads() {
         let event = HookEvent {
-            agent: HookAgent::Codex,
+            agent: HostIntegrationIdV1::Codex,
             kind: HookEventKind::Shell,
             rel_paths: Vec::new(),
             had_command: true,
@@ -337,7 +338,7 @@ mod tests {
     #[test]
     fn hook_route_idempotency_key_distinguishes_durable_admissions() {
         let event = HookEvent {
-            agent: HookAgent::Codex,
+            agent: HostIntegrationIdV1::Codex,
             kind: HookEventKind::Shell,
             rel_paths: Vec::new(),
             had_command: false,

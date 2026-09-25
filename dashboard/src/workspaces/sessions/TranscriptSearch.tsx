@@ -33,7 +33,7 @@ export function TranscriptSearchResults({ read, submitted, selection, onSelect }
       elevation="well"
       bodyClassName="p-0"
       actions={
-        <span className="td-value truncate text-3xs text-text-muted" title={submitted}>
+        <span className="td-value truncate text-xs text-text-muted" title={submitted}>
           "{submitted}"
         </span>
       }
@@ -51,7 +51,7 @@ export function TranscriptSearchResults({ read, submitted, selection, onSelect }
           const hits = data.matches.messages;
           return (
             <div className="flex flex-col">
-              <p className="tabular flex flex-wrap items-baseline gap-x-2 border-b border-edge-subtle px-3 py-1.5 text-2xs text-text-muted">
+              <p className="tabular flex flex-wrap items-baseline gap-x-2 border-b border-edge-subtle px-3 py-1.5 text-sm text-text-muted">
                 <span className="text-text-secondary">
                   {data.total.messages.toLocaleString()} message {data.total.messages === 1 ? 'match' : 'matches'}
                 </span>
@@ -90,7 +90,7 @@ export function TranscriptSearchResults({ read, submitted, selection, onSelect }
                   omissions={envelope.coverage.omitted ?? undefined}
                 />
                 {envelope.coverage.omission_reasons.map((reason) => (
-                  <span key={reason} className="text-3xs text-text-muted">
+                  <span key={reason} className="text-sm text-text-muted">
                     {reason}
                   </span>
                 ))}
@@ -130,16 +130,16 @@ function SearchHit({
       </span>
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         {snippet == null ? (
-          <span className="text-3xs italic text-text-muted">body not held by the store</span>
+          <span className="text-sm italic text-text-muted">body not held by the store</span>
         ) : (
-          <span className="line-clamp-2 text-2xs leading-snug text-text-primary">{snippet}</span>
+          <span className="line-clamp-2 text-body leading-snug text-text-primary">{snippet}</span>
         )}
-        <span className="td-value truncate text-3xs text-text-muted" title={hit.session_id}>
+        <span className="td-value truncate text-xs text-text-muted" title={hit.session_id}>
           {hit.session_id}
         </span>
       </span>
       <span
-        className="td-value w-28 shrink-0 whitespace-nowrap text-right text-2xs text-text-muted max-md:hidden"
+        className="td-value w-28 shrink-0 whitespace-nowrap text-right text-sm text-text-muted max-md:hidden"
         data-cell="numeric"
       >
         {hit.timestamp != null ? formatStamp(hit.timestamp) : 'no timestamp'}

@@ -41,12 +41,27 @@ pub fn assert_metadata_path_eq(actual: &serde_json::Value, expected: &Path) {
     assert_path_text_eq(actual, expected);
 }
 
-/// Initializes `project` as a tracedecay project the ingest resolvers accept
-/// (a local `.tracedecay/tracedecay.db` marker).
+/// Initializes `project` as a tracedecay project the ingest resolvers accept:
+/// a git worktree carrying a repository identity marker unique to its path.
+/// Runs the literal `git` binary so tests that point `GIT` at a stalling fake
+/// still get a real fixture repository.
 pub fn init_project_at(project: &Path) {
     std::fs::create_dir_all(project).unwrap();
-    std::fs::create_dir_all(project.join(".tracedecay")).unwrap();
-    std::fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
+    if !project.join(".git").exists() {
+        run_git(project, &["init", "-q"]);
+    }
+    if !tracedecay_runtime_core::storage::has_repository_identity_marker(project) {
+        let project_id = tracedecay_runtime_core::storage::path_local_profile_project_id(project);
+        assert!(
+            tracedecay_runtime_core::storage::write_repository_identity_marker(
+                project,
+                &project_id
+            )
+            .unwrap(),
+            "fixture '{}' must accept a repository identity marker",
+            project.display()
+        );
+    }
 }
 
 pub fn run_git(project: &Path, args: &[&str]) {

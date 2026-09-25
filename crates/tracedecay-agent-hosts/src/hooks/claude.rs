@@ -10,19 +10,20 @@ use serde_json::Value;
 use crate::ports::hook_runtime::HookRuntimeV1;
 
 use super::post_tool_use::is_post_tool_use_failure_event;
-use super::tool_hints::{HintAgent, ToolHintInput, decide_hint};
+use super::tool_hints::{ToolHintInput, decide_hint};
 use super::{
     additional_context_json, compact_daemon_args, event_project_root_with_identity,
     event_session_id, prompt_like_text, read_hook_event, record_hook_invoked_parsed,
     research_block_reason,
 };
+use tracedecay_domain::HostIntegrationIdV1;
 
 /// Pure decision logic for the `PreToolUse` hook.
 pub fn evaluate_hook_decision(tool_input: &str) -> String {
     let parsed: serde_json::Value =
         serde_json::from_str(tool_input).unwrap_or_else(|_| serde_json::json!({}));
     let hint = decide_hint(&ToolHintInput {
-        agent: HintAgent::Claude,
+        agent: HostIntegrationIdV1::Claude,
         session_id: event_session_id(&parsed),
         tool_name: Some("Agent".to_string()),
         command: None,
@@ -104,7 +105,7 @@ pub async fn hook_claude_post_compact(runtime: &HookRuntimeV1) -> i32 {
     let hook_telemetry = record_hook_invoked_parsed(
         runtime,
         root.as_deref(),
-        HintAgent::Claude,
+        HostIntegrationIdV1::Claude,
         "PostCompact",
         &event,
         &parsed,
@@ -117,7 +118,7 @@ pub async fn hook_claude_post_compact(runtime: &HookRuntimeV1) -> i32 {
     }
     if !super::write_hook_output(
         root.as_deref(),
-        tracedecay_hooks::HookHostV1::ClaudeCode,
+        tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
         &event,
         &serde_json::json!({}).to_string(),
     )
@@ -137,7 +138,7 @@ pub async fn hook_claude_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
     if let Some(response) = response
         && !super::write_hook_output(
             root.as_deref(),
-            tracedecay_hooks::HookHostV1::ClaudeCode,
+            tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
             &event,
             &response,
         )
@@ -165,14 +166,14 @@ async fn claude_post_tool_use_response(
     let hook_telemetry = record_hook_invoked_parsed(
         runtime,
         root.as_deref(),
-        HintAgent::Claude,
+        HostIntegrationIdV1::Claude,
         hook_event_name,
         event,
         &parsed,
     );
     let response = super::dispatch::dispatch_for_scope(
         runtime,
-        tracedecay_hooks::HookHostV1::ClaudeCode,
+        tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
         event,
         root.as_deref(),
         Some(&hook_telemetry),
@@ -201,14 +202,14 @@ async fn claude_guidance_hook(runtime: &HookRuntimeV1, hook_name: &'static str) 
     let hook_telemetry = record_hook_invoked_parsed(
         runtime,
         root.as_deref(),
-        HintAgent::Claude,
+        HostIntegrationIdV1::Claude,
         hook_name,
         &event,
         &parsed,
     );
     let output = super::dispatch::dispatch_for_scope(
         runtime,
-        tracedecay_hooks::HookHostV1::ClaudeCode,
+        tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
         &event,
         root.as_deref(),
         Some(&hook_telemetry),
@@ -223,7 +224,7 @@ async fn claude_guidance_hook(runtime: &HookRuntimeV1, hook_name: &'static str) 
     );
     if !super::write_hook_output(
         root.as_deref(),
-        tracedecay_hooks::HookHostV1::ClaudeCode,
+        tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
         &event,
         &output,
     )

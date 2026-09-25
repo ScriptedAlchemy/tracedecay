@@ -4,7 +4,8 @@ use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Serialize, Serializer};
 use tracedecay_domain::{CompactContextBundleV1, ContextOmissionReasonV1, HydrationStateV1};
 
-use super::super::ports::{ExecutionControl, TemporalPortError};
+use super::super::execution::ExecutionControl;
+use super::super::ports::TemporalPortError;
 use super::super::resolution::summary::SummaryOmission;
 use super::estimation::{TOKEN_SCAN_CHUNK_BYTES, TokenSummary};
 use super::{ContextError, ContextPayload, MAX_CONTEXT_OUTPUT_BYTES, TokenPolicy};
@@ -269,6 +270,6 @@ pub const fn omission_reason(state: HydrationStateV1) -> ContextOmissionReasonV1
         HydrationStateV1::Locked => ContextOmissionReasonV1::Locked,
         HydrationStateV1::Available
         | HydrationStateV1::RetainedButUnavailable
-        | HydrationStateV1::UnverifiableLegacy => ContextOmissionReasonV1::Unavailable,
+        | HydrationStateV1::Unverifiable => ContextOmissionReasonV1::Unavailable,
     }
 }

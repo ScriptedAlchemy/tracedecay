@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
-use crate::common::local_node_id;
+use crate::common::{clean_c_comment, docstring_from_preceding_comments, local_node_id};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
     ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility,
@@ -915,28 +915,9 @@ impl ProtoExtractor {
         }
     }
 
-    /// Extract docstrings from `// comment` lines preceding definitions.
-    ///
-    /// Protobuf uses line comments (`//`) as documentation. We look for `comment`
-    /// sibling nodes that immediately precede the given definition node.
+    /// Protobuf documents definitions with the comments directly above them.
     fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        let mut comments: Vec<String> = Vec::new();
-        let mut prev = node.prev_named_sibling();
-        while let Some(prev_node) = prev {
-            if prev_node.kind() == "comment" {
-                let text = state.node_text(prev_node);
-                let stripped = text.trim_start_matches("//").trim().to_string();
-                comments.push(stripped);
-                prev = prev_node.prev_named_sibling();
-            } else {
-                break;
-            }
-        }
-        if comments.is_empty() {
-            return None;
-        }
-        comments.reverse();
-        Some(comments.join("\n"))
+        docstring_from_preceding_comments(state.source, node, clean_c_comment)
     }
 
     fn build_artifact(state: ExtractionState<'_>, start: Instant) -> ExtractionArtifactV1 {

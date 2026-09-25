@@ -64,7 +64,7 @@ resolver = "3"
 # inheritance table is the sanctioned single source of truth.
 [workspace.package]
 edition = "2024"
-version = "0.1.0-beta.47"
+version = "1.0.0-beta.53"
 
 [workspace.dependencies]
 # Opt-in profiler, pinned once for the whole workspace. Non-optional on purpose:
@@ -84,7 +84,8 @@ rusqlite = { version = "0.40.1", default-features = false, features = ["backup",
 # Pinned once: the MCP git handlers and the root's edit/lifecycle readers must
 # resolve the same object database and status implementation, so a feature
 # added for one is never missing for the other.
-gix = { version = "=0.86.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
+gix = { version = "=0.87.1", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
+schemars = "1.2.1"
 
 [profile.bench]
 opt-level = 3

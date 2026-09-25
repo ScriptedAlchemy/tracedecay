@@ -45,7 +45,7 @@ pub use project_memory::{
 
 #[cfg(test)]
 use tracedecay_domain::{
-    DomainError, FactId, FactLineageEventV1, ProvenanceId, RetrievalAnchorRecordV2,
+    DomainError, FactId, FactLineageEventV1, ProvenanceId, RetrievalAnchorRecord,
 };
 #[cfg(test)]
 use tracedecay_store::{

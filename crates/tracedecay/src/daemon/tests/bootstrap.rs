@@ -13,7 +13,7 @@ fn requirement_for(line: String) -> ProjectServerRequirement {
 }
 use tracedecay_mcp::JsonRpcResponse;
 #[cfg(unix)]
-use tracedecay_session_memory::context::CancellationToken;
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 static PRODUCTION_DASHBOARD_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -136,16 +136,14 @@ pub(super) fn run_git(root: &std::path::Path, args: &[&str]) {
 
 #[cfg(unix)]
 fn assert_missing_enrollment_admission(error: &TraceDecayError) {
-    match error {
-        TraceDecayError::Config { message } => {
-            assert!(
-                message.contains("is not enrolled"),
-                "expected missing-enrollment admission error, got: {error}"
-            );
-        }
-        // Add the typed MissingEnrollment admission variant here once exposed.
-        other => panic!("expected missing-enrollment admission error, got: {other}"),
-    }
+    assert!(
+        super::super::error_is_project_not_enrolled(error),
+        "expected typed missing-enrollment admission error, got: {error}"
+    );
+    assert!(
+        error.to_string().contains("tracedecay init"),
+        "the refusal must name the repair: {error}"
+    );
 }
 
 #[cfg(unix)]
@@ -186,7 +184,7 @@ fn daemon_project_route_rejects_the_user_profile_root() {
     // Portable production path: `project_route_for_handshake` is the Windows
     // and Unix authority. `DaemonEngine::project_route` is only a unix wrapper
     // around it and must not be referenced from this un-gated contract test.
-    let _profile = crate::config::PinnedUserDataDir::new();
+    let _profile = tracedecay_project::config::PinnedUserDataDir::new();
     let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("pinned HOME"));
     let handshake = DaemonHandshake {
         project_path: Some(home),
@@ -197,6 +195,20 @@ fn daemon_project_route_rejects_the_user_profile_root() {
         .expect_err("ambient home route must fail before project open");
 
     assert!(error.to_string().contains("ambient user/filesystem root"));
+}
+
+#[test]
+fn daemon_project_route_uses_the_product_root_identity() {
+    let project = TempDir::new().expect("project root");
+    let mut handshake = test_handshake_defaults();
+    handshake.project_path = Some(project.path().to_path_buf());
+
+    let expected = tracedecay_runtime_core::path_safety::canonical_root_identity(project.path());
+    let (project_root, route) =
+        super::super::project_route_for_handshake(&handshake).expect("resolve project route");
+
+    assert_eq!(project_root, expected);
+    assert_eq!(route.project_path, expected);
 }
 
 /// Enrolls `project_root` on disk exactly as a previously-initialized project
@@ -360,17 +372,18 @@ async fn orphaned_store_with_repository_identity_is_readopted_without_aliasing()
         .registered_profile_database()
         .await
         .expect("profile registry");
-    let open_options = crate::project::TraceDecayOpenOptions {
+    let open_options = tracedecay_project::project::TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
         global_db_path: None,
     };
-    let store_layout = crate::project::TraceDecay::resolve_registered_configuration_layout(
-        &project,
-        &open_options,
-        registry.as_ref(),
-    )
-    .await
-    .expect("durable identity must resolve the registered layout");
+    let store_layout =
+        tracedecay_project::project::TraceDecay::resolve_registered_configuration_layout(
+            &project,
+            &open_options,
+            registry.as_ref(),
+        )
+        .await
+        .expect("durable identity must resolve the registered layout");
     assert_eq!(
         store_layout.identity.project_id.as_deref(),
         Some(project_id),
@@ -450,8 +463,8 @@ fn enroll_nongit_project_on_disk(
 #[cfg(unix)]
 fn moved_nongit_open_options(
     profile_root: &std::path::Path,
-) -> crate::project::TraceDecayOpenOptions {
-    crate::project::TraceDecayOpenOptions {
+) -> tracedecay_project::project::TraceDecayOpenOptions {
+    tracedecay_project::project::TraceDecayOpenOptions {
         profile_root: Some(profile_root.to_path_buf()),
         global_db_path: None,
     }
@@ -494,11 +507,11 @@ async fn moved_nongit_project_is_readopted_only_when_confirmed() {
     // Ambient first-touch (`Never`) mints a fresh path-derived identity and
     // must not touch the moved project's registration.
     let ambient =
-        crate::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
+        tracedecay_project::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
             &moved,
             &moved_nongit_open_options(&profile_root),
             registry.as_ref(),
-            &crate::project::MovedStoreAdoption::Never,
+            &tracedecay_project::project::MovedStoreAdoption::Never,
         )
         .await
         .expect("ambient first-touch mints fresh");
@@ -513,11 +526,11 @@ async fn moved_nongit_project_is_readopted_only_when_confirmed() {
     // Explicit init without adoption flags refuses with the candidate and
     // the explicit choices instead of silently remapping or silently
     // splitting identity.
-    let offer = crate::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
+    let offer = tracedecay_project::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
         &moved,
         &moved_nongit_open_options(&profile_root),
         registry.as_ref(),
-        &crate::project::MovedStoreAdoption::OfferCandidates,
+        &tracedecay_project::project::MovedStoreAdoption::OfferCandidates,
     )
     .await
     .expect_err("explicit init without flags must refuse when a candidate exists");
@@ -541,11 +554,11 @@ async fn moved_nongit_project_is_readopted_only_when_confirmed() {
 
     // `init --yes` confirms adopting the unique candidate.
     let store_layout =
-        crate::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
+        tracedecay_project::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
             &moved,
             &moved_nongit_open_options(&profile_root),
             registry.as_ref(),
-            &crate::project::MovedStoreAdoption::AdoptUnique,
+            &tracedecay_project::project::MovedStoreAdoption::AdoptUnique,
         )
         .await
         .expect("confirmed unique moved nongit project must be adopted");
@@ -613,11 +626,11 @@ async fn ambient_first_touch_never_adopts_a_moved_nongit_store() {
     let scratch_canonical = scratch.canonicalize().expect("canonical scratch root");
 
     let layout =
-        crate::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
+        tracedecay_project::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
             &scratch,
             &moved_nongit_open_options(&profile_root),
             registry.as_ref(),
-            &crate::project::MovedStoreAdoption::Never,
+            &tracedecay_project::project::MovedStoreAdoption::Never,
         )
         .await
         .expect("ambient first-touch on a fresh directory mints a fresh identity");
@@ -679,11 +692,11 @@ async fn moved_nongit_adoption_is_refused_when_ambiguous() {
     let target = root.join("nongit-new");
     std::fs::create_dir_all(&target).expect("create adoption target");
 
-    let error = crate::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
+    let error = tracedecay_project::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
         &target,
         &moved_nongit_open_options(&profile_root),
         registry.as_ref(),
-        &crate::project::MovedStoreAdoption::AdoptUnique,
+        &tracedecay_project::project::MovedStoreAdoption::AdoptUnique,
     )
     .await
     .expect_err("ambiguous moved nongit adoption must refuse");
@@ -699,11 +712,11 @@ async fn moved_nongit_adoption_is_refused_when_ambiguous() {
 
     // The stale stores must not brick a genuinely new project: opting out of
     // adoption (`--fresh`, and every ambient first-touch) mints fresh.
-    let fresh = crate::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
+    let fresh = tracedecay_project::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
         &target,
         &moved_nongit_open_options(&profile_root),
         registry.as_ref(),
-        &crate::project::MovedStoreAdoption::Never,
+        &tracedecay_project::project::MovedStoreAdoption::Never,
     )
     .await
     .expect("fresh init must stay possible with stale moved stores present");
@@ -757,11 +770,11 @@ async fn moved_nongit_adoption_honors_explicit_project_id() {
     std::fs::create_dir_all(&target).expect("create adoption target");
 
     let store_layout =
-        crate::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
+        tracedecay_project::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
             &target,
             &moved_nongit_open_options(&profile_root),
             registry.as_ref(),
-            &crate::project::MovedStoreAdoption::AdoptNamed("proj_nongit_flag_a".to_owned()),
+            &tracedecay_project::project::MovedStoreAdoption::AdoptNamed("proj_nongit_flag_a".to_owned()),
         )
         .await
         .expect("flagged adoption must select the named project");
@@ -817,11 +830,11 @@ async fn moved_nongit_adoption_refuses_conflicting_registered_root() {
         .expect("register moved project");
     std::fs::rename(&original, root.join("nongit-moved")).expect("move conflicting project");
 
-    let error = crate::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
+    let error = tracedecay_project::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
         &occupant,
         &moved_nongit_open_options(&profile_root),
         registry.as_ref(),
-        &crate::project::MovedStoreAdoption::AdoptNamed("proj_nongit_conflict".to_owned()),
+        &tracedecay_project::project::MovedStoreAdoption::AdoptNamed("proj_nongit_conflict".to_owned()),
     )
     .await
     .expect_err("adoption onto another project's root must refuse");
@@ -879,11 +892,11 @@ async fn interrupted_moved_nongit_remap_resumes_on_next_explicit_init() {
         .expect("journal manifest write");
 
     let resumed =
-        crate::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
+        tracedecay_project::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
             &moved,
             &moved_nongit_open_options(&profile_root),
             registry.as_ref(),
-            &crate::project::MovedStoreAdoption::OfferCandidates,
+            &tracedecay_project::project::MovedStoreAdoption::OfferCandidates,
         )
         .await
         .expect("a torn remap must resume from its manifest journal record");
@@ -945,11 +958,11 @@ async fn unreadable_moved_store_evidence_is_a_typed_refusal() {
         .expect("profile-sharded layout carries a manifest path");
     std::fs::write(manifest_path, b"not a manifest").expect("corrupt the manifest");
 
-    let error = crate::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
+    let error = tracedecay_project::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
         &moved,
         &moved_nongit_open_options(&profile_root),
         registry.as_ref(),
-        &crate::project::MovedStoreAdoption::AdoptUnique,
+        &tracedecay_project::project::MovedStoreAdoption::AdoptUnique,
     )
     .await
     .expect_err("unreadable evidence must be a typed error, not a silent non-match");
@@ -2175,9 +2188,11 @@ async fn route_open_backoff_retries_after_deadline_without_cross_route_blocking(
     let rejected_attempts = Arc::clone(&attempts);
     let rejected_state = match tasks.start(rejected.clone(), async move {
         rejected_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: "identity cutover conflict: strict route invariant".to_string(),
-        })
+        Err(tracedecay_domain::errors::TraceDecayError::project_route(
+            crate::daemon::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
+            true,
+            "strict route invariant",
+        ))
     }) {
         super::super::ProjectOpenTaskClaim::InFlight(state) => state,
         super::super::ProjectOpenTaskClaim::Failed(_) => {
@@ -4035,10 +4050,11 @@ async fn production_composition_harness_reads_retained_profile_analytics_authori
         .ledger_writes_settled()
         .await;
 
-    let second_owner = crate::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(
-        harness.profile_root(),
-    )
-    .await;
+    let second_owner =
+        tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(
+            harness.profile_root(),
+        )
+        .await;
     let error = match second_owner {
         Ok(_) => panic!("parallel profile authority must remain rejected"),
         Err(error) => error,

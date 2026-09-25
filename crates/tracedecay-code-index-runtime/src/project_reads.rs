@@ -168,7 +168,7 @@ impl ProjectCodeGraphServingAuthorityV1 {
                 })?;
         Ok(ProjectCodeGraphServingProjectionV1 {
             generation_id: latest.metadata().manifest().generation_id.clone(),
-            statistics: latest.metadata().generation_statistics().cloned(),
+            statistics: Some(latest.metadata().generation_statistics().clone()),
             store,
             freshness,
         })

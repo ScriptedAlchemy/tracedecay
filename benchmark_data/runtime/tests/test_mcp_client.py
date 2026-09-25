@@ -363,12 +363,12 @@ class MCPClientTest(unittest.TestCase):
             with self.client() as client:
                 client.call_tool("echo")
 
-        self.assertEqual(popen.call_count, 1)
-        self.assertIs(popen.call_args.kwargs["shell"], False)
-        self.assertEqual(
-            tuple(popen.call_args.args[0])[-2:],
-            ("serve", "--timings"),
-        )
+        server_calls = [
+            call for call in popen.call_args_list
+            if tuple(call.args[0])[-2:] == ("serve", "--timings")
+        ]
+        self.assertEqual(len(server_calls), 1)
+        self.assertIs(server_calls[0].kwargs["shell"], False)
 
     def test_string_command_is_rejected_instead_of_shell_parsed(self) -> None:
         with self.assertRaisesRegex(TypeError, "sequence"):

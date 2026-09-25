@@ -102,6 +102,7 @@ pub mod config;
 pub mod db;
 pub mod git;
 pub mod git_discovery;
+pub mod git_open;
 pub mod git_repository;
 pub mod lifecycle_lease;
 pub mod logging;

@@ -8,8 +8,6 @@ use serde_json::Value;
 #[cfg(feature = "test-transport")]
 use serde_json::json;
 use std::ffi::OsString;
-#[cfg(feature = "test-transport")]
-use std::fs;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "test-transport")]
@@ -19,16 +17,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "test-transport")]
 use std::time::Duration;
 use tempfile::TempDir;
-use tokio::sync::{Mutex, MutexGuard};
 #[cfg(feature = "test-transport")]
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 #[cfg(feature = "test-transport")]
 use tracedecay::mcp::McpServer;
-use tracedecay::project::TraceDecay;
-#[cfg(feature = "test-transport")]
-use tracedecay::test_support::host_admission::{
-    HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1,
-};
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::errors::TraceDecayError;
 #[cfg(feature = "test-transport")]
@@ -40,13 +32,18 @@ use tracedecay_domain::{
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
     ObservationSourceRangeV1, PayloadAccessState, PayloadReferenceV1, ProjectId,
     ProjectionGenerationId, ProjectionOutputOrdinalV1, ProviderId, RetentionClass,
-    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, SanitizationReceiptId,
+    RetrievalAnchorRecord, RetrievalAnchorRecordParts, SanitizationReceiptId,
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
     SessionId, SessionProjectionGenerationV1, UtcMicros, derive_exact_observation_anchor_id,
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_mcp::McpTransport;
 use tracedecay_mcp::ToolResult;
+use tracedecay_project::project::TraceDecay;
+#[cfg(feature = "test-transport")]
+use tracedecay_project::test_support::host_admission::{
+    HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1,
+};
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::admission::HostAdmissionScope;
@@ -58,12 +55,51 @@ use tracedecay_store::{
     SessionFrozenWatermarksV1, SessionGenerationActivationRequestV1,
     SessionGenerationRebuildRequestV1, SessionTemporalCapabilitiesV1, SessionTemporalCapabilityV1,
     SessionTemporalProjectionBatchV1, SessionTemporalProjectionStore, SessionTemporalSnapshotV1,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
 #[cfg(feature = "test-transport")]
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
-pub(crate) static GLOBAL_DB_ENV_LOCK: Mutex<()> = Mutex::const_new(());
+pub(crate) use crate::common::{ProcessEnvGuard, lock_process_env};
+
+/// `HOME` is one slot shared by every test in this binary, and the two
+/// fixtures that pin it ([`HomeEnvGuard`] and `common::IsolatedEnv`) both
+/// prove they hold `common::PROCESS_ENV_LOCK` to do so. A raw `set_var`
+/// bypasses that proof: the suite once pinned `HOME` under a second, private
+/// mutex and the Hermes bridge read a sibling fixture's home out of `$HOME`.
+#[test]
+fn home_is_pinned_only_through_the_process_env_guard() {
+    let suite = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("mcp_suite");
+    let mut pending = vec![suite.clone()];
+    let mut offenders = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).expect("read mcp_suite directory") {
+            let path = entry.expect("mcp_suite directory entry").path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if path.extension().is_some_and(|extension| extension == "rs")
+                && path != suite.join("support.rs")
+            {
+                let source = std::fs::read_to_string(&path).expect("read mcp_suite source");
+                if ["set_var(\"HOME\"", "set_var(\"USERPROFILE\""]
+                    .iter()
+                    .any(|needle| source.contains(needle))
+                {
+                    offenders.push(path);
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "pin HOME through HomeEnvGuard or common::IsolatedEnv, which hold \
+         common::PROCESS_ENV_LOCK; these set it directly: {offenders:?}"
+    );
+}
 
 #[cfg(feature = "test-transport")]
 pub(crate) const MCP_TEST_RESPONSE_CHAR_LIMIT: usize = tracedecay_mcp::MAX_RESPONSE_CHARS;
@@ -371,7 +407,50 @@ pub(crate) async fn wait_for_current_graph(server: &McpServer) {
 pub(crate) struct ProductionCompositionFixture {
     pub(crate) harness: ProductionProjectCompositionHarnessV1,
     pub(crate) project_root: PathBuf,
+    _data_dir_guard: common::EnvVarGuard,
+    _global_db_guard: common::EnvVarGuard,
+    _environment: common::IsolatedEnv,
     _isolation: TestTempDir,
+}
+
+#[cfg(feature = "test-transport")]
+impl ProductionCompositionFixture {
+    pub(crate) async fn shutdown(self) {
+        self.harness.shutdown().await;
+    }
+
+    pub(crate) async fn reopen(self) -> Self {
+        let Self {
+            harness,
+            project_root,
+            _data_dir_guard,
+            _global_db_guard,
+            _environment,
+            _isolation,
+        } = self;
+        harness.shutdown().await;
+        drop(_data_dir_guard);
+        drop(_global_db_guard);
+        drop(_environment);
+
+        let (environment, _) = common::IsolatedEnv::acquire().await;
+        let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
+            _isolation.path(),
+            vec![project_root.clone()],
+        ))
+        .await
+        .expect("reopen production composition");
+        let (data_dir_guard, global_db_guard) =
+            pin_production_composition_profile(&harness, &project_root);
+        Self {
+            harness,
+            project_root,
+            _data_dir_guard: data_dir_guard,
+            _global_db_guard: global_db_guard,
+            _environment: environment,
+            _isolation,
+        }
+    }
 }
 
 /// `git init`, stage everything, and commit. Identity, hooks, and gc come
@@ -394,22 +473,79 @@ pub(crate) async fn production_composition_fixture() -> ProductionCompositionFix
 pub(crate) async fn production_composition_fixture_with_sources(
     write_sources: impl FnOnce(&Path),
 ) -> ProductionCompositionFixture {
+    let (environment, _) = common::IsolatedEnv::acquire().await;
     let isolation = test_temp_dir();
-    let project_root = isolation.path().join("project");
-    fs::create_dir_all(&project_root).expect("production composition project");
-    write_sources(&project_root);
-    commit_worktree(&project_root, "production composition fixture");
+    let project_root = seed_production_composition_project(isolation.path(), write_sources);
     let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
         isolation.path(),
         vec![project_root.clone()],
     ))
     .await
     .expect("production composition harness");
+    let (data_dir_guard, global_db_guard) =
+        pin_production_composition_profile(&harness, &project_root);
     ProductionCompositionFixture {
         harness,
         project_root,
+        _data_dir_guard: data_dir_guard,
+        _global_db_guard: global_db_guard,
+        _environment: environment,
         _isolation: isolation,
     }
+}
+
+/// Opens a second composition, with its own project and profile, inside the
+/// environment `owner` holds. A second fixture would wait forever on the
+/// process env lock `owner` keeps for its whole lifetime.
+#[cfg(feature = "test-transport")]
+pub(crate) async fn peer_production_composition(
+    _owner: &ProductionCompositionFixture,
+) -> (ProductionProjectCompositionHarnessV1, TestTempDir) {
+    let isolation = test_temp_dir();
+    let project_root = seed_production_composition_project(
+        isolation.path(),
+        fixture::write_indexed_fixture_sources,
+    );
+    let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
+        isolation.path(),
+        vec![project_root],
+    ))
+    .await
+    .expect("peer production composition harness");
+    (harness, isolation)
+}
+
+#[cfg(feature = "test-transport")]
+fn seed_production_composition_project(
+    isolation_root: &Path,
+    write_sources: impl FnOnce(&Path),
+) -> PathBuf {
+    let project_root = isolation_root.join("project");
+    std::fs::create_dir_all(&project_root).expect("production composition project");
+    write_sources(&project_root);
+    commit_worktree(&project_root, "production composition fixture");
+    project_root
+}
+
+#[cfg(feature = "test-transport")]
+fn pin_production_composition_profile(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project_root: &Path,
+) -> (common::EnvVarGuard, common::EnvVarGuard) {
+    let profile_root = harness.profile_root();
+    let data_dir_guard =
+        common::EnvVarGuard::set(tracedecay_project::config::USER_DATA_DIR_ENV, profile_root);
+    let global_db_guard =
+        common::EnvVarGuard::set(common::GLOBAL_DB_ENV, profile_root.join("global.db"));
+    let response_handle_root =
+        tracedecay_runtime_core::storage::resolve_response_handle_root(project_root)
+            .expect("production composition response-handle root");
+    assert!(
+        response_handle_root.starts_with(profile_root),
+        "response handles must stay inside the fixture profile: {}",
+        response_handle_root.display()
+    );
+    (data_dir_guard, global_db_guard)
 }
 
 /// Production-mounted source-edit fixture for projects whose exact sources are
@@ -932,17 +1068,20 @@ pub(crate) struct HomeEnvGuard {
 }
 
 impl HomeEnvGuard {
-    pub(crate) fn set(home: &Path) -> Self {
+    /// Takes the process-env lock by reference: `HOME` is one process-wide
+    /// slot, so a caller that pins it without holding the lock every other
+    /// fixture holds reads a sibling's home instead of its own.
+    pub(crate) fn set(_process_env: &ProcessEnvGuard, home: &Path) -> Self {
         let previous_home = std::env::var_os("HOME");
         let previous_userprofile = std::env::var_os("USERPROFILE");
-        let previous_data_dir = std::env::var_os(tracedecay::config::USER_DATA_DIR_ENV);
+        let previous_data_dir = std::env::var_os(tracedecay_project::config::USER_DATA_DIR_ENV);
         let home = canonicalize_test_dir(home);
         unsafe {
             std::env::set_var("HOME", &home);
             std::env::set_var("USERPROFILE", &home);
             std::env::set_var(
-                tracedecay::config::USER_DATA_DIR_ENV,
-                home.join(tracedecay::config::TRACEDECAY_DIR),
+                tracedecay_project::config::USER_DATA_DIR_ENV,
+                home.join(tracedecay_project::config::TRACEDECAY_DIR),
             );
         }
         Self {
@@ -965,8 +1104,10 @@ impl Drop for HomeEnvGuard {
                 None => std::env::remove_var("USERPROFILE"),
             }
             match self.previous_data_dir.take() {
-                Some(value) => std::env::set_var(tracedecay::config::USER_DATA_DIR_ENV, value),
-                None => std::env::remove_var(tracedecay::config::USER_DATA_DIR_ENV),
+                Some(value) => {
+                    std::env::set_var(tracedecay_project::config::USER_DATA_DIR_ENV, value)
+                }
+                None => std::env::remove_var(tracedecay_project::config::USER_DATA_DIR_ENV),
             }
         }
     }
@@ -999,9 +1140,12 @@ pub(crate) struct TestTempDir {
 
 impl TestTempDir {
     pub(crate) fn new() -> Self {
-        Self {
-            dir: Some(TempDir::new().unwrap()),
-        }
+        // Keep fixture paths aligned with macOS's canonical /private/var project roots.
+        #[cfg(target_os = "macos")]
+        let dir = TempDir::new_in(canonicalize_test_dir(&std::env::temp_dir())).unwrap();
+        #[cfg(not(target_os = "macos"))]
+        let dir = TempDir::new().unwrap();
+        Self { dir: Some(dir) }
     }
 }
 
@@ -1031,7 +1175,7 @@ pub(crate) struct TestEnv {
     pub(crate) _global_db_guard: GlobalDbEnvGuard,
     // Drop order = declaration order: the env lock must outlive the guards
     // above so their env restores happen while the lock is still held.
-    pub(crate) _env_lock: MutexGuard<'static, ()>,
+    pub(crate) _env_lock: ProcessEnvGuard,
 }
 
 pub(crate) struct TestTraceDecay {
@@ -1121,9 +1265,9 @@ pub(crate) async fn close_test_graph(cg: TestTraceDecay) {
 }
 
 pub(crate) async fn init_test_project(project: &Path) -> (TestTraceDecay, TestEnv) {
-    let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
+    let env_lock = lock_process_env().await;
     let home = project.join("home");
-    let home_guard = HomeEnvGuard::set(&home);
+    let home_guard = HomeEnvGuard::set(&env_lock, &home);
     let global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
     let cg = fixture::init_project_from_template(project).await.unwrap();
     (
@@ -1711,14 +1855,14 @@ pub(crate) async fn persist_temporal_lcm_observation_with_access(
     let authorization =
         build_observation_resolution_authorization_v1(&observation, "observation-capture.v1")
             .unwrap();
-    let base_anchor = build_observation_retrieval_anchor_v2(
+    let base_anchor = build_observation_retrieval_anchor(
         &observation,
         projection_generation.clone(),
         ingested_at,
         authorization,
     )
     .unwrap();
-    let anchor = RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+    let anchor = RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
         target: base_anchor.target().clone(),
         owner: base_anchor.owner().clone(),
         aliases: base_anchor.aliases().to_vec(),

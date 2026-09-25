@@ -330,19 +330,6 @@ impl FeedbackImpactPort for FixedImpact {
     }
 }
 
-#[derive(Clone)]
-struct Observations(Arc<dyn tracedecay_contracts::feedback::FeedbackObservationPort + Send + Sync>);
-
-impl tracedecay_contracts::feedback::FeedbackObservationPort for Observations {
-    fn observe(
-        &self,
-        input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
-        observation: tracedecay_domain::feedback::FeedbackCycleObservationV1,
-    ) {
-        self.0.observe(input, observation);
-    }
-}
-
 struct NoopFeedbackCycle;
 
 impl FeedbackCycleRuntimePort for NoopFeedbackCycle {
@@ -505,7 +492,7 @@ async fn consume_fixture() -> ConsumeFixture {
         },
         FixedImpact(impact),
         runtime.publication_store(),
-        Observations(runtime.observation_port()),
+        runtime.observation_port(),
         runtime.route_authorization(),
         operation,
     );
@@ -561,6 +548,7 @@ async fn consume_fixture() -> ConsumeFixture {
 
 #[tokio::test]
 async fn completed_publication_is_consumed_into_exactly_one_hook_notice() {
+    let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let fixture = consume_fixture().await;
     let publication = fixture
         .completed
@@ -695,6 +683,7 @@ async fn completed_publication_is_consumed_into_exactly_one_hook_notice() {
 
 #[tokio::test]
 async fn unpublished_cycles_and_hookless_hosts_deliver_nothing() {
+    let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let fixture = consume_fixture().await;
 
     // A tick without a completed publication is a typed error, not a delivery.

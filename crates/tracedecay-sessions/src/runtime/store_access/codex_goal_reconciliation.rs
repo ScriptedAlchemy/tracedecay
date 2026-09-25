@@ -27,7 +27,7 @@ pub async fn find_preceding_codex_goal_response(
             "SELECT message_id, kind, metadata_json
              FROM (
                 SELECT message_id, kind, metadata_json, ordinal
-                FROM session_messages
+                FROM lcm_raw_messages
                 WHERE provider = ?1 AND session_id = ?2
                   AND ((?3 IS NULL AND source_path IS NULL) OR source_path = ?3)
                   AND ordinal < ?4

@@ -45,10 +45,13 @@ For literal strings, regexes, and config keys inside indexed code, use
 
 Before running `cargo check`/`tsc`/`clippy` in the shell, or when shell output
 shows compile errors, the injected steering routes the moment to tracedecay
-diagnostics: paste captured output into `tracedecay_diagnose`, or run
-`tracedecay_diagnostics` for fresh structured errors mapped to the enclosing
-symbols and callers. The bundled `fixing-build-and-type-errors` skill covers
-this workflow.
+diagnostics: paste captured output into `tracedecay_diagnose`, or read the
+published diagnostics with `tracedecay_diagnostics`, mapped to the enclosing
+symbols and callers. A TypeScript project with its own `node_modules/.bin/tsc`
+is checked by the daemon automatically after each complete index generation;
+other toolchains publish through `tracedecay_diagnose`, and a read with no
+publication is a typed problem naming the next step. The bundled
+`fixing-build-and-type-errors` skill covers this workflow.
 
 `PostCompact` is an admission-only request. The daemon schedules compaction
 against its canonical session data and owns model execution, retries, and

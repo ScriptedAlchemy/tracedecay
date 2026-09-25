@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import type { AnalyticsRecentHookV1 } from '../../contracts/generated.ts';
+import type { AnalyticsRecentHookV1, AnalyticsSubagentNodeV1 } from '../../contracts/generated.ts';
 import { EvidenceGrade } from '../../ui/EvidenceGrade.tsx';
 import { StateChip } from '../../ui/StateChip.tsx';
 import { cn } from '../../ui/cn';
@@ -15,6 +15,13 @@ import type { DelegationTopologyModel } from './delegationTopology.ts';
 import type { AttemptFailureReading } from './failure.ts';
 import type { AgentHandoffReading } from './handoff.ts';
 import { handoffTargetLabel, type HandoffTokenReading } from './handoffTokens.ts';
+import {
+  PartialMark,
+  coverageLabel,
+  sessionUsage,
+  tokenCount,
+  type UsageCoverage,
+} from './sessionUsage.tsx';
 import { subagentElapsedSeconds } from './subagentTree.ts';
 
 /**
@@ -276,6 +283,8 @@ export function AgentInspector({
         />
       </Section>
 
+      <ProviderUsage node={node} coverage={model.usageCoverage} />
+
       <TokenFrontier tokens={tokens} mode={mode} />
 
       <Section
@@ -330,6 +339,45 @@ export function AgentInspector({
 
 /** The grant store's per-session frontier, as the page read it, or the
  * reason it did not. */
+/** Provider-reported usage for this session, split by counter. An absent
+ * row reads against the tree's coverage: none recorded, possibly unread, or a
+ * read that did not answer at all. */
+function ProviderUsage({ node, coverage }: { node: AnalyticsSubagentNodeV1; coverage: UsageCoverage }) {
+  const usage = sessionUsage(node);
+  if (usage.state === 'absent') {
+    return (
+      <Section legend="Provider usage" grade={<EvidenceGrade grade="UNAVAILABLE" source="PROVIDER" />}>
+        <p className="text-2xs leading-relaxed text-text-muted" data-agent-inspector-usage="absent">
+          tokens absent · {coverageLabel(coverage)}
+        </p>
+      </Section>
+    );
+  }
+  return (
+    <Section
+      legend="Provider usage"
+      grade={
+        usage.state === 'partial' ? <PartialMark /> : <EvidenceGrade grade="EXACT" source="PROVIDER" />
+      }
+    >
+      <div data-agent-inspector-usage={usage.state}>
+        <Facts
+          rows={[
+            ['total', tokenCount(usage.total)],
+            ...usage.split.map(([label, value]) => [label, tokenCount(value)] as const),
+            ['events', usage.events.toLocaleString()],
+          ]}
+        />
+      </div>
+      {usage.state === 'partial' ? (
+        <p className="text-3xs leading-relaxed text-text-muted">
+          the provider marked this aggregate incomplete · counts are a floor
+        </p>
+      ) : null}
+    </Section>
+  );
+}
+
 function TokenFrontier({
   tokens,
   mode,

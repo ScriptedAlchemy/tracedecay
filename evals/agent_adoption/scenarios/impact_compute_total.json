@@ -13,13 +13,12 @@
       "tracedecay_impact",
       "tracedecay_affected",
       "tracedecay_callers",
-      "tracedecay_callers_for",
       "tracedecay_context"
     ],
     "acceptable": [
       "tracedecay_test_map",
       "tracedecay_search",
-      "tracedecay_body",
+      "tracedecay_source_body",
       "Read"
     ]
   },

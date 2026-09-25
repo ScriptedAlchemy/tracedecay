@@ -40,7 +40,7 @@ fn every_mcp_tool_is_listed_by_the_cli_discovery_command() {
         listing.starts_with(&format!(
             "Available tools ({}; TraceDecay {}",
             definitions.len(),
-            tracedecay::version::PACKAGE_VERSION
+            tracedecay_project::version::PACKAGE_VERSION
         )),
         "the CLI catalog must expose its exact count and version so agents can detect a stale MCP"
     );

@@ -1,8 +1,9 @@
 //! Production-bound exact/lexical/graph candidate-output generator.
 //!
-//! Builds one published code generation from checked-in sanitized corpus
-//! fixtures, then runs the shared `CompositionKernel` over the real exact,
-//! lexical, and graph production lanes.
+//! Publishes one code generation per queried scope set from checked-in
+//! sanitized corpus fixtures, seals each into the production lexical artifact,
+//! then runs the shared `CompositionKernel` over the real exact, lexical, and
+//! graph production lanes.
 //!
 //! Outputs deterministic checked-in `train` / `validation` candidate records
 //! plus current/10x resource samples and ranking receipts. Cancellation is
@@ -18,16 +19,19 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
+use tempfile::TempDir;
 
-use tracedecay_code_index::chunks::{ExtractionAdmittedCodeSearchChunkV1, content_digest};
+use tracedecay_code_index::chunks::content_digest;
 use tracedecay_code_index::graph_projection::CodeGraphEvidenceReader;
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use tracedecay_code_index::production::{
     CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
-    CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1, CodeIndexProductionOwnerV1,
-    CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
+    CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1, CodeIndexProductionErrorV1,
+    CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
     CodeIndexRepositoryParseIdentityV1, DAEMON_CODE_INDEX_CHUNKER_REVISION,
-    VerifiedSealedLexicalSymbolDisplayV1,
+    SealedGenerationSegmentPublicationV1, VerifiedSealedLexicalPageReadV1,
+    VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalSymbolDisplayV1,
 };
 use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -46,28 +50,32 @@ use tracedecay_domain::{
     ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
     ProjectionOutcomeV1, PublicRetrieverStatus, QueryFallbackSubpayload,
     QueryNormalizationRevision, RelationEdgeKindV1, RepositoryDirtyStateV1, RepositoryId,
-    RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind,
-    RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-    SanitizerRevision, SingleRootScopeV1, SnapshotFileDispositionV1, SymbolOccurrenceId,
+    RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverBatch,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1,
+    SanitizedCodeSnapshotV1, SanitizerRevision, SingleRootScopeV1, SnapshotFileDispositionV1,
     TemporalModeV1, UtcMicros, VectorWatermark,
 };
 use tracedecay_query::native_git::NativeHistoricalBlobReaderV1;
 use tracedecay_query::retrieval::exact::{
-    CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
-    ExactLaneRetriever,
+    CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneEvidence,
+    ExactLaneRequest, ExactLaneRetriever,
 };
 use tracedecay_query::retrieval::fusion::{
-    CompositionKernel, CompositionLaneInput, CompositionOutputV1, FusionStageInput,
+    CompositionKernel, CompositionLaneInput, CompositionOutputV1, FusionStageError,
+    FusionStageInput,
 };
 use tracedecay_query::retrieval::graph::{
-    GraphLane, GraphLaneRequest, GraphLaneRetriever, production_code_index_freshness,
+    GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever,
+    production_code_index_freshness,
 };
 use tracedecay_query::retrieval::lexical::{
-    CodeLexicalProjectionAdapterV1, CodeLexicalProjectionMetadataV1, LexicalLane,
-    LexicalLaneRequest, LexicalLaneRetriever, LexicalRouteOutcomeV1, LexicalRoutePlanV1,
-    LexicalRoutingV1, lexical_query_parts, merge_lexical_routes,
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBuilderV1,
+    CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1, CodeLexicalCloneRouteV1,
+    CodeLexicalProjectionMetadataV1, LexicalLane, LexicalLaneEvidence, LexicalLaneRequest,
+    LexicalLaneRetriever, LexicalRouteOutcomeV1, LexicalRoutePlanV1, LexicalRoutingV1,
+    lexical_query_parts, merge_lexical_routes,
 };
-use tracedecay_query::retrieval::ports::CodeCandidateBindingV1;
+use tracedecay_query::retrieval::ports::{CodeCandidateBindingV1, RETRIEVAL_CANDIDATE_BATCH_SIZE};
 use tracedecay_query::search_quality::candidate_output::{
     CandidateOutputError, CandidateWorkloadV1, CorpusDocumentV1, EVALUATION_CACHE_STATE,
     EVALUATION_SEED, GenerateCandidateOutputsResultV1, HistoricalQueryExecutionV1,
@@ -197,15 +205,27 @@ struct OccurrenceMapEntry {
     display_anchors: Vec<String>,
 }
 
-/// Retrieval adapters keyed by canonical allowed-scope key (sorted, deduped),
-/// as produced by [`canonical_scope_key`].
-type ScopedLexicalProjections = BTreeMap<Vec<String>, CodeLexicalProjectionAdapterV1>;
-type ScopedGraphEvidence = BTreeMap<Vec<String>, CodeGraphEvidenceReader>;
+/// Page byte bound for draining a sealed generation into its lexical artifact,
+/// the daemon's text-artifact page bound.
+const LEXICAL_ARTIFACT_PAGE_BYTES: usize = 4 * 1024 * 1024;
+
+/// One queried scope set's corpus: the generation published over exactly the
+/// files those scopes admit, its sealed lexical artifact, and its graph
+/// evidence. Each scope set is its own repository snapshot, so lexical
+/// statistics and graph edges never cross into files a query cannot see.
+struct ScopedCorpus {
+    generation: Arc<CodeIndexPublishedGenerationV1>,
+    lexical: CodeLexicalArtifactReaderV1,
+    graph: CodeGraphEvidenceReader,
+    /// Owns the sealed artifact file `lexical` serves.
+    _artifact_directory: TempDir,
+}
 
 struct PublishedCorpus {
-    generation: Arc<CodeIndexPublishedGenerationV1>,
-    lexical_projections: ScopedLexicalProjections,
-    graph_projections: ScopedGraphEvidence,
+    /// Keyed by canonical allowed-scope key, as produced by
+    /// [`canonical_scope_key`]; `None` when the scopes admit no indexable
+    /// source file.
+    scopes: BTreeMap<Vec<String>, Option<ScopedCorpus>>,
     occurrence_map: BTreeMap<String, OccurrenceMapEntry>,
     repo_root: PathBuf,
     source_commit: GitOidV1,
@@ -237,26 +257,110 @@ fn canonical_scope_key(scopes: &[String]) -> Vec<String> {
     key
 }
 
-/// Build every scoped retrieval projection the workload's queries need.
-///
-/// Preparation is measured on its own span so query evaluation timing can
-/// neither absorb nor hide it. Cost is O(chunks + scope memberships): the
-/// corpus is classified once through a reverse scope map rather than once per
-/// distinct scope set.
-#[hotpath::measure(label = "search_eval.corpus.query_projections")]
-fn build_query_projections(
+/// Seal `generation` into the production lexical artifact and reopen it for
+/// serving: the same partitioned encoding, verified page source, builder, and
+/// reader the daemon runs, over an in-memory segment store and a private
+/// temporary directory.
+#[hotpath::measure(label = "search_eval.corpus.lexical_artifact")]
+fn seal_lexical_artifact(
     generation: &CodeIndexPublishedGenerationV1,
-    file_scopes: &BTreeMap<String, String>,
-    symbol_displays: Arc<BTreeMap<SymbolOccurrenceId, VerifiedSealedLexicalSymbolDisplayV1>>,
-    queries: &[WorkloadQueryV1],
-) -> Result<(ScopedLexicalProjections, ScopedGraphEvidence), CandidateOutputError> {
+    metadata: &CodeLexicalProjectionMetadataV1,
+) -> Result<(TempDir, CodeLexicalArtifactReaderV1), CandidateOutputError> {
+    let contract =
+        |error: &dyn std::fmt::Display| CandidateOutputError::Contract(error.to_string());
+    let mut segments = BTreeMap::new();
+    let mut evidence_pack = Vec::new();
+    let manifest = generation
+        .encode_partitioned_sealed(|publication| {
+            match publication {
+                SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
+                    segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+                }
+                SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
+                    evidence_pack.extend_from_slice(bytes);
+                }
+                SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
+                    segment_digest,
+                    ..
+                } => {
+                    segments.insert(
+                        segment_digest.as_str().to_owned(),
+                        std::mem::take(&mut evidence_pack),
+                    );
+                }
+            }
+            Ok(())
+        })
+        .map_err(|error| contract(&error))?;
+    let state_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&manifest))
+        .map_err(|error| contract(&error))?;
+    let segments = Arc::new(segments);
+    let mut source = VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
+        &manifest,
+        state_digest,
+        move |digest, _, buffer, _control| {
+            let bytes = segments.get(digest.as_str()).ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed evaluation segment is missing".to_owned(),
+                )
+            })?;
+            buffer.clear();
+            buffer.extend_from_slice(bytes);
+            Ok(())
+        },
+        RETRIEVAL_CANDIDATE_BATCH_SIZE,
+        LEXICAL_ARTIFACT_PAGE_BYTES,
+    )
+    .map_err(|error| contract(&error))?;
+    let directory = tempfile::tempdir().map_err(|error| contract(&error))?;
+    let path = directory.path().join("lexical-artifact.sqlite");
+    let mut builder = CodeLexicalArtifactBuilderV1::create(&path, metadata.clone())
+        .map_err(|error| contract(&error))?;
+    let receipt = loop {
+        match source
+            .next_page(&ActiveControl)
+            .map_err(|error| contract(&error))?
+        {
+            VerifiedSealedLexicalPageReadV1::Page(page) => {
+                builder
+                    .append_page(&page, &ActiveControl)
+                    .map_err(|error| contract(&error))?;
+            }
+            VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
+        }
+    };
+    let verified = loop {
+        match builder
+            .advance_finalization(&receipt, 4_096, &ActiveControl)
+            .map_err(|error| contract(&error))?
+        {
+            CodeLexicalArtifactFinalizationStepV1::Pending { .. } => {}
+            CodeLexicalArtifactFinalizationStepV1::Ready(verified) => break *verified,
+        }
+    };
+    drop(builder);
+    let reader = CodeLexicalArtifactReaderV1::open_with_control(
+        &path,
+        &verified,
+        metadata,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &ActiveControl,
+    )
+    .map_err(|error| contract(&error))?;
+    Ok((directory, reader))
+}
+
+/// The lexical artifact and graph evidence over every file of `generation`.
+fn scoped_retrieval(
+    generation: Arc<CodeIndexPublishedGenerationV1>,
+) -> Result<ScopedCorpus, CandidateOutputError> {
     let generation_id = generation.manifest().generation_id.clone();
     let freshness = production_code_index_freshness(
         generation.manifest().seal.sealed_at,
         id::<ComponentRevision>("policy.candidate.v1")?,
     )
     .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    let metadata = Arc::new(CodeLexicalProjectionMetadataV1 {
+    let metadata = CodeLexicalProjectionMetadataV1 {
         generation: generation_id.clone(),
         repository_id: Some(generation.snapshot().repository.clone()),
         logical_paths: generation
@@ -273,80 +377,27 @@ fn build_query_projections(
             tracedecay_query::retrieval::QUERY_LEXICAL_RETRIEVER_REVISION_V1,
         )?,
         exact_score_domain: id(tracedecay_query::retrieval::QUERY_EXACT_SCORE_DOMAIN_V1)?,
-    });
-    // Canonical scope keys, deduplicated once; the position is the bucket id.
-    let scope_keys = queries
-        .iter()
-        .map(|query| canonical_scope_key(&query.allowed_scopes))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    // Reverse map from a file scope to every scope key admitting it, so one
-    // corpus pass places each chunk in all of its buckets instead of scanning
-    // the corpus once per distinct scope set.
-    let mut interested_buckets: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
-    for (bucket, scope_key) in scope_keys.iter().enumerate() {
-        for scope in scope_key {
-            interested_buckets
-                .entry(scope.as_str())
-                .or_default()
-                .push(bucket);
-        }
-    }
-    let buckets_for = |file_occurrence_id: &str| {
-        file_scopes
-            .get(file_occurrence_id)
-            .and_then(|scope| interested_buckets.get(scope.as_str()))
-            .into_iter()
-            .flatten()
-            .copied()
+        clone_route: Some(CodeLexicalCloneRouteV1 {
+            project_id: generation.manifest().project_id.clone(),
+            worktree_id: generation.snapshot().worktree.clone(),
+            snapshot_digest: generation.manifest().snapshot_digest.clone(),
+        }),
     };
-    // Corpus order within each bucket is the order the admitted sweep and the
-    // chunk manifest already carry, exactly what a per-scope filter yielded.
-    let admitted = generation
-        .admitted_chunks()
-        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    let mut lexical_chunks: Vec<Vec<ExtractionAdmittedCodeSearchChunkV1>> =
-        vec![Vec::new(); scope_keys.len()];
-    for chunk in admitted.iter() {
-        for bucket in buckets_for(chunk.chunk().anchor.file_occurrence_id.as_str()) {
-            lexical_chunks[bucket].push(chunk.clone());
-        }
-    }
-    drop(admitted);
-    let mut graph_chunks: Vec<Vec<Arc<CodeSearchChunkV1>>> = vec![Vec::new(); scope_keys.len()];
-    for chunk in generation.chunks().chunks() {
-        for bucket in buckets_for(chunk.anchor.file_occurrence_id.as_str()) {
-            graph_chunks[bucket].push(Arc::clone(chunk));
-        }
-    }
-    let mut lexical = BTreeMap::new();
-    let mut graph = BTreeMap::new();
-    for ((scope_key, chunks), graph_chunks) in
-        scope_keys.into_iter().zip(lexical_chunks).zip(graph_chunks)
-    {
-        lexical.insert(
-            scope_key.clone(),
-            CodeLexicalProjectionAdapterV1::new_admitted(
-                Arc::clone(&metadata),
-                chunks,
-                Arc::clone(&symbol_displays),
-            )
-            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
-        );
-        graph.insert(
-            scope_key,
-            CodeGraphEvidenceReader::new_for_evaluation(
-                generation_id.clone(),
-                Some(generation.snapshot().repository.clone()),
-                freshness.clone(),
-                generation.edges(),
-                &graph_chunks,
-            )
-            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
-        );
-    }
-    Ok((lexical, graph))
+    let (artifact_directory, lexical) = seal_lexical_artifact(&generation, &metadata)?;
+    let graph = CodeGraphEvidenceReader::new_for_evaluation(
+        generation_id,
+        Some(generation.snapshot().repository.clone()),
+        freshness,
+        generation.edges(),
+        generation.chunks().chunks(),
+    )
+    .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+    Ok(ScopedCorpus {
+        generation,
+        lexical,
+        graph,
+        _artifact_directory: artifact_directory,
+    })
 }
 
 /// The corpora published for one candidate-generation call, memoized by scale.
@@ -725,8 +776,68 @@ fn compose_production_query(
     profile: &ProfileSpecV1,
     query: &WorkloadQueryV1,
 ) -> Result<CompositionOutputV1, CandidateOutputError> {
-    let generation_id = published.generation.manifest().generation_id.clone();
-    let request = retrieval_request(&profile.profile_id, published)?;
+    let scope_key = canonical_scope_key(&query.allowed_scopes);
+    let scoped = published.scopes.get(&scope_key).ok_or_else(|| {
+        CandidateOutputError::Contract(format!(
+            "missing scoped corpus for query {}",
+            query.query_id
+        ))
+    })?;
+    let lanes = match scoped {
+        Some(scoped) => production_lanes(scoped, profile, query)?,
+        None => unindexed_scope_lanes()?,
+    };
+    let kernel = CompositionKernel::new(id::<ComponentRevision>(
+        tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1,
+    )?);
+    kernel
+        .compose(
+            &FusionStageInput {
+                profile: fusion_profile(profile)?,
+                lanes,
+            },
+            &evaluated_diversity_policy()?,
+        )
+        .map_err(|error| CandidateOutputError::Contract(error.to_string()))
+}
+
+/// A scope set with no indexable source file publishes no generation: its
+/// exact and lexical lanes complete over zero documents, and with no seeds the
+/// graph lane is unavailable exactly as it is for any seedless query.
+fn unindexed_scope_lanes() -> Result<Vec<CompositionLaneInput>, CandidateOutputError> {
+    fn empty<E>() -> RetrieverOutcome<RetrieverBatch<E>> {
+        RetrieverOutcome::Complete(RetrieverBatch {
+            candidates: Vec::new(),
+            evidence_by_occurrence: BTreeMap::new(),
+            coverage: RetrieverCoverage::default(),
+            continuation: None,
+        })
+    }
+    let contract = |error: FusionStageError| CandidateOutputError::Contract(error.to_string());
+    Ok(vec![
+        CompositionLaneInput::new(RetrieverKind::ExactLiteral, empty::<ExactLaneEvidence>())
+            .map_err(contract)?,
+        CompositionLaneInput::new(RetrieverKind::Lexical, empty::<LexicalLaneEvidence>())
+            .map_err(contract)?,
+        CompositionLaneInput::new(
+            RetrieverKind::Graph,
+            RetrieverOutcome::<RetrieverBatch<GraphLaneEvidence>>::Unavailable(
+                RetrievalFailure::AuthorityUnavailable {
+                    detail: "no graph seeds from exact/lexical".to_owned(),
+                },
+            ),
+        )
+        .map_err(contract)?,
+    ])
+}
+
+fn production_lanes(
+    scoped: &ScopedCorpus,
+    profile: &ProfileSpecV1,
+    query: &WorkloadQueryV1,
+) -> Result<Vec<CompositionLaneInput>, CandidateOutputError> {
+    let generation_id = scoped.generation.manifest().generation_id.clone();
+    let request = retrieval_request(&profile.profile_id, &scoped.generation)?;
     let query_view = EphemeralSanitizedQueryViewV1::sanitize(
         &query.query,
         id::<SanitizerRevision>(tracedecay_query::retrieval::QUERY_SANITIZER_REVISION_V1)?,
@@ -736,37 +847,15 @@ fn compose_production_query(
     )
     .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
 
-    let scope_key = canonical_scope_key(&query.allowed_scopes);
-    let lexical_projection = published
-        .lexical_projections
-        .get(&scope_key)
-        .cloned()
-        .ok_or_else(|| {
-            CandidateOutputError::Contract(format!(
-                "missing lexical projection for query {}",
-                query.query_id
-            ))
-        })?;
     let authority = CentralExactAdmissionAuthorityV1::new(id::<ExactAdmissionRuleRevision>(
         tracedecay_query::retrieval::QUERY_EXACT_RULE_REVISION_V1,
     )?);
     let exact_lane = ExactLane::new(
         authority.clone(),
-        lexical_projection.exact_adapter(authority.clone()),
+        scoped.lexical.exact_adapter(authority.clone()),
     );
-    let lexical_lane = LexicalLane::new(lexical_projection);
-    let graph_lane = GraphLane::new(
-        published
-            .graph_projections
-            .get(&scope_key)
-            .cloned()
-            .ok_or_else(|| {
-                CandidateOutputError::Contract(format!(
-                    "missing graph projection for query {}",
-                    query.query_id
-                ))
-            })?,
-    );
+    let lexical_lane = LexicalLane::new(scoped.lexical.clone());
+    let graph_lane = GraphLane::new(scoped.graph.clone());
 
     let budget = retrieval_budget();
     let exact_request = ExactLaneRequest {
@@ -839,26 +928,14 @@ fn compose_production_query(
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?
     };
 
-    let kernel = CompositionKernel::new(id::<ComponentRevision>(
-        tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1,
-    )?);
-    let lanes = vec![
+    Ok(vec![
         CompositionLaneInput::new(RetrieverKind::ExactLiteral, exact_outcome)
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
         CompositionLaneInput::new(RetrieverKind::Lexical, lexical_outcome)
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
         CompositionLaneInput::new(RetrieverKind::Graph, graph_outcome)
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
-    ];
-    kernel
-        .compose(
-            &FusionStageInput {
-                profile: fusion_profile(profile)?,
-                lanes,
-            },
-            &evaluated_diversity_policy()?,
-        )
-        .map_err(|error| CandidateOutputError::Contract(error.to_string()))
+    ])
 }
 
 fn query_lane_coverage(
@@ -1128,19 +1205,142 @@ fn publish_corpus_with_scale(
     copies: usize,
     admitted_scope: AdmittedCorpusScopeFn,
 ) -> Result<PublishedCorpus, CandidateOutputError> {
-    if copies == 0 {
-        return Err(CandidateOutputError::Contract(
-            "corpus scale must be positive".to_owned(),
-        ));
-    }
+    let expected_chunks = match copies {
+        1 => workload.execution_contract.exact_eligible_chunks_current,
+        10 => workload.execution_contract.exact_eligible_chunks_10x,
+        _ => {
+            return Err(CandidateOutputError::Contract(
+                "evaluation corpus scale must be current or exact 10x".to_owned(),
+            ));
+        }
+    };
     let corpus_digest = compute_corpus_digest(repo_root, workload)?;
+    let scope_keys = workload
+        .queries
+        .iter()
+        .map(|query| canonical_scope_key(&query.allowed_scopes))
+        .collect::<BTreeSet<_>>();
+    let mut scopes = BTreeMap::new();
+    let mut occurrence_map = BTreeMap::new();
+    // Chunk and admitted-chunk counts per corpus file. Chunking is file-local,
+    // so a file several scope sets admit is counted once.
+    let mut file_chunks: BTreeMap<FileOccurrenceId, (u64, u64)> = BTreeMap::new();
+    for scope_key in scope_keys {
+        let documents = workload
+            .corpus
+            .iter()
+            .filter(|document| scope_key.contains(&document.scope))
+            .collect::<Vec<_>>();
+        let Some((generation, file_to_document)) =
+            publish_scope_generation(repo_root, &corpus_digest, &scope_key, &documents, copies)?
+        else {
+            scopes.insert(scope_key, None);
+            continue;
+        };
+        let mut scope_file_chunks: BTreeMap<FileOccurrenceId, (u64, u64)> = BTreeMap::new();
+        for chunk in generation.chunks().chunks() {
+            scope_file_chunks
+                .entry(chunk.anchor.file_occurrence_id.clone())
+                .or_default()
+                .0 += 1;
+        }
+        let admitted = generation
+            .admitted_chunks()
+            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+        for chunk in admitted.iter() {
+            scope_file_chunks
+                .entry(chunk.chunk().anchor.file_occurrence_id.clone())
+                .or_default()
+                .1 += 1;
+        }
+        drop(admitted);
+        for (file, counts) in scope_file_chunks {
+            file_chunks.entry(file).or_insert(counts);
+        }
+        let symbol_displays: BTreeMap<_, _> = generation
+            .symbols()
+            .symbols
+            .iter()
+            .map(|symbol| {
+                (
+                    symbol.occurrence.clone(),
+                    VerifiedSealedLexicalSymbolDisplayV1::from(symbol.as_ref()),
+                )
+            })
+            .collect();
+        for chunk in generation.chunks().chunks() {
+            let Some(document) = file_to_document.get(chunk.anchor.file_occurrence_id.as_str())
+            else {
+                continue;
+            };
+            let qualified_name = chunk
+                .anchor
+                .symbol_occurrence_id
+                .as_ref()
+                .and_then(|symbol| symbol_displays.get(symbol))
+                .map(VerifiedSealedLexicalSymbolDisplayV1::qualified_name);
+            let display_anchors = display_anchors_for_chunk(chunk, document, qualified_name);
+            let entry = || OccurrenceMapEntry {
+                document_id: document.document_id.clone(),
+                scope: document.scope.clone(),
+                display_anchors: display_anchors.clone(),
+            };
+            if let Some(symbol) = &chunk.anchor.symbol_occurrence_id {
+                occurrence_map.insert(format!("code-symbol:{}", symbol.as_str()), entry());
+                occurrence_map.insert(format!("code-graph:{}", symbol.as_str()), entry());
+            }
+            occurrence_map.insert(format!("code-chunk:{}", chunk.id.as_str()), entry());
+        }
+        scopes.insert(
+            scope_key,
+            Some(hotpath::measure_block!(
+                "search_eval.corpus.scope_retrieval",
+                scoped_retrieval(generation)
+            )?),
+        );
+    }
+    let observed_chunks: u64 = file_chunks.values().map(|(chunks, _)| chunks).sum();
+    if observed_chunks != expected_chunks {
+        return Err(CandidateOutputError::Contract(format!(
+            "eligible chunk count mismatch for {copies}x corpus: declared {expected_chunks}, observed {observed_chunks}"
+        )));
+    }
+    Ok(PublishedCorpus {
+        scopes,
+        occurrence_map,
+        repo_root: repo_root.to_path_buf(),
+        source_commit: GitOidV1::new(workload.source_repository_commit.clone())
+            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
+        corpus: workload.corpus.clone(),
+        corpus_digest,
+        eligible_chunks: file_chunks.values().map(|(_, admitted)| admitted).sum(),
+        admitted_scope,
+    })
+}
+
+/// A published generation and the corpus document behind each file path.
+type ScopeGeneration = (
+    Arc<CodeIndexPublishedGenerationV1>,
+    BTreeMap<String, CorpusDocumentV1>,
+);
+
+/// Publish one generation over `documents` (each copied `copies` times) with
+/// the daemon's production code-index owner, returning it with the corpus
+/// document each file occurrence came from. `None` when no document is in an
+/// indexable language: production publishes no generation for such a tree.
+fn publish_scope_generation(
+    repo_root: &Path,
+    corpus_digest: &str,
+    scope_key: &[String],
+    documents: &[&CorpusDocumentV1],
+    copies: usize,
+) -> Result<Option<ScopeGeneration>, CandidateOutputError> {
     let language_registry = StaticLanguageRegistry::new();
     let mut files = Vec::new();
     let mut captured = Vec::new();
     let mut file_to_document = BTreeMap::new();
-    let mut file_scopes = BTreeMap::new();
     for copy in 0..copies {
-        for document in &workload.corpus {
+        for &document in documents {
             let absolute = repo_root.join(&document.path);
             let bytes = fs::read(&absolute).map_err(|source| CandidateOutputError::Read {
                 path: absolute.clone(),
@@ -1154,10 +1354,6 @@ fn publish_corpus_with_scale(
             let file_occurrence_id =
                 id::<FileOccurrenceId>(&format!("file.{}{}", document.document_id, copy_suffix))?;
             file_to_document.insert(file_occurrence_id.as_str().to_owned(), document.clone());
-            file_scopes.insert(
-                file_occurrence_id.as_str().to_owned(),
-                document.scope.clone(),
-            );
             let language = id::<LanguageId>(&document.language)?;
             let indexable = language_registry.descriptor(&language).is_some();
             files.push(SanitizedCodeFileV1 {
@@ -1180,6 +1376,9 @@ fn publish_corpus_with_scale(
             }
         }
     }
+    if captured.is_empty() {
+        return Ok(None);
+    }
     files.sort_by(|left, right| {
         (&left.logical_path, &left.file_occurrence_id)
             .cmp(&(&right.logical_path, &right.file_occurrence_id))
@@ -1193,8 +1392,9 @@ fn publish_corpus_with_scale(
         sanitizer_revision: id::<SanitizerRevision>("sanitizer.candidate.v1")?,
         sanitization_receipts: vec![id::<SanitizationReceiptId>("receipt.candidate.v1")?],
         content_identity: id(&canonical_sha256(&(
-            "tracedecay.search-eval.scaled-corpus.v1",
-            &corpus_digest,
+            "tracedecay.search-eval.scoped-corpus.v1",
+            corpus_digest,
+            scope_key,
             copies,
         ))?)?,
         captured_at: UtcMicros(1_000_000),
@@ -1238,97 +1438,7 @@ fn publish_corpus_with_scale(
     .map_err(|error| CandidateOutputError::Contract(format!("open production owner: {error}")))?
     .build_and_publish(request, &ActiveControl)
     .map_err(|error| CandidateOutputError::Contract(format!("publish generation: {error}")))?;
-    let expected_chunks = match copies {
-        1 => workload.execution_contract.exact_eligible_chunks_current,
-        10 => workload.execution_contract.exact_eligible_chunks_10x,
-        _ => {
-            return Err(CandidateOutputError::Contract(
-                "evaluation corpus scale must be current or exact 10x".to_owned(),
-            ));
-        }
-    };
-    let observed_chunks = generation.chunks().chunks().len() as u64;
-    if observed_chunks != expected_chunks {
-        return Err(CandidateOutputError::Contract(format!(
-            "eligible chunk count mismatch for {copies}x corpus: declared {expected_chunks}, observed {observed_chunks}"
-        )));
-    }
-    let symbol_displays: Arc<BTreeMap<_, _>> = Arc::new(
-        generation
-            .symbols()
-            .symbols
-            .iter()
-            .map(|symbol| {
-                (
-                    symbol.occurrence.clone(),
-                    VerifiedSealedLexicalSymbolDisplayV1::from(symbol.as_ref()),
-                )
-            })
-            .collect(),
-    );
-    let mut occurrence_map = BTreeMap::new();
-    for chunk in generation.chunks().chunks() {
-        let Some(document) = file_to_document.get(chunk.anchor.file_occurrence_id.as_str()) else {
-            continue;
-        };
-        let qualified_name = chunk
-            .anchor
-            .symbol_occurrence_id
-            .as_ref()
-            .and_then(|symbol| symbol_displays.get(symbol))
-            .map(VerifiedSealedLexicalSymbolDisplayV1::qualified_name);
-        let display_anchors = display_anchors_for_chunk(chunk, document, qualified_name);
-        if let Some(symbol) = &chunk.anchor.symbol_occurrence_id {
-            occurrence_map.insert(
-                format!("code-symbol:{}", symbol.as_str()),
-                OccurrenceMapEntry {
-                    document_id: document.document_id.clone(),
-                    scope: document.scope.clone(),
-                    display_anchors: display_anchors.clone(),
-                },
-            );
-            occurrence_map.insert(
-                format!("code-graph:{}", symbol.as_str()),
-                OccurrenceMapEntry {
-                    document_id: document.document_id.clone(),
-                    scope: document.scope.clone(),
-                    display_anchors: display_anchors.clone(),
-                },
-            );
-        }
-        occurrence_map.insert(
-            format!("code-chunk:{}", chunk.id.as_str()),
-            OccurrenceMapEntry {
-                document_id: document.document_id.clone(),
-                scope: document.scope.clone(),
-                display_anchors,
-            },
-        );
-    }
-
-    let eligible_chunks = generation
-        .admitted_chunks()
-        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?
-        .len() as u64;
-    let (lexical_projections, graph_projections) = build_query_projections(
-        &generation,
-        &file_scopes,
-        symbol_displays,
-        &workload.queries,
-    )?;
-    Ok(PublishedCorpus {
-        generation,
-        lexical_projections,
-        graph_projections,
-        occurrence_map,
-        repo_root: repo_root.to_path_buf(),
-        source_commit: GitOidV1::new(workload.source_repository_commit.clone())
-            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
-        corpus: workload.corpus.clone(),
-        corpus_digest,
-        eligible_chunks,
-        admitted_scope,
-    })
+    Ok(Some((generation, file_to_document)))
 }
 
 fn display_anchors_for_chunk(
@@ -1472,9 +1582,9 @@ fn graph_seeds_from_outcomes(
 
 fn retrieval_request(
     profile_id: &str,
-    published: &PublishedCorpus,
+    generation: &CodeIndexPublishedGenerationV1,
 ) -> Result<RetrievalRequest, CandidateOutputError> {
-    let manifest = published.generation.manifest();
+    let manifest = generation.manifest();
     let freshness_digest = canonical_sha256(&(
         "tracedecay.search-eval.freshness.v1",
         &manifest.generation_id,
@@ -2024,7 +2134,12 @@ pub(crate) mod tests {
         let published = publish_corpus(fixture.root(), &workload, fixture_admitted_scope)
             .expect("publish corpus");
 
-        for chunk in published.generation.chunks().chunks() {
+        for chunk in published
+            .scopes
+            .values()
+            .flatten()
+            .flat_map(|scoped| scoped.generation.chunks().chunks())
+        {
             assert_eq!(
                 chunk.chunker_revision.as_str(),
                 DAEMON_CODE_INDEX_CHUNKER_REVISION,
@@ -2223,10 +2338,16 @@ pub(crate) mod tests {
             .expect("current corpus");
         let ten_x = publish_corpus_with_scale(fixture_root, &workload, 10, fixture_admitted_scope)
             .expect("10x corpus");
-        assert_ne!(
-            current.generation.manifest().generation_id,
-            ten_x.generation.manifest().generation_id
-        );
+        for (scope_key, scoped) in &current.scopes {
+            let (Some(scoped), Some(ten_x_scoped)) = (scoped, &ten_x.scopes[scope_key]) else {
+                assert!(scoped.is_none() && ten_x.scopes[scope_key].is_none());
+                continue;
+            };
+            assert_ne!(
+                scoped.generation.manifest().generation_id,
+                ten_x_scoped.generation.manifest().generation_id
+            );
+        }
         assert_eq!(
             ten_x.eligible_chunks,
             current.eligible_chunks.saturating_mul(10)

@@ -266,14 +266,14 @@ fn retained_mutations_deny_foreign_project_scope_without_a_receipt() {
             (
                 "active",
                 format!(
-                    "{}/api/plugins/holographic/?q=crossboundarysentinel&limit=10",
+                    "{}/api/plugins/holographic?q=crossboundarysentinel&limit=10",
                     fixture.base_url
                 ),
             ),
             (
                 "registered target",
                 format!(
-                    "{}/api/projects/{target_project_id}/plugins/holographic/?q=crossboundarysentinel&limit=10",
+                    "{}/api/projects/{target_project_id}/plugins/holographic?q=crossboundarysentinel&limit=10",
                     fixture.base_url
                 ),
             ),
@@ -324,7 +324,7 @@ fn automatic_fact_receipt_endpoints_expose_terminal_applied_and_quarantined_rece
             .host_runtime
             .open_project_graph_for_test(
                 &fixture.project_root,
-                tracedecay::project::TraceDecayOpenOptions::default(),
+                tracedecay_project::project::TraceDecayOpenOptions::default(),
             )
             .await
             .unwrap_or_else(|error| panic!("open dashboard fixture project: {error}"));
@@ -445,7 +445,6 @@ fn automatic_fact_receipt_endpoints_expose_terminal_applied_and_quarantined_rece
             "state=applied must exclude the quarantined receipt: {listed}"
         );
         assert_eq!(listed["limit"], 50);
-        assert_eq!(listed["error"], "");
         let receipts = listed["receipts"]
             .as_array()
             .unwrap_or_else(|| panic!("automatic receipt list must contain receipts: {listed}"));

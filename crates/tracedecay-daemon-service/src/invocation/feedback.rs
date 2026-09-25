@@ -265,7 +265,9 @@ fn feedback_invocation_result_with<T>(
     let application = result.map_err(|problem| problem.problem.into_source())?;
     let evidence = match application.outcome {
         ApplicationOutcome::Evidence(packet) => packet,
-        ApplicationOutcome::Preview(_) | ApplicationOutcome::Effect(_) => {
+        ApplicationOutcome::Preview(_)
+        | ApplicationOutcome::Effect(_)
+        | ApplicationOutcome::Result(_) => {
             return Err(ApplicationProblem::unavailable(SafeDiagnostic {
                 code: "feedback.invalid_owner_result".to_owned(),
                 message: "The feedback read owner returned an invalid outcome".to_owned(),
@@ -388,7 +390,7 @@ pub fn advisory_cycle_invocation_result(
     use tracedecay_application::advisory::AdvisoryCycleOutcome;
     use tracedecay_domain::feedback::FeedbackCycleTerminationV1;
 
-    let ended_at = current_micros();
+    let ended_at = now_micros();
     let policy_digest = canonical_sha256(&(
         "tracedecay.daemon.feedback-advisory-policy",
         context.scope(),
@@ -616,7 +618,7 @@ pub fn feedback_proximity_invocation_result(
     result
         .validate()
         .map_err(|_| feedback_proximity_contract_problem())?;
-    let ended_at = current_micros();
+    let ended_at = now_micros();
     let (termination, completeness, returned, omission_reason) = match &result {
         FeedbackProximityReadResultV1::Complete { page } => (
             OperationTermination::Completed,
@@ -802,7 +804,7 @@ pub(super) async fn execute_feedback_advisory_cycle(
             ApplicationProblem::cancelled_before_admission(),
         );
     }
-    if deadline.is_elapsed_at(observed_at) || deadline.is_elapsed_at(current_micros()) {
+    if deadline.is_elapsed_at(observed_at) || deadline.is_elapsed_at(now_micros()) {
         return application_problem(
             wire_request_id,
             ApplicationProblem::timed_out_before_admission(),

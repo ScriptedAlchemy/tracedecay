@@ -191,7 +191,7 @@ async fn circular_names_the_cycles_and_an_empty_graph_stays_empty() {
         ),
         named_cycles_payload(200, 200)
     );
-    cyclic.harness.shutdown().await;
+    cyclic.shutdown().await;
 
     let acyclic = production_composition_fixture_with_sources(write_acyclic_project).await;
     warm(&acyclic, "leaf").await;
@@ -210,5 +210,5 @@ async fn circular_names_the_cycles_and_an_empty_graph_stays_empty() {
         call_circular(&acyclic, json!({"format": "markdown"})).await,
         "No circular dependencies found.\n"
     );
-    acyclic.harness.shutdown().await;
+    acyclic.shutdown().await;
 }

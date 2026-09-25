@@ -13,11 +13,11 @@ use std::time::Duration;
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tracedecay::daemon::call_tool;
-use tracedecay::project::MovedStoreAdoption;
 use tracedecay_daemon_protocol::transport::DaemonAuthPreface;
 use tracedecay_daemon_protocol::{
     DaemonClientIdentity, DaemonHandshake, DaemonHandshakeRefusal, DaemonHandshakeRefusalReason,
 };
+use tracedecay_project::project::MovedStoreAdoption;
 
 use crate::common::{daemon_socket_path, spawn_tracedecay_daemon, tempdir_or_panic};
 

@@ -96,9 +96,13 @@ describe('the register strip', () => {
       'rank',
     ]);
     expect(cells[0]?.reading).toMatchObject({ value: '12,873', note: '12,873 symbols indexed' });
-    // The field is force-settled and sized by degree; the register must not
-    // promise eigenvector rank the renderer does not compute.
-    expect(cells[5]?.reading).toMatchObject({ value: 'force-directed' });
+    // The field packs directories and sizes by degree; the register must not
+    // promise a force layout or an eigenvector rank the renderer does not run.
+    expect(cells[5]?.reading).toEqual({
+      kind: 'measured',
+      value: 'module-packed',
+      note: 'directories packed by shared relations',
+    });
     expect(cells[6]?.reading).toMatchObject({ value: 'degree' });
   });
 });

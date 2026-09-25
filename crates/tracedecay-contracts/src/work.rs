@@ -19,13 +19,6 @@ pub enum WorkRoutingSnapshotErrorV1 {
     Unavailable,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewProposalDispositionV1 {
-    Rejected,
-    Superseded,
-}
-
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkRoutingSnapshotV1 {

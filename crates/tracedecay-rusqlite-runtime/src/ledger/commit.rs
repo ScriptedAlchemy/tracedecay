@@ -6,7 +6,7 @@ use tracedecay_store::{
 
 use super::{
     LedgerDisposition, LedgerError, checkpoint, idempotency, inbox, outbox, prune,
-    sqlite::{LedgerTransaction, Submission, encode_json},
+    sqlite::{LedgerTransaction, Submission},
 };
 
 enum RuntimeBookkeeping<'a> {
@@ -30,7 +30,35 @@ pub(crate) fn record_commit(
         outbox_entry
             .map(RuntimeBookkeeping::Outbox)
             .unwrap_or(RuntimeBookkeeping::None),
+        ReplayAuthority::Ledger,
     )
+}
+
+/// Where a resubmission of an already-committed operation is answered.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReplayAuthority {
+    /// The ledger retains the original receipt and replays it.
+    Ledger,
+    /// The repository executor settles a resubmission from its own durable
+    /// state, so a ledger copy of every receipt would only duplicate it:
+    /// external-source receipts are keyed by the same idempotency identity,
+    /// and an observation already stored is classified as an exact
+    /// duplicate. Cursor advances stay on the ledger: its replay is what tells
+    /// a losing concurrent owner that the frontier was not its commit.
+    Repository,
+}
+
+impl ReplayAuthority {
+    fn for_payload(payload: &RepositoryWritePayloadV1) -> Self {
+        match payload {
+            RepositoryWritePayloadV1::ExternalSource(_)
+            | RepositoryWritePayloadV1::ExternalSourceBatch(_)
+            | RepositoryWritePayloadV1::ExternalSourceProjection(_)
+            | RepositoryWritePayloadV1::Observation(_)
+            | RepositoryWritePayloadV1::ObservationBatch(_) => Self::Repository,
+            _ => Self::Ledger,
+        }
+    }
 }
 
 pub(crate) fn record_runtime_commit(
@@ -47,7 +75,13 @@ pub(crate) fn record_runtime_commit(
         }
         _ => RuntimeBookkeeping::None,
     };
-    record_with_bookkeeping(transaction, metadata, transaction_scope, bookkeeping)
+    record_with_bookkeeping(
+        transaction,
+        metadata,
+        transaction_scope,
+        bookkeeping,
+        ReplayAuthority::for_payload(payload),
+    )
 }
 
 #[hotpath::measure(label = "rusqlite.ledger.record_commit")]
@@ -56,11 +90,14 @@ fn record_with_bookkeeping(
     metadata: &StoreOperationMetadataV1,
     transaction_scope: &RuntimeTransactionScopeV1,
     bookkeeping: RuntimeBookkeeping<'_>,
+    replay: ReplayAuthority,
 ) -> Result<LedgerDisposition, LedgerError> {
     let submission = Submission::new(metadata, transaction_scope)?;
-    match idempotency::disposition(transaction, &submission)? {
-        LedgerDisposition::New => {}
-        existing => return Ok(existing),
+    if replay == ReplayAuthority::Ledger {
+        match idempotency::disposition(transaction, &submission)? {
+            LedgerDisposition::New => {}
+            existing => return Ok(existing),
+        }
     }
 
     let checkpoint = checkpoint::next(transaction, &submission)?;
@@ -73,7 +110,6 @@ fn record_with_bookkeeping(
         commit_sequence: checkpoint.watermark.commit_sequence,
         committed_at: metadata.admitted_at,
     };
-    let receipt_json = encode_json(&receipt, "original_receipt_json")?;
     checkpoint::persist(transaction, &submission, &checkpoint, &receipt)?;
     // The persisted checkpoint is the validated authority for which of this
     // incarnation's records are now unreachable, so the prune runs after
@@ -81,7 +117,9 @@ fn record_with_bookkeeping(
     // so a backlog converges; the record inserted below sits at the persisted
     // epoch and is never eligible.
     prune::prune_superseded(transaction, &submission, &checkpoint)?;
-    idempotency::insert(transaction, &submission, &receipt, &receipt_json)?;
+    if replay == ReplayAuthority::Ledger {
+        idempotency::insert(transaction, &submission, &receipt)?;
+    }
     match bookkeeping {
         RuntimeBookkeeping::None => {}
         RuntimeBookkeeping::Outbox(entry) => {

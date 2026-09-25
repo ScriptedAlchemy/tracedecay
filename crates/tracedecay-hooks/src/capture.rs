@@ -11,10 +11,12 @@ use tracedecay_domain::UtcMicros;
 
 use crate::{
     HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1, HookConfigurationSubscriberV1,
-    HookEventEnvelopeV2, HookHostV1, HookScopeBindingV1, HookSpoolConfigV1, HookSpoolError,
-    HookSpoolV1, NativeEnvelopeMaterialV1, NativeHookDecodeError, OpenCodePluginSurfaceV1,
+    HookEventEnvelopeV2, HookScopeBindingV1, HookSpoolConfigV1, HookSpoolError, HookSpoolV1,
+    NativeEnvelopeMaterialV1, NativeHookDecodeError, OpenCodePluginSurfaceV1,
     decode_native_hook_event, decode_opencode_plugin_event, hook_configuration_path,
+    hook_v2_spool_root,
 };
+use tracedecay_domain::NativeHostIdentityV1;
 
 /// The real host surface that supplied native hook bytes.
 ///
@@ -22,15 +24,15 @@ use crate::{
 /// though it produces the same host-neutral envelope as its event-bus route.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeHookCaptureSourceV1 {
-    Host(HookHostV1),
+    Host(NativeHostIdentityV1),
     OpenCodeToolExecuteAfter,
 }
 
 impl NativeHookCaptureSourceV1 {
-    pub const fn host(self) -> HookHostV1 {
+    pub const fn host(self) -> NativeHostIdentityV1 {
         match self {
             Self::Host(host) => host,
-            Self::OpenCodeToolExecuteAfter => HookHostV1::OpenCode,
+            Self::OpenCodeToolExecuteAfter => NativeHostIdentityV1::OpenCode,
         }
     }
 }
@@ -122,7 +124,7 @@ fn capture_native_event_for_replay_inner(
         Ok(envelope) => envelope,
         Err(_) => return NativeHookCaptureOutcomeV1::Rejected,
     };
-    let spool_root = data_root.join("hook-v2-spool").join(host.hook_key());
+    let spool_root = hook_v2_spool_root(data_root, host);
     let mut spool = match HookSpoolV1::open_within(
         spool_root,
         HookSpoolConfigV1::stock(host),

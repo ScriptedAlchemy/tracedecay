@@ -5,8 +5,8 @@
 //! and the default binding shape in its own per-surface loop.
 
 use tracedecay_tool_catalog::{
-    ApplicationSurfaceOperation, BindingId, BindingStatus, BindingSurface, CapabilityId,
-    ProtocolRevisionRange, SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName,
+    ApplicationSurfaceOperation, BindingId, BindingSurface, CapabilityId, ProtocolRevisionRange,
+    SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName,
 };
 
 use crate::error::ApplicationContractError;
@@ -35,23 +35,13 @@ pub(crate) fn current_bindings(
     operation: &str,
     surfaces: impl IntoIterator<Item = BindingSurface>,
 ) -> Result<(Vec<SurfaceBindingV1>, Vec<BindingId>), ApplicationContractError> {
-    current_bindings_with_slug(capability_id, operation, operation, surfaces)
-}
-
-/// [`current_bindings`] for the operations whose binding-id slug differs from
-/// their wire operation name.
-pub(crate) fn current_bindings_with_slug(
-    capability_id: &CapabilityId,
-    operation: &str,
-    slug: &str,
-    surfaces: impl IntoIterator<Item = BindingSurface>,
-) -> Result<(Vec<SurfaceBindingV1>, Vec<BindingId>), ApplicationContractError> {
     let surfaces = surfaces.into_iter();
     let expected = surfaces.size_hint().0;
     let mut bindings = Vec::with_capacity(expected);
     let mut binding_ids = Vec::with_capacity(expected);
     for surface in surfaces {
-        let binding_id = BindingId::new(format!("binding.{}.{slug}.v1", surface_name(surface)))?;
+        let binding_id =
+            BindingId::new(format!("binding.{}.{operation}.v1", surface_name(surface)))?;
         bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
             binding_id: binding_id.clone(),
             capability_id: capability_id.clone(),
@@ -59,8 +49,6 @@ pub(crate) fn current_bindings_with_slug(
             operation: SurfaceOperationName::new(operation)?,
             protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
             required_features: Vec::new(),
-            status: BindingStatus::Current,
-            alias_of: None,
         })?);
         binding_ids.push(binding_id);
     }
@@ -94,8 +82,6 @@ pub(crate) fn current_application_bindings(
             operation: SurfaceOperationName::new(operation.name_for_surface(surface))?,
             protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
             required_features: Vec::new(),
-            status: BindingStatus::Current,
-            alias_of: None,
         })?);
         binding_ids.push(binding_id);
     }

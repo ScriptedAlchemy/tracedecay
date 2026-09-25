@@ -62,10 +62,9 @@ pub use results::{
     MemoryAutomationFactReceiptV1, MemoryAutomationFactRequestV1, MemoryAutomationFactStateV1,
     MemoryAutomationFactTargetV1, MemoryAutomationFactValidationStatusV1,
     MemoryAutomationFactValidationV1, MemoryFeedbackFunnelV1, MemoryStatusResultV1, MemoryStatusV1,
-    MessageSearchFreshnessV1, MessageSearchHitV1, MessageSearchResultV1, MessageSearchRootV1,
-    MessageSearchSkipV1, RetainedErrorV1, RetainedNextActionV1, RetainedOutcomeStatusV1,
-    RetainedSurfaceResultV1, RetrievalWorkerStatusV1, SessionCorrelationHitV1,
-    SessionCoverageIntervalV1, SessionCoverageModeV1, SessionCoverageReasonV1,
+    MessageSearchHitV1, MessageSearchResultV1, RetainedErrorV1, RetainedNextActionV1,
+    RetainedOutcomeStatusV1, RetainedSurfaceResultV1, RetrievalWorkerStatusV1,
+    SessionCorrelationHitV1, SessionCoverageIntervalV1, SessionCoverageReasonV1,
     SessionCoverageRequestV1, SessionCoverageStateV1, SessionMessageV1, SessionRecordV1,
     SessionRefreshBeginResultV1, SessionRefreshCancelResultV1, SessionRefreshFrontierResultV1,
     SessionRefreshProgressV1, SessionRefreshReceiptV1, SessionRefreshStatusResultV1,
@@ -78,19 +77,9 @@ pub use results::{
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::{FactEventId, FactId, ProjectId};
+use tracedecay_domain::{FactEventId, FactId, ProjectId, TemporalModeV1};
 
 use super::RetainedSurfaceOperation;
-
-/// Output formatting accepted by legacy MCP calls. SDK and HTTP callers use
-/// JSON, but accepting this field keeps the schema aligned with the mounted
-/// MCP request form while the transport discards presentation-only controls.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RetainedOutputFormatV1 {
-    Markdown,
-    Json,
-}
 
 /// Exact registered-project selector shared by retained reads.
 ///
@@ -316,26 +305,22 @@ pub struct MessageSearchRequestV1 {
     pub provider: Option<String>,
     pub project_key: Option<String>,
     pub include_subagents: Option<bool>,
-    pub catch_up: Option<bool>,
+    /// Freshness precondition: stale or partial coverage returns
+    /// `refresh_required` instead of stored evidence. The read never refreshes.
+    pub require_fresh: Option<bool>,
     pub cursor: Option<String>,
     pub parent_session_id: Option<String>,
     pub since: Option<RetainedTimeFilterV1>,
     pub until: Option<RetainedTimeFilterV1>,
-    pub time_from: Option<RetainedTimeFilterV1>,
-    pub time_to: Option<RetainedTimeFilterV1>,
     pub scope: Option<MessageRelationshipScopeV1>,
     pub message_type: Option<MessageTypeFilterV1>,
     pub limit: Option<u64>,
     pub project_selector: Option<RetainedProjectSelectorV1>,
-    pub project_id: Option<String>,
-    pub project_path: Option<String>,
-    pub project_scope: Option<String>,
     pub branch: Option<String>,
     pub worktree: Option<String>,
     pub commit: Option<String>,
     pub workflow_run: Option<String>,
     pub workflow_agent: Option<String>,
-    pub format: Option<RetainedOutputFormatV1>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -363,7 +348,6 @@ pub struct SessionsForRequestV1 {
     pub until: Option<RetainedTimeFilterV1>,
     pub relation: Option<SessionGitRelationV1>,
     pub limit: Option<u64>,
-    pub format: Option<RetainedOutputFormatV1>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -376,7 +360,6 @@ pub struct WorkflowsRequestV1 {
     pub worktree: Option<String>,
     pub commit: Option<String>,
     pub limit: Option<u64>,
-    pub format: Option<RetainedOutputFormatV1>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -388,8 +371,6 @@ pub struct LcmStatusRequestV1 {
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deep: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub format: Option<RetainedOutputFormatV1>,
 }
 
 #[cfg(test)]
@@ -404,7 +385,6 @@ mod lcm_status_request_tests {
             provider: None,
             session_id: Some("stock-check-session".to_owned()),
             deep: None,
-            format: None,
         };
 
         assert_eq!(
@@ -418,23 +398,13 @@ mod lcm_status_request_tests {
 #[serde(deny_unknown_fields)]
 pub struct LcmDoctorRequestV1 {}
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum LcmTemporalModeV1 {
-    Current,
-    AsOf,
-    Evolution,
-    Forensic,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LcmLoadSessionRequestV1 {
     pub provider: Option<String>,
     pub session_id: String,
     pub cursor: Option<String>,
-    pub temporal_mode: Option<LcmTemporalModeV1>,
-    pub as_of_micros: Option<u64>,
+    pub temporal_mode: Option<TemporalModeV1>,
     pub limit: Option<u64>,
     pub role: Option<String>,
     pub roles: Option<Vec<String>>,
@@ -442,7 +412,6 @@ pub struct LcmLoadSessionRequestV1 {
     pub end_time: Option<u64>,
     pub content_offset: Option<u64>,
     pub content_limit: Option<u64>,
-    pub format: Option<RetainedOutputFormatV1>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -552,12 +521,10 @@ pub struct LcmGrepRequestV1 {
     pub until: Option<RetainedTimeFilterV1>,
     pub limit: Option<u64>,
     pub cursor: Option<String>,
-    pub temporal_mode: Option<LcmTemporalModeV1>,
-    pub as_of_micros: Option<u64>,
+    pub temporal_mode: Option<TemporalModeV1>,
     pub branch: Option<String>,
     pub worktree: Option<String>,
     pub commit: Option<String>,
-    pub format: Option<RetainedOutputFormatV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -574,7 +541,6 @@ pub struct LcmDescribeRequestV1 {
     pub provider: String,
     pub session_id: String,
     pub target: Option<LcmDescribeTargetV1>,
-    pub format: Option<RetainedOutputFormatV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -596,7 +562,6 @@ pub struct LcmExpandRequestV1 {
     pub content_limit: Option<u64>,
     pub source_limit: Option<u64>,
     pub cursor: Option<String>,
-    pub format: Option<RetainedOutputFormatV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -618,7 +583,6 @@ pub struct LcmExpandQueryRequestV1 {
     pub max_tokens: Option<u64>,
     pub context_max_tokens: Option<u64>,
     pub cursor: Option<String>,
-    pub format: Option<RetainedOutputFormatV1>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -664,15 +628,6 @@ pub struct SessionRefreshSourceV1 {
     pub scope: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum SessionRefreshTemporalModeV1 {
-    Current,
-    AsOf { cutoff: u64 },
-    Evolution,
-    Forensic,
-}
-
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionRefreshGrainV1 {
@@ -695,7 +650,7 @@ pub struct SessionRefreshFrontierV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SessionRefreshTargetV1 {
-    pub temporal_mode: SessionRefreshTemporalModeV1,
+    pub temporal_mode: TemporalModeV1,
     pub grain: SessionRefreshGrainV1,
     pub frontier: SessionRefreshFrontierV1,
 }
@@ -713,7 +668,6 @@ pub struct SessionRefreshActionRequestV1 {
     pub source: SessionRefreshSourceV1,
     pub target: SessionRefreshTargetV1,
     pub handle: Option<String>,
-    pub format: Option<RetainedOutputFormatV1>,
 }
 
 /// Operation-selected request used by the canonical application owner.
@@ -762,8 +716,7 @@ mod session_refresh_request_tests {
                 "grain": "session",
                 "frontier": { "observed_through": 0, "committed_through": 0 }
             },
-            "handle": null,
-            "format": "json"
+            "handle": null
         })
     }
 
@@ -832,10 +785,12 @@ mod session_refresh_request_tests {
         body["target"]["temporal_mode"] = json!({ "kind": "as_of", "cutoff": 42 });
         let request = serde_json::from_value::<SessionRefreshRequestV1>(body)
             .expect("canonical as-of request");
-        assert!(matches!(
+        assert_eq!(
             request.request.target.temporal_mode,
-            super::SessionRefreshTemporalModeV1::AsOf { cutoff: 42 }
-        ));
+            tracedecay_domain::TemporalModeV1::AsOf {
+                cutoff: tracedecay_domain::UtcMicros(42)
+            }
+        );
     }
 }
 

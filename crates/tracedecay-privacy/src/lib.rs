@@ -81,9 +81,8 @@ pub use structured_text::{
     sanitize_lcm_payload_text, sanitize_provider_metadata_text,
 };
 pub use tracedecay_capture::{
-    ClaudeRecordParseErrorV1, MAX_OBSERVATION_RECORD_BYTES, ObservationRecordParseErrorV1,
-    ParsedClaudeRecordV1, ParsedObservationRecordV1, PreparedObservationRecordV1,
-    normalize_prepared_observation_record_v1, parse_claude_record_v1,
+    MAX_OBSERVATION_RECORD_BYTES, ObservationRecordParseErrorV1, ParsedObservationRecordV1,
+    PreparedObservationRecordV1, normalize_prepared_observation_record_v1,
     parse_normalized_observation_record_v1, parse_observation_record_v1,
     prepare_observation_record_v1,
 };

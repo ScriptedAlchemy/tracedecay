@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,10 +30,9 @@ use tracedecay_sessions::runtime::{
     SessionRecord, SessionSearchScope,
 };
 use tracedecay_temporal_query::context::ContextBudget;
-use tracedecay_temporal_query::ports::{
-    TemporalCandidateFilterV1, TemporalCandidatePopulationCount,
-};
+use tracedecay_temporal_query::ports::TemporalCandidateFilterV1;
 use tracedecay_temporal_query::ranking::DiversityLimits;
+use tracedecay_temporal_query::snapshot::TemporalCandidatePopulationCount;
 
 use super::session_refresh::{
     MountedSessionRefreshAuthorityV1, RetainedSessionRefreshPortV1,
@@ -469,7 +468,7 @@ struct MessageSearchInput {
     provider: ProviderScope,
     project_key: Option<String>,
     include_subagents: bool,
-    catch_up: bool,
+    require_fresh: bool,
     cursor: Option<String>,
     parent_session_id: Option<String>,
     since: Option<i64>,
@@ -507,14 +506,8 @@ impl MessageSearchInput {
         if workflow_agent.is_some() && workflow_run.is_none() {
             return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
         }
-        let since = time_filter(
-            request.since.as_ref().or(request.time_from.as_ref()),
-            SearchTimeBound::Start,
-        )?;
-        let until = time_filter(
-            request.until.as_ref().or(request.time_to.as_ref()),
-            SearchTimeBound::End,
-        )?;
+        let since = time_filter(request.since.as_ref(), SearchTimeBound::Start)?;
+        let until = time_filter(request.until.as_ref(), SearchTimeBound::End)?;
         if since.zip(until).is_some_and(|(since, until)| since > until) {
             return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
         }
@@ -530,7 +523,7 @@ impl MessageSearchInput {
             provider,
             project_key: optional_string(request.project_key.as_deref())?,
             include_subagents,
-            catch_up: request.catch_up.unwrap_or(false),
+            require_fresh: request.require_fresh.unwrap_or(false),
             cursor: optional_string(request.cursor.as_deref())?,
             parent_session_id: optional_string(request.parent_session_id.as_deref())?,
             since,
@@ -590,7 +583,7 @@ impl MessageSearchInput {
         .map(|query| {
             query
                 .with_retrieval_scope(SessionRetrievalScope::AllSessionsInAuthorizedRoot)
-                .with_freshness_policy(if self.catch_up {
+                .with_freshness_policy(if self.require_fresh {
                     SessionFreshnessPolicy::RequireFresh
                 } else {
                     SessionFreshnessPolicy::AllowStored
@@ -628,7 +621,7 @@ impl MessageSearchInput {
             } => {
                 result.status = RetainedOutcomeStatusV1::Stale;
                 result.outcome = RetainedOutcomeStatusV1::Stale;
-                result.refresh_required = self.catch_up;
+                result.refresh_required = self.require_fresh;
                 apply_temporal(&mut result, temporal, freshness);
             }
             SessionRetrievalServiceOutcome::Partial {
@@ -640,7 +633,7 @@ impl MessageSearchInput {
                 result.outcome = RetainedOutcomeStatusV1::Partial;
                 result.omitted = Some(omitted);
                 result.refresh_required =
-                    self.catch_up && !matches!(freshness, SessionDataFreshness::Fresh);
+                    self.require_fresh && !matches!(freshness, SessionDataFreshness::Fresh);
                 apply_page(&mut result, page, freshness)?;
             }
             SessionRetrievalServiceOutcome::Redacted => {
@@ -707,10 +700,7 @@ impl MessageSearchInput {
 
     fn base_result(&self, store_scope: SessionRetrievalStoreScope) -> MessageSearchResultV1 {
         MessageSearchResultV1 {
-            catch_up: self.catch_up,
-            catch_up_failures: Vec::new(),
-            catch_up_performed: false,
-            catch_up_provider: self.provider.response_label().to_owned(),
+            require_fresh: self.require_fresh,
             count: Some(0),
             goals: self.goals,
             include_subagents: self.include_subagents,
@@ -737,14 +727,7 @@ impl MessageSearchInput {
             git_filter_applied: (!self.git.is_empty()).then_some(true),
             message: None,
             omitted: None,
-            project_scope: None,
-            registry_truncated: None,
-            roots: None,
-            searched_project_count: None,
-            selected_project_root: None,
             service_status: None,
-            skipped: None,
-            skipped_project_count: None,
             store_scope: Some(
                 match store_scope {
                     SessionRetrievalStoreScope::Project => "project",
@@ -776,21 +759,9 @@ fn ensure_project_message_scope(
 ) -> Result<(), RetainedSurfaceExecutionErrorV1> {
     ensure_mounted_project_context(context, authorities)?;
     if request
-        .project_scope
-        .as_deref()
-        .is_some_and(|scope| scope != "project")
-        || request
-            .project_id
-            .as_deref()
-            .is_some_and(|project_id| project_id != authorities.project_id.as_str())
-        || request
-            .project_path
-            .as_deref()
-            .is_some_and(|path| Path::new(path) != authorities.project_root.as_path())
-        || request
-            .project_selector
-            .as_ref()
-            .is_some_and(|selector| selector.project_id != authorities.project_id)
+        .project_selector
+        .as_ref()
+        .is_some_and(|selector| selector.project_id != authorities.project_id)
     {
         return Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized);
     }
@@ -800,12 +771,11 @@ fn ensure_project_message_scope(
 fn ensure_profile_message_scope(
     request: &MessageSearchRequestV1,
 ) -> Result<(), RetainedSurfaceExecutionErrorV1> {
-    (request.project_scope.is_none()
-        && request.project_id.is_none()
-        && request.project_path.is_none()
-        && request.project_selector.is_none())
-    .then_some(())
-    .ok_or(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized)
+    request
+        .project_selector
+        .is_none()
+        .then_some(())
+        .ok_or(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized)
 }
 
 fn ensure_session_refresh_identity(
@@ -926,9 +896,6 @@ fn apply_page(
     page: SessionRetrievalPageView,
     freshness: SessionDataFreshness,
 ) -> Result<(), RetainedSurfaceExecutionErrorV1> {
-    result
-        .selected_project_root
-        .clone_from(&page.temporal.authorized_root);
     result.count = Some(page.results.len());
     result.results = Some(
         page.results
@@ -945,9 +912,6 @@ fn apply_temporal(
     temporal_view: SessionTemporalMetadataView,
     freshness: SessionDataFreshness,
 ) {
-    result
-        .selected_project_root
-        .clone_from(&temporal_view.authorized_root);
     result.temporal = Some(temporal(temporal_view, freshness));
 }
 
@@ -1084,7 +1048,7 @@ mod refusal_tests {
         ApplicationProblemKind, LegalAction, RetryDirective, retained_surface_execution_problem,
     };
     use tracedecay_domain::CursorManifestLimitKindV1;
-    use tracedecay_temporal_query::ports::TemporalCandidatePopulationCount;
+    use tracedecay_temporal_query::snapshot::TemporalCandidatePopulationCount;
 
     use crate::session_retrieval::{
         SessionRetrievalCoverageOmissionView, SessionTemporalMetadataView,

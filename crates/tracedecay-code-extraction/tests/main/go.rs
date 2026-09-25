@@ -2,6 +2,8 @@ use tracedecay_code_extraction::GoExtractor;
 use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_domain::*;
 
+include!("support/edges.rs");
+
 #[test]
 fn test_go_extract_package() {
     let source = r#"package main
@@ -13,7 +15,7 @@ func main() {
 }
 "#;
     let extractor = GoExtractor;
-    let result = extractor.extract("main.go", source);
+    let result = extractor.extract_artifact("main.go", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let pkgs: Vec<_> = result
         .nodes
@@ -36,7 +38,7 @@ func Add(a, b int) int {
 func helper() {}
 "#;
     let extractor = GoExtractor;
-    let result = extractor.extract("math.go", source);
+    let result = extractor.extract_artifact("math.go", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fns: Vec<_> = result
         .nodes
@@ -69,7 +71,7 @@ type Point struct {
 }
 "#;
     let extractor = GoExtractor;
-    let result = extractor.extract("model/point.go", source);
+    let result = extractor.extract_artifact("model/point.go", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let structs: Vec<_> = result
         .nodes
@@ -102,14 +104,21 @@ type Config struct {
 }
 "#;
     let extractor = GoExtractor;
-    let result = extractor.extract("model/config.go", source);
+    let result = extractor.extract_artifact("model/config.go", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tags: Vec<_> = result
         .nodes
         .iter()
         .filter(|n| n.kind == NodeKind::StructTag)
+        .map(|n| (n.name.as_str(), n.signature.as_deref()))
         .collect();
-    assert!(tags.len() >= 2, "should extract struct tags");
+    assert_eq!(
+        tags,
+        [
+            ("Name:tag", Some(r#"`json:"name" yaml:"name"`"#)),
+            ("Port:tag", Some(r#"`json:"port"`"#)),
+        ]
+    );
 }
 
 #[test]
@@ -122,7 +131,7 @@ type Reader interface {
 }
 "#;
     let extractor = GoExtractor;
-    let result = extractor.extract("io/reader.go", source);
+    let result = extractor.extract_artifact("io/reader.go", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let ifaces: Vec<_> = result
         .nodes
@@ -152,7 +161,7 @@ func (c Circle) String() string {
 }
 "#;
     let extractor = GoExtractor;
-    let result = extractor.extract("model/circle.go", source);
+    let result = extractor.extract_artifact("model/circle.go", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let methods: Vec<_> = result
         .nodes
@@ -161,14 +170,9 @@ func (c Circle) String() string {
         .collect();
     assert_eq!(methods.len(), 2);
     // Check Receives edges
-    let receives: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Receives)
-        .collect();
-    assert!(
-        !receives.is_empty(),
-        "should have Receives edges for methods with receivers"
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Receives),
+        [("Area", "Circle"), ("String", "Circle")]
     );
 }
 
@@ -183,7 +187,7 @@ import (
 )
 "#;
     let extractor = GoExtractor;
-    let result = extractor.extract("main.go", source);
+    let result = extractor.extract_artifact("main.go", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let uses: Vec<_> = result
         .nodes
@@ -202,7 +206,7 @@ const MaxSize = 1024
 var counter int
 "#;
     let extractor = GoExtractor;
-    let result = extractor.extract("main.go", source);
+    let result = extractor.extract_artifact("main.go", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let consts: Vec<_> = result
         .nodes
@@ -235,14 +239,15 @@ func main() {
 }
 "#;
     let extractor = GoExtractor;
-    let result = extractor.extract("main.go", source);
+    let result = extractor.extract_artifact("main.go", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let call_refs: Vec<_> = result
         .unresolved_refs
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
+        .map(|r| r.reference_name.as_str())
         .collect();
-    assert!(!call_refs.is_empty(), "should have call refs");
+    assert_eq!(call_refs, ["fmt.Println", "greet"]);
 }
 
 #[test]
@@ -252,7 +257,7 @@ fn test_go_extract_type_alias() {
 type StringSlice = []string
 "#;
     let extractor = GoExtractor;
-    let result = extractor.extract("main.go", source);
+    let result = extractor.extract_artifact("main.go", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let aliases: Vec<_> = result
         .nodes
@@ -277,7 +282,7 @@ type ReadWriter interface {
 }
 "#;
     let extractor = GoExtractor;
-    let result = extractor.extract("io/io.go", source);
+    let result = extractor.extract_artifact("io/io.go", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     // Should have an Extends edge or unresolved ref for Reader embedded in ReadWriter
     let has_extends = result.edges.iter().any(|e| e.kind == EdgeKind::Extends)
@@ -301,7 +306,7 @@ func Map[T any, U any](s []T, f func(T) U) []U {
 }
 "#;
     let extractor = GoExtractor;
-    let result = extractor.extract("main.go", source);
+    let result = extractor.extract_artifact("main.go", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fns: Vec<_> = result
         .nodes
@@ -315,9 +320,9 @@ func Map[T any, U any](s []T, f func(T) U) []U {
         .iter()
         .filter(|n| n.kind == NodeKind::GenericParam)
         .collect();
-    assert!(
-        generics.len() >= 2,
-        "should extract generic type params T and U"
+    assert_eq!(
+        generics.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+        ["T", "U"]
     );
 }
 
@@ -328,7 +333,7 @@ fn test_go_file_node_is_root() {
 func main() {}
 "#;
     let extractor = GoExtractor;
-    let result = extractor.extract("main.go", source);
+    let result = extractor.extract_artifact("main.go", source).result;
     let files: Vec<_> = result
         .nodes
         .iter()
@@ -349,17 +354,15 @@ type Foo struct {
 func (f Foo) Baz() {}
 "#;
     let extractor = GoExtractor;
-    let result = extractor.extract("main.go", source);
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    // File contains: GoPackage, Struct, StructMethod; Struct contains: Field
-    assert!(
-        contains.len() >= 4,
-        "should have Contains edges: {:?}",
-        contains.len()
+    let result = extractor.extract_artifact("main.go", source).result;
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Contains),
+        [
+            ("main.go", "main"),
+            ("main.go", "Foo"),
+            ("Foo", "Bar"),
+            ("main.go", "Baz")
+        ]
     );
 }
 
@@ -370,7 +373,9 @@ fn test_go_qualified_names() {
 func HandleRequest() {}
 "#;
     let extractor = GoExtractor;
-    let result = extractor.extract("pkg/server/handler.go", source);
+    let result = extractor
+        .extract_artifact("pkg/server/handler.go", source)
+        .result;
     let fns: Vec<_> = result
         .nodes
         .iter()

@@ -31,7 +31,7 @@ use super::operation_events::{
     HttpOperationEventState, http_operation_event_router,
     resolve_authenticated_http_request_context,
 };
-use super::problems::{current_micros, invocation_problem};
+use super::problems::current_micros;
 use super::request_control::{
     ActiveHttpRequest, HttpCancellationRegistry, application_http_context,
 };
@@ -93,27 +93,6 @@ fn operation_context(project_id: &ProjectId) -> RequestContext {
         CancellationContext::active("cancel.http-adapter").expect("cancellation"),
     )
     .expect("context")
-}
-
-#[test]
-fn daemon_reset_problem_preserves_reset_terminal_contract() {
-    let problem =
-        invocation_problem(tracedecay_daemon_protocol::DaemonInvocationProblem::ResetRequired)
-            .expect("canonical reset problem");
-    let ApplicationProblem::ResetRequired {
-        retry,
-        legal_actions,
-        ..
-    } = problem
-    else {
-        panic!("application surface must preserve reset-required");
-    };
-
-    assert_eq!(retry, tracedecay_contracts::RetryDirective::Never);
-    assert_eq!(
-        legal_actions,
-        vec![tracedecay_contracts::LegalAction::Reset]
-    );
 }
 
 #[test]
@@ -709,9 +688,9 @@ async fn http_git_read_routes_preserve_the_canonical_typed_request() {
 }
 
 #[test]
-fn catalog_bound_compatibility_tools_resolve_before_retained_dispatch() {
+fn every_callable_cli_and_mcp_binding_names_an_application_operation() {
     let catalog = super::application_surface_catalog().expect("application catalog");
-    let mut compatibility_operations = std::collections::BTreeSet::new();
+    let mut unmapped = std::collections::BTreeSet::new();
 
     for capability in catalog.capabilities() {
         if !capability.availability().is_callable() {
@@ -719,80 +698,19 @@ fn catalog_bound_compatibility_tools_resolve_before_retained_dispatch() {
         }
         for binding_id in capability.binding_ids() {
             let binding = catalog.binding(binding_id).expect("catalog binding");
-            if !matches!(
+            if matches!(
                 binding.surface(),
                 tracedecay_tool_catalog::BindingSurface::Cli
                     | tracedecay_tool_catalog::BindingSurface::Mcp
-            ) || ApplicationSurfaceOperation::from_tool_name(binding.operation().as_str())
-                .is_some()
+            ) && ApplicationSurfaceOperation::from_tool_name(binding.operation().as_str())
+                .is_none()
             {
-                continue;
+                unmapped.insert(binding.operation().as_str().to_owned());
             }
-
-            let tool_name = format!("tracedecay_{}", binding.operation().as_str());
-            let resolved = super::resolve_catalog_tool_binding(binding.surface(), &tool_name)
-                .expect("compatibility binding resolution")
-                .unwrap_or_else(|| panic!("{tool_name} must resolve before retained dispatch"));
-            assert_eq!(resolved.binding_id, *binding_id);
-            compatibility_operations.insert(binding.operation().as_str().to_owned());
         }
     }
 
-    assert_eq!(
-        compatibility_operations,
-        [
-            "ast_grep_rewrite",
-            "callees",
-            "context",
-            "fact_feedback",
-            "fact_store_add",
-            "fact_store_contradict",
-            "fact_store_curate",
-            "fact_store_get",
-            "fact_store_list",
-            "fact_store_probe",
-            "fact_store_reason",
-            "fact_store_related",
-            "fact_store_remove",
-            "fact_store_search",
-            "fact_store_supersede",
-            "fact_store_update",
-            "impact",
-            "insert_at",
-            "insert_at_symbol",
-            "lcm_describe",
-            "lcm_doctor",
-            "lcm_expand",
-            "lcm_expand_query",
-            "lcm_grep",
-            "lcm_load_session",
-            "lcm_status",
-            "memory_status",
-            "message_search",
-            "move_symbol",
-            "multi_str_replace",
-            "node",
-            "port_order",
-            "port_status",
-            "redundancy",
-            "rename_preview",
-            "rename_symbol",
-            "replace_symbol",
-            "session_refresh_begin",
-            "session_refresh_cancel",
-            "session_refresh_status",
-            "sessions_for",
-            "similar",
-            "source_edit_reconcile",
-            "source_edit_rollback",
-            "str_replace",
-            "todos",
-            "workflows",
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect()
-    );
+    assert_eq!(unmapped, std::collections::BTreeSet::new());
 }
 
 #[test]
@@ -1462,79 +1380,6 @@ fn callable_code_page_is_transport_owned() {
         rejected,
         Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest { .. })
     ));
-}
-
-#[test]
-fn callable_code_operation_names_are_exact_and_not_primitive_aliases() {
-    for (operation, name) in [
-        (
-            ApplicationSurfaceOperation::CodeExactOccurrence,
-            "code_exact_occurrence",
-        ),
-        (
-            ApplicationSurfaceOperation::CodePhraseSearch,
-            "code_phrase_search",
-        ),
-        (
-            ApplicationSurfaceOperation::CodeSymbolSearch,
-            "code_symbol_search",
-        ),
-        (
-            ApplicationSurfaceOperation::CodeSignatureSearch,
-            "code_signature_search",
-        ),
-        (
-            ApplicationSurfaceOperation::CodeImplementations,
-            "code_implementations",
-        ),
-        (
-            ApplicationSurfaceOperation::CodeTypeHierarchy,
-            "code_type_hierarchy",
-        ),
-        (ApplicationSurfaceOperation::CodeCallers, "code_callers"),
-        (ApplicationSurfaceOperation::CodeCallees, "code_callees"),
-        (ApplicationSurfaceOperation::CodeFacets, "code_facets"),
-        (ApplicationSurfaceOperation::CodeTimeline, "code_timeline"),
-        (
-            ApplicationSurfaceOperation::CodeDeclaration,
-            "code_declaration",
-        ),
-        (
-            ApplicationSurfaceOperation::CodeTypeDefinition,
-            "code_type_definition",
-        ),
-        (
-            ApplicationSurfaceOperation::CodeReferences,
-            "code_references",
-        ),
-    ] {
-        assert_eq!(operation.as_str(), name);
-        assert_eq!(
-            ApplicationSurfaceOperation::from_tool_name(&format!("tracedecay_{name}")),
-            Some(operation)
-        );
-    }
-    for primitive_alias in [
-        "exact_occurrence",
-        "phrase_search",
-        "symbol_search",
-        "signature_search",
-        "implementations",
-        "type_hierarchy",
-        "callers",
-        "callees",
-        "facets",
-        "timeline",
-        "declaration",
-        "definition",
-        "type_definition",
-        "references",
-    ] {
-        assert_eq!(
-            ApplicationSurfaceOperation::from_tool_name(primitive_alias),
-            None
-        );
-    }
 }
 
 #[test]

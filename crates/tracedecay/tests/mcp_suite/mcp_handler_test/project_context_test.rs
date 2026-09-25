@@ -25,7 +25,7 @@ async fn project_context_returns_the_project_the_caller_named() {
         .clone()
         .expect("served project identity");
     let runtime =
-        tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1::project_scoped(
+        tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::project_scoped(
             registry_dir.path(),
             cg.project_root(),
             tracedecay_domain::ProjectId::new(active_project_id.clone()).expect("project id"),
@@ -105,7 +105,7 @@ async fn project_context_returns_the_project_the_caller_named() {
         .expect("seed served project");
 
     let server = tracedecay::mcp::McpServer::new_with_host_admission_test_runtime_for_test(
-        tracedecay::project::TraceDecay::open(cg.project_root())
+        tracedecay_project::project::TraceDecay::open(cg.project_root())
             .await
             .expect("open served project"),
         None,
@@ -270,7 +270,7 @@ async fn project_context_returns_the_project_the_caller_named() {
 async fn project_context_reports_an_unmounted_registry_as_unavailable() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let server = tracedecay::mcp::McpServer::new(
-        tracedecay::project::TraceDecay::open(cg.project_root())
+        tracedecay_project::project::TraceDecay::open(cg.project_root())
             .await
             .expect("open served project"),
         None,
@@ -300,7 +300,7 @@ async fn project_context_reports_a_broken_registry_read_as_a_tool_error() {
     let registry_dir = test_temp_dir();
     let registry_path = registry_dir.path().join("global.db");
     let runtime =
-        tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1::project_scoped(
+        tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::project_scoped(
             registry_dir.path(),
             cg.project_root(),
             tracedecay_domain::ProjectId::new(
@@ -327,7 +327,7 @@ async fn project_context_reports_a_broken_registry_read_as_a_tool_error() {
         .execute_batch("DROP TABLE project_aliases")
         .expect("drop aliases");
     let server = tracedecay::mcp::McpServer::new_with_host_admission_test_runtime_for_test(
-        tracedecay::project::TraceDecay::open(cg.project_root())
+        tracedecay_project::project::TraceDecay::open(cg.project_root())
             .await
             .expect("open served project"),
         None,

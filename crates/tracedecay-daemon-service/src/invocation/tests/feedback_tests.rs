@@ -69,7 +69,7 @@ impl DaemonAdvisoryCycleInvocationPort for MountedAdvisoryCycle {
 
 #[tokio::test]
 async fn advisory_cycle_dispatches_to_the_mounted_project_owner() {
-    let observed_at = current_micros();
+    let observed_at = now_micros();
     let project_id = ProjectId::new("project.feedback-cycle-mounted").expect("project id");
     let owner = DaemonAdvisoryCycleInvocationOwner::new(project_id, Arc::new(MountedAdvisoryCycle));
     let response = execute_feedback_advisory_cycle(
@@ -112,7 +112,7 @@ fn proximity_wire_request_has_one_typed_body() {
 
 #[tokio::test]
 async fn proximity_dispatches_to_the_mounted_project_owner() {
-    let observed_at = current_micros();
+    let observed_at = now_micros();
     let project_id = ProjectId::new("project.feedback-proximity-mounted").expect("project id");
     let owner = DaemonAdvisoryCycleInvocationOwner::new(project_id, Arc::new(MountedAdvisoryCycle));
     let response = execute_feedback_proximity(

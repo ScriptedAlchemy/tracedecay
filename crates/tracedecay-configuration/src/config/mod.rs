@@ -24,68 +24,48 @@ use tracedecay_domain::configuration::{
     DIAGNOSTICS_PREWARM_SETTING_KEY, INDEX_EXCLUDE_SETTING_KEY,
     INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
     INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
-    INDEX_TRACK_CALL_SITES_SETTING_KEY, SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
-    SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
+    INDEX_TRACK_CALL_SITES_SETTING_KEY, LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
+    LcmSummarizerExecutablesV1, SYNC_AUTO_INIT_SETTING_KEY,
+    SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
+    SYNC_AUTO_WATCH_SETTING_KEY, SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
+    SYNC_BRANCH_GC_DAYS_SETTING_KEY, SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
+    SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY, SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
+    SYNC_READ_REFRESH_SETTING_KEY, SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY,
+    SYNC_SESSION_START_SYNC_SETTING_KEY, SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
+    SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
+    SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::configuration::contracts::ConfigurationCurrentStateV1;
 
+use model::{RetentionConfig, SyncConfig, TelemetryConfig};
+
+/// Settings decoded from one resolved configuration snapshot.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeTraceDecayConfig {
+    /// Glob patterns for paths to index despite the default hidden-directory,
+    /// generated-directory, and gitignore filters.
     pub include: Vec<String>,
+    /// Glob patterns for files to exclude during indexing.
     pub exclude: Vec<String>,
+    /// Maximum file size in bytes; larger files are skipped.
     pub max_file_size: u64,
     pub extract_docstrings: bool,
     pub track_call_sites: bool,
     pub git_ignore: bool,
+    /// A cold `tracedecay_diagnostics` call prewarms in the background instead
+    /// of blocking on the dependency build.
     pub diagnostics_prewarm: bool,
+    /// Whether the persistent native code graph may activate. Disabling it
+    /// leaves exact and lexical retrieval available.
     pub native_graph_activation: bool,
-    pub sync: RuntimeSyncConfig,
-    pub telemetry: RuntimeTelemetryConfig,
-}
-
-impl Default for RuntimeTraceDecayConfig {
-    fn default() -> Self {
-        Self {
-            include: Vec::new(),
-            exclude: Vec::new(),
-            max_file_size: 1_048_576,
-            extract_docstrings: true,
-            track_call_sites: true,
-            git_ignore: true,
-            diagnostics_prewarm: false,
-            native_graph_activation: true,
-            sync: RuntimeSyncConfig::default(),
-            telemetry: RuntimeTelemetryConfig::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeSyncConfig {
-    pub auto_track_pr_branches: bool,
-    pub auto_track_pr_poll_secs: u64,
-}
-
-impl Default for RuntimeSyncConfig {
-    fn default() -> Self {
-        Self {
-            auto_track_pr_branches: false,
-            auto_track_pr_poll_secs: 300,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeTelemetryConfig {
-    pub timings: bool,
-}
-
-impl Default for RuntimeTelemetryConfig {
-    fn default() -> Self {
-        Self { timings: true }
-    }
+    /// The host CLIs on-demand LCM summarization may launch. Every provider
+    /// is unconfigured until an operator names its executable; the daemon
+    /// never resolves one from `PATH` or its environment.
+    pub lcm_summarizers: LcmSummarizerExecutablesV1,
+    pub sync: SyncConfig,
+    pub telemetry: TelemetryConfig,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -186,6 +166,11 @@ pub trait PinnedRuntimeConfigurationCachePort: Send + Sync {
     fn publish(&self, configuration: PinnedRuntimeConfiguration) -> Result<()>;
 
     fn cached_for_root(&self, project_root: &Path) -> Result<PinnedRuntimeConfiguration>;
+
+    /// The pin published for an already-authoritative registered project,
+    /// for daemon work (session shards, background convergence) that has a
+    /// project identity but no route root.
+    fn cached_for_project(&self, project_id: &ProjectId) -> Result<PinnedRuntimeConfiguration>;
 }
 
 static PINNED_RUNTIME_CONFIGURATION_CACHE: OnceLock<Arc<dyn PinnedRuntimeConfigurationCachePort>> =
@@ -219,6 +204,19 @@ pub fn cached_pinned_runtime_configuration(
     pinned_runtime_configuration_cache()?.cached_for_root(project_root)
 }
 
+/// The summarizer executables the daemon published for one registered
+/// project. A missing cache or pin is a typed configuration error, not an
+/// unconfigured provider: the caller decides whether that means "pending".
+pub fn lcm_summarizer_executables_for_project(
+    project_id: &ProjectId,
+) -> Result<LcmSummarizerExecutablesV1> {
+    Ok(pinned_runtime_configuration_cache()?
+        .cached_for_project(project_id)?
+        .config()
+        .lcm_summarizers
+        .clone())
+}
+
 /// Converts a complete typed snapshot into the runtime settings every
 /// configuration consumer shares. There are no defaults, file reads, or
 /// environment reads: an absent or mistyped required setting is an error.
@@ -241,7 +239,34 @@ fn runtime_config_from_snapshot(
             snapshot,
             INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
         )?,
-        sync: RuntimeSyncConfig {
+        lcm_summarizers: required_lcm_summarizer_executables(snapshot)?,
+        sync: SyncConfig {
+            auto_watch: required_bool(snapshot, SYNC_AUTO_WATCH_SETTING_KEY)?,
+            watch_linked_worktrees: required_bool(
+                snapshot,
+                SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
+            )?,
+            watch_debounce_ms: required_unsigned(snapshot, SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY)?,
+            watch_max_delay_ms: required_unsigned(snapshot, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY)?,
+            watch_max_projects: required_usize(snapshot, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY)?,
+            read_refresh: required_bool(snapshot, SYNC_READ_REFRESH_SETTING_KEY)?,
+            read_cooldown_secs: required_unsigned(snapshot, SYNC_READ_COOLDOWN_SECS_SETTING_KEY)?,
+            session_start_sync: required_bool(snapshot, SYNC_SESSION_START_SYNC_SETTING_KEY)?,
+            session_start_stale_threshold_secs: required_unsigned(
+                snapshot,
+                SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY,
+            )?,
+            backstop_interval_mins: required_unsigned(
+                snapshot,
+                SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
+            )?,
+            full_sync_escalation_files: required_usize(
+                snapshot,
+                SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
+            )?,
+            max_concurrent_syncs: required_usize(snapshot, SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY)?,
+            branch_gc_days: required_unsigned(snapshot, SYNC_BRANCH_GC_DAYS_SETTING_KEY)?,
+            auto_init: required_bool(snapshot, SYNC_AUTO_INIT_SETTING_KEY)?,
             auto_track_pr_branches: required_bool(
                 snapshot,
                 SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
@@ -250,8 +275,11 @@ fn runtime_config_from_snapshot(
                 snapshot,
                 SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
             )?,
+            // Retention is not a registered setting, so a snapshot cannot
+            // carry retention policy.
+            retention: RetentionConfig::default(),
         },
-        telemetry: RuntimeTelemetryConfig {
+        telemetry: TelemetryConfig {
             timings: required_bool(snapshot, TELEMETRY_TIMINGS_SETTING_KEY)?,
         },
     })
@@ -320,6 +348,18 @@ pub fn required_string_list(
     }
 }
 
+fn required_lcm_summarizer_executables(
+    snapshot: &ConfigurationSnapshotV1,
+) -> Result<LcmSummarizerExecutablesV1> {
+    match required_setting(snapshot, LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY)? {
+        ConfigurationValueV1::LcmSummarizerExecutables(value) => Ok(value.clone()),
+        value => Err(config_error(format!(
+            "resolved configuration setting '{LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY}' has wrong type: expected lcm summarizer executables, got {:?}",
+            value.kind()
+        ))),
+    }
+}
+
 fn config_error(message: impl Into<String>) -> TraceDecayError {
     TraceDecayError::Config {
         message: message.into(),
@@ -334,7 +374,8 @@ mod tests {
     use tracedecay_domain::ProjectId;
     use tracedecay_domain::configuration::{
         ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationSnapshotV1,
-        ConfigurationValueV1, INDEX_MAX_FILE_SIZE_SETTING_KEY, SettingKey,
+        ConfigurationValueV1, INDEX_MAX_FILE_SIZE_SETTING_KEY, SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
+        SettingKey,
     };
     use tracedecay_domain::errors::TraceDecayError;
 
@@ -391,6 +432,33 @@ mod tests {
         assert!(
             message.contains(INDEX_MAX_FILE_SIZE_SETTING_KEY) && message.contains("missing"),
             "missing required settings must name the key, not default it: {message}"
+        );
+    }
+
+    #[test]
+    fn pin_decodes_daemon_sync_settings_and_rejects_their_absence() {
+        let complete = resolved(BTreeMap::new());
+        let pinned =
+            PinnedRuntimeConfiguration::new(target(), revision(), complete.clone()).unwrap();
+        let key = SettingKey::new(SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY).unwrap();
+        assert_eq!(
+            complete.effective_values.get(&key),
+            Some(&ConfigurationValueV1::Unsigned(
+                pinned.config().sync.watch_debounce_ms
+            ))
+        );
+
+        let mut values = complete.effective_values.clone();
+        let mut provenance = complete.provenance.clone();
+        values.remove(&key);
+        provenance.remove(&key);
+        let incomplete = ConfigurationSnapshotV1::new(values, provenance).unwrap();
+        let message = config_message(
+            PinnedRuntimeConfiguration::new(target(), revision(), incomplete).unwrap_err(),
+        );
+        assert!(
+            message.contains(SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY) && message.contains("missing"),
+            "{message}"
         );
     }
 

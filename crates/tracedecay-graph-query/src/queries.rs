@@ -35,6 +35,16 @@ pub struct FileAdjacencyScan {
     pub dependency_edges_examined: usize,
 }
 
+/// Files that call or use symbols defined in one file, and whether the graph
+/// also holds call sites it could not bind to that file's symbols.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FileDependentsV1 {
+    pub files: Vec<String>,
+    /// Some retained call to a same-named symbol has no bound target, so a
+    /// dependent may be missing; the file list is partial evidence.
+    pub unresolved_callers: bool,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct VerifiedHealthFileAggregateV1 {
     pub file_path: String,
@@ -267,7 +277,7 @@ impl<'a> GraphQueryManager<'a> {
     }
 
     #[hotpath::measure(label = "usecases.graph.file_dependents", future = true)]
-    pub async fn get_file_dependents(&self, file_path: &str) -> Result<Vec<String>> {
+    pub async fn get_file_dependents(&self, file_path: &str) -> Result<FileDependentsV1> {
         let symbols = hotpath::measure_block!("usecases.graph.file_neighbors.symbols", {
             self.reader
                 .symbols_in_logical_file(
@@ -290,8 +300,17 @@ impl<'a> GraphQueryManager<'a> {
         // `incoming_edges` and `edges_among` below already carry this guard;
         // this was the one adjacency call site missing it.
         if seeds.is_empty() {
-            return Ok(Vec::new());
+            return Ok(FileDependentsV1::default());
         }
+        // A call site the seal could not bind to this file's symbols (an
+        // unresolved receiver, an import of project code that reached no
+        // indexed module) may belong to a dependent this list cannot name.
+        let unresolved_callers = self
+            .reader
+            .has_unresolved_callers(&seeds, None, Arc::clone(&self.cancellation))
+            .map_err(|error| {
+                super::map_code_graph_read_runtime_error(map_projection_error(error))
+            })?;
         let edges = hotpath::measure_block!("usecases.graph.file_neighbors.edges", {
             self.reader
                 .callers(
@@ -313,7 +332,10 @@ impl<'a> GraphQueryManager<'a> {
             .into_iter()
             .collect::<Vec<_>>();
         paths.sort();
-        Ok(paths)
+        Ok(FileDependentsV1 {
+            files: paths,
+            unresolved_callers,
+        })
     }
 
     #[hotpath::measure(label = "usecases.graph.circular_dependencies", future = true)]

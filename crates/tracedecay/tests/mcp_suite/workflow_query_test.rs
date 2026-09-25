@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use tracedecay::mcp::McpServer;
-use tracedecay::project::TraceDecay;
-use tracedecay::test_support::host_admission::{
+use tracedecay_project::project::TraceDecay;
+use tracedecay_project::test_support::host_admission::{
     HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1,
 };
 use tracedecay_sessions::runtime::git_correlation::{
@@ -250,7 +250,6 @@ async fn call(
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn workflow_queries_distinguish_missing_schema_from_empty_results() {
-    let _env_lock = crate::mcp_handler_test::GLOBAL_DB_ENV_LOCK.lock().await;
     let (_env, project_root) = common::IsolatedEnv::acquire().await;
     let cg = TraceDecay::init(&project_root)
         .await
@@ -287,7 +286,6 @@ async fn workflow_queries_distinguish_missing_schema_from_empty_results() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn workflows_query_surface_end_to_end() {
-    let _env_lock = crate::mcp_handler_test::GLOBAL_DB_ENV_LOCK.lock().await;
     let (env, project_root) = common::IsolatedEnv::acquire().await;
     let home = env.home().to_path_buf();
 
@@ -307,7 +305,7 @@ async fn workflows_query_surface_end_to_end() {
         .expect("init retains registered project session runtime");
 
     let stats = runtime
-        .ingest_workflows_for_test(cg.project_root())
+        .ingest_workflows_for_test(&home, cg.project_root())
         .await
         .unwrap_or_else(|error| panic!("ingest workflows: {error}"));
     assert_eq!(stats.runs_ingested, 1, "one run ingested: {stats:?}");
@@ -604,7 +602,6 @@ async fn refuse(cg: &TraceDecay, args: Value) -> String {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn workflows_tool_returns_literal_query_documents() {
-    let _env_lock = crate::mcp_handler_test::GLOBAL_DB_ENV_LOCK.lock().await;
     let (env, project_root) = common::IsolatedEnv::acquire().await;
     let home = env.home().to_path_buf();
     let cg = TraceDecay::init(&project_root)
@@ -616,7 +613,7 @@ async fn workflows_tool_returns_literal_query_documents() {
         .test_runtime_for_test()
         .expect("init retains registered project session runtime");
     let stats = runtime
-        .ingest_workflows_for_test(cg.project_root())
+        .ingest_workflows_for_test(&home, cg.project_root())
         .await
         .unwrap_or_else(|error| panic!("ingest workflows: {error}"));
     assert_eq!(stats.runs_ingested, 1);

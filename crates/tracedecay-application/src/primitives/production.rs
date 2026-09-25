@@ -42,15 +42,16 @@ use tracedecay_graph_query::queries::{GraphQueryManager, is_test_marker};
 use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadRequest,
 };
-use tracedecay_session_temporal_store::SessionTemporalCursorKeyProvider;
+use tracedecay_session_temporal_store::{SessionTemporalAccess, SessionTemporalCursorKeyProvider};
 use tracedecay_temporal_query::cursor::{
     CURSOR_LIFETIME_MICROS, StableSortKey, encode_cursor, verify_cursor,
 };
-use tracedecay_temporal_query::ports::{
-    BindingDigest, KernelVersions, SessionCursorAuthenticator, TemporalExecutionSnapshot,
-    TemporalSnapshotRequest, TemporalWatermarks,
-};
+use tracedecay_temporal_query::execution::BindingDigest;
+use tracedecay_temporal_query::ports::{SessionCursorAuthenticator, TemporalSnapshotRequest};
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+use tracedecay_temporal_query::snapshot::{
+    KernelVersions, TemporalExecutionSnapshot, TemporalWatermarks,
+};
 
 mod affected_tests;
 #[cfg(test)]
@@ -93,6 +94,43 @@ fn completed<T>(
     let Ok(coverage) = EvidenceCoverage::complete(vec![domain], 1, 1, 1) else {
         return failed(domain, finished_at);
     };
+    completed_with_coverage(payload, domain, finished_at, coverage, Vec::new())
+}
+
+/// A payload the graph could only partly witness: one unsupported omission
+/// names the capability gap, and coverage says `partial` so an empty payload
+/// never reads as a proven absence.
+fn completed_unsupported<T>(
+    payload: T,
+    domain: EvidenceDomain,
+    finished_at: UtcMicros,
+) -> RetrievalPortOutcome<T> {
+    let coverage = EvidenceCoverage {
+        requested_domains: vec![domain],
+        visited: Some(1),
+        eligible: Some(1),
+        returned: 1,
+        completeness: CoverageCompleteness::Partial,
+        domains: vec![CoverageDomainState {
+            domain,
+            completeness: CoverageCompleteness::Partial,
+        }],
+    };
+    let omissions = vec![Omission {
+        domain,
+        count: 1,
+        reason: OmissionReason::Unsupported,
+    }];
+    completed_with_coverage(payload, domain, finished_at, coverage, omissions)
+}
+
+fn completed_with_coverage<T>(
+    payload: T,
+    domain: EvidenceDomain,
+    finished_at: UtcMicros,
+    coverage: EvidenceCoverage,
+    omissions: Vec<Omission>,
+) -> RetrievalPortOutcome<T> {
     let Ok(page) = PageState::first_page(PRIMITIVE_SORT_CONTRACT.clone(), 1, Some(1), 1) else {
         return failed(domain, finished_at);
     };
@@ -101,7 +139,7 @@ fn completed<T>(
         temporal: TemporalState::current(finished_at),
         evidence_authorities: Vec::new(),
         coverage,
-        omissions: Vec::new(),
+        omissions,
         scores: Vec::new(),
         contributions: Vec::new(),
         page,
@@ -628,8 +666,7 @@ pub async fn open_production_primitive_runtime(
     let project_root = source_runtime.project_root().to_path_buf();
     let scope = access.scope.clone();
     let configuration_digest = access.configuration_digest.clone();
-    let key = session_db
-        .as_ref()
+    let key = SessionTemporalAccess::new(session_db.as_ref())
         .ensure_active_session_cursor_key_result()
         .await
         .map_err(|_| ApplicationContractError::Inconsistent {

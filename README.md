@@ -102,7 +102,6 @@ the installed cache is loaded.
 tracedecay daemon install-service   # install + start the daemon (required before init)
 tracedecay init [path]              # enroll a project and publish its first generation
 tracedecay sync [path]              # explicit administrative refresh
-tracedecay sync --force [path]      # explicit full generation refresh
 tracedecay status [path]            # graph stats, freshness, savings, cost
 tracedecay tool                     # list every MCP tool
 tracedecay tool search "<query>"    # CLI symbol search
@@ -124,7 +123,7 @@ list and `tracedecay tool <name> --help` for one tool's parameters.
 
 The MCP server exposes tools grouped around normal coding workflows:
 
-- Discovery: `tracedecay_context`, `tracedecay_search`, `tracedecay_outline`, `tracedecay_files`
+- Discovery: `tracedecay_context`, `tracedecay_search`, `tracedecay_source_outline`, `tracedecay_files`
 - Graph traversal: `tracedecay_callers`, `tracedecay_callees`, `tracedecay_impact`, `tracedecay_affected`
 - Code health: `tracedecay_complexity`, `tracedecay_dead_code`, `tracedecay_unmounted_files`, `tracedecay_coupling`, `tracedecay_test_risk`
 - Git workflow: `tracedecay_diff_context`, `tracedecay_pr_context`, `tracedecay_changelog`, `tracedecay_test_map`

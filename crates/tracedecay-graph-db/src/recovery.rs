@@ -96,19 +96,22 @@ pub(crate) fn validate_or_initialize_format(
         validate_or_initialize_format_marker(database, validated)
     )?;
     // The pinned grafeo fork persists the store's property-index keys in the
-    // catalog section and `load_from_sections` rebuilds each one with a full
-    // node scan inside `GrafeoDB::with_config`, so on a store checkpointed by
-    // this engine these calls find the index present and return without
-    // scanning. This loop stays as the authority that *defines* the index
-    // set: a fresh store and a store whose last checkpoint predates catalog
-    // index persistence register here, and without the indexes the unique-key
+    // catalog section (sealed compact containers write them at seal time) and
+    // `GrafeoDB::with_config` rebuilds each one with a full node scan, so a
+    // reopened store already has every index. Re-declaring one is not a
+    // no-op: on a compacted store it rebuilds the columnar base's hash index
+    // a second time and marks the container stale, which also forces a full
+    // checkpoint on close. This loop stays as the authority that *defines*
+    // the index set for a fresh store and a store whose last checkpoint
+    // predates catalog index persistence; without the indexes the unique-key
     // lookups in `state.rs` degrade from a hash hit to a full node scan,
     // measured at 500k entities, 64 point reads took 23.7s instead of 1.4ms,
-    // and the bounded traversal 773ms instead of 2.7ms. The span shows which
-    // side of the engine boundary the rebuild cost actually lands on.
+    // and the bounded traversal 773ms instead of 2.7ms.
     hotpath::measure_block!("graph_db.generation.open.property_indexes", {
         for property in INDEXED_PROPERTIES {
-            database.create_property_index(property);
+            if !database.has_property_index(property) {
+                database.create_property_index(property);
+            }
         }
     });
     Ok(())

@@ -8,7 +8,7 @@ fn extract_sample() -> ExtractionResult {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.proto")
         .expect("failed to read sample.proto");
     let extractor = ProtoExtractor;
-    extractor.extract("sample.proto", &source)
+    extractor.extract_artifact("sample.proto", &source).result
 }
 
 #[test]
@@ -138,11 +138,17 @@ fn test_proto_messages() {
         .iter()
         .filter(|n| n.kind == NodeKind::ProtoMessage)
         .collect();
-    assert!(
-        msgs.len() >= 7,
-        "expected >= 7 messages, got {} : {:?}",
-        msgs.len(),
-        msgs.iter().map(|m| &m.name).collect::<Vec<_>>()
+    assert_eq!(
+        msgs.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+        [
+            "Endpoint",
+            "ConnectionConfig",
+            "AuthConfig",
+            "ConnectionStatus",
+            "DisconnectRequest",
+            "HealthCheckRequest",
+            "HealthCheckResponse"
+        ]
     );
     assert!(msgs.iter().any(|m| m.name == "Endpoint"));
     assert!(msgs.iter().any(|m| m.name == "ConnectionConfig"));
@@ -185,14 +191,9 @@ fn test_proto_enum() {
         .collect();
     assert_eq!(enums.len(), 1);
     assert_eq!(enums[0].name, "LogLevel");
-    assert!(
-        enums[0].docstring.is_some(),
-        "LogLevel should have docstring"
-    );
-    assert!(
-        enums[0].docstring.as_ref().unwrap().contains("log level"),
-        "docstring: {:?}",
-        enums[0].docstring
+    assert_eq!(
+        enums[0].docstring.as_deref(),
+        Some("Represents the log level.")
     );
 }
 
@@ -228,9 +229,9 @@ fn test_proto_service() {
         .collect();
     assert_eq!(services.len(), 1);
     assert_eq!(services[0].name, "ConnectionService");
-    assert!(
-        services[0].docstring.is_some(),
-        "ConnectionService should have docstring"
+    assert_eq!(
+        services[0].docstring.as_deref(),
+        Some("Manages network connections.")
     );
 }
 
@@ -254,9 +255,9 @@ fn test_proto_rpcs() {
     assert!(rpcs.iter().any(|r| r.name == "HealthCheck"));
 
     let connect = rpcs.iter().find(|r| r.name == "Connect").unwrap();
-    assert!(
-        connect.docstring.is_some(),
-        "Connect rpc should have docstring"
+    assert_eq!(
+        connect.docstring.as_deref(),
+        Some("Establishes a new connection.")
     );
 }
 
@@ -268,10 +269,28 @@ fn test_proto_fields() {
         .iter()
         .filter(|n| n.kind == NodeKind::Field)
         .collect();
-    assert!(
-        fields.len() >= 15,
-        "expected >= 15 fields, got {}",
-        fields.len()
+    assert_eq!(
+        fields.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+        [
+            "host",
+            "port",
+            "tls",
+            "endpoint",
+            "max_retries",
+            "timeout_ms",
+            "log_level",
+            "token",
+            "username",
+            "auth",
+            "round_robin",
+            "least_connections",
+            "connected",
+            "connection_id",
+            "connection_id",
+            "connection_id",
+            "healthy",
+            "latency_ms"
+        ]
     );
     assert!(fields.iter().any(|f| f.name == "host"));
     assert!(fields.iter().any(|f| f.name == "port"));
@@ -310,19 +329,7 @@ fn test_proto_docstrings() {
         .iter()
         .find(|n| n.kind == NodeKind::ProtoMessage && n.name == "Endpoint")
         .unwrap();
-    assert!(
-        endpoint.docstring.is_some(),
-        "Endpoint should have docstring"
-    );
-    assert!(
-        endpoint
-            .docstring
-            .as_ref()
-            .unwrap()
-            .contains("network endpoint"),
-        "docstring: {:?}",
-        endpoint.docstring
-    );
+    assert_eq!(endpoint.docstring.as_deref(), Some("A network endpoint."));
 }
 
 #[test]

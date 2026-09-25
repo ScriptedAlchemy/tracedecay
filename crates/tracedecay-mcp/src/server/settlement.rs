@@ -180,8 +180,6 @@ pub struct RetainedDispatchRegistry {
     state: RetainedDispatchStateMutex<RetainedDispatchState>,
     #[cfg(any(test, feature = "test-transport"))]
     retained_spawn_count: AtomicUsize,
-    #[cfg(any(test, feature = "test-transport"))]
-    connection_owned_count: AtomicUsize,
 }
 
 impl RetainedDispatchRegistry {
@@ -203,8 +201,6 @@ impl RetainedDispatchRegistry {
             ),
             #[cfg(any(test, feature = "test-transport"))]
             retained_spawn_count: AtomicUsize::new(0),
-            #[cfg(any(test, feature = "test-transport"))]
-            connection_owned_count: AtomicUsize::new(0),
         }
     }
 
@@ -303,12 +299,6 @@ impl RetainedDispatchRegistry {
     #[doc(hidden)]
     pub fn retained_spawn_count_for_test(&self) -> usize {
         self.retained_spawn_count.load(Ordering::Acquire)
-    }
-
-    #[cfg(feature = "test-transport")]
-    #[doc(hidden)]
-    pub fn connection_owned_count_for_test(&self) -> usize {
-        self.connection_owned_count.load(Ordering::Acquire)
     }
 
     #[cfg(test)]
@@ -600,87 +590,6 @@ impl DispatchControl {
 
     pub fn cancellation(&self) -> tracedecay_contracts::CancellationSignal {
         self.cancellation.clone()
-    }
-
-    pub fn permits_connection_owned_execution(&self) -> bool {
-        !self.carries_effect && !self.canonical_effect_settlement
-    }
-
-    #[hotpath::measure(label = "mcp.server.dispatch.settlement", future = true)]
-    pub async fn run_connection_owned<T, F>(
-        &self,
-        registry: &RetainedDispatchRegistry,
-        future: F,
-    ) -> RetainedDispatchOutcome<T>
-    where
-        F: Future<Output = Result<T>> + Send,
-    {
-        let cancelled_before_admission = self.cancellation.is_cancelled();
-        if cancelled_before_admission && !self.live_cancellable {
-            return RetainedDispatchOutcome::failed(dispatch_cancelled_error(
-                &self.tool_name,
-                DispatchSettlement::NotStarted,
-                self.carries_effect,
-            ));
-        }
-        if tokio::time::Instant::now() >= self.deadline_at {
-            let _ = self
-                .cancellation
-                .cancel(tracedecay_contracts::clock::now_micros());
-            return RetainedDispatchOutcome::failed(dispatch_deadline_error(
-                &self.tool_name,
-                DispatchSettlement::NotStarted,
-                self.carries_effect,
-            ));
-        }
-
-        let _capacity_lease = match registry.acquire_capacity() {
-            Ok(lease) => lease,
-            Err(error) => return RetainedDispatchOutcome::failed(error),
-        };
-        #[cfg(any(test, feature = "test-transport"))]
-        registry
-            .connection_owned_count
-            .fetch_add(1, Ordering::AcqRel);
-        let settlement = Arc::new(DispatchExecutionSettlement::not_started());
-        settlement.mark_settling();
-        let deadline = tokio::time::sleep_until(self.deadline_at);
-        let cancellation =
-            tracedecay_daemon_protocol::wait_for_cancellation(self.cancellation.clone());
-        tokio::pin!(future);
-        tokio::pin!(deadline);
-        tokio::pin!(cancellation);
-
-        let outcome = tokio::select! {
-            biased;
-            () = &mut cancellation, if self.live_cancellable => {
-                Err(DispatchFailure::new(dispatch_cancelled_error(
-                    &self.tool_name,
-                    if cancelled_before_admission {
-                        DispatchSettlement::NotStarted
-                    } else {
-                        settlement.snapshot()
-                    },
-                    self.carries_effect,
-                )))
-            }
-            () = &mut deadline => {
-                let _ = self
-                    .cancellation
-                    .cancel(tracedecay_contracts::clock::now_micros());
-                Err(DispatchFailure::new(dispatch_deadline_error(
-                    &self.tool_name,
-                    settlement.snapshot(),
-                    self.carries_effect,
-                )))
-            }
-            output = &mut future => output.map_err(DispatchFailure::new),
-        };
-        settlement.mark_joined();
-        RetainedDispatchOutcome {
-            result: outcome,
-            settlement,
-        }
     }
 
     #[hotpath::measure(label = "mcp.server.dispatch.settlement", future = true)]
@@ -1037,7 +946,7 @@ mod tests {
         let worker_flag = Arc::clone(&worker_ran);
         let outcome = control
             .run_retained(&registry, async move {
-                worker_flag.store(true, std::sync::atomic::Ordering::Release);
+                worker_flag.store(true, Ordering::Release);
                 Ok::<_, tracedecay_domain::errors::TraceDecayError>("authority settled")
             })
             .await;
@@ -1056,7 +965,7 @@ mod tests {
         );
         registry.shutdown().await;
         assert!(
-            worker_ran.load(std::sync::atomic::Ordering::Acquire),
+            worker_ran.load(Ordering::Acquire),
             "the admitted worker must run so the invocation authority settles it"
         );
     }
@@ -1113,7 +1022,7 @@ mod tests {
         let worker_flag = Arc::clone(&worker_ran);
         let outcome = control
             .run_retained(&registry, async move {
-                worker_flag.store(true, std::sync::atomic::Ordering::Release);
+                worker_flag.store(true, Ordering::Release);
                 Ok::<_, tracedecay_domain::errors::TraceDecayError>("never admitted")
             })
             .await;
@@ -1127,7 +1036,7 @@ mod tests {
         );
         registry.shutdown().await;
         assert!(
-            !worker_ran.load(std::sync::atomic::Ordering::Acquire),
+            !worker_ran.load(Ordering::Acquire),
             "no settlement authority exists, so the worker must never be admitted"
         );
     }
@@ -1189,12 +1098,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inline_read_capacity_refuses_the_next_retained_effect() {
+    async fn retained_read_capacity_refuses_the_next_retained_effect() {
         let registry = Arc::new(RetainedDispatchRegistry::new_with_capacity_for_test(1));
         let read_control = dispatch_control(
             "tracedecay_status",
             deadline_after(std::time::Duration::from_mins(1)),
-            tracedecay_contracts::CancellationSignal::active("capacity.inline-read")
+            tracedecay_contracts::CancellationSignal::active("capacity.retained-read")
                 .expect("read cancellation"),
         )
         .expect("read control");
@@ -1205,7 +1114,7 @@ mod tests {
         let read_registry = Arc::clone(&registry);
         let read = tokio::spawn(async move {
             read_control
-                .run_connection_owned(&read_registry, async move {
+                .run_retained(&read_registry, async move {
                     started.notify_one();
                     release.notified().await;
                     Ok::<_, tracedecay_domain::errors::TraceDecayError>("read")
@@ -1238,155 +1147,7 @@ mod tests {
 
         read_release.notify_one();
         assert_eq!(read.await.expect("join read").result.expect("read"), "read");
-        assert_eq!(registry.active_slot_count_for_test(), 0);
         registry.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn retained_effect_capacity_refuses_the_next_inline_read() {
-        let registry = Arc::new(RetainedDispatchRegistry::new_with_capacity_for_test(1));
-        let effect_control = dispatch_control(
-            "tracedecay_configuration_set",
-            deadline_after(std::time::Duration::from_mins(1)),
-            tracedecay_contracts::CancellationSignal::active("capacity.retained-owner")
-                .expect("effect cancellation"),
-        )
-        .expect("effect control");
-        let effect_started = Arc::new(tokio::sync::Notify::new());
-        let effect_release = Arc::new(tokio::sync::Notify::new());
-        let started = Arc::clone(&effect_started);
-        let release = Arc::clone(&effect_release);
-        let effect_registry = Arc::clone(&registry);
-        let effect = tokio::spawn(async move {
-            effect_control
-                .run_retained(&effect_registry, async move {
-                    started.notify_one();
-                    release.notified().await;
-                    Ok::<_, tracedecay_domain::errors::TraceDecayError>("effect")
-                })
-                .await
-        });
-        effect_started.notified().await;
-        assert_eq!(registry.active_slot_count_for_test(), 1);
-
-        let read_control = dispatch_control(
-            "tracedecay_status",
-            deadline_after(std::time::Duration::from_mins(1)),
-            tracedecay_contracts::CancellationSignal::active("capacity.inline-refused")
-                .expect("read cancellation"),
-        )
-        .expect("read control");
-        let refused = read_control
-            .run_connection_owned(&registry, async {
-                Ok::<_, tracedecay_domain::errors::TraceDecayError>("read")
-            })
-            .await;
-        assert_eq!(
-            refused
-                .result
-                .expect_err("inline read must be refused")
-                .project_route_context()
-                .map(|context| context.0),
-            Some("tool_dispatch_saturated")
-        );
-
-        effect_release.notify_one();
-        assert_eq!(
-            effect.await.expect("join effect").result.expect("effect"),
-            "effect"
-        );
         assert_eq!(registry.active_slot_count_for_test(), 0);
-        registry.shutdown().await;
-    }
-
-    struct FutureDropObserver(Arc<std::sync::atomic::AtomicBool>);
-
-    impl Drop for FutureDropObserver {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::Release);
-        }
-    }
-
-    #[tokio::test]
-    async fn connection_owned_cancellation_drops_the_read_and_joins_settlement() {
-        let registry = RetainedDispatchRegistry::new();
-        let cancellation = tracedecay_contracts::CancellationSignal::active("inline.cancel-drop")
-            .expect("cancellation");
-        let control = dispatch_control(
-            "tracedecay_search",
-            deadline_after(std::time::Duration::from_mins(1)),
-            cancellation.clone(),
-        )
-        .expect("control");
-        let started = Arc::new(tokio::sync::Notify::new());
-        let entered = Arc::clone(&started);
-        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let drop_observer = Arc::clone(&dropped);
-        let dispatch = async move {
-            let _drop_observer = FutureDropObserver(drop_observer);
-            entered.notify_one();
-            std::future::pending::<tracedecay_domain::errors::Result<&'static str>>().await
-        };
-        let runner =
-            tokio::spawn(async move { control.run_connection_owned(&registry, dispatch).await });
-
-        started.notified().await;
-        assert!(cancellation.cancel(tracedecay_contracts::clock::now_micros()));
-        let cancelled = runner.await.expect("join inline dispatch");
-        assert_eq!(
-            cancelled
-                .result
-                .as_ref()
-                .expect_err("cancellation must win")
-                .project_route_context()
-                .map(|context| context.0),
-            Some("tool_dispatch_cancelled")
-        );
-        assert_eq!(cancelled.settlement(), DispatchSettlement::Joined);
-        assert!(
-            dropped.load(Ordering::Acquire),
-            "connection-owned reads have no post-cancel owner"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn connection_owned_deadline_drops_the_read_and_joins_settlement() {
-        let registry = RetainedDispatchRegistry::new();
-        let control = dispatch_control(
-            "tracedecay_status",
-            deadline_after(std::time::Duration::from_secs(1)),
-            tracedecay_contracts::CancellationSignal::active("inline.deadline-drop")
-                .expect("cancellation"),
-        )
-        .expect("control");
-        let started = Arc::new(tokio::sync::Notify::new());
-        let entered = Arc::clone(&started);
-        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let drop_observer = Arc::clone(&dropped);
-        let dispatch = async move {
-            let _drop_observer = FutureDropObserver(drop_observer);
-            entered.notify_one();
-            std::future::pending::<tracedecay_domain::errors::Result<&'static str>>().await
-        };
-        let runner =
-            tokio::spawn(async move { control.run_connection_owned(&registry, dispatch).await });
-
-        started.notified().await;
-        tokio::time::advance(std::time::Duration::from_secs(1)).await;
-        let timed_out = runner.await.expect("join inline dispatch");
-        assert_eq!(
-            timed_out
-                .result
-                .as_ref()
-                .expect_err("deadline must win")
-                .project_route_context()
-                .map(|context| context.0),
-            Some("tool_dispatch_deadline_exceeded")
-        );
-        assert_eq!(timed_out.settlement(), DispatchSettlement::Joined);
-        assert!(
-            dropped.load(Ordering::Acquire),
-            "connection-owned reads have no post-deadline owner"
-        );
     }
 }

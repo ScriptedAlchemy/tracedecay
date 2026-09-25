@@ -1,5 +1,5 @@
 import type { ListedTaskHandoffV1 } from '../../contracts/generated.ts';
-import { ReadFailure } from '../../ui/LegacyStates.tsx';
+import { ReadFailure } from '../../ui/ReadFailure.tsx';
 import { formatMicrosUtc } from '../../ui/format.ts';
 import { handoffTargetLabel, type HandoffTokenReading } from './handoffTokens.ts';
 

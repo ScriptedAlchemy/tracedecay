@@ -9,7 +9,7 @@ use tracedecay_tool_catalog::{EffectClass, SortContractId};
 
 use crate::retained_surfaces::{
     RetainedSurfaceEvidenceFactsV1, RetainedSurfaceEvidenceTerminalV1, RetainedSurfaceOperation,
-    RetainedSurfaceResultV1, RetainedSurfaceTemporalRequestV1, SessionCoverageModeV1,
+    RetainedSurfaceResultV1, RetainedSurfaceTemporalRequestV1,
 };
 use crate::{
     ApplicationOutcome, AuthorityReceipt, CancellationStage, CoverageDomainState, Deadline,
@@ -600,14 +600,7 @@ fn temporal_request_mode(
             "the temporal coverage requests disagreed on their mode",
         ));
     }
-    Ok(match first.mode {
-        SessionCoverageModeV1::Current => TemporalModeV1::Current,
-        SessionCoverageModeV1::AsOf { cutoff } => TemporalModeV1::AsOf {
-            cutoff: tracedecay_domain::UtcMicros(cutoff),
-        },
-        SessionCoverageModeV1::Evolution => TemporalModeV1::Evolution,
-        SessionCoverageModeV1::Forensic => TemporalModeV1::Forensic,
-    })
+    Ok(first.mode)
 }
 
 struct CountingSink {

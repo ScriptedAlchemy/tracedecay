@@ -78,7 +78,7 @@ pub struct ProjectSessionHistoricalIngestor {
     project_id: tracedecay_domain::ProjectId,
     transcript_source_home: Option<PathBuf>,
     cancellation: ObservationCancellation,
-    codex_discovery: Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub>,
+    codex_discovery: Arc<tracedecay_sessions::runtime::hosts::codex::CodexDiscoveryHub>,
     background_cpu: Arc<ProcessBackgroundCpuV1>,
     codex_consumer: String,
     codex_registered: AtomicBool,
@@ -92,7 +92,7 @@ impl ProjectSessionHistoricalIngestor {
         project_root: PathBuf,
         project_id: tracedecay_domain::ProjectId,
         transcript_source_home: Option<PathBuf>,
-        codex_discovery: Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub>,
+        codex_discovery: Arc<tracedecay_sessions::runtime::hosts::codex::CodexDiscoveryHub>,
         background_cpu: Arc<ProcessBackgroundCpuV1>,
     ) -> Self {
         let source_home = transcript_source_home
@@ -186,7 +186,7 @@ pub struct ProfileSessionHistoricalIngestor {
     profile_identity: Arc<dyn ProfileIdentityReadPort>,
     transcript_source_home: Option<PathBuf>,
     cancellation: ObservationCancellation,
-    codex_discovery: Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub>,
+    codex_discovery: Arc<tracedecay_sessions::runtime::hosts::codex::CodexDiscoveryHub>,
     background_cpu: Arc<ProcessBackgroundCpuV1>,
     session_review: SessionReviewPort,
     codex_consumer: String,
@@ -200,7 +200,7 @@ impl ProfileSessionHistoricalIngestor {
         registry_database: RegisteredGlobalDbLeaseV1,
         profile_identity: Arc<dyn ProfileIdentityReadPort>,
         transcript_source_home: Option<PathBuf>,
-        codex_discovery: Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub>,
+        codex_discovery: Arc<tracedecay_sessions::runtime::hosts::codex::CodexDiscoveryHub>,
         background_cpu: Arc<ProcessBackgroundCpuV1>,
         session_review: SessionReviewPort,
     ) -> Self {

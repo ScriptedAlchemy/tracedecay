@@ -14,13 +14,12 @@ async fn unchanged_reconcile_does_not_reactivate_the_serving_generation() {
         .await
         .expect("mount");
     wait_for_initial_generation(&registry, fixture.path()).await;
-    // The seat is published mid-pass and the seat no longer waits for the
-    // clone successor, so the mount's own receipt lands after the in-progress
-    // guard drops and the leftover backfill drains on later wakes that post
-    // receipts of their own. Settle that whole chain first: a wake still
-    // pending when the overflow arrives keeps its earlier arrival instant, and
-    // the pass would then answer for both.
-    drain_clone_backfill(&registry, fixture.path()).await;
+    // The seat is published mid-pass, so the mount's own receipt lands after
+    // the in-progress guard drops and later wakes post receipts of their own.
+    // Settle that whole chain first: a wake still pending when the overflow
+    // arrives keeps its earlier arrival instant, and the pass would then
+    // answer for both.
+    settle_text_projection(&registry, fixture.path()).await;
     wait_for_settled_owner(&registry, fixture.path()).await;
     wait_for_event_to_ready(&registry).await;
     let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;

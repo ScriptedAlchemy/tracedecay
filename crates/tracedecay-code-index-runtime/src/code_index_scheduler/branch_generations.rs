@@ -579,6 +579,7 @@ mod tests {
     use crate::code_index_scheduler::{
         CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
     };
+    use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
     fn git(root: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
@@ -620,7 +621,8 @@ mod tests {
         let base_tree =
             GitOidV1::new(git(project.path(), &["rev-parse", "HEAD^{tree}"])).expect("base tree");
         let project_id = ProjectId::new("project.branch-generation-diff").expect("project id");
-        let canonical_project = project.path().canonicalize().expect("canonical project");
+        let canonical_project =
+            canonical_existing_identity(project.path()).expect("canonical project");
         let scoped_store = scoped_code_index_store_root(store.path(), &canonical_project);
         let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
             project_id.clone(),
@@ -978,7 +980,8 @@ mod tests {
         git(project.path(), &["checkout", "-q", "main"]);
 
         let project_id = ProjectId::new("project.non-checked-out-refs").expect("project id");
-        let canonical_project = project.path().canonicalize().expect("canonical project");
+        let canonical_project =
+            canonical_existing_identity(project.path()).expect("canonical project");
         let scoped_store = scoped_code_index_store_root(store.path(), &canonical_project);
         let scheduler = CodeIndexWorktreeSchedulerV1::open(
             project_id.clone(),
@@ -1094,7 +1097,8 @@ mod tests {
         .expect("dirty source");
 
         let project_id = ProjectId::new("project.dirty-generation").expect("project id");
-        let canonical_project = project.path().canonicalize().expect("canonical project");
+        let canonical_project =
+            canonical_existing_identity(project.path()).expect("canonical project");
         let scoped_store = scoped_code_index_store_root(store.path(), &canonical_project);
         let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
             project_id.clone(),
@@ -1303,7 +1307,8 @@ mod tests {
         );
 
         let project_id = ProjectId::new("project.superseded-tip-mint").expect("project id");
-        let canonical_project = project.path().canonicalize().expect("canonical project");
+        let canonical_project =
+            canonical_existing_identity(project.path()).expect("canonical project");
         let scoped_store = scoped_code_index_store_root(store.path(), &canonical_project);
         // Only the current tip is indexed, so the pair's head is served from the
         // index and its base, a commit the branch has already left behind, is
@@ -1432,7 +1437,8 @@ mod tests {
             );
 
             let project_id = ProjectId::new(project_id).expect("project id");
-            let canonical_project = project.path().canonicalize().expect("canonical project");
+            let canonical_project =
+                canonical_existing_identity(project.path()).expect("canonical project");
             let scoped_store = scoped_code_index_store_root(store.path(), &canonical_project);
             let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
                 project_id.clone(),
@@ -1689,7 +1695,8 @@ mod tests {
         );
 
         let project_id = ProjectId::new("project.truncated-index-mint").expect("project id");
-        let canonical_project = project.path().canonicalize().expect("canonical project");
+        let canonical_project =
+            canonical_existing_identity(project.path()).expect("canonical project");
         let scoped_store = scoped_code_index_store_root(store.path(), &canonical_project);
         let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
             project_id.clone(),

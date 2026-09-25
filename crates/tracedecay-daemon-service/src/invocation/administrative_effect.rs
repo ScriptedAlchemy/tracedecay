@@ -16,7 +16,8 @@ use tracedecay_domain::{
 };
 use tracedecay_tool_catalog::{EffectClass, UseCaseId};
 
-use super::{RegisteredWorkRuntime, current_micros};
+use super::RegisteredWorkRuntime;
+use tracedecay_contracts::now_micros;
 
 /// Policy-bound authority receipt and completed operation receipt for one
 /// admitted operation of the `family` request family.
@@ -49,7 +50,7 @@ pub(super) fn administrative_authority(
     let authority = AuthorityReceipt::from_context(context, policy, observed_at)?;
     let execution = OperationReceipt::completed(
         observed_at,
-        current_micros(),
+        now_micros(),
         deadline,
         OperationBudgetUsage::default(),
     )?;

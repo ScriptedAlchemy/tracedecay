@@ -44,7 +44,7 @@ async fn project_quiescence_denies_git_cached_routes() {
         .await
         .expect("quiesce project runtime");
     let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
-    let now = current_micros();
+    let now = now_micros();
     let deadline = Deadline::new(UtcMicros(now.0.saturating_add(30_000_000))).expect("deadline");
     let request = DaemonInvocationRequest {
         protocol: tracedecay_daemon_protocol::DAEMON_INVOCATION_PROTOCOL.to_owned(),
@@ -666,7 +666,7 @@ async fn missing_work_owner_stops_retrying_after_publication() {
                     .mark_publication_ready(&publication)
             );
         }
-        let now = current_micros();
+        let now = now_micros();
         let request = DaemonInvocationRequest::work_application(
             "request.work.unmounted",
             tracedecay_daemon_protocol::WorkApplicationInvocationV1::Topology(

@@ -36,6 +36,7 @@ use super::{
 pub async fn evaluate_and_record_scheduler_skip(
     dashboard_root: &Path,
     config: &AutomationConfig,
+    executable: Option<&Path>,
     job: &AutomationJob,
     run_id: &str,
     occurrence_anchor_run_id: Option<&str>,
@@ -45,6 +46,7 @@ pub async fn evaluate_and_record_scheduler_skip(
         return record_scheduler_diagnostic(
             dashboard_root,
             config,
+            executable,
             job,
             run_id,
             reason,
@@ -64,6 +66,7 @@ pub async fn evaluate_and_record_scheduler_skip(
         return record_scheduler_lock_skip(
             dashboard_root,
             config,
+            executable,
             job,
             run_id,
             &current_timestamp().to_string(),
@@ -83,6 +86,7 @@ pub async fn evaluate_and_record_scheduler_skip(
     record_scheduler_diagnostic(
         dashboard_root,
         config,
+        executable,
         job,
         run_id,
         reason,
@@ -97,6 +101,7 @@ pub async fn evaluate_and_record_scheduler_skip(
 pub(super) async fn evaluate_and_record_scheduler_skip_at(
     dashboard_root: &Path,
     config: &AutomationConfig,
+    executable: Option<&Path>,
     job: &AutomationJob,
     run_id: &str,
     now_secs: i64,
@@ -107,6 +112,7 @@ pub(super) async fn evaluate_and_record_scheduler_skip_at(
         return record_scheduler_diagnostic(
             dashboard_root,
             config,
+            executable,
             job,
             run_id,
             reason,
@@ -122,6 +128,7 @@ pub(super) async fn evaluate_and_record_scheduler_skip_at(
         return record_scheduler_lock_skip(
             dashboard_root,
             config,
+            executable,
             job,
             run_id,
             &now_secs.to_string(),
@@ -138,6 +145,7 @@ pub(super) async fn evaluate_and_record_scheduler_skip_at(
     record_scheduler_diagnostic(
         dashboard_root,
         config,
+        executable,
         job,
         run_id,
         reason,
@@ -167,6 +175,7 @@ async fn load_scheduler_summary(
 async fn record_scheduler_diagnostic(
     dashboard_root: &Path,
     config: &AutomationConfig,
+    executable: Option<&Path>,
     job: &AutomationJob,
     occurrence_run_id: &str,
     reason: AutomationSkipReasonV1,
@@ -177,6 +186,7 @@ async fn record_scheduler_diagnostic(
     JobRunContext {
         dashboard_root,
         config,
+        executable,
         job,
         run_id: &diagnostic_run_id,
         trigger: AutomationTrigger::Scheduler,
@@ -193,6 +203,7 @@ async fn record_scheduler_diagnostic(
 pub(super) async fn record_scheduler_lock_skip(
     dashboard_root: &Path,
     config: &AutomationConfig,
+    executable: Option<&Path>,
     job: &AutomationJob,
     occurrence_run_id: &str,
     started_at: &str,
@@ -201,6 +212,7 @@ pub(super) async fn record_scheduler_lock_skip(
     record_scheduler_diagnostic(
         dashboard_root,
         config,
+        executable,
         job,
         occurrence_run_id,
         AutomationSkipReasonV1::SchedulerLockActive,

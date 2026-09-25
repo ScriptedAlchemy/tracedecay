@@ -9,7 +9,7 @@ use tracedecay_code_extraction::{
     import_module_kind,
 };
 use tracedecay_domain::{
-    CanonicalRelationEdgeV1, CodeGenerationId, FileOccurrenceId, ManifestDigest,
+    CanonicalRelationEdgeV1, CodeGenerationId, EdgeKind, FileOccurrenceId, ManifestDigest,
     RelationEdgeKindV1, SourceSpan, SymbolOccurrenceId,
 };
 
@@ -144,8 +144,8 @@ impl CodeIndexImportEvidenceV1 {
 /// One parser-observed reference the file's own symbol table could not bind.
 /// Retained as typed evidence so generation sealing can resolve it against
 /// the whole generation's symbol set, where a cross-file target may live.
-/// Names are already narrowed at retention: ubiquitous method names and
-/// receiver-dotted paths never reach this lane.
+/// Unqualified ubiquitous names are excluded. Rust receiver-dotted calls
+/// remain as limitation evidence even when their receiver type cannot bind.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(deny_unknown_fields)]
 pub struct CodeIndexUnresolvedReferenceV1 {
@@ -159,6 +159,11 @@ pub struct CodeIndexUnresolvedReferenceV1 {
 
 impl CodeIndexUnresolvedReferenceV1 {
     pub(crate) fn validate(&self) -> Result<(), ChunkingFailureV1> {
+        self.evidence_span.validate().map_err(|error| {
+            ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(
+                error,
+            ))
+        })?;
         self.from_occurrence.validate().map_err(|error| {
             ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(
                 error,
@@ -221,7 +226,7 @@ pub enum CodeIndexEdgeAbstentionReasonV1 {
 pub struct CodeIndexEdgeAbstentionV1 {
     pub source_node_id: String,
     pub target_node_id: String,
-    pub legacy_kind: String,
+    pub kind: EdgeKind,
     pub reason: CodeIndexEdgeAbstentionReasonV1,
 }
 
@@ -253,24 +258,6 @@ impl CodeFileIndexArtifactsV1 {
             clone_bodies,
             artifact.schema_evidence.clone(),
             unresolved_references,
-        )?;
-        artifacts.validate_generation_import_authority(extraction)?;
-        Ok(artifacts)
-    }
-
-    pub(crate) fn without_parser_rows(
-        chunks: CodeFileChunksV1,
-        extraction: &ExtractionBatchV1,
-    ) -> Result<Self, ChunkingFailureV1> {
-        let artifacts = Self::from_parts(
-            chunks,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            None,
-            Vec::new(),
         )?;
         artifacts.validate_generation_import_authority(extraction)?;
         Ok(artifacts)
@@ -311,7 +298,9 @@ impl CodeFileIndexArtifactsV1 {
             schema_evidence,
             unresolved_references,
         };
-        artifacts.validate()?;
+        // Every payload was just derived from its tokens or reused under a
+        // key covering every digest input; re-deriving them proves nothing.
+        artifacts.validate_reusing_clone_payloads()?;
         Ok(artifacts)
     }
 

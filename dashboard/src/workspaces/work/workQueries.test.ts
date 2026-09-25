@@ -51,7 +51,6 @@ describe("where a Work read is sent", () => {
   });
 
   it("routes the canonical execution-topology projection through the selected project", () => {
-    expect(WORK_TOPOLOGY_ROUTE.operation).toBe("operation.work.topology");
     expect(scopedUrl(project("selected"), WORK_TOPOLOGY_ROUTE.path)).toBe(
       "/api/projects/project.beta/work/topology",
     );

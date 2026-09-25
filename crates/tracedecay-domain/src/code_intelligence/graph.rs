@@ -16,17 +16,16 @@ use sha2::{Digest, Sha256};
 /// emits the enum variant, the `ALL` slot, the `as_str` arm, and the
 /// `from_str` arm, so a spelling cannot drift between them. `as_str` stays a
 /// direct exhaustive `match`, a new variant fails to compile until it is
-/// declared here, and the node-ID hot path never scans the table. Extra
-/// `| "alias"` spellings widen `from_str` only; `ALL` and `as_str` record what
-/// is written. Serde representations come from the derives passed through on
-/// the enum and are independent of these spellings.
+/// declared here, and the node-ID hot path never scans the table. Serde
+/// representations come from the derives passed through on the enum and are
+/// independent of these spellings.
 macro_rules! wire_enum {
     (
         $(#[$meta:meta])*
         $vis:vis enum $name:ident {
             $(
                 $(#[$variant_meta:meta])*
-                $variant:ident => $wire:literal $(| $alias:literal)*
+                $variant:ident => $wire:literal
             ),+ $(,)?
         }
     ) => {
@@ -38,8 +37,7 @@ macro_rules! wire_enum {
         #[allow(clippy::should_implement_trait)]
         impl $name {
             /// Every variant paired with the spelling [`Self::as_str`] emits and
-            /// [`Self::from_str`] accepts, in declaration order. Inbound-only
-            /// aliases are not listed: `ALL` records what is written.
+            /// [`Self::from_str`] accepts, in declaration order.
             pub const ALL: [($name, &'static str); wire_enum!(@count $($variant)+)] =
                 [$((Self::$variant, $wire),)+];
 
@@ -51,7 +49,7 @@ macro_rules! wire_enum {
 
             pub fn from_str(s: &str) -> Option<Self> {
                 match s {
-                    $($wire $(| $alias)* => Some(Self::$variant),)+
+                    $($wire => Some(Self::$variant),)+
                     _ => None,
                 }
             }
@@ -167,7 +165,7 @@ impl NodeKind {
 }
 
 wire_enum! {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
     pub enum EdgeKind {
         Contains => "contains",
         Calls => "calls",
@@ -185,8 +183,7 @@ wire_enum! {
 wire_enum! {
     #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub enum Visibility {
-        // `"pub"` is accepted inbound only; `"public"` is what is written.
-        Pub => "public" | "pub",
+        Pub => "public",
         PubCrate => "pub_crate",
         PubSuper => "pub_super",
         #[default]
@@ -546,10 +543,10 @@ mod empty_name_node_id_tests {
 mod wire_spelling_tests {
     use super::{EdgeKind, NodeKind, Visibility, generate_node_id};
 
-    /// Spellings that do not follow from the variant name, the inbound-only
-    /// `"pub"` alias, and refusal of unknown spellings.
+    /// Spellings that do not follow from the variant name and refusal of
+    /// unknown spellings, including Rust's `pub` keyword.
     #[test]
-    fn representative_spellings_alias_and_refusal() {
+    fn representative_spellings_and_refusal() {
         assert_eq!(NodeKind::ScalaObject.as_str(), "object");
         assert_eq!(NodeKind::ValField.as_str(), "val");
         assert_eq!(NodeKind::VarField.as_str(), "var");
@@ -561,8 +558,8 @@ mod wire_spelling_tests {
                 .starts_with("object:")
         );
 
-        assert_eq!(Visibility::from_str("pub"), Some(Visibility::Pub));
-        assert!(Visibility::ALL.iter().all(|(_, wire)| *wire != "pub"));
+        assert_eq!(Visibility::from_str("public"), Some(Visibility::Pub));
+        assert!(Visibility::from_str("pub").is_none());
         assert_eq!(Visibility::default(), Visibility::Private);
 
         assert!(NodeKind::from_str("unknown_kind").is_none());

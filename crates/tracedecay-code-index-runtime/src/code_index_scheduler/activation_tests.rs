@@ -13,13 +13,19 @@
 //! Plus the invariant none of the above may weaken: a corrupt sealed store
 //! still fails every request, with no memoized verdict.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
 use tempfile::TempDir;
-use tracedecay_domain::{CodeGenerationId, ProjectId, SanitizerRevision, sha256_hex_suffix};
+use tracedecay_code_index_retention::code_index_generations::{
+    CodeGenerationRetentionModeV1, run_code_generation_retention,
+};
+use tracedecay_domain::{
+    CodeGenerationId, ProjectId, SanitizerRevision, UtcMicros, sha256_hex_suffix,
+};
 use tracedecay_runtime_core::path_safety::{
     canonical_root_identity, plain_git_args, plain_host_path,
 };
@@ -29,6 +35,7 @@ use super::{
     DaemonCodeIndexPublicationStoreV1, SharedCodeIndexBytePoolV1,
 };
 use tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 fn git(root: &Path, args: &[&str]) {
     let output = Command::new("git")
@@ -123,10 +130,8 @@ fn publication_store(store_root: &Path) -> DaemonCodeIndexPublicationStoreV1 {
 async fn cold_mount_defers_sealed_decode_and_truth_verification_to_the_retained_owner() {
     let project = fixture();
     let store = TempDir::new().expect("store root");
-    let canonical_project_root = project
-        .path()
-        .canonicalize()
-        .expect("canonical project root");
+    let canonical_project_root =
+        canonical_existing_identity(project.path()).expect("canonical project root");
     let scoped_store = super::scoped_code_index_store_root(store.path(), &canonical_project_root);
     let generation_id = {
         let mut scheduler = open(project.path(), &scoped_store);
@@ -498,7 +503,28 @@ fn superseded_generation_churn_never_evicts_the_pinned_active_generation() {
         .latest_complete()
         .expect("active generation after churn");
     assert_eq!(served.generation().manifest().generation_id, active);
-    assert!(!served.exact().expect("exact admission").is_empty());
+    let exact = served.exact().expect("exact admission");
+    let files = &served.generation().snapshot().files;
+    let exact_paths: BTreeSet<&str> = exact
+        .iter()
+        .map(|admitted| {
+            files
+                .iter()
+                .find(|file| file.file_occurrence_id == admitted.chunk().anchor.file_occurrence_id)
+                .map(|file| file.logical_path.as_str())
+                .expect("exact chunk names a snapshot file")
+        })
+        .collect();
+    assert_eq!(exact_paths, BTreeSet::from(["src/lib.rs"]));
+    let latest_body = format!("activation_revision() -> u32 {{ {} }}", revisions - 1);
+    assert!(
+        exact.iter().any(|admitted| admitted
+            .chunk()
+            .sanitized_text
+            .as_str()
+            .contains(&latest_body)),
+        "the active generation must serve the last published revision"
+    );
     assert_eq!(
         scheduler.sealed_decode_count(),
         after_activation + pinned_decodes,
@@ -566,5 +592,63 @@ fn a_corrupt_sealed_generation_fails_closed_on_every_request() {
         publication.sealed_decode_count(),
         2,
         "the next request must repeat the full check rather than trust a verdict"
+    );
+}
+
+/// The decoded-generation LRU is an in-memory decode cache, never a retention
+/// mark: a superseded generation it still holds loses its sealed manifest and
+/// the segment only it named on the first retention pass.
+#[test]
+fn decoded_generation_cache_never_keeps_a_superseded_generation_on_disk() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = open(project.path(), store.path());
+    let superseded = publish(&mut scheduler);
+    write(project.path(), "src/lib.rs", 1);
+    let active = publish(&mut scheduler);
+    assert_ne!(superseded, active);
+    scheduler
+        .generation(&superseded)
+        .expect("pinned generation read")
+        .expect("superseded generation is decoded into the cache");
+
+    let file_count = |directory: &str| {
+        fs::read_dir(store.path().join(directory))
+            .expect("read store directory")
+            .count()
+    };
+    let segments_before = file_count("code-generation-segments-v1");
+    assert_eq!(file_count("code-generations-v1"), 2);
+
+    let report = run_code_generation_retention(
+        store.path(),
+        &BTreeSet::new(),
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(1),
+        None,
+    )
+    .expect("apply retention");
+
+    assert_eq!(
+        report
+            .deleted_generations
+            .iter()
+            .map(|generation| &generation.generation_id)
+            .collect::<Vec<_>>(),
+        vec![&superseded]
+    );
+    assert_eq!(file_count("code-generations-v1"), 1);
+    assert!(
+        file_count("code-generation-segments-v1") < segments_before,
+        "the edited file's superseded segment is collected with its manifest"
+    );
+    assert_eq!(
+        scheduler
+            .latest_complete()
+            .expect("active generation still serves")
+            .generation()
+            .manifest()
+            .generation_id,
+        active
     );
 }

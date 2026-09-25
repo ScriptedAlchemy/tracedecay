@@ -27,8 +27,8 @@ use super::ports::{
     FeedbackCycleDedupePort, FeedbackCycleDedupeState, FeedbackDiagnosticsPort,
     FeedbackDiagnosticsRequest, FeedbackImpactPort, FeedbackImpactPortOutcome,
     FeedbackImpactRequest, FeedbackObservationPort, FeedbackPublicationRecordState,
-    FeedbackPublicationV1, FeedbackRouteAdmission, FeedbackRouteAuthorizationPort,
-    FeedbackRuntimeStatePort, FeedbackRuntimeStateV1,
+    FeedbackPublicationV1, FeedbackRouteAuthorizationPort, FeedbackRuntimeStatePort,
+    FeedbackRuntimeStateV1,
 };
 use super::problem_terminal::terminal_for_problem;
 
@@ -187,7 +187,7 @@ impl FeedbackCycleExecutionRequest {
 
 /// Accumulated state carried between typed feedback-cycle stages.
 struct FeedbackCycleProgress {
-    admission: FeedbackRouteAdmission,
+    admission: AuthorityReceipt,
     runtime: Option<FeedbackRuntimeStateV1>,
     completed_stages: Vec<FeedbackEvaluationStageV1>,
     baselines: Vec<FeedbackDiagnosticBaselineV1>,
@@ -1159,7 +1159,7 @@ where
         &self,
         context: &RequestContext,
         request: &FeedbackCycleExecutionRequest,
-        admission: &FeedbackRouteAdmission,
+        admission: &AuthorityReceipt,
         initial_runtime: Option<&FeedbackRuntimeStateV1>,
         dedupe_key: Option<FeedbackDedupeKeyV1>,
         termination: FeedbackCycleTerminationV1,
@@ -1851,7 +1851,6 @@ fn diagnostic_matches_input(
 fn finding_lifecycle(diagnostic: &GenerationDiagnosticV1) -> FeedbackFindingLifecycleV1 {
     match &diagnostic.state {
         DiagnosticRecordStateV1::Current => FeedbackFindingLifecycleV1::Active,
-        DiagnosticRecordStateV1::Superseded { .. } => FeedbackFindingLifecycleV1::Superseded,
         DiagnosticRecordStateV1::Cleared { .. } => FeedbackFindingLifecycleV1::Cleared,
     }
 }

@@ -13,18 +13,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::code_index_scheduler::identity::repository_id_for;
+use tracedecay_configuration::config::PinnedRuntimeConfiguration;
 use tracedecay_contracts::doctor::{
     AdvisoryFeedbackDoctorPort, AdvisoryFeedbackReadV1, CodeIndexMountDoctorPort,
     CodeIndexMountReadV1, CodeIndexMountStateV1, ConfigurationAuthorityDoctorPort,
     ConfigurationAuthorityReadV1, ConfigurationDriftV1, DaemonRuntimeHealthSignalV1,
     DoctorCoverageCompletenessV1, DoctorKernelInputsV1, DoctorReportComposerV1, DoctorReportV1,
     DoctorSourceFuture, DoctorStorageFamilyReadV1, HostConformanceV1, HostIntegrationDoctorPort,
-    HostIntegrationReadV1, IngestRefusalCensusReadV1, LanguageServerDoctorPort,
-    LanguageServerReadV1, LanguageServerStateV1, ObservabilityDoctorPort, ObservabilityReadV1,
-    ObservabilityStateV1, OperationalAuditDoctorPort, OperationalAuditReadV1,
-    ProfileAuthorityReadV1, RemoteOperationalReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1,
-    StorageDoctorPort, advisory_feedback_read_from_publication, merge_storage_reads,
-    runtime_health_read, storage_family_read,
+    HostIntegrationReadV1, IngestRefusalCensusReadV1, LanguageServerAnalyzerStateV1,
+    LanguageServerAnalyzerV1, LanguageServerDoctorPort, LanguageServerReadV1,
+    ObservabilityDoctorPort, ObservabilityReadV1, ObservabilityStateV1, OperationalAuditDoctorPort,
+    OperationalAuditReadV1, ProfileAuthorityReadV1, RemoteOperationalReadV1,
+    RuntimeHealthDoctorPort, RuntimeHealthReadV1, StorageDoctorPort,
+    advisory_feedback_read_from_publication, merge_storage_reads, runtime_health_read,
+    storage_family_read,
 };
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::storage::SchemaConvergenceFindingV1;
@@ -34,10 +36,10 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::CodeGenerationId;
 use tracedecay_global_db::{GlobalDbNativeIntegrationStore, RegisteredGlobalDb};
-use tracedecay_project::config::DaemonRuntimeConfiguration;
 
 use crate::DaemonFeedbackRuntimeRegistrar;
 use tracedecay_maintenance::telemetry::GuardedStoreTelemetryPort;
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 const DOCTOR_REPORT_CAPABILITY: &str = "capability.application.doctor.report";
 const DOCTOR_REPORT_USE_CASE: &str = "use-case.application.doctor.report";
@@ -54,7 +56,7 @@ const DOCTOR_CONTEXT_HORIZON_MICROS: i64 = 30_000_000;
 /// a fabricated healthy result.
 #[must_use]
 pub fn configuration_read_from_pin<E>(
-    resolved: &Result<DaemonRuntimeConfiguration, E>,
+    resolved: &Result<PinnedRuntimeConfiguration, E>,
 ) -> ConfigurationAuthorityReadV1 {
     match resolved {
         Ok(_) => ConfigurationAuthorityReadV1::Resolved {
@@ -121,10 +123,10 @@ fn host_integration_read_from_report(
     }) {
         HostConformanceV1::ProtocolDrift
     } else if report.components.iter().any(|component| {
-        // `Drifted`, `OrphanedRegistration`, and `ActivationDeferred` are
-        // repairable conformance, not protocol drift: the component's ownership
-        // is intact and either the ordinary reinstall or the host's own
-        // activation converges it, so none may escalate to `ProtocolDrift`.
+        // `Drifted`, `OrphanedRegistration`, `ActivationDeferred`, and
+        // `ReinstallRequired` are repairable conformance, not protocol drift:
+        // an ordinary or adopting install, or the host's own activation,
+        // converges each, so none may escalate to `ProtocolDrift`.
         matches!(
             component.state,
             HostBundleComponentDoctorStateV1::Repairable
@@ -132,6 +134,7 @@ fn host_integration_read_from_report(
                 | HostBundleComponentDoctorStateV1::Drifted
                 | HostBundleComponentDoctorStateV1::OrphanedRegistration
                 | HostBundleComponentDoctorStateV1::ActivationDeferred
+                | HostBundleComponentDoctorStateV1::ReinstallRequired
         )
     }) {
         HostConformanceV1::Drifted
@@ -249,42 +252,50 @@ pub struct SchemaConvergenceDoctorReadV1 {
 
 // === Language server/analyzer (LanguageServer family) ========================
 
-/// Map the daemon diagnostic broker's project-active engine statuses.
+/// Map the daemon diagnostic broker's resolved engine statuses into the Doctor
+/// read. Every adapter is carried so `lsp servers` can list the daemon's view;
+/// grading of inactive languages is refused by the contract itself.
 #[must_use]
-pub fn language_server_read_from_engine_states(
-    states: impl IntoIterator<Item = tracedecay_lsp::analyzer::broker::EngineState>,
+pub fn language_server_read_from_engine_statuses(
+    statuses: impl IntoIterator<Item = tracedecay_lsp::analyzer::broker::ResolvedEngineStatus>,
 ) -> LanguageServerReadV1 {
     use tracedecay_lsp::analyzer::broker::EngineState;
 
-    let states = states.into_iter().collect::<Vec<_>>();
-    if states.is_empty() {
-        return LanguageServerReadV1::Absent;
-    }
-    let state = if states.contains(&EngineState::Crashed) {
-        LanguageServerStateV1::Crashed
-    } else if states.contains(&EngineState::Unavailable) {
-        LanguageServerStateV1::Unavailable
-    } else if states.contains(&EngineState::Disabled) {
-        LanguageServerStateV1::Disabled
-    } else if states.contains(&EngineState::Refreshing) {
-        LanguageServerStateV1::Refreshing
-    } else if states.iter().all(|state| *state == EngineState::Ready) {
-        LanguageServerStateV1::Ready
-    } else {
-        LanguageServerStateV1::Available
-    };
-    LanguageServerReadV1::Observed {
-        state,
-        coverage: DoctorCoverageCompletenessV1::Complete,
-    }
+    LanguageServerReadV1::observed(
+        statuses
+            .into_iter()
+            .map(|resolved| LanguageServerAnalyzerV1 {
+                state: match (resolved.active, resolved.status.state) {
+                    (false, _) | (true, EngineState::Inactive) => {
+                        LanguageServerAnalyzerStateV1::Inactive
+                    }
+                    (true, EngineState::Ready) => LanguageServerAnalyzerStateV1::Ready,
+                    (true, EngineState::Available) => LanguageServerAnalyzerStateV1::Available,
+                    (true, EngineState::Refreshing) => LanguageServerAnalyzerStateV1::Refreshing,
+                    (true, EngineState::Disabled) => LanguageServerAnalyzerStateV1::Disabled,
+                    (true, EngineState::Unavailable) => LanguageServerAnalyzerStateV1::Unavailable,
+                    (true, EngineState::Crashed) => LanguageServerAnalyzerStateV1::Crashed,
+                },
+                executable_found: resolved.executable_found,
+                language: resolved.status.language,
+                command: resolved.status.command,
+                install: resolved
+                    .status
+                    .install_options
+                    .first()
+                    .map(|option| option.command.clone()),
+                detail: resolved.status.last_error,
+            })
+            .collect(),
+    )
 }
 
-/// Read live project-active analyzer state from the daemon diagnostic owner.
+/// Read live analyzer state from the daemon diagnostic owner.
 pub async fn language_server_read_from_broker(
     broker: &tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>,
 ) -> LanguageServerReadV1 {
-    let statuses = broker.lock().await.project_engine_statuses();
-    language_server_read_from_engine_states(statuses.into_iter().map(|status| status.state))
+    let statuses = broker.lock().await.resolved_engine_statuses();
+    language_server_read_from_engine_statuses(statuses)
 }
 
 // === Canonical Plan-26 observations (Observability family) ===================
@@ -1005,6 +1016,7 @@ pub fn production_doctor_report_reader(
                         })
                 })
             });
+            let project_temporal = SessionTemporalAccess::new(&*project_sessions);
             let (
                 quick_check,
                 authority_audit_ok,
@@ -1026,7 +1038,7 @@ pub fn production_doctor_report_reader(
                         tokio::join!(
                     graph.quick_check_report(),
                     observation_authority_audit_ok(registry.as_ref()),
-                    project_sessions.session_temporal_doctor_health(),
+                    project_temporal.session_temporal_doctor_health(),
                     profile_storage_reads,
                     collect_over_budget_store_findings(&context, &telemetry_ports, &retention),
                     tracedecay_maintenance::retention::diagnostics::collect_session_retention_findings(
@@ -1135,7 +1147,8 @@ pub fn production_doctor_report_reader(
             Ok(
                 tracedecay_dashboard_api::AdmittedDoctorReportV1::new(report)
                     .with_table_growth_evidence(store_telemetry.table_growth_evidence)
-                    .with_schema_convergences(schema_convergence.findings),
+                    .with_schema_convergences(schema_convergence.findings)
+                    .with_language_servers(inputs.language_server),
             )
         })
     })

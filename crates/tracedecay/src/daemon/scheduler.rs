@@ -4,19 +4,20 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 use tracedecay_automation_runtime::automation::AutomationRunControl;
-use tracedecay_automation_runtime::automation::backend::AgentTaskKind;
+use tracedecay_automation_runtime::automation::backend::{AgentTaskBackend, AgentTaskKind};
 use tracedecay_automation_runtime::automation::maintenance_termination::MaintenanceTaskTermination;
 use tracedecay_automation_runtime::automation::scheduler_stop::AutomationSchedulerStop;
 
-use crate::project::TraceDecay;
 use tracedecay_automation_runtime::automation::effect_runtime::settlement::{
     AutomationEffectAdmission, AutomationEffectAuthority, RetainedAutomationSettlementOutcome,
     RetainedAutomationSettlementProjection, pinned_automation_configuration_digest,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_project::project::TraceDecay;
 
 use super::branch_admin::MaintenanceReaperKind;
-use super::{DAEMON_TASK_ABORT_DEADLINE, DaemonEngine, DaemonHandshake, ProjectServerKey};
+use super::{DaemonEngine, DaemonHandshake, ProjectServerKey};
+use tracedecay_daemon_service::shutdown::DAEMON_TASK_ABORT_DEADLINE;
 use tracedecay_runtime_core::logging::log_daemon_event;
 
 mod combined_effect;
@@ -168,6 +169,9 @@ where
         + 'static,
 {
     synchronize_scheduler_effect_control(run_control);
+    // The task was admitted, so a pre-admission problem that recurs later is
+    // a new transition and must be logged again.
+    effect_admission::note_scheduler_task_admitted(project_path, task);
     let settlement = effect.start_retained_automation_settlement(
         retained,
         Some(scheduler_run_observer(engine, project_id, project_path)),
@@ -395,7 +399,7 @@ impl DaemonEngine {
         key: ProjectServerKey,
         project_path: PathBuf,
         handshake: DaemonHandshake,
-        cg: Arc<crate::project::TraceDecay>,
+        cg: Arc<tracedecay_project::project::TraceDecay>,
     ) {
         if !self.lifecycle.accepting() {
             return;
@@ -994,7 +998,8 @@ impl DaemonEngine {
             .await
             .clear();
         let _child_shutdown =
-            tracedecay_sessions::runtime::codex_app_server::begin_codex_app_server_shutdown();
+            tracedecay_sessions::runtime::hosts::codex_app_server::begin_codex_app_server_shutdown(
+            );
         let _ = timeout(DAEMON_TASK_ABORT_DEADLINE, async {
             for retirement in retirements {
                 retirement.wait().await;
@@ -1335,8 +1340,16 @@ pub(super) async fn automation_scheduler_tick_secs_for_project(cg: &TraceDecay) 
 /// this often no matter how many projects are active.
 const RETENTION_MIN_INTERVAL_SECS: u64 = 6 * 60 * 60;
 
+/// Owned by [`StoreAdministration`], the daemon-wide handle every project's
+/// scheduler loop already clones, so one daemon runs at most one global
+/// retention pass per [`RETENTION_MIN_INTERVAL_SECS`].
+///
+/// Not a process-wide static: a test binary hosts many daemons, and a sibling
+/// daemon's scheduler tick took the `in_flight` reservation out from under a
+/// retention test, which then observed a pass that returned before it ever
+/// acquired the writer.
 #[derive(Debug, Default)]
-struct GlobalRetentionCadence {
+pub(super) struct GlobalRetentionCadence {
     last_success: Option<std::time::Instant>,
     in_flight: bool,
 }
@@ -1363,14 +1376,9 @@ impl GlobalRetentionCadence {
     }
 }
 
-static GLOBAL_RETENTION_CADENCE: std::sync::Mutex<GlobalRetentionCadence> =
-    std::sync::Mutex::new(GlobalRetentionCadence {
-        last_success: None,
-        in_flight: false,
-    });
-
-#[cfg(test)]
-static GLOBAL_RETENTION_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// The daemon-wide cadence handle, shared by every clone of one
+/// [`StoreAdministration`].
+pub(super) type SharedGlobalRetentionCadence = Arc<std::sync::Mutex<GlobalRetentionCadence>>;
 
 #[cfg(test)]
 mod global_retention_cadence_tests {
@@ -1385,12 +1393,12 @@ mod global_retention_cadence_tests {
     /// hanging the suite.
     #[tokio::test]
     async fn denied_reservation_returns_without_relocking_the_cadence() {
-        let _test_lock = super::GLOBAL_RETENTION_TEST_LOCK.lock().await;
+        let cadence = super::SharedGlobalRetentionCadence::default();
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let now = Instant::now();
-            let first = super::reserve_global_retention(now);
-            let second = super::reserve_global_retention(now);
+            let first = super::reserve_global_retention(&cadence, now);
+            let second = super::reserve_global_retention(&cadence, now);
             let outcome = (first.is_some(), second.is_some());
             drop(first);
             sender.send(outcome).expect("report reservation outcome");
@@ -1430,12 +1438,13 @@ mod global_retention_cadence_tests {
 }
 
 struct GlobalRetentionReservation {
+    cadence: SharedGlobalRetentionCadence,
     active: bool,
 }
 
 impl GlobalRetentionReservation {
     fn finish(mut self, now: std::time::Instant, succeeded: bool) {
-        finish_global_retention(now, succeeded);
+        finish_global_retention(&self.cadence, now, succeeded);
         self.active = false;
     }
 }
@@ -1443,28 +1452,36 @@ impl GlobalRetentionReservation {
 impl Drop for GlobalRetentionReservation {
     fn drop(&mut self) {
         if self.active {
-            finish_global_retention(std::time::Instant::now(), false);
+            finish_global_retention(&self.cadence, std::time::Instant::now(), false);
         }
     }
 }
 
-fn reserve_global_retention(now: std::time::Instant) -> Option<GlobalRetentionReservation> {
-    let mut guard = match GLOBAL_RETENTION_CADENCE.lock() {
+fn reserve_global_retention(
+    cadence: &SharedGlobalRetentionCadence,
+    now: std::time::Instant,
+) -> Option<GlobalRetentionReservation> {
+    let mut guard = match cadence.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
     // `then` (not `then_some`) so the reservation only exists when the
     // cadence granted it: `then_some` constructs the value eagerly, and a
-    // denied reservation would be dropped right here, its Drop re-locks
-    // GLOBAL_RETENTION_CADENCE while this guard is still held, deadlocking
-    // the scheduler tick (and falsely finishing a pass it never owned).
-    guard
-        .reserve(now)
-        .then(|| GlobalRetentionReservation { active: true })
+    // denied reservation would be dropped right here, its Drop re-locks the
+    // cadence while this guard is still held, deadlocking the scheduler tick
+    // (and falsely finishing a pass it never owned).
+    guard.reserve(now).then(|| GlobalRetentionReservation {
+        cadence: Arc::clone(cadence),
+        active: true,
+    })
 }
 
-fn finish_global_retention(now: std::time::Instant, succeeded: bool) {
-    let mut guard = match GLOBAL_RETENTION_CADENCE.lock() {
+fn finish_global_retention(
+    cadence: &SharedGlobalRetentionCadence,
+    now: std::time::Instant,
+    succeeded: bool,
+) {
+    let mut guard = match cadence.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
@@ -1474,19 +1491,15 @@ fn finish_global_retention(now: std::time::Instant, succeeded: bool) {
 fn global_table_retention_config(
     config: &tracedecay_configuration::RetentionConfig,
 ) -> tracedecay_maintenance::retention::RetentionConfig {
-    let (session_messages_days, lcm_raw_messages_days) = if config.session_lcm.enabled {
-        (
-            config.session_lcm.dedupe_projected_after_days,
-            config.session_lcm.drop_after_days,
-        )
+    let lcm_raw_messages_days = if config.session_lcm.enabled {
+        config.session_lcm.drop_after_days
     } else {
-        (None, None)
+        None
     };
     tracedecay_maintenance::retention::RetentionConfig {
         // The root retention tree has no analytics-event window. Disabling
         // this legacy table is the only mapping that does not invent policy.
         analytics_events_days: None,
-        session_messages_days,
         lcm_raw_messages_days,
     }
 }
@@ -1500,10 +1513,13 @@ async fn maybe_run_global_retention(
     database: &tracedecay_global_db::RegisteredGlobalDb,
     config: &tracedecay_configuration::RetentionConfig,
 ) {
-    let Some(reservation) = reserve_global_retention(std::time::Instant::now()) else {
+    let Some(reservation) = reserve_global_retention(
+        administration.global_retention_cadence(),
+        std::time::Instant::now(),
+    ) else {
         return;
     };
-    let now_secs = crate::project::current_timestamp();
+    let now_secs = tracedecay_runtime_core::tracedecay::current_timestamp();
     let global_config = global_table_retention_config(config);
     let Some(retention) = administration
         .try_with_writer(|| async {
@@ -1575,29 +1591,6 @@ mod global_retention_tests {
     use tracedecay_global_db::RegisteredGlobalDb;
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
 
-    struct ResetGlobalRetentionCadence;
-
-    impl ResetGlobalRetentionCadence {
-        fn new() -> Self {
-            reset_global_retention_cadence();
-            Self
-        }
-    }
-
-    impl Drop for ResetGlobalRetentionCadence {
-        fn drop(&mut self) {
-            reset_global_retention_cadence();
-        }
-    }
-
-    fn reset_global_retention_cadence() {
-        let mut cadence = match GLOBAL_RETENTION_CADENCE.lock() {
-            Ok(cadence) => cadence,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        *cadence = GlobalRetentionCadence::default();
-    }
-
     async fn seed_eligible_projected_message(database: &RegisteredGlobalDb) {
         let session = tracedecay_sessions::runtime::SessionRecord {
             provider: "claude".to_owned(),
@@ -1653,18 +1646,23 @@ mod global_retention_tests {
             .execute_batch(
                 "CREATE TABLE retention_delete_receipts (deleted_message_id TEXT NOT NULL);
                  CREATE TRIGGER retention_delete_receipt
-                 AFTER DELETE ON session_messages BEGIN
+                 AFTER DELETE ON lcm_raw_messages BEGIN
                     INSERT INTO retention_delete_receipts(deleted_message_id)
                     VALUES (OLD.message_id);
                  END;
-                 INSERT INTO lcm_summary_nodes(
-                    node_id, provider, conversation_id, session_id, depth, summary_text,
-                    summary_hash, summary_token_count, source_token_count
+                 INSERT INTO retrieval_anchors (
+                    anchor_id, anchor_json, owner_json, projection_generation
+                 ) VALUES ('retention-summary-anchor', '{}', '{}', 'test');
+                 INSERT INTO session_summary_nodes(
+                    summary_id, session_id, provider, conversation_id, depth,
+                    summary_anchor_id, summary_text, summary_hash, summary_token_count,
+                    source_token_count, source_horizon_json, created_at
                  ) VALUES (
-                    'retention-summary', 'claude', 'retention-session', 'retention-session', 0,
-                    'retention summary', 'retention-summary-hash', 1, 1
+                    'retention-summary', 'retention-session', 'claude', 'retention-session', 0,
+                    'retention-summary-anchor', 'retention summary', 'retention-summary-hash',
+                    1, 1, '{}', 1
                  );
-                 INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
+                 INSERT INTO session_summary_sources(summary_id, source_kind, source_id, ordinal)
                  SELECT 'retention-summary', 'raw_message', CAST(store_id AS TEXT), 0
                  FROM lcm_raw_messages
                  WHERE provider = 'claude' AND message_id = 'retention-message';",
@@ -1702,16 +1700,13 @@ mod global_retention_tests {
     fn global_retention_config() -> tracedecay_configuration::RetentionConfig {
         let mut config = tracedecay_configuration::RetentionConfig::default();
         config.session_lcm.enabled = true;
-        config.session_lcm.dedupe_projected_after_days = Some(1);
-        config.session_lcm.drop_after_days = None;
+        config.session_lcm.drop_after_days = Some(1);
         config.session_lcm.offload_after_days = None;
         config
     }
 
     #[tokio::test]
     async fn retention_defers_while_daemon_writer_is_held_and_prunes_once_after_release() {
-        let _test_lock = GLOBAL_RETENTION_TEST_LOCK.lock().await;
-        let _cadence_reset = ResetGlobalRetentionCadence::new();
         let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = RegisteredGlobalDbHarness::open("global-retention-writer-admission").await;
         let database = harness.registered.clone();
@@ -1780,8 +1775,6 @@ mod global_retention_tests {
 
     #[tokio::test]
     async fn cancelled_admitted_retention_releases_writer_and_cadence_for_retry() {
-        let _test_lock = GLOBAL_RETENTION_TEST_LOCK.lock().await;
-        let _cadence_reset = ResetGlobalRetentionCadence::new();
         let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = RegisteredGlobalDbHarness::open("global-retention-cancelled-admission").await;
         let database = harness.registered.clone();
@@ -1844,8 +1837,6 @@ mod global_retention_tests {
 
     #[tokio::test]
     async fn failed_retention_releases_writer_and_cadence_for_retry() {
-        let _test_lock = GLOBAL_RETENTION_TEST_LOCK.lock().await;
-        let _cadence_reset = ResetGlobalRetentionCadence::new();
         let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = RegisteredGlobalDbHarness::open("global-retention-prune-failure").await;
         let database = harness.registered.clone();
@@ -1855,7 +1846,7 @@ mod global_retention_tests {
             .expect("open registered writer for retention fault")
             .execute_batch(
                 "CREATE TRIGGER fail_global_retention_prune
-                 BEFORE DELETE ON session_messages
+                 BEFORE DELETE ON lcm_raw_messages
                  WHEN OLD.message_id = 'retention-message'
                  BEGIN
                     SELECT RAISE(ABORT, 'forced global retention prune failure');
@@ -1907,11 +1898,15 @@ struct PinnedAutomationConfiguration {
     configuration_revision_id: tracedecay_domain::configuration::ConfigurationRevisionId,
     configuration_digest: tracedecay_domain::ManifestDigest,
     settings: tracedecay_automation_runtime::automation::config::AutomationConfig,
+    /// The `codex` executable the same snapshot binds
+    /// (`lcm.summarizer_executables.v1`); the automation backend spawns only
+    /// this path.
+    codex_executable: tracedecay_domain::configuration::LcmSummarizerExecutableV1,
 }
 
 #[hotpath::measure(label = "daemon.scheduler.read_automation_config", future = true)]
 async fn effective_automation_config_for_project(
-    cg: &crate::project::TraceDecay,
+    cg: &tracedecay_project::project::TraceDecay,
 ) -> Result<PinnedAutomationConfiguration> {
     let configuration = cg
         .configuration_runtime()
@@ -1933,6 +1928,7 @@ async fn effective_automation_config_for_project(
         configuration_revision_id: configuration.revision_id().clone(),
         configuration_digest,
         settings,
+        codex_executable: configuration.config().lcm_summarizers.codex.clone(),
     })
 }
 
@@ -1974,7 +1970,7 @@ pub(super) fn automation_scheduler_configured(
 /// scheduled fixed task or a schedulable user-defined job.
 #[hotpath::measure(label = "daemon.scheduler.probe_scheduler_work", future = true)]
 async fn automation_scheduler_has_work(
-    cg: &crate::project::TraceDecay,
+    cg: &tracedecay_project::project::TraceDecay,
     config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
 ) -> Result<bool> {
     use tracedecay_automation_runtime::automation::config::{
@@ -2016,7 +2012,7 @@ async fn run_user_jobs_scheduler_pass(
     project_id: &tracedecay_domain::ProjectId,
     project_path: &Path,
     profile_root: &Path,
-    cg: &crate::project::TraceDecay,
+    cg: &tracedecay_project::project::TraceDecay,
     configuration_digest: tracedecay_domain::ManifestDigest,
     config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
     backend: &tracedecay_automation_runtime::automation::backend::CodexAppServerBackend,
@@ -2061,6 +2057,7 @@ async fn run_user_jobs_scheduler_pass(
         match tracedecay_automation_runtime::automation::jobs::evaluate_and_record_scheduler_skip(
             &dashboard_root,
             config,
+            backend.executable(),
             job,
             &requested_run_id,
             occurrence_anchor_run_id.as_deref(),

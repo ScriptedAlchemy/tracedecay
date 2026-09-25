@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use tracedecay_domain::CodeGenerationId;
 use tracedecay_domain::canonical_text::{encode_lowercase_hex, is_lowercase_hex};
 
+use super::file_quarantine::{FileQuarantine, open_optional_dir};
 use super::graph_replay_release;
 use super::journal::{BoundedJournalSpec, journal_path};
 use super::locking::{CodeGenerationStoreLockV1, try_acquire_code_generation_store_lock};
@@ -38,6 +39,8 @@ pub(super) const GENERATION_TRANSACTION_JOURNAL: BoundedJournalSpec<
     write_context: "code-generation-retention-transaction",
     validate: validate_transaction,
 };
+
+const GENERATION_QUARANTINE_LABEL: &str = "collectable generation";
 
 pub(super) const GENERATION_RECEIPT_STORE: ReceiptStoreSpec = ReceiptStoreSpec {
     directory: RECEIPTS_DIRECTORY,
@@ -130,51 +133,22 @@ pub(super) fn stage_collectable_generations(
     store_root: &Path,
     transaction: &CodeGenerationRetentionTransactionV1,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
-    let generations_root = store_root.join(GENERATIONS_DIRECTORY);
-    let stage_root = transaction_stage_root(store_root, &transaction.receipt);
-    std::fs::create_dir_all(&stage_root).map_err(storage)?;
-    sync_directory(stage_root.parent().ok_or_else(|| {
-        CodeGenerationRetentionErrorV1::UnsafeState("retention quarantine has no parent".to_owned())
-    })?)?;
-
+    let generations = open_optional_dir(&store_root.join(GENERATIONS_DIRECTORY))?;
+    let quarantine = FileQuarantine::prepare(
+        GENERATION_QUARANTINE_LABEL,
+        &store_root.join(QUARANTINE_DIRECTORY),
+        &transaction.receipt.receipt_digest,
+    )?;
     for generation in &transaction.receipt.deleted_generations {
-        let source = generations_root.join(&generation.generation_file);
-        let staged = stage_root.join(&generation.generation_file);
-        match (regular_file_exists(&source)?, regular_file_exists(&staged)?) {
-            (true, false) => {
-                // No-follow: `regular_file_exists` already proved the path is
-                // a regular file, and sizing through a racing symlink would
-                // measure foreign bytes.
-                let metadata = std::fs::symlink_metadata(&source).map_err(storage)?;
-                if metadata.len() != generation.size_bytes {
-                    return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                        "collectable generation '{}' changed after the mark phase",
-                        generation.generation_file
-                    )));
-                }
-                std::fs::rename(&source, &staged).map_err(storage)?;
-                sync_directory(&generations_root)?;
-                sync_directory(&stage_root)?;
-            }
-            (false, false) => {
+        quarantine.stage(generations.as_ref(), &generation.generation_file, |file| {
+            if file.metadata().map_err(storage)?.len() != generation.size_bytes {
                 return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                    "collectable generation '{}' is missing before quarantine",
+                    "collectable generation '{}' changed after the mark phase",
                     generation.generation_file
                 )));
             }
-            (false, true) => {
-                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                    "collectable generation '{}' was already quarantined",
-                    generation.generation_file
-                )));
-            }
-            (true, true) => {
-                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                    "collectable generation '{}' exists in both source and quarantine",
-                    generation.generation_file
-                )));
-            }
-        }
+            Ok(())
+        })?;
     }
     crate::hotpath_observe::retention_quarantined(
         transaction
@@ -733,31 +707,14 @@ pub(super) fn rollback_staged_transaction(
     transaction: &CodeGenerationRetentionTransactionV1,
     graph_replay_pool_root: Option<&Path>,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
-    let generations_root = store_root.join(GENERATIONS_DIRECTORY);
-    let stage_root = transaction_stage_root(store_root, &transaction.receipt);
+    let generations = open_optional_dir(&store_root.join(GENERATIONS_DIRECTORY))?;
+    let quarantine = FileQuarantine::recover(
+        GENERATION_QUARANTINE_LABEL,
+        &store_root.join(QUARANTINE_DIRECTORY),
+        &transaction.receipt.receipt_digest,
+    )?;
     for generation in &transaction.receipt.deleted_generations {
-        let source = generations_root.join(&generation.generation_file);
-        let staged = stage_root.join(&generation.generation_file);
-        match (regular_file_exists(&source)?, regular_file_exists(&staged)?) {
-            (true, false) => {}
-            (false, true) => {
-                std::fs::rename(&staged, &source).map_err(storage)?;
-                sync_directory(&generations_root)?;
-                sync_directory(&stage_root)?;
-            }
-            (false, false) => {
-                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                    "retention rollback cannot find '{}'",
-                    generation.generation_file
-                )));
-            }
-            (true, true) => {
-                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                    "retention rollback found duplicate '{}'",
-                    generation.generation_file
-                )));
-            }
-        }
+        quarantine.restore(generations.as_ref(), &generation.generation_file)?;
     }
     if let Some(pool_root) = graph_replay_pool_root {
         withdraw_generations_from_graph_replay_pool(store_root, transaction, pool_root)?;
@@ -769,7 +726,7 @@ pub(super) fn rollback_staged_transaction(
     // reverse order is safe at every intermediate crash point because a
     // rewritten pointer names a strict subset of what is on disk.
     restore_pointer_for_rollback(store_root, transaction)?;
-    remove_empty_stage_root(&stage_root)
+    quarantine.remove_empty_stage()
 }
 
 /// Put the pre-collection `generation_index` back after a rolled-back unit.
@@ -853,23 +810,16 @@ pub(super) fn cleanup_committed_transaction_under_graph_replay_pool_lock(
     if let Some(pool_lock) = graph_replay_pool_lock {
         verify_committed_graph_replay_pool_state(store_root, transaction, pool_lock)?;
     }
-    let generations_root = store_root.join(GENERATIONS_DIRECTORY);
-    let stage_root = transaction_stage_root(store_root, &transaction.receipt);
+    let generations = open_optional_dir(&store_root.join(GENERATIONS_DIRECTORY))?;
+    let quarantine = FileQuarantine::recover(
+        GENERATION_QUARANTINE_LABEL,
+        &store_root.join(QUARANTINE_DIRECTORY),
+        &transaction.receipt.receipt_digest,
+    )?;
     for generation in &transaction.receipt.deleted_generations {
-        let source = generations_root.join(&generation.generation_file);
-        if regular_file_exists(&source)? {
-            return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                "retention receipt is durable but '{}' returned to the generation directory",
-                generation.generation_file
-            )));
-        }
-        let staged = stage_root.join(&generation.generation_file);
-        if regular_file_exists(&staged)? {
-            std::fs::remove_file(&staged).map_err(storage)?;
-            sync_directory(&stage_root)?;
-        }
+        quarantine.remove_committed(generations.as_ref(), &generation.generation_file)?;
     }
-    remove_empty_stage_root(&stage_root)
+    quarantine.remove_empty_stage()
 }
 
 pub(super) fn ensure_transaction_liveness(
@@ -914,26 +864,6 @@ pub(super) fn ensure_transaction_liveness(
         ));
     }
     Ok(())
-}
-
-pub(super) fn remove_empty_stage_root(
-    stage_root: &Path,
-) -> Result<(), CodeGenerationRetentionErrorV1> {
-    let mut entries = match std::fs::read_dir(stage_root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(storage(error)),
-    };
-    if entries.next().is_some() {
-        return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "retention quarantine '{}' contains unexpected files",
-            stage_root.display()
-        )));
-    }
-    std::fs::remove_dir(stage_root).map_err(storage)?;
-    sync_directory(stage_root.parent().ok_or_else(|| {
-        CodeGenerationRetentionErrorV1::UnsafeState("retention quarantine has no parent".to_owned())
-    })?)
 }
 
 pub(super) fn regular_file_exists(path: &Path) -> Result<bool, CodeGenerationRetentionErrorV1> {

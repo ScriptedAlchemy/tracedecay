@@ -76,10 +76,6 @@ fn should_print_status_logo(short: bool, stdout_is_terminal: bool) -> bool {
     !short && stdout_is_terminal
 }
 
-fn should_fetch_online_status_embellishments(stdout_is_terminal: bool) -> bool {
-    stdout_is_terminal
-}
-
 /// Cache lifetimes of the two decorative worldwide-counter reads. The status
 /// render always shows the cache; these only decide whether one bounded
 /// refresh for the next invocation is worth starting.
@@ -453,8 +449,7 @@ async fn handle_status_command_within(
         .map(serde_json::from_value)
         .transpose()?
         .unwrap_or_default();
-    let show_online =
-        should_fetch_online_status_embellishments(stdout_is_terminal) && upload_enabled;
+    let show_online = stdout_is_terminal && upload_enabled;
     // The worldwide counter and country flags are decoration served from the
     // local cache: the render below never waits on the network. When a cache
     // has expired, one refresh for the next invocation starts here so its
@@ -545,20 +540,6 @@ async fn handle_status_command_within(
         }
     }
 
-    if !tracedecay_configuration::is_in_gitignore(&project_path) {
-        let dir_name = tracedecay::config::active_data_dir_name(&project_path);
-        if stderr_is_terminal {
-            eprintln!(
-                "\n\x1b[33mWarning: {dir_name} is not in .gitignore. \
-                 run `echo {dir_name} >> .gitignore` to exclude it from git.\x1b[0m"
-            );
-        } else {
-            eprintln!(
-                "\nWarning: {dir_name} is not in .gitignore. \
-                 run `echo {dir_name} >> .gitignore` to exclude it from git."
-            );
-        }
-    }
     if let Some(refresh) = refresh
         && let Some(fresh) = await_online_refresh(deadline, refresh).await
         && fresh.apply(&mut config, now)

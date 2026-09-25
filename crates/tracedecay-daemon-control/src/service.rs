@@ -39,7 +39,7 @@ use probe::{
     DaemonProtocolState, DaemonSocketState, daemon_readiness_probe, daemon_socket_state,
     daemon_transport_display,
 };
-use runner::{ServicePlatform, ServiceRunner};
+use runner::{ServicePlatform, ServiceRunner, launchd_service_state};
 use unit_file::{
     launchd_plist_env_value, read_service_unit, remove_service_unit, service_unit_exists,
     service_unit_path, socket_path_from_unit_text, write_service_unit,
@@ -76,6 +76,22 @@ const DAEMON_STOP_TIMEOUT_MARGIN_SECS: u64 = 15;
 /// Two seconds matches the launchd `ThrottleInterval` and is long enough to
 /// let an OOM-killed cgroup release memory before the next `ExecStart`.
 const DAEMON_RESTART_SEC: u64 = 2;
+
+/// How long a maintenance window waits, after stopping the managed daemon,
+/// for that daemon to release the shared lifecycle lease it holds for its
+/// whole lifetime.
+///
+/// `launchctl bootout` returns once the job is signalled, not once the
+/// process has exited, so the daemon is still draining clients, aborting
+/// tasks, and persisting shutdown work while the window tries to take the
+/// exclusive lease. Read as instant contention, that turned `tracedecay
+/// update` against a healthy daemon into "another lifecycle operation is
+/// already active" with the daemon left stopped. The bound covers the
+/// supervisor's stop timeout (which SIGKILLs a hung daemon) plus process-exit
+/// and lease-release latency; only a foreign holder that outlives it is
+/// reported as contention.
+const QUIESCED_LEASE_RELEASE_TIMEOUT: Duration =
+    Duration::from_secs(DAEMON_STOP_TIMEOUT_SECS + DAEMON_STOP_TIMEOUT_MARGIN_SECS * 2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonServiceSpec {
@@ -123,31 +139,26 @@ pub struct QuiescedDaemonLifecycle {
 }
 
 impl QuiescedDaemonLifecycle {
+    /// Stops the managed daemon, waits for it to release its shared lifecycle
+    /// lease within [`QUIESCED_LEASE_RELEASE_TIMEOUT`], then takes exclusive
+    /// ownership. A failed acquisition restores the captured daemon state
+    /// before the error is returned.
     pub fn acquire(operation: &str, expected_version: &str) -> Result<Self> {
-        Self::acquire_with(
-            operation,
-            expected_version,
-            ServiceRunner::current()?,
-            || tracedecay_runtime_core::lifecycle_lease::acquire_exclusive(operation),
-        )
+        Self::acquire_with_timeout(operation, QUIESCED_LEASE_RELEASE_TIMEOUT, expected_version)
     }
 
-    /// Stops the managed daemon, then waits up to `timeout` for its shared
-    /// lifecycle lease to release before taking exclusive ownership.
+    /// [`Self::acquire`] with an explicit bound on the wait for the shared
+    /// lifecycle lease to release.
     pub fn acquire_with_timeout(
         operation: &str,
         timeout: Duration,
         expected_version: &str,
     ) -> Result<Self> {
-        Self::acquire_with(
+        Self::acquire_with_runner_and_timeout(
             operation,
             expected_version,
             ServiceRunner::current()?,
-            || {
-                tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_with_timeout(
-                    operation, timeout,
-                )
-            },
+            timeout,
         )
     }
 
@@ -156,8 +167,24 @@ impl QuiescedDaemonLifecycle {
         expected_version: &str,
         runner: ServiceRunner,
     ) -> Result<Self> {
+        Self::acquire_with_runner_and_timeout(
+            operation,
+            expected_version,
+            runner,
+            QUIESCED_LEASE_RELEASE_TIMEOUT,
+        )
+    }
+
+    fn acquire_with_runner_and_timeout(
+        operation: &str,
+        expected_version: &str,
+        runner: ServiceRunner,
+        timeout: Duration,
+    ) -> Result<Self> {
         Self::acquire_with(operation, expected_version, runner, || {
-            tracedecay_runtime_core::lifecycle_lease::acquire_exclusive(operation)
+            tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_with_timeout(
+                operation, timeout,
+            )
         })
     }
 
@@ -549,6 +576,12 @@ impl DaemonServiceSpec {
         ))
     }
 
+    /// launchd appends the agent's stdout and stderr to `daemon.out.log` and
+    /// `daemon.err.log` under the data directory and never rotates them. The
+    /// daemon bounds `daemon.err.log` itself while it runs: it rotates the
+    /// file past `DAEMON_STDERR_LOG_ROTATE_BYTES` (32 MiB), keeping exactly
+    /// one previous generation as `daemon.err.log.1`, so the managed log holds
+    /// at most about twice that bound on disk.
     pub fn render_launchd_plist(&self) -> Result<String> {
         validate_managed_remote_tls(self.remote_tls.as_ref())?;
         if !self.tracedecay_bin.is_absolute() {
@@ -1072,25 +1105,7 @@ fn refresh_installed_service_with_state_and_runner(
         refreshed_spec.data_dir_override = windows_task::profile_root_from_task_xml(&unit);
     }
     if let Some(socket_path) = socket_path_from_unit_text(&unit) {
-        #[cfg(unix)]
-        {
-            let profile_root = refreshed_spec
-                .data_dir_override
-                .clone()
-                .map_or_else(tracedecay_data_dir, Ok)?;
-            let legacy_generated_socket = profile_root.join("daemon.sock");
-            if socket_path != legacy_generated_socket
-                || tracedecay_daemon_protocol::unix_socket_path_within_limit(&socket_path)
-            {
-                refreshed_spec.socket_path = socket_path;
-            } else {
-                refreshed_spec.socket_path = default_socket_path_for_profile(&profile_root);
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            refreshed_spec.socket_path = socket_path;
-        }
+        refreshed_spec.socket_path = socket_path;
     }
     let previous_state = match previous_state {
         Some(state) => state,
@@ -1444,6 +1459,7 @@ fn installed_service_status_snapshot(
     DaemonSocketState,
     DaemonProtocolState,
 )> {
+    const READINESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
     let service_path = service_unit_path()?;
     if !service_unit_exists(&service_path)? {
         let socket_path = default_socket_path()?;
@@ -1457,13 +1473,23 @@ fn installed_service_status_snapshot(
     }
     let unit = read_service_unit(&service_path)?;
     let socket_path = socket_path_from_unit_text(&unit).unwrap_or(default_socket_path()?);
+    // launchd's liveness is a socket connect, so the authenticated readiness
+    // probe doubles as that observation instead of the daemon seeing an extra
+    // bare connection ahead of it.
+    if let ServiceRunner::Launchd { launchctl, id } = runner {
+        let (socket_state, protocol_state) =
+            daemon_readiness_probe(&socket_path, expected_version, READINESS_TIMEOUT);
+        let actual = launchd_service_state(launchctl, id, socket_state)?;
+        let protocol_state = if actual.is_running() {
+            protocol_state
+        } else {
+            DaemonProtocolState::NotRequired
+        };
+        return Ok((actual, socket_path, socket_state, protocol_state));
+    }
     let actual = runner.service_state(&socket_path)?;
     let (socket_state, protocol_state) = if actual.is_running() {
-        daemon_readiness_probe(
-            &socket_path,
-            expected_version,
-            std::time::Duration::from_secs(10),
-        )
+        daemon_readiness_probe(&socket_path, expected_version, READINESS_TIMEOUT)
     } else {
         (
             daemon_socket_state(&socket_path),

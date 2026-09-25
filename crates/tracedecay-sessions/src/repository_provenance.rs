@@ -14,13 +14,13 @@ use gix::bstr::ByteSlice;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::{encode_lowercase_hex, encode_tagged_lowercase_hex};
 use tracedecay_domain::{
-    AnchorDurabilityClass, AnchorSourceGenerationV2, CommitId, CoverageReportV1,
+    AnchorDurabilityClass, AnchorSourceGeneration, CommitId, CoverageReportV1,
     DurableObservationV1, EvidenceAvailabilityV1, EvidenceClass,
     GenerationBoundRepositoryProvenanceV1, PayloadAccessState, PrivacyDomainBoundLocatorDigest,
     ProjectId, ProjectionGenerationId, RefId, RepositoryDirtyStateV1, RepositoryEvidenceV1,
     RepositoryId, RepositoryProvenanceV1, RepositoryRemoteIdentityV1, ResolutionAuthorizationV1,
-    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, TreeId,
-    UtcMicros, VectorWatermark, WorktreeId,
+    RetrievalAnchorRecord, RetrievalAnchorRecordParts, RetrievalAnchorTarget, TreeId, UtcMicros,
+    VectorWatermark, WorktreeId,
 };
 
 const MAX_REMOTE_IDENTITY_BYTES: usize = 8 * 1024;
@@ -304,7 +304,7 @@ impl<'a> ObservationProjectId<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedRepositoryProvenanceV1 {
     availability: EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1>,
-    anchor: Option<RetrievalAnchorRecordV2>,
+    anchor: Option<RetrievalAnchorRecord>,
 }
 
 impl PreparedRepositoryProvenanceV1 {
@@ -320,7 +320,7 @@ impl PreparedRepositoryProvenanceV1 {
         &self.availability
     }
 
-    pub fn anchor(&self) -> Option<&RetrievalAnchorRecordV2> {
+    pub fn anchor(&self) -> Option<&RetrievalAnchorRecord> {
         self.anchor.as_ref()
     }
 }
@@ -377,7 +377,7 @@ impl NativeRepositoryProvenanceProbe {
         // Admission has already resolved the exact checkout root. Opening that
         // root directly prevents a removed nested checkout from silently
         // walking up to, and capturing evidence from, an ambient repository.
-        let Ok(repo) = gix::open(request.project_root) else {
+        let Ok(repo) = tracedecay_runtime_core::git_open::open(request.project_root) else {
             return EvidenceAvailabilityV1::Unavailable;
         };
         Self::capture_open_repository(&repo, request)
@@ -496,21 +496,19 @@ fn prepare_generation_binding(
         };
     };
     let capture = binding.capture();
-    let target = RetrievalAnchorTargetV2::RepositoryCapture {
+    let target = RetrievalAnchorTarget::RepositoryCapture {
         repository_id: capture.repository_id().clone(),
         capture_id: binding.capture_id().clone(),
         receipt: observation.receipt().receipt().clone(),
     };
-    let anchor = RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+    let anchor = RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
         target,
         owner: observation.scope().clone(),
         aliases: vec![],
         occurred_at: None,
         ingested_at,
         evidence_class: EvidenceClass::Observed,
-        source_generation: AnchorSourceGenerationV2::RepositoryCapture(
-            binding.capture_id().clone(),
-        ),
+        source_generation: AnchorSourceGeneration::RepositoryCapture(binding.capture_id().clone()),
         projection_generation: projection_generation.clone(),
         projection_watermark: VectorWatermark::default(),
         coverage: CoverageReportV1::default(),
@@ -600,7 +598,7 @@ fn canonical_path(path: &Path) -> (PathBuf, bool) {
 }
 
 fn repository_provenance_watermark(project_root: &Path) -> Option<RepositoryProvenanceWatermark> {
-    let repo = gix::open(project_root).ok()?;
+    let repo = tracedecay_runtime_core::git_open::open(project_root).ok()?;
     let workdir = repo.workdir()?;
     let (canonical_root, root_partial) = canonical_path(workdir);
     let (canonical_common_dir, common_partial) = canonical_path(repo.common_dir());
@@ -652,7 +650,7 @@ fn persisted_index_watermark(path: &Path) -> PersistedFileWatermark {
 }
 
 fn discover_canonical_common_dir(project_root: &Path) -> Option<PathBuf> {
-    let repository = gix::discover(project_root).ok()?;
+    let repository = tracedecay_runtime_core::git_open::discover(project_root).ok()?;
     let (common_dir, partial) = canonical_path(repository.common_dir());
     (!partial && common_dir.is_absolute()).then_some(common_dir)
 }

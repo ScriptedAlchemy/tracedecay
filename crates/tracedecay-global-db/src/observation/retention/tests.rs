@@ -12,6 +12,8 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::ObservationCoverageV1;
 
+use crate::schema_contract::invariants::SOURCE_CURSOR_ADVANCE_DELETE_GUARD_SQL;
+
 const DAY: i64 = 24 * 60 * 60;
 const NOW: i64 = 1_900_000_000;
 const OWNER: &str = "{\"owner\":\"o1\"}";
@@ -221,23 +223,22 @@ async fn seed_cursor_advance_history(conn: &RetentionTestStore) -> Result<(), St
     let scope = ObservationScopeV1::Profile;
     let source_json = serde_json::to_string(&source).unwrap();
     let scope_json = serde_json::to_string(&scope).unwrap();
-    conn.execute_batch(
+    conn.execute_batch(&format!(
         "CREATE TRIGGER IF NOT EXISTS source_cursor_advances_immutable_update_v1
          BEFORE UPDATE ON source_cursor_advances BEGIN
              SELECT RAISE(ABORT, 'source cursor advances are immutable');
          END;
-         CREATE TRIGGER IF NOT EXISTS source_cursor_advances_immutable_delete_v1
-         BEFORE DELETE ON source_cursor_advances BEGIN
-             SELECT RAISE(ABORT, 'source cursor advances are immutable');
-         END;",
-    )
+         DROP TRIGGER IF EXISTS source_cursor_advances_immutable_delete_v1;
+         {SOURCE_CURSOR_ADVANCE_DELETE_GUARD_SQL};"
+    ))
     .await
     .map_err(|error| format!("install cursor immutability: {error}"))?;
     let current_generation = 1_u64;
-    let current_cursor = ObservationSourceCursorV1::new(
+    let current_cursor = ObservationSourceCursorV1::for_ordering(
         source.clone(),
         scope.clone(),
         ObservationSourceGenerationV1::new(current_generation).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
         30,
     )
     .unwrap();

@@ -240,7 +240,7 @@ async fn source_edit_dispatch_refuses_an_expired_deadline_without_a_silent_succe
     let project_root = PathBuf::from("/projects/source-edit-expired");
     admit_project_without_source_edit_owner(&service, project_root.clone()).await;
     let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
-    let now = current_micros();
+    let now = now_micros();
     let request = DaemonInvocationRequest::source_edit(
         "request.source-edit.expired",
         source_edit_invocation(),

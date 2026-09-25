@@ -1,6 +1,6 @@
 use super::tool_hints::{HintCategory, MAX_HINTS_PER_SESSION};
 use super::{
-    EnvGuard, HintAgent, Path, PathBuf, ToolHint, Value, deduped_project_hint_with_id,
+    EnvGuard, HostIntegrationIdV1, Path, PathBuf, ToolHint, Value, deduped_project_hint_with_id,
     mint_hint_id, record_hint_emitted, record_hook_invoked,
 };
 use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
@@ -95,7 +95,7 @@ fn hook_invocation_rows_include_duration_telemetry() {
         let _hook_telemetry = record_hook_invoked(
             &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
-            HintAgent::Codex,
+            HostIntegrationIdV1::Codex,
             "PostToolUse",
             r#"{"session_id":"s1","tool_name":"Bash","cwd":"/tmp"}"#,
         );
@@ -137,7 +137,13 @@ fn record_hint_emitted_missing_session_is_single_terminal() {
     let hint = test_hint();
     let id = mint_hint_id();
 
-    record_hint_emitted(Some(&project_root), HintAgent::Cursor, None, &id, &hint);
+    record_hint_emitted(
+        Some(&project_root),
+        HostIntegrationIdV1::Cursor,
+        None,
+        &id,
+        &hint,
+    );
 
     let rows = recorded_rows(&data_root, &profile_root);
     let seq: Vec<&str> = events_for(&rows, &id)
@@ -168,7 +174,7 @@ fn every_hint_branch_yields_exactly_one_terminal_with_hint_id() {
     assert!(
         deduped_project_hint_with_id(
             Some(&project_root),
-            HintAgent::Cursor,
+            HostIntegrationIdV1::Cursor,
             Some("session-emit".to_string()),
             &emit_id,
             test_hint(),
@@ -181,7 +187,7 @@ fn every_hint_branch_yields_exactly_one_terminal_with_hint_id() {
     assert!(
         deduped_project_hint_with_id(
             Some(&project_root),
-            HintAgent::Cursor,
+            HostIntegrationIdV1::Cursor,
             Some("session-emit".to_string()),
             &dup_id,
             test_hint(),
@@ -194,7 +200,7 @@ fn every_hint_branch_yields_exactly_one_terminal_with_hint_id() {
     assert!(
         deduped_project_hint_with_id(
             Some(&project_root),
-            HintAgent::Cursor,
+            HostIntegrationIdV1::Cursor,
             None,
             &no_session_id,
             test_hint(),
@@ -207,7 +213,7 @@ fn every_hint_branch_yields_exactly_one_terminal_with_hint_id() {
     assert!(
         deduped_project_hint_with_id(
             None,
-            HintAgent::Cursor,
+            HostIntegrationIdV1::Cursor,
             Some("session-noroot".to_string()),
             &no_root_id,
             test_hint(),
@@ -273,7 +279,7 @@ fn hints_without_project_root_dedupe_in_the_user_profile() {
     assert!(
         deduped_project_hint_with_id(
             None,
-            HintAgent::Codex,
+            HostIntegrationIdV1::Codex,
             session.clone(),
             &mint_hint_id(),
             test_hint(),
@@ -283,7 +289,7 @@ fn hints_without_project_root_dedupe_in_the_user_profile() {
     assert!(
         deduped_project_hint_with_id(
             None,
-            HintAgent::Codex,
+            HostIntegrationIdV1::Codex,
             session,
             &mint_hint_id(),
             test_hint(),
@@ -323,7 +329,7 @@ fn budget_exhaustion_records_suppressed_budget_terminal() {
         assert!(
             deduped_project_hint_with_id(
                 Some(&project_root),
-                HintAgent::Cursor,
+                HostIntegrationIdV1::Cursor,
                 Some(session.clone()),
                 &mint_hint_id(),
                 hint,
@@ -338,7 +344,7 @@ fn budget_exhaustion_records_suppressed_budget_terminal() {
     let over_id = mint_hint_id();
     let over = deduped_project_hint_with_id(
         Some(&project_root),
-        HintAgent::Cursor,
+        HostIntegrationIdV1::Cursor,
         Some(session.clone()),
         &over_id,
         ToolHint {
@@ -375,7 +381,7 @@ fn repeated_usage_records_hint_escalated_terminal() {
     let emit = |id: &str| {
         deduped_project_hint_with_id(
             Some(&project_root),
-            HintAgent::Cursor,
+            HostIntegrationIdV1::Cursor,
             Some(session.clone()),
             id,
             test_hint(),

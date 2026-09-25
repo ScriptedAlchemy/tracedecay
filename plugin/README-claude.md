@@ -39,7 +39,7 @@ path with spaces.
 
 The LSP bridge, hooks, skills, and CLI bindings form the MCP-free core. The MCP
 registration is an independently installable companion in the signed host
-bundle lifecycle; the compatibility installer composes both.
+bundle lifecycle; `tracedecay install` without `--component` installs both.
 
 ## CLI fallback
 

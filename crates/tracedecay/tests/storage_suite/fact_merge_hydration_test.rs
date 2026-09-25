@@ -13,7 +13,7 @@ use std::fmt::Write as _;
 use serde_json::json;
 use tempfile::TempDir;
 use tracedecay_domain::{
-    AccessPolicyDigest, ActorId, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId,
+    AccessPolicyDigest, ActorId, AnchorDurabilityClass, AnchorSourceGeneration, CapabilityId,
     ComponentVersion, Confidence, CoverageReportV1, CoverageUniverseKnowledgeV1, DomainError,
     EntityId, EntityKind, EntityRef, EvidenceClass, FactAssertionId, FactAssertionKindV1,
     FactAssertionV1, FactCategoryV1, FactCurationActionV1, FactEventId, FactEvidenceRefV1,
@@ -21,7 +21,7 @@ use tracedecay_domain::{
     FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, ObservationScopeV1,
     PayloadAccessState, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest, PrivacyDomainId,
     ProjectionGenerationId, ResolutionAuthorizationV1, RetentionClass, RetrievalAnchorId,
-    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2,
+    RetrievalAnchorRecord, RetrievalAnchorRecordParts, RetrievalAnchorTarget,
     SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
     ScopeResolutionId, SensitivityV1, ShardDispositionV1, ShardId, UtcMicros, VectorWatermark,
 };
@@ -109,13 +109,13 @@ fn anchor(
     privacy_domain: &str,
     payload_access: PayloadAccessState,
     coverage: CoverageReportV1,
-) -> RetrievalAnchorRecordV2 {
+) -> RetrievalAnchorRecord {
     const POLICY_DIGEST: &str =
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const REQUEST_DIGEST: &str =
         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
-        target: RetrievalAnchorTargetV2::Entity(EntityRef {
+    RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
+        target: RetrievalAnchorTarget::Entity(EntityRef {
             id: EntityId::new(entity).unwrap(),
             kind: EntityKind::Document,
         }),
@@ -124,7 +124,7 @@ fn anchor(
         occurred_at: None,
         ingested_at: UtcMicros(1),
         evidence_class: EvidenceClass::Observed,
-        source_generation: AnchorSourceGenerationV2::Unknown,
+        source_generation: AnchorSourceGeneration::Unknown,
         projection_generation: ProjectionGenerationId::new("projection.fmh").unwrap(),
         projection_watermark: VectorWatermark::default(),
         coverage,
@@ -247,7 +247,7 @@ async fn anchor_record(
     store: &DatabaseFactStore<'_>,
     owner: &FactOwnerV1,
     anchor_id: &RetrievalAnchorId,
-) -> RetrievalAnchorRecordV2 {
+) -> RetrievalAnchorRecord {
     store
         .get_retrieval_anchor(RetrievalAnchorQuery::new(owner.clone(), anchor_id.clone()).unwrap())
         .await
@@ -257,7 +257,7 @@ async fn anchor_record(
 
 struct InitialFact {
     fact_id: FactId,
-    anchor: RetrievalAnchorRecordV2,
+    anchor: RetrievalAnchorRecord,
     assertion: FactAssertionV1,
     receipt: FactCommitReceipt,
 }
@@ -267,7 +267,7 @@ async fn commit_initial(
     store: &DatabaseFactStore<'_>,
     owner: &FactOwnerV1,
     operation: &str,
-    anchor: RetrievalAnchorRecordV2,
+    anchor: RetrievalAnchorRecord,
     content: &str,
     occurred_at: i64,
 ) -> InitialFact {

@@ -2,27 +2,24 @@
 
 mod work_product_attempt_support;
 
-use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use tracedecay_contracts::{
-    ApplicationOperation, AuthorityReceipt, AuthorizationPort, AuthorizationPortOutcome,
-    AuthorizationRequest, AuthorizedWorkProductScopeV1, CancellationContext,
+    ApplicationOperation, AuthorityReceipt, AuthorizedWorkProductScopeV1, CancellationContext,
     CapabilityGrantSnapshot, Deadline, DisclosureClass, EvidenceCoverage, EvidenceDomain,
     PageState, PolicyDecisionRef, RequestContext, RequestId, ResolvedScope, ResultContractRef,
-    RetrievalEvidence, SourceAuthorizationSnapshot, StartWorkAttemptCommand, TemporalState,
-    VerifiedWorkGraphVersionV1, WorkAttemptAdmissionKind, WorkAttemptCapacityV1,
-    WorkAttemptCapacityVerdictV1, WorkAttemptEvidenceRecordV1, WorkAttemptInsertOutcome,
-    WorkAttemptListPageV1, WorkAttemptStorageError, WorkAttemptStoragePort,
-    WorkGraphReadPortErrorV1, WorkGraphReadPortV1, WorkGraphReadRequestV1, WorkGraphReadV1,
-    WorkGraphVersionEntryV1, WorkProductAttemptAdmissionErrorV1,
-    WorkProductAttemptAdmissionOutcomeV1, WorkProductAttemptAdmissionPortV1,
-    WorkProductAttemptAdmissionV1, WorkProductBindingV1, WorkProductEventCommitV1,
+    RetrievalEvidence, StartWorkAttemptCommand, TemporalState, VerifiedWorkGraphVersionV1,
+    WorkAttemptAdmissionKind, WorkAttemptCapacityV1, WorkAttemptCapacityVerdictV1,
+    WorkAttemptEvidenceRecordV1, WorkAttemptInsertOutcome, WorkAttemptListPageV1,
+    WorkAttemptStorageError, WorkAttemptStoragePort, WorkGraphReadPortErrorV1, WorkGraphReadPortV1,
+    WorkGraphReadRequestV1, WorkGraphReadV1, WorkGraphVersionEntryV1,
+    WorkProductAttemptAdmissionErrorV1, WorkProductAttemptAdmissionOutcomeV1,
+    WorkProductAttemptAdmissionPortV1, WorkProductAttemptAdmissionV1,
+    WorkProductAuthorizedRelationScopeV1, WorkProductBindingV1, WorkProductEventCommitV1,
     WorkProductOwnerAuthorizationErrorV1, WorkProductOwnerAuthorizationPortV1,
     WorkProductPortContextV1, WorkProductRevisionPinsV1, WorkProductSelectionScopeV1,
-    WorkRelationScopeV1, WorkSynthesisAdmissionRecordV1, WorkSynthesisAdmissionStoragePort,
-    WorkSynthesisInsertOutcome,
+    WorkSynthesisAdmissionRecordV1, WorkSynthesisAdmissionStoragePort, WorkSynthesisInsertOutcome,
 };
 use tracedecay_domain::configuration::TopologyConcurrencyPolicyV1;
 use tracedecay_domain::{
@@ -38,9 +35,6 @@ use tracedecay_domain::{
     WorkRecoveryStateV1, WorkRouteDecisionV1, WorkRuntimeProjectionCoverageV1,
     WorkRuntimeProjectionV1, WorkScoreKindV1, WorkShapeAssessmentV1, WorkSizingV1, WorktreeId,
 };
-use tracedecay_policy::authorization::{
-    SourceAuthorizationInputV1, SourceAuthorizationTruthTableV1,
-};
 use tracedecay_tool_catalog::{CapabilityId, SchemaId, SortContractId, UseCaseId};
 
 use work_product_attempt_support::{
@@ -53,8 +47,6 @@ pub const SHA256_A: &str =
     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 pub const SHA256_B: &str =
     "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-const SOURCE_AUTHORIZATION_TRUTH_TABLES: &str =
-    include_str!("../../../../tracedecay-policy/tests/fixtures/source_authorization/core.json");
 
 pub use tracedecay_domain::test_fixtures::id;
 
@@ -172,77 +164,6 @@ pub fn authority(context: &RequestContext) -> AuthorityReceipt {
     .unwrap()
 }
 
-pub fn source_authorization_input(name: &str) -> SourceAuthorizationInputV1 {
-    serde_json::from_str::<Vec<SourceAuthorizationTruthTableV1>>(SOURCE_AUTHORIZATION_TRUTH_TABLES)
-        .expect("checked-in source authorization truth tables deserialize")
-        .into_iter()
-        .find(|row| row.name == name)
-        .unwrap_or_else(|| panic!("source authorization fixture {name} exists"))
-        .input
-}
-
-pub fn authorized_source_input() -> SourceAuthorizationInputV1 {
-    source_authorization_input("project_authorized_live")
-}
-
-pub fn source_snapshot(input: SourceAuthorizationInputV1) -> SourceAuthorizationSnapshot {
-    SourceAuthorizationSnapshot::new(input, true)
-}
-
-pub struct StaticAuthorizationPort {
-    outcome: AuthorizationPortOutcome,
-}
-
-impl StaticAuthorizationPort {
-    pub fn authorized() -> Self {
-        Self::new(AuthorizationPortOutcome::Snapshot(Box::new(
-            source_snapshot(authorized_source_input()),
-        )))
-    }
-
-    pub fn new(outcome: AuthorizationPortOutcome) -> Self {
-        Self { outcome }
-    }
-}
-
-impl AuthorizationPort for StaticAuthorizationPort {
-    fn source_authorization_snapshot(
-        &self,
-        _request: &AuthorizationRequest<'_>,
-    ) -> AuthorizationPortOutcome {
-        self.outcome.clone()
-    }
-}
-
-pub struct SequencedAuthorizationPort {
-    outcomes: RefCell<VecDeque<AuthorizationPortOutcome>>,
-}
-
-impl SequencedAuthorizationPort {
-    pub fn snapshots(snapshots: impl IntoIterator<Item = SourceAuthorizationSnapshot>) -> Self {
-        Self {
-            outcomes: RefCell::new(
-                snapshots
-                    .into_iter()
-                    .map(|snapshot| AuthorizationPortOutcome::Snapshot(Box::new(snapshot)))
-                    .collect(),
-            ),
-        }
-    }
-}
-
-impl AuthorizationPort for SequencedAuthorizationPort {
-    fn source_authorization_snapshot(
-        &self,
-        _request: &AuthorizationRequest<'_>,
-    ) -> AuthorizationPortOutcome {
-        self.outcomes
-            .borrow_mut()
-            .pop_front()
-            .expect("authorization snapshot sequence is not exhausted")
-    }
-}
-
 pub fn evidence<T>(payload: T) -> RetrievalEvidence<T> {
     RetrievalEvidence {
         payload: Some(payload),
@@ -267,10 +188,12 @@ pub fn evidence<T>(payload: T) -> RetrievalEvidence<T> {
 
 /// Canonical repository relation selected by Work-product attempt admission.
 pub fn work_product_selection(context: &RequestContext) -> WorkProductSelectionScopeV1 {
-    WorkProductSelectionScopeV1::relations(BTreeSet::from([WorkRelationScopeV1::Repository {
-        project_id: context.scope().project_id.clone(),
-        repository_id: context.scope().repository_id.clone(),
-    }]))
+    WorkProductSelectionScopeV1::relations(BTreeSet::from([
+        WorkProductAuthorizedRelationScopeV1::Repository {
+            project_id: context.scope().project_id.clone(),
+            repository_id: context.scope().repository_id.clone(),
+        },
+    ]))
     .expect("request scope produces a canonical Work product selection")
 }
 
@@ -518,10 +441,10 @@ impl WorkProductOwnerAuthorizationPortV1 for WorkProductAttemptStore {
             WorkProductSelectionScopeV1::ProfileOwnedNoGit => true,
             WorkProductSelectionScopeV1::Relations { relation_scopes } => {
                 relation_scopes.iter().all(|relation| match relation {
-                    WorkRelationScopeV1::Project { project_id } => {
+                    WorkProductAuthorizedRelationScopeV1::Project { project_id } => {
                         project_id == &context.scope().project_id
                     }
-                    WorkRelationScopeV1::Repository {
+                    WorkProductAuthorizedRelationScopeV1::Repository {
                         project_id,
                         repository_id,
                     } => {
