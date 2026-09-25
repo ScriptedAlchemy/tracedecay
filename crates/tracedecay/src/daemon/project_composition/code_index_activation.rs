@@ -393,6 +393,7 @@ mod tests {
 
     use super::*;
     use tempfile::TempDir;
+    use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
     fn git(root: &Path, arguments: &[&str]) {
         let status = Command::new(
@@ -509,10 +510,8 @@ mod tests {
     #[tokio::test]
     async fn reconcile_request_before_mount_activates_indexing() {
         let repository = repository();
-        let root = repository
-            .path()
-            .canonicalize()
-            .expect("canonical repository root");
+        let root =
+            canonical_existing_identity(repository.path()).expect("canonical repository root");
         let mount_attempts = Arc::new(AtomicUsize::new(0));
         let mount: code_index_scheduler::CodeIndexActivationMountV1 = {
             let mount_attempts = Arc::clone(&mount_attempts);
@@ -581,10 +580,8 @@ mod tests {
     #[tokio::test]
     async fn explicit_reconcile_overrides_linked_worktree_watch_policy() {
         let repository = repository();
-        let root = repository
-            .path()
-            .canonicalize()
-            .expect("canonical repository root");
+        let root =
+            canonical_existing_identity(repository.path()).expect("canonical repository root");
         let mount_attempts = Arc::new(AtomicUsize::new(0));
         let mount: code_index_scheduler::CodeIndexActivationMountV1 = {
             let mount_attempts = Arc::clone(&mount_attempts);

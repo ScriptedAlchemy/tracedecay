@@ -18,13 +18,13 @@ use tracedecay_runtime_core::branch_meta::{
     BranchGraphSourceRollbackOutcomeV1,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
-use tracedecay_runtime_core::path_safety::plain_host_path;
 
 use super::registry::{CodeIndexServingScopeV1, ServingGenerationInstallationV1};
 use super::{
     CodeIndexDemandAdmissionV1, CodeIndexPublishedGenerationV1, CodeIndexSchedulerRegistryV1,
     ServingGenerationInstallationOutcomeV1, ServingGenerationRollbackOutcomeV1,
 };
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";
 const CODE_INDEX_ACTIVATION_UNAVAILABLE: &str = "code_index_activation_unavailable";
@@ -117,16 +117,17 @@ impl BranchPublicationContextV1 {
         branch: &str,
         cancellation: &CancellationToken,
     ) -> Result<BranchAddOutcome, TraceDecayError> {
-        let canonical_project_root = project_root.canonicalize().map_err(|error| {
-            TraceDecayError::project_route(
-                CODE_INDEX_IDENTITY_MISMATCH,
-                false,
-                format!(
-                    "failed to canonicalize branch project root '{}': {error}",
-                    project_root.display()
-                ),
-            )
-        })?;
+        let canonical_project_root =
+            canonical_existing_identity(project_root).map_err(|error| {
+                TraceDecayError::project_route(
+                    CODE_INDEX_IDENTITY_MISMATCH,
+                    false,
+                    format!(
+                        "failed to canonicalize branch project root '{}': {error}",
+                        project_root.display()
+                    ),
+                )
+            })?;
         if !self.owns_project(&canonical_project_root)? {
             return Err(TraceDecayError::project_route(
                 CODE_INDEX_IDENTITY_MISMATCH,
@@ -140,16 +141,17 @@ impl BranchPublicationContextV1 {
         if cancellation.is_cancelled() {
             return Err(branch_publication_cancelled_error(branch));
         }
-        let canonical_worktree_root = worktree_root.canonicalize().map_err(|error| {
-            TraceDecayError::project_route(
-                CODE_INDEX_IDENTITY_MISMATCH,
-                false,
-                format!(
-                    "failed to canonicalize branch worktree '{}': {error}",
-                    worktree_root.display()
-                ),
-            )
-        })?;
+        let canonical_worktree_root =
+            canonical_existing_identity(worktree_root).map_err(|error| {
+                TraceDecayError::project_route(
+                    CODE_INDEX_IDENTITY_MISMATCH,
+                    false,
+                    format!(
+                        "failed to canonicalize branch worktree '{}': {error}",
+                        worktree_root.display()
+                    ),
+                )
+            })?;
         let source_branch = tracedecay_runtime_core::branch::current_branch(
             &canonical_worktree_root,
         )
@@ -635,19 +637,13 @@ impl BranchPublicationContextV1 {
     }
 
     fn owns_project(&self, canonical_root: &Path) -> Result<bool, TraceDecayError> {
-        let retained_root =
-            self.project_root
-                .canonicalize()
-                .map_err(|error| TraceDecayError::File {
-                    message: format!(
-                        "failed to canonicalize retained branch project root: {error}"
-                    ),
-                    path: self.project_root.display().to_string(),
-                })?;
-        // One root, whichever spelling the caller resolved it through: Windows
-        // `canonicalize` answers `\\?\D:\...` where the root identity reads
-        // `D:\...`.
-        Ok(plain_host_path(&retained_root) == plain_host_path(canonical_root))
+        let retained_root = canonical_existing_identity(&self.project_root).map_err(|error| {
+            TraceDecayError::File {
+                message: format!("failed to canonicalize retained branch project root: {error}"),
+                path: self.project_root.display().to_string(),
+            }
+        })?;
+        Ok(retained_root == canonical_root)
     }
 }
 

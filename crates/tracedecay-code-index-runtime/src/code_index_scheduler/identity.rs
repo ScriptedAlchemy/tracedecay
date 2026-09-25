@@ -16,6 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_contracts::{ApplicationContractError, ResolvedScope};
 use tracedecay_domain::{CommitId, ProjectId, RefId, RepositoryId, TreeId, WorktreeId};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 /// Failure to resolve an exact indexing identity from a checkout.
 #[derive(Debug, thiserror::Error)]
@@ -315,13 +316,12 @@ pub fn repository_id_for_common_dir(common_dir: &Path) -> Result<RepositoryId, I
 }
 
 pub fn worktree_id_for(project_root: &Path) -> Result<WorktreeId, IdentityErrorV1> {
-    let project_root =
-        project_root
-            .canonicalize()
-            .map_err(|source| IdentityErrorV1::CanonicalWorktreePath {
-                path: project_root.to_path_buf(),
-                source,
-            })?;
+    let project_root = canonical_existing_identity(project_root).map_err(|source| {
+        IdentityErrorV1::CanonicalWorktreePath {
+            path: project_root.to_path_buf(),
+            source,
+        }
+    })?;
     WorktreeId::new(format!(
         "worktree.daemon.{}",
         super::sha256_hex(project_root.to_string_lossy().as_bytes())

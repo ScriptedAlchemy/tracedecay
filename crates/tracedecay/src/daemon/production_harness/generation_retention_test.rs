@@ -15,6 +15,7 @@ use tracedecay_code_index_retention::code_index_generations::{
     code_generation_segments_root, prepare_next_code_generation_retention_cancellable,
 };
 use tracedecay_maintenance::tick::{MaintenanceContinuation, MaintenanceTickOutcome};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 fn initialize_git_project(root: &Path) {
     git(root, &["init", "-q", "-b", "main"]);
@@ -101,10 +102,8 @@ async fn mounted_code_generation_retention_continues_capped_segment_reclamation(
     // The scheduler hashes the canonical project root. A non-canonical
     // `project_root()` names a store that is never created, and
     // `latest_generation_id` still answers because it canonicalizes itself.
-    let canonical_root = graph
-        .project_root()
-        .canonicalize()
-        .expect("canonical project root");
+    let canonical_root =
+        canonical_existing_identity(graph.project_root()).expect("canonical project root");
     let first_source = schedulers
         .latest_generation_id(&canonical_root)
         .await

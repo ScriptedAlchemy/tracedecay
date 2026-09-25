@@ -4,6 +4,7 @@ use std::{path::Path, sync::Arc};
 
 use super::super::{CodeIndexSchedulerErrorV1, LatestCompleteCodeIndexV1};
 use super::{CodeIndexSchedulerRegistryV1, unique_mounted_for_scope};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 impl CodeIndexSchedulerRegistryV1 {
     pub(super) async fn install_test_attribution_authority(
@@ -11,7 +12,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         latest: &LatestCompleteCodeIndexV1,
     ) -> bool {
-        let Ok(project_root) = project_root.canonicalize() else {
+        let Ok(project_root) = canonical_existing_identity(project_root) else {
             return false;
         };
         let Ok(authority) = latest.test_attribution_authority() else {
@@ -48,7 +49,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
     ) {
-        let Ok(project_root) = project_root.canonicalize() else {
+        let Ok(project_root) = canonical_existing_identity(project_root) else {
             return;
         };
         self.test_attribution_authorities
@@ -69,7 +70,7 @@ impl CodeIndexSchedulerRegistryV1 {
         scope
             .validate()
             .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
-        let project_root = project_root.canonicalize()?;
+        let project_root = canonical_existing_identity(project_root)?;
         let mut mounted = self.mounted.lock().await;
         let worktree = mounted.get_mut(&project_root).ok_or_else(|| {
             CodeIndexSchedulerErrorV1::Identity(
@@ -104,7 +105,7 @@ impl CodeIndexSchedulerRegistryV1 {
         scope
             .validate()
             .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
-        let project_root = project_root.canonicalize()?;
+        let project_root = canonical_existing_identity(project_root)?;
         let mut mounted = self.mounted.lock().await;
         let target = mounted.get(&project_root).ok_or_else(|| {
             CodeIndexSchedulerErrorV1::Identity(
@@ -179,7 +180,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         observability: super::super::observability::CodeIndexObservabilityV1,
     ) -> Result<(), CodeIndexSchedulerErrorV1> {
-        let project_root = project_root.canonicalize()?;
+        let project_root = canonical_existing_identity(project_root)?;
         let mounted = self.mounted.lock().await;
         let worktree = mounted.get(&project_root).ok_or_else(|| {
             CodeIndexSchedulerErrorV1::Identity(

@@ -31,6 +31,7 @@ use super::super::graph_activation::{
     set_injected_activation_failures,
 };
 use super::CodeIndexSchedulerRegistryV1;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 /// Ceiling on how long a test waits for the worker to reach the asserted
 /// state. Nothing is asserted about elapsed time; this only stops a hung
@@ -89,7 +90,8 @@ impl Fixture {
         // is the one `poison` plants on the artifacts root itself.
         let store = root.path().join("store");
         tracedecay_private_fs::create_private_directory(&store).expect("create store root");
-        let canonical_project = project.canonicalize().expect("canonical project root");
+        let canonical_project =
+            canonical_existing_identity(&project).expect("canonical project root");
         let scoped = scoped_code_index_store_root(&store, &canonical_project);
         tracedecay_private_fs::create_private_directory(&scoped).expect("create scoped root");
         let artifacts_root = code_text_artifact_staging_root(&scoped);
@@ -124,7 +126,7 @@ impl Fixture {
     /// One wake that carries no new input, exactly like the periodic cadence
     /// traffic a live daemon produces over an unchanged checkout.
     async fn wake_without_new_input(&self) {
-        let canonical = self.project.canonicalize().expect("canonical project");
+        let canonical = canonical_existing_identity(&self.project).expect("canonical project");
         let mounted = self.registry.mounted.lock().await;
         if let Some(worktree) = mounted.get(&canonical) {
             worktree.wake.notify_one();
@@ -401,7 +403,7 @@ async fn fresh_graph_activation_never_delays_the_published_text_owner() {
     tokio::time::timeout(CONVERGENCE_DEADLINE, gate.wait_until_started())
         .await
         .expect("fresh graph activation starts beside the opened text projection");
-    let canonical = fixture.project.canonicalize().expect("canonical project");
+    let canonical = canonical_existing_identity(&fixture.project).expect("canonical project");
     let text = {
         let mounted = fixture.registry.mounted.lock().await;
         mounted

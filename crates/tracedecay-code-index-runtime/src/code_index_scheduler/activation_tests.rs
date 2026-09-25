@@ -35,6 +35,7 @@ use super::{
     DaemonCodeIndexPublicationStoreV1, SharedCodeIndexBytePoolV1,
 };
 use tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 fn git(root: &Path, args: &[&str]) {
     let output = Command::new("git")
@@ -129,10 +130,8 @@ fn publication_store(store_root: &Path) -> DaemonCodeIndexPublicationStoreV1 {
 async fn cold_mount_defers_sealed_decode_and_truth_verification_to_the_retained_owner() {
     let project = fixture();
     let store = TempDir::new().expect("store root");
-    let canonical_project_root = project
-        .path()
-        .canonicalize()
-        .expect("canonical project root");
+    let canonical_project_root =
+        canonical_existing_identity(project.path()).expect("canonical project root");
     let scoped_store = super::scoped_code_index_store_root(store.path(), &canonical_project_root);
     let generation_id = {
         let mut scheduler = open(project.path(), &scoped_store);

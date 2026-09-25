@@ -833,9 +833,8 @@ impl DaemonEngine {
                     message: "project server requested without project_path".to_string(),
                 });
             };
-            let canonical_project_path = project_path
-                .canonicalize()
-                .unwrap_or_else(|_| project_path.clone());
+            let canonical_project_path =
+                tracedecay_runtime_core::path_safety::canonical_root_identity(project_path);
             Box::pin(
                 self.ensure_registered_project_route(&canonical_project_path, handshake.allow_init),
             )

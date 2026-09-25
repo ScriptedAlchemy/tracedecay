@@ -72,6 +72,7 @@ use super::{
 };
 #[cfg(test)]
 use super::{HeldActiveDecodeV1, reconcile_panic_guard};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 const MAX_PENDING_HINTS: usize = 1_024;
 const MAX_SUPERSEDED_RECONCILE_RETRIES: usize = 4;
@@ -949,7 +950,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         byte_pool: Arc<SharedCodeIndexBytePoolV1>,
         policy: CodeIndexHintPolicyV1,
     ) -> Result<Self, CodeIndexSchedulerErrorV1> {
-        let project_root = project_root.canonicalize()?;
+        let project_root = canonical_existing_identity(project_root)?;
         // Resolve exact identity BEFORE any indexing work. Paths located this
         // checkout; identity authorizes what may be reused.
         let identity = identity::IndexingIdentityV1::resolve(&project_root)

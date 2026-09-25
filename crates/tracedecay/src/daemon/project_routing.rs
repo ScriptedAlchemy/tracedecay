@@ -78,9 +78,8 @@ pub(super) fn project_route_for_handshake(
             message: "project server requested without project_path".to_string(),
         });
     };
-    let canonical_project_path = project_path
-        .canonicalize()
-        .unwrap_or_else(|_| project_path.clone());
+    let canonical_project_path =
+        tracedecay_runtime_core::path_safety::canonical_root_identity(project_path);
     if tracedecay_project::config::is_ambient_project_root(&canonical_project_path) {
         return Err(TraceDecayError::Config {
             message: format!(

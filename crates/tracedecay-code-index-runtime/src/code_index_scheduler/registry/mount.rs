@@ -37,6 +37,7 @@ use super::{
     convergence_park_retries_on_wake, is_repeated_conflict_verdict, park_convergence,
     publication_authority_is_terminal, retained_noop_requires_follow_up_wake,
 };
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 impl CodeIndexSchedulerRegistryV1 {
     #[cfg(test)]
@@ -157,7 +158,7 @@ impl CodeIndexSchedulerRegistryV1 {
         store_root: PathBuf,
         graph_activation: CodeGraphActivationAuthorityV1,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
-        let project_root = project_root.canonicalize()?;
+        let project_root = canonical_existing_identity(project_root)?;
         #[cfg(test)]
         Self::pause_cold_mount_admission_for_test(&project_root).await;
         let cold_mount_reservation = loop {

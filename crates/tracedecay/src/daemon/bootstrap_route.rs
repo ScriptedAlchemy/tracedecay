@@ -155,9 +155,8 @@ fn cached_project_node_count_inner<'a>(
     // so every profiling feature can compute its layout.
     Box::pin(async move {
         let project_path = handshake.project_path.as_ref()?;
-        let canonical_project_path = project_path
-            .canonicalize()
-            .unwrap_or_else(|_| project_path.clone());
+        let canonical_project_path =
+            tracedecay_runtime_core::path_safety::canonical_root_identity(project_path);
         let route = ProjectRouteKey::from_handshake(&canonical_project_path, handshake).ok()?;
         let _server = {
             let servers = store_administration.project_servers().lock().await;

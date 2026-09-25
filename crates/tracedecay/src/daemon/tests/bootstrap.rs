@@ -199,6 +199,20 @@ fn daemon_project_route_rejects_the_user_profile_root() {
     assert!(error.to_string().contains("ambient user/filesystem root"));
 }
 
+#[test]
+fn daemon_project_route_uses_the_product_root_identity() {
+    let project = TempDir::new().expect("project root");
+    let mut handshake = test_handshake_defaults();
+    handshake.project_path = Some(project.path().to_path_buf());
+
+    let expected = tracedecay_runtime_core::path_safety::canonical_root_identity(project.path());
+    let (project_root, route) =
+        super::super::project_route_for_handshake(&handshake).expect("resolve project route");
+
+    assert_eq!(project_root, expected);
+    assert_eq!(route.project_path, expected);
+}
+
 /// Enrolls `project_root` on disk exactly as a previously-initialized project
 /// is enrolled, a `.git/` repository identity marker plus a materialized
 /// profile store, without touching the profile registry. This is the on-disk
