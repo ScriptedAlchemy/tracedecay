@@ -12,7 +12,10 @@ CXXFLAGS = { value = "-DNDEBUG", force = false }
 # SQLite's sorter merges at most 16 runs, so 15 helpers are the largest
 # effective auxiliary width. Keep the bundled build deterministic across
 # developer and CI hosts instead of accepting SQLite's default ceiling of 8.
-LIBSQLITE3_FLAGS = { value = "-DSQLITE_MAX_WORKER_THREADS=15", force = true }
+# Memory statistics are off: with them on, every SQLite allocation and free
+# in the process takes one global mutex, which serializes all concurrent
+# connections. Nothing reads those statistics or sets a heap limit.
+LIBSQLITE3_FLAGS = { value = "-DSQLITE_MAX_WORKER_THREADS=15 -DSQLITE_DEFAULT_MEMSTATUS=0", force = true }
 
 # Global accounting (savings ledger, worldwide-counter flushes) is ON by
 # default for installed binaries, but `cargo test` / `cargo run` would then
