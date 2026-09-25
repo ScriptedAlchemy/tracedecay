@@ -835,7 +835,10 @@ jobs:
   # nothing could shorten, then the five shards ran 10-14 min each: 116 min
   # for the lane's verdict, against 27 for Linux. As partitions each job pays
   # the chain and its own selection's test targets, as `linux-test-partition`
-  # does, so the lane's wall time is the slowest partition. The manifest's
+  # does, so the lane's wall time is the slowest partition: 66.5 min in run
+  # 36077289779 (`runtime`: 25 min of library chain with its dependency
+  # units beside it, 23 min of 31 test targets, 15 min of tests; the root
+  # partitions compile 35-38 min each). The manifest's
   # `windows_timeout_minutes` are the budgets; the executables the suites
   # spawn are built into the same resolution first, as on Linux.
   windows-test-partition:

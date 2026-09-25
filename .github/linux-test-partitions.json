@@ -3,7 +3,7 @@
     {
       "name": "root-lib",
       "timeout_minutes": 40,
-      "windows_timeout_minutes": 65,
+      "windows_timeout_minutes": 70,
       "macos_group": "root-lib",
       "packages": [
         "tracedecay",
@@ -20,7 +20,7 @@
     {
       "name": "root-sessions",
       "timeout_minutes": 80,
-      "windows_timeout_minutes": 65,
+      "windows_timeout_minutes": 50,
       "macos_group": "root-suites",
       "packages": [
         "tracedecay",
@@ -44,7 +44,7 @@
     {
       "name": "root-journeys",
       "timeout_minutes": 75,
-      "windows_timeout_minutes": 70,
+      "windows_timeout_minutes": 85,
       "macos_group": "root-suites",
       "packages": [
         "tracedecay",
@@ -78,7 +78,7 @@
     {
       "name": "root-transport",
       "timeout_minutes": 90,
-      "windows_timeout_minutes": 95,
+      "windows_timeout_minutes": 90,
       "macos_group": "root-transport",
       "packages": [
         "tracedecay",
@@ -101,7 +101,7 @@
     {
       "name": "root-dashboard-api",
       "timeout_minutes": 70,
-      "windows_timeout_minutes": 50,
+      "windows_timeout_minutes": 65,
       "macos_group": "root-transport",
       "packages": [
         "tracedecay",
@@ -118,7 +118,7 @@
     {
       "name": "runtime",
       "timeout_minutes": 65,
-      "windows_timeout_minutes": 80,
+      "windows_timeout_minutes": 100,
       "macos_group": "lower",
       "packages": [
         "tracedecay-application",
@@ -159,7 +159,7 @@
     {
       "name": "core-storage",
       "timeout_minutes": 50,
-      "windows_timeout_minutes": 50,
+      "windows_timeout_minutes": 55,
       "macos_group": "lower",
       "packages": [
         "tracedecay-code-index",
@@ -188,7 +188,7 @@
     {
       "name": "core-contracts",
       "timeout_minutes": 55,
-      "windows_timeout_minutes": 60,
+      "windows_timeout_minutes": 70,
       "macos_group": "lower",
       "packages": [
         "tracedecay-agent-hosts",
@@ -225,28 +225,28 @@
       ]
     }
   ],
-  "windows_budget_basis": "First hosted run of the Windows partitions: Linux wall time from run 36051245663 (ubuntu-24.04-arm, 4 vCPU) x3.5, from the MSVC lane compiling the library chain beneath the root crate in 27 min against 10 on Arm (2.7x) in the same run, plus headroom. Replace with measured wall time x1.25 after the first hosted run.",
+  "windows_budget_basis": "Measured wall time in run 36077289779 (windows-latest, 4 vCPU, prefix-matched dependency cache) x1.5, rounded up to 5: root-lib 46.0 (35.2 compile + 8.1 tests), root-sessions 30.8 (24.0 + 4.3), root-journeys 54.4 (38.7 + 10.9), root-transport 57.7 (38.0 + 17.3 with 36 failures and one hung test), root-dashboard-api 40.6 (34.4 + 3.3), runtime 66.5 (48.4 + 14.8), core-storage 36.5 (27.5 + 6.3), core-contracts 44.5 (39.4 + 2.5). The wider headroom is for this runner class: the archive lane's one workspace build measured 64.8 and 106.5 min on the same cache key (docs/ci-release-timing-census.md).",
   "macos_budget_basis": "Each group's budget is measured wall time plus headroom, from run 36051245663 (macos-14, 3 vCPU, warm dependency cache) where the groups were root-lib, root-suites (sessions, journeys, transport), runtime-storage and contracts-dashboard-api: root-lib 21.7 compile + 4.3 tests; root-sessions 25.9 + 4.1; root-journeys 7.4 + 4.1 against the sessions tree; root-transport 18.2 + 12.6 against the journeys tree (test-transport re-resolves 31 workspace crates); root-dashboard-api 24.4 + 0.8 as a lone `-p tracedecay` resolution (108 dependency units and 48 workspace crates apart from every other root partition); runtime 38.8 + 5.2 and core-storage 15.3 + 2.8 with 213 dependency units missing the root cache; core-contracts 20.6 + 12.3 (one hung test, 33 s on Linux). Groups now pair partitions that share one resolution so a group compiles one chain, and the lower group carries its own dependency cache.",
   "macos_groups": [
     {
       "name": "root-lib",
       "timeout_minutes": 60,
-      "budget_basis": "27.4 measured (21.7 compile + 4.3 tests + setup); the root chain, library test target and 774 tests are the lane's floor, so nothing shares this job; x1.25 = 34, kept at 60 until a second measurement"
+      "budget_basis": "27.4 (run 36051245663) and 30.4 (run 36077289779) measured: the root chain, library test target and 776 tests are the lane's floor, so nothing shares this job; kept at 60 for this runner class's variance"
     },
     {
       "name": "root-suites",
-      "timeout_minutes": 55,
-      "budget_basis": "root-sessions 30.0 + root-journeys 11.5 measured in one target directory = 41.5 (+1 setup) x1.25 = 53"
+      "timeout_minutes": 45,
+      "budget_basis": "34.4 measured in run 36077289779 (root-sessions 20.0 compile + 2.9 tests, root-journeys 6.1 + 3.4 against the sessions tree, prefix-matched dependency cache) x1.25 = 43"
     },
     {
       "name": "root-transport",
-      "timeout_minutes": 60,
-      "budget_basis": "root-transport 30.8 measured against a warm journeys tree; alone it also compiles the chain beneath graph-db (~8 on this runner), then root-dashboard-api adds one test target of the same resolution (~2 + 0.8 tests): ~43 x1.25 = 54; first hosted run of this pairing, replace with measured"
+      "timeout_minutes": 45,
+      "budget_basis": "35.5 measured in run 36077289779 (root-transport 20.2 compile + 12.4 tests with one hung test, root-dashboard-api 0.9 + 0.7 against the transport tree) x1.25 = 44"
     },
     {
       "name": "lower",
       "timeout_minutes": 110,
-      "budget_basis": "runtime 44.0 + core-storage 18.1 + core-contracts 21.1 (tests 0.5 without the hang) = 83 measured with the dependency units missing the root cache, x1.25 = 104; warm against this group's own `ci-test-lower-macOS` cache the compiles are roughly halved; replace with measured after the first warm run"
+      "budget_basis": "87.5 measured cold in run 36077289779 (no `ci-test-lower-macOS` entry yet: runtime 28.5 compile + 5.2 tests, core-storage 13.0 + 2.6, core-contracts 20.0 + 12.3 with one hung test, 604 dependency units from source) x1.25 = 109; replace with the warm measurement once the entry exists"
     }
   ],
   "not_run": {
