@@ -14,6 +14,10 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use crate::common::fixture::{
+    TYPESCRIPT_FIXTURE_TSC_INVOCATIONS, TypeScriptFixtureCompiler,
+    write_typescript_diagnostics_fixture,
+};
 use crate::common::{
     canonical_existing_path, git_program, spawn_tracedecay_daemon, tracedecay_command_with_home,
 };
@@ -353,6 +357,123 @@ fn application_surface_tools_resolve_the_project_from_a_subdirectory() {
         "a subdirectory must bind the same project route as the checkout root"
     );
     assert_surface_resolves_project(&home_path, &nested, "git_status", r#"{"format":"json"}"#);
+}
+
+/// Commits a TypeScript checkout and initializes it, so the daemon admits the
+/// project and, when the project carries its own compiler, its diagnostics
+/// producer.
+fn init_typescript_project(home: &Path, project: &Path, compiler: TypeScriptFixtureCompiler) {
+    write_typescript_diagnostics_fixture(project, compiler);
+    git(project, &["init", "--initial-branch=master"]);
+    git(project, &["config", "user.email", "surface@example.com"]);
+    git(project, &["config", "user.name", "Surface Test"]);
+    git(project, &["add", "."]);
+    git(project, &["commit", "-m", "initial"]);
+    crate::common::initialize_tracedecay_cli_project(home, project);
+}
+
+const DIAGNOSTICS_FILE_ARGS: &str = r#"{"scope":"file","path":"src/index.ts","format":"json"}"#;
+
+/// The CLI fallback the MCP error text names must answer exactly like the
+/// MCP tool: a fresh TypeScript project with its own `tsc` yields the
+/// compiler's `TS4023` on the file once the daemon's producer has published.
+#[test]
+fn tool_diagnostics_reads_the_typescript_producer_publication() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_typescript_project(
+        &home_path,
+        &project_path,
+        TypeScriptFixtureCompiler::Present,
+    );
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+
+    let started = Instant::now();
+    let payload = loop {
+        let outcome = run_surface_tool_from(
+            &home_path,
+            &project_path,
+            "diagnostics",
+            DIAGNOSTICS_FILE_ARGS,
+        );
+        match outcome.problem_code().as_deref() {
+            None => break outcome.payload(),
+            Some("application.diagnostics.pending" | "application.diagnostics.stale") => {
+                assert!(
+                    started.elapsed() < SURFACE_TIMEOUT,
+                    "the TypeScript producer did not publish within {:?}\nstdout:\n{}",
+                    started.elapsed(),
+                    outcome.stdout
+                );
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            Some(code) => panic!(
+                "the producer reported a terminal state instead of publishing: {code}\nstdout:\n{}\nstderr:\n{}",
+                outcome.stdout, outcome.stderr
+            ),
+        }
+    };
+    let records = payload["outcome"]["value"]["payload"]["diagnostics"]
+        .as_array()
+        .unwrap_or_else(|| panic!("diagnostics evidence lists its records: {payload}"));
+    assert_eq!(records.len(), 1, "{payload}");
+    assert_eq!(records[0]["logical_path"], "src/index.ts", "{payload}");
+    assert_eq!(records[0]["diagnostic"]["code"], "TS4023", "{payload}");
+    assert_eq!(records[0]["diagnostic"]["severity"], "error", "{payload}");
+
+    let invocations =
+        std::fs::read_to_string(project_path.join(TYPESCRIPT_FIXTURE_TSC_INVOCATIONS))
+            .expect("the fixture compiler records every invocation");
+    assert!(
+        invocations
+            .lines()
+            .all(|line| line == format!("{} --noEmit --pretty false", project_path.display())),
+        "the producer runs the project's own tsc from the project root: {invocations}"
+    );
+}
+
+/// Before `npm install` the same read is a typed refusal that carries the
+/// exact setup command and a legal action.
+#[test]
+fn tool_diagnostics_names_the_install_command_without_a_compiler() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_typescript_project(
+        &home_path,
+        &project_path,
+        TypeScriptFixtureCompiler::Missing,
+    );
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+
+    let outcome = run_surface_tool_from(
+        &home_path,
+        &project_path,
+        "diagnostics",
+        DIAGNOSTICS_FILE_ARGS,
+    );
+    assert_eq!(
+        outcome.problem_code().as_deref(),
+        Some("application.diagnostics.producer-missing"),
+        "stdout:\n{}\nstderr:\n{}",
+        outcome.stdout,
+        outcome.stderr
+    );
+    let problem = &outcome.payload()["problem"];
+    assert_eq!(
+        problem["legal_actions"],
+        serde_json::json!(["refresh"]),
+        "{problem}"
+    );
+    assert!(
+        problem["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("`npm install --save-dev typescript`")),
+        "{problem}"
+    );
 }
 
 /// The filesystem root is not a project. A surface call from there must keep

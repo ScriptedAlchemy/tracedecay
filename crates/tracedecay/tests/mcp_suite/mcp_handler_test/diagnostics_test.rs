@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use tracedecay::mcp::McpServer;
 
 const UNPUBLISHED_CODE: &str = "application.diagnostics.unsupported";
-const UNPUBLISHED_MESSAGE: &str = "No diagnostic producer is configured for this scope.";
+const UNPUBLISHED_MESSAGE: &str = "No diagnostic producer is configured for this project: it has no tsconfig.json, so no compiler runs automatically. Run the project's own build or type check and publish its output with tracedecay_diagnose (`cargo_output`), then read again.";
 
 #[tokio::test]
 async fn diagnostics_call_refuses_bad_arguments_and_reports_unpublished_reads() {
@@ -126,7 +126,8 @@ async fn diagnostics_call_refuses_bad_arguments_and_reports_unpublished_reads() 
     );
     assert_eq!(
         markdown["structuredContent"]["problem"]["legal_actions"],
-        json!([])
+        json!(["correct_request"]),
+        "a project without an automatic producer is routed to tracedecay_diagnose"
     );
     let markdown_text = extract_real_server_text(&markdown);
     assert!(
@@ -146,13 +147,16 @@ async fn diagnostics_call_refuses_bad_arguments_and_reports_unpublished_reads() 
     assert!(markdown_text.contains("\n- Owning layer: `application`"));
     assert!(markdown_text.contains("\n- Terminality: `pre_admission`"));
     assert!(
-        markdown_text.contains("\n- Message: No diagnostic producer is configured for this scope.")
+        markdown_text.contains(
+            "\n- Message: No diagnostic producer is configured for this project: it has no tsconfig.json, so no compiler runs automatically. Run the project's own build or type check and publish its output with tracedecay\\_diagnose (\\`cargo\\_output\\`), then read again."
+        ),
+        "{markdown_text}"
     );
     assert!(markdown_text.contains("\n- Retryable: `false`"));
     assert!(markdown_text.contains("\n- Retry: `never`"));
     assert!(markdown_text.contains("\n- Retry scope: `none`"));
     assert!(markdown_text.contains("\n- Retry after: `none`"));
-    assert!(markdown_text.contains("\n- Legal actions: `none`"));
+    assert!(markdown_text.contains("\n- Legal actions: `correct_request`"));
     assert!(markdown_text.contains("\n- Coverage: `not_available`"));
     assert!(
         !markdown_text.contains("findings_cleared"),
@@ -254,7 +258,7 @@ fn assert_unpublished_json(label: &str, result: &Value) {
     );
     assert_eq!(
         payload["problem"]["legal_actions"],
-        json!([]),
+        json!(["correct_request"]),
         "{label}: {payload}"
     );
     assert_eq!(
