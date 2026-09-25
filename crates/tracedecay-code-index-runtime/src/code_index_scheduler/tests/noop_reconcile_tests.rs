@@ -57,6 +57,7 @@ async fn unchanged_reconcile_does_not_reactivate_the_serving_generation() {
         ),
         "mounted worktree accepts an unchanged reconcile"
     );
+    let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
     drop(admission);
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     loop {
@@ -77,7 +78,7 @@ async fn unchanged_reconcile_does_not_reactivate_the_serving_generation() {
             std::time::Instant::now() <= deadline,
             "unchanged reconcile retried graph activation instead of settling"
         );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        signals.changed_before(deadline).await;
     }
     super::super::graph_activation::set_injected_activation_failures(&worktree_id, 0);
     assert_eq!(
