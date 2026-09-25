@@ -158,6 +158,7 @@ async fn runtime_opt_in_sections_are_exact_typed_payloads() {
             "kind": "unsupported",
             "table_growth_evidence": [],
             "schema_convergences": [],
+            "language_servers": { "kind": "unsupported" },
         })
     );
     assert!(doctor.get("session_temporal_health").is_none());
