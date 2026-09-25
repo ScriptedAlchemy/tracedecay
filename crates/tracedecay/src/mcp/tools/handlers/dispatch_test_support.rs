@@ -246,6 +246,35 @@ fn verified_graph_options_with_freshness<'a>(
     options
 }
 
+/// Graph-tool operations execute on the project's graph-tool owner, which
+/// computes them under the owning server's admitted authorities and renders
+/// the typed result; every other tool still dispatches through the MCP
+/// handler table.
+pub(super) async fn dispatch_on_graph_authority(
+    cg: &TraceDecay,
+    tool_name: &str,
+    args: Value,
+    options: ToolCallRegistryOptions<'_>,
+) -> Result<ToolResult> {
+    match ApplicationSurfaceOperation::from_tool_name(tool_name)
+        .filter(|operation| operation.is_graph_tool())
+    {
+        Some(operation) => {
+            let completion =
+                super::compute_graph_tool_for_owner(cg, operation, args.clone(), None, options)
+                    .await?;
+            tracedecay_mcp::handlers::graph_tool::render_graph_tool(
+                Some(cg.project_root()),
+                &args,
+                completion,
+            )
+        }
+        None => {
+            handle_tool_call_with_registry_options(cg, tool_name, args, None, None, options).await
+        }
+    }
+}
+
 pub(super) fn verified_graph_error_options<'a>(
     cg: &TraceDecay,
     options: ToolCallRegistryOptions<'a>,
