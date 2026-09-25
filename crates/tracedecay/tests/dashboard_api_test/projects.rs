@@ -3,8 +3,7 @@ use std::path::PathBuf;
 use tracedecay_domain::FactId;
 
 pub(crate) async fn setup_target_project(fixture: &DashboardFixture) -> (PathBuf, Arc<TraceDecay>) {
-    let target_root = fixture
-        .canonical_existing_identity(_tmp.path())
+    let target_root = canonical_existing_identity(fixture._tmp.path())
         .expect("fixture root should canonicalize")
         .join("target-project");
     write_file(
