@@ -20,7 +20,7 @@ static LSP_BRIDGE_CONTROL_SEQUENCE: ProcessLocalRequestSequence =
 pub(crate) async fn handle_lsp_action(action: LspAction) -> tracedecay_domain::errors::Result<()> {
     match action {
         LspAction::Servers { json } => {
-            hotpath::measure_block!("cli.lsp.servers", print_lsp_servers(json))?
+            hotpath::future!(print_lsp_servers(json), label = "cli.lsp.servers").await?;
         }
         LspAction::Bridge { stdio, project } => {
             if !stdio {
@@ -454,51 +454,175 @@ fn bridge_config_error(message: impl Into<String>) -> tracedecay_domain::errors:
     }
 }
 
-fn print_lsp_servers(json: bool) -> tracedecay_domain::errors::Result<()> {
-    let adapters = lsp_adapters::builtin_adapters();
+/// Where `lsp servers` resolved analyzer availability.
+///
+/// The daemon is the authority: it spawns analyzers on its own PATH and its
+/// broker is what `tracedecay doctor` grades, so a daemon-resolved table can
+/// never disagree with Doctor. Without a reachable daemon the only PATH left
+/// to consult is the CLI shell's, which the daemon does not use; that read is
+/// labelled as such rather than passed off as the daemon's view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum LspAvailabilityResolution {
+    Daemon,
+    CliPath,
+}
+
+struct LspServersInventory {
+    resolution: LspAvailabilityResolution,
+    /// Why the daemon read was not used, when it was not.
+    daemon_unavailable: Option<String>,
+    rows: Vec<Value>,
+}
+
+async fn print_lsp_servers(json: bool) -> tracedecay_domain::errors::Result<()> {
+    let inventory = lsp_servers_inventory().await;
     if json {
-        let rows: Vec<_> = adapters.iter().map(lsp_server_row).collect();
-        println!("{}", serde_json::to_string_pretty(&rows)?);
-    } else {
-        print_lsp_servers_table(&adapters);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "resolution": inventory.resolution,
+                "daemon_unavailable": inventory.daemon_unavailable,
+                "servers": inventory.rows,
+            }))?
+        );
+        return Ok(());
+    }
+    match inventory.resolution {
+        LspAvailabilityResolution::Daemon => {
+            println!(
+                "availability resolved by the daemon for the current project (same read as `tracedecay doctor`)"
+            );
+        }
+        LspAvailabilityResolution::CliPath => {
+            println!(
+                "availability resolved on this shell's PATH, not the daemon's: {}",
+                inventory
+                    .daemon_unavailable
+                    .as_deref()
+                    .unwrap_or("daemon read unavailable")
+            );
+        }
+    }
+    println!(
+        "{:<14} {:<8} {:<12} {:<28} install",
+        "language", "active", "state", "command"
+    );
+    for row in &inventory.rows {
+        let text = |key: &str| row.get(key).and_then(Value::as_str).unwrap_or("");
+        println!(
+            "{:<14} {:<8} {:<12} {:<28} {}",
+            text("language"),
+            match row.get("active").and_then(Value::as_bool) {
+                Some(true) => "yes",
+                Some(false) => "no",
+                None => "?",
+            },
+            text("state"),
+            text("command"),
+            row.pointer("/install_options/0/command")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+        );
     }
     Ok(())
 }
 
-fn lsp_server_row(adapter: &lsp_adapters::LspAdapterDefinition) -> Value {
-    serde_json::json!({
-        "language": adapter.language,
-        "language_id": adapter.language_id,
-        "command": adapter.command,
-        "args": adapter.args,
-        "available": lsp_broker::command_available(&adapter.command),
-        "extensions": adapter.extensions,
-        "root_markers": adapter.root_markers,
-        "install_options": adapter.install_options,
-    })
+/// The compiled-in adapter catalogue, with availability and project activity
+/// merged from the daemon's resolved read when one is reachable.
+async fn lsp_servers_inventory() -> LspServersInventory {
+    use tracedecay_contracts::doctor::LanguageServerReadV1;
+
+    let adapters = lsp_adapters::builtin_adapters();
+    let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let daemon_read = tracedecay::doctor::daemon_language_server_read(&project_path).await;
+    let (analyzers, daemon_unavailable) = match daemon_read {
+        Ok(Some(
+            LanguageServerReadV1::Observed { analyzers, .. }
+            | LanguageServerReadV1::Absent { analyzers },
+        )) => (Some(analyzers), None),
+        Ok(Some(LanguageServerReadV1::Unsupported)) => (
+            None,
+            Some("language-server inspection is unsupported on this platform".to_owned()),
+        ),
+        Ok(Some(LanguageServerReadV1::Denied)) => (
+            None,
+            Some("the daemon denied analyzer inspection".to_owned()),
+        ),
+        Ok(Some(LanguageServerReadV1::Unknown)) => (
+            None,
+            Some("the daemon could not determine analyzer state".to_owned()),
+        ),
+        Ok(None) => (
+            None,
+            Some(format!(
+                "the daemon has not published analyzer state for '{}' yet",
+                project_path.display()
+            )),
+        ),
+        Err(error) => (None, Some(error.to_string())),
+    };
+    let resolution = if analyzers.is_some() {
+        LspAvailabilityResolution::Daemon
+    } else {
+        LspAvailabilityResolution::CliPath
+    };
+    let rows = adapters
+        .iter()
+        .map(|adapter| {
+            let resolved = analyzers.as_deref().and_then(|analyzers| {
+                analyzers
+                    .iter()
+                    .find(|analyzer| analyzer.language == adapter.language)
+            });
+            let (available, active, state, command) = match resolved {
+                Some(analyzer) => (
+                    analyzer.executable_found,
+                    Value::Bool(analyzer.state.aggregate().is_some()),
+                    lsp_analyzer_state_label(analyzer.state),
+                    analyzer.command.as_str(),
+                ),
+                None => (
+                    lsp_broker::command_available(&adapter.command),
+                    Value::Null,
+                    "unresolved",
+                    adapter.command.as_str(),
+                ),
+            };
+            serde_json::json!({
+                "language": adapter.language,
+                "language_id": adapter.language_id,
+                "command": command,
+                "args": adapter.args,
+                "available": available,
+                "active": active,
+                "state": state,
+                "extensions": adapter.extensions,
+                "root_markers": adapter.root_markers,
+                "install_options": adapter.install_options,
+            })
+        })
+        .collect();
+    LspServersInventory {
+        resolution,
+        daemon_unavailable,
+        rows,
+    }
 }
 
-fn print_lsp_servers_table(adapters: &[lsp_adapters::LspAdapterDefinition]) {
-    println!(
-        "{:<14} {:<12} {:<28} install",
-        "language", "available", "command"
-    );
-    for adapter in adapters {
-        let install = adapter
-            .install_options
-            .first()
-            .map_or("", |option| option.command.as_str());
-        println!(
-            "{:<14} {:<12} {:<28} {}",
-            adapter.language,
-            if lsp_broker::command_available(&adapter.command) {
-                "yes"
-            } else {
-                "no"
-            },
-            adapter.command,
-            install
-        );
+fn lsp_analyzer_state_label(
+    state: tracedecay_contracts::doctor::LanguageServerAnalyzerStateV1,
+) -> &'static str {
+    use tracedecay_contracts::doctor::LanguageServerAnalyzerStateV1 as State;
+
+    match state {
+        State::Ready => "ready",
+        State::Available => "available",
+        State::Refreshing => "refreshing",
+        State::Disabled => "disabled",
+        State::Unavailable => "unavailable",
+        State::Crashed => "crashed",
+        State::Inactive => "inactive",
     }
 }
 

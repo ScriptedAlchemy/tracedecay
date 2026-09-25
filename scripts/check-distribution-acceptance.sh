@@ -922,7 +922,10 @@ import json
 import sys
 from pathlib import Path
 
-value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+inventory = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if not isinstance(inventory, dict) or inventory.get("resolution") not in {"daemon", "cli_path"}:
+    raise SystemExit("distribution acceptance: lsp servers omitted its availability resolution")
+value = inventory.get("servers")
 if not isinstance(value, list) or not value:
     raise SystemExit("distribution acceptance: lsp servers returned an empty inventory")
 required_languages = {"rust", "typescript", "javascript", "python", "go", "c", "cpp"}

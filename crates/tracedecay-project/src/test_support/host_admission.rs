@@ -1142,7 +1142,7 @@ const fn registered_authority_unavailable_outcome() -> HostAdmissionOutcome {
         retryable: true,
         reason_code: Some("registered_authority_unavailable"),
         recovery: None,
-        storage_cause: None,
+        cause: None,
     }
 }
 

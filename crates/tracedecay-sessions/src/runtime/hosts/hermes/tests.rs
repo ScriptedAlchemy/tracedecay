@@ -1738,3 +1738,62 @@ mod deterministic_refusal_recovery {
         );
     }
 }
+
+/// The identity digest is taken from the row's f64 timestamp before the
+/// native record crosses the JSON boundary and again after `normalize` parses
+/// it back. serde_json's default float parser does not reproduce every f64;
+/// this REAL is one it gets wrong, which made the two digests disagree, the
+/// sanitizer refuse the row as `privacy_boundary_failed`, and the sweep cover
+/// past roughly one Hermes row in eight forever. The workspace pins
+/// `float_roundtrip` so the boundary is exact; this is the row that proves it.
+#[test]
+fn hermes_timestamp_survives_the_json_boundary_into_one_identity() {
+    let mut row = fixture(2);
+    row.role = "assistant".to_string();
+    row.content = Some("safe fixture reply".to_string());
+    row.reasoning = None;
+    row.tool_name = None;
+    row.tool_calls = None;
+    row.timestamp = Some(1_783_829_317.501_287_5);
+    row.is_session_usage_frontier = false;
+
+    let record = normalized(&row, 1);
+    let encoded = serde_json::to_vec(&record.native).unwrap();
+    let parsed = parse_normalized_observation_record_v1(
+        &encoded,
+        record.range,
+        ObservationOrderingDomainV1::SqliteRowId,
+        |native| normalize_native_observation(native, record.range),
+    )
+    .unwrap();
+    assert_eq!(
+        parsed.value()["stable_record_id"].as_str(),
+        Some(record.native_record_id.as_str()),
+        "the canonical envelope must re-derive the identity the row was admitted under"
+    );
+
+    let identity = ObservationIdentityMaterialV1::for_native_record(
+        record.source,
+        ObservationScopeV1::Profile,
+        ObservationSourceGenerationV1::new(1).unwrap(),
+        record.range,
+        ObservationOrderingDomainV1::SqliteRowId,
+        record.native_record_id,
+    )
+    .unwrap();
+    let outcome = tracedecay_privacy::ClaudeRecordSanitizerV1::observation_v1()
+        .unwrap()
+        .sanitize_parsed(
+            parsed,
+            identity,
+            RetentionClass::new(OBSERVATION_RETENTION).unwrap(),
+        )
+        .expect("a plain Hermes row must cross the privacy boundary");
+    assert!(
+        matches!(
+            outcome,
+            tracedecay_privacy::ObservationSanitizationOutcomeV1::Durable { .. }
+        ),
+        "row must be durable, not refused"
+    );
+}

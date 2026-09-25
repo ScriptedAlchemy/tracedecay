@@ -2023,8 +2023,10 @@ impl ActiveAdmission<'_> {
             {
                 tracing::warn!(
                     provider = self.provider,
+                    session = self.source.session_id().as_str(),
                     offset = checkpoint.offset,
                     reason = outcome.reason_code.unwrap_or("host_admission_refused"),
+                    cause = outcome.cause.as_deref().unwrap_or("unspecified"),
                     "admission refused a record; covering past it"
                 );
                 self.advance_coverage(

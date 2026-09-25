@@ -220,7 +220,7 @@ fn transcript_store_failures_keep_their_conflict_and_availability_statuses() {
 }
 
 #[test]
-fn authority_write_failed_includes_storage_cause_in_hook_detail() {
+fn authority_write_failed_includes_cause_in_hook_detail() {
     let mapped = map_transcript_ingest_error(
         &tracedecay_sessions::runtime::source::TranscriptIngestError::HostAdmission {
             provider: "codex",

@@ -234,7 +234,7 @@ fn still_mounting_admission_failures_keep_the_admission_retryability() {
             retryable: true,
             reason_code: Some("authority_write_failed"),
             recovery: None,
-            storage_cause: None,
+            cause: None,
         },
     );
 
@@ -256,7 +256,7 @@ fn permanent_admission_failures_still_classify_permanent() {
             retryable: false,
             reason_code: Some("invalid_observation_contract"),
             recovery: None,
-            storage_cause: None,
+            cause: None,
         },
     );
 

@@ -215,7 +215,7 @@ pub(crate) const fn admission_outcome(
         retryable,
         reason_code,
         recovery: None,
-        storage_cause: None,
+        cause: None,
     }
 }
 
@@ -1103,7 +1103,7 @@ fn classify_git_evidence_error(
     tracing::warn!(%error, "canonical Git evidence publication failed");
     let mut outcome =
         HostAdmissionOutcome::retained_unavailable("git_evidence_publication_unavailable");
-    outcome.storage_cause = Some(error.to_string());
+    outcome.cause = Some(error.to_string());
     outcome
 }
 
@@ -1141,8 +1141,9 @@ fn accepted_for_external_source_replay(
 fn classify_store_error(error: &ObservationStoreError) -> HostAdmissionOutcome {
     let reason_code = match error {
         ObservationStoreError::ObservationCollision { .. } => {
-            return HostAdmissionOutcome::deterministic_content_refusal(
+            return HostAdmissionOutcome::deterministic_content_refusal_with_cause(
                 "observation_identity_collision",
+                error,
             );
         }
         ObservationStoreError::SanitizationReceiptCollision => {
@@ -1243,7 +1244,7 @@ fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {
                 true,
                 Some("authority_write_failed"),
             );
-            outcome.storage_cause = Some(format!("{operation}: {source}"));
+            outcome.cause = Some(format!("{operation}: {source}"));
             outcome
         }
         ObservationApplicationError::Contract(_) => {
@@ -1256,8 +1257,11 @@ fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {
             true,
             Some("privacy_authority_unavailable"),
         ),
-        ObservationApplicationError::Privacy(_) => {
-            HostAdmissionOutcome::deterministic_content_refusal("privacy_boundary_failed")
+        ObservationApplicationError::Privacy(error) => {
+            HostAdmissionOutcome::deterministic_content_refusal_with_cause(
+                "privacy_boundary_failed",
+                error,
+            )
         }
         ObservationApplicationError::Store(error) => classify_store_error(error),
     }

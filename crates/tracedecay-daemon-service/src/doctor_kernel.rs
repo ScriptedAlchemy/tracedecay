@@ -20,12 +20,13 @@ use tracedecay_contracts::doctor::{
     ConfigurationAuthorityReadV1, ConfigurationDriftV1, DaemonRuntimeHealthSignalV1,
     DoctorCoverageCompletenessV1, DoctorKernelInputsV1, DoctorReportComposerV1, DoctorReportV1,
     DoctorSourceFuture, DoctorStorageFamilyReadV1, HostConformanceV1, HostIntegrationDoctorPort,
-    HostIntegrationReadV1, IngestRefusalCensusReadV1, LanguageServerDoctorPort,
-    LanguageServerReadV1, LanguageServerStateV1, ObservabilityDoctorPort, ObservabilityReadV1,
-    ObservabilityStateV1, OperationalAuditDoctorPort, OperationalAuditReadV1,
-    ProfileAuthorityReadV1, RemoteOperationalReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1,
-    StorageDoctorPort, advisory_feedback_read_from_publication, merge_storage_reads,
-    runtime_health_read, storage_family_read,
+    HostIntegrationReadV1, IngestRefusalCensusReadV1, LanguageServerAnalyzerStateV1,
+    LanguageServerAnalyzerV1, LanguageServerDoctorPort, LanguageServerReadV1,
+    ObservabilityDoctorPort, ObservabilityReadV1, ObservabilityStateV1, OperationalAuditDoctorPort,
+    OperationalAuditReadV1, ProfileAuthorityReadV1, RemoteOperationalReadV1,
+    RuntimeHealthDoctorPort, RuntimeHealthReadV1, StorageDoctorPort,
+    advisory_feedback_read_from_publication, merge_storage_reads, runtime_health_read,
+    storage_family_read,
 };
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::storage::SchemaConvergenceFindingV1;
@@ -251,42 +252,50 @@ pub struct SchemaConvergenceDoctorReadV1 {
 
 // === Language server/analyzer (LanguageServer family) ========================
 
-/// Map the daemon diagnostic broker's project-active engine statuses.
+/// Map the daemon diagnostic broker's resolved engine statuses into the Doctor
+/// read. Every adapter is carried so `lsp servers` can list the daemon's view;
+/// grading of inactive languages is refused by the contract itself.
 #[must_use]
-pub fn language_server_read_from_engine_states(
-    states: impl IntoIterator<Item = tracedecay_lsp::analyzer::broker::EngineState>,
+pub fn language_server_read_from_engine_statuses(
+    statuses: impl IntoIterator<Item = tracedecay_lsp::analyzer::broker::ResolvedEngineStatus>,
 ) -> LanguageServerReadV1 {
     use tracedecay_lsp::analyzer::broker::EngineState;
 
-    let states = states.into_iter().collect::<Vec<_>>();
-    if states.is_empty() {
-        return LanguageServerReadV1::Absent;
-    }
-    let state = if states.contains(&EngineState::Crashed) {
-        LanguageServerStateV1::Crashed
-    } else if states.contains(&EngineState::Unavailable) {
-        LanguageServerStateV1::Unavailable
-    } else if states.contains(&EngineState::Disabled) {
-        LanguageServerStateV1::Disabled
-    } else if states.contains(&EngineState::Refreshing) {
-        LanguageServerStateV1::Refreshing
-    } else if states.iter().all(|state| *state == EngineState::Ready) {
-        LanguageServerStateV1::Ready
-    } else {
-        LanguageServerStateV1::Available
-    };
-    LanguageServerReadV1::Observed {
-        state,
-        coverage: DoctorCoverageCompletenessV1::Complete,
-    }
+    LanguageServerReadV1::observed(
+        statuses
+            .into_iter()
+            .map(|resolved| LanguageServerAnalyzerV1 {
+                state: match (resolved.active, resolved.status.state) {
+                    (false, _) | (true, EngineState::Inactive) => {
+                        LanguageServerAnalyzerStateV1::Inactive
+                    }
+                    (true, EngineState::Ready) => LanguageServerAnalyzerStateV1::Ready,
+                    (true, EngineState::Available) => LanguageServerAnalyzerStateV1::Available,
+                    (true, EngineState::Refreshing) => LanguageServerAnalyzerStateV1::Refreshing,
+                    (true, EngineState::Disabled) => LanguageServerAnalyzerStateV1::Disabled,
+                    (true, EngineState::Unavailable) => LanguageServerAnalyzerStateV1::Unavailable,
+                    (true, EngineState::Crashed) => LanguageServerAnalyzerStateV1::Crashed,
+                },
+                executable_found: resolved.executable_found,
+                language: resolved.status.language,
+                command: resolved.status.command,
+                install: resolved
+                    .status
+                    .install_options
+                    .first()
+                    .map(|option| option.command.clone()),
+                detail: resolved.status.last_error,
+            })
+            .collect(),
+    )
 }
 
-/// Read live project-active analyzer state from the daemon diagnostic owner.
+/// Read live analyzer state from the daemon diagnostic owner.
 pub async fn language_server_read_from_broker(
     broker: &tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>,
 ) -> LanguageServerReadV1 {
-    let statuses = broker.lock().await.project_engine_statuses();
-    language_server_read_from_engine_states(statuses.into_iter().map(|status| status.state))
+    let statuses = broker.lock().await.resolved_engine_statuses();
+    language_server_read_from_engine_statuses(statuses)
 }
 
 // === Canonical Plan-26 observations (Observability family) ===================
@@ -1138,7 +1147,8 @@ pub fn production_doctor_report_reader(
             Ok(
                 tracedecay_dashboard_api::AdmittedDoctorReportV1::new(report)
                     .with_table_growth_evidence(store_telemetry.table_growth_evidence)
-                    .with_schema_convergences(schema_convergence.findings),
+                    .with_schema_convergences(schema_convergence.findings)
+                    .with_language_servers(inputs.language_server),
             )
         })
     })

@@ -209,7 +209,7 @@ use tracedecay_automation_runtime::automation::backend;
 use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationHostMode};
 use tracedecay_automation_runtime::automation::host_io::HostIo;
 use tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader;
-use tracedecay_contracts::doctor::DoctorReportV1;
+use tracedecay_contracts::doctor::{DoctorReportV1, LanguageServerReadV1};
 use tracedecay_contracts::storage::{SchemaConvergenceFindingV1, TableGrowthDoctorEvidenceV1};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
@@ -368,6 +368,9 @@ pub struct AdmittedDoctorReportV1 {
     pub report: DoctorReportV1,
     pub table_growth_evidence: Vec<TableGrowthDoctorEvidenceV1>,
     pub schema_convergences: Vec<SchemaConvergenceFindingV1>,
+    /// The daemon owner's per-analyzer read behind the `LanguageServer`
+    /// finding, so `lsp servers` lists exactly what Doctor graded.
+    pub language_servers: LanguageServerReadV1,
 }
 
 impl AdmittedDoctorReportV1 {
@@ -376,7 +379,13 @@ impl AdmittedDoctorReportV1 {
             report,
             table_growth_evidence: Vec::new(),
             schema_convergences: Vec::new(),
+            language_servers: LanguageServerReadV1::Unknown,
         }
+    }
+
+    pub fn with_language_servers(mut self, read: LanguageServerReadV1) -> Self {
+        self.language_servers = read;
+        self
     }
 
     pub fn with_table_growth_evidence(
