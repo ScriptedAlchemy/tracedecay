@@ -172,10 +172,11 @@ fn publish(projection: &GitEvidenceProjectionV1) -> MemoryEvidenceGraphRuntime {
 }
 
 fn open_indexed(runtime: &MemoryEvidenceGraphRuntime) -> GitEvidenceGraphView {
-    match open_git_evidence_graph_view(runtime, &identity(), Arc::new(NeverCancelled)).unwrap() {
-        GitEvidenceGraphHead::Indexed(view) => view,
-        GitEvidenceGraphHead::Unpublished => panic!("projection was published"),
-    }
+    open_git_evidence_graph_view(runtime, &identity(), Arc::new(NeverCancelled))
+        .unwrap()
+        .into_indexed()
+        .unwrap()
+        .expect("projection was published")
 }
 
 fn query(
@@ -559,6 +560,47 @@ fn unknown_or_missing_projector_revision_is_corrupt_on_both_read_paths() {
             "{recovery_error}"
         );
     }
+}
+
+#[test]
+fn pre_index_metadata_is_a_typed_rebuildable_head_on_both_read_paths() {
+    let projection = seeded_projection(6);
+    let mut manifest =
+        build_git_evidence_manifest_checked(identity(), &projection, &revision(), &|| Ok(()))
+            .unwrap();
+    for entity in &mut manifest.entities {
+        if entity.identity.as_str() == "projection:session-git-evidence" {
+            entity
+                .properties
+                .retain(|name, _| name.as_str() == "projection-record");
+        }
+    }
+    let runtime = MemoryEvidenceGraphRuntime::default();
+    runtime
+        .publish_verified_manifest(
+            &manifest,
+            GraphIdempotencyKey::new("pre-index").unwrap(),
+            never_cancelled(),
+        )
+        .unwrap();
+
+    let head =
+        open_git_evidence_graph_view(&runtime, &identity(), Arc::new(NeverCancelled)).unwrap();
+    assert!(
+        matches!(&head, GitEvidenceGraphHead::PreIndex { generation } if *generation == manifest.generation),
+        "{head:?}"
+    );
+    let view_error = head.into_indexed().unwrap_err();
+    assert!(
+        matches!(&view_error, GitCorrelationError::Unavailable(detail) if detail.contains("predates the indexed projector")),
+        "{view_error}"
+    );
+    let recovery_error =
+        recover_git_evidence_projection(&runtime, &identity(), never_cancelled()).unwrap_err();
+    assert!(
+        matches!(&recovery_error, GitCorrelationError::Unavailable(detail) if detail.contains("predates the indexed projector")),
+        "{recovery_error}"
+    );
 }
 
 #[test]

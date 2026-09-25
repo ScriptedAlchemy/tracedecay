@@ -918,13 +918,12 @@ async fn sealed_generation_fixture(project: &str, source: &str) -> SealedGenerat
         &project_root,
         &["config", "user.email", "tracedecay@example.invalid"],
     );
-    std::fs::write(
-        project_root.join("src/lib.rs"),
-        source,
-    )
-    .expect("project source");
+    std::fs::write(project_root.join("src/lib.rs"), source).expect("project source");
     git(&project_root, &["add", "."]);
-    git(&project_root, &["commit", "-qm", "sealed generation fixture"]);
+    git(
+        &project_root,
+        &["commit", "-qm", "sealed generation fixture"],
+    );
     let project_id = ProjectId::new(project).expect("project id");
     tracedecay_runtime_core::storage::pin_fixture_repository_identity(
         &project_root,
@@ -1165,11 +1164,16 @@ async fn graph_reads_during_engine_warm_up_are_typed_pending_and_share_one_open(
     .await;
     let snapshot = fixture
         .runtime
-        .publish_verified_snapshot(fixture.latest.generation(), Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot(
+            fixture.latest.generation(),
+            Arc::new(AtomicBool::new(false)),
+        )
         .expect("seal the code graph");
-    let store =
-        CodeGraphProjectionStore::from_verified_snapshot(snapshot.clone(), fixture.generation_id.clone())
-            .expect("projection store over the sealed snapshot");
+    let store = CodeGraphProjectionStore::from_verified_snapshot(
+        snapshot.clone(),
+        fixture.generation_id.clone(),
+    )
+    .expect("projection store over the sealed snapshot");
     let sweep = || async {
         fixture
             .registry

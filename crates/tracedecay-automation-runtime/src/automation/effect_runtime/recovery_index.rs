@@ -25,9 +25,10 @@ use super::journal::{self, DurableAutomationAdmission};
 use super::projection::project_recovered_committed_receipts;
 use super::{AutomationSettledTerminal, contract_error, digest};
 use crate::automation::run_ledger::{self, ExactRunPublishOutcome, ExactRunUnboundDiscardOutcome};
-use tracedecay_domain::errors::Result;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const INDEX_SCHEMA_VERSION: u32 = 1;
+const PENDING_INDEX_AUTHORITY: &str = "automation pending index";
 const MAX_PENDING_AUTOMATION_EFFECTS: usize = 256;
 const MAX_INDEX_BYTES: u64 = 128 * 1024;
 const INDEX_FILENAME: &str = "pending-index.json";
@@ -49,6 +50,7 @@ pub enum AutomationEffectRecoveryPreparation {
 
 pub struct PreparedAutomationEffectRecovery {
     dashboard_root: PathBuf,
+    reset_journals: usize,
 }
 
 #[hotpath::measure(label = "daemon.automation.effect.prepare_recovery", future = true)]
@@ -66,21 +68,106 @@ pub async fn prepare_reserved_automation_effect_recovery(
         ))
     })??;
     let recovery_root = dashboard_root.to_path_buf();
-    let indexed = tokio::task::spawn_blocking(move || indexed_recovery_blocking(&recovery_root))
-        .await
-        .map_err(|error| {
-            contract_error(format!("automation recovery index reader failed: {error}"))
-        })??;
+    let (reset_journals, indexed) = tokio::task::spawn_blocking(move || {
+        let reset_journals = rebuild_unsupported_index_blocking(&recovery_root)?;
+        Ok::<_, TraceDecayError>((reset_journals, indexed_recovery_blocking(&recovery_root)?))
+    })
+    .await
+    .map_err(|error| {
+        contract_error(format!("automation recovery index reader failed: {error}"))
+    })??;
     if indexed.is_empty() {
-        let report = AutomationEffectRecoveryReport::default();
+        let report = reset_report(reset_journals);
         observe_recovery_report(&report);
         return Ok(AutomationEffectRecoveryPreparation::Complete(report));
     }
     Ok(AutomationEffectRecoveryPreparation::Pending(
         PreparedAutomationEffectRecovery {
             dashboard_root: dashboard_root.to_path_buf(),
+            reset_journals,
         },
     ))
+}
+
+fn reset_report(reset_journals: usize) -> AutomationEffectRecoveryReport {
+    AutomationEffectRecoveryReport {
+        inspected: reset_journals,
+        reset_required: reset_journals,
+        ..AutomationEffectRecoveryReport::default()
+    }
+}
+
+/// Rebuilds a pending index whose persisted shape is refused from the journals
+/// beside it, discarding journals whose own shape is refused. Journals are read
+/// before the index lock is taken, preserving the journal -> index lock order
+/// used by reservation. Returns the number of discarded journals.
+fn rebuild_unsupported_index_blocking(dashboard_root: &Path) -> Result<usize> {
+    let path = index_path(dashboard_root);
+    let refusal = match with_index_lock(&path, || read_index(&path)) {
+        Ok(_) => return Ok(0),
+        Err(error) if error.reset_required_context().is_some() => error,
+        Err(error) => return Err(error),
+    };
+    let root = automation_root(dashboard_root);
+    let listing = std::fs::read_dir(&root).map_err(|error| {
+        contract_error(format!(
+            "automation journal directory listing failed: {error}"
+        ))
+    })?;
+    let mut entries = Vec::new();
+    let mut discarded = 0;
+    for listed in listing {
+        let listed = listed.map_err(|error| {
+            contract_error(format!(
+                "automation journal directory listing failed: {error}"
+            ))
+        })?;
+        let Some(name) = listed.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if validate_journal_filename(&name).is_err() {
+            continue;
+        }
+        let journal_path = root.join(&name);
+        match journal::read_or_discard_unsupported_record_blocking(&journal_path)? {
+            journal::JournalShapeProbe::Current(record) if !record.is_terminal() => {
+                entries.push(entry_for(&journal_path, &record.admission().scope)?);
+            }
+            journal::JournalShapeProbe::Discarded(journal_refusal) => {
+                discarded += 1;
+                log_journal_reset(&journal_path, &journal_refusal);
+            }
+            journal::JournalShapeProbe::Current(_) | journal::JournalShapeProbe::Missing => {}
+        }
+    }
+    entries.sort_by(|left, right| left.journal_file.cmp(&right.journal_file));
+    let rebuilt_entries = entries.len();
+    let bytes = encode_pending_index(&PendingIndex {
+        schema_version: INDEX_SCHEMA_VERSION,
+        entries,
+    })?;
+    with_index_lock(&path, || match read_index(&path) {
+        Err(error) if error.reset_required_context().is_some() => {
+            write_pending_index(&path, &bytes)
+        }
+        other => other.map(|_| ()),
+    })?;
+    tracing::warn!(
+        event = "automation_pending_index_reset",
+        index = %path.display(),
+        reason = %refusal,
+        rebuilt_entries,
+        discarded_journals = discarded,
+    );
+    Ok(discarded)
+}
+
+fn log_journal_reset(journal: &Path, refusal: &TraceDecayError) {
+    tracing::warn!(
+        event = "automation_effect_journal_reset",
+        journal = %journal.display(),
+        reason = %refusal,
+    );
 }
 
 /// Opens receipt authority only for reserved memory effects; failures defer that
@@ -97,7 +184,10 @@ where
     F: Fn(RunId, FactReadControl) -> Fut + Sync,
     Fut: Future<Output = Result<ProjectMemoryAutomationRunReceiptsV1>> + Send,
 {
-    let PreparedAutomationEffectRecovery { dashboard_root } = preparation;
+    let PreparedAutomationEffectRecovery {
+        dashboard_root,
+        reset_journals,
+    } = preparation;
     let tracedecay_domain::FactOwnerV1::Project { project_id } = owner else {
         return Err(contract_error(
             "automation recovery requires a project owner",
@@ -112,7 +202,7 @@ where
     let operation =
         retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
             .map_err(contract_error)?;
-    let mut report = AutomationEffectRecoveryReport::default();
+    let mut report = reset_report(reset_journals);
     let indexed_root = dashboard_root.clone();
     let indexed_scope = scope.clone();
     let indexed = tokio::task::spawn_blocking(move || {
@@ -198,7 +288,13 @@ where
     let path = indexed.path.clone();
     let record = tokio::task::spawn_blocking(move || journal::read_indexed_record_blocking(&path))
         .await
-        .map_err(|error| contract_error(format!("automation recovery reader failed: {error}")))??;
+        .map_err(|error| contract_error(format!("automation recovery reader failed: {error}")))?;
+    let record = match record {
+        Err(error) if error.reset_required_context().is_some() => {
+            return discard_unsupported_journal(dashboard_root, &indexed.path).await;
+        }
+        record => record?,
+    };
     let Some(record) = record else {
         remove_pending_async(dashboard_root, &indexed.path).await?;
         return Ok(EntryRecoveryOutcome::AlreadyTerminal);
@@ -535,6 +631,28 @@ fn automation_journal_filename(run_id: &RunId) -> Result<String> {
     ))
 }
 
+async fn discard_unsupported_journal(
+    dashboard_root: &Path,
+    journal_path: &Path,
+) -> Result<EntryRecoveryOutcome> {
+    let root = dashboard_root.to_path_buf();
+    let path = journal_path.to_path_buf();
+    tokio::task::spawn_blocking(
+        move || match journal::read_or_discard_unsupported_record_blocking(&path)? {
+            journal::JournalShapeProbe::Discarded(refusal) => {
+                log_journal_reset(&path, &refusal);
+                remove_pending_blocking(&root, &path)?;
+                Ok(EntryRecoveryOutcome::ResetRequired)
+            }
+            journal::JournalShapeProbe::Missing | journal::JournalShapeProbe::Current(_) => {
+                Ok(EntryRecoveryOutcome::Deferred)
+            }
+        },
+    )
+    .await
+    .map_err(|error| contract_error(format!("automation journal reset failed to join: {error}")))?
+}
+
 async fn remove_pending_async(dashboard_root: &Path, journal_path: &Path) -> Result<()> {
     let root = dashboard_root.to_path_buf();
     let path = journal_path.to_path_buf();
@@ -750,12 +868,18 @@ fn read_index(path: &Path) -> Result<PendingIndex> {
             "automation pending index grew beyond its durable byte bound",
         ));
     }
-    let index: PendingIndex = serde_json::from_slice(&bytes).map_err(contract_error)?;
-    if index.schema_version != INDEX_SCHEMA_VERSION
-        || index.entries.len() > MAX_PENDING_AUTOMATION_EFFECTS
-    {
+    let index: PendingIndex = serde_json::from_slice(&bytes).map_err(|error| {
+        TraceDecayError::reset_required(PENDING_INDEX_AUTHORITY, error.to_string())
+    })?;
+    if index.schema_version != INDEX_SCHEMA_VERSION {
+        return Err(TraceDecayError::reset_required(
+            PENDING_INDEX_AUTHORITY,
+            format!("unsupported schema version {}", index.schema_version),
+        ));
+    }
+    if index.entries.len() > MAX_PENDING_AUTOMATION_EFFECTS {
         return Err(contract_error(
-            "automation pending index has an unsupported or unbounded shape",
+            "automation pending index exceeds its bounded capacity",
         ));
     }
     for entry in &index.entries {
@@ -900,6 +1024,7 @@ mod tests {
     fn prepared_recovery(dashboard_root: &Path) -> PreparedAutomationEffectRecovery {
         PreparedAutomationEffectRecovery {
             dashboard_root: dashboard_root.to_path_buf(),
+            reset_journals: 0,
         }
     }
 

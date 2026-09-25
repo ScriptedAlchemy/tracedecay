@@ -709,6 +709,85 @@ mod proximity_threshold_tests {
 }
 
 #[cfg(test)]
+mod released_setting_keys_tests {
+    use super::*;
+    use tracedecay_domain::configuration::RETIRED_CORE_SETTING_KEYS_V1;
+
+    /// Every setting key a published release persisted, as literals so that
+    /// removing a key constant cannot silently shrink this history. Append a
+    /// key here when it first ships; never delete one.
+    const RELEASED_SETTING_KEYS: &[&str] = &[
+        "analyzer.settings.v1",
+        "automation.settings.v1",
+        "context_scout.settings.v1",
+        "diagnostics.prewarm.v1",
+        "feedback.proximity.risk_threshold",
+        "index.exclude.v1",
+        "index.extract_docstrings.v1",
+        "index.git_ignore.v1",
+        "index.include.v1",
+        "index.max_file_size.v1",
+        "index.native_graph_activation.v1",
+        "index.track_call_sites.v1",
+        "lcm.summarizer_executables.v1",
+        "scope.access_rules.v1",
+        "scope.source_bindings.v1",
+        "semantic.runtime.v1",
+        "sync.auto_init.v1",
+        "sync.auto_track_pr_branches.v1",
+        "sync.auto_track_pr_poll_secs.v1",
+        "sync.auto_watch.v1",
+        "sync.backstop_interval_mins.v1",
+        "sync.branch_gc_days.v1",
+        "sync.full_sync_escalation_files.v1",
+        "sync.max_concurrent_syncs.v1",
+        "sync.orphan_db_gc_days.v1",
+        "sync.read_cooldown_secs.v1",
+        "sync.read_refresh.v1",
+        "sync.session_start_stale_threshold_secs.v1",
+        "sync.session_start_sync.v1",
+        "sync.watch_debounce_ms.v1",
+        "sync.watch_linked_worktrees.v1",
+        "sync.watch_max_delay_ms.v1",
+        "sync.watch_max_projects.v1",
+        "telemetry.timings.v1",
+        "user.code_index_workers.v1",
+        "user.extraction_timeout_secs.v1",
+        "user.upload_enabled.v1",
+        "user.watcher_debounce_ms.v1",
+        "user.work_expertise_consent.v1",
+        "work.executable_bindings.v1",
+        "work.expertise_consent.v1",
+        "work.topology_policy.v1",
+    ];
+
+    /// A released key that is neither registered nor retired would turn every
+    /// persisted snapshot carrying it into a configuration reset on open.
+    #[test]
+    fn every_released_setting_key_is_registered_or_retired() {
+        let core = ConfigurationRegistry::core().expect("core registry");
+        let profile =
+            ConfigurationRegistry::profile_code_index_workers().expect("profile registry");
+        for raw_key in RELEASED_SETTING_KEYS {
+            let key = SettingKey::new(*raw_key).expect("key");
+            let registered = core.definition(&key).is_ok() || profile.definition(&key).is_ok();
+            let retired = RETIRED_CORE_SETTING_KEYS_V1.contains(raw_key);
+            assert!(
+                registered != retired,
+                "released setting {raw_key} must be exactly one of registered or retired \
+                 (registered: {registered}, retired: {retired})"
+            );
+        }
+        for raw_key in RETIRED_CORE_SETTING_KEYS_V1 {
+            assert!(
+                RELEASED_SETTING_KEYS.contains(raw_key),
+                "retired setting {raw_key} must record a released key"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod user_profile_settings_tests {
     use super::*;
 

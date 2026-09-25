@@ -490,9 +490,12 @@ function summarizeMass(
     masses.length % 2 === 0
       ? ((masses[middle - 1] ?? 0) + (masses[middle] ?? 0)) / 2
       : (masses[middle] ?? 0);
-  const lowerHalfCount = masses.filter(
-    (mass) => (Math.log1p(mass) - axisLow) / axisSpan < 0.5,
-  ).length;
+  // A registry where every project measures the same has no lower half: the
+  // clamped span would otherwise place every body below the midpoint.
+  const flat = masses[0] === masses[masses.length - 1];
+  const lowerHalfCount = flat
+    ? 0
+    : masses.filter((mass) => (Math.log1p(mass) - axisLow) / axisSpan < 0.5).length;
   return {
     floor: masses[0] ?? 0,
     ceiling: masses[masses.length - 1] ?? 0,

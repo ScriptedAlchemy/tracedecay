@@ -2628,9 +2628,7 @@ fn verify_retained_artifact_digest(
     Ok(())
 }
 
-fn compute_clone_index_census(
-    path: &Path,
-) -> Result<Arc<CodeLexicalCloneIndexCensusV1>, String> {
+fn compute_clone_index_census(path: &Path) -> Result<Arc<CodeLexicalCloneIndexCensusV1>, String> {
     let file = open_private_file(path)
         .map_err(map_private_artifact_file_error)
         .map_err(|error| error.to_string())?;

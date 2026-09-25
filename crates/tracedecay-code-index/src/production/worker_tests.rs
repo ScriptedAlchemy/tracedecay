@@ -264,7 +264,11 @@ fn sealed_generation_is_reusable_by_a_later_build_with_the_same_stored_shape() {
         ..later_build.clone()
     });
     assert_eq!(
-        rechunked.incompatibilities().iter().copied().collect::<Vec<_>>(),
+        rechunked
+            .incompatibilities()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
         [CodeIndexGenerationIncompatibilityV1::ChunkerRevision]
     );
     assert!(

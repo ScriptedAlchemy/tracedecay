@@ -92,6 +92,22 @@ pub(crate) fn observed_bundle_discovery_matches(
     Ok(source_digest == cache_digest)
 }
 
+/// Auto-discovered entrypoints under `root` outside `expected_relatives`; an
+/// absent root has none.
+pub(crate) fn unexpected_bundle_entrypoints(
+    root: &Path,
+    expected_relatives: &[String],
+    discovery_roots: &[&str],
+) -> Result<Vec<String>> {
+    let Some(paths) = discovered_bundle_paths(root, discovery_roots)? else {
+        return Ok(Vec::new());
+    };
+    Ok(paths
+        .into_iter()
+        .filter(|relative| !expected_relatives.contains(relative))
+        .collect())
+}
+
 fn discovered_bundle_paths(root: &Path, discovery_roots: &[&str]) -> Result<Option<Vec<String>>> {
     match std::fs::symlink_metadata(root) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {

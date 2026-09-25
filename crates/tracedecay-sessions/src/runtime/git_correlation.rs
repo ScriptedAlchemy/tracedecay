@@ -1217,7 +1217,8 @@ pub(crate) use attribution::publish_graph_evidence_controlled;
 pub use attribution::{
     CommitAttributionSweepOutcome, ScannedCommit, SpanScanTarget, SpanWindow, TargetScan,
     commit_overlap_kind, graph_evidence_publication_key, match_commit_to_spans,
-    publish_graph_evidence, publish_transcript_graph_evidence, run_commit_attribution_sweep,
+    publish_graph_evidence, publish_transcript_graph_evidence, rebuild_pre_index_git_evidence,
+    run_commit_attribution_sweep,
 };
 pub use backfill::{
     BackfillOptions, BackfillSkipReason, BackfillStats, BoundedBackfillInterruption,

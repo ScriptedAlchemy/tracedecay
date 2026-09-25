@@ -1,4 +1,5 @@
 use super::*;
+use crate::agents::host_bundle::HostComponentV1;
 use crate::agents::safe_write_json_file;
 
 /// The repo-local `hooks-codex.json` ships only an empty `hooks` object.
@@ -848,6 +849,139 @@ fn redeploy_preserves_foreign_discovery_and_support_bytes() {
     assert_eq!(std::fs::read(&reference).unwrap(), reference_bytes);
     assert_eq!(std::fs::read(&helper).unwrap(), helper_bytes);
     assert!(!codex_plugin_is_natively_active(home.path(), Some(TEST_BIN)).unwrap());
+}
+
+/// `skills/tracedecay-find-impact/SKILL.md` exactly as a released bundle
+/// deployed it; the current bundle no longer ships that path.
+const RELEASED_RETIRED_SKILL: &str = "---\nname: tracedecay-find-impact\ndescription: 'Use to find the blast radius of a change, including impacted symbols, files, and the tests to run.'\n---\n\n# Find impact\n\nUse to find a change's blast radius: impacted symbols, files, and tests to run.\n\nUse `tracedecay:assessing-impact`.\n\n- **Target:** the symbol, file, or change to analyze. If none is given, use the current working-tree diff.\n- Read-only: shallow `max_depth` first. Identify impact; do not run tests.\n\nOutput: impacted symbols + files, the test set to run, and any hub/coupling risk.\n";
+
+#[test]
+fn activation_retires_released_skill_files_and_converges() {
+    let home = tempfile::tempdir().unwrap();
+    let cli_dir = tempfile::tempdir().unwrap();
+    let _codex_cli = install_fake_codex_cli(cli_dir.path());
+    write_exact_native_activation(home.path(), TEST_BIN);
+    let retired_dir = codex_plugin_install_dir(home.path()).join("skills/tracedecay-find-impact");
+    std::fs::create_dir_all(&retired_dir).unwrap();
+    std::fs::write(retired_dir.join("SKILL.md"), RELEASED_RETIRED_SKILL).unwrap();
+    assert!(!codex_plugin_is_natively_active(home.path(), Some(TEST_BIN)).unwrap());
+
+    CodexIntegration
+        .activate_deployed_host_registration(&install_ctx(home.path()))
+        .unwrap();
+
+    assert!(
+        !retired_dir.exists(),
+        "activation must delete the retired skill and its emptied directory"
+    );
+    copy_rendered_bundle_to_native_cache(home.path(), TEST_BIN);
+    assert!(codex_plugin_is_natively_active(home.path(), Some(TEST_BIN)).unwrap());
+}
+
+#[test]
+fn deactivation_retires_released_skill_files_and_keeps_edited_ones() {
+    let home = tempfile::tempdir().unwrap();
+    let source = install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
+    let retired = source.join("skills/tracedecay-find-impact/SKILL.md");
+    std::fs::create_dir_all(retired.parent().unwrap()).unwrap();
+    std::fs::write(&retired, RELEASED_RETIRED_SKILL).unwrap();
+    let edited = source.join("skills/tracedecay-review-diff/SKILL.md");
+    std::fs::create_dir_all(edited.parent().unwrap()).unwrap();
+    std::fs::write(
+        &edited,
+        "---\nname: tracedecay-review-diff\n---\noperator edit\n",
+    )
+    .unwrap();
+
+    CodexIntegration
+        .deactivate_deployed_host_registration(&install_ctx(home.path()))
+        .unwrap();
+
+    assert!(!retired.parent().unwrap().exists());
+    assert_eq!(
+        std::fs::read_to_string(&edited).unwrap(),
+        "---\nname: tracedecay-review-diff\n---\noperator edit\n"
+    );
+}
+
+#[test]
+fn install_preview_refuses_foreign_entrypoints_as_ownership_conflict() {
+    use crate::agents::host_bundle::{
+        HostBundleError, HostBundleLifecycleOpV1, HostBundleWriterV1,
+        HostComponentSetExecutionRequestV1, HostComponentSetLifecycleRequestV1,
+        HostComponentSetTransactionV1, HostKindV1,
+    };
+
+    let home = tempfile::tempdir().unwrap();
+    let lifecycle = tempfile::tempdir().unwrap();
+    let source = install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
+    let retired = source.join("skills/tracedecay-find-impact/SKILL.md");
+    std::fs::create_dir_all(retired.parent().unwrap()).unwrap();
+    std::fs::write(&retired, RELEASED_RETIRED_SKILL).unwrap();
+    let operator_skill = source.join("skills/operator-owned/SKILL.md");
+    std::fs::create_dir_all(operator_skill.parent().unwrap()).unwrap();
+    std::fs::write(&operator_skill, "---\nname: operator-owned\n---\n").unwrap();
+    assert_eq!(
+        CodexIntegration
+            .foreign_bundle_entrypoints(&[HostComponentV1::ContextMcp], home.path())
+            .unwrap(),
+        Vec::<PathBuf>::new(),
+        "an MCP-only set never loads the plugin source"
+    );
+
+    let component_set =
+        crate::agents::host_bundle_registry::verified_embedded_host_component_set_with_tracedecay_bin(
+            HostKindV1::Codex,
+            &[HostComponentV1::Core],
+            0,
+            TEST_BIN,
+            crate::agents::TEST_GENERATOR_COMMIT,
+        )
+        .unwrap();
+    let request = HostComponentSetExecutionRequestV1 {
+        lifecycle: HostComponentSetLifecycleRequestV1 {
+            operation: HostBundleLifecycleOpV1::Install,
+            expected_host: HostKindV1::Codex,
+            expected_components: vec![HostComponentV1::Core],
+            explicit_confirmation: true,
+            hermes_profile_bindings: 0,
+            explicit_adoption: false,
+        },
+        operation_id: [41; 16],
+    };
+    let mut writer =
+        HostBundleWriterV1::open_with_lifecycle_root(home.path(), lifecycle.path()).unwrap();
+    let mut registration = crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
+        "codex",
+        home.path(),
+        request.lifecycle.operation,
+        TEST_BIN.to_string(),
+    )
+    .unwrap();
+    let error = HostComponentSetTransactionV1::new(&mut writer)
+        .preview(
+            &component_set.component_set,
+            &request,
+            &component_set,
+            &mut registration,
+        )
+        .expect_err("a foreign entrypoint in the plugin source must refuse install");
+
+    let HostBundleError::OwnershipConflict(message) = error else {
+        panic!("expected an ownership conflict, got {error:?}");
+    };
+    assert!(
+        message.contains(&operator_skill.display().to_string()),
+        "{message}"
+    );
+    assert!(
+        !message.contains("tracedecay-find-impact"),
+        "released bytes must not be reported as foreign: {message}"
+    );
+    assert!(
+        operator_skill.is_file() && retired.is_file(),
+        "preview mutates nothing"
+    );
 }
 
 /// Install an executable `codex` on the host-program search path only.

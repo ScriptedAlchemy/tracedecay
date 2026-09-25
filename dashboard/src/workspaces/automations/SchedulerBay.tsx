@@ -74,7 +74,7 @@ export function SchedulerBay({
             </div>
             <SchedulerControl paused={status.paused} {...control} />
           </div>
-          <dl className="grid grid-cols-2 gap-x-3 gap-y-2 border-t border-edge-subtle pt-2 sm:grid-cols-3">
+          <dl className="grid grid-cols-2 gap-x-3 gap-y-2 border-t border-edge-subtle pt-2 sm:grid-cols-3 xl:grid-cols-2">
             <Term label="automation">{status.enabled ? 'enabled' : 'disabled'}</Term>
             <Term label="tick interval" mono>{status.scheduler_tick_secs}s</Term>
             <Term label="daemon clock (utc)" mono>{formatUtc(status.now)}</Term>
