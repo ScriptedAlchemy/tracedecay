@@ -504,6 +504,8 @@ pub struct FusionStageInput {
 /// final scalar utility.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FusionComparatorRecordV1 {
+    /// Distinct caller anchors the candidate carries; the leading key.
+    pub anchor_tier: u32,
     pub exact_class: ExactClass,
     pub utility_micros: u64,
     pub source_validity_rank: u8,
@@ -569,10 +571,25 @@ impl CompositionKernel {
         input: &FusionStageInput,
         policy: &tracedecay_domain::DiversityPolicy,
     ) -> Result<CompositionOutputV1, FusionStageError> {
+        self.compose_with_anchor_tiers(input, policy, &BTreeMap::new())
+    }
+
+    /// Compose with caller-anchor tiers: a fused candidate carrying more
+    /// caller anchors ranks ahead of every candidate carrying fewer, exact
+    /// class included, before dedupe, diversity caps, and pagination see the
+    /// order. Anchors are the caller's statement of what the answer is about;
+    /// a lane score cannot carry that through calibration.
+    pub fn compose_with_anchor_tiers(
+        &self,
+        input: &FusionStageInput,
+        policy: &tracedecay_domain::DiversityPolicy,
+        anchor_tiers: &BTreeMap<RetrievalAnchorId, u32>,
+    ) -> Result<CompositionOutputV1, FusionStageError> {
         self.compose_required(
             input,
             policy,
             &[RetrieverKind::ExactLiteral, RetrieverKind::Lexical],
+            anchor_tiers,
         )
     }
 
@@ -585,7 +602,7 @@ impl CompositionKernel {
         policy: &tracedecay_domain::DiversityPolicy,
         lane: RetrieverKind,
     ) -> Result<CompositionOutputV1, FusionStageError> {
-        self.compose_required(input, policy, &[lane])
+        self.compose_required(input, policy, &[lane], &BTreeMap::new())
     }
 
     #[hotpath::measure(label = "query.fusion")]
@@ -594,6 +611,7 @@ impl CompositionKernel {
         input: &FusionStageInput,
         policy: &tracedecay_domain::DiversityPolicy,
         required_lanes: &[RetrieverKind],
+        anchor_tiers: &BTreeMap<RetrievalAnchorId, u32>,
     ) -> Result<CompositionOutputV1, FusionStageError> {
         let admitted = admitted_lanes(input, required_lanes)?;
         let (compact, dedupe_decisions) = self
@@ -605,7 +623,7 @@ impl CompositionKernel {
         // One sort with the final comparator establishes the order every
         // later stage preserves; representative selection and diversity caps
         // only filter it.
-        let (ordered, comparator_records) = self.fusion.order_fused(fused);
+        let (ordered, comparator_records) = self.fusion.order_fused(fused, anchor_tiers);
         let (deduped, mut copy_decisions) = self
             .dedupe
             .select_representatives_with_decisions(ordered)
@@ -989,12 +1007,17 @@ impl DeterministicFixedPointFusion {
     fn order_fused(
         &self,
         candidates: Vec<FusedCandidate>,
+        anchor_tiers: &BTreeMap<RetrievalAnchorId, u32>,
     ) -> (OrderedFusedCandidates, Vec<FusionComparatorRecordV1>) {
-        let mut ordered = OrderedFusedCandidates::sort(candidates);
+        let mut ordered = OrderedFusedCandidates::sort(candidates, anchor_tiers);
         let records = ordered
             .iter_mut()
             .map(|candidate| {
-                let record = self.comparator_record(candidate);
+                let anchor_tier = anchor_tiers
+                    .get(&candidate.anchor_id)
+                    .copied()
+                    .unwrap_or(0);
+                let record = self.comparator_record(candidate, anchor_tier);
                 candidate.decisions.push(RankingDecision {
                     kind: RankingDecisionKind::ComparatorProvenance,
                     retriever: None,
@@ -1004,7 +1027,8 @@ impl DeterministicFixedPointFusion {
                         .first()
                         .map(|occurrence| occurrence.retriever_evidence_anchor.clone()),
                     detail: format!(
-                        "exact={:?};utility={};source_validity={};domain_scores=[{}];evidence_anchors=[{}];occurrences=[{}];revision={}",
+                        "anchor_tier={};exact={:?};utility={};source_validity={};domain_scores=[{}];evidence_anchors=[{}];occurrences=[{}];revision={}",
+                        record.anchor_tier,
                         record.exact_class,
                         record.utility_micros,
                         record.source_validity_rank,
@@ -1029,9 +1053,14 @@ impl DeterministicFixedPointFusion {
         (ordered, records)
     }
 
-    pub fn comparator_record(&self, candidate: &FusedCandidate) -> FusionComparatorRecordV1 {
+    pub fn comparator_record(
+        &self,
+        candidate: &FusedCandidate,
+        anchor_tier: u32,
+    ) -> FusionComparatorRecordV1 {
         stage_counters::record_comparator_record();
         FusionComparatorRecordV1 {
+            anchor_tier,
             exact_class: candidate.exact_class,
             utility_micros: candidate.utility_micros,
             source_validity_rank: source_validity_rank(candidate),
