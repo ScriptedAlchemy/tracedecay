@@ -567,40 +567,41 @@ impl CodeLexicalArtifactReaderV1 {
         self.receipt.format_revision()
     }
 
+    /// The clone census if it has been computed, without computing it.
+    ///
+    /// `None` while the census task has not finished. This never waits on an
+    /// in-flight census, so status reads it on the request path.
     #[hotpath::skip]
-    pub fn clone_index_census(
+    pub fn computed_clone_index_census(
         &self,
-    ) -> Result<Option<Arc<CodeLexicalCloneIndexCensusV1>>, CodeLexicalArtifactErrorV1> {
-        let census = self.clone_index_census.get_or_init(|| {
-            let file = open_private_file(self.path.as_ref())
-                .map_err(map_private_artifact_file_error)
-                .map_err(|error| error.to_string())?;
-            verify_named_path_identity(self.path.as_ref(), &file)
-                .map_err(|error| error.to_string())?;
-            let connection = Connection::open_with_flags(
-                self.path.as_ref(),
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .map_err(|error| map_reader_open_error(self.path.as_ref(), error))
-            .map_err(|error| error.to_string())?;
-            connection
-                .pragma_update(None, "query_only", true)
-                .map_err(sqlite_error)
-                .map_err(|error| error.to_string())?;
-            verify_named_path_identity(self.path.as_ref(), &file)
-                .map_err(|error| error.to_string())?;
-            let census =
-                read_clone_index_census(&connection, CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1)
-                    .map(Arc::new)
-                    .map_err(|error| error.to_string())?;
-            verify_named_path_identity(self.path.as_ref(), &file)
-                .map_err(|error| error.to_string())?;
-            Ok(census)
-        });
-        census
-            .as_ref()
-            .map(|census| Some(Arc::clone(census)))
-            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.clone()))
+    ) -> Option<Result<Arc<CodeLexicalCloneIndexCensusV1>, CodeLexicalArtifactErrorV1>> {
+        self.clone_index_census.get().map(|census| {
+            census
+                .as_ref()
+                .map(Arc::clone)
+                .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.clone()))
+        })
+    }
+
+    /// The task that computes this artifact's clone census once for every
+    /// clone of this reader.
+    ///
+    /// The census validates every stored clone payload, which is corpus-sized
+    /// work, so it runs off request paths. The task holds only the artifact
+    /// path and the shared result slot, not this reader's connection or page
+    /// cache, so a retired reader's memory is not pinned while it runs.
+    #[hotpath::skip]
+    pub fn clone_index_census_task(&self) -> impl FnOnce() + Send + 'static {
+        let path = Arc::clone(&self.path);
+        let census = Arc::clone(&self.clone_index_census);
+        move || {
+            census.get_or_init(|| {
+                hotpath::measure_block!(
+                    "query.artifact.clone_census.compute",
+                    compute_clone_index_census(path.as_ref())
+                )
+            });
+        }
     }
 
     #[hotpath::skip]
@@ -2625,6 +2626,31 @@ fn verify_retained_artifact_digest(
         ));
     }
     Ok(())
+}
+
+fn compute_clone_index_census(
+    path: &Path,
+) -> Result<Arc<CodeLexicalCloneIndexCensusV1>, String> {
+    let file = open_private_file(path)
+        .map_err(map_private_artifact_file_error)
+        .map_err(|error| error.to_string())?;
+    verify_named_path_identity(path, &file).map_err(|error| error.to_string())?;
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| map_reader_open_error(path, error))
+    .map_err(|error| error.to_string())?;
+    connection
+        .pragma_update(None, "query_only", true)
+        .map_err(sqlite_error)
+        .map_err(|error| error.to_string())?;
+    verify_named_path_identity(path, &file).map_err(|error| error.to_string())?;
+    let census = read_clone_index_census(&connection, CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1)
+        .map(Arc::new)
+        .map_err(|error| error.to_string())?;
+    verify_named_path_identity(path, &file).map_err(|error| error.to_string())?;
+    Ok(census)
 }
 
 /// Make the content-addressed reader refuse a replacement at the published
