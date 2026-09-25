@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.51](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.50...v1.0.0-beta.51) (2026-09-25)
+
+
+### Bug Fixes
+
+* **doctor:** name missing analyzers; stop Hermes float-identity refusals ([#1992](https://github.com/ScriptedAlchemy/tracedecay/issues/1992)) ([10e5560](https://github.com/ScriptedAlchemy/tracedecay/commit/10e556037c51e1c75b657ccd6f728f80c2f65e94))
+* fresh init leaves the tree clean and TypeScript diagnostics have a producer ([#1991](https://github.com/ScriptedAlchemy/tracedecay/issues/1991)) ([bec5c1f](https://github.com/ScriptedAlchemy/tracedecay/commit/bec5c1fca25807e327ee16431343d9968daf0774)), closes [#1986](https://github.com/ScriptedAlchemy/tracedecay/issues/1986)
+* **mcp:** answer project-less serve initialize with a typed state ([#1987](https://github.com/ScriptedAlchemy/tracedecay/issues/1987)) ([c9e0328](https://github.com/ScriptedAlchemy/tracedecay/commit/c9e03289af5e4f79a7cc2e8306031dea771e0717))
+* one-command upgrade journey for stale hosts, daemon lease, and refused stores ([#1996](https://github.com/ScriptedAlchemy/tracedecay/issues/1996)) ([a2e6ec0](https://github.com/ScriptedAlchemy/tracedecay/commit/a2e6ec097150a09aa037ac1836586d7a3a1c9f73)), closes [#1982](https://github.com/ScriptedAlchemy/tracedecay/issues/1982)
+* self-heal a corrupt code-index publication and bound the daemon log ([#1990](https://github.com/ScriptedAlchemy/tracedecay/issues/1990)) ([02acfed](https://github.com/ScriptedAlchemy/tracedecay/commit/02acfedb8225c578aad521658c6d25ca0c380a66)), closes [#1981](https://github.com/ScriptedAlchemy/tracedecay/issues/1981)
+
 ## [1.0.0-beta.50](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.50...v1.0.0-beta.50) (2026-09-25)
 
 
