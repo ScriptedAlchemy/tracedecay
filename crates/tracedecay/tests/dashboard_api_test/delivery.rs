@@ -46,9 +46,11 @@ use tracedecay_mcp::handlers::dashboard_delivery::DashboardDeliveryReadAdapter;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::dashboard_api_support::*;
+use serde_json::json;
 use tracedecay_sessions::runtime::git_correlation::{
     DEFAULT_SPAN_MERGE_GAP_SECS, SpanObservation, SpanSource,
 };
+use tracedecay_sessions::runtime::hosts::codex::CodexSource;
 
 const DELIVERY_HTTP_ADMISSION_MATCHED_PR: &str = "42";
 const DELIVERY_HTTP_ADMISSION_UNMATCHED_PR: &str = "99";
@@ -595,6 +597,47 @@ fn delivery_overview_serves_real_git_reads_and_typed_unmounted_authority() {
     });
 }
 
+const CODEX_SUBAGENT_THREAD: &str = "codex-subagent-thread";
+
+fn write_codex_subagent_rollout(home: &Path, project_root: &Path, branch: &str) {
+    let day = home.join(".codex/sessions/2026/09/25");
+    std::fs::create_dir_all(&day).unwrap();
+    let call = |n: u32, name: &str| {
+        [
+            json!({"timestamp": format!("2026-09-25T11:00:1{n}.000Z"), "type": "response_item",
+                   "payload": {"type": "function_call", "name": name,
+                               "arguments": "{\"command\":[\"ls\"]}", "call_id": format!("call-{n}")}}),
+            json!({"timestamp": format!("2026-09-25T11:00:1{n}.500Z"), "type": "response_item",
+                   "payload": {"type": "function_call_output", "call_id": format!("call-{n}"),
+                               "output": "ok"}}),
+        ]
+    };
+    let mut lines = vec![
+        json!({"timestamp": "2026-09-25T11:00:00.000Z", "type": "session_meta", "payload": {
+            "id": CODEX_SUBAGENT_THREAD,
+            "cwd": project_root,
+            "git": {"branch": branch},
+            "thread_source": "subagent",
+            "source": {"subagent": {"thread_spawn": {"parent_thread_id": "codex-parent-thread"}}},
+        }}),
+        json!({"timestamp": "2026-09-25T11:00:01.000Z", "type": "response_item", "payload": {
+            "type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "review the dialog change"}],
+        }}),
+    ];
+    for (n, name) in [(1, "shell"), (2, "shell"), (3, "apply_patch")] {
+        lines.extend(call(n, name));
+    }
+    let body: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    std::fs::write(
+        day.join(format!(
+            "rollout-2026-09-25T11-00-00-{CODEX_SUBAGENT_THREAD}.jsonl"
+        )),
+        body,
+    )
+    .unwrap();
+}
+
 fn agent_usage_session(
     project_key: &str,
     project_path: &Path,
@@ -738,6 +781,21 @@ fn delivery_overview_counts_agent_tool_calls_for_sessions_on_the_live_branch() {
                 .await
                 .expect("seed agent usage transcript");
         }
+        // A subagent rollout admitted through the production Codex source:
+        // its tool invocations exist only as canonical observations, and the
+        // paired outputs are results, not invocations.
+        let codex_home = tempfile::tempdir().expect("codex home");
+        write_codex_subagent_rollout(codex_home.path(), &project_root, "feature/agents");
+        let stats = fixture
+            .host_runtime
+            .ingest_project_transcript_source_for_test(
+                &CodexSource::with_home(codex_home.path()),
+                &project_root,
+            )
+            .await
+            .expect("ingest Codex rollout");
+        assert!(stats.messages_upserted > 0, "{stats:?}");
+
         for (session_id, branch) in [
             ("planner-1", "feature/agents"),
             ("planner-2", "feature/agents"),
@@ -769,12 +827,21 @@ fn delivery_overview_counts_agent_tool_calls_for_sessions_on_the_live_branch() {
         let value = &usage["value"];
         assert_eq!(value["branch"], "feature/agents", "{body}");
         assert_eq!(
-            value["sessions"], 3,
+            value["sessions"], 4,
             "only this project's branch sessions: {body}"
         );
         assert_eq!(value["truncated"], false);
         let agents = value["agents"].as_array().expect("agent rows");
-        assert_eq!(agents.len(), 2, "{body}");
+        assert_eq!(agents.len(), 3, "{body}");
+        let subagent = agents
+            .iter()
+            .find(|row| !row["agent"].is_null() && row["agent"] != "planner")
+            .unwrap_or_else(|| panic!("canonical Codex subagent row: {body}"));
+        assert_eq!(subagent["sessions"], 1, "{body}");
+        assert_eq!(
+            subagent["tool_calls"], 3,
+            "canonical invocations, not their outputs: {body}"
+        );
         let planner = agents
             .iter()
             .find(|row| row["agent"] == "planner")

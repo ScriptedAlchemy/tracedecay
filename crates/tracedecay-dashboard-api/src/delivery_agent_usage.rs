@@ -174,6 +174,10 @@ pub(super) async fn agent_usage_projection(
 /// Resolves correlated `(provider, session_id)` pairs to this project's
 /// sessions, with their agent and recorded tool invocations. A hit whose
 /// provider is empty is an unattributed span and matches the session id alone.
+///
+/// Invocations come from both admitted canonical observations and legacy raw
+/// rows; a host can record one invocation as several rows (a call, its
+/// output, an edit receipt), so they are counted once per call identity.
 async fn project_sessions(
     db: &RegisteredGlobalDb,
     host_io: &HostIo,
@@ -197,15 +201,29 @@ async fn project_sessions(
                 s.session_id,
                 COALESCE(s.agent_id, '') AS agent_id,
                 COALESCE(s.metadata_json, '') AS metadata_json,
-                (SELECT COUNT(DISTINCT COALESCE(
-                            CASE WHEN json_valid(m.metadata_json)
-                                 THEN json_extract(m.metadata_json, '$.call_id') END,
-                            m.message_id))
-                   FROM lcm_raw_messages m
-                  WHERE m.provider = s.provider
-                    AND m.session_id = s.session_id
-                    AND (m.kind IN ('tool_call', 'file_edit')
-                         OR (m.kind = 'tool_event' AND COALESCE(m.tool_names, '') <> ''))
+                (SELECT COUNT(DISTINCT invocation) FROM (
+                     SELECT COALESCE(
+                                CASE WHEN json_valid(m.metadata_json)
+                                     THEN json_extract(m.metadata_json, '$.call_id') END,
+                                m.message_id) AS invocation
+                       FROM lcm_raw_messages m
+                      WHERE m.provider = s.provider
+                        AND m.session_id = s.session_id
+                        AND (m.kind IN ('tool_call', 'file_edit')
+                             OR (m.kind = 'tool_event' AND COALESCE(m.tool_names, '') <> ''))
+                     UNION ALL
+                     SELECT json_extract(fact.value, '$.invocation_id')
+                       FROM session_temporal_observation_effects e
+                       JOIN observations o ON o.observation_id = e.observation_id
+                       JOIN json_each(
+                                CASE WHEN json_valid(o.observation_json)
+                                     THEN o.observation_json ELSE '{}' END,
+                                '$.payload.facts') fact
+                      WHERE e.session_id = s.session_id
+                        AND CASE WHEN json_valid(o.observation_json)
+                                 THEN json_extract(o.observation_json, '$.payload.provider')
+                            END = s.provider
+                        AND json_extract(fact.value, '$.kind') = 'tool_invocation')
                 ) AS tool_calls
          FROM correlated c
          JOIN sessions s
