@@ -1630,6 +1630,7 @@ pub(super) async fn serve_windows_broker_client(
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 // Cohesive per-connection serving context; bundling into a params struct would churn every caller.
 pub(super) async fn serve_windows_broker_client_with_class(
     stream: BrokerStream,
@@ -1659,6 +1660,7 @@ pub(super) async fn serve_windows_broker_client_with_class(
 
 #[cfg(any(not(unix), test))]
 // The foreground portable broker supplies one daemon-generation invocation state.
+#[allow(clippy::too_many_arguments)]
 #[hotpath::measure(label = "daemon.engine.transport.dispatch", future = true)]
 pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     stream: BrokerStream,
