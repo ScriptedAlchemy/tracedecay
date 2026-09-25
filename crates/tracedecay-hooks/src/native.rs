@@ -238,6 +238,7 @@ pub fn decode_native_hook_event(
         NativeHostIdentityV1::Kiro => decode_kiro(&raw)?,
         NativeHostIdentityV1::KimiCode => decode_kimi(&raw)?,
         NativeHostIdentityV1::OpenCode => decode_opencode_event(&raw)?,
+        NativeHostIdentityV1::Pi => decode_pi(&raw)?,
         NativeHostIdentityV1::Cline
         | NativeHostIdentityV1::RooCode
         | NativeHostIdentityV1::Kilo => {
@@ -568,6 +569,16 @@ struct KimiStopEvent {
     _stop_hook_active: IgnoredAny,
 }
 
+/// The lifecycle payload the TraceDecay Pi extension writes for Pi's
+/// in-process `session_start` and `agent_end` events.
+#[derive(Deserialize)]
+struct PiLifecycleEvent {
+    id: String,
+    session_id: String,
+    #[serde(rename = "cwd")]
+    _cwd: IgnoredAny,
+}
+
 #[derive(Deserialize)]
 struct OpenCodeEventProperties {
     file: Option<String>,
@@ -783,6 +794,19 @@ fn decode_kimi(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeError>
     }
 }
 
+fn decode_pi(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeError> {
+    let boundary = match event_name(raw, "hook_event_name")? {
+        "session_start" => HookBoundaryV1::Start,
+        "agent_end" => HookBoundaryV1::TurnComplete,
+        _ => return Err(NativeHookDecodeError::UnsupportedNativeEvent),
+    };
+    let event = decode_shape::<PiLifecycleEvent>(raw)?;
+    if event.id.is_empty() || event.session_id.is_empty() {
+        return Err(NativeHookDecodeError::MissingTypedIdentity);
+    }
+    Ok(NativeHookSignalV1::SessionBoundary(boundary))
+}
+
 fn decode_opencode_event(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeError> {
     let event = decode_shape::<OpenCodeBusEvent>(raw)?;
     match event_name(raw, "type")? {
@@ -929,6 +953,16 @@ mod tests {
                 include_bytes!("../fixtures/host_events/kimi/stop.json"),
                 NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete),
             ),
+            (
+                NativeHostIdentityV1::Pi,
+                include_bytes!("../fixtures/host_events/pi/session-start.json"),
+                NativeHookSignalV1::SessionBoundary(HookBoundaryV1::Start),
+            ),
+            (
+                NativeHostIdentityV1::Pi,
+                include_bytes!("../fixtures/host_events/pi/agent-end.json"),
+                NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete),
+            ),
         ];
 
         for (host, payload, signal) in captures {
@@ -974,6 +1008,36 @@ mod tests {
                 .unwrap()
                 .ordering,
             HookOrderingV1::Unknown
+        );
+    }
+
+    #[test]
+    fn pi_lifecycle_requires_its_own_event_and_session_identity() {
+        let agent_end = include_bytes!("../fixtures/host_events/pi/agent-end.json");
+        let mut payload = serde_json::from_slice::<Value>(agent_end).unwrap();
+        payload["session_id"] = Value::String(String::new());
+        assert_eq!(
+            decode_native_hook_event(
+                NativeHostIdentityV1::Pi,
+                &serde_json::to_vec(&payload).unwrap()
+            ),
+            Err(NativeHookDecodeError::MissingTypedIdentity)
+        );
+        payload["hook_event_name"] = Value::String("tool_result".to_owned());
+        assert_eq!(
+            decode_native_hook_event(
+                NativeHostIdentityV1::Pi,
+                &serde_json::to_vec(&payload).unwrap()
+            ),
+            Err(NativeHookDecodeError::UnsupportedNativeEvent)
+        );
+        // Another host's event shape never decodes as a Pi boundary.
+        assert_eq!(
+            decode_native_hook_event(
+                NativeHostIdentityV1::Pi,
+                include_bytes!("../fixtures/host_events/codex/stop.json")
+            ),
+            Err(NativeHookDecodeError::UnsupportedNativeEvent)
         );
     }
 

@@ -1036,7 +1036,8 @@ impl CommandFamily {
             | Commands::HookHermesTerminalReceipt
             | Commands::HookKimiEvent
             | Commands::HookOpenCodeEvent
-            | Commands::HookOpenCodeToolAfter => Self::Hook,
+            | Commands::HookOpenCodeToolAfter
+            | Commands::HookPiEvent => Self::Hook,
             Commands::Upgrade { .. }
             | Commands::Update { .. }
             | Commands::PostUpdate { .. }
@@ -1663,7 +1664,8 @@ async fn dispatch_hook_command(
         | Commands::HookHermesTerminalReceipt
         | Commands::HookKimiEvent
         | Commands::HookOpenCodeEvent
-        | Commands::HookOpenCodeToolAfter) => hook_cmd::handle_hook_command(hook_command).await?,
+        | Commands::HookOpenCodeToolAfter
+        | Commands::HookPiEvent) => hook_cmd::handle_hook_command(hook_command).await?,
         _ => unreachable!("non-hook command passed to hook dispatcher"),
     };
     Ok(CommandOutcome::Exit(code))

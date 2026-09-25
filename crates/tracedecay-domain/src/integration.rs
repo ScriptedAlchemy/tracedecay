@@ -306,7 +306,9 @@ const fn canonical_stock_host_capabilities(host: HostKindV1) -> [HostCapabilityR
         // Pi exposes no MCP server route: its extension API registers
         // model-callable tools and lifecycle hooks directly, and the shipped
         // extension bridges the code graph through `tracedecay tool` over the
-        // daemon socket. The CLI remains the scripted fallback surface.
+        // daemon socket. The CLI remains the scripted fallback surface. Its
+        // lifecycle events reach `hook-pi-event` under the Pi native identity,
+        // but no host-integration native fixture evidences that route yet.
         HostKindV1::Pi => (
             Unavailable(HostRegistrationUnsupported),
             Unavailable(HostApiAbsent),

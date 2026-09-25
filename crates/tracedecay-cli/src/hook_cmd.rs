@@ -68,6 +68,9 @@ fn handle_hook_command_inner(
             Commands::HookOpenCodeToolAfter => {
                 Some(tracedecay_agent_hosts::hooks::hook_opencode_tool_after(&runtime).await)
             }
+            Commands::HookPiEvent => {
+                Some(tracedecay_agent_hosts::hooks::hook_pi_event(&runtime).await)
+            }
             _ => None,
         };
         if let Some(code) = native_response_code {

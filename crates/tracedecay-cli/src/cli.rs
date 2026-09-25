@@ -449,6 +449,9 @@ pub enum Commands {
     /// OpenCode direct tool.execute.after Hook V2 handler.
     #[command(name = "hook-opencode-tool-after", hide = true)]
     HookOpenCodeToolAfter,
+    /// Pi extension lifecycle (`session_start`, `agent_end`) Hook V2 handler.
+    #[command(name = "hook-pi-event", hide = true)]
+    HookPiEvent,
     /// Serve the local dashboard UI (holographic memory + LCM + code graph explorers)
     #[command(long_about = DASHBOARD_LONG_ABOUT, after_help = DASHBOARD_AFTER_HELP)]
     Dashboard {
