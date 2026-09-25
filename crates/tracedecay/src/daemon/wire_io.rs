@@ -280,6 +280,7 @@ mod wire_bound_tests {
                     None,
                     false,
                     &lifecycle,
+                    lifecycle.try_enter(),
                 )
                 .await
             }

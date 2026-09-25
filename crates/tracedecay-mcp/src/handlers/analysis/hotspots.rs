@@ -1,6 +1,14 @@
 //! `tracedecay_hotspots`, churn-weighted complexity ranking.
 
+use std::sync::LazyLock;
+
+use tracedecay_code_extraction::LanguageRegistry;
+
 use super::*;
+
+/// Manifest keys (`package.json`, `Cargo.toml`) are indexed for module
+/// resolution; they have no call edges and are not code hotspots.
+static EXTRACTORS: LazyLock<LanguageRegistry> = LazyLock::new(LanguageRegistry::new);
 
 #[hotpath::measure(future = true, label = "mcp.analysis.hotspots.total")]
 pub async fn handle_hotspots(
@@ -26,6 +34,7 @@ pub async fn handle_hotspots(
             *outgoing.entry(edge.from_occurrence).or_default() += 1;
             *incoming.entry(edge.to_occurrence).or_default() += 1;
         }
+        symbols.retain(|symbol| !EXTRACTORS.is_configuration_file(&symbol.path));
         symbols.sort_by(|left, right| {
             let left_total = incoming
                 .get(&left.occurrence)

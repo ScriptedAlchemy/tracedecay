@@ -61,7 +61,7 @@ mod tests {
         initialize_response_decorator: Option<RmcpInitializeResponseDecorator>,
     ) -> RmcpConnectionAdapter<ProductionMcpConnectionContext> {
         RmcpConnectionAdapter::new(
-            ProductionMcpConnectionContext::new(Arc::clone(server)),
+            ProductionMcpConnectionContext::with_activity(Arc::clone(server), None),
             false,
             initialize_response_decorator,
             server.delivery_settlement_recorder.clone(),

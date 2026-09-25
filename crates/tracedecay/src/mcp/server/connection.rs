@@ -8,7 +8,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tracedecay_daemon_protocol::BrokerStream;
 #[cfg(any(test, feature = "test-transport"))]
 use tracedecay_daemon_service::shutdown::DaemonLifecycle;
-use tracedecay_daemon_service::shutdown::ShutdownStatus;
+use tracedecay_daemon_service::shutdown::{DaemonActivity, ShutdownStatus};
 
 pub(super) const MAX_CONCURRENT_CONNECTION_READS: usize =
     crate::daemon::MAX_CONCURRENT_REQUESTS_PER_DAEMON_CLIENT;
@@ -20,13 +20,22 @@ pub(super) const MAX_CONCURRENT_CONNECTION_READS: usize =
 pub(crate) struct ProductionMcpConnectionContext {
     server: Arc<McpServer>,
     admission: Option<Arc<crate::daemon::ParkableConnectionAdmission>>,
+    _activity: Option<DaemonActivity>,
 }
 
 impl ProductionMcpConnectionContext {
-    pub(crate) fn new(server: Arc<McpServer>) -> Arc<Self> {
+    /// rmcp retains this context in its serve loop and in every spawned
+    /// request handler, and neither ends when the connection task is aborted.
+    /// Holding the daemon activity here keeps shutdown's client drain waiting
+    /// until the last of them releases the server and its store leases.
+    pub(crate) fn with_activity(
+        server: Arc<McpServer>,
+        activity: Option<DaemonActivity>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             server,
             admission: crate::daemon::current_connection_admission(),
+            _activity: activity,
         })
     }
 }
@@ -184,6 +193,7 @@ impl McpServer {
             None,
             self.timings_enabled(),
             lifecycle,
+            lifecycle.try_enter(),
         );
         let (reader, mut writer) = tokio::io::split(client_side);
         let pump = async move {

@@ -327,7 +327,7 @@ async fn drive_rmcp(
     pause_at: usize,
 ) {
     let adapter = tracedecay_mcp::server::RmcpConnectionAdapter::new(
-        super::connection::ProductionMcpConnectionContext::new(Arc::clone(server)),
+        super::connection::ProductionMcpConnectionContext::with_activity(Arc::clone(server), None),
         false,
         None,
         server.delivery_settlement_recorder.clone(),
