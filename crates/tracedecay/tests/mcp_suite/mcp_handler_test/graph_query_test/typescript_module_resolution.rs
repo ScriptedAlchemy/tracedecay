@@ -198,3 +198,53 @@ async fn typescript_monorepo_callers_and_file_dependents_bind_across_packages() 
 
     shutdown_graph_fixture(fixture).await;
 }
+
+#[tokio::test]
+async fn typescript_same_module_exports_and_test_shadowing_bind_callers() {
+    let fixture =
+        graph_query_fixture_with_sources(|project| copy_fixture(Path::new(FIXTURE_ROOT), project))
+            .await;
+
+    for (qualified_name, expected_callers) in [
+        // `export { hopped }`; `hopped()` inside `describe("hopped", …)`
+        // calls the import, not the describe block.
+        (
+            "apps/web/src/hops.ts::hopped",
+            vec!["calls the import", "consumeHops"],
+        ),
+        // `export { inner as renamed }` beside an unexported local `renamed`.
+        ("apps/web/src/hops.ts::inner", vec!["consumeHops"]),
+        ("apps/web/src/hops.ts::renamed", Vec::new()),
+        // `export { relayTarget as relayed }` forwards a local import; the
+        // helper named `relayed` shadows it only inside its describe block.
+        (
+            "apps/web/src/hop-target.ts::relayTarget",
+            vec!["calls the imported relay", "consumeHops"],
+        ),
+        (
+            "apps/web/test/shadowing.test.ts::relayed::relayed",
+            vec!["calls the local helper"],
+        ),
+        ("apps/web/test/shadowing.test.ts::hopped", Vec::new()),
+        ("apps/web/test/shadowing.test.ts::relayed", Vec::new()),
+    ] {
+        let (names, evidence) = callers_evidence(&fixture, qualified_name).await;
+        assert_eq!(names, expected_callers, "{qualified_name}: {evidence:#}");
+        assert_eq!(
+            evidence["coverage"]["completeness"], "complete",
+            "{qualified_name}: {evidence:#}"
+        );
+    }
+
+    let evidence = file_dependents_evidence(&fixture, "apps/web/src/hop-target.ts").await;
+    assert_eq!(
+        evidence["payload"]["dependent_files"],
+        json!([
+            "apps/web/src/hop-consumer.ts",
+            "apps/web/test/shadowing.test.ts"
+        ]),
+        "{evidence:#}"
+    );
+
+    shutdown_graph_fixture(fixture).await;
+}
