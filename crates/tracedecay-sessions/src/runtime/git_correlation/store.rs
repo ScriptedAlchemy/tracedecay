@@ -299,6 +299,31 @@ fn require_current_projector_revision(recorded: Option<&str>) -> Result<(), GitC
     }
 }
 
+/// The pre-index projector recorded only the watermark on its projection
+/// entity. Metadata carrying any indexed field is judged by the current
+/// projector's rules instead, so a partial head stays corrupt.
+fn is_pre_index_metadata(
+    properties: &BTreeMap<GraphPropertyName, GraphProperty>,
+) -> Result<bool, GitCorrelationError> {
+    for name in [
+        PROJECTOR_REVISION_PROPERTY,
+        SPAN_COUNT_PROPERTY,
+        COMMIT_COUNT_PROPERTY,
+    ] {
+        if properties.contains_key(&GraphPropertyName::new(name)?) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn pre_index_generation_unavailable(generation: &GraphGenerationId) -> GitCorrelationError {
+    GitCorrelationError::Unavailable(format!(
+        "verified Git evidence generation `{}` predates the indexed projector; Git evidence convergence rebuilds it from session history",
+        generation.as_str()
+    ))
+}
+
 fn current_projector_revision() -> Result<GraphProjectorRevision, GitCorrelationError> {
     GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION.to_owned()).map_err(Into::into)
 }
@@ -371,6 +396,9 @@ impl GitEvidenceProjectionStore {
                             "verified Git evidence contains duplicate projection metadata"
                                 .to_owned(),
                         ));
+                    }
+                    if is_pre_index_metadata(&entity.properties)? {
+                        return Err(pre_index_generation_unavailable(snapshot.generation()));
                     }
                     require_current_projector_revision(
                         match entity.properties.get(&revision_property) {
@@ -513,7 +541,25 @@ pub fn recover_git_evidence_projection(
 pub enum GitEvidenceGraphHead {
     /// No verified head has ever been published: the typed empty start.
     Unpublished,
+    /// Published by the pre-index projector. No bounded read can be served
+    /// from it; Git evidence convergence replaces it with a generation rebuilt
+    /// from session history rather than converting its rows.
+    PreIndex {
+        generation: GraphGenerationId,
+    },
     Indexed(GitEvidenceGraphView),
+}
+
+impl GitEvidenceGraphHead {
+    /// The servable view, `None` for the never-published empty start, and a
+    /// typed unavailable state for a pre-index head awaiting its rebuild.
+    pub fn into_indexed(self) -> Result<Option<GitEvidenceGraphView>, GitCorrelationError> {
+        match self {
+            Self::Unpublished => Ok(None),
+            Self::PreIndex { generation } => Err(pre_index_generation_unavailable(&generation)),
+            Self::Indexed(view) => Ok(Some(view)),
+        }
+    }
 }
 
 /// Bounded query view over one verified Git-evidence generation.
@@ -574,6 +620,11 @@ pub fn open_git_evidence_graph_view(
                 "verified Git evidence is missing projection metadata".to_owned(),
             )
         })?;
+    if is_pre_index_metadata(&metadata.properties)? {
+        return Ok(GitEvidenceGraphHead::PreIndex {
+            generation: snapshot.generation().clone(),
+        });
+    }
     require_current_projector_revision(string_property(
         &metadata.properties,
         PROJECTOR_REVISION_PROPERTY,
