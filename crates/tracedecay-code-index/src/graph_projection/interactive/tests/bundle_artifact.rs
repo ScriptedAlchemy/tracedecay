@@ -133,6 +133,15 @@ fn installed_artifact_serves_identically_to_the_warm_scan_without_scanning() {
         .expect("installed page");
     assert_eq!(warm_page, installed_page);
     assert_eq!(
+        warmed_reader
+            .degree_ranking(64, request())
+            .expect("warm ranking"),
+        installed_reader
+            .degree_ranking(64, request())
+            .expect("installed ranking"),
+        "seal-time and scan-derived degrees must agree"
+    );
+    assert_eq!(
         warmed_reader.files(64, request()).expect("warm files"),
         installed_reader
             .files(64, request())

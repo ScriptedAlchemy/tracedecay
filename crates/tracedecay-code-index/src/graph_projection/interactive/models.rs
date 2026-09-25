@@ -53,16 +53,20 @@ pub struct CodeGraphSymbolDegreesV1 {
     pub incoming: u64,
 }
 
-/// Symbols of one generation ranked by total semantic degree.
-///
-/// `complete` is `false` exactly when the examination budget stopped the scan
-/// before every symbol of the generation had been measured, so a ranking over
-/// a prefix of the graph can never be mistaken for the whole graph's ranking.
+/// One ranked symbol with its true semantic in/out degree.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CodeGraphRankedSymbolV1 {
+    pub summary: CodeGraphSymbolSummaryV1,
+    pub outgoing: u64,
+    pub incoming: u64,
+}
+
+/// The most-connected symbols of one generation, ranked over every symbol
+/// of the generation; `symbol_count` is that census size.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CodeGraphDegreeRankingV1 {
-    pub ranked: Vec<CodeGraphSymbolDegreesV1>,
-    pub symbols_examined: usize,
-    pub complete: bool,
+    pub ranked: Vec<CodeGraphRankedSymbolV1>,
+    pub symbol_count: usize,
 }
 
 /// One symbol reached by a reverse-reachability (impact) expansion.
@@ -95,6 +99,11 @@ pub(super) struct CatalogSymbol {
     pub(super) binding: Option<CodeGraphSymbolBindingV1>,
     pub(super) metadata: Option<LineageSymbolRecordV1>,
     pub(super) unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
+    /// Semantic degree: `CodeRelationSource` relations leaving the symbol
+    /// and `CodeRelationTarget` relations reaching it, the same counts
+    /// [`super::CodeGraphInteractiveReader::degrees`] reads from adjacency.
+    pub(super) outgoing: u64,
+    pub(super) incoming: u64,
 }
 
 /// Generation-pinned catalog of every file, symbol, and import entity in one
@@ -165,17 +174,24 @@ impl InteractiveCatalog {
         self.symbols.insert(occurrence, record);
     }
 
+    pub(super) fn symbol_summary(
+        occurrence: &SymbolOccurrenceId,
+        record: &CatalogSymbol,
+    ) -> CodeGraphSymbolSummaryV1 {
+        CodeGraphSymbolSummaryV1 {
+            occurrence: occurrence.clone(),
+            binding: record.binding.clone(),
+            metadata: record.metadata.clone(),
+        }
+    }
+
     pub(super) fn summary(
         &self,
         occurrence: &SymbolOccurrenceId,
     ) -> Option<CodeGraphSymbolSummaryV1> {
         self.symbols
             .get(occurrence)
-            .map(|record| CodeGraphSymbolSummaryV1 {
-                occurrence: occurrence.clone(),
-                binding: record.binding.clone(),
-                metadata: record.metadata.clone(),
-            })
+            .map(|record| Self::symbol_summary(occurrence, record))
     }
 }
 

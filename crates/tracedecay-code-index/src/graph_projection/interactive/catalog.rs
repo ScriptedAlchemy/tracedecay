@@ -1,5 +1,6 @@
 //! Bounded construction of the generation-pinned interactive catalog.
 
+use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -17,7 +18,8 @@ use super::super::schema::{
     file_import_relation_id, has_label, import_entity_id,
 };
 use super::super::{
-    CodeGraphProjectionError, SymbolRecordV1, symbol_entity_id, validate_symbol_record,
+    CodeGraphProjectionError, SOURCE_EDGE_KIND, SymbolRecordV1, TARGET_EDGE_KIND, symbol_entity_id,
+    validate_symbol_record,
 };
 use super::models::{CatalogSymbol, InteractiveCatalog};
 use crate::chunks::CodeIndexImportEvidenceV1;
@@ -92,6 +94,7 @@ struct CatalogScan {
     catalog: InteractiveCatalog,
     imports_by_entity: BTreeMap<GraphEntityId, CodeIndexImportEvidenceV1>,
     import_links: BTreeMap<GraphEntityId, GraphRelation>,
+    degrees: SymbolDegreeCounts<GraphEntityId>,
     scanned_entities: usize,
     scanned_relations: usize,
 }
@@ -102,6 +105,7 @@ impl CatalogScan {
             catalog: InteractiveCatalog::empty(),
             imports_by_entity: BTreeMap::new(),
             import_links: BTreeMap::new(),
+            degrees: SymbolDegreeCounts::default(),
             scanned_entities: 0,
             scanned_relations: 0,
         }
@@ -201,6 +205,8 @@ impl CatalogScan {
                 binding: record.binding,
                 metadata: record.metadata,
                 unresolved_calls: record.unresolved_calls,
+                outgoing: 0,
+                incoming: 0,
             },
         );
         Ok(())
@@ -239,10 +245,12 @@ impl CatalogScan {
         for relation in relations {
             check_cancelled(cancellation)?;
             self.count_relation()?;
-            if relation.kind.as_str() != FILE_IMPORT_EDGE_KIND {
-                continue;
+            match relation.kind.as_str() {
+                FILE_IMPORT_EDGE_KIND => self.record_import_link(relation.clone())?,
+                SOURCE_EDGE_KIND => self.degrees.record_outgoing(relation.from.clone()),
+                TARGET_EDGE_KIND => self.degrees.record_incoming(relation.to.clone()),
+                _ => {}
             }
-            self.record_import_link(relation.clone())?;
         }
         Ok(())
     }
@@ -337,9 +345,66 @@ impl CatalogScan {
             ));
         }
 
+        for (occurrence, symbol) in &mut self.catalog.symbols {
+            (symbol.outgoing, symbol.incoming) = self.degrees.take(&symbol_entity_id(occurrence)?);
+        }
+        self.degrees.require_drained()?;
+
         self.catalog.imports = self.imports_by_entity.into_values().collect();
         self.catalog.imports.sort_by(canonical_import_order);
         Ok(self.catalog)
+    }
+}
+
+/// Per-symbol semantic degree tallied from `CodeRelationSource` /
+/// `CodeRelationTarget` relations while the rows stream past, keyed by the
+/// symbol's entity identity.
+pub(super) struct SymbolDegreeCounts<K> {
+    counts: BTreeMap<K, (u64, u64)>,
+}
+
+impl<K> Default for SymbolDegreeCounts<K> {
+    fn default() -> Self {
+        Self {
+            counts: BTreeMap::new(),
+        }
+    }
+}
+
+impl<K: Ord> SymbolDegreeCounts<K> {
+    pub(super) fn record_outgoing(&mut self, symbol: K) {
+        self.counts.entry(symbol).or_default().0 += 1;
+    }
+
+    pub(super) fn record_incoming(&mut self, symbol: K) {
+        self.counts.entry(symbol).or_default().1 += 1;
+    }
+
+    pub(super) fn get<Q>(&self, symbol: &Q) -> (u64, u64)
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.counts.get(symbol).copied().unwrap_or_default()
+    }
+
+    pub(super) fn take<Q>(&mut self, symbol: &Q) -> (u64, u64)
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.counts.remove(symbol).unwrap_or_default()
+    }
+
+    /// Every tallied endpoint must have been claimed by a symbol entity.
+    pub(super) fn require_drained(&self) -> Result<(), CodeGraphProjectionError> {
+        if self.counts.is_empty() {
+            Ok(())
+        } else {
+            Err(CodeGraphProjectionError::Corrupt(
+                "code graph relation endpoint is not a symbol entity".to_owned(),
+            ))
+        }
     }
 }
 
