@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
 
@@ -31,12 +31,13 @@ use tracedecay_contracts::{
     ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, AuthorityReceipt,
     CancellationContext, CancellationObservation, CancellationStage, CapabilityGrantId,
     CapabilityGrantSnapshot, CoverageCompleteness, CoverageDomainState, Deadline, DisclosureClass,
-    EvidenceCoverage, EvidenceDomain, EvidencePacket, FreshnessState, Omission, OmissionReason,
-    OpaqueCursor, OperationBudgetUsage, OperationReceipt, OperationTermination, PageCursor,
-    PageRequest, PageState, PolicyDecisionRef, RequestAdmission, RequestContext, RequestId,
-    ResolvedScope, RetrievalEvidence, RetryDirective, SafeDiagnostic, TemporalState,
+    EvidenceCoverage, EvidenceDomain, EvidencePacket, FreshnessState, LegalAction, Omission,
+    OmissionReason, OpaqueCursor, OperationBudgetUsage, OperationReceipt, OperationTermination,
+    PageCursor, PageRequest, PageState, PolicyDecisionRef, RequestAdmission, RequestContext,
+    RequestId, ResolvedScope, RetrievalEvidence, RetryDirective, SafeDiagnostic, TemporalState,
 };
 use tracedecay_domain::{CodeGenerationId, CommitId, ComponentVersion, UtcMicros};
+use tracedecay_lsp::TYPESCRIPT_INSTALL_COMMAND;
 use tracedecay_tool_catalog::SortContractId;
 use url::Url;
 
@@ -48,6 +49,9 @@ use super::grep_analysis::{
 use super::symbol_graph::{CanonicalSymbolGraphAdapter, SymbolGraphCursorPort};
 use crate::ProjectSourceAccessSnapshot;
 use crate::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
+use crate::diagnostics_producer::{
+    CompilerProducerRunV1, TypeScriptDiagnosticsAvailabilityV1, typescript_diagnostics_availability,
+};
 use crate::operation_stream::{
     CanonicalManagedTestRunReader, ManagedTestRunCurrentScope, ManagedTestRunReadOutcome,
     ManagedTestRunStaleReason, OperationEventAuthority, current_managed_test_run,
@@ -57,6 +61,9 @@ use tracedecay_runtime_core::db::Database;
 const MAX_OPERATION_OUTPUT_BYTES: usize = 1_048_576;
 const MAX_ADMITTED_ROOT_URI_BYTES: usize = 4_096;
 const MAX_CONCURRENT_PRIMITIVES: usize = 32;
+/// [`SafeDiagnostic`] refuses messages longer than this; producer-reported
+/// text is folded and cut to fit before it becomes a problem message.
+const MAX_SAFE_DIAGNOSTIC_MESSAGE_BYTES: usize = 512;
 
 /// Validated once per process rather than on every paged primitive result.
 static PRIMITIVE_SORT_CONTRACT: LazyLock<SortContractId> = LazyLock::new(|| {
@@ -283,6 +290,9 @@ pub struct OwnedPrimitiveRuntime {
     scope: ResolvedScope,
     access: ProjectSourceAccessSnapshot,
     admitted_root_uri: String,
+    /// The filesystem root `admitted_root_uri` names; diagnostics reads probe
+    /// the producer state here when no publication exists.
+    admitted_project_root: PathBuf,
     test_runs: CanonicalManagedTestRunReader,
     test_run_scope: Arc<dyn ManagedTestRunCurrentScopePort>,
     capacity: PrimitiveCapacity,
@@ -556,6 +566,7 @@ pub fn open_primitive_project_runtime(
         scope,
         access,
         admitted_root_uri,
+        admitted_project_root,
         test_runs: CanonicalManagedTestRunReader::new(operation_events),
         test_run_scope,
         capacity: PrimitiveCapacity::new(MAX_CONCURRENT_PRIMITIVES),
@@ -951,6 +962,7 @@ async fn dispatch_admitted(
                     &context,
                     &operation,
                     evidence.omissions.first().map(|omission| omission.reason),
+                    &runtime.admitted_project_root,
                 );
             }
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
@@ -1879,46 +1891,154 @@ fn diagnostics_unavailable_problem<T>(
     context: &RequestContext,
     operation: &ApplicationOperation,
     reason: Option<OmissionReason>,
+    project_root: &Path,
 ) -> Result<ApplicationResult<T>, ApplicationContractError> {
-    problem(context, operation, diagnostics_absence_problem(reason)?)
+    problem(
+        context,
+        operation,
+        diagnostics_absence_problem(reason, project_root)?,
+    )
 }
 
 /// Maps the diagnostic authority's own omission reason onto the typed state a
-/// caller can act on. An unsupported scope is terminal; every other absence is
-/// worth retrying once a producer publishes.
+/// caller can act on. A missing publication is described through the
+/// TypeScript producer's real state for `project_root`, so every refusal
+/// carries the route that changes it; every other absence is worth retrying
+/// once a producer publishes.
 fn diagnostics_absence_problem(
     reason: Option<OmissionReason>,
+    project_root: &Path,
 ) -> Result<ApplicationProblem, ApplicationContractError> {
     let (code, message) = match reason {
         Some(OmissionReason::Stale) => (
             "application.diagnostics.stale",
-            "The diagnostic authority has not published a result for the current code generation.",
+            "The diagnostic authority has not published a result for the current code generation."
+                .to_owned(),
         ),
-        Some(OmissionReason::Unsupported) => (
-            "application.diagnostics.unsupported",
-            "No diagnostic producer is configured for this scope.",
-        ),
+        Some(OmissionReason::Unsupported) => {
+            return unpublished_diagnostics_problem(project_root);
+        }
         Some(OmissionReason::Redacted) => (
             "application.diagnostics.redacted",
-            "The diagnostic result for this scope is not disclosable.",
+            "The diagnostic result for this scope is not disclosable.".to_owned(),
         ),
         _ => (
             "application.diagnostics.unavailable",
-            "The diagnostic authority is unavailable; no diagnostics were read.",
+            "The diagnostic authority is unavailable; no diagnostics were read.".to_owned(),
         ),
     };
-    let diagnostic = SafeDiagnostic::new(code, message)?;
-    let problem = if matches!(reason, Some(OmissionReason::Unsupported)) {
-        ApplicationProblem::Unsupported {
-            diagnostic,
+    let problem = ApplicationProblem::unavailable(SafeDiagnostic::new(code, message)?);
+    problem.validate()?;
+    Ok(problem)
+}
+
+/// The typed state for a project with no diagnostic publication.
+///
+/// The compiler pillar has two producers: the daemon's TypeScript producer,
+/// which runs the project's own `tsc` after each clean generation, and
+/// `tracedecay_diagnose`, which publishes compiler output the caller pastes.
+/// The problem names whichever route applies, so "no producer" is never the
+/// whole answer.
+fn unpublished_diagnostics_problem(
+    project_root: &Path,
+) -> Result<ApplicationProblem, ApplicationContractError> {
+    let problem = match typescript_diagnostics_availability(project_root) {
+        TypeScriptDiagnosticsAvailabilityV1::NoTsconfig => ApplicationProblem::Unsupported {
+            diagnostic: SafeDiagnostic::new(
+                "application.diagnostics.unsupported",
+                "No diagnostic producer is configured for this project: it has no tsconfig.json, so \
+                 no compiler runs automatically. Run the project's own build or type check and \
+                 publish its output with tracedecay_diagnose (`cargo_output`), then read again.",
+            )?,
             retry: RetryDirective::Never,
-            legal_actions: Vec::new(),
+            legal_actions: vec![LegalAction::CorrectRequest],
+        },
+        TypeScriptDiagnosticsAvailabilityV1::CompilerMissing => ApplicationProblem::Unsupported {
+            diagnostic: SafeDiagnostic::new(
+                "application.diagnostics.producer-missing",
+                format!(
+                    "tsconfig.json was found but the project has no TypeScript compiler \
+                     (node_modules/.bin/tsc). Run `{TYPESCRIPT_INSTALL_COMMAND}` in the project, \
+                     then reopen it and read again."
+                ),
+            )?,
+            retry: RetryDirective::AfterRevalidate,
+            legal_actions: vec![LegalAction::Refresh],
+        },
+        TypeScriptDiagnosticsAvailabilityV1::Configured { compiler, last_run } => {
+            let compiler = compiler
+                .strip_prefix(project_root)
+                .unwrap_or(&compiler)
+                .display()
+                .to_string();
+            match last_run {
+                // A read that found no publication while the last run published
+                // is the same pending state: the producer publishes exactly once
+                // per generation, so the current generation's run is what the
+                // caller is waiting on.
+                None
+                | Some(
+                    CompilerProducerRunV1::CodeIndexGenerationUnavailable
+                    | CompilerProducerRunV1::Published { .. },
+                ) => ApplicationProblem::unavailable(SafeDiagnostic::new(
+                    "application.diagnostics.pending",
+                    format!(
+                        "The TypeScript producer ({compiler}) has not published diagnostics for \
+                         this project's current generation yet; it runs after the code index \
+                         seals a complete generation. Retry shortly."
+                    ),
+                )?),
+                Some(CompilerProducerRunV1::NoResolvableDiagnostics { unresolved }) => {
+                    ApplicationProblem::Unsupported {
+                        diagnostic: SafeDiagnostic::new(
+                            "application.diagnostics.unresolvable",
+                            safe_problem_message(&format!(
+                                "The TypeScript producer ({compiler}) reported {} finding(s), none in a \
+                                 file the code index covers: {}",
+                                unresolved.len(),
+                                unresolved.join("; ")
+                            )),
+                        )?,
+                        retry: RetryDirective::AfterRevalidate,
+                        legal_actions: vec![LegalAction::Refresh],
+                    }
+                }
+                Some(CompilerProducerRunV1::CompilerFailed { reason }) => {
+                    ApplicationProblem::Unsupported {
+                        diagnostic: SafeDiagnostic::new(
+                            "application.diagnostics.producer-failed",
+                            safe_problem_message(&format!(
+                                "The TypeScript producer could not check the project: {reason}. Fix the \
+                                 compiler setup, then reopen the project and read again."
+                            )),
+                        )?,
+                        retry: RetryDirective::AfterRevalidate,
+                        legal_actions: vec![LegalAction::Refresh],
+                    }
+                }
+                Some(CompilerProducerRunV1::PublicationFailed { reason }) => {
+                    ApplicationProblem::unavailable(SafeDiagnostic::new(
+                        "application.diagnostics.unavailable",
+                        safe_problem_message(&format!(
+                            "The TypeScript producer checked the project but its publication failed: \
+                             {reason}"
+                        )),
+                    )?)
+                }
+            }
         }
-    } else {
-        ApplicationProblem::unavailable(diagnostic)
     };
     problem.validate()?;
     Ok(problem)
+}
+
+/// Folds control characters out of producer-reported text and cuts it to the
+/// [`SafeDiagnostic`] message bound at a character boundary.
+fn safe_problem_message(text: &str) -> String {
+    let folded = tracedecay_domain::fold_control_characters(text);
+    tracedecay_domain::utf8_prefix_at_or_before(folded.trim(), MAX_SAFE_DIAGNOSTIC_MESSAGE_BYTES)
+        .trim_end()
+        .to_owned()
 }
 
 fn contract_problem<T>(
@@ -1938,10 +2058,11 @@ fn contract_problem<T>(
 #[cfg(test)]
 mod tests {
     use super::{
-        ExtendedPrimitivePort, OmissionReason, PrimitiveCapacity, PrimitiveDispatch,
-        PrimitiveRequest, StorageStatusPrimitiveRequest, diagnostics_absence_problem,
-        pre_admission_problem, session_structural_refusal_problem, symbol_temporal_state,
-        valid_owned_primitive_request, validate_admitted_root_uri,
+        ExtendedPrimitivePort, MAX_SAFE_DIAGNOSTIC_MESSAGE_BYTES, OmissionReason,
+        PrimitiveCapacity, PrimitiveDispatch, PrimitiveRequest, StorageStatusPrimitiveRequest,
+        TYPESCRIPT_INSTALL_COMMAND, diagnostics_absence_problem, pre_admission_problem,
+        safe_problem_message, session_structural_refusal_problem, symbol_temporal_state,
+        unpublished_diagnostics_problem, valid_owned_primitive_request, validate_admitted_root_uri,
     };
     use tracedecay_contracts::retrieval::{
         CodeGraphReadFreshnessV1, GraphRelationRequest, ImplementationSelector,
@@ -1951,7 +2072,7 @@ mod tests {
     };
     use tracedecay_contracts::{
         ApplicationProblemKind, CancellationContext, Deadline, FreshnessState, LegalAction,
-        PageRequest, RequestId, RetryDirective,
+        PageRequest, RequestId, RetryDirective, SafeDiagnostic,
     };
     use tracedecay_domain::{
         CodeGenerationId, EphemeralSanitizedQueryViewV1, QueryNormalizationRevision,
@@ -2028,6 +2149,7 @@ mod tests {
     /// answered" are different answers, and only the second is retryable.
     #[test]
     fn absent_diagnostics_authority_is_a_typed_state_not_an_empty_success() {
+        let project = tempfile::tempdir().expect("project root");
         for (reason, kind, code) in [
             (
                 None,
@@ -2055,7 +2177,8 @@ mod tests {
                 "application.diagnostics.unsupported",
             ),
         ] {
-            let problem = diagnostics_absence_problem(reason).expect("typed diagnostics absence");
+            let problem = diagnostics_absence_problem(reason, project.path())
+                .expect("typed diagnostics absence");
             assert_eq!(problem.kind(), kind, "reason {reason:?}");
             assert_eq!(
                 problem
@@ -2064,22 +2187,74 @@ mod tests {
                 Some(code),
                 "reason {reason:?}"
             );
+            assert!(
+                !problem.legal_actions().is_empty(),
+                "every diagnostics absence names a legal action: {reason:?}"
+            );
         }
+    }
 
-        // Only an unsupported scope is terminal; the rest invite a retry once a
-        // producer publishes.
-        assert!(
-            diagnostics_absence_problem(Some(OmissionReason::Unsupported))
-                .expect("unsupported")
-                .legal_actions()
-                .is_empty()
+    /// A project with no publication is described through the producer route
+    /// that would change that, never as a bare "no producer" with nothing to do.
+    #[test]
+    fn unpublished_diagnostics_name_the_producer_route() {
+        let project = tempfile::tempdir().expect("project root");
+
+        let no_tsconfig = unpublished_diagnostics_problem(project.path()).expect("no tsconfig");
+        assert_eq!(no_tsconfig.kind(), ApplicationProblemKind::Unsupported);
+        assert_eq!(
+            no_tsconfig.legal_actions(),
+            [LegalAction::CorrectRequest],
+            "a project without an automatic producer is routed to tracedecay_diagnose"
         );
-        assert!(
-            !diagnostics_absence_problem(Some(OmissionReason::Stale))
-                .expect("stale")
-                .legal_actions()
-                .is_empty()
+        let message = no_tsconfig
+            .diagnostic()
+            .expect("diagnostic")
+            .message
+            .clone();
+        assert!(message.contains("tracedecay_diagnose"), "{message}");
+
+        std::fs::write(project.path().join("tsconfig.json"), "{}").expect("tsconfig");
+        let missing = unpublished_diagnostics_problem(project.path()).expect("missing compiler");
+        assert_eq!(missing.kind(), ApplicationProblemKind::Unsupported);
+        assert_eq!(missing.legal_actions(), [LegalAction::Refresh]);
+        assert_eq!(
+            missing.diagnostic().expect("diagnostic").code,
+            "application.diagnostics.producer-missing"
         );
+        let message = missing.diagnostic().expect("diagnostic").message.clone();
+        assert!(
+            message.contains(TYPESCRIPT_INSTALL_COMMAND),
+            "the refusal carries the exact setup command: {message}"
+        );
+
+        let bin = project.path().join("node_modules/.bin");
+        std::fs::create_dir_all(&bin).expect("node_modules/.bin");
+        std::fs::write(bin.join(if cfg!(windows) { "tsc.cmd" } else { "tsc" }), "")
+            .expect("local tsc");
+        let pending = unpublished_diagnostics_problem(project.path()).expect("pending");
+        assert_eq!(pending.kind(), ApplicationProblemKind::Unavailable);
+        assert_eq!(pending.legal_actions(), [LegalAction::Retry]);
+        assert_eq!(
+            pending.diagnostic().expect("diagnostic").code,
+            "application.diagnostics.pending"
+        );
+        let message = pending.diagnostic().expect("diagnostic").message.clone();
+        assert!(
+            message.contains("node_modules/.bin/tsc")
+                || message.contains("node_modules\\.bin\\tsc"),
+            "the pending state names the project's own compiler: {message}"
+        );
+    }
+
+    #[test]
+    fn producer_reported_text_is_bounded_and_control_free() {
+        let long = format!("tsc said:\u{7}\n{}", "x".repeat(2_000));
+        let message = safe_problem_message(&long);
+        assert!(message.len() <= MAX_SAFE_DIAGNOSTIC_MESSAGE_BYTES);
+        assert!(!message.chars().any(char::is_control), "{message:?}");
+        SafeDiagnostic::new("application.diagnostics.producer-failed", message)
+            .expect("bounded text satisfies the safe diagnostic contract");
     }
 
     #[test]

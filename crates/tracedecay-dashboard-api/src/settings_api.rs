@@ -152,7 +152,6 @@ struct ProjectSettingsPayloadV1 {
     configuration_snapshot_id: String,
     configuration_revision_id: String,
     config: ProjectEditableSettingsV1,
-    tracedecay_dir_gitignored: bool,
     pr_autotrack: PrAutoTrackPayloadV1,
 }
 
@@ -624,7 +623,6 @@ async fn settings_envelope(
                 .to_owned(),
             configuration_revision_id: project_configuration.revision_id().as_str().to_owned(),
             config: project_editable_settings(&project_configuration),
-            tracedecay_dir_gitignored: crate::config::is_in_gitignore(&state.project_root),
             pr_autotrack,
         },
         user: user_settings_payload(&user, &worker_configuration),

@@ -56,6 +56,7 @@ pub mod code_index;
 pub mod dashboard_diagnostics;
 pub mod delivery;
 pub mod diagnose;
+pub mod diagnostics_producer;
 pub mod diagnostics_publication;
 pub mod diagnostics_query;
 pub mod diagnostics_store;

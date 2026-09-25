@@ -3,18 +3,13 @@
 //! Runtime values are decoded from a pinned snapshot in [`crate::config`].
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 pub use tracedecay_runtime_core::config::brand_env;
-use tracedecay_runtime_core::config::{
-    active_data_dir_name, discover_project_root, is_generated_dir_segment,
-};
+use tracedecay_runtime_core::config::{discover_project_root, is_generated_dir_segment};
 
 /// Returns `true` if any component of `path` is a generated/vendored
 /// directory segment, or `path` itself carries a minified-asset suffix
@@ -209,109 +204,6 @@ impl Default for SyncConfig {
 fn config_error(message: impl Into<String>) -> TraceDecayError {
     TraceDecayError::Config {
         message: message.into(),
-    }
-}
-
-/// Returns `true` if the project marker dir (`.tracedecay`) is ignored by Git
-/// for this project.
-///
-/// This respects the repository `.gitignore`, `.git/info/exclude`, and the
-/// user's global excludes file via `git check-ignore`. If Git cannot answer
-/// (for example outside a Git repository), falls back to checking the local
-/// `.gitignore` file only.
-pub fn is_in_gitignore(project_path: &Path) -> bool {
-    if let Some(is_ignored) = is_ignored_by_git(project_path, None) {
-        return is_ignored;
-    }
-
-    is_in_local_gitignore(project_path)
-}
-
-pub(crate) fn is_ignored_by_git(
-    project_path: &Path,
-    git_config_global: Option<&Path>,
-) -> Option<bool> {
-    let fallback_global_excludes = || {
-        git_config_global
-            .and_then(|path| is_ignored_by_explicit_global_excludes(project_path, path))
-    };
-    let dir_name = active_data_dir_name(project_path);
-    let Ok(git) = tracedecay_runtime_core::git::try_git_program() else {
-        return fallback_global_excludes();
-    };
-    let mut command = Command::new(git);
-    command
-        .arg("-C")
-        .arg(project_path)
-        .arg("check-ignore")
-        .arg("-q")
-        .arg(format!("{dir_name}/"))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-
-    if let Some(path) = git_config_global {
-        command.env_clear();
-        command.env("PATH", git_subprocess_path());
-        command.env("GIT_CONFIG_GLOBAL", path);
-        command.env("GIT_CONFIG_NOSYSTEM", "1");
-    }
-
-    let Ok(status) = command.status() else {
-        return fallback_global_excludes();
-    };
-
-    match status.code() {
-        Some(0) => Some(true),
-        Some(1) => Some(false),
-        _ => fallback_global_excludes(),
-    }
-}
-
-pub(crate) fn is_ignored_by_explicit_global_excludes(
-    project_path: &Path,
-    git_config_global: &Path,
-) -> Option<bool> {
-    let config = fs::read_to_string(git_config_global).ok()?;
-    let excludes_file = config.lines().find_map(|line| {
-        let trimmed = line.trim();
-        let (key, value) = trimmed.split_once('=')?;
-        (key.trim() == "excludesFile").then(|| PathBuf::from(value.trim()))
-    })?;
-    let excludes = fs::read_to_string(excludes_file).ok()?;
-    let dir_name = active_data_dir_name(project_path);
-    let dir_pattern = format!("{dir_name}/");
-    Some(excludes.lines().any(|line| {
-        let trimmed = line.trim();
-        !trimmed.is_empty()
-            && !trimmed.starts_with('#')
-            && (trimmed == dir_name || trimmed == dir_pattern)
-    }))
-}
-
-fn git_subprocess_path() -> OsString {
-    std::env::var_os("PATH").unwrap_or_else(|| {
-        #[cfg(all(test, not(windows)))]
-        {
-            OsString::from("/usr/bin:/bin")
-        }
-        #[cfg(not(all(test, not(windows))))]
-        {
-            OsString::new()
-        }
-    })
-}
-
-fn is_in_local_gitignore(project_path: &Path) -> bool {
-    let dir_name = active_data_dir_name(project_path);
-    let gitignore = project_path.join(".gitignore");
-    match fs::read_to_string(&gitignore) {
-        Ok(content) => content.lines().any(|line| {
-            let trimmed = line.trim();
-            trimmed == dir_name
-                || trimmed == format!("{dir_name}/")
-                || trimmed == format!("/{dir_name}")
-        }),
-        Err(_) => false,
     }
 }
 

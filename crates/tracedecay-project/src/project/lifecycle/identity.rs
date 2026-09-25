@@ -216,8 +216,9 @@ impl TraceDecay {
         Ok(layout.graph_db_path.is_file().then_some(layout))
     }
 
-    /// Resolves the profile store layout for a local path using enrollment
-    /// markers first, then the global registry aliases for the git identity.
+    /// Resolves the profile store layout for a local path using the `.git/`
+    /// repository identity marker first, then the global registry aliases for
+    /// the git identity. Nothing in the working tree carries identity.
     #[hotpath::skip]
     pub async fn resolve_store_layout_for_identity(project_root: &Path) -> Result<StoreLayout> {
         Self::resolve_store_layout_for_identity_with_options(

@@ -4687,7 +4687,6 @@ export const ProjectSettingsPayloadV1Schema = z.object({
   configuration_revision_id: z.string(),
   configuration_snapshot_id: z.string(),
   pr_autotrack: z.lazy(() => PrAutoTrackPayloadV1Schema),
-  tracedecay_dir_gitignored: z.boolean(),
 });
 export type ProjectSettingsPayloadV1 = z.infer<typeof ProjectSettingsPayloadV1Schema>;
 

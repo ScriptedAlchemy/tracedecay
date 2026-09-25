@@ -371,7 +371,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         label: "build diagnostics",
         skill: "fixing-build-and-type-errors",
         message: "For build/type-check errors, use TraceDecay's diagnostics tools instead of parsing raw compiler output.",
-        context: "tracedecay_diagnostics runs (or reads) the project's diagnostics and maps each error to its enclosing symbol; tracedecay_diagnose adds caller/impact context for a specific failure so you fix the root cause, not just the line the compiler points at.",
+        context: "tracedecay_diagnostics reads the diagnostics published for the current indexed generation and maps each error to its enclosing symbol; a TypeScript project's own tsc is run for it automatically, other toolchains publish by pasting compiler output into tracedecay_diagnose, which also adds caller/impact context so you fix the root cause, not just the line the compiler points at.",
         expected_tools: &["tracedecay_diagnostics", "tracedecay_diagnose"],
         nonblocking: false,
     }.checked(),

@@ -852,3 +852,70 @@ fn copy_tree_contents(src: &Path, dest: &Path) -> io::Result<()> {
     }
     Ok(())
 }
+
+/// The one report the TypeScript fixture's compiler prints, byte-for-byte the
+/// `tsc --noEmit --pretty false` shape for a real `TS4023` on `src/index.ts`
+/// line 3 column 14, where `value` is declared.
+pub const TYPESCRIPT_FIXTURE_TSC_REPORT: &str = "src/index.ts(3,14): error TS4023: Exported variable 'value' has or is using name 'Hidden' from external module \"./src/dep\" but cannot be named.\n";
+
+/// Where the fixture compiler records each invocation: one line per run with
+/// the working directory and the arguments it received.
+pub const TYPESCRIPT_FIXTURE_TSC_INVOCATIONS: &str = "node_modules/tsc-invocations.log";
+
+/// Whether the TypeScript fixture project carries its own compiler.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TypeScriptFixtureCompiler {
+    /// `node_modules/.bin/tsc` exists and reports [`TYPESCRIPT_FIXTURE_TSC_REPORT`].
+    Present,
+    /// No `node_modules` at all: a checkout before `npm install`.
+    Missing,
+}
+
+/// A small TypeScript project whose sources genuinely produce `TS4023` under
+/// `declaration: true`: `index.ts` exports a value typed by an interface
+/// `dep.ts` does not export. With [`TypeScriptFixtureCompiler::Present`] the
+/// project's own `node_modules/.bin/tsc` reports that finding, so the daemon's
+/// producer must run exactly that binary from the project root.
+#[cfg(unix)]
+pub fn write_typescript_diagnostics_fixture(project: &Path, compiler: TypeScriptFixtureCompiler) {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("package.json"),
+        "{\n  \"name\": \"diagnostics-fixture\",\n  \"private\": true\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("tsconfig.json"),
+        "{\n  \"compilerOptions\": {\n    \"strict\": true,\n    \"declaration\": true,\n    \"module\": \"es2022\",\n    \"target\": \"es2022\"\n  },\n  \"include\": [\"src\"]\n}\n",
+    )
+    .unwrap();
+    fs::write(project.join(".gitignore"), "node_modules/\n").unwrap();
+    fs::write(
+        project.join("src/dep.ts"),
+        "interface Hidden {\n  a: number;\n}\n\nexport function make(): Hidden {\n  return { a: 1 };\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("src/index.ts"),
+        "import { make } from \"./dep\";\n\nexport const value = make();\n",
+    )
+    .unwrap();
+    if compiler == TypeScriptFixtureCompiler::Missing {
+        return;
+    }
+    let bin = project.join("node_modules/.bin");
+    fs::create_dir_all(&bin).unwrap();
+    let tsc = bin.join("tsc");
+    fs::write(
+        &tsc,
+        format!(
+            "#!/bin/sh\nprintf '%s %s\\n' \"$(pwd)\" \"$*\" >> \"{}\"\ncat <<'TSC_REPORT'\n{}TSC_REPORT\nexit 2\n",
+            project.join(TYPESCRIPT_FIXTURE_TSC_INVOCATIONS).display(),
+            TYPESCRIPT_FIXTURE_TSC_REPORT
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&tsc, fs::Permissions::from_mode(0o755)).unwrap();
+}

@@ -110,7 +110,10 @@ pub(super) fn spawn(
     ))
 }
 
-async fn wait_for_generation_change(
+/// Waits for the next signal that `project_root` may have a new generation:
+/// a sealed publication for this root, a serving swap, a retained seat, or a
+/// root mount. `false` when the scheduler's publication channel closed.
+pub(in crate::daemon::project_open_owners) async fn wait_for_generation_change(
     project_root: &Path,
     publications: &mut broadcast::Receiver<CodeIndexGenerationPublishedV1>,
     serving_changes: &mut Option<watch::Receiver<()>>,

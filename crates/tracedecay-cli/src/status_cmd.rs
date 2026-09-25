@@ -540,20 +540,6 @@ async fn handle_status_command_within(
         }
     }
 
-    if !tracedecay_configuration::is_in_gitignore(&project_path) {
-        let dir_name = tracedecay_project::config::active_data_dir_name(&project_path);
-        if stderr_is_terminal {
-            eprintln!(
-                "\n\x1b[33mWarning: {dir_name} is not in .gitignore. \
-                 run `echo {dir_name} >> .gitignore` to exclude it from git.\x1b[0m"
-            );
-        } else {
-            eprintln!(
-                "\nWarning: {dir_name} is not in .gitignore. \
-                 run `echo {dir_name} >> .gitignore` to exclude it from git."
-            );
-        }
-    }
     if let Some(refresh) = refresh
         && let Some(fresh) = await_online_refresh(deadline, refresh).await
         && fresh.apply(&mut config, now)

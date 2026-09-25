@@ -183,13 +183,14 @@ tracedecay gitignore on           # enable (default)
 tracedecay gitignore off          # disable, index everything
 ```
 
-TraceDecay never creates files inside your repository's working tree: all
-project data lives under `~/.tracedecay`, and a git repository additionally
+TraceDecay never creates files inside your repository's working tree, so
+`init` leaves `git status` untouched and nothing needs a `.gitignore` entry:
+all project data lives under `~/.tracedecay`, and a git repository additionally
 carries an identity marker inside `.git/` (never committed). If a project was
 enrolled by an older TraceDecay, it may still have a leftover
-`.tracedecay/enrollment.json` in the repository, its identity is adopted into
-the profile registry the first time the project is opened, after which the
-file is ignored and you can safely delete the `.tracedecay/` directory.
+`.tracedecay/enrollment.json` in the repository. Nothing reads that file any
+more; identity comes from `.git/` and the profile registry, so you can safely
+delete the `.tracedecay/` directory.
 
 ---
 
@@ -964,8 +965,7 @@ are separate daemon operations with receipts. Hosts and clients never become a
 storage authority or open a database directly.
 
 A leftover repo-local `.tracedecay/enrollment.json` from an older TraceDecay is
-adopted into the registry on first open and then ignored; you can delete it.
-Do not copy or edit store files.
+not read; you can delete it. Do not copy or edit store files.
 
 An incompatible persisted shape or incomplete privacy remediation returns
 `ResetRequired`/`reset_required`. Follow the daemon's remediation or explicitly
