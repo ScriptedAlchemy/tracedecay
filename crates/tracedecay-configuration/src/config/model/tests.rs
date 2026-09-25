@@ -235,3 +235,23 @@ mod retention_config_tests {
         assert_eq!(retention, reparsed);
     }
 }
+
+/// An explicit `.` or relative path names a directory relative to the CLI's
+/// working directory, not to whatever directory the daemon happens to run in.
+#[test]
+fn explicit_relative_path_is_anchored_to_the_cli_working_directory() {
+    let cwd = std::env::current_dir().unwrap();
+
+    let dot = super::resolve_path_with_discovery(Some(".".to_string()));
+    assert!(dot.is_absolute());
+    assert_eq!(dot, cwd.join("."));
+    assert_eq!(
+        super::resolve_path_with_discovery(Some("nested/project".to_string())),
+        cwd.join("nested/project")
+    );
+    let absolute = TempDir::new().unwrap();
+    assert_eq!(
+        super::resolve_path_with_discovery(Some(absolute.path().display().to_string())),
+        absolute.path()
+    );
+}

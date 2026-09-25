@@ -235,9 +235,13 @@ fn absolutize_path(path: PathBuf) -> PathBuf {
 ///
 /// Used by `serve`, `sync`, and `status`. NOT used by `init` (which must
 /// create a fresh project at the target directory).
+///
+/// An explicit path is anchored to this process's working directory before it
+/// leaves the CLI: the daemon that receives it runs from its own directory
+/// (`/` under launchd), where a bare `.` would name the filesystem root.
 pub fn resolve_path_with_discovery(path: Option<String>) -> PathBuf {
     if let Some(p) = path {
-        PathBuf::from(p)
+        absolutize_path(PathBuf::from(p))
     } else {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         discover_project_root(&cwd)
