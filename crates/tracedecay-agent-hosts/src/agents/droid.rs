@@ -408,7 +408,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let integration = DroidIntegration;
         assert!(!integration.is_detected(home.path()));
-        assert_eq!(integration.has_tracedecay(home.path()), false);
+        assert!(!integration.has_tracedecay(home.path()));
 
         std::fs::create_dir_all(droid_config_dir(home.path())).unwrap();
         assert!(integration.is_detected(home.path()));
