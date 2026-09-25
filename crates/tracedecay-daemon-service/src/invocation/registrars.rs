@@ -521,6 +521,7 @@ impl DaemonFeedbackRuntimeRegistrar {
         &self,
         database: Database,
         project_root: PathBuf,
+        response_handle_root: PathBuf,
         scope: ResolvedScope,
         access: ProjectSourceAccessSnapshot,
         authorization: Arc<dyn CallableCodeAuthorizationSourcePort>,
@@ -537,8 +538,14 @@ impl DaemonFeedbackRuntimeRegistrar {
                 #[cfg(any(test, feature = "test-helpers"))]
                 producer_constructions.fetch_add(1, Ordering::SeqCst);
                 let runtime = Arc::new(
-                    open_feedback_runtime(database, runtime_root.clone(), scope.clone(), access)
-                        .await?,
+                    open_feedback_runtime(
+                        database,
+                        runtime_root.clone(),
+                        response_handle_root,
+                        scope.clone(),
+                        access,
+                    )
+                    .await?,
                 );
                 let publications = runtime.publication_store();
                 let unavailable_cycle = Arc::new(UnavailableFeedbackCycleRuntimeV1::new(

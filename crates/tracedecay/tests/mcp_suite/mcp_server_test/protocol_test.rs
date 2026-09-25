@@ -10,7 +10,6 @@ use tracedecay::mcp::McpServer;
 use tracedecay_mcp::response_handles::{
     RESPONSE_HANDLE_TTL_SECS, cleanup_expired_response_handles, store_response_handle,
 };
-use tracedecay_runtime_core::storage::resolve_response_handle_root;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 /// Logging is deprecated by MCP SEP-2577 and the server emits no log
@@ -134,9 +133,12 @@ async fn test_tools_call_explicit_null_id_is_refused_before_dispatch() {
 async fn test_tools_list() {
     let (server, _dir) = setup_server().await;
     let now = current_timestamp();
-    let stored =
-        store_response_handle(server.cg().await.project_root(), "{\"items\":[1,2,3]}", now)
-            .unwrap();
+    let stored = store_response_handle(
+        &server.cg().await.store_layout().response_handle_root,
+        "{\"items\":[1,2,3]}",
+        now,
+    )
+    .unwrap();
     let responses = run_server_with_messages(
         server,
         vec![
@@ -846,8 +848,12 @@ async fn test_tracedecay_retrieve_invalid_handle_is_invalid_params_with_reason_c
 async fn test_tracedecay_retrieve_corrupt_handle_record_returns_actionable_internal_error() {
     let (server, _dir) = setup_server().await;
     let cg = server.cg().await;
-    let stored =
-        store_response_handle(cg.project_root(), "{\"items\":[1]}", current_timestamp()).unwrap();
+    let stored = store_response_handle(
+        &cg.store_layout().response_handle_root,
+        "{\"items\":[1]}",
+        current_timestamp(),
+    )
+    .unwrap();
     fs::write(
         response_handle_dir(&cg).join(format!("{}.json", stored.handle)),
         "{not-json",
@@ -886,8 +892,12 @@ async fn test_tracedecay_retrieve_corrupt_handle_record_returns_actionable_inter
 async fn test_tracedecay_retrieve_handle_read_failure_returns_actionable_internal_error() {
     let (server, _dir) = setup_server().await;
     let cg = server.cg().await;
-    let stored =
-        store_response_handle(cg.project_root(), "{\"items\":[2]}", current_timestamp()).unwrap();
+    let stored = store_response_handle(
+        &cg.store_layout().response_handle_root,
+        "{\"items\":[2]}",
+        current_timestamp(),
+    )
+    .unwrap();
     let handle_path = response_handle_dir(&cg).join(format!("{}.json", stored.handle));
     fs::remove_file(&handle_path).unwrap();
     fs::create_dir(&handle_path).unwrap();
@@ -1156,7 +1166,7 @@ async fn test_server_stats_include_response_handle_metrics() {
     assert_eq!(missing_payload["reason_code"], "handle_not_found");
 
     let expired = store_response_handle(
-        cg.project_root(),
+        &cg.store_layout().response_handle_root,
         "{\"expired\":true}",
         current_timestamp() - RESPONSE_HANDLE_TTL_SECS - 5,
     )
@@ -1171,8 +1181,12 @@ async fn test_server_stats_include_response_handle_metrics() {
         serde_json::from_str(crate::support::extract_real_server_text(&expired_result)).unwrap();
     assert_eq!(expired_payload["reason_code"], "handle_expired");
 
-    let broken =
-        store_response_handle(cg.project_root(), "{\"broken\":true}", current_timestamp()).unwrap();
+    let broken = store_response_handle(
+        &cg.store_layout().response_handle_root,
+        "{\"broken\":true}",
+        current_timestamp(),
+    )
+    .unwrap();
     let broken_path = response_handle_dir(&cg).join(format!("{}.json", broken.handle));
     fs::remove_file(&broken_path).unwrap();
     fs::create_dir(&broken_path).unwrap();
@@ -1189,10 +1203,14 @@ async fn test_server_stats_include_response_handle_metrics() {
     );
     fs::remove_dir(&broken_path).unwrap();
 
-    store_response_handle(cg.project_root(), "{\"expires\":true}", current_timestamp())
-        .expect("direct store should succeed so cleanup has something to expire");
+    store_response_handle(
+        &cg.store_layout().response_handle_root,
+        "{\"expires\":true}",
+        current_timestamp(),
+    )
+    .expect("direct store should succeed so cleanup has something to expire");
     let expired_removed = cleanup_expired_response_handles(
-        cg.project_root(),
+        &cg.store_layout().response_handle_root,
         current_timestamp() + RESPONSE_HANDLE_TTL_SECS + 1,
     )
     .unwrap();
@@ -1202,11 +1220,10 @@ async fn test_server_stats_include_response_handle_metrics() {
     );
 
     let failure_root = TempDir::new().unwrap();
-    let failure_handle_root = resolve_response_handle_root(failure_root.path()).unwrap();
-    fs::create_dir_all(failure_handle_root.parent().unwrap()).unwrap();
+    let failure_handle_root = failure_root.path().join("response-handles");
     fs::write(&failure_handle_root, "not-a-directory").unwrap();
     store_response_handle(
-        failure_root.path(),
+        &failure_handle_root,
         "store failure telemetry",
         current_timestamp(),
     )

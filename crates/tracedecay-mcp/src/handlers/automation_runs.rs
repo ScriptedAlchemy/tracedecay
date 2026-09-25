@@ -94,7 +94,7 @@ pub async fn handle_list(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
         "completeness": completeness,
     });
     Ok(tool_json_with_md(
-        Some(cg.project_root()),
+        Some(&cg.store_layout().response_handle_root),
         &args,
         &payload,
         || renderers::automation_run_list_md(&payload),
@@ -117,7 +117,7 @@ pub async fn handle_view(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
         "run": record,
     });
     Ok(tool_json_with_md(
-        Some(cg.project_root()),
+        Some(&cg.store_layout().response_handle_root),
         &args,
         &payload,
         || renderers::automation_run_view_md(&payload),

@@ -16,7 +16,7 @@ use crate::tool_json;
 /// [`RemoteOperationalStatusReadV1::Unavailable`], never an empty success.
 #[hotpath::measure(label = "mcp.info.remote_status.total")]
 pub fn handle_remote_status(
-    project_root: &Path,
+    response_handle_root: &Path,
     args: &Value,
     provider: Option<&RemoteOperationalStatusReaderV1>,
 ) -> Result<ToolResult> {
@@ -25,7 +25,7 @@ pub fn handle_remote_status(
         None => RemoteOperationalStatusReadV1::Unavailable,
     };
     let value = serde_json::to_value(&status)?;
-    Ok(tool_json(Some(project_root), args, &value))
+    Ok(tool_json(Some(response_handle_root), args, &value))
 }
 
 #[cfg(test)]
@@ -48,8 +48,12 @@ mod tests {
 
     #[test]
     fn handler_returns_typed_unavailable_when_provider_is_absent() {
-        let result = handle_remote_status(Path::new("."), &json!({ "format": "json" }), None)
-            .expect("absent provider is a typed read");
+        let result = handle_remote_status(
+            Path::new("response-handles"),
+            &json!({ "format": "json" }),
+            None,
+        )
+        .expect("absent provider is a typed read");
         let parsed = parse_tool_json(&result);
         assert_eq!(parsed, json!({ "kind": "unavailable" }));
         assert_ne!(parsed, json!({}));

@@ -202,7 +202,7 @@ fn dispatch_info_tools_inner<'a>(
         // dispatch through the portable table.
         match tool_name {
             "tracedecay_remote_status" => portable_info::handle_remote_status(
-                cg.project_root(),
+                &cg.store_layout().response_handle_root,
                 &args,
                 options.remote_operational_status.as_ref(),
             ),
@@ -237,6 +237,7 @@ fn dispatch_info_tools_inner<'a>(
             "tracedecay_project_context" => {
                 portable_info::handle_project_context(
                     Some(cg.project_root()),
+                    Some(&cg.store_layout().response_handle_root),
                     args,
                     options.project_registry_reads,
                 )
@@ -248,6 +249,7 @@ fn dispatch_info_tools_inner<'a>(
             _ => {
                 portable_info::dispatch_tool(
                     cg.project_root(),
+                    &cg.store_layout().response_handle_root,
                     &verified_graph_open(&options),
                     tool_name,
                     args,
@@ -370,7 +372,7 @@ fn dispatch_application_surface_tools_inner<'a>(
         }
         if retained {
             return application_surface::run_retained_surface_tool(
-                Some(cg.project_root()),
+                Some(&cg.store_layout().response_handle_root),
                 BindingSurface::Mcp,
                 operation,
                 args,
@@ -393,14 +395,14 @@ fn dispatch_application_surface_tools_inner<'a>(
             )
             .await?;
             return tracedecay_mcp::handlers::graph_tool::render_graph_tool(
-                Some(cg.project_root()),
+                Some(&cg.store_layout().response_handle_root),
                 &args,
                 execution,
             );
         }
         if source_edit {
             return edit::source_edit_tool(
-                Some(cg.project_root()),
+                Some(&cg.store_layout().response_handle_root),
                 BindingSurface::Mcp,
                 operation,
                 args,
@@ -516,13 +518,14 @@ fn dispatch_analysis_tools_inner<'a>(
     // Erase the portable dispatch future before it reaches the measured
     // wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
-        portable_analysis::dispatch_tool(
+        Box::pin(portable_analysis::dispatch_tool(
             cg.project_root(),
+            &cg.store_layout().response_handle_root,
             &verified_graph_open(&options),
             tool_name,
             args,
             scope_prefix,
-        )
+        ))
         .await
     })
 }

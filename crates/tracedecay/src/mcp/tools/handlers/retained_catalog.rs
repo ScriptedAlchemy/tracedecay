@@ -179,7 +179,7 @@ pub(super) async fn dispatch_profile_retained_application_tool(
         options.application_request_id,
         options.application_deadline,
         options.application_cancellation,
-        Some(cg.project_root()),
+        Some(&cg.store_layout().response_handle_root),
     )
     .await
 }
@@ -201,7 +201,7 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
     protocol_request_id: Option<tracedecay_contracts::RequestId>,
     protocol_deadline: Option<tracedecay_contracts::Deadline>,
     protocol_cancellation: Option<tracedecay_contracts::CancellationSignal>,
-    project_root: Option<&std::path::Path>,
+    response_handle_root: Option<&std::path::Path>,
 ) -> Result<ToolResult> {
     if let Some(arguments) = args.as_object_mut()
         && (tool_name.starts_with("tracedecay_lcm_") || tool_name == "tracedecay_message_search")
@@ -271,7 +271,7 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
     hotpath::measure_block!(
         "mcp.retained.profile.render",
         application_surface::render_retained_result(
-            project_root,
+            response_handle_root,
             operation,
             binding.binding_id(),
             result,

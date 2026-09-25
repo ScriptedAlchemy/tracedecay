@@ -242,7 +242,7 @@ pub async fn handle_diagnose(
         })
     );
     Ok(rendered_tool_result(
-        Some(cg.project_root()),
+        Some(&cg.store_layout().response_handle_root),
         &args,
         &body,
         touched.into_iter().collect(),
@@ -648,7 +648,7 @@ where
     );
 
     Ok(generic_tool_result(
-        Some(cg.project_root()),
+        Some(&cg.store_layout().response_handle_root),
         &args,
         &body,
         touched_files,

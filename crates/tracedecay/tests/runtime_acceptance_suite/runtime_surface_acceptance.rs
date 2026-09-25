@@ -91,6 +91,13 @@ impl RuntimeFixture {
         self._environment.home()
     }
 
+    fn response_handle_root(&self) -> PathBuf {
+        tracedecay_runtime_core::storage::resolve_enrolled_layout_for_current_profile(&self.project)
+            .expect("resolve admitted project store")
+            .expect("admitted project is enrolled")
+            .response_handle_root
+    }
+
     /// The path an LSP client addresses the admitted project through.
     ///
     /// Daemon admission canonicalizes the root, while a client spells it the
@@ -2699,7 +2706,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
             "cycle-backed related projections must expose retrieval handles"
         );
         let handle_record = match retrieve_response_handle(
-            &fixture.project,
+            &fixture.response_handle_root(),
             lsp_handle,
             wall_clock_micros().0.div_euclid(1_000_000),
         )
@@ -2741,7 +2748,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
 
         for lsp_handle in related_lsp_handles {
             let record = match retrieve_response_handle(
-                &fixture.project,
+                &fixture.response_handle_root(),
                 &lsp_handle,
                 wall_clock_micros().0.div_euclid(1_000_000),
             )
@@ -3077,9 +3084,15 @@ async fn feedback_handle_bootstrap_reads() {
     let scope = resolved_scope("feedback");
     let observed_at = wall_clock_micros();
     let access = feedback_access(&scope, observed_at);
-    let runtime = open_feedback_runtime(database, project.path(), scope, access)
-        .await
-        .expect("feedback runtime");
+    let runtime = open_feedback_runtime(
+        database,
+        project.path(),
+        project.path().join("response-handles"),
+        scope,
+        access,
+    )
+    .await
+    .expect("feedback runtime");
     let owner = runtime.owner();
 
     let list_handle = runtime

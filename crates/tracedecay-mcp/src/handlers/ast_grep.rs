@@ -26,6 +26,7 @@ const DEFAULT_MAX_RESULTS: usize = 50;
 #[hotpath::measure(future = true, label = "mcp.search.ast_grep.total")]
 pub async fn handle_ast_grep_search(
     project_root: &Path,
+    response_handle_root: &Path,
     args: Value,
     scope_prefix: Option<&str>,
     deadline: Option<tracedecay_contracts::Deadline>,
@@ -90,7 +91,7 @@ pub async fn handle_ast_grep_search(
     let touched_files = unique_file_paths(hits.iter().map(|hit| hit.file.as_ref()));
     let output_value = build_output_value(&hits, search.truncated, search.files_scanned);
 
-    let text = render::finalize(Some(project_root), &args, &output_value, || {
+    let text = render::finalize(Some(response_handle_root), &args, &output_value, || {
         render_md(&hits, search.truncated, search.files_scanned)
     });
     Ok(ToolResult::new(
@@ -168,6 +169,7 @@ mod tests {
 
         let result = handle_ast_grep_search(
             temp.path(),
+            &temp.path().join("response-handles"),
             json!({"pattern": "target($A)", "lang": "rust", "max_results": 10}),
             None,
             None,

@@ -29,6 +29,7 @@ const UNMOUNTED_FILES_MAX_LIMIT: usize = 2_000;
 #[hotpath::measure(future = true, label = "mcp.analysis.unmounted_files.total")]
 pub async fn handle_unmounted_files(
     project_root: &Path,
+    response_handle_root: &Path,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -118,7 +119,7 @@ pub async fn handle_unmounted_files(
         });
 
     Ok(rendered_tool_result(
-        Some(project_root),
+        Some(response_handle_root),
         &args,
         &output,
         touched_files,

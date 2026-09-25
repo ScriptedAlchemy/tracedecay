@@ -4,6 +4,7 @@ use super::*;
 
 #[hotpath::measure(future = true, label = "mcp.analysis.rank.total")]
 pub async fn handle_rank(
+    response_handle_root: &Path,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
@@ -125,7 +126,7 @@ pub async fn handle_rank(
     });
 
     Ok(generic_tool_result(
-        Some(graph.project_root()?),
+        Some(response_handle_root),
         &args,
         &output,
         touched_files,
@@ -134,6 +135,7 @@ pub async fn handle_rank(
 
 #[hotpath::measure(future = true, label = "mcp.analysis.largest.total")]
 pub async fn handle_largest(
+    response_handle_root: &Path,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
@@ -193,7 +195,7 @@ pub async fn handle_largest(
     });
 
     Ok(generic_tool_result(
-        Some(graph.project_root()?),
+        Some(response_handle_root),
         &args,
         &output,
         touched_files,
@@ -202,6 +204,7 @@ pub async fn handle_largest(
 
 #[hotpath::measure(future = true, label = "mcp.analysis.coupling.total")]
 pub async fn handle_coupling(
+    response_handle_root: &Path,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
@@ -287,7 +290,7 @@ pub async fn handle_coupling(
     });
 
     Ok(generic_tool_result(
-        Some(graph.project_root()?),
+        Some(response_handle_root),
         &args,
         &output,
         vec![],
@@ -296,6 +299,7 @@ pub async fn handle_coupling(
 
 #[hotpath::measure(future = true, label = "mcp.analysis.inheritance_depth.total")]
 pub async fn handle_inheritance_depth(
+    response_handle_root: &Path,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
@@ -360,7 +364,7 @@ pub async fn handle_inheritance_depth(
     });
 
     Ok(generic_tool_result(
-        Some(graph.project_root()?),
+        Some(response_handle_root),
         &args,
         &output,
         touched_files,
@@ -396,6 +400,7 @@ fn inheritance_depth(
 
 #[hotpath::measure(future = true, label = "mcp.analysis.distribution.total")]
 pub async fn handle_distribution(
+    response_handle_root: &Path,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
@@ -487,7 +492,7 @@ pub async fn handle_distribution(
     };
 
     Ok(generic_tool_result(
-        Some(graph.project_root()?),
+        Some(response_handle_root),
         &args,
         &output,
         vec![],

@@ -348,7 +348,7 @@ pub async fn handle_runtime(
         attach_doctor_report(&mut value, ctx.doctor_report());
     }
     Ok(generic_tool_result(
-        Some(ctx.project_root()),
+        Some(&ctx.store_layout().response_handle_root),
         &args,
         &value,
         vec![],

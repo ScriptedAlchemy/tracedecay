@@ -1,39 +1,7 @@
 use super::*;
-use crate::response_handles::{
-    ResponseHandleLookup, lock_response_handle_store, retrieve_response_handle,
-};
+use crate::response_handles::{ResponseHandleLookup, retrieve_response_handle};
 use serde_json::json;
-use std::ffi::OsString;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
-
-/// Restores one environment variable on drop. Callers must already hold
-/// `lock_response_handle_store` (the user-data-dir test-env lock) so the
-/// mutation cannot race other tests.
-struct EnvRestore {
-    key: &'static str,
-    previous: Option<OsString>,
-}
-
-impl EnvRestore {
-    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-        let previous = std::env::var_os(key);
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvRestore {
-    fn drop(&mut self) {
-        unsafe {
-            match self.previous.take() {
-                Some(previous) => std::env::set_var(self.key, previous),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
 
 #[test]
 fn json_format_is_compact() {
@@ -50,7 +18,6 @@ fn json_format_is_compact() {
 
 #[test]
 fn truncated_json_envelope_includes_handle() {
-    let _store_guard = lock_response_handle_store();
     let dir = tempfile::TempDir::new().unwrap();
     let long = format!(
         "{{\"items\":[{}]}}",
@@ -97,7 +64,6 @@ fn truncated_json_envelope_reports_character_counts_for_utf8() {
 
 #[test]
 fn truncated_markdown_includes_readable_handle_guidance() {
-    let _store_guard = lock_response_handle_store();
     let dir = tempfile::TempDir::new().unwrap();
     let long = format!("# Scan\n\n{}", "- repeated finding\n".repeat(3_000));
 
@@ -131,7 +97,6 @@ fn truncated_markdown_includes_readable_handle_guidance() {
 
 #[test]
 fn truncated_markdown_preserves_late_priority_sections() {
-    let _store_guard = lock_response_handle_store();
     let dir = tempfile::TempDir::new().unwrap();
     let long = format!(
         "## Code Context\n{}\n### Memory Matches\n- fact_id=fact.v1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb category=project trust=0.90 score=0.500: remembered context\n\n### Entry Points\n- **late_symbol** (function) - src/lib.rs:10\n",
@@ -178,7 +143,6 @@ fn markdown_truncation_preview_closes_prefix_fence_before_preserved_sections() {
 
 #[test]
 fn markdown_preview_with_handle_stores_full_text_when_preview_differs() {
-    let _store_guard = lock_response_handle_store();
     let dir = tempfile::TempDir::new().unwrap();
     let full = format!(
         "# Full\n\nsmall visible preview\n\n{}## Details\nfull-only detail",
@@ -209,17 +173,11 @@ fn markdown_preview_with_handle_stores_full_text_when_preview_differs() {
 
 #[test]
 fn truncated_json_envelope_reports_store_failure() {
-    let _store_guard = lock_response_handle_store();
     let dir = tempfile::TempDir::new().unwrap();
-    // Identity never lives in the working tree, so the honest failure
-    // injection is an unwritable profile root: pin discovery beneath a
-    // regular file so every durable handle-store write fails.
+    // A handle root beneath a regular file makes every durable write fail.
     let blocker = dir.path().join("blocker");
     std::fs::write(&blocker, b"not a directory").unwrap();
-    let _profile = EnvRestore::set(
-        tracedecay_runtime_core::config::USER_DATA_DIR_ENV,
-        blocker.join(".tracedecay"),
-    );
+    let handle_root = blocker.join("response-handles");
     let long = format!(
         "{{\"items\":[{}]}}",
         (0..3_000)
@@ -228,7 +186,7 @@ fn truncated_json_envelope_reports_store_failure() {
             .join(",")
     );
 
-    let result = truncated_json_envelope_with_handle(Some(dir.path()), &long);
+    let result = truncated_json_envelope_with_handle(Some(&handle_root), &long);
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
 
     assert_eq!(parsed["truncated"], true);

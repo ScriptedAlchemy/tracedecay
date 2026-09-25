@@ -47,7 +47,12 @@ fn retrieve_call(id: i64, arguments: Value) -> String {
 #[tokio::test]
 async fn retrieve_returns_stored_pages_as_literal_json() {
     let (server, _dir) = setup_server().await;
-    let root = server.cg().await.project_root().to_path_buf();
+    let root = server
+        .cg()
+        .await
+        .store_layout()
+        .response_handle_root
+        .clone();
     store_response_handle(&root, HELLO, STORED_AT).unwrap();
 
     let responses = run_server_with_messages(
@@ -95,7 +100,12 @@ async fn retrieve_returns_stored_pages_as_literal_json() {
 #[tokio::test]
 async fn retrieve_default_and_markdown_slice_characters_not_bytes() {
     let (server, _dir) = setup_server().await;
-    let root = server.cg().await.project_root().to_path_buf();
+    let root = server
+        .cg()
+        .await
+        .store_layout()
+        .response_handle_root
+        .clone();
     store_response_handle(&root, HELLO, STORED_AT).unwrap();
     store_response_handle(&root, CRAB, STORED_AT).unwrap();
 
@@ -146,7 +156,12 @@ async fn retrieve_default_and_markdown_slice_characters_not_bytes() {
 #[tokio::test]
 async fn retrieve_reports_missing_and_expired_handles() {
     let (server, _dir) = setup_server().await;
-    let root = server.cg().await.project_root().to_path_buf();
+    let root = server
+        .cg()
+        .await
+        .store_layout()
+        .response_handle_root
+        .clone();
     store_response_handle(&root, SHORT, EXPIRED_AT).unwrap();
 
     let responses = run_server_with_messages(
@@ -180,7 +195,12 @@ async fn retrieve_reports_missing_and_expired_handles() {
 #[tokio::test]
 async fn retrieve_rejects_bad_arguments_with_typed_errors() {
     let (server, _dir) = setup_server().await;
-    let root = server.cg().await.project_root().to_path_buf();
+    let root = server
+        .cg()
+        .await
+        .store_layout()
+        .response_handle_root
+        .clone();
     store_response_handle(&root, SHORT, STORED_AT).unwrap();
 
     let responses = run_server_with_messages(

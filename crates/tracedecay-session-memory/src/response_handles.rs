@@ -9,7 +9,6 @@ use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage::{
     DURABLE_REMOVAL_TOMBSTONE_PREFIX, PrivateStoreIo, reject_symlink_components,
-    resolve_response_handle_root,
 };
 
 pub const RESPONSE_HANDLE_TTL_SECS: i64 = 86_400;
@@ -85,27 +84,11 @@ pub fn is_valid_response_handle(handle: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
-pub fn store_response_handle(
-    project_root: &Path,
-    content: &str,
-    now: i64,
-) -> Result<ResponseHandleRecord> {
-    let root = prepared_response_handle_root(project_root)?;
-    store_response_handle_in_root(&root, content, now)
-}
-
-fn prepared_response_handle_root(project_root: &Path) -> Result<PathBuf> {
-    let root = resolve_response_handle_root(project_root)?;
-    PrivateStoreIo::create_dir_all_durable(&root)
-        .map_err(|error| file_error(&root, "create durable directory", error))?;
-    Ok(root)
-}
-
-fn store_response_handle_in_root(
-    root: &Path,
-    content: &str,
-    now: i64,
-) -> Result<ResponseHandleRecord> {
+/// Publishes `content` under `root`, the owning store's
+/// [`response_handle_root`](tracedecay_runtime_core::storage::StoreLayout::response_handle_root).
+pub fn store_response_handle(root: &Path, content: &str, now: i64) -> Result<ResponseHandleRecord> {
+    PrivateStoreIo::create_dir_all_durable(root)
+        .map_err(|error| file_error(root, "create durable directory", error))?;
     with_exclusive_lock(root, || store_response_handle_locked(root, content, now))
 }
 
@@ -179,16 +162,6 @@ fn store_response_handle_locked(
     })
 }
 
-pub fn retrieve_response_handle(
-    project_root: &Path,
-    handle: &str,
-    now: i64,
-) -> Result<ResponseHandleLookup> {
-    validate_handle(handle)?;
-    let root = resolve_response_handle_root(project_root)?;
-    retrieve_from_root(&root, handle, now)
-}
-
 /// Non-mutating lookup that never takes the root lock.
 ///
 /// A record file is published by atomically renaming a fully synced staging
@@ -199,7 +172,11 @@ pub fn retrieve_response_handle(
 /// cannot be mistaken for the record this lookup started with. Expired files
 /// are not reclaimed here; cleanup and the renewing publication remove them
 /// under the exclusive writer lock.
-fn retrieve_from_root(root: &Path, handle: &str, now: i64) -> Result<ResponseHandleLookup> {
+pub fn retrieve_response_handle(
+    root: &Path,
+    handle: &str,
+    now: i64,
+) -> Result<ResponseHandleLookup> {
     validate_handle(handle)?;
     validate_response_handle_path(root)?;
     if !path_exists(root)? {
@@ -228,18 +205,7 @@ fn lookup_record(root: &Path, handle: &str, now: i64) -> Result<ResponseHandleLo
     }))
 }
 
-pub fn cleanup_expired_response_handles(
-    project_root: &Path,
-    now: i64,
-) -> Result<ResponseHandleCleanup> {
-    let root = resolve_response_handle_root(project_root)?;
-    cleanup_expired_response_handles_in_root(&root, now)
-}
-
-fn cleanup_expired_response_handles_in_root(
-    root: &Path,
-    now: i64,
-) -> Result<ResponseHandleCleanup> {
+pub fn cleanup_expired_response_handles(root: &Path, now: i64) -> Result<ResponseHandleCleanup> {
     validate_response_handle_path(root)?;
     if !path_exists(root)? {
         return Ok(ResponseHandleCleanup::default());
@@ -267,12 +233,7 @@ fn cleanup_expired_response_handles_in_root(
     })
 }
 
-pub fn inventory_response_handles(project_root: &Path) -> Result<ResponseHandleInventory> {
-    let root = resolve_response_handle_root(project_root)?;
-    inventory_response_handles_in_root(&root)
-}
-
-fn inventory_response_handles_in_root(root: &Path) -> Result<ResponseHandleInventory> {
+pub fn inventory_response_handles(root: &Path) -> Result<ResponseHandleInventory> {
     validate_response_handle_path(root)?;
     if !path_exists(root)? {
         return Ok(ResponseHandleInventory::default());
@@ -635,7 +596,7 @@ mod tests {
             let barrier = Arc::clone(&barrier);
             std::thread::spawn(move || {
                 barrier.wait();
-                store_response_handle_in_root(&root, "shared payload", now)
+                store_response_handle(&root, "shared payload", now)
             })
         });
         for result in workers.map(|worker| worker.join().unwrap()) {
@@ -647,16 +608,11 @@ mod tests {
                 ));
             }
         }
-        let first = store_response_handle_in_root(&root, "shared payload", 100).unwrap();
+        let first = store_response_handle(&root, "shared payload", 100).unwrap();
 
-        assert_eq!(
-            inventory_response_handles_in_root(&root)
-                .unwrap()
-                .file_count,
-            1
-        );
+        assert_eq!(inventory_response_handles(&root).unwrap().file_count, 1);
         let ResponseHandleLookup::Found(persisted) =
-            retrieve_from_root(&root, &first.handle, 100).unwrap()
+            retrieve_response_handle(&root, &first.handle, 100).unwrap()
         else {
             panic!("concurrent response handle was not retrievable");
         };
@@ -684,7 +640,7 @@ mod tests {
         let worker_root = root.path().to_path_buf();
         let (sent, received) = mpsc::channel();
         let worker = std::thread::spawn(move || {
-            let _ = sent.send(inventory_response_handles_in_root(&worker_root));
+            let _ = sent.send(inventory_response_handles(&worker_root));
         });
         let early = received.recv_timeout(Duration::from_millis(250));
         held.unlock().unwrap();
@@ -707,15 +663,14 @@ mod tests {
     #[test]
     fn expiry_cleanup_removes_the_exact_record() {
         let root = tempfile::tempdir().unwrap();
-        let record = store_response_handle_in_root(root.path(), "expired", 10).unwrap();
+        let record = store_response_handle(root.path(), "expired", 10).unwrap();
         let cleanup =
-            cleanup_expired_response_handles_in_root(root.path(), 10 + RESPONSE_HANDLE_TTL_SECS)
-                .unwrap();
+            cleanup_expired_response_handles(root.path(), 10 + RESPONSE_HANDLE_TTL_SECS).unwrap();
 
         assert_eq!(cleanup.scanned, 1);
         assert_eq!(cleanup.removed_expired, 1);
         assert!(matches!(
-            retrieve_from_root(root.path(), &record.handle, 20).unwrap(),
+            retrieve_response_handle(root.path(), &record.handle, 20).unwrap(),
             ResponseHandleLookup::Missing
         ));
     }
@@ -723,12 +678,12 @@ mod tests {
     #[test]
     fn expired_lookup_is_non_mutating_until_cleanup_or_renewal() {
         let root = tempfile::tempdir().unwrap();
-        let record = store_response_handle_in_root(root.path(), "stale", 10).unwrap();
+        let record = store_response_handle(root.path(), "stale", 10).unwrap();
         let expired_at = 10 + RESPONSE_HANDLE_TTL_SECS;
 
         for _ in 0..2 {
             assert!(matches!(
-                retrieve_from_root(root.path(), &record.handle, expired_at).unwrap(),
+                retrieve_response_handle(root.path(), &record.handle, expired_at).unwrap(),
                 ResponseHandleLookup::Expired {
                     created_at: 10,
                     expires_at
@@ -736,24 +691,20 @@ mod tests {
             ));
         }
         assert_eq!(
-            inventory_response_handles_in_root(root.path())
-                .unwrap()
-                .file_count,
+            inventory_response_handles(root.path()).unwrap().file_count,
             1,
             "a lookup must not reclaim the expired record"
         );
 
-        let renewed = store_response_handle_in_root(root.path(), "stale", expired_at).unwrap();
+        let renewed = store_response_handle(root.path(), "stale", expired_at).unwrap();
         assert_eq!(renewed.handle, record.handle);
         assert_eq!(renewed.created_at, expired_at);
         assert_eq!(
-            inventory_response_handles_in_root(root.path())
-                .unwrap()
-                .file_count,
+            inventory_response_handles(root.path()).unwrap().file_count,
             1
         );
         let ResponseHandleLookup::Found(persisted) =
-            retrieve_from_root(root.path(), &record.handle, expired_at).unwrap()
+            retrieve_response_handle(root.path(), &record.handle, expired_at).unwrap()
         else {
             panic!("renewed expired handle was not retrievable");
         };
@@ -763,25 +714,23 @@ mod tests {
     #[test]
     fn failed_renewal_of_an_expired_record_leaves_no_record() {
         let root = tempfile::tempdir().unwrap();
-        let record = store_response_handle_in_root(root.path(), "retire me", 10).unwrap();
+        let record = store_response_handle(root.path(), "retire me", 10).unwrap();
         let expired_at = 10 + RESPONSE_HANDLE_TTL_SECS;
 
         assert!(
             with_durable_atomic_write_fault_for_test(
                 DurableAtomicWriteFaultForTest::AfterTempSync,
-                || store_response_handle_in_root(root.path(), "retire me", expired_at),
+                || store_response_handle(root.path(), "retire me", expired_at),
             )
             .is_err()
         );
 
         assert!(matches!(
-            retrieve_from_root(root.path(), &record.handle, expired_at).unwrap(),
+            retrieve_response_handle(root.path(), &record.handle, expired_at).unwrap(),
             ResponseHandleLookup::Missing
         ));
         assert_eq!(
-            inventory_response_handles_in_root(root.path())
-                .unwrap()
-                .file_count,
+            inventory_response_handles(root.path()).unwrap().file_count,
             0,
             "publication must retire the expired record before a fresh publish"
         );
@@ -790,7 +739,7 @@ mod tests {
     #[test]
     fn lookups_do_not_take_the_writer_lock() {
         let root = tempfile::tempdir().unwrap();
-        let record = store_response_handle_in_root(root.path(), "read me", 10).unwrap();
+        let record = store_response_handle(root.path(), "read me", 10).unwrap();
         let leaf = root.path().file_name().unwrap().to_str().unwrap();
         let lock_path = root
             .path()
@@ -806,8 +755,8 @@ mod tests {
             .unwrap();
         held.lock().unwrap();
 
-        let lookup = retrieve_from_root(root.path(), &record.handle, 10);
-        let missing = retrieve_from_root(root.path(), "rh_000000000000000000000000", 10);
+        let lookup = retrieve_response_handle(root.path(), &record.handle, 10);
+        let missing = retrieve_response_handle(root.path(), "rh_000000000000000000000000", 10);
         held.unlock().unwrap();
 
         assert!(matches!(
@@ -824,13 +773,13 @@ mod tests {
         fs::write(&path, b"{}").unwrap();
 
         assert!(matches!(
-            inventory_response_handles_in_root(root.path()),
+            inventory_response_handles(root.path()),
             Err(TraceDecayError::File { message, path: error_path })
                 if message.contains("corrupt response-handle record")
                     && error_path == path.display().to_string()
         ));
         assert!(matches!(
-            cleanup_expired_response_handles_in_root(root.path(), 10),
+            cleanup_expired_response_handles(root.path(), 10),
             Err(TraceDecayError::File { message, path: error_path })
                 if message.contains("corrupt response-handle record")
                     && error_path == path.display().to_string()
@@ -840,18 +789,17 @@ mod tests {
         {
             let owner = tempfile::tempdir().unwrap();
             let attacker = tempfile::tempdir().unwrap();
-            let stored =
-                store_response_handle_in_root(owner.path(), "private payload", 10).unwrap();
+            let stored = store_response_handle(owner.path(), "private payload", 10).unwrap();
             let linked_root = attacker.path().join("response-handles");
             symlink(owner.path(), &linked_root).unwrap();
 
             assert!(matches!(
-                retrieve_from_root(&linked_root, &stored.handle, 10),
+                retrieve_response_handle(&linked_root, &stored.handle, 10),
                 Err(TraceDecayError::File { message, .. })
                     if message.contains("must not contain symlinks")
             ));
-            assert!(inventory_response_handles_in_root(&linked_root).is_err());
-            assert!(cleanup_expired_response_handles_in_root(&linked_root, 10).is_err());
+            assert!(inventory_response_handles(&linked_root).is_err());
+            assert!(cleanup_expired_response_handles(&linked_root, 10).is_err());
         }
     }
 
@@ -865,7 +813,7 @@ mod tests {
             .join(format!("{DURABLE_REMOVAL_TOMBSTONE_PREFIX}orphan"));
         fs::write(&tombstone, b"private response payload").unwrap();
 
-        let cleanup = cleanup_expired_response_handles_in_root(root.path(), 10).unwrap();
+        let cleanup = cleanup_expired_response_handles(root.path(), 10).unwrap();
 
         assert_eq!(cleanup.scanned, 0);
         assert_eq!(cleanup.removed_expired, 0);
@@ -878,17 +826,17 @@ mod tests {
     #[test]
     fn identical_store_replaces_a_corrupt_record() {
         let root = tempfile::tempdir().unwrap();
-        let original = store_response_handle_in_root(root.path(), "recover me", 10).unwrap();
+        let original = store_response_handle(root.path(), "recover me", 10).unwrap();
         let path = root.path().join(format!("{}.json", original.handle));
         fs::write(&path, b"{not-json").unwrap();
 
-        let restored = store_response_handle_in_root(root.path(), "recover me", 20).unwrap();
+        let restored = store_response_handle(root.path(), "recover me", 20).unwrap();
 
         assert_eq!(restored.handle, original.handle);
         assert_eq!(restored.created_at, 20);
         assert_eq!(restored.expires_at, 20 + RESPONSE_HANDLE_TTL_SECS);
         let ResponseHandleLookup::Found(persisted) =
-            retrieve_from_root(root.path(), &restored.handle, 20).unwrap()
+            retrieve_response_handle(root.path(), &restored.handle, 20).unwrap()
         else {
             panic!("restored response handle was not retrievable");
         };
@@ -903,20 +851,20 @@ mod tests {
         assert!(
             with_durable_atomic_write_fault_for_test(
                 DurableAtomicWriteFaultForTest::AfterTempSync,
-                || store_response_handle_in_root(root.path(), "retry me", 10),
+                || store_response_handle(root.path(), "retry me", 10),
             )
             .is_err()
         );
         let handle = response_handle_for("retry me");
         assert!(matches!(
-            retrieve_from_root(root.path(), &handle, 10).unwrap(),
+            retrieve_response_handle(root.path(), &handle, 10).unwrap(),
             ResponseHandleLookup::Missing
         ));
 
-        let recovered = store_response_handle_in_root(root.path(), "retry me", 20).unwrap();
+        let recovered = store_response_handle(root.path(), "retry me", 20).unwrap();
         assert_eq!(recovered.handle, handle);
         let ResponseHandleLookup::Found(persisted) =
-            retrieve_from_root(root.path(), &handle, 20).unwrap()
+            retrieve_response_handle(root.path(), &handle, 20).unwrap()
         else {
             panic!("retried response handle was not retrievable");
         };
@@ -930,21 +878,20 @@ mod tests {
         assert!(
             with_durable_atomic_write_fault_for_test(
                 DurableAtomicWriteFaultForTest::AfterRename,
-                || store_response_handle_in_root(root.path(), "retry after rename", 10),
+                || store_response_handle(root.path(), "retry after rename", 10),
             )
             .is_err()
         );
         let handle = response_handle_for("retry after rename");
         assert!(matches!(
-            retrieve_from_root(root.path(), &handle, 10).unwrap(),
+            retrieve_response_handle(root.path(), &handle, 10).unwrap(),
             ResponseHandleLookup::Missing
         ));
 
-        let recovered =
-            store_response_handle_in_root(root.path(), "retry after rename", 20).unwrap();
+        let recovered = store_response_handle(root.path(), "retry after rename", 20).unwrap();
         assert_eq!(recovered.handle, handle);
         assert!(matches!(
-            retrieve_from_root(root.path(), &handle, 20).unwrap(),
+            retrieve_response_handle(root.path(), &handle, 20).unwrap(),
             ResponseHandleLookup::Found(_)
         ));
     }
@@ -952,18 +899,18 @@ mod tests {
     #[test]
     fn failed_renewal_restores_the_previously_issued_record() {
         let root = tempfile::tempdir().unwrap();
-        let original = store_response_handle_in_root(root.path(), "renew safely", 10).unwrap();
+        let original = store_response_handle(root.path(), "renew safely", 10).unwrap();
 
         assert!(
             with_durable_atomic_write_fault_for_test(
                 DurableAtomicWriteFaultForTest::AfterRename,
-                || store_response_handle_in_root(root.path(), "renew safely", 20),
+                || store_response_handle(root.path(), "renew safely", 20),
             )
             .is_err()
         );
 
         let ResponseHandleLookup::Found(restored) =
-            retrieve_from_root(root.path(), &original.handle, 11).unwrap()
+            retrieve_response_handle(root.path(), &original.handle, 11).unwrap()
         else {
             panic!("failed renewal must preserve the previously issued record");
         };

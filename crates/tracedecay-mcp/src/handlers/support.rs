@@ -38,13 +38,13 @@ pub fn retrieval_cursor(args: &Value) -> Result<Option<tracedecay_domain::Retrie
 /// `touched_files`. The `format:"json"` path is unaffected,
 /// [`render::finalize`] serializes `value` compactly there.
 pub fn rendered_tool_result<F: FnOnce() -> String>(
-    project_root: Option<&Path>,
+    response_handle_root: Option<&Path>,
     args: &Value,
     value: &Value,
     touched_files: Vec<String>,
     md: F,
 ) -> ToolResult {
-    let text = render::finalize(project_root, args, value, md);
+    let text = render::finalize(response_handle_root, args, value, md);
     text_tool_result(&text, touched_files)
 }
 
@@ -62,30 +62,30 @@ pub fn text_tool_result(text: &str, touched_files: Vec<String>) -> ToolResult {
 
 /// [`rendered_tool_result`] for handlers that touch no files.
 pub fn tool_json_with_md<F: FnOnce() -> String>(
-    project_root: Option<&Path>,
+    response_handle_root: Option<&Path>,
     args: &Value,
     value: &Value,
     md: F,
 ) -> ToolResult {
-    rendered_tool_result(project_root, args, value, Vec::new(), md)
+    rendered_tool_result(response_handle_root, args, value, Vec::new(), md)
 }
 
 /// [`rendered_tool_result`] for handlers that don't need a custom markdown
 /// renderer, the default body is [`render::generic_md`] over the same value.
 pub fn generic_tool_result(
-    project_root: Option<&Path>,
+    response_handle_root: Option<&Path>,
     args: &Value,
     value: &Value,
     touched_files: Vec<String>,
 ) -> ToolResult {
-    rendered_tool_result(project_root, args, value, touched_files, || {
+    rendered_tool_result(response_handle_root, args, value, touched_files, || {
         render::generic_md(value)
     })
 }
 
 /// [`generic_tool_result`] for handlers that touch no files.
-pub fn tool_json(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
-    generic_tool_result(project_root, args, value, Vec::new())
+pub fn tool_json(response_handle_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
+    generic_tool_result(response_handle_root, args, value, Vec::new())
 }
 
 /// The single rejection every dispatch family returns for a name it does not own.

@@ -120,11 +120,11 @@ pub(super) async fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<Too
     // loading it back is real disk I/O that must not run inline on the async
     // dispatch worker.
     let lookup = {
-        let project_root = cg.project_root().to_path_buf();
+        let response_handle_root = cg.store_layout().response_handle_root.clone();
         let handle = handle.to_string();
         hotpath::future!(
             tokio::task::spawn_blocking(move || {
-                retrieve_response_handle(&project_root, &handle, current_timestamp())
+                retrieve_response_handle(&response_handle_root, &handle, current_timestamp())
             }),
             label = "mcp.retrieve.handle.load"
         )
@@ -221,7 +221,11 @@ pub(super) async fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<Too
             "expires_at": expires_at,
         }),
     };
-    Ok(tool_json(Some(cg.project_root()), args, &payload))
+    Ok(tool_json(
+        Some(&cg.store_layout().response_handle_root),
+        args,
+        &payload,
+    ))
 }
 
 fn optional_usize_argument(args: &Value, field: &str) -> Result<Option<usize>> {

@@ -366,7 +366,7 @@ impl ConcreteFeedbackLspSource {
         let content = serde_json::to_string(&record)
             .map_err(|_| LspRuntimeFailure::new("context-expansion-handle-invalid"))?;
         let stored = store_response_handle(
-            self.runtime.project_root(),
+            self.runtime.response_handle_root(),
             &content,
             micros_to_seconds(observed_at),
         )
@@ -382,7 +382,7 @@ impl ConcreteFeedbackLspSource {
     ) -> ContextExpansionOutcome {
         let observed_at = now_micros();
         let content = match retrieve_response_handle(
-            self.runtime.project_root(),
+            self.runtime.response_handle_root(),
             &request.retrieval_handle,
             micros_to_seconds(observed_at),
         ) {

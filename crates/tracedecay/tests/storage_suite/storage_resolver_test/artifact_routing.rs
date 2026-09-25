@@ -19,7 +19,9 @@ async fn resolved_project_store_helpers_route_profile_sharded_session_artifacts(
         profile_root.join("projects/proj_123/sessions.db"),
     );
     assert_path_eq(
-        resolve_response_handle_root(&project).unwrap(),
+        resolve_layout_for_current_profile(&project)
+            .unwrap()
+            .response_handle_root,
         profile_root.join("projects/proj_123/response-handles"),
     );
     assert_path_eq(
@@ -64,7 +66,10 @@ async fn response_handles_route_to_profile_shard_when_enrolled() {
     tracedecay_runtime_core::storage::pin_fixture_repository_identity(&project, "proj_123")
         .unwrap();
 
-    let stored = store_response_handle(&project, r#"{"items":[1]}"#, 1_720_000_000).unwrap();
+    let handle_root = resolve_layout_for_current_profile(&project)
+        .unwrap()
+        .response_handle_root;
+    let stored = store_response_handle(&handle_root, r#"{"items":[1]}"#, 1_720_000_000).unwrap();
     let shard_path = shard_root
         .join("response-handles")
         .join(format!("{}.json", stored.handle));
@@ -72,7 +77,7 @@ async fn response_handles_route_to_profile_shard_when_enrolled() {
     assert!(shard_path.exists());
     assert!(!project.join(".tracedecay/response-handles").exists());
     assert!(matches!(
-        retrieve_response_handle(&project, &stored.handle, 1_720_000_001).unwrap(),
+        retrieve_response_handle(&handle_root, &stored.handle, 1_720_000_001).unwrap(),
         ResponseHandleLookup::Found(record) if record.content == r#"{"items":[1]}"#
     ));
 }

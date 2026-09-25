@@ -37,7 +37,7 @@ use super::search_evidence::append_verified_graph_evidence_md;
 /// Renders a context result: the full markdown for JSON callers' fallback,
 /// and a lane-bounded preview for markdown callers.
 pub(crate) fn render_context(
-    project_root: Option<&Path>,
+    response_handle_root: Option<&Path>,
     args: &Value,
     result: &ContextResultV1,
     touched_files: Vec<String>,
@@ -84,10 +84,10 @@ pub(crate) fn render_context(
         output.push_str(&degradation);
     }
     let text = if render::wants_json(args) {
-        render::finalize(project_root, args, &value, || output)
+        render::finalize(response_handle_root, args, &value, || output)
     } else {
         let preview = context_markdown_lane_preview(&output);
-        render::markdown_preview_with_handle(project_root, &output, &preview)
+        render::markdown_preview_with_handle(response_handle_root, &output, &preview)
     };
     Ok(text_tool_result(&text, touched_files))
 }

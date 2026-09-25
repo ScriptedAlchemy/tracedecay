@@ -13,6 +13,7 @@ const MAX_TEST_MAP_RELATIONS_PER_HOP: usize = 20_000;
 
 #[hotpath::measure(label = "mcp.health.test_risk.total")]
 pub async fn handle_test_risk(
+    response_handle_root: &Path,
     graph: &VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
@@ -45,7 +46,7 @@ pub async fn handle_test_risk(
     );
 
     Ok(generic_tool_result(
-        Some(graph.project_root()?),
+        Some(response_handle_root),
         &args,
         &output,
         vec![],
@@ -54,6 +55,7 @@ pub async fn handle_test_risk(
 
 #[hotpath::measure(label = "mcp.health.test_map.total")]
 pub async fn handle_test_map(
+    response_handle_root: &Path,
     graph: &VerifiedGraphQuery,
     args: Value,
     _scope_prefix: Option<&str>,
@@ -145,7 +147,7 @@ pub async fn handle_test_map(
         .collect::<Result<Vec<_>>>()?;
     let touched_files = unique_file_paths(touched_files.into_iter().map(|(_, file)| file));
     Ok(generic_tool_result(
-        Some(graph.project_root()?),
+        Some(response_handle_root),
         &args,
         &output,
         touched_files,

@@ -245,15 +245,15 @@ fn render_result(
     cg: &TraceDecay,
     result: ApplicationSurfaceInvocationResult,
 ) -> Result<tracedecay_mcp::ToolResult> {
-    render_result_for_root(Some(cg.project_root()), result)
+    render_result_for_root(Some(&cg.store_layout().response_handle_root), result)
 }
 
 fn render_result_for_root(
-    project_root: Option<&std::path::Path>,
+    response_handle_root: Option<&std::path::Path>,
     result: ApplicationSurfaceInvocationResult,
 ) -> Result<tracedecay_mcp::ToolResult> {
     render_result_parts(
-        project_root,
+        response_handle_root,
         result.operation.as_str(),
         &result.binding_id,
         &result.result,
@@ -262,7 +262,7 @@ fn render_result_for_root(
 }
 
 fn render_result_parts(
-    project_root: Option<&std::path::Path>,
+    response_handle_root: Option<&std::path::Path>,
     operation: &str,
     binding_id: &BindingId,
     result: &ApplicationResult<Value>,
@@ -288,7 +288,7 @@ fn render_result_parts(
         }
     };
     let text = tracedecay_mcp::tools::render::finalize_with_format(
-        project_root,
+        response_handle_root,
         requested_format,
         &value,
         || markdown.unwrap_or_default(),
@@ -331,7 +331,7 @@ pub struct RetainedSurfaceExecution {
 #[allow(clippy::too_many_arguments)]
 #[hotpath::measure(future = true, label = "mcp.retained.total")]
 pub async fn run_retained_surface_tool(
-    project_root: Option<&std::path::Path>,
+    response_handle_root: Option<&std::path::Path>,
     surface: tracedecay_tool_catalog::BindingSurface,
     operation: ApplicationSurfaceOperation,
     args: Value,
@@ -350,18 +350,18 @@ pub async fn run_retained_surface_tool(
         cancellation,
     )
     .await?;
-    render_retained_execution(project_root, &execution)
+    render_retained_execution(response_handle_root, &execution)
 }
 
 /// Render a settled retained tool call.
 pub fn render_retained_execution(
-    project_root: Option<&std::path::Path>,
+    response_handle_root: Option<&std::path::Path>,
     execution: &RetainedSurfaceExecution,
 ) -> Result<tracedecay_mcp::ToolResult> {
     hotpath::measure_block!(
         "mcp.retained.render",
         render_result_parts(
-            project_root,
+            response_handle_root,
             execution.operation.as_str(),
             &execution.binding_id,
             &execution.result,
@@ -619,7 +619,7 @@ fn graph_tool_unavailable(
 }
 
 pub(super) fn render_retained_result(
-    project_root: Option<&std::path::Path>,
+    response_handle_root: Option<&std::path::Path>,
     operation: RetainedSurfaceOperation,
     binding_id: &BindingId,
     result: ApplicationResult<tracedecay_contracts::retained_surfaces::RetainedSurfaceResultV1>,
@@ -630,7 +630,7 @@ pub(super) fn render_retained_result(
             message: format!("invalid retained application result: {error}"),
         })?;
     render_result_parts(
-        project_root,
+        response_handle_root,
         operation.as_str(),
         binding_id,
         &result,

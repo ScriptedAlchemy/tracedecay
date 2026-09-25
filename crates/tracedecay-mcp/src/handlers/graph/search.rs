@@ -143,7 +143,13 @@ fn rendered_tool_result<F>(
 where
     F: FnOnce() -> String,
 {
-    support_rendered(Some(ctx.project_root()), args, value, touched_files, md)
+    support_rendered(
+        Some(&ctx.store_layout().response_handle_root),
+        args,
+        value,
+        touched_files,
+        md,
+    )
 }
 
 /// [`rendered_tool_result`] with the default [`render::generic_md`] body.
@@ -153,7 +159,12 @@ fn generic_tool_result(
     value: &Value,
     touched_files: Vec<String>,
 ) -> ToolResult {
-    support_generic(Some(ctx.project_root()), args, value, touched_files)
+    support_generic(
+        Some(&ctx.store_layout().response_handle_root),
+        args,
+        value,
+        touched_files,
+    )
 }
 
 #[hotpath::measure(label = "mcp.graph.search.total")]

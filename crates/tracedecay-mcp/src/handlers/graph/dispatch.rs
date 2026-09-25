@@ -46,6 +46,7 @@ pub async fn dispatch_tool(
             };
             handle_grep(
                 ctx.project_root(),
+                &ctx.store_layout().response_handle_root,
                 graph.as_ref(),
                 args,
                 scope_prefix,
@@ -57,6 +58,7 @@ pub async fn dispatch_tool(
         "tracedecay_ast_grep_search" => {
             handle_ast_grep_search(
                 ctx.project_root(),
+                &ctx.store_layout().response_handle_root,
                 args,
                 scope_prefix,
                 ctx.deadline().cloned(),
@@ -75,13 +77,28 @@ pub async fn dispatch_tool(
             .await
         }
         "tracedecay_by_qualified_name" => {
-            handle_by_qualified_name(&open(read("qualified_name")?).await?, args).await
+            handle_by_qualified_name(
+                &ctx.store_layout().response_handle_root,
+                &open(read("qualified_name")?).await?,
+                args,
+            )
+            .await
         }
         "tracedecay_signature" => {
-            handle_signature(&open(read("qualified_name")?).await?, args).await
+            handle_signature(
+                &ctx.store_layout().response_handle_root,
+                &open(read("qualified_name")?).await?,
+                args,
+            )
+            .await
         }
         "tracedecay_derives" => {
-            handle_derives(&open(read("code_type_hierarchy")?).await?, args).await
+            handle_derives(
+                &ctx.store_layout().response_handle_root,
+                &open(read("code_type_hierarchy")?).await?,
+                args,
+            )
+            .await
         }
         _ => Err(unknown_tool_error(tool_name)),
     }

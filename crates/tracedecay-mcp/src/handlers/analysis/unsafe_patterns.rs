@@ -128,6 +128,7 @@ fn path_looks_like_test(path: &str) -> bool {
 #[hotpath::measure(future = true, label = "mcp.analysis.unsafe_patterns.total")]
 pub async fn handle_unsafe_patterns(
     project_root: &Path,
+    response_handle_root: &Path,
     graph: &VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
@@ -284,7 +285,7 @@ pub async fn handle_unsafe_patterns(
         })
     });
     Ok(rendered_tool_result(
-        Some(project_root),
+        Some(response_handle_root),
         &args,
         &payload,
         touched,
