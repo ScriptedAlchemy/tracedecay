@@ -1480,12 +1480,6 @@ function graphOverviewPayload(): Record<string, unknown> {
       { kind: 'enum', count: 470 },
       { kind: 'module', count: 393 },
     ],
-    edges_by_kind: [
-      { kind: 'calls', count: 21_400 },
-      { kind: 'references', count: 12_600 },
-      { kind: 'contains', count: 5_206 },
-      { kind: 'implements', count: 2_000 },
-    ],
     files_by_language: [
       { language: 'rust', count: 512 },
       { language: 'typescript', count: 96 },
@@ -1512,6 +1506,7 @@ function graphSearchPayload(query = ''): Record<string, unknown> {
     limit: 100,
     offset: 0,
     total: 1043,
+    has_more: true,
     count: results.length,
     results,
   };

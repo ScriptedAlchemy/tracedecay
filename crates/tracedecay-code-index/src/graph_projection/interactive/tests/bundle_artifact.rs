@@ -147,6 +147,22 @@ fn installed_artifact_serves_identically_to_the_warm_scan_without_scanning() {
             .files(64, request())
             .expect("installed files"),
     );
+    let warm_census = warmed_reader.census(64, request()).expect("warm census");
+    assert_eq!(
+        warm_census,
+        installed_reader
+            .census(64, request())
+            .expect("installed census")
+    );
+    assert_eq!(warm_census.semantic_edges, 3, "fixture edges are counted");
+    assert_eq!(
+        warmed_reader
+            .search_symbols("run", None, 0, 8, request())
+            .expect("warm search"),
+        installed_reader
+            .search_symbols("run", None, 0, 8, request())
+            .expect("installed search"),
+    );
 
     // Idempotent over an already-ready catalog.
     installed

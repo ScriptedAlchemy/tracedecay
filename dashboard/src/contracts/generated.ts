@@ -3126,7 +3126,6 @@ export const GraphNodeV1Schema = z.object({
 export type GraphNodeV1 = z.infer<typeof GraphNodeV1Schema>;
 
 export const GraphOverviewPayloadV1Schema = z.object({
-  edges_by_kind: z.array(z.lazy(() => GraphKindCountV1Schema)),
   files_by_language: z.array(z.lazy(() => GraphLanguageCountV1Schema)),
   largest_files: z.array(z.lazy(() => GraphLargestFileV1Schema)),
   nodes_by_kind: z.array(z.lazy(() => GraphKindCountV1Schema)),
@@ -3149,11 +3148,12 @@ export type GraphPathPayloadV1 = z.infer<typeof GraphPathPayloadV1Schema>;
 
 export const GraphSearchPayloadV1Schema = z.object({
   count: z.number().int().safe().min(0),
+  has_more: z.boolean(),
   limit: z.number().int().safe(),
   offset: z.number().int().safe(),
   query: z.string(),
   results: z.array(z.lazy(() => GraphNodeV1Schema)),
-  total: z.number().int().safe(),
+  total: z.number().int().safe().min(0).nullable(),
 });
 export type GraphSearchPayloadV1 = z.infer<typeof GraphSearchPayloadV1Schema>;
 
@@ -5825,7 +5825,7 @@ export const StoreGrowthDimensionV1Schema = z.discriminatedUnion("state", [z.obj
 export type StoreGrowthDimensionV1 = z.infer<typeof StoreGrowthDimensionV1Schema>;
 
 /** Logical name of one owner-profile store (for example `sessions.db`,
-`graph.db`, or `branches/feature-x`). Never an absolute on-disk path. */
+`graph.db`, or `projects/proj_x`). Never an absolute on-disk path. */
 export const StoreKeyV1Schema = z.string();
 export type StoreKeyV1 = z.infer<typeof StoreKeyV1Schema>;
 

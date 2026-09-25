@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -807,4 +808,133 @@ fn degree_ranking_denies_a_cancelled_read() {
         reader.degree_ranking(4, Arc::new(CancelledNow)),
         Err(CodeGraphProjectionError::Cancelled)
     ));
+}
+
+#[test]
+fn census_counts_come_from_catalog_aggregates() {
+    let reader = reader(&store_for(production_manifest()));
+
+    let census = reader.census(2, request()).expect("census");
+    assert_eq!(
+        (census.symbols, census.semantic_edges, census.files),
+        (4, 3, 3)
+    );
+    assert_eq!(
+        census.symbols_by_kind,
+        BTreeMap::from([("function".to_owned(), 3), ("struct".to_owned(), 1)])
+    );
+    assert_eq!(
+        census.files_by_language,
+        BTreeMap::from([("rust".to_owned(), 3)])
+    );
+    assert_eq!(
+        census
+            .largest_files
+            .iter()
+            .map(|file| (file.logical_path.as_str(), file.symbols))
+            .collect::<Vec<_>>(),
+        vec![("src/beta.rs", 2), ("src/alpha.rs", 1)],
+        "densest file first, ties by path, truncated to the requested count"
+    );
+}
+
+#[test]
+fn symbol_search_ranks_exact_names_first_and_pages_without_a_full_scan() {
+    let reader = reader(&store_for(production_manifest()));
+
+    let all = reader
+        .search_symbols("RUN", None, 0, 8, request())
+        .expect("search");
+    assert_eq!(
+        all.symbols
+            .iter()
+            .map(|symbol| symbol.occurrence.as_str())
+            .collect::<Vec<_>>(),
+        vec!["sym.alpha.run", "sym.beta.run", "sym.beta.runner"],
+        "exact simple-name hits precede containment hits"
+    );
+    assert_eq!((all.has_more, all.total), (false, Some(3)));
+
+    let first = reader
+        .search_symbols("run", None, 0, 1, request())
+        .expect("first window");
+    assert_eq!(first.symbols.len(), 1);
+    assert_eq!(
+        (first.has_more, first.total),
+        (true, None),
+        "a scan stopped past its window does not claim a total"
+    );
+    let last = reader
+        .search_symbols("run", None, 2, 5, request())
+        .expect("last window");
+    assert_eq!(
+        last.symbols
+            .iter()
+            .map(|symbol| symbol.occurrence.as_str())
+            .collect::<Vec<_>>(),
+        vec!["sym.beta.runner"]
+    );
+    assert_eq!((last.has_more, last.total), (false, Some(3)));
+
+    let not_beta = |_: &SymbolOccurrenceId,
+                    binding: Option<&crate::graph_projection::CodeGraphSymbolBindingV1>,
+                    _: Option<&LineageSymbolRecordV1>| {
+        binding
+            .and_then(|binding| binding.logical_path.as_deref())
+            .is_some_and(|path| path != "src/beta.rs")
+    };
+    let scoped = reader
+        .search_symbols("run", Some(&not_beta), 0, 8, request())
+        .expect("scoped search");
+    assert_eq!(
+        scoped
+            .symbols
+            .iter()
+            .map(|symbol| symbol.occurrence.as_str())
+            .collect::<Vec<_>>(),
+        vec!["sym.alpha.run"]
+    );
+
+    let browse = reader
+        .search_symbols("", None, 1, 2, request())
+        .expect("browse window");
+    assert_eq!(browse.symbols.len(), 2);
+    assert_eq!(
+        (browse.has_more, browse.total),
+        (true, Some(4)),
+        "an unfiltered browse knows the census total"
+    );
+}
+
+#[test]
+fn census_and_search_refuse_zero_sizes_and_cancellation() {
+    let reader = reader(&store_for(production_manifest()));
+    reader.census(0, request()).expect("warm catalog");
+
+    assert!(matches!(
+        reader.search_symbols("run", None, 0, 0, request()),
+        Err(CodeGraphProjectionError::Contract(_))
+    ));
+    let cancelled = || -> Arc<dyn GraphCancellation> { Arc::new(CancelledNow) };
+    assert_eq!(
+        reader.census(4, cancelled()),
+        Err(CodeGraphProjectionError::Cancelled)
+    );
+    assert_eq!(
+        reader.search_symbols("run", None, 0, 4, cancelled()),
+        Err(CodeGraphProjectionError::Cancelled)
+    );
+    let error = reader
+        .search_symbols(
+            "absent",
+            None,
+            0,
+            4,
+            Arc::new(CancelAfter {
+                observations: AtomicU64::new(0),
+                allowed: 3,
+            }),
+        )
+        .expect_err("the containment scan must observe cancellation");
+    assert_eq!(error, CodeGraphProjectionError::Cancelled);
 }

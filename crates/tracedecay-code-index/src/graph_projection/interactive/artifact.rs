@@ -439,5 +439,6 @@ pub(super) fn decode_interactive_catalog_artifact(
     }
     imports.sort_by(super::catalog::canonical_import_order);
     catalog.imports = imports;
+    catalog.finalize();
     Ok(catalog)
 }

@@ -352,6 +352,7 @@ impl CatalogScan {
 
         self.catalog.imports = self.imports_by_entity.into_values().collect();
         self.catalog.imports.sort_by(canonical_import_order);
+        self.catalog.finalize();
         Ok(self.catalog)
     }
 }

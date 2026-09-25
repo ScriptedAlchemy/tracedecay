@@ -69,6 +69,36 @@ pub struct CodeGraphDegreeRankingV1 {
     pub symbol_count: usize,
 }
 
+/// Symbol count of one logical file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CodeGraphFileSymbolCountV1 {
+    pub logical_path: String,
+    pub symbols: u64,
+}
+
+/// Generation-wide aggregates, derived once while the catalog is built (at
+/// seal for bundled generations), so reading them never walks the census.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CodeGraphCensusV1 {
+    pub symbols: u64,
+    pub semantic_edges: u64,
+    pub files: u64,
+    pub symbols_by_kind: BTreeMap<String, u64>,
+    pub files_by_language: BTreeMap<String, u64>,
+    /// Most symbol-dense files first, ties by path.
+    pub largest_files: Vec<CodeGraphFileSymbolCountV1>,
+}
+
+/// One window of a symbol name search. `total` is the exact match count
+/// when the scan reached the end of the generation, and `None` when it
+/// stopped one match past the window (`has_more`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CodeGraphSymbolSearchPageV1 {
+    pub symbols: Vec<CodeGraphSymbolSummaryV1>,
+    pub has_more: bool,
+    pub total: Option<u64>,
+}
+
 /// One symbol reached by a reverse-reachability (impact) expansion.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CodeGraphImpactedSymbolV1 {
@@ -126,6 +156,12 @@ pub(in crate::graph_projection) struct InteractiveCatalog {
     pub(super) files: BTreeMap<FileOccurrenceId, SanitizedCodeFileV1>,
     pub(super) imports: Vec<CodeIndexImportEvidenceV1>,
     pub(super) unresolved_call_sources: BTreeMap<String, Vec<SymbolOccurrenceId>>,
+    pub(super) symbols_by_kind: BTreeMap<String, u64>,
+    symbols_by_logical_path: BTreeMap<String, u64>,
+    /// Filled by [`Self::finalize`].
+    pub(super) files_by_language: BTreeMap<String, u64>,
+    pub(super) largest_files: Vec<CodeGraphFileSymbolCountV1>,
+    pub(super) semantic_edges: u64,
 }
 
 impl InteractiveCatalog {
@@ -139,7 +175,41 @@ impl InteractiveCatalog {
             files: BTreeMap::new(),
             imports: Vec::new(),
             unresolved_call_sources: BTreeMap::new(),
+            symbols_by_kind: BTreeMap::new(),
+            symbols_by_logical_path: BTreeMap::new(),
+            files_by_language: BTreeMap::new(),
+            largest_files: Vec::new(),
+            semantic_edges: 0,
         }
+    }
+
+    /// Derives the generation-wide aggregates once every file and symbol,
+    /// with its degrees, is recorded.
+    pub(super) fn finalize(&mut self) {
+        self.files_by_language.clear();
+        for file in self.files.values() {
+            if let Some(language) = &file.language {
+                *self
+                    .files_by_language
+                    .entry(language.as_str().to_owned())
+                    .or_default() += 1;
+            }
+        }
+        let mut largest_files: Vec<_> = std::mem::take(&mut self.symbols_by_logical_path)
+            .into_iter()
+            .map(|(logical_path, symbols)| CodeGraphFileSymbolCountV1 {
+                logical_path,
+                symbols,
+            })
+            .collect();
+        largest_files.sort_by(|left, right| {
+            right
+                .symbols
+                .cmp(&left.symbols)
+                .then_with(|| left.logical_path.cmp(&right.logical_path))
+        });
+        self.largest_files = largest_files;
+        self.semantic_edges = self.symbols.values().map(|symbol| symbol.outgoing).sum();
     }
 
     pub(super) fn insert(&mut self, occurrence: SymbolOccurrenceId, record: CatalogSymbol) {
@@ -156,6 +226,10 @@ impl InteractiveCatalog {
             }
         }
         if let Some(metadata) = &record.metadata {
+            *self
+                .symbols_by_kind
+                .entry(metadata.kind.clone())
+                .or_default() += 1;
             self.by_qualified_name
                 .entry(metadata.qualified_name.clone())
                 .or_default()
@@ -166,6 +240,12 @@ impl InteractiveCatalog {
                 .push(occurrence.clone());
         }
         if let Some(binding) = &record.binding {
+            if let Some(path) = &binding.logical_path {
+                *self
+                    .symbols_by_logical_path
+                    .entry(path.clone())
+                    .or_default() += 1;
+            }
             self.by_file
                 .entry(binding.file.clone())
                 .or_default()
