@@ -437,6 +437,7 @@ fn native_host_evidence_is_embedded_and_covers_every_advertised_native_route() {
         HostKindV1::Hermes,
         HostKindV1::KimiCode,
         HostKindV1::OpenCode,
+        HostKindV1::Pi,
     ] {
         let record = evidence
             .iter()

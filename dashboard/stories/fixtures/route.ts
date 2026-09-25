@@ -6,10 +6,14 @@
  * the browser network layer (page.route), not via a service worker.
  */
 import type { Page, Route } from '@playwright/test';
-import { resolveFixture } from './data.ts';
+import { lookupFixture } from './data.ts';
 
-async function fulfillApi(route: Route): Promise<void> {
-  const url = new URL(route.request().url());
+/** Requests no fixture modelled, as `METHOD /path?query`, in arrival order. */
+export type UnmatchedRequests = readonly string[];
+
+async function fulfillApi(route: Route, unmatched: string[]): Promise<void> {
+  const request = route.request();
+  const url = new URL(request.url());
 
   // The daemon event stream: answer with an empty, closed event-stream so the
   // app settles into its "offline" liveness state instead of hanging on a
@@ -25,14 +29,26 @@ async function fulfillApi(route: Route): Promise<void> {
     return;
   }
 
+  const payload = lookupFixture(url.pathname, url.search);
+  if (payload === undefined) {
+    // Answered the way the daemon answers an unbound route, and recorded so the
+    // run fails: a surface reading a path nobody modelled is being audited
+    // against a state the daemon would never produce.
+    unmatched.push(`${request.method()} ${url.pathname}${url.search}`);
+    await route.fulfill({ status: 404, contentType: 'text/plain', body: 'no fixture' });
+    return;
+  }
   await route.fulfill({
     status: 200,
     contentType: 'application/json',
-    body: JSON.stringify(resolveFixture(url.pathname, url.search)),
+    body: JSON.stringify(payload),
   });
 }
 
-/** Intercept all `/api/**` traffic on the page and serve fixtures. */
-export async function installApiFixtures(page: Page): Promise<void> {
-  await page.route('**/api/**', fulfillApi);
+/** Intercept all `/api/**` traffic on the page and serve fixtures. The returned
+ * list fills with every request no fixture answered. */
+export async function installApiFixtures(page: Page): Promise<UnmatchedRequests> {
+  const unmatched: string[] = [];
+  await page.route('**/api/**', (route) => fulfillApi(route, unmatched));
+  return unmatched;
 }

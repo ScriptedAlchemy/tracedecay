@@ -1169,11 +1169,11 @@ async fn message_search_returns_literal_seeded_messages() {
     );
     assert_eq!(
         unknown_provider["message"],
-        "unknown session provider 'unknown-agent' (expected all, cursor, claude, codex, vibe, cline, roo-code, kilo, kiro, kimi, opencode, or hermes)"
+        "unknown session provider 'unknown-agent' (expected all, cursor, claude, codex, vibe, cline, roo-code, kilo, kiro, kimi, opencode, hermes, or pi)"
     );
     assert_eq!(
         unknown_provider["diagnostic"]["message"],
-        "unknown session provider 'unknown-agent' (expected all, cursor, claude, codex, vibe, cline, roo-code, kilo, kiro, kimi, opencode, or hermes)"
+        "unknown session provider 'unknown-agent' (expected all, cursor, claude, codex, vibe, cline, roo-code, kilo, kiro, kimi, opencode, hermes, or pi)"
     );
     assert_eq!(unknown_provider["retry"], "never");
     assert_eq!(

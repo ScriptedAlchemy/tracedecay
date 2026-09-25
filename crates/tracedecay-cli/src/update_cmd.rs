@@ -9,6 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::agent_cmd::{HostLifecycleCompletion, HostLifecycleSummary};
 use crate::upgrade::UpgradeOutcome;
 use tracedecay_daemon_control as daemon_control;
 use tracedecay_session_memory::user_config::UserConfig;
@@ -197,17 +198,17 @@ pub(crate) enum RefreshPolicy {
 ///
 /// Returns the installed binary's version when an install happened and its
 /// version is known, so the surrounding maintenance window restores the
-/// daemon validating the binary that actually starts. A tolerated
-/// ([`RefreshPolicy::AfterInstall`]) refresh failure does not erase that
-/// version: the new binary is installed regardless.
+/// daemon validating the binary that actually starts. A refresh that did not
+/// complete does not erase that version: the new binary is installed
+/// regardless.
 pub(crate) fn run_install_then_refresh<U, P>(
     policy: RefreshPolicy,
     upgrade: U,
     post_update: P,
-) -> tracedecay_domain::errors::Result<Option<String>>
+) -> tracedecay_domain::errors::Result<InstallThenRefresh>
 where
     U: FnOnce() -> tracedecay_domain::errors::Result<UpgradeOutcome>,
-    P: FnOnce(Option<&Path>) -> tracedecay_domain::errors::Result<()>,
+    P: FnOnce(Option<&Path>) -> tracedecay_domain::errors::Result<PluginRefreshOutcome>,
 {
     let outcome = upgrade()?;
     match policy {
@@ -218,61 +219,143 @@ where
                 }
                 UpgradeOutcome::AlreadyCurrent => (None, None),
             };
-            post_update(binary)?;
-            Ok(installed_version)
+            let refresh = post_update(binary)?;
+            Ok(InstallThenRefresh {
+                installed_version,
+                refresh: Some(refresh),
+            })
         }
         RefreshPolicy::AfterInstall => match outcome {
             UpgradeOutcome::Installed { binary, version } => {
-                if let Err(error) = post_update(binary.as_deref()) {
-                    // Point the retry at the installed binary when we know
-                    // where it lives, a bare `tracedecay` may not be on PATH.
-                    let retry = match &binary {
-                        Some(path) => format!("`{} update`", path.display()),
-                        None => "`tracedecay update`".to_string(),
-                    };
-                    eprintln!(
-                        "  \x1b[33mwarning:\x1b[0m post-upgrade refresh failed: {error}\n  \
-                         The new binary is installed; run {retry} to retry the \
-                         plugin and agent-integration refresh."
-                    );
+                // Point the retry at the installed binary when we know where
+                // it lives, a bare `tracedecay` may not be on PATH.
+                let retry = match &binary {
+                    Some(path) => format!("`{} update`", path.display()),
+                    None => "`tracedecay update`".to_string(),
+                };
+                let refresh = match post_update(binary.as_deref()) {
+                    Ok(refresh) => refresh,
+                    Err(error) => {
+                        eprintln!(
+                            "  \x1b[33mwarning:\x1b[0m post-upgrade refresh could not run: {error}"
+                        );
+                        PluginRefreshOutcome::Failed
+                    }
+                };
+                match refresh {
+                    PluginRefreshOutcome::Complete => {}
+                    PluginRefreshOutcome::PendingOperatorAction => eprintln!(
+                        "  The new binary is installed; the plugin refresh is waiting on the \
+                         operator action listed above."
+                    ),
+                    PluginRefreshOutcome::Failed => eprintln!(
+                        "  \x1b[33mwarning:\x1b[0m post-upgrade refresh failed (see above). \
+                         The new binary is installed; run {retry} to retry the plugin and \
+                         agent-integration refresh."
+                    ),
                 }
-                Ok(version)
+                Ok(InstallThenRefresh {
+                    installed_version: version,
+                    refresh: Some(refresh),
+                })
             }
             UpgradeOutcome::AlreadyCurrent => {
                 eprintln!(
                     "Nothing was installed, so plugins were left untouched. \
                      run `tracedecay update` to refresh generated plugins anyway."
                 );
-                Ok(None)
+                Ok(InstallThenRefresh {
+                    installed_version: None,
+                    refresh: None,
+                })
             }
         },
+    }
+}
+
+/// What an install-then-refresh step did.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct InstallThenRefresh {
+    /// The installed binary's version, for daemon-restore validation.
+    pub(crate) installed_version: Option<String>,
+    /// `None` when the policy left plugins untouched.
+    pub(crate) refresh: Option<PluginRefreshOutcome>,
+}
+
+/// What the post-update refresh concluded, read from the `post-update`
+/// child's exit status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PluginRefreshOutcome {
+    Complete,
+    PendingOperatorAction,
+    Failed,
+}
+
+impl PluginRefreshOutcome {
+    fn from_exit_code(code: Option<i32>) -> Self {
+        match code {
+            Some(0) => Self::Complete,
+            Some(crate::agent_cmd::PENDING_OPERATOR_ACTION_EXIT_CODE) => {
+                Self::PendingOperatorAction
+            }
+            _ => Self::Failed,
+        }
     }
 }
 
 #[hotpath::measure(label = "cli.update.run", future = true)]
 pub(crate) async fn run_update_command(
     no_reinstall: bool,
-) -> tracedecay_domain::errors::Result<()> {
-    run_update_flow("update", RefreshPolicy::Always, no_reinstall).await
+) -> tracedecay_domain::errors::Result<HostLifecycleCompletion> {
+    let refresh = run_update_flow("update", RefreshPolicy::Always, no_reinstall).await?;
+    update_completion(refresh)
+}
+
+/// `update` keeps a successful binary upgrade while reporting the refresh as
+/// what it was: a failed refresh fails the command, a pending host step
+/// exits with the pending-operator-action status.
+fn update_completion(
+    refresh: Option<PluginRefreshOutcome>,
+) -> tracedecay_domain::errors::Result<HostLifecycleCompletion> {
+    match refresh {
+        None | Some(PluginRefreshOutcome::Complete) => Ok(HostLifecycleCompletion::Complete),
+        Some(PluginRefreshOutcome::PendingOperatorAction) => {
+            eprintln!(
+                "\nThe TraceDecay binary is up to date; the plugin refresh is waiting on the \
+                 operator action listed above."
+            );
+            Ok(HostLifecycleCompletion::PendingOperatorAction)
+        }
+        Some(PluginRefreshOutcome::Failed) => {
+            Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "the TraceDecay binary is up to date, but the plugin and \
+                          agent-integration refresh failed (see above); fix it and run \
+                          `tracedecay update` again"
+                    .to_string(),
+            })
+        }
+    }
 }
 
 #[hotpath::measure(label = "cli.upgrade.run", future = true)]
 pub(crate) async fn run_upgrade_command(
     no_reinstall: bool,
 ) -> tracedecay_domain::errors::Result<()> {
-    run_update_flow("upgrade", RefreshPolicy::AfterInstall, no_reinstall).await
+    run_update_flow("upgrade", RefreshPolicy::AfterInstall, no_reinstall)
+        .await
+        .map(|_| ())
 }
 
 async fn run_update_flow(
     operation: &str,
     refresh_policy: RefreshPolicy,
     no_reinstall: bool,
-) -> tracedecay_domain::errors::Result<()> {
-    daemon_control::with_exclusive_maintenance_window(
+) -> tracedecay_domain::errors::Result<Option<PluginRefreshOutcome>> {
+    let refresh = daemon_control::with_exclusive_maintenance_window(
         operation,
         crate::product_runtime::PRODUCT_BUILD_VERSION,
         |lease_token| {
-            let installed_version =
+            let outcome =
                 run_install_then_refresh(refresh_policy, crate::upgrade::run_upgrade, |binary| {
                     run_post_update_subcommand(no_reinstall, binary, lease_token)
                 })?;
@@ -280,12 +363,13 @@ async fn run_update_flow(
             // validates the binary it actually starts, not the one that was
             // running before the upgrade.
             Ok(daemon_control::MaintenanceWindowOutcome {
-                value: (),
-                installed_version,
+                value: outcome.refresh,
+                installed_version: outcome.installed_version,
             })
         },
     )?;
-    reset_refused_profile_authorities(operation).await
+    reset_refused_profile_authorities(operation).await?;
+    Ok(refresh)
 }
 
 /// What the post-window profile probe decided.
@@ -382,7 +466,7 @@ fn combine_operation_and_restore<T>(
 pub(crate) async fn run_post_update_command(
     no_reinstall: bool,
     lifecycle_lease_token: Option<&str>,
-) -> tracedecay_domain::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<HostLifecycleCompletion> {
     if let Some(token) = lifecycle_lease_token {
         let lifecycle_lease =
             tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_or_inherited(
@@ -440,7 +524,7 @@ fn run_post_update_subcommand(
     no_reinstall: bool,
     installed: Option<&Path>,
     lifecycle_lease_token: &str,
-) -> tracedecay_domain::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<PluginRefreshOutcome> {
     let tracedecay_bin = post_update_binary(installed)?;
     let mut command = std::process::Command::new(&tracedecay_bin);
     command
@@ -456,49 +540,7 @@ fn run_post_update_subcommand(
             .map_err(|e| tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("failed to run post-update with '{tracedecay_bin}': {e}"),
             })?;
-    if status.success() {
-        return Ok(());
-    }
-    Err(tracedecay_domain::errors::TraceDecayError::Config {
-        message: format!("post-update failed with status: {status}"),
-    })
-}
-
-/// The result of a tracked-agent reinstall pass. Version markers may only
-/// advance on [`ReinstallOutcome::AllOk`]; a failure leaves the markers
-/// untouched so the startup silent reinstall retries the work.
-pub(crate) enum ReinstallOutcome {
-    /// Every tracked agent reinstalled successfully (an empty tracked list is
-    /// also `AllOk`).
-    AllOk,
-    /// One or more tracked agents failed to reinstall; `failed` lists ids (or
-    /// a descriptive pseudo-id when the environment could not be resolved).
-    PartialFailure { failed: Vec<String> },
-}
-
-/// Partitions per-agent reinstall results into a [`ReinstallOutcome`]. A pure
-/// helper so the outcome logic is unit-testable without touching the real
-/// filesystem or agent registry.
-pub(crate) fn partition_reinstall_results(
-    results: Vec<(
-        String,
-        tracedecay_domain::errors::Result<crate::agent_cmd::AgentReinstallOutcome>,
-    )>,
-) -> ReinstallOutcome {
-    // Carry the reason, not just the name, so the operator can diagnose a
-    // failed integration refresh without reading the installer source.
-    let mut failed = Vec::new();
-    for (id, result) in results {
-        match result {
-            Ok(crate::agent_cmd::AgentReinstallOutcome::Installed) => {}
-            Err(error) => failed.push(format!("{id}: {error}")),
-        }
-    }
-    if !failed.is_empty() {
-        ReinstallOutcome::PartialFailure { failed }
-    } else {
-        ReinstallOutcome::AllOk
-    }
+    Ok(PluginRefreshOutcome::from_exit_code(status.code()))
 }
 
 /// Records a completed tracked-agent reinstall pass by advancing BOTH version
@@ -540,37 +582,36 @@ pub(crate) fn install_pass_covers_tracked_agents(
     tracked.iter().all(|id| refreshed.contains(id))
 }
 
-/// Re-runs the canonical component lifecycle for every tracked agent so
+/// Re-runs the canonical component lifecycle for every swept agent so
 /// artifacts, tool permissions, hooks, and MCP config stay in sync with the
-/// running binary, exactly as `tracedecay reinstall` does. Continues past a failing agent; returns
-/// [`ReinstallOutcome::PartialFailure`] listing every failure (an empty tracked
-/// list is [`ReinstallOutcome::AllOk`]). If the home or binary cannot be
-/// resolved, no install runs and a descriptive failure is reported so the
-/// version markers stay put.
+/// running binary, exactly as `tracedecay reinstall` does. Continues past a
+/// failing agent and returns every host's typed result; an unresolvable
+/// binary fails the pass before any install runs.
 async fn reinstall_tracked_agents_under_lease(
     agent_ids: &[String],
+    tracked: &[String],
     home: &Path,
     lifecycle_lease: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
-) -> ReinstallOutcome {
-    let Some(bin) = tracedecay_agent_hosts::agents::which_tracedecay() else {
-        return ReinstallOutcome::PartialFailure {
-            failed: vec!["<environment>: could not resolve tracedecay binary on PATH".to_string()],
-        };
-    };
-    let results = crate::agent_cmd::reinstall_agent_integrations_under_lease(
+) -> tracedecay_domain::errors::Result<HostLifecycleSummary> {
+    let bin = tracedecay_agent_hosts::agents::which_tracedecay().ok_or_else(|| {
+        tracedecay_domain::errors::TraceDecayError::Config {
+            message: "could not resolve tracedecay binary on PATH".to_string(),
+        }
+    })?;
+    crate::agent_cmd::reinstall_agent_integrations_under_lease(
         agent_ids,
+        tracked,
         home,
         &bin,
         lifecycle_lease,
     )
-    .await;
-    partition_reinstall_results(results)
+    .await
 }
 
 pub(crate) async fn run_post_update_tasks(
     no_reinstall: bool,
     lifecycle_lease: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
-) -> tracedecay_domain::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<HostLifecycleCompletion> {
     eprintln!("\nPreparing safe post-update maintenance.");
     eprintln!("  Waiting for TraceDecay writers to shut down cleanly, do not interrupt.");
     let previous_daemon_state = daemon_control::verify_installed_service_quiesced_under_lease()?;
@@ -583,7 +624,7 @@ pub(crate) async fn run_post_update_tasks(
 async fn run_post_update_mutations(
     no_reinstall: bool,
     lifecycle_lease: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
-) -> tracedecay_domain::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<HostLifecycleCompletion> {
     if no_reinstall {
         eprintln!("Skipping agent integration refresh (--no-reinstall).");
         // `--no-reinstall` is a durable opt-out for THIS version, not a
@@ -593,7 +634,7 @@ async fn run_post_update_mutations(
         if let Err(err) = record_completed_reinstall_pass(&mut config) {
             eprintln!("warning: {err}");
         }
-        return Ok(());
+        return Ok(HostLifecycleCompletion::Complete);
     }
 
     // A version bump can change any host's artifacts, permissions, hooks, or
@@ -628,31 +669,42 @@ async fn run_post_update_mutations(
     } else {
         eprintln!("Refreshing agent integrations: {}", agent_ids.join(", "));
     }
-    let reinstall_result =
-        match reinstall_tracked_agents_under_lease(&agent_ids, &home, lifecycle_lease).await {
-            ReinstallOutcome::AllOk => {
-                if config.installed_agents != agent_ids {
-                    config.installed_agents = agent_ids;
-                    if let Err(err) = config.save() {
-                        eprintln!("warning: could not save tracedecay config: {err}");
-                    }
-                }
-                if let Err(err) = record_completed_reinstall_pass(&mut config) {
-                    eprintln!("warning: {err}");
-                }
-                Ok(())
-            }
-            ReinstallOutcome::PartialFailure { failed } => {
-                eprintln!(
-                    "  \x1b[33mwarning:\x1b[0m agent install failed for: {}; \
-                 it will be retried on the next tracedecay command.",
-                    failed.join(", ")
-                );
-                Ok(())
-            }
-        };
+    let summary = reinstall_tracked_agents_under_lease(
+        &agent_ids,
+        &config.installed_agents,
+        &home,
+        lifecycle_lease,
+    )
+    .await;
+    let summary = match summary {
+        Ok(summary) => summary,
+        Err(error) => {
+            deploy_managed_skills_after_lifecycle();
+            return Err(error);
+        }
+    };
+    // A detected host this pass converged is tracked from now on; a skipped
+    // leftover or a failed host is not.
+    let before = config.installed_agents.len();
+    for id in summary.converged_hosts() {
+        if !config.installed_agents.iter().any(|tracked| tracked == id) {
+            config.installed_agents.push(id.to_string());
+        }
+    }
+    if config.installed_agents.len() != before
+        && let Err(err) = config.save()
+    {
+        eprintln!("warning: could not save tracedecay config: {err}");
+    }
     deploy_managed_skills_after_lifecycle();
-    reinstall_result
+    // Version markers record only a pass that left every host current.
+    let completion = summary.finish()?;
+    if completion == HostLifecycleCompletion::Complete
+        && let Err(err) = record_completed_reinstall_pass(&mut config)
+    {
+        eprintln!("warning: {err}");
+    }
+    Ok(completion)
 }
 
 /// Redeploys managed skills after a lifecycle pass (`update`, `reinstall`,
@@ -698,11 +750,12 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        ProfileResetDecision, RefreshPolicy, ReinstallOutcome, current_tracedecay_exe_from,
-        install_pass_covers_tracked_agents, partition_reinstall_results, post_update_binary,
+        InstallThenRefresh, PluginRefreshOutcome, ProfileResetDecision, RefreshPolicy,
+        current_tracedecay_exe_from, install_pass_covers_tracked_agents, post_update_binary,
         post_update_binary_from, prepare_post_update_lease, profile_reset_decision,
-        restart_daemon_service_with, run_install_then_refresh,
+        restart_daemon_service_with, run_install_then_refresh, update_completion,
     };
+    use crate::agent_cmd::HostLifecycleCompletion;
     use crate::upgrade::UpgradeOutcome;
     use tempfile::TempDir;
     use tracedecay_daemon_control as daemon_control;
@@ -857,27 +910,6 @@ mod tests {
         }
     }
 
-    fn ok(
-        id: &str,
-    ) -> (
-        String,
-        tracedecay_domain::errors::Result<crate::agent_cmd::AgentReinstallOutcome>,
-    ) {
-        (
-            id.to_string(),
-            Ok(crate::agent_cmd::AgentReinstallOutcome::Installed),
-        )
-    }
-
-    fn err(
-        id: &str,
-    ) -> (
-        String,
-        tracedecay_domain::errors::Result<crate::agent_cmd::AgentReinstallOutcome>,
-    ) {
-        (id.to_string(), Err(config_err("install failed")))
-    }
-
     #[test]
     fn generated_artifact_bin_ignores_non_tracedecay_test_exe() {
         let current = Path::new("/repo/target/debug/deps/agent_suite-abc123");
@@ -885,28 +917,12 @@ mod tests {
         assert_eq!(current_tracedecay_exe_from(Some(current)), None);
     }
 
-    #[test]
-    fn partition_collects_only_failed_ids_in_order() {
-        match partition_reinstall_results(vec![ok("claude"), err("cursor"), err("copilot")]) {
-            ReinstallOutcome::PartialFailure { failed } => {
-                assert_eq!(
-                    failed,
-                    vec![
-                        "cursor: config error: install failed".to_string(),
-                        "copilot: config error: install failed".to_string(),
-                    ],
-                );
-            }
-            ReinstallOutcome::AllOk => panic!("expected a partial failure"),
-        }
-    }
-
     /// An unresolvable tracked id (renamed/removed by a later release, or a
     /// typo in `installed_agents`) must be SKIPPED, not treated as a failure.
     /// otherwise it gates marker advancement forever and wedges explicit
     /// post-update maintenance into an infinite reinstall loop. The reinstall
     /// pass drops it from the results entirely, so an otherwise-empty pass is
-    /// AllOk and the markers advance.
+    /// complete and the markers advance.
     #[tokio::test]
     async fn reinstall_agent_integrations_skips_unknown_ids()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -917,59 +933,25 @@ mod tests {
                 lease_root.path(),
                 "post-update-test",
             )?;
-        let results = crate::agent_cmd::reinstall_agent_integrations_under_lease(
+        let summary = crate::agent_cmd::reinstall_agent_integrations_under_lease(
+            &["unknown-agent".to_string()],
             &["unknown-agent".to_string()],
             home.path(),
             "tracedecay",
             &lifecycle_lease,
         )
-        .await;
-        // Skipped, not failed: the unknown id is absent from the results.
-        assert!(
-            results.is_empty(),
-            "unknown tracked agent id must be skipped, not reported: {:?}",
-            results.iter().map(|(id, _)| id).collect::<Vec<_>>()
+        .await?;
+        assert_eq!(
+            summary.converged_hosts().count(),
+            0,
+            "unknown tracked agent id must be skipped, not reported"
         );
-        assert!(
-            matches!(
-                partition_reinstall_results(results),
-                ReinstallOutcome::AllOk
-            ),
-            "an unknown id must not prevent AllOk / marker advancement"
+        assert_eq!(
+            summary.finish()?,
+            HostLifecycleCompletion::Complete,
+            "an unknown id must not prevent a complete pass / marker advancement"
         );
         Ok(())
-    }
-
-    /// Markers advance only when every tracked agent reinstalled (AllOk).
-    #[test]
-    fn markers_advance_only_on_all_ok() {
-        let running = "9.9.9";
-
-        let mut config = UserConfig {
-            installed_agents: vec!["claude".to_string()],
-            previous_version: "9.0.0".to_string(),
-            ..UserConfig::default()
-        };
-        if let ReinstallOutcome::AllOk = partition_reinstall_results(vec![ok("claude")]) {
-            assert!(config.mark_version_installed(running));
-        } else {
-            panic!("expected AllOk");
-        }
-        assert_eq!(config.previous_version, running);
-        assert_eq!(config.last_installed_version, running);
-
-        let mut config = UserConfig {
-            installed_agents: vec!["claude".to_string()],
-            previous_version: "9.0.0".to_string(),
-            ..UserConfig::default()
-        };
-        match partition_reinstall_results(vec![err("claude")]) {
-            ReinstallOutcome::PartialFailure { .. } => {}
-            ReinstallOutcome::AllOk => panic!("expected PartialFailure"),
-        }
-        assert_eq!(config.previous_version, "9.0.0");
-        assert!(config.last_installed_version.is_empty());
-        assert!(config.mark_version_installed(running));
     }
 
     /// An install that only touched its selection delta must not record a full
@@ -1023,8 +1005,9 @@ mod tests {
         calls: &'a RefCell<Vec<&'static str>>,
         label: &'static str,
         seen_binary: &'a RefCell<Option<Option<PathBuf>>>,
-        result: tracedecay_domain::errors::Result<()>,
-    ) -> impl FnOnce(Option<&Path>) -> tracedecay_domain::errors::Result<()> + 'a {
+        result: tracedecay_domain::errors::Result<PluginRefreshOutcome>,
+    ) -> impl FnOnce(Option<&Path>) -> tracedecay_domain::errors::Result<PluginRefreshOutcome> + 'a
+    {
         move |binary| {
             calls.borrow_mut().push(label);
             *seen_binary.borrow_mut() = Some(binary.map(Path::to_path_buf));
@@ -1037,17 +1020,26 @@ mod tests {
         let calls = RefCell::new(Vec::new());
         let seen_binary = RefCell::new(None);
 
-        let installed_version = run_install_then_refresh(
+        let outcome = run_install_then_refresh(
             RefreshPolicy::Always,
             record_upgrade(&calls, "upgrade", Ok(UpgradeOutcome::AlreadyCurrent)),
-            record_post_update(&calls, "post-update", &seen_binary, Ok(())),
+            record_post_update(
+                &calls,
+                "post-update",
+                &seen_binary,
+                Ok(PluginRefreshOutcome::Complete),
+            ),
         )
         .expect("update steps should succeed");
 
         assert_eq!(calls.into_inner(), vec!["upgrade", "post-update"]);
         assert_eq!(seen_binary.into_inner(), Some(None));
         assert_eq!(
-            installed_version, None,
+            outcome,
+            InstallThenRefresh {
+                installed_version: None,
+                refresh: Some(PluginRefreshOutcome::Complete),
+            },
             "no install must leave daemon restore validating the running version"
         );
     }
@@ -1060,7 +1052,12 @@ mod tests {
         let result = run_install_then_refresh(
             RefreshPolicy::Always,
             record_upgrade(&calls, "upgrade", Err(config_err("upgrade failed"))),
-            record_post_update(&calls, "post-update", &seen_binary, Ok(())),
+            record_post_update(
+                &calls,
+                "post-update",
+                &seen_binary,
+                Ok(PluginRefreshOutcome::Complete),
+            ),
         );
 
         assert!(result.is_err());
@@ -1087,6 +1084,86 @@ mod tests {
         assert_eq!(calls.into_inner(), vec!["upgrade", "post-update"]);
     }
 
+    /// A refresh that ran and failed keeps the upgrade: the installed version
+    /// still reaches the daemon restore, and the failure travels as a typed
+    /// outcome instead of an error that would erase it.
+    #[test]
+    fn update_policy_keeps_the_upgrade_when_the_refresh_fails() {
+        let calls = RefCell::new(Vec::new());
+        let seen_binary = RefCell::new(None);
+
+        let outcome = run_install_then_refresh(
+            RefreshPolicy::Always,
+            record_upgrade(
+                &calls,
+                "upgrade",
+                Ok(UpgradeOutcome::Installed {
+                    binary: None,
+                    version: Some("9.9.9".to_string()),
+                }),
+            ),
+            record_post_update(
+                &calls,
+                "post-update",
+                &seen_binary,
+                Ok(PluginRefreshOutcome::Failed),
+            ),
+        )
+        .expect("a refresh that ran and failed is an outcome, not an update error");
+
+        assert_eq!(
+            outcome,
+            InstallThenRefresh {
+                installed_version: Some("9.9.9".to_string()),
+                refresh: Some(PluginRefreshOutcome::Failed),
+            }
+        );
+    }
+
+    #[test]
+    fn update_exit_reports_the_refresh_truthfully() {
+        assert_eq!(
+            update_completion(None).unwrap(),
+            HostLifecycleCompletion::Complete
+        );
+        assert_eq!(
+            update_completion(Some(PluginRefreshOutcome::Complete)).unwrap(),
+            HostLifecycleCompletion::Complete
+        );
+        assert_eq!(
+            update_completion(Some(PluginRefreshOutcome::PendingOperatorAction)).unwrap(),
+            HostLifecycleCompletion::PendingOperatorAction
+        );
+        let failed = update_completion(Some(PluginRefreshOutcome::Failed))
+            .expect_err("a failed refresh must fail `update`")
+            .to_string();
+        assert!(failed.contains("binary is up to date"), "{failed}");
+        assert!(failed.contains("refresh failed"), "{failed}");
+    }
+
+    #[test]
+    fn refresh_outcome_reads_the_post_update_exit_status() {
+        assert_eq!(
+            PluginRefreshOutcome::from_exit_code(Some(0)),
+            PluginRefreshOutcome::Complete
+        );
+        assert_eq!(
+            PluginRefreshOutcome::from_exit_code(Some(
+                crate::agent_cmd::PENDING_OPERATOR_ACTION_EXIT_CODE
+            )),
+            PluginRefreshOutcome::PendingOperatorAction
+        );
+        assert_eq!(
+            PluginRefreshOutcome::from_exit_code(Some(1)),
+            PluginRefreshOutcome::Failed
+        );
+        assert_eq!(
+            PluginRefreshOutcome::from_exit_code(None),
+            PluginRefreshOutcome::Failed,
+            "a signal-terminated refresh is a failure"
+        );
+    }
+
     #[test]
     fn upgrade_policy_forwards_installed_binary_to_post_update() {
         let calls = RefCell::new(Vec::new());
@@ -1103,7 +1180,12 @@ mod tests {
                     version: None,
                 }),
             ),
-            record_post_update(&calls, "post-update", &seen_binary, Ok(())),
+            record_post_update(
+                &calls,
+                "post-update",
+                &seen_binary,
+                Ok(PluginRefreshOutcome::Complete),
+            ),
         )
         .expect("upgrade steps should succeed");
 
@@ -1120,7 +1202,7 @@ mod tests {
         let calls = RefCell::new(Vec::new());
         let seen_binary = RefCell::new(None);
 
-        let installed_version = run_install_then_refresh(
+        let outcome = run_install_then_refresh(
             RefreshPolicy::Always,
             record_upgrade(
                 &calls,
@@ -1130,11 +1212,16 @@ mod tests {
                     version: Some("9.9.9".to_string()),
                 }),
             ),
-            record_post_update(&calls, "post-update", &seen_binary, Ok(())),
+            record_post_update(
+                &calls,
+                "post-update",
+                &seen_binary,
+                Ok(PluginRefreshOutcome::Complete),
+            ),
         )
         .expect("update steps should succeed");
 
-        assert_eq!(installed_version.as_deref(), Some("9.9.9"));
+        assert_eq!(outcome.installed_version.as_deref(), Some("9.9.9"));
     }
 
     #[test]
@@ -1142,17 +1229,26 @@ mod tests {
         let calls = RefCell::new(Vec::new());
         let seen_binary = RefCell::new(None);
 
-        let installed_version = run_install_then_refresh(
+        let outcome = run_install_then_refresh(
             RefreshPolicy::AfterInstall,
             record_upgrade(&calls, "upgrade", Ok(UpgradeOutcome::AlreadyCurrent)),
-            record_post_update(&calls, "post-update", &seen_binary, Ok(())),
+            record_post_update(
+                &calls,
+                "post-update",
+                &seen_binary,
+                Ok(PluginRefreshOutcome::Complete),
+            ),
         )
         .expect("an up-to-date upgrade should stay a successful no-op");
 
         assert_eq!(calls.into_inner(), vec!["upgrade"]);
         assert_eq!(seen_binary.into_inner(), None);
         assert_eq!(
-            installed_version, None,
+            outcome,
+            InstallThenRefresh {
+                installed_version: None,
+                refresh: None,
+            },
             "no install must leave daemon restore validating the running version"
         );
     }
@@ -1184,8 +1280,11 @@ mod tests {
         // the installed version: the new binary is on disk, so the daemon
         // restore must still validate it.
         assert_eq!(
-            result.expect("tolerated refresh failure").as_deref(),
-            Some("9.9.9")
+            result.expect("tolerated refresh failure"),
+            InstallThenRefresh {
+                installed_version: Some("9.9.9".to_string()),
+                refresh: Some(PluginRefreshOutcome::Failed),
+            }
         );
         assert_eq!(calls.into_inner(), vec!["upgrade", "post-update"]);
     }

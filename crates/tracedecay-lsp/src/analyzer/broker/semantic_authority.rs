@@ -1,8 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use tokio::sync::Mutex;
 use tracedecay_runtime_core::logging::log_daemon_event;
 
 use super::super::client::{
@@ -35,6 +34,16 @@ struct StdioLspSemanticAuthorityInner {
     timeouts: LspRefreshTimeouts,
     shared: Arc<SharedAnalyzerClient>,
     operations: Mutex<BTreeMap<SemanticOperationKey, CancellationToken>>,
+}
+
+impl StdioLspSemanticAuthorityInner {
+    /// Held only for one map operation and never across an await, so start
+    /// and cancel wait for a peer instead of refusing or dropping the request.
+    fn operations(&self) -> MutexGuard<'_, BTreeMap<SemanticOperationKey, CancellationToken>> {
+        self.operations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 /// Retained analyzer authority sharing the broker's stdio client slot.
@@ -176,23 +185,13 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
             request_id,
         };
         let cancellation = CancellationToken::new();
-        let inserted = match self.inner.operations.try_lock() {
-            Ok(mut operations) => {
-                if operations.contains_key(&key) {
-                    false
-                } else {
-                    operations.insert(key.clone(), cancellation.clone());
-                    true
-                }
-            }
-            Err(_) => {
-                return Box::pin(async {
-                    LspSemanticOperationOutcome::Partial {
-                        value: serde_json::Value::Null,
-                        coverage: "semantic-runtime-busy".to_owned(),
-                        detail: None,
-                    }
-                });
+        let inserted = {
+            let mut operations = self.inner.operations();
+            if operations.contains_key(&key) {
+                false
+            } else {
+                operations.insert(key.clone(), cancellation.clone());
+                true
             }
         };
         if !inserted {
@@ -219,7 +218,7 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                     let mut slot = match slot {
                         Ok(slot) => slot,
                         Err(error) => {
-                            inner.operations.lock().await.remove(&key);
+                            inner.operations().remove(&key);
                             return analyzer_start_failure(&error);
                         }
                     };
@@ -229,7 +228,7 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                             .is_terminal()
                             .then_some(LspSemanticOperationOutcome::Unavailable)
                     {
-                        inner.operations.lock().await.remove(&key);
+                        inner.operations().remove(&key);
                         return outcome;
                     }
                     // Holding the client lock is what makes a start single
@@ -252,7 +251,7 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                         };
                         (attempt, started)
                     } else {
-                        inner.operations.lock().await.remove(&key);
+                        inner.operations().remove(&key);
                         return LspSemanticOperationOutcome::Unavailable;
                     };
                     match client {
@@ -263,7 +262,7 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                                 // analyzer. Drop it rather than installing it
                                 // over the replacement's.
                                 slot.retire(client);
-                                inner.operations.lock().await.remove(&key);
+                                inner.operations().remove(&key);
                                 return analyzer_event_outcome(AnalyzerEvent::Cancelled);
                             };
                             // The analyzer answers only for documents in its
@@ -336,7 +335,7 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                     }
                 }
             };
-            inner.operations.lock().await.remove(&key);
+            inner.operations().remove(&key);
             outcome
         })
     }
@@ -346,15 +345,11 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
             root_uri: root.uri().to_owned(),
             request_id: request_id.clone(),
         };
-        self.inner
-            .operations
-            .try_lock()
-            .ok()
-            .and_then(|operations| operations.get(&key).cloned())
-            .is_some_and(|cancellation| {
-                cancellation.cancel();
-                true
-            })
+        let cancellation = self.inner.operations().get(&key).cloned();
+        cancellation.is_some_and(|cancellation| {
+            cancellation.cancel();
+            true
+        })
     }
 }
 
@@ -650,6 +645,119 @@ mod tests {
             joining.await.expect("joining caller"),
             LspSemanticOperationOutcome::Unavailable,
             "a caller that joined a live start must not be answered as retired"
+        );
+    }
+
+    fn document_symbol_request() -> crate::LspSemanticRequest {
+        crate::LspSemanticRequest::from_standard(
+            "textDocument/documentSymbol",
+            serde_json::json!({ "textDocument": { "uri": "file:///project/src/lib.rs" } }),
+        )
+    }
+
+    fn unspawnable_authority() -> Arc<StdioLspSemanticAuthority> {
+        StdioLspSemanticAuthority::new(
+            AnalyzerLaunch::direct("tracedecay-analyzer-that-cannot-spawn"),
+            Vec::new(),
+            "rust",
+            std::env::temp_dir(),
+            "file:///project",
+            LspRefreshTimeouts::from_diagnostics_quiet_window(Duration::from_secs(1)),
+        )
+    }
+
+    /// Another request registering or retiring its operation holds the map
+    /// for one insert or remove. A request arriving in that window waits for
+    /// it and runs, rather than being answered `semantic-runtime-busy`.
+    #[test]
+    fn a_request_arriving_during_a_peer_map_update_waits_and_runs() {
+        let authority = unspawnable_authority();
+        let peer = authority.inner.operations.try_lock().unwrap();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let starting = std::thread::spawn({
+            let authority = Arc::clone(&authority);
+            move || {
+                let outcome = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(authority.start(
+                        AdmittedRoot::new("file:///project"),
+                        LspRequestId::Number(3),
+                        document_symbol_request(),
+                    ));
+                sender.send(outcome).unwrap();
+            }
+        });
+
+        assert!(
+            receiver.recv_timeout(Duration::from_millis(25)).is_err(),
+            "the request must wait for the peer, not answer busy"
+        );
+        drop(peer);
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
+            LspSemanticOperationOutcome::Partial {
+                value: serde_json::Value::Null,
+                coverage: "analyzer-start-failed".to_owned(),
+                detail: Some("Analyzer failed to start."),
+            }
+        );
+        starting.join().unwrap();
+    }
+
+    /// `$/cancelRequest` for a queued operation must reach it even while a
+    /// peer holds the operation map; dropping it would let the cancelled
+    /// request run to completion.
+    #[tokio::test]
+    async fn cancellation_during_a_peer_map_update_is_delivered() {
+        let authority = unspawnable_authority();
+        let held_client = authority.inner.shared.client().await.unwrap();
+        let queued = tokio::spawn({
+            let authority = Arc::clone(&authority);
+            async move {
+                authority
+                    .start(
+                        AdmittedRoot::new("file:///project"),
+                        LspRequestId::Number(4),
+                        document_symbol_request(),
+                    )
+                    .await
+            }
+        });
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!queued.is_finished(), "the request queues on the client");
+
+        let peer = authority.inner.operations.try_lock().unwrap();
+        let cancelling = std::thread::spawn({
+            let authority = Arc::clone(&authority);
+            move || {
+                authority.cancel_request(
+                    &AdmittedRoot::new("file:///project"),
+                    &LspRequestId::Number(4),
+                )
+            }
+        });
+        std::thread::sleep(Duration::from_millis(25));
+        drop(peer);
+        assert!(
+            cancelling.join().unwrap(),
+            "cancellation of a registered operation must not be dropped"
+        );
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(queued.is_finished(), "cancellation ends the queued request");
+        drop(held_client);
+        assert_eq!(
+            queued.await.unwrap(),
+            LspSemanticOperationOutcome::Partial {
+                value: serde_json::Value::Null,
+                coverage: "semantic-cancelled".to_owned(),
+                detail: None,
+            }
         );
     }
 }

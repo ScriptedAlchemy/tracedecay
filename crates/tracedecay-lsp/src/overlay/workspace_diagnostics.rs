@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tracedecay_daemon_protocol::ProcessLocalRequestSequence;
 use tracedecay_domain::{ManifestDigest, canonical_sha256};
@@ -92,10 +92,6 @@ impl WorkspaceDiagnosticAdapter {
                     coverage: "refresh-required".to_owned(),
                 }
             }
-            OperationPoll::Busy => WorkspaceDiagnosticSnapshotOutcome::Partial {
-                code_generation_id: None,
-                coverage: "runtime-busy".to_owned(),
-            },
         }
     }
 
@@ -111,9 +107,7 @@ impl WorkspaceDiagnosticAdapter {
         let Some(key) = workspace_key(workspace, root, overlays) else {
             return rejected("workspace-diagnostic-identity-unavailable");
         };
-        if !self.adopt_key(&key) {
-            return rejected("runtime-busy");
-        }
+        self.adopt_key(&key);
         let request = CanonicalWorkspaceDiagnosticRefreshRequest {
             workspace: workspace.clone(),
             root: root.clone(),
@@ -158,16 +152,19 @@ impl WorkspaceDiagnosticAdapter {
             Ok(OperationAdmission::Existing(identity)) => {
                 DiagnosticRefreshAdmission::AlreadyRunning(identity)
             }
-            Ok(OperationAdmission::Busy) => rejected("runtime-busy"),
             Ok(OperationAdmission::Saturated) => rejected("workspace-diagnostic-capacity"),
             Err(_) => rejected("workspace-diagnostic-identity-exhausted"),
         }
     }
 
-    fn adopt_key(&self, key: &WorkspaceDiagnosticOperationKey) -> bool {
-        let Ok(mut active_keys) = self.active_keys.try_lock() else {
-            return false;
-        };
+    fn active_keys(&self) -> MutexGuard<'_, BTreeMap<String, WorkspaceDiagnosticOperationKey>> {
+        self.active_keys
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn adopt_key(&self, key: &WorkspaceDiagnosticOperationKey) {
+        let mut active_keys = self.active_keys();
         if let Some(previous) = active_keys
             .get(&key.root_uri)
             .filter(|previous| *previous != key)
@@ -176,13 +173,11 @@ impl WorkspaceDiagnosticAdapter {
             self.operations.cancel(&previous);
         }
         active_keys.insert(key.root_uri.clone(), key.clone());
-        true
     }
 
     fn release_key(&self, key: &WorkspaceDiagnosticOperationKey) {
-        if let Ok(mut active_keys) = self.active_keys.try_lock()
-            && active_keys.get(&key.root_uri) == Some(key)
-        {
+        let mut active_keys = self.active_keys();
+        if active_keys.get(&key.root_uri) == Some(key) {
             active_keys.remove(&key.root_uri);
         }
     }
@@ -231,4 +226,103 @@ pub(super) fn diagnostic_refresh_is_partial(failure_class: &str) -> bool {
             | "workspace-code-generation-stale"
             | "workspace-code-generation-warming"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::task::{Context, Poll};
+    use std::time::Duration;
+
+    use super::*;
+    use crate::gateway::{LspRuntimeFailure, LspRuntimeTask};
+    use crate::overlay::CanonicalDiagnosticRefreshRequest;
+    use crate::provider::GenerationDiagnostics;
+    use crate::workspace_diagnostics::WorkspaceGenerationDiagnostics;
+
+    struct InlineTask;
+
+    impl LspRuntimeTask for InlineTask {
+        fn abort(&self) {}
+    }
+
+    struct InlineSpawner;
+
+    impl LspRuntimeSpawner for InlineSpawner {
+        fn spawn(&self, mut future: LspRuntimeFuture<()>) -> Box<dyn LspRuntimeTask> {
+            let mut context = Context::from_waker(std::task::Waker::noop());
+            assert_eq!(future.as_mut().poll(&mut context), Poll::Ready(()));
+            Box::new(InlineTask)
+        }
+    }
+
+    struct Authority;
+
+    impl CanonicalDiagnosticSnapshotAuthority for Authority {
+        fn refresh(
+            &self,
+            _request: CanonicalDiagnosticRefreshRequest,
+        ) -> LspRuntimeFuture<Result<GenerationDiagnostics, LspRuntimeFailure>> {
+            Box::pin(async { Err(LspRuntimeFailure::new("document-refresh-unused")) })
+        }
+
+        fn supports_workspace_diagnostics(&self) -> bool {
+            true
+        }
+
+        fn refresh_workspace(
+            &self,
+            _request: CanonicalWorkspaceDiagnosticRefreshRequest,
+        ) -> LspRuntimeFuture<Result<WorkspaceGenerationDiagnostics, LspRuntimeFailure>> {
+            Box::pin(async { Err(LspRuntimeFailure::new("workspace-refresh-finished")) })
+        }
+    }
+
+    /// A refresh request or completed poll that lands while a peer session
+    /// updates the active-key map waits for it: refusing the request as busy
+    /// drops a refresh, and skipping the release strands the key.
+    #[test]
+    fn refresh_and_release_wait_for_a_peer_updating_active_keys() {
+        let adapter = Arc::new(WorkspaceDiagnosticAdapter::new(
+            Arc::new(InlineSpawner),
+            Arc::new(Authority),
+        ));
+        let root = AdmittedRoot::new("file:///admitted");
+        let workspace = AuthorizedLspWorkspace::single(root.clone());
+
+        let peer = adapter.active_keys.lock().unwrap();
+        let requesting = std::thread::spawn({
+            let adapter = Arc::clone(&adapter);
+            let (workspace, root) = (workspace.clone(), root.clone());
+            move || adapter.request(&workspace, &root, &[])
+        });
+        std::thread::sleep(Duration::from_millis(25));
+        drop(peer);
+        assert!(
+            matches!(
+                requesting.join().unwrap(),
+                DiagnosticRefreshAdmission::Started(_)
+            ),
+            "a contended refresh must start, not be rejected as busy"
+        );
+        assert_eq!(adapter.active_keys.lock().unwrap().len(), 1);
+
+        let peer = adapter.active_keys.lock().unwrap();
+        let polling = std::thread::spawn({
+            let adapter = Arc::clone(&adapter);
+            move || adapter.snapshot(&workspace, &root, &[])
+        });
+        std::thread::sleep(Duration::from_millis(25));
+        drop(peer);
+        assert_eq!(
+            polling.join().unwrap(),
+            WorkspaceDiagnosticSnapshotOutcome::Failed {
+                code_generation_id: None,
+                failure_class: "workspace-refresh-finished".to_owned(),
+            }
+        );
+        assert!(
+            adapter.active_keys.lock().unwrap().is_empty(),
+            "the finished operation releases its active key"
+        );
+    }
 }

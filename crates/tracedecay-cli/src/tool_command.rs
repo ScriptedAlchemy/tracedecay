@@ -72,7 +72,9 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 use crate::cli::dispatch::resolve_cli_application_surface;
 use crate::commands::{recover_truncated_mcp_result, reject_truncation_envelope};
 
+mod application_family;
 mod args;
+use application_family::{FamilyTool, dispatch_cli_family_tool};
 use args::{
     ParsedInvocation, canonical_tool_name, nearest_tool_name, parse_invocation,
     parse_whole_payload_invocation,
@@ -365,12 +367,25 @@ fn run_inner(
             )
             .await;
         }
+        if let Some(tool) = FamilyTool::from_tool_name(&def.name) {
+            let project_path =
+                DaemonToolDispatch::project_scoped(explicit_project, &def.name).project_path;
+            return dispatch_cli_family_tool(
+                tool,
+                &def.name,
+                tool_args,
+                project_path,
+                raw_json,
+                deadline,
+            )
+            .await;
+        }
         // Finding `def` in the host-filtered MCP definitions is the retained
         // compatibility owner's admission authority. This point is reachable
-        // only after both typed application-operation branches above rejected
-        // the name, so composing the application catalog again can only return
-        // `None`; rebuilding a second advertised-name set likewise repeats the
-        // exact membership check that selected `def`.
+        // only after every typed branch above rejected the name, so composing
+        // the application catalog again can only return `None`; rebuilding a
+        // second advertised-name set likewise repeats the exact membership
+        // check that selected `def`.
         let dispatch = DaemonToolDispatch::for_tool(explicit_project, &def.name, &mut tool_args);
         dispatch_compatibility_tool(dispatch, &def.name, tool_args, raw_json, deadline).await
     })
@@ -722,11 +737,11 @@ async fn dispatch_cli_graph_tool(
             })
         });
         if !mounting
-            || deadline.saturating_duration_since(Instant::now()) <= GRAPH_TOOL_RESEND_DELAY
+            || deadline.saturating_duration_since(Instant::now()) <= OWNER_MOUNT_RESEND_DELAY
         {
             break outcome?;
         }
-        tokio::time::sleep(GRAPH_TOOL_RESEND_DELAY).await;
+        tokio::time::sleep(OWNER_MOUNT_RESEND_DELAY).await;
     };
     let mut result = tracedecay_mcp::handlers::graph_tool::render_graph_tool(
         project.as_deref(),
@@ -739,7 +754,7 @@ async fn dispatch_cli_graph_tool(
     tool_result_process_outcome(&result.value, tool_name)
 }
 
-const GRAPH_TOOL_RESEND_DELAY: Duration = Duration::from_millis(250);
+const OWNER_MOUNT_RESEND_DELAY: Duration = Duration::from_millis(250);
 
 fn print_cli_application_surface(
     result: ApplicationSurfaceInvocationResult,

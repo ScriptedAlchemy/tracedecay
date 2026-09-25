@@ -101,7 +101,6 @@ impl RegisteredGlobalDbOwnerV1 {
             Arc::clone(&operation_task_owner),
         );
         super::schema_stages::ensure_attached_registered_schema(&registered.database).await?;
-        registered.rearm_queued_projection_retries().await?;
         super::schema_stages::converge_attached_registered_schema(&registered.database).await?;
         drop(registered);
         Ok(Self {
@@ -127,7 +126,6 @@ impl RegisteredGlobalDbOwnerV1 {
         );
         let convergence =
             super::schema_stages::ensure_attached_registered_schema(&registered.database).await?;
-        registered.rearm_queued_projection_retries().await?;
         drop(registered);
         Ok((
             Self {
@@ -528,20 +526,6 @@ impl RegisteredGlobalDb {
             },
         )?;
         Ok(())
-    }
-
-    #[hotpath::skip]
-    async fn rearm_queued_projection_retries(&self) -> tracedecay_domain::errors::Result<()> {
-        let transaction = self
-            .database
-            .begin_write_transaction("rearm queued projection retries")
-            .await?;
-        crate::observation_projection::rearm_queued_projection_retries(&transaction)
-            .await
-            .map_err(|error| {
-                registered_error("rearm queued projection retries", error.durable_detail())
-            })?;
-        transaction.commit().await
     }
 
     /// Rebuilds the registered observation projection through this client's

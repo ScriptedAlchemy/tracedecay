@@ -3,8 +3,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tracedecay_query::code_search;
+use tracedecay_contracts::retrieval::LexicalAnchorDropReasonV1;
+use tracedecay_query::code_search::{self, CodeIndexSearchDisplayV1};
 use tracedecay_query::retrieval::RetrievalPortError;
+use tracedecay_query::retrieval::lexical::LexicalRouteReceiptV1;
 
 use crate::code_index_scheduler;
 use crate::code_index_task_support;
@@ -1348,6 +1350,13 @@ where
                     executed.generation.as_str(),
                     executed.served_stale,
                 );
+                let mut lexical_routes = executed.lexical_routes;
+                reconcile_served_anchor_sites(
+                    &mut lexical_routes,
+                    &executed.authorized.composition.ranked_candidates,
+                    &ordered_candidates,
+                    &display_by_anchor,
+                );
                 code_search::CodeIndexSearchOutcomeV1::Complete(
                     code_search::CodeIndexSearchCompletedV1 {
                         code_generation: executed.generation.as_str().to_owned(),
@@ -1356,13 +1365,41 @@ where
                         display_by_anchor,
                         next_cursor,
                         coverage,
-                        lexical_routes: executed.lexical_routes,
+                        lexical_routes,
                     },
                 )
             },
             label = "daemon.code_index.search"
         ))
     })
+}
+
+/// Count each caller anchor against the sites this response carries: a
+/// lane-admitted site absent from the hydrated page was removed by the
+/// diversity cap, fell outside the page, or was not hydrated.
+fn reconcile_served_anchor_sites(
+    lexical_routes: &mut LexicalRouteReceiptV1,
+    ranked: &[tracedecay_domain::RankedCandidate],
+    page: &[tracedecay_domain::RankedCandidate],
+    display_by_anchor: &HashMap<tracedecay_domain::RetrievalAnchorId, CodeIndexSearchDisplayV1>,
+) {
+    let contains = |candidates: &[tracedecay_domain::RankedCandidate],
+                    site: &tracedecay_domain::RetrievalAnchorId| {
+        candidates
+            .iter()
+            .any(|ranked| ranked.candidate.anchor_id == *site)
+    };
+    lexical_routes.reconcile_served(|site| {
+        if display_by_anchor.contains_key(site) {
+            None
+        } else if contains(page, site) {
+            Some(LexicalAnchorDropReasonV1::NotHydrated)
+        } else if contains(ranked, site) {
+            Some(LexicalAnchorDropReasonV1::OutsidePage)
+        } else {
+            Some(LexicalAnchorDropReasonV1::DiversityCap)
+        }
+    });
 }
 
 pub fn code_index_similar_executor<A, S>(

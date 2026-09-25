@@ -202,6 +202,88 @@ fn one_lane_counts_at_most_its_weight_per_candidate_however_many_chunks_matched(
 }
 
 #[test]
+fn a_caller_anchored_site_outranks_every_exact_hit_that_carries_no_anchor() {
+    // Ordinary task words admitted as exact identifiers fill the page with
+    // exact-class hits; the one site carrying the caller's anchor is an
+    // approximate lexical hit whose anchor tier the lexical calibration
+    // saturates away.
+    let lanes = || {
+        composition_lanes(vec![
+            (
+                RetrieverKind::ExactLiteral,
+                RetrieverOutcome::Complete(batch(
+                    (0..3_u32)
+                        .map(|ordinal| {
+                            let mut hit = exact_candidate(&format!("word-{ordinal}"), 1_000_000);
+                            hit.ordinal_rank = ordinal;
+                            hit
+                        })
+                        .collect(),
+                    "exact",
+                )),
+            ),
+            (
+                RetrieverKind::Lexical,
+                RetrieverOutcome::Complete(batch(
+                    vec![candidate(RetrieverKind::Lexical, "anchored", 900_000, 0)],
+                    "lexical",
+                )),
+            ),
+            (
+                RetrieverKind::Graph,
+                RetrieverOutcome::Complete(batch(Vec::new(), "empty")),
+            ),
+        ])
+    };
+    let kernel = CompositionKernel::new(id("ranking.fixture.v1"));
+    let input = FusionStageInput {
+        profile: profile(),
+        lanes: lanes(),
+    };
+    let order = |output: &crate::retrieval::fusion::CompositionOutputV1| {
+        output
+            .ranked_candidates
+            .iter()
+            .map(|ranked| ranked.candidate.anchor_id.as_str().to_owned())
+            .collect::<Vec<_>>()
+    };
+
+    let unanchored = kernel.compose(&input, &no_caps()).unwrap();
+    assert_eq!(
+        order(&unanchored).last().map(String::as_str),
+        Some("anchor.anchored"),
+        "without tiers exact class orders first: {:?}",
+        order(&unanchored)
+    );
+
+    let tiers = BTreeMap::from([(id("anchor.anchored"), 1_u32)]);
+    let anchored = kernel
+        .compose_with_anchor_tiers(&input, &no_caps(), &tiers)
+        .unwrap();
+    assert_eq!(order(&anchored)[0], "anchor.anchored", "{:?}", order(&anchored));
+    assert_eq!(
+        order(&anchored)[1..],
+        order(&unanchored)[..3],
+        "the unanchored hits keep their exact-first order behind the anchor"
+    );
+    assert_eq!(anchored.comparator_records[0].anchor_tier, 1);
+    assert!(
+        anchored.comparator_records[1..]
+            .iter()
+            .all(|record| record.anchor_tier == 0)
+    );
+    assert!(
+        anchored.ranked_candidates[0]
+            .candidate
+            .decisions
+            .iter()
+            .any(|decision| decision.kind == RankingDecisionKind::ComparatorProvenance
+                && decision.detail.starts_with("anchor_tier=1;")),
+        "the provenance names the leading key"
+    );
+}
+
+#[test]
 fn fusion_calibrates_raw_scores_in_their_declared_score_domain() {
     let normal = candidate(RetrieverKind::Lexical, "normal-domain", 1_000_000, 0);
     let mut shifted = candidate(RetrieverKind::Lexical, "shifted-domain", 1_000_000, 1);

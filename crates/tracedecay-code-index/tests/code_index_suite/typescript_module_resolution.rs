@@ -149,6 +149,14 @@ fn resolved_callers(
     generation: &CodeIndexPublishedGenerationV1,
     target: &SymbolOccurrenceId,
 ) -> BTreeMap<String, usize> {
+    callers_with_authority(generation, target, EdgeAuthorityV1::NameResolved)
+}
+
+fn callers_with_authority(
+    generation: &CodeIndexPublishedGenerationV1,
+    target: &SymbolOccurrenceId,
+    authority: EdgeAuthorityV1,
+) -> BTreeMap<String, usize> {
     let names = generation
         .symbols()
         .symbols
@@ -159,7 +167,7 @@ fn resolved_callers(
     for edge in generation.edges().iter().filter(|edge| {
         edge.to_occurrence == *target
             && edge.kind == RelationEdgeKindV1::Calls
-            && edge.authority == EdgeAuthorityV1::NameResolved
+            && edge.authority == authority
     }) {
         *callers
             .entry(names[&edge.from_occurrence].clone())
@@ -280,6 +288,79 @@ fn workspace_package_alias_dotted_and_barrel_imports_bind_every_call_site() {
     }
 }
 
+/// `hops.ts` forwards its own bindings through a same-module export clause:
+/// a declaration (`hopped`), a renamed declaration beside a same-named local
+/// (`inner as renamed`), a local import (`relayTarget as relayed`), and a
+/// local import of an unindexed module (`missing as relayedMissing`).
+#[test]
+fn same_module_export_clauses_bind_the_forwarded_binding() {
+    let generation = published_fixture();
+    let consume = "apps/web/src/hop-consumer.ts::consumeHops".to_owned();
+    let test_file = "apps/web/test/shadowing.test.ts";
+
+    let hopped = symbol(&generation, "apps/web/src/hops.ts::hopped");
+    assert_eq!(
+        resolved_callers(&generation, &hopped),
+        BTreeMap::from([
+            (consume.clone(), 1),
+            (format!("{test_file}::hopped::calls the import"), 1),
+        ])
+    );
+    let inner = symbol(&generation, "apps/web/src/hops.ts::inner");
+    assert_eq!(
+        resolved_callers(&generation, &inner),
+        BTreeMap::from([(consume.clone(), 1)])
+    );
+    // The local `renamed` is not what `export { inner as renamed }` exports.
+    let renamed = symbol(&generation, "apps/web/src/hops.ts::renamed");
+    assert!(resolved_callers(&generation, &renamed).is_empty());
+    let relay_target = symbol(&generation, "apps/web/src/hop-target.ts::relayTarget");
+    assert_eq!(
+        resolved_callers(&generation, &relay_target),
+        BTreeMap::from([
+            (consume.clone(), 1),
+            (format!("{test_file}::calls the imported relay"), 1),
+        ])
+    );
+
+    // `relayedMissing` forwards an import of a module that is not indexed:
+    // no edge, and the call site stays a disclosed gap.
+    let gaps = generation.unresolved_typescript_import_calls();
+    assert!(
+        gaps.iter().any(|gap| gap.reference_name == "relayedMissing"),
+        "{gaps:?}"
+    );
+}
+
+/// A test title is not a declaration, and a same-file declaration shadows an
+/// import only inside the function scope that declares it.
+#[test]
+fn test_titles_and_out_of_scope_helpers_do_not_shadow_imports() {
+    let generation = published_fixture();
+    let test_file = "apps/web/test/shadowing.test.ts";
+
+    for title in ["hopped", "relayed"] {
+        let describe = symbol(&generation, &format!("{test_file}::{title}"));
+        for authority in [EdgeAuthorityV1::SyntaxExact, EdgeAuthorityV1::NameResolved] {
+            assert!(
+                callers_with_authority(&generation, &describe, authority).is_empty(),
+                "describe({title:?}) is no call target"
+            );
+        }
+    }
+    let helper = symbol(&generation, &format!("{test_file}::relayed::relayed"));
+    assert_eq!(
+        callers_with_authority(&generation, &helper, EdgeAuthorityV1::SyntaxExact),
+        BTreeMap::from([(format!("{test_file}::relayed::calls the local helper"), 1)])
+    );
+    let relay_target = symbol(&generation, "apps/web/src/hop-target.ts::relayTarget");
+    assert!(
+        !resolved_callers(&generation, &relay_target)
+            .contains_key(&format!("{test_file}::relayed::calls the local helper")),
+        "the in-scope helper shadows the import"
+    );
+}
+
 #[test]
 fn file_dependents_list_every_importing_file_and_disclose_unbound_imports() {
     let generation = published_fixture();
@@ -340,5 +421,5 @@ fn sealed_replay_recomputes_identical_typescript_edges() {
         restored.unresolved_typescript_import_calls(),
         generation.unresolved_typescript_import_calls()
     );
-    assert_eq!(generation.unresolved_typescript_import_calls().len(), 2);
+    assert_eq!(generation.unresolved_typescript_import_calls().len(), 3);
 }

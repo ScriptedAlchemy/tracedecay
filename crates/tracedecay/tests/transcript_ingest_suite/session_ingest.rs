@@ -441,7 +441,7 @@ async fn cancelled_user_pass_reports_partial_coverage() {
     assert_eq!(outcome.units_admitted, 0);
     assert_eq!(
         outcome.coverage,
-        IngestPassCoverage::Partial { deferred_units: 11 }
+        IngestPassCoverage::Partial { deferred_units: 12 }
     );
     assert!(
         outcome

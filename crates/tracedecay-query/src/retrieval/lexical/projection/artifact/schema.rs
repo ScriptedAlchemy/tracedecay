@@ -7,7 +7,7 @@ use super::{CodeLexicalArtifactErrorV1, checkpoint};
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{ExactFieldV1, nonnegative_sha256_prefix};
 
-/// Revision 26 is the only layout this build serves: interned exact terms,
+/// Revision 27 is the only layout this build serves: interned exact terms,
 /// integer field codes, rows stored as deflated blocks of consecutive
 /// documents (per-file and per-symbol strings interned once as
 /// `row_dictionary` entries, a signature chunk's text stored as the prefix
@@ -18,7 +18,8 @@ use tracedecay_domain::{ExactFieldV1, nonnegative_sha256_prefix};
 /// uppercase byte; every other raw window is its normalized window), and the clone index (binary payloads keyed by 32-byte
 /// digest, content-only occurrences keyed by symbol digest, and exact and
 /// positional winnowed fingerprint postings, each naming its payload or
-/// occurrence by integer ordinal) sealed by the same build. Batches append
+/// occurrence by integer ordinal) sealed by the same build, with the receipt
+/// carrying the clone census the seal computed over those tables. Batches append
 /// page-ordered staging that finalization merges and drops, so no secondary
 /// index duplicates a posting. Annotation uses mint no document. The sealed
 /// file holds content only: route identity (generation, repository,
@@ -27,9 +28,9 @@ use tracedecay_domain::{ExactFieldV1, nonnegative_sha256_prefix};
 /// seal, so identical trees in different worktrees seal byte-identical
 /// files. Every other revision is refused as incompatible and rebuilt from
 /// the sealed generation.
-pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 26;
+pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 27;
 
-const DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v26\0";
+const DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v27\0";
 
 const FIELD_SYMBOL_NAME: i64 = 1;
 const FIELD_QUALIFIED_NAME: i64 = 2;
@@ -294,7 +295,7 @@ mod tests {
     fn superseded_revisions_are_rejected() {
         require_served_revision(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1)
             .expect("the served revision opens");
-        for revision in [16, 20, 22, 25, 27] {
+        for revision in [16, 20, 22, 25, 26, 28] {
             assert!(matches!(
                 require_served_revision(revision),
                 Err(CodeLexicalArtifactErrorV1::Incompatible(message))

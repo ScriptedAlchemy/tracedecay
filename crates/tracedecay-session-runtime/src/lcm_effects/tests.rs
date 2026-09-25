@@ -113,6 +113,17 @@ fn retained_guard(
     }
 }
 
+/// A configured fake summarizer on the shortest admitted run budget, so a
+/// fake that stops answering fails the test quickly instead of at the default.
+fn fake_summarizer(executable: &std::path::Path) -> LcmSummarizerExecutableV1 {
+    LcmSummarizerExecutableV1::configured_with(
+        executable.to_path_buf(),
+        None,
+        Some(*tracedecay_domain::configuration::LCM_SUMMARIZER_TIMEOUT_SECS_RANGE.start()),
+    )
+    .unwrap()
+}
+
 /// A registered project sessions shard whose summarizer binding the test
 /// publishes explicitly through `lcm.summarizer_executables.v1`. Provider
 /// executables are never resolved from the environment or `PATH`, so a test
@@ -159,8 +170,7 @@ impl ProjectSummarizerFixture {
 
     fn pin_cursor_agent(&self, cursor_agent: &std::path::Path) {
         self.pin(LcmSummarizerExecutablesV1 {
-            cursor_agent: LcmSummarizerExecutableV1::configured(cursor_agent.to_path_buf())
-                .unwrap(),
+            cursor_agent: fake_summarizer(cursor_agent),
             codex: LcmSummarizerExecutableV1::Unconfigured,
         });
     }
@@ -168,7 +178,7 @@ impl ProjectSummarizerFixture {
     fn pin_codex(&self, codex: &std::path::Path) {
         self.pin(LcmSummarizerExecutablesV1 {
             cursor_agent: LcmSummarizerExecutableV1::Unconfigured,
-            codex: LcmSummarizerExecutableV1::configured(codex.to_path_buf()).unwrap(),
+            codex: fake_summarizer(codex),
         });
     }
 
@@ -195,8 +205,9 @@ impl ProjectSummarizerFixture {
     }
 }
 
-/// Runs a future under the canonical user-data-dir env lock so provider
-/// tuning env overrides cannot race parallel tests.
+/// Runs a future under the canonical user-data-dir test lock: fixtures share
+/// one project identity, so its process-wide pinned summarizer binding must
+/// not race parallel tests.
 fn run_with_test_env_lock<T>(future: impl std::future::Future<Output = T>) -> T {
     let _lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
     tokio::runtime::Builder::new_multi_thread()
@@ -1098,7 +1109,6 @@ done
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&codex_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         fixture.pin_codex(&codex_bin);
-        let _env = TestEnvironment::set([("TRACEDECAY_CODEX_SUMMARY_TIMEOUT_SECS", "5")]);
 
         let converged =
             super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
@@ -1938,12 +1948,6 @@ fn mega_session_convergence_bounds_protection_and_compression_pages() {
         // Summarization must never reach the operator's installed agent CLI:
         // this profile shard has no `lcm.summarizer_executables.v1` binding,
         // so every provider stays unconfigured and nothing is launched.
-        let temporary = tempfile::tempdir().unwrap();
-        let workspace_env = temporary.path().to_string_lossy().into_owned();
-        let _env = TestEnvironment::set([(
-            "TRACEDECAY_CURSOR_SUMMARY_WORKSPACE",
-            workspace_env.as_str(),
-        )]);
         const RAW_ROWS: i64 = tracedecay_lcm::LCM_SCAN_PAGE_ROWS + 1;
         let harness = RegisteredGlobalDbHarness::open("lcm-summary-convergence-mega").await;
         let db = harness.registered.clone();
@@ -2051,14 +2055,6 @@ fn retained_pages_never_reuse_unbound_session_wide_native_text() {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&cursor_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         fixture.pin_cursor_agent(&cursor_bin);
-        let workspace_env = temporary.path().to_string_lossy().into_owned();
-        let _env = TestEnvironment::set([
-            (
-                "TRACEDECAY_CURSOR_SUMMARY_WORKSPACE",
-                workspace_env.as_str(),
-            ),
-            ("TRACEDECAY_CURSOR_SUMMARY_TIMEOUT_SECS", "5"),
-        ]);
 
         for _ in 0..8 {
             super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
@@ -2179,14 +2175,6 @@ fn protected_in_place_revision_stales_old_summary_before_reconvergence() {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&cursor_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         fixture.pin_cursor_agent(&cursor_bin);
-        let workspace_env = temporary.path().to_string_lossy().into_owned();
-        let _env = TestEnvironment::set([
-            (
-                "TRACEDECAY_CURSOR_SUMMARY_WORKSPACE",
-                workspace_env.as_str(),
-            ),
-            ("TRACEDECAY_CURSOR_SUMMARY_TIMEOUT_SECS", "5"),
-        ]);
         let mut revised = message(session_id, 1);
         revised.message_id = format!("{session_id}-message-1");
         revised.text = "authoritative revised protected content".to_string();
@@ -2379,14 +2367,6 @@ fn disjoint_published_summary_revisions_both_reconverge_across_restart() {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&cursor_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         fixture.pin_cursor_agent(&cursor_bin);
-        let workspace_env = temporary.path().to_string_lossy().into_owned();
-        let _env = TestEnvironment::set([
-            (
-                "TRACEDECAY_CURSOR_SUMMARY_WORKSPACE",
-                workspace_env.as_str(),
-            ),
-            ("TRACEDECAY_CURSOR_SUMMARY_TIMEOUT_SECS", "5"),
-        ]);
 
         let first =
             super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
@@ -2516,14 +2496,6 @@ fn retained_summary_rejects_a_role_revision_during_model_generation() {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&cursor_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         fixture.pin_cursor_agent(&cursor_bin);
-        let workspace_env = temporary.path().to_string_lossy().into_owned();
-        let _env = TestEnvironment::set([
-            (
-                "TRACEDECAY_CURSOR_SUMMARY_WORKSPACE",
-                workspace_env.as_str(),
-            ),
-            ("TRACEDECAY_CURSOR_SUMMARY_TIMEOUT_SECS", "5"),
-        ]);
 
         let convergence_db = db.clone();
         let convergence = tokio::spawn(async move {
@@ -3196,18 +3168,9 @@ done
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
         fixture.pin(LcmSummarizerExecutablesV1 {
-            cursor_agent: LcmSummarizerExecutableV1::configured(cursor_bin.clone()).unwrap(),
-            codex: LcmSummarizerExecutableV1::configured(codex_bin.clone()).unwrap(),
+            cursor_agent: fake_summarizer(&cursor_bin),
+            codex: fake_summarizer(&codex_bin),
         });
-        let workspace_env = temporary.path().to_string_lossy().into_owned();
-        let env = TestEnvironment::set([
-            (
-                "TRACEDECAY_CURSOR_SUMMARY_WORKSPACE",
-                workspace_env.as_str(),
-            ),
-            ("TRACEDECAY_CURSOR_SUMMARY_TIMEOUT_SECS", "5"),
-            ("TRACEDECAY_CODEX_SUMMARY_TIMEOUT_SECS", "5"),
-        ]);
 
         for (provider, expected) in [
             ("cursor", "cursor authoritative summary"),
@@ -3235,41 +3198,7 @@ done
                 LcmRelationProjectionStatus::Applied
             );
         }
-        drop(env);
     });
-}
-
-struct TestEnvironment {
-    previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
-}
-
-impl TestEnvironment {
-    fn set<const N: usize>(values: [(&'static str, &str); N]) -> Self {
-        let mut previous = Vec::with_capacity(N);
-        for (name, value) in values {
-            previous.push((name, std::env::var_os(name)));
-            // SAFETY: tests serialize process-environment access through
-            // the shared TraceDecay environment lock.
-            unsafe { std::env::set_var(name, value) };
-        }
-        Self { previous }
-    }
-}
-
-impl Drop for TestEnvironment {
-    fn drop(&mut self) {
-        for (name, value) in self.previous.drain(..).rev() {
-            // SAFETY: the shared test environment lock remains held until
-            // this guard restores every value.
-            unsafe {
-                if let Some(value) = value {
-                    std::env::set_var(name, value);
-                } else {
-                    std::env::remove_var(name);
-                }
-            }
-        }
-    }
 }
 
 #[tokio::test]

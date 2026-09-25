@@ -8,7 +8,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard, OnceLock};
 
 use roaring::RoaringBitmap;
@@ -31,14 +31,13 @@ use tracedecay_domain::{
 use tracedecay_private_fs::open_private_file;
 
 use super::builder::compute_section_digests;
-use super::clone_census::{CodeLexicalCloneIndexCensusV1, read_clone_index_census};
 use super::clone_codec::{
     CloneOccurrenceRouteV1, digest_key, routed_clone_body_row, stored_clone_occurrence,
 };
 use super::fingerprints::{
-    CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1, CloneFingerprintArtifactReadV1,
-    CloneFingerprintReadRequestV1, CloneSelectedBlockArtifactCandidateV1,
-    CloneSelectedBlockArtifactReadV1, read_clone_fingerprint_page,
+    CloneFingerprintArtifactReadV1, CloneFingerprintReadRequestV1,
+    CloneSelectedBlockArtifactCandidateV1, CloneSelectedBlockArtifactReadV1,
+    read_clone_fingerprint_page,
 };
 use super::format::{
     ArtifactRowV1, CodeLexicalArtifactOccurrenceV1, CodeLexicalImportMembershipWitnessV1,
@@ -132,10 +131,8 @@ impl LexicalIndexedRow for ArtifactRowV1 {
 #[derive(Clone)]
 pub struct CodeLexicalArtifactReaderV1 {
     connection: Arc<ArtifactConnectionMutex<Connection>>,
-    path: Arc<PathBuf>,
     metadata: super::super::CodeLexicalProjectionMetadataV1,
     receipt: VerifiedCodeLexicalArtifactV1,
-    clone_index_census: Arc<OnceLock<Result<Arc<CodeLexicalCloneIndexCensusV1>, String>>>,
     retained_owned_bytes: usize,
     /// Fuzzy expansion walks every in-fuzzy term; share one load across
     /// clones and later queries on this reader.
@@ -329,7 +326,6 @@ impl CodeLexicalArtifactReaderV1 {
         let reader = hotpath::measure_block!(
             "query.artifact.open.reader_restore",
             Self::open_connection_with_control(
-                path,
                 connection,
                 &receipt,
                 authority,
@@ -381,7 +377,6 @@ impl CodeLexicalArtifactReaderV1 {
         let reader = hotpath::measure_block!(
             "query.artifact.open.reader_restore",
             Self::open_connection_with_control(
-                path,
                 connection,
                 expected,
                 authority,
@@ -400,9 +395,7 @@ impl CodeLexicalArtifactReaderV1 {
     /// `authority` is the opener's projection: the artifact stores only its
     /// content part, and the reader serves the opener's generation,
     /// repository, freshness, and clone route.
-    #[allow(clippy::too_many_arguments)] // both open routes' authorities, bound once
     fn open_connection_with_control(
-        path: &Path,
         connection: Connection,
         expected: &VerifiedCodeLexicalArtifactV1,
         authority: &super::super::CodeLexicalProjectionMetadataV1,
@@ -543,10 +536,8 @@ impl CodeLexicalArtifactReaderV1 {
             // identity for the process lifetime, so this per-reader lock must
             // remain plain. Static query spans retain operation visibility.
             connection: Arc::new(StdMutex::new(connection)),
-            path: Arc::new(path.to_path_buf()),
             metadata,
             receipt: stored,
-            clone_index_census: Arc::new(OnceLock::new()),
             retained_owned_bytes,
             fuzzy_vocabulary: Arc::new(OnceLock::new()),
         })
@@ -560,48 +551,6 @@ impl CodeLexicalArtifactReaderV1 {
     #[hotpath::skip]
     pub fn verified_artifact(&self) -> &VerifiedCodeLexicalArtifactV1 {
         &self.receipt
-    }
-
-    #[hotpath::skip]
-    pub fn artifact_format_revision(&self) -> u32 {
-        self.receipt.format_revision()
-    }
-
-    /// The clone census if it has been computed, without computing it.
-    ///
-    /// `None` while the census task has not finished. This never waits on an
-    /// in-flight census, so status reads it on the request path.
-    #[hotpath::skip]
-    pub fn computed_clone_index_census(
-        &self,
-    ) -> Option<Result<Arc<CodeLexicalCloneIndexCensusV1>, CodeLexicalArtifactErrorV1>> {
-        self.clone_index_census.get().map(|census| {
-            census
-                .as_ref()
-                .map(Arc::clone)
-                .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.clone()))
-        })
-    }
-
-    /// The task that computes this artifact's clone census once for every
-    /// clone of this reader.
-    ///
-    /// The census validates every stored clone payload, which is corpus-sized
-    /// work, so it runs off request paths. The task holds only the artifact
-    /// path and the shared result slot, not this reader's connection or page
-    /// cache, so a retired reader's memory is not pinned while it runs.
-    #[hotpath::skip]
-    pub fn clone_index_census_task(&self) -> impl FnOnce() + Send + 'static {
-        let path = Arc::clone(&self.path);
-        let census = Arc::clone(&self.clone_index_census);
-        move || {
-            census.get_or_init(|| {
-                hotpath::measure_block!(
-                    "query.artifact.clone_census.compute",
-                    compute_clone_index_census(path.as_ref())
-                )
-            });
-        }
     }
 
     #[hotpath::skip]
@@ -2626,29 +2575,6 @@ fn verify_retained_artifact_digest(
         ));
     }
     Ok(())
-}
-
-fn compute_clone_index_census(path: &Path) -> Result<Arc<CodeLexicalCloneIndexCensusV1>, String> {
-    let file = open_private_file(path)
-        .map_err(map_private_artifact_file_error)
-        .map_err(|error| error.to_string())?;
-    verify_named_path_identity(path, &file).map_err(|error| error.to_string())?;
-    let connection = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|error| map_reader_open_error(path, error))
-    .map_err(|error| error.to_string())?;
-    connection
-        .pragma_update(None, "query_only", true)
-        .map_err(sqlite_error)
-        .map_err(|error| error.to_string())?;
-    verify_named_path_identity(path, &file).map_err(|error| error.to_string())?;
-    let census = read_clone_index_census(&connection, CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1)
-        .map(Arc::new)
-        .map_err(|error| error.to_string())?;
-    verify_named_path_identity(path, &file).map_err(|error| error.to_string())?;
-    Ok(census)
 }
 
 /// Make the content-addressed reader refuse a replacement at the published

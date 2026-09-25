@@ -386,7 +386,9 @@ function RegistryList({
   ]);
   if (rows.length <= LIST_VIRTUALIZE_AT) {
     return (
-      <div className="grid gap-2">
+      // `grid-cols-1` is `minmax(0, 1fr)`: an implicit `auto` track grows to its
+      // widest card's unwrapped label or path, pushing every row past the rail.
+      <div className="grid grid-cols-1 gap-2">
         {groups.map((group, index) => (
           <RepoGroupCard key={`${group.git_common_dir ?? group.label}#${index}`} group={group} holdings={holdings} onInspect={onInspect} />
         ))}

@@ -49,6 +49,7 @@ import {
   TOUCH_TARGET_PROBE,
   clippedContentFailures,
   reflowFailures,
+  sidewaysRailFailures,
   touchTargetFailures,
   type ReflowReport,
   type TouchTargetReport,
@@ -94,6 +95,8 @@ interface ShotEntry {
   targets?: TouchTargetReport;
   /** Plan 11 assertions this shot failed. */
   planFailures?: string[];
+  /** `/api` requests made while on this surface that no fixture models. */
+  unmatchedRequests?: string[];
   diff?: DiffResult;
   error?: string;
 }
@@ -219,6 +222,7 @@ async function main(): Promise<void> {
   let browser: Browser | null = null;
   const surfaces: SurfaceEntry[] = [];
   const pageErrors: string[] = [];
+  let unmatched: readonly string[] = [];
   let screenshotCount = 0;
 
   try {
@@ -239,7 +243,7 @@ async function main(): Promise<void> {
       console.error(`[audit] PAGEERROR ${error.message}`);
     });
     await page.clock.setFixedTime(AUDIT_NOW_MS);
-    await installApiFixtures(page);
+    unmatched = await installApiFixtures(page);
     // Passed as source text, not a function: tsx compiles callbacks with
     // esbuild's `keepNames`, whose `__name` helper does not exist in the page.
     // As a function this threw `__name is not defined` on every run, so the
@@ -262,6 +266,7 @@ async function main(): Promise<void> {
         for (const surface of STORY_SURFACES) {
           const file = `${surface.id}__${theme}__${width}.png`;
           const entry = surfaceMap.get(surface.id)!;
+          const unmatchedBefore = unmatched.length;
           try {
             await gotoSurface(page, surface.path);
             await setTheme(page, theme); // reassert after navigation
@@ -279,6 +284,7 @@ async function main(): Promise<void> {
             const planFailures = [
               ...(width === 320 ? reflowFailures(reflow, tag) : []),
               ...(width === 320 ? clippedContentFailures(reflow, tag) : []),
+              ...sidewaysRailFailures(reflow, tag),
               ...touchTargetFailures(targets, tag),
             ];
             const shot: ShotEntry = {
@@ -289,6 +295,7 @@ async function main(): Promise<void> {
               reflow,
               targets,
               planFailures,
+              unmatchedRequests: unmatched.slice(unmatchedBefore),
             };
             if (DIFF_MODE) shot.diff = diffAgainstBaseline(file, buf as Buffer);
             entry.shots.push(shot);
@@ -299,6 +306,7 @@ async function main(): Promise<void> {
                 (shot.diff ? `  diff=${shot.diff.status}` : ''),
             );
             for (const f of planFailures) console.log(`           ! ${f}`);
+            for (const r of shot.unmatchedRequests ?? []) console.log(`           ! no fixture: ${r}`);
           } catch (err) {
             entry.shots.push({ theme, width, file, bytes: 0, error: String(err) });
             console.warn(`[audit] FAILED ${file}: ${String(err)}`);
@@ -348,6 +356,7 @@ async function main(): Promise<void> {
     screenshotCount,
     expectedScreenshotCount: STORY_SURFACES.length * THEMES.length * WIDTHS.length,
     planFailureCount: planFailures.length,
+    unmatchedRequests: [...new Set(unmatched)],
     undersizedTargets: [...undersized.entries()].map(([selector, v]) => ({ selector, ...v })),
     surfaces,
   };
@@ -410,17 +419,25 @@ async function main(): Promise<void> {
   if (pageErrors.length > 0) {
     console.error(`[audit] ${pageErrors.length} page error(s)`);
   }
+  if (manifest.unmatchedRequests.length > 0) {
+    console.error(
+      `[audit] ${manifest.unmatchedRequests.length} request path(s) have no fixture, so the ` +
+        `surfaces that read them were captured against a 404 the daemon may never send:`,
+    );
+    for (const r of manifest.unmatchedRequests) console.error(`         ${r}`);
+  }
   if (diffs.length > 0) {
     console.error(`[audit] ${diffs.length} shot(s) drifted from their baseline`);
   }
   if (planFailures.length > 0) {
     console.error(
-      `[audit] ${planFailures.length} shot(s) failed a Plan 11 assertion (reflow at 320, or a touch target under ${MIN_TOUCH_TARGET_PX}x${MIN_TOUCH_TARGET_PX})`,
+      `[audit] ${planFailures.length} shot(s) failed a layout assertion (reflow at 320, a side rail scrolling sideways, or a touch target under ${MIN_TOUCH_TARGET_PX}x${MIN_TOUCH_TARGET_PX})`,
     );
   }
   if (
     failed.length > 0 ||
     pageErrors.length > 0 ||
+    manifest.unmatchedRequests.length > 0 ||
     diffs.length > 0 ||
     planFailures.length > 0
   ) {

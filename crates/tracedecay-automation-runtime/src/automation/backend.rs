@@ -230,7 +230,10 @@ impl CodexAppServerBackend {
     ) -> Self {
         let config = codex.canonical_path().map(|codex_bin| {
             let mut config = CodexAppServerSummaryConfig::for_executable(codex_bin);
-            if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
+            if let Some(model) = model
+                .filter(|model| !model.trim().is_empty())
+                .or_else(|| codex.model().map(str::to_owned))
+            {
                 config.model = Some(model);
             }
             config.timeout = Duration::from_secs(timeout_secs.clamp(5, 300));

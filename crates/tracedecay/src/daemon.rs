@@ -346,9 +346,7 @@ mod projectless;
 mod remote_deletion;
 #[cfg(test)]
 use projectless::projectless_tools_call_response;
-use projectless::{
-    projectless_tool_call, projectless_user_session_request, serve_projectless_client,
-};
+use projectless::{projectless_first_request, projectless_tool_call, serve_projectless_client};
 mod project_composition;
 mod project_delivery_mount;
 pub(crate) use project_composition::daemon_transcript_source_home;

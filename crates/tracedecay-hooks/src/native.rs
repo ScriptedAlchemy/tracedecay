@@ -1012,6 +1012,36 @@ mod tests {
     }
 
     #[test]
+    fn pi_evidence_catalog_requests_are_the_checked_in_captures() {
+        let catalog = include_str!("../fixtures/host_events/pi.json");
+        for (identity, capture, signal) in [
+            (
+                "session_start",
+                &include_bytes!("../fixtures/host_events/pi/session-start.json")[..],
+                NativeHookSignalV1::SessionBoundary(HookBoundaryV1::Start),
+            ),
+            (
+                "stop",
+                &include_bytes!("../fixtures/host_events/pi/agent-end.json")[..],
+                NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete),
+            ),
+        ] {
+            let request = fixture_request(catalog, identity);
+            assert_eq!(
+                serde_json::from_slice::<Value>(&request).unwrap(),
+                serde_json::from_slice::<Value>(capture).unwrap(),
+                "{identity} catalog request drifted from its capture"
+            );
+            assert_eq!(
+                decode_native_hook_event(NativeHostIdentityV1::Pi, &request)
+                    .unwrap()
+                    .signal,
+                signal
+            );
+        }
+    }
+
+    #[test]
     fn pi_lifecycle_requires_its_own_event_and_session_identity() {
         let agent_end = include_bytes!("../fixtures/host_events/pi/agent-end.json");
         let mut payload = serde_json::from_slice::<Value>(agent_end).unwrap();

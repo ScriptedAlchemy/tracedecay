@@ -1,10 +1,10 @@
-//! MCP adapter for the canonical Workflow application owner.
+//! Tool adapter for the canonical Workflow application owner.
 //!
-//! Workflow owns a typed HTTP envelope already. MCP builds that exact request
-//! and returns the owner's envelope as JSON content, so request decoding,
-//! binding lookup, cancellation policy, result contracts, and failure taxonomy
-//! cannot drift between the two transports. This is the Work adapter's mirror;
-//! the composition root supplies the daemon-owned invoke.
+//! Workflow owns a typed HTTP envelope already. MCP and `tracedecay tool`
+//! build that exact request and return the owner's envelope as JSON content, so
+//! request decoding, binding lookup, cancellation policy, result contracts, and
+//! failure taxonomy cannot drift between transports. This is the Work adapter's
+//! mirror; the composition root supplies the daemon-owned invoke.
 
 use std::future::Future;
 

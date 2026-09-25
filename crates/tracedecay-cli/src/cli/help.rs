@@ -174,7 +174,25 @@ Safe to re-run; use it after installing a new agent or moving the tracedecay bin
 Pass --git-hook to install the global post-commit sync hook; that flag is explicit \
 because setting core.hooksPath can redirect every repository away from .git/hooks.";
 
-pub(crate) const INSTALL_AFTER_HELP: &str = "\
+/// Exit statuses of every host lifecycle command; one literal so the four
+/// commands cannot drift apart.
+macro_rules! host_lifecycle_exit_status {
+    () => {
+        "
+
+Exit status:
+  0   every host completed, or was skipped: not applicable, or its host CLI
+      is not installed and TraceDecay only found leftover config for it
+  1   a host failed: the lifecycle ran and failed, or a tracked or named
+      host's CLI is not installed; the per-host summary names each one
+  75  nothing failed, but a host needs an interactive operator step (Kimi
+      Code's `/plugins install`); run the printed command, then rerun.
+      `tracedecay doctor` reports the step until it is done"
+    };
+}
+
+pub(crate) const INSTALL_AFTER_HELP: &str = concat!(
+    "\
 Examples:
   tracedecay install                             Configure every detected agent
   tracedecay install --agent cursor              One agent only
@@ -190,7 +208,9 @@ Examples:
   tracedecay install --local                     Project-local config in cwd
 
 Related: tracedecay uninstall, tracedecay reinstall (repair installed agents),
-tracedecay update-plugin (update installed agents), tracedecay doctor.";
+tracedecay update-plugin (update installed agents), tracedecay doctor.",
+    host_lifecycle_exit_status!()
+);
 
 pub(crate) const REINSTALL_LONG_ABOUT: &str = "\
 Repairs every agent that already has tracedecay configured by re-running its \
@@ -199,7 +219,8 @@ rules with current settings. Use after upgrading the binary manually or when age
 config drifted; it never adds integration to agents that were not installed before. \
 --dry-run previews each tracked agent's repair plan without mutating.";
 
-pub(crate) const REINSTALL_AFTER_HELP: &str = "\
+pub(crate) const REINSTALL_AFTER_HELP: &str = concat!(
+    "\
 Examples:
   tracedecay reinstall                           Repair all installed agents
   tracedecay reinstall --dry-run                 Preview every repair plan
@@ -207,16 +228,21 @@ Examples:
   tracedecay reinstall --component core          Repair signed Core components
 
 Related: tracedecay install (add an agent), tracedecay update-plugin
-(update installed agents to this binary).";
+(update installed agents to this binary).",
+    host_lifecycle_exit_status!()
+);
 
-pub(crate) const UPDATE_PLUGIN_AFTER_HELP: &str = "\
+pub(crate) const UPDATE_PLUGIN_AFTER_HELP: &str = concat!(
+    "\
 Examples:
   tracedecay update-plugin                       Update all installed agents
   tracedecay update-plugin --component context-mcp --dry-run
   tracedecay update-plugin --component context-mcp
 
 Related: tracedecay reinstall (repair installed agents),
-tracedecay update (binary + plugins + daemon + health pass).";
+tracedecay update (binary + plugins + daemon + health pass).",
+    host_lifecycle_exit_status!()
+);
 
 pub(crate) const UNINSTALL_LONG_ABOUT: &str = "\
 Removes tracedecay's MCP server registration, permissions, hooks, and prompt \
@@ -224,7 +250,8 @@ rules from agent configuration through the same component-set lifecycle. Removes
 every installed agent's integration when --agent is omitted. Project indexes under \
 .tracedecay/ are left intact. use `tracedecay wipe` to delete data.";
 
-pub(crate) const UNINSTALL_AFTER_HELP: &str = "\
+pub(crate) const UNINSTALL_AFTER_HELP: &str = concat!(
+    "\
 Examples:
   tracedecay uninstall                           Remove from every agent
   tracedecay uninstall --agent cursor            Remove from one agent
@@ -232,7 +259,9 @@ Examples:
   tracedecay uninstall --agent cursor --component context-mcp --yes
   tracedecay uninstall --agent hermes --profile dev
 
-Related: tracedecay install, tracedecay wipe (delete project stores).";
+Related: tracedecay install, tracedecay wipe (delete project stores).",
+    host_lifecycle_exit_status!()
+);
 
 pub(crate) const FEEDBACK_ROLLBACK_LONG_ABOUT: &str = "\
 Dry-runs, applies, or restores the direct host feedback-route rollback switch \
@@ -307,6 +336,11 @@ After a real install, upgrade re-runs install for every configured agent
 integration so a separate `tracedecay reinstall` is not needed. --no-reinstall
 skips that refresh.
 
+Exit status: 0 once the newest binary is installed, even when the refresh
+after it failed or waits on an operator step (both are reported as warnings);
+non-zero only when the upgrade itself fails. Use `tracedecay update` for an
+exit status that also reflects the refresh.
+
 Related: tracedecay update (refresh even when current), tracedecay channel
 (switch stable/beta).";
 
@@ -317,6 +351,14 @@ Examples:
 
 Update re-runs install for every configured agent integration so a separate
 `tracedecay reinstall` is not needed. --no-reinstall skips that refresh.
+
+Exit status (a completed binary upgrade stays installed in every case):
+  0   the binary is current and every host refreshed, or was skipped because
+      its host CLI is not installed and only leftover config was found
+  1   the upgrade failed, or the refresh failed for a host or for the daemon;
+      the per-host summary names each failed host
+  75  the refresh waits on an interactive operator step (Kimi Code's
+      `/plugins install`); run the printed command, then rerun
 
 Related: tracedecay upgrade (refresh only after a real install),
 tracedecay update-plugin (plugins only), tracedecay channel.";

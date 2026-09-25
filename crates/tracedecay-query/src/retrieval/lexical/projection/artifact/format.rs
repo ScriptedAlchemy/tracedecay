@@ -15,6 +15,7 @@ use tracedecay_domain::{
 
 use super::super::{CodeLexicalProjectionMetadataV1, LexicalFieldV1, ProjectedChunkV1};
 use super::CodeLexicalArtifactErrorV1;
+use super::clone_census::CodeLexicalCloneIndexCensusV1;
 use super::schema::{CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1, digest_domain_for_revision};
 
 pub(super) use super::schema::{SERVING_INDEX_STEP_COUNT_V11, STATISTICS_STEP_COUNT_V11};
@@ -1080,10 +1081,16 @@ pub struct VerifiedCodeLexicalArtifactV1 {
     import_dictionary_digest: ManifestDigest,
     artifact_digest: ManifestDigest,
     section_digests: Vec<CodeLexicalArtifactSectionDigestV1>,
+    clone_index_census: CodeLexicalCloneIndexCensusV1,
     file_size_bytes: u64,
 }
 
 impl VerifiedCodeLexicalArtifactV1 {
+    /// The clone census the seal computed over this artifact's clone tables.
+    pub fn clone_index_census(&self) -> &CodeLexicalCloneIndexCensusV1 {
+        &self.clone_index_census
+    }
+
     pub fn artifact_digest(&self) -> &ManifestDigest {
         &self.artifact_digest
     }
@@ -1291,6 +1298,7 @@ pub(super) fn artifact_digest(
     import_payload_bytes: u64,
     import_dictionary_digest: &ManifestDigest,
     sections: &[CodeLexicalArtifactSectionDigestV1],
+    clone_index_census: &CodeLexicalCloneIndexCensusV1,
     format_revision: u32,
 ) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
     manifest_digest(
@@ -1305,6 +1313,7 @@ pub(super) fn artifact_digest(
             import_payload_bytes,
             import_dictionary_digest.as_str(),
             sections,
+            clone_index_census,
             format_revision,
         ),
     )
@@ -1326,6 +1335,7 @@ pub(super) fn receipt_artifact_digest(
         receipt.import_payload_bytes,
         &receipt.import_dictionary_digest,
         sections,
+        &receipt.clone_index_census,
         receipt.format_revision,
     )
 }
@@ -1449,6 +1459,7 @@ pub(super) fn new_verified_receipt(
     metadata_digest: ManifestDigest,
     source: &tracedecay_code_index::production::VerifiedSealedLexicalSourceReceiptV1,
     section_digests: Vec<CodeLexicalArtifactSectionDigestV1>,
+    clone_index_census: CodeLexicalCloneIndexCensusV1,
     file_size_bytes: u64,
 ) -> Result<VerifiedCodeLexicalArtifactV1, CodeLexicalArtifactErrorV1> {
     let artifact_digest = artifact_digest(
@@ -1461,6 +1472,7 @@ pub(super) fn new_verified_receipt(
         source.import_payload_bytes(),
         source.import_dictionary_digest(),
         &section_digests,
+        &clone_index_census,
         CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1,
     )?;
     Ok(VerifiedCodeLexicalArtifactV1 {
@@ -1475,8 +1487,38 @@ pub(super) fn new_verified_receipt(
         import_dictionary_digest: source.import_dictionary_digest().clone(),
         artifact_digest,
         section_digests,
+        clone_index_census,
         file_size_bytes,
     })
+}
+
+/// A receipt over hand-staged `sections` that no sealed source produced.
+#[cfg(test)]
+pub(super) fn sourceless_test_receipt(
+    metadata_digest: ManifestDigest,
+    section_digests: Vec<CodeLexicalArtifactSectionDigestV1>,
+    clone_index_census: CodeLexicalCloneIndexCensusV1,
+    file_size_bytes: u64,
+) -> Result<VerifiedCodeLexicalArtifactV1, CodeLexicalArtifactErrorV1> {
+    let import_dictionary_digest = ManifestDigest::from_sha256_bytes(&[0; 32])
+        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+    let mut receipt = VerifiedCodeLexicalArtifactV1 {
+        format_revision: CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1,
+        metadata_digest,
+        source_format_revision: 0,
+        page_count: 0,
+        total_chunks: 0,
+        total_payload_bytes: 0,
+        total_imports: 0,
+        import_payload_bytes: 0,
+        import_dictionary_digest: import_dictionary_digest.clone(),
+        artifact_digest: import_dictionary_digest,
+        section_digests,
+        clone_index_census,
+        file_size_bytes,
+    };
+    receipt.artifact_digest = receipt_artifact_digest(&receipt, &receipt.section_digests)?;
+    Ok(receipt)
 }
 
 #[cfg(test)]

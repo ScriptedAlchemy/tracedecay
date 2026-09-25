@@ -1,7 +1,12 @@
 /** `ExecutionTopologyMetricsV1` fixtures, shaped like the Rust projector's
  * output; consumers parse them with the generated schema. */
 
-const HORIZON = {
+interface Horizon {
+  since_micros: number;
+  until_micros: number;
+}
+
+const HORIZON: Horizon = {
   since_micros: 1_753_000_000_000_000,
   until_micros: 1_753_003_600_000_000,
 };
@@ -35,6 +40,7 @@ export function topologyMeasurement(spec: {
   dimensions: readonly { dimension: string; value: string }[];
   coverage?: CoverageSpec;
   unavailable?: string;
+  horizon?: Horizon;
 }) {
   const unavailable = spec.unavailable ?? null;
   const cellCoverage = coverage(spec.coverage);
@@ -60,7 +66,7 @@ export function topologyMeasurement(spec: {
         descriptor_revision: `${spec.denominator}.v1`,
         eligible_population: spec.denominator,
       },
-      temporal: { horizon: HORIZON, baseline_watermark: null, delta: null },
+      temporal: { horizon: spec.horizon ?? HORIZON, baseline_watermark: null, delta: null },
       uncertainty: { lower: spec.value, upper: spec.value, reason: unavailable },
       calibration: null,
       unavailable_reason: unavailable,
@@ -78,15 +84,17 @@ export interface TopologyMetricsSpec {
     unavailable?: string | null;
   };
   coverage?: CoverageSpec;
+  horizon?: Horizon;
 }
 
 export function topologyMetricsModel(spec: TopologyMetricsSpec = {}) {
   const capability = spec.githubStackCapability;
+  const horizon = spec.horizon ?? HORIZON;
   return {
     authorized_scope_ref: 'project.tracedecay',
-    horizon: HORIZON,
+    horizon,
     watermark: 'observability:topology:41',
-    observed_at_micros: HORIZON.until_micros,
+    observed_at_micros: horizon.until_micros,
     current: true,
     coverage: coverage(spec.coverage ?? { observed: 9, completed: 9, state: 'known' }),
     emission_coverage: { emitted: 9, delayed: 0, dropped: 0, sampled_events: 0 },

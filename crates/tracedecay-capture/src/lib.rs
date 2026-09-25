@@ -10,6 +10,7 @@ pub mod kimi;
 pub mod kiro;
 pub mod opencode;
 mod parse;
+pub mod pi;
 mod timestamp;
 pub mod vibe;
 

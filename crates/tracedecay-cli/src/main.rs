@@ -1170,15 +1170,13 @@ async fn dispatch_command(
             dispatch_runtime_command(command).await?;
             Ok(CommandOutcome::Success)
         }
-        CommandFamily::Agent => {
-            dispatch_agent_command(command, host_bundle).await?;
-            Ok(CommandOutcome::Success)
-        }
+        CommandFamily::Agent => dispatch_agent_command(command, host_bundle)
+            .await
+            .map(lifecycle_command_outcome),
         CommandFamily::Hook => dispatch_hook_command(command).await,
-        CommandFamily::Update => {
-            dispatch_update_command(command).await?;
-            Ok(CommandOutcome::Success)
-        }
+        CommandFamily::Update => dispatch_update_command(command)
+            .await
+            .map(lifecycle_command_outcome),
         CommandFamily::Configuration => {
             dispatch_configuration_command(command).await?;
             Ok(CommandOutcome::Success)
@@ -1555,10 +1553,21 @@ async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay_domain::err
     Ok(())
 }
 
+/// A lifecycle that committed everything it could but left a host waiting on
+/// an operator step exits with its own status instead of plain success.
+fn lifecycle_command_outcome(completion: agent_cmd::HostLifecycleCompletion) -> CommandOutcome {
+    match completion {
+        agent_cmd::HostLifecycleCompletion::Complete => CommandOutcome::Success,
+        agent_cmd::HostLifecycleCompletion::PendingOperatorAction => {
+            CommandOutcome::Exit(completion.exit_code())
+        }
+    }
+}
+
 async fn dispatch_agent_command(
     command: Commands,
     host_bundle: HostBundleCliOptions,
-) -> tracedecay_domain::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<agent_cmd::HostLifecycleCompletion> {
     use agent_cmd::HostBundleCliOperation as Operation;
 
     let (operation, agent, local, no_dashboard, automation, git_hook) = match command {
@@ -1576,7 +1585,8 @@ async fn dispatch_agent_command(
                 }
                 crate::cli::FeedbackRollbackAction::DryRun { .. } => {}
             }
-            return agent_cmd::handle_feedback_rollback_command(action).await;
+            agent_cmd::handle_feedback_rollback_command(action).await?;
+            return Ok(agent_cmd::HostLifecycleCompletion::Complete);
         }
         Commands::Install {
             agent,
@@ -1603,7 +1613,7 @@ async fn dispatch_agent_command(
         }
         _ => unreachable!("non-agent command passed to agent dispatcher"),
     };
-    if local {
+    let completion = if local {
         if host_bundle.component.is_some() || host_bundle.dry_run {
             return Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: "--component and --dry-run cannot be combined with --local".to_string(),
@@ -1613,6 +1623,7 @@ async fn dispatch_agent_command(
             message: "--local requires a project-capable --agent".to_string(),
         })?;
         agent_cmd::handle_project_local_lifecycle_command(agent_id, operation).await?;
+        agent_cmd::HostLifecycleCompletion::Complete
     } else {
         agent_cmd::handle_host_lifecycle_command(
             agent,
@@ -1621,14 +1632,14 @@ async fn dispatch_agent_command(
             no_dashboard,
             automation.then_some(agent_cmd::CodexAutomationInstall),
         )
-        .await?;
-    }
+        .await?
+    };
     if git_hook {
         agent_cmd::install_requested_git_hook()?;
     } else if operation == Operation::Install {
         tracedecay_agent_hosts::agents::report_git_post_commit_hook_status();
     }
-    Ok(())
+    Ok(completion)
 }
 
 async fn dispatch_hook_command(
@@ -1671,20 +1682,25 @@ async fn dispatch_hook_command(
     Ok(CommandOutcome::Exit(code))
 }
 
-async fn dispatch_update_command(command: Commands) -> tracedecay_domain::errors::Result<()> {
+async fn dispatch_update_command(
+    command: Commands,
+) -> tracedecay_domain::errors::Result<agent_cmd::HostLifecycleCompletion> {
     match command {
         Commands::Upgrade { no_reinstall } => {
             update_cmd::run_upgrade_command(no_reinstall).await?;
         }
         Commands::Update { no_reinstall } => {
-            update_cmd::run_update_command(no_reinstall).await?;
+            return update_cmd::run_update_command(no_reinstall).await;
         }
         Commands::PostUpdate {
             no_reinstall,
             lifecycle_lease_token,
         } => {
-            update_cmd::run_post_update_command(no_reinstall, lifecycle_lease_token.as_deref())
-                .await?;
+            return update_cmd::run_post_update_command(
+                no_reinstall,
+                lifecycle_lease_token.as_deref(),
+            )
+            .await;
         }
         Commands::PackageHook {
             action: PackageHookAction::Scoop { action },
@@ -1729,7 +1745,7 @@ async fn dispatch_update_command(command: Commands) -> tracedecay_domain::errors
         },
         _ => unreachable!("non-update command passed to update dispatcher"),
     }
-    Ok(())
+    Ok(agent_cmd::HostLifecycleCompletion::Complete)
 }
 
 async fn dispatch_configuration_command(
