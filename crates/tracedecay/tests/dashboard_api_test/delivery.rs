@@ -674,7 +674,36 @@ fn delivery_overview_counts_agent_tool_calls_for_sessions_on_the_live_branch() {
             ("main-1", "tool_call", 7),
             ("other-1", "tool_call", 11),
         ];
+        // One Codex `apply_patch` invocation: its named call row, the paired
+        // unnamed output row, and the `patch_apply_end` edit row share a
+        // call id and count once.
+        let patch_call = r#"{"call_id":"call-patch-1"}"#;
+        let codex_patch_rows = [
+            ("tool_event", Some("apply_patch")),
+            ("tool_event", None),
+            ("file_edit", None),
+        ];
         for session in &sessions {
+            let patch_rows = (session.session_id == "unlabeled-1")
+                .then_some(codex_patch_rows.iter())
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .map(|(n, (kind, tool))| {
+                    MessageRecordBuilder::new(
+                        "codex",
+                        &format!("unlabeled-1-patch-{n}"),
+                        "unlabeled-1",
+                        "tool",
+                        100 + i64::try_from(n).unwrap(),
+                        "fixture patch",
+                        kind,
+                    )
+                    .with_timestamp(Some(1_760_000_011))
+                    .with_tool_names(*tool)
+                    .with_metadata(Some(patch_call))
+                    .build()
+                });
             let messages: Vec<SessionMessageRecord> = tool_rows
                 .iter()
                 .filter(|(id, _, _)| *id == session.session_id)
@@ -695,6 +724,7 @@ fn delivery_overview_counts_agent_tool_calls_for_sessions_on_the_live_branch() {
                     .with_tool_names((kind != "chat").then_some("Bash"))
                     .build()
                 })
+                .chain(patch_rows)
                 .collect();
             fixture
                 .host_runtime
@@ -759,7 +789,10 @@ fn delivery_overview_counts_agent_tool_calls_for_sessions_on_the_live_branch() {
             .iter()
             .find(|row| row["agent"].is_null())
             .unwrap_or_else(|| panic!("unlabeled row: {body}"));
-        assert_eq!(unlabeled["tool_calls"], 2);
+        assert_eq!(
+            unlabeled["tool_calls"], 3,
+            "two tool calls plus one Codex patch invocation: {body}"
+        );
         // No provider usage was observed for these sessions; the rows say so
         // instead of reporting zero tokens.
         for row in agents {

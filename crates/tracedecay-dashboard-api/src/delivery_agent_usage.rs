@@ -197,10 +197,16 @@ async fn project_sessions(
                 s.session_id,
                 COALESCE(s.agent_id, '') AS agent_id,
                 COALESCE(s.metadata_json, '') AS metadata_json,
-                (SELECT COUNT(*) FROM lcm_raw_messages m
+                (SELECT COUNT(DISTINCT COALESCE(
+                            CASE WHEN json_valid(m.metadata_json)
+                                 THEN json_extract(m.metadata_json, '$.call_id') END,
+                            m.message_id))
+                   FROM lcm_raw_messages m
                   WHERE m.provider = s.provider
                     AND m.session_id = s.session_id
-                    AND m.kind IN ('tool_call', 'file_edit')) AS tool_calls
+                    AND (m.kind IN ('tool_call', 'file_edit')
+                         OR (m.kind = 'tool_event' AND COALESCE(m.tool_names, '') <> ''))
+                ) AS tool_calls
          FROM correlated c
          JOIN sessions s
            ON s.session_id = c.session_id
@@ -216,22 +222,23 @@ async fn project_sessions(
     )
     .await
     .map_err(|error| format!("correlated session query failed: {error}"))?;
-    Ok(rows
-        .iter()
+    rows.iter()
         .map(|row| {
             let agent_id = str_field(row, "agent_id");
             let agent =
                 managed_agent_label_for_session(host_io, agent_id, str_field(row, "metadata_json"))
                     .map(str::to_owned)
                     .or_else(|| (!agent_id.trim().is_empty()).then(|| agent_id.trim().to_owned()));
-            CorrelatedSessionV1 {
+            let tool_calls = u64::try_from(i64_field(row, "tool_calls"))
+                .map_err(|error| format!("tool invocation count is not a count: {error}"))?;
+            Ok(CorrelatedSessionV1 {
                 provider: str_field(row, "provider").to_owned(),
                 session_id: str_field(row, "session_id").to_owned(),
                 agent,
-                tool_calls: u64::try_from(i64_field(row, "tool_calls")).unwrap_or(0),
-            }
+                tool_calls,
+            })
         })
-        .collect())
+        .collect()
 }
 
 fn agent_usage(
