@@ -7,8 +7,8 @@ use tracedecay_domain::ProjectId;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
-    EnrollmentMarker, ProjectIdentity, STORE_MANIFEST_FILENAME, StorageMode, StoreKind,
-    StoreLayout, read_repository_identity_marker, validate_project_id,
+    ProjectIdentity, STORE_MANIFEST_FILENAME, StorageMode, StoreKind, StoreLayout,
+    read_repository_identity_marker, validate_project_id,
 };
 
 /// Typed project identity recorded on a registered store layout.
@@ -124,28 +124,28 @@ pub fn default_profile_sharded_layout(
     project_root: &Path,
     profile_root: &Path,
 ) -> Result<StoreLayout> {
-    let marker = EnrollmentMarker {
-        project_id: default_profile_project_id(project_root),
-        storage_mode: StorageMode::ProfileSharded,
-    };
-    profile_sharded_layout(project_root, profile_root, &marker)
+    profile_sharded_layout(
+        project_root,
+        profile_root,
+        &default_profile_project_id(project_root),
+    )
 }
 
 pub fn profile_sharded_layout(
     project_root: &Path,
     profile_root: &Path,
-    marker: &EnrollmentMarker,
+    project_id: &str,
 ) -> Result<StoreLayout> {
-    validate_project_id(&marker.project_id).map_err(|message| TraceDecayError::Config {
+    validate_project_id(project_id).map_err(|message| TraceDecayError::Config {
         message: format!(
-            "invalid enrollment marker for '{}': {message}",
+            "invalid project identity for '{}': {message}",
             project_root.display()
         ),
     })?;
-    let data_root = profile_sharded_data_root(profile_root, &marker.project_id);
+    let data_root = profile_sharded_data_root(profile_root, project_id);
     Ok(StoreLayout::new(
         ProjectIdentity {
-            project_id: Some(marker.project_id.clone()),
+            project_id: Some(project_id.to_owned()),
             display_root: project_root.to_path_buf(),
             primary_alias: project_root.to_path_buf(),
         },
@@ -173,15 +173,7 @@ pub fn resolve_persisted_layout(
     // any path-derived guess, or one repository can acquire two project
     // stores and two mutable writer lanes.
     if let Some(marker) = read_repository_identity_marker(project_root)? {
-        return profile_sharded_layout(
-            project_root,
-            profile_root,
-            &EnrollmentMarker {
-                project_id: marker.project_id,
-                storage_mode: StorageMode::ProfileSharded,
-            },
-        )
-        .map(Some);
+        return profile_sharded_layout(project_root, profile_root, &marker.project_id).map(Some);
     }
 
     // Without a repository-side marker (a non-git project, or a repository
@@ -193,15 +185,7 @@ pub fn resolve_persisted_layout(
     let store_exists = data_root.join(config::db_filename(&data_root)).exists()
         || data_root.join(STORE_MANIFEST_FILENAME).is_file();
     if store_exists {
-        return profile_sharded_layout(
-            project_root,
-            profile_root,
-            &EnrollmentMarker {
-                project_id,
-                storage_mode: StorageMode::ProfileSharded,
-            },
-        )
-        .map(Some);
+        return profile_sharded_layout(project_root, profile_root, &project_id).map(Some);
     }
     Ok(None)
 }
@@ -216,11 +200,9 @@ pub fn default_profile_root() -> Result<PathBuf> {
 /// hooks, MCP response handles, config resolution, the agent command, Doctor,
 /// and diagnostics.
 ///
-/// This used to read only the enrollment marker and otherwise derive a project
-/// id from the checkout path, so it disagreed with the async registry resolver
-/// about the same directory and split one repository across shards. It now
-/// consults every authority available without awaiting, the same enrollment
-/// marker and repository identity marker via [`resolve_persisted_layout`].
+/// It consults every authority available without awaiting, the repository
+/// identity marker and the profile shard via [`resolve_persisted_layout`], so
+/// it agrees with the async registry resolver about the same directory.
 pub fn resolve_layout_for_current_profile(project_root: &Path) -> Result<StoreLayout> {
     let profile_root = default_profile_root()?;
     match resolve_enrolled_layout(project_root, &profile_root)? {

@@ -568,13 +568,7 @@ async fn wipe_under_profile_offline(
                 home_tracedecay.as_deref(),
             )
             .await?;
-            // A prior partial wipe may have removed the profile shard while a
-            // marker deletion failed. Keep that marker-backed target selectable so
-            // the same command can finish the cleanup without deleting its registry
-            // retry authority on the failed attempt.
-            if location.status.is_live() || location.marker_root.is_some() {
-                targets.push(location);
-            }
+            targets.push(location);
         }
 
         if !all && targets.is_empty() {
@@ -616,17 +610,12 @@ async fn wipe_under_profile_offline(
             return Ok(());
         }
 
-        let mut removed = 0usize;
         let mut failures = Vec::new();
         let mut wiped_paths: Vec<PathBuf> = Vec::new();
-        let mut marker_cleanup = Vec::new();
 
         for location in &targets {
             match remove_store_directory(&location.data_root) {
-                Ok(_) => {
-                    wiped_paths.push(location.project_root.clone());
-                    marker_cleanup.push(location);
-                }
+                Ok(_) => wiped_paths.push(location.project_root.clone()),
                 Err(error) => {
                     eprintln!(
                         "  \x1b[31m✗\x1b[0m {} ({error})",
@@ -637,29 +626,15 @@ async fn wipe_under_profile_offline(
             }
         }
 
-        // Keep repository markers intact until the registry transaction succeeds.
-        // If it fails after a shard was removed, the marker remains the durable
-        // local discovery authority for a retry.
-        if !wiped_paths.is_empty() {
-            if let Some(registry) = registry.as_ref() {
-                registry.delete_project_paths(&wiped_paths).await?;
-            }
+        if !wiped_paths.is_empty()
+            && let Some(registry) = registry.as_ref()
+        {
+            registry.delete_project_paths(&wiped_paths).await?;
         }
-
-        for location in marker_cleanup {
-            if let Some(marker_root) = &location.marker_root
-                && let Err(error) = remove_store_directory(marker_root)
-            {
-                eprintln!("  \x1b[31m✗\x1b[0m {} ({error})", marker_root.display());
-                failures.push(format!("{} ({error})", marker_root.display()));
-                continue;
-            }
-            removed += 1;
-            eprintln!(
-                "  \x1b[32m✔\x1b[0m wiped {}",
-                location.project_root.display()
-            );
+        for path in &wiped_paths {
+            eprintln!("  \x1b[32m✔\x1b[0m wiped {}", path.display());
         }
+        let removed = wiped_paths.len();
 
         if !failures.is_empty() {
             return Err(tracedecay_domain::errors::TraceDecayError::Config {
@@ -719,7 +694,7 @@ fn handle_list_inner(
         let mut token_errors: Vec<String> = Vec::new();
 
         for path in &project_paths {
-            let mut location = global::classify_project_storage(path);
+            let mut location = global::classify_project_storage(path)?;
             if location.status == global::ProjectStorageStatus::Stale
                 && let Some(profile_root) = home_tracedecay.as_deref()
             {

@@ -637,14 +637,10 @@ fn report_daemon_diagnostics_unavailable(
 }
 
 fn fallback_database_path(project_path: &Path) -> Option<PathBuf> {
-    if let Ok(Some(layout)) =
-        tracedecay_runtime_core::storage::resolve_enrolled_layout_for_current_profile(project_path)
-    {
-        return Some(layout.graph_db_path);
-    }
-    let data_root = tracedecay_project::config::get_tracedecay_dir(project_path);
-    let db_path = data_root.join(tracedecay_project::config::db_filename(&data_root));
-    db_path.is_file().then_some(db_path)
+    tracedecay_runtime_core::storage::resolve_enrolled_layout_for_current_profile(project_path)
+        .ok()
+        .flatten()
+        .map(|layout| layout.graph_db_path)
 }
 
 fn database_recovery_guidance(db_path: &Path) -> String {

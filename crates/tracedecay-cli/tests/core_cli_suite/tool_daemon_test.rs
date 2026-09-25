@@ -28,8 +28,8 @@ use tracedecay_domain::UtcMicros;
 use tracedecay_domain::{FactCategoryV1, ProjectId, RepositoryId, WorktreeId};
 use tracedecay_hooks::{HookEventV2, HookSpoolConfigV1, HookSpoolV1};
 use tracedecay_runtime_core::storage::{
-    EnrollmentMarker, StorageMode, default_profile_project_id, pin_fixture_repository_identity,
-    profile_sharded_data_root, profile_sharded_layout,
+    default_profile_project_id, pin_fixture_repository_identity, profile_sharded_data_root,
+    profile_sharded_layout,
 };
 /// Bound for waits that depend on spawning and running the real `tracedecay`
 /// CLI as a child process: connecting to the fake daemon socket and forwarding
@@ -678,15 +678,7 @@ fn enroll_native_capture_project(home: &Path, project: &Path, project_id: &str) 
     let profile_root = home.join(".tracedecay");
     tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
         .expect("install fixture profile identity");
-    let layout = profile_sharded_layout(
-        project,
-        &profile_root,
-        &EnrollmentMarker {
-            project_id: project_id.to_owned(),
-            storage_mode: StorageMode::ProfileSharded,
-        },
-    )
-    .unwrap();
+    let layout = profile_sharded_layout(project, &profile_root, project_id).unwrap();
     tracedecay_agent_hosts::hooks::publish_hook_bindings(&tracedecay::hook_runtime(), &layout)
         .unwrap();
     layout.data_root

@@ -35,10 +35,7 @@ async fn discover_project_root_with_identity_does_not_open_registry_only_store()
     let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
         &project_root,
         &profile_root,
-        &tracedecay_runtime_core::storage::EnrollmentMarker {
-            project_id: project_id.to_string(),
-            storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
-        },
+        project_id,
     )
     .unwrap();
     fs::create_dir_all(layout.graph_db_path.parent().unwrap()).unwrap();
@@ -125,10 +122,7 @@ async fn store_layout_for_identity_does_not_open_registry_without_enrollment() {
     let identity_layout = tracedecay_runtime_core::storage::profile_sharded_layout(
         &project_root,
         &profile_root,
-        &tracedecay_runtime_core::storage::EnrollmentMarker {
-            project_id: project_id.to_string(),
-            storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
-        },
+        project_id,
     )
     .unwrap();
 
@@ -169,10 +163,7 @@ async fn discover_project_root_with_identity_does_not_bind_non_git_child_to_pare
     let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
         &parent_root,
         &profile_root,
-        &tracedecay_runtime_core::storage::EnrollmentMarker {
-            project_id: project_id.to_string(),
-            storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
-        },
+        project_id,
     )
     .unwrap();
     fs::create_dir_all(layout.graph_db_path.parent().unwrap()).unwrap();

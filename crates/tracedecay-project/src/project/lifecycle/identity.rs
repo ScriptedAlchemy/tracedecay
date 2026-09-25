@@ -77,6 +77,7 @@ impl TraceDecay {
         allow_default_identity: bool,
         adoption: &MovedStoreAdoption,
     ) -> Result<StoreLayout> {
+        storage::refuse_retired_checkout_layout(project_root)?;
         let profile_root = open_options.resolved_profile_root()?;
         let mut selected = storage::resolve_persisted_layout(project_root, &profile_root)?;
         // Every linked worktree resolves through its repository, attached or
@@ -108,10 +109,7 @@ impl TraceDecay {
             selected = Some(storage::profile_sharded_layout(
                 project_root,
                 &profile_root,
-                &storage::EnrollmentMarker {
-                    project_id: resolution.project.project_id,
-                    storage_mode: storage::StorageMode::ProfileSharded,
-                },
+                &resolution.project.project_id,
             )?);
         }
 
@@ -331,5 +329,43 @@ mod tests {
         .await
         .expect("a throwaway profile still admits throwaway roots");
         assert!(layout.data_root.starts_with(hermetic.path()));
+    }
+
+    #[tokio::test]
+    async fn first_touch_refuses_a_retired_checkout_enrollment_marker() {
+        let project = tempfile::TempDir::new().expect("project");
+        let hermetic = tempfile::TempDir::new().expect("hermetic profile");
+        let options = TraceDecayOpenOptions {
+            profile_root: Some(hermetic.path().join("profile")),
+            global_db_path: Some(hermetic.path().join("profile/registry.db")),
+        };
+        std::fs::create_dir_all(project.path().join(".tracedecay")).expect("retired dir");
+        std::fs::write(
+            project.path().join(".tracedecay/enrollment.json"),
+            r#"{"project_id":"proj_retired","storage_mode":"profile_sharded"}"#,
+        )
+        .expect("retired enrollment marker");
+
+        let error = TraceDecay::resolve_store_layout_for_authority(
+            project.path(),
+            &options,
+            None,
+            true,
+            &MovedStoreAdoption::Never,
+        )
+        .await
+        .expect_err("a retired checkout layout must be refused, not ignored");
+
+        assert_eq!(
+            error
+                .reset_required_context()
+                .map(|(authority, _)| authority),
+            Some("project store"),
+            "{error:?}"
+        );
+        assert!(
+            !hermetic.path().join("profile/projects").exists(),
+            "refusal must mint no store"
+        );
     }
 }

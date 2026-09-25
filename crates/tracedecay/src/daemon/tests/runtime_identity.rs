@@ -153,17 +153,6 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
 
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&primary, &client_identity).await;
-    // A user leftover from before the working-tree cutover: a stale legacy
-    // enrollment file inside the linked worktree. Nothing writes these
-    // anymore; routing must ignore it because the repository identity
-    // resolves first.
-    let stale_project_id = "proj_stale_linked_worktree";
-    std::fs::create_dir_all(linked.join(".tracedecay")).expect("legacy marker dir");
-    std::fs::write(
-        linked.join(".tracedecay/enrollment.json"),
-        format!("{{\"project_id\":\"{stale_project_id}\",\"storage_mode\":\"profile_sharded\"}}"),
-    )
-    .expect("write stale legacy linked-worktree marker");
     let _database_scope =
         enter_test_daemon_database_scope(&profile_root, "shared worktree authority");
     let engine = test_daemon_engine_for_profile(&profile_root);
@@ -230,13 +219,6 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
         primary_graph.store_layout().graph_db_path,
         linked_graph.store_layout().graph_db_path,
         "both exact worktree views must derive their database authority from the canonical layout locator"
-    );
-    assert!(
-        !profile_root
-            .join("projects")
-            .join(stale_project_id)
-            .exists(),
-        "a stale worktree-local marker must never create or open a second project store"
     );
 
     // `f347a0a46` ("fix(index): require opt-in for linked worktree scopes")
@@ -468,12 +450,6 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
         tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::RunningNotified
             | tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::Exiting
     ));
-    assert!(
-        std::fs::read_to_string(linked.join(".tracedecay/enrollment.json"))
-            .expect("read linked legacy marker")
-            .contains(stale_project_id),
-        "routing must ignore, not rewrite or delete, a stale legacy worktree-local marker"
-    );
     // Every whole-worktree demand the daemon raised for the linked route on
     // its own, both full servers' startup catch-up and the `workspaceOpen`
     // hook above, is automatic and stays behind the watch opt-in, so the

@@ -232,8 +232,7 @@ impl TraceDecay {
 
     /// Initializes a new `TraceDecay` project at the given root.
     ///
-    /// Initializes the graph and its durable configuration revision. It never
-    /// creates or rewrites legacy `config.json`.
+    /// Initializes the graph and its durable configuration revision.
     #[hotpath::skip]
     pub async fn init(project_root: &Path) -> Result<Self> {
         Self::init_with_options(project_root, TraceDecayOpenOptions::default()).await

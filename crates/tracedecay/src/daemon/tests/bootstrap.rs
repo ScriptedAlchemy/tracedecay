@@ -240,14 +240,10 @@ pub(super) fn enroll_project_on_disk_only(
         .expect("repository identity marker"),
         "fixture repository must accept an identity marker"
     );
-    let marker = tracedecay_runtime_core::storage::EnrollmentMarker {
-        project_id: project_id.to_owned(),
-        storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
-    };
     let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
         project_root,
         profile_root,
-        &marker,
+        project_id,
     )
     .expect("layout");
     std::fs::create_dir_all(&layout.data_root).expect("profile store root");
@@ -446,14 +442,10 @@ fn enroll_nongit_project_on_disk(
     profile_root: &std::path::Path,
     project_id: &str,
 ) -> tracedecay_runtime_core::storage::StoreLayout {
-    let marker = tracedecay_runtime_core::storage::EnrollmentMarker {
-        project_id: project_id.to_owned(),
-        storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
-    };
     let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
         project_root,
         profile_root,
-        &marker,
+        project_id,
     )
     .expect("nongit layout");
     std::fs::create_dir_all(&layout.data_root).expect("profile store root");
@@ -889,15 +881,9 @@ async fn interrupted_moved_nongit_remap_resumes_on_next_explicit_init() {
     std::fs::rename(&original, &moved).expect("move nongit project");
     // Simulate the interruption: the remap wrote the shard manifest for the
     // new root but crashed before the registry upsert.
-    let torn_layout = tracedecay_runtime_core::storage::profile_sharded_layout(
-        &moved,
-        &profile_root,
-        &tracedecay_runtime_core::storage::EnrollmentMarker {
-            project_id: project_id.to_owned(),
-            storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
-        },
-    )
-    .expect("layout for the interrupted remap");
+    let torn_layout =
+        tracedecay_runtime_core::storage::profile_sharded_layout(&moved, &profile_root, project_id)
+            .expect("layout for the interrupted remap");
     tracedecay_runtime_core::storage::write_store_manifest(&torn_layout)
         .expect("journal manifest write");
 

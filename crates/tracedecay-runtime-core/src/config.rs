@@ -44,8 +44,9 @@ pub fn holds_cargo_profile_dir(target_dir: &Path) -> bool {
         .any(|profile| target_dir.join(profile).is_dir())
 }
 
-/// New runtime storage lives in the user-level profile shard. The project root
-/// only carries lightweight marker/config files under `.tracedecay/`.
+/// A root's `.tracedecay/` directory. Runtime storage lives in the profile
+/// shard; a checkout's copy only holds the retired layout that
+/// [`crate::storage::refuse_retired_checkout_layout`] refuses.
 pub fn get_tracedecay_dir(project_root: &Path) -> PathBuf {
     project_root.join(TRACEDECAY_DIR)
 }

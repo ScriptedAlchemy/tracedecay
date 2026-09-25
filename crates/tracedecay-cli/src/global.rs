@@ -4,7 +4,9 @@ use crate::{commands::daemon_tool_json, current_unix_timestamp};
 
 pub(crate) use tracedecay_runtime_core::storage::{ProjectStorageLocation, ProjectStorageStatus};
 
-pub(crate) fn classify_project_storage(project_root: &Path) -> ProjectStorageLocation {
+pub(crate) fn classify_project_storage(
+    project_root: &Path,
+) -> tracedecay_domain::errors::Result<ProjectStorageLocation> {
     tracedecay_runtime_core::storage::classify_project_storage(project_root)
 }
 
@@ -15,9 +17,8 @@ pub(crate) async fn classify_project_storage_with_registry(
     >,
     profile_root: Option<&Path>,
 ) -> tracedecay_domain::errors::Result<ProjectStorageLocation> {
-    let location = classify_project_storage(project_root);
     let (Some(registry), Some(profile_root)) = (registry, profile_root) else {
-        return Ok(location);
+        return classify_project_storage(project_root);
     };
     registry
         .classify_project_storage(project_root, profile_root)
@@ -377,7 +378,7 @@ pub(crate) fn print_flash_warning(all: bool, targets: &[ProjectStorageLocation])
     }
     eprintln!();
     if !all && targets.is_empty() {
-        eprintln!("  \x1b[33m(no project .tracedecay directories found)\x1b[0m");
+        eprintln!("  \x1b[33m(no project stores found)\x1b[0m");
     } else if !targets.is_empty() {
         eprintln!("Targets:");
         for t in targets {
@@ -386,9 +387,6 @@ pub(crate) fn print_flash_warning(all: bool, targets: &[ProjectStorageLocation])
                 t.data_root.display(),
                 t.status.label()
             );
-            if let Some(marker_root) = &t.marker_root {
-                eprintln!("    marker: {}", marker_root.display());
-            }
         }
     }
     eprintln!();

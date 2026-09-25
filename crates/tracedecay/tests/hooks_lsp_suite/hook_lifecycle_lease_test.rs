@@ -448,10 +448,7 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
             &project,
             &home.join(".tracedecay"),
-            &tracedecay_runtime_core::storage::EnrollmentMarker {
-                project_id,
-                storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
-            },
+            &project_id,
         )
         .unwrap();
         tracedecay_agent_hosts::hooks::publish_hook_bindings(&tracedecay::hook_runtime(), &layout)

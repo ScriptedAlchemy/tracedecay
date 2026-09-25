@@ -190,10 +190,10 @@ pub fn runtime_configuration_for_layout(
 /// paths that must never invent authority, this is the daemon authority path:
 /// the daemon owns the durable configuration store, so a registered project that
 /// simply has not been opened in this process (a first operation, or the first
-/// after a daemon restart) is resolved and pinned rather than rejected. It never
-/// consults legacy `config.json` input. A cold cache adopts the durable current
-/// revision through the same canonical open path as project open, so a fresh
-/// store mints the sole canonical initial revision instead of failing; an
+/// after a daemon restart) is resolved and pinned rather than rejected. A cold
+/// cache adopts the durable current revision through the same canonical open
+/// path as project open, so a fresh store mints the sole canonical initial
+/// revision instead of failing; an
 /// initialized-but-unreadable store still yields a typed authority error rather
 /// than a fabricated default authority.
 pub async fn resolve_runtime_configuration_for_registered_database(
