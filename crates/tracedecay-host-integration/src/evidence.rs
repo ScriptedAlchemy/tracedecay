@@ -182,6 +182,13 @@ pub(crate) const HOST_REGISTRATIONS: &[HostRegistrationDescriptor] = host_regist
         Hook => "copilot_host_hook_surface_absent_v1",
         Mcp => "src/agents/copilot.rs",
     }
+    // Pi's extension registers the tracedecay tool bridge and the lifecycle
+    // hooks in one file; both routes cite it. No MCP route exists: Pi has no
+    // MCP server admission path, matching the capability row.
+    Pi {
+        Cli => "plugin/pi/index.ts",
+        Hook => "plugin/pi/index.ts",
+    }
 };
 
 /// Registration routes and their evidence for one stock host, used by
@@ -421,7 +428,8 @@ pub fn stock_host_native_fixture_evidence_from_embedded_assets(
         | HostKindV1::RooCode
         | HostKindV1::Kilo
         | HostKindV1::Gemini
-        | HostKindV1::Copilot => return None,
+        | HostKindV1::Copilot
+        | HostKindV1::Pi => return None,
     };
     let bytes = assets
         .native_fixtures

@@ -1,7 +1,7 @@
 # TraceDecay Plugin Bundle
 
 This source tree builds the TraceDecay integrations for Claude Code, Codex,
-Cursor, Kimi Code, and OpenCode. The installed bundles expose a host-specific MCP server
+Cursor, Kimi Code, OpenCode, and Pi. The installed bundles expose a host-specific MCP server
 key (`graph` for Claude/Codex, `tracedecay` for Cursor, Kimi Code, and OpenCode), shared
 workflow skills, and host-specific lifecycle hooks. Each hook is a bounded
 daemon-admission adapter; capture, sync, compaction, and advisory work stay in
@@ -53,6 +53,11 @@ never a doubled `tracedecay`.
 - `opencode/`: OpenCode native plugin (`tracedecay.ts`), MCP companion
   (`tracedecay-mcp.ts`), and registration JSON (`opencode.registration.json`).
   OpenCode has no `plugin.json`; the host discovers the TypeScript module.
+- `pi/`: the Pi extension (`index.ts`) plus its `package.json` and the
+  `tracedecay-cli` routing skill. Pi has no MCP route: the extension registers
+  the `tracedecay_*` graph tools and lifecycle hooks inside the Pi process
+  over the CLI bridge, so the installer renders the resolved binary path into
+  the extension source exactly like the OpenCode plugin renderer.
 - `README-claude.md`, `README-codex.md`, `README-cursor.md`, `README-kimi.md`:
   host README files, deployed as `README.md`.
 - `README-opencode.md`: OpenCode host README. It is source documentation;

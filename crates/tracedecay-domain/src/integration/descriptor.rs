@@ -200,7 +200,8 @@ impl HostKindV1 {
             | Self::Vibe
             | Self::ClineFamily
             | Self::Gemini
-            | Self::Copilot => None,
+            | Self::Copilot
+            | Self::Pi => None,
             Self::Cline => Some(NativeHostIdentityV1::Cline),
             Self::RooCode => Some(NativeHostIdentityV1::RooCode),
             Self::Kilo => Some(NativeHostIdentityV1::Kilo),
@@ -404,6 +405,19 @@ pub fn host_descriptor_v1(host: HostKindV1) -> HostDescriptorV1 {
             "copilot",
             NotApplicable,
             vec![ContextMcp],
+            ManagedEmbedded,
+            Managed,
+            HostProjectRegistrationPathV1::Unavailable,
+        ),
+        // Pi registers tools, hooks, and skills through its extension API in
+        // `~/.pi/agent/extensions`; there is no MCP route, so the component
+        // set is Core + Agent only. No project-local registration route for
+        // now (`.pi/extensions` is exercised by the operator today).
+        HostKindV1::Pi => (
+            "pi",
+            "pi",
+            NotApplicable,
+            vec![Core, Agent],
             ManagedEmbedded,
             Managed,
             HostProjectRegistrationPathV1::Unavailable,

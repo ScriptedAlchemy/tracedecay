@@ -27,6 +27,7 @@ pub mod kimi;
 pub mod kiro;
 mod mcp_registration;
 pub mod opencode;
+pub mod pi;
 pub mod plugin_bundle;
 pub mod prompt_rules;
 mod text_file_transaction;
@@ -61,6 +62,7 @@ pub use kilo::KiloIntegration;
 pub use kimi::KimiIntegration;
 pub use kiro::KiroIntegration;
 pub use opencode::OpenCodeIntegration;
+pub use pi::PiIntegration;
 pub use roo_code::RooCodeIntegration;
 pub use vibe::VibeIntegration;
 pub use zed::ZedIntegration;
@@ -626,6 +628,7 @@ pub fn get_integration(id: &str) -> Result<Box<dyn AgentIntegration>> {
         "kiro" => Ok(Box::new(KiroIntegration)),
         "kimi" => Ok(Box::new(KimiIntegration)),
         "vibe" => Ok(Box::new(VibeIntegration)),
+        "pi" => Ok(Box::new(PiIntegration)),
         _ => Err(TraceDecayError::Config {
             message: format!(
                 "unknown agent: \"{id}\". Available agents: {}",
@@ -654,6 +657,7 @@ pub fn all_integrations() -> Vec<Box<dyn AgentIntegration>> {
         Box::new(KiroIntegration),
         Box::new(KimiIntegration),
         Box::new(VibeIntegration),
+        Box::new(PiIntegration),
     ]
 }
 
@@ -676,6 +680,7 @@ pub fn available_integrations() -> Vec<&'static str> {
         "kiro",
         "kimi",
         "vibe",
+        "pi",
     ]
 }
 
@@ -698,6 +703,7 @@ pub fn integration_id_for_host(host: host_bundle::HostKindV1) -> &'static str {
         host_bundle::HostKindV1::OpenCode => "opencode",
         host_bundle::HostKindV1::Gemini => "gemini",
         host_bundle::HostKindV1::Copilot => "copilot",
+        host_bundle::HostKindV1::Pi => "pi",
     }
 }
 
