@@ -82,6 +82,56 @@ pub fn run_serve_runtime(
     path_arg: Option<&OsStr>,
     initialize_params: Value,
 ) -> Output {
+    run_serve_requests(
+        home,
+        cwd,
+        path_arg,
+        &[
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": initialize_params
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "tracedecay_runtime",
+                    "arguments": { "format": "json" }
+                }
+            }),
+        ],
+    )
+}
+
+/// The request lines [`assert_unenrolled_cwd_serve_session`] checks:
+/// `initialize` (id 1), a project-bound `tools/call` (id 2), `tools/list`
+/// (id 3), in the order a host issues them.
+#[cfg(unix)]
+pub fn unenrolled_cwd_serve_requests() -> [Value; 3] {
+    [
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
+        json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list" }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": { "name": "tracedecay_runtime", "arguments": { "format": "json" } }
+        }),
+    ]
+}
+
+/// Spawns `tracedecay serve` from `cwd` (optionally with `--path`), writes
+/// each JSON-RPC `request` as one stdio line, and returns the process output
+/// once stdin closes.
+pub fn run_serve_requests(
+    home: &Path,
+    cwd: &Path,
+    path_arg: Option<&OsStr>,
+    requests: &[Value],
+) -> Output {
     let mut command = tracedecay_command_with_home(home);
     command.arg("serve");
     if let Some(path) = path_arg {
@@ -100,34 +150,26 @@ pub fn run_serve_runtime(
 
     {
         let stdin = child.stdin_mut().expect("stdin should be piped");
-        let _ = writeln!(
-            stdin,
-            "{}",
-            json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": initialize_params
-            })
-        );
-        let _ = writeln!(
-            stdin,
-            "{}",
-            json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": {
-                    "name": "tracedecay_runtime",
-                    "arguments": { "format": "json" }
-                }
-            })
-        );
+        for request in requests {
+            let _ = writeln!(stdin, "{request}");
+        }
     }
 
     child
         .wait_with_output(SERVE_CHILD_TIMEOUT)
         .expect("tracedecay serve should exit after stdin closes")
+}
+
+/// The JSON-RPC response line with the given `id`, or a panic naming the
+/// full stdout so a missing response is diagnosable.
+#[cfg(unix)]
+pub fn json_rpc_response(stdout: &[u8], id: i64) -> Value {
+    let stdout = String::from_utf8_lossy(stdout);
+    stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|response| response.get("id") == Some(&json!(id)))
+        .unwrap_or_else(|| panic!("missing response id {id} in stdout:\n{stdout}"))
 }
 
 #[cfg(unix)]
@@ -136,6 +178,59 @@ pub fn canonical_path_string(path: &Path) -> String {
         .unwrap_or_else(|_| path.to_path_buf())
         .to_string_lossy()
         .into_owned()
+}
+
+/// Asserts one `serve` session against a daemon whose handshake route is
+/// `cwd`, a directory the profile never enrolled: `initialize` (id 1) and
+/// `tools/list` (id 3) answer normally, and the `tools/call` (id 2) is the
+/// typed `project_not_enrolled` refusal naming `cwd` and the repair. A
+/// dropped daemon connection, a transport-flavoured error, or manufactured
+/// project state under `cwd` all fail here.
+#[cfg(unix)]
+pub fn assert_unenrolled_cwd_serve_session(output: &Output, cwd: &Path) {
+    assert!(
+        output.status.success(),
+        "tracedecay serve failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let initialize = json_rpc_response(&output.stdout, 1);
+    assert!(
+        initialize.get("error").is_none(),
+        "initialize must succeed for an unenrolled cwd: {initialize}"
+    );
+    assert_eq!(initialize["result"]["serverInfo"]["name"], "tracedecay");
+
+    let tools = json_rpc_response(&output.stdout, 3);
+    assert!(
+        tools["result"]["tools"]
+            .as_array()
+            .is_some_and(|tools| !tools.is_empty()),
+        "tools/list must advertise the catalog before a project exists: {tools}"
+    );
+
+    let refusal = json_rpc_response(&output.stdout, 2);
+    let error = &refusal["error"];
+    assert_eq!(
+        error["data"]["reason_code"], "project_not_enrolled",
+        "tools/call must answer with the typed not-enrolled state: {refusal}"
+    );
+    assert_eq!(error["data"]["retryable"], false);
+    let message = error["message"].as_str().unwrap_or_default();
+    let cwd = canonical_existing_path(cwd);
+    assert!(
+        message.contains(&cwd.to_string_lossy().into_owned())
+            && message.contains("tracedecay init"),
+        "the refusal must name the discovered directory and the repair: {refusal}"
+    );
+    assert!(
+        !message.contains("daemon closed the connection"),
+        "a missing project must not surface as a transport failure: {refusal}"
+    );
+    assert!(
+        !cwd.join(".tracedecay").exists(),
+        "an unenrolled serve session must not manufacture project state"
+    );
 }
 
 /// Extracts `database.project_root` from the `tracedecay_runtime` tools/call

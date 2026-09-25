@@ -69,6 +69,12 @@ pub const PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE: &str = "project_server_re
 pub const PROJECT_OPEN_TASK_CAPACITY_REASON_CODE: &str = "project_open_task_capacity_reached";
 /// Typed reason the cached project-server table is full.
 pub const PROJECT_SERVER_CAPACITY_REASON_CODE: &str = "project_server_capacity_reached";
+/// Typed reason a handshake route names a directory the authenticated profile
+/// has not enrolled (no `tracedecay init`, no registry row, no durable store).
+/// It is a client state, not a daemon failure: `initialize` and `tools/list`
+/// still answer, and every `tools/call` re-derives this refusal until
+/// enrollment succeeds.
+pub const PROJECT_NOT_ENROLLED_REASON_CODE: &str = "project_not_enrolled";
 #[cfg(unix)]
 const TOOL_LIST_CHANGED_METHOD: &str = "notifications/tools/list_changed";
 #[cfg(unix)]
@@ -150,6 +156,14 @@ pub(crate) fn error_is_project_warming(error: &TraceDecayError) -> bool {
     matches!(
         error.project_route_context(),
         Some((PROJECT_WARMING_REASON_CODE, true, _))
+    )
+}
+
+/// True when route admission refused the handshake path as not enrolled.
+pub(crate) fn error_is_project_not_enrolled(error: &TraceDecayError) -> bool {
+    matches!(
+        error.project_route_context(),
+        Some((PROJECT_NOT_ENROLLED_REASON_CODE, false, _))
     )
 }
 
@@ -358,7 +372,8 @@ mod project_open_handshake;
 #[cfg(test)]
 use project_open_handshake::is_missing_index_error;
 use project_open_handshake::{
-    open_project_for_handshake, project_open_error_response, write_project_open_error,
+    initialize_project_open_error, open_project_for_handshake, project_open_error_response,
+    write_project_open_error,
 };
 mod project_open_orchestration;
 mod project_routing;

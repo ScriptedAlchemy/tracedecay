@@ -136,16 +136,14 @@ pub(super) fn run_git(root: &std::path::Path, args: &[&str]) {
 
 #[cfg(unix)]
 fn assert_missing_enrollment_admission(error: &TraceDecayError) {
-    match error {
-        TraceDecayError::Config { message } => {
-            assert!(
-                message.contains("is not enrolled"),
-                "expected missing-enrollment admission error, got: {error}"
-            );
-        }
-        // Add the typed MissingEnrollment admission variant here once exposed.
-        other => panic!("expected missing-enrollment admission error, got: {other}"),
-    }
+    assert!(
+        super::super::error_is_project_not_enrolled(error),
+        "expected typed missing-enrollment admission error, got: {error}"
+    );
+    assert!(
+        error.to_string().contains("tracedecay init"),
+        "the refusal must name the repair: {error}"
+    );
 }
 
 #[cfg(unix)]

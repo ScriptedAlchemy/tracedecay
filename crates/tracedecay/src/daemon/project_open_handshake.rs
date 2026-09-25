@@ -227,6 +227,20 @@ fn tool_call_open_refusal_response(
     ))
 }
 
+/// Which route-admission failures turn an MCP `initialize` into an error.
+///
+/// A route the profile has not enrolled is the client's state, not an open
+/// failure: the handshake completes (the host sees the catalog) and every
+/// later `tools/call` re-derives the typed [`PROJECT_NOT_ENROLLED_REASON_CODE`]
+/// refusal until `tracedecay init` or a corrected `--path` makes admission
+/// succeed. Propagating it here used to close the connection with no
+/// response, which the proxy could only report as an unknown transport
+/// outcome. Every other refusal (deferred discovery, remote deletion, reset
+/// required) still answers `initialize` as the typed open error it is.
+pub(super) fn initialize_project_open_error(error: TraceDecayError) -> Option<TraceDecayError> {
+    (!error_is_project_not_enrolled(&error)).then_some(error)
+}
+
 pub(super) fn project_open_error_response(
     id: serde_json::Value,
     error: &TraceDecayError,
@@ -236,7 +250,9 @@ pub(super) fn project_open_error_response(
             reason_code,
             retryable,
             detail,
-        } if project_open_retryable_reason(reason_code) => {
+        } if project_open_retryable_reason(reason_code)
+            || reason_code == PROJECT_NOT_ENROLLED_REASON_CODE =>
+        {
             let mut data = json!({
                 "reason_code": reason_code,
                 "retryable": retryable,

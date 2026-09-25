@@ -5,6 +5,145 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.50](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.50...v1.0.0-beta.50) (2026-09-25)
+
+
+### ⚠ BREAKING CHANGES
+
+* **sessions:** one summary authority for LCM reads
+* **mcp:** serve graph and port reads through their daemon owner
+* **sessions:** `TRACEDECAY_CURSOR_AGENT_BIN` and `TRACEDECAY_CODEX_BIN` no longer select the LCM summarizer executable; configure `lcm.summarizer_executables.v1` on the project layer instead.
+* **sessions:** store message text once in lcm_raw_messages
+* **cli:** drop the automation config scope flag
+* **dashboard:** delete the Sigma graph renderer
+* **automation:** refuse managed skill records without timestamps
+* **retention:** stop collecting per-scope segment directories
+* **fs:** refuse unsafe roots instead of healing old layouts
+* **search-eval:** evaluate on the production lexical artifact
+* **sessions:** prune settled cursor advance rows
+* **automation:** one wire form for skips and skill proposals
+* **fs:** unlock file leases before close; continue legacy removal
+* **dashboard:** generated contracts only; docs and SDK
+* **daemon:** collapse dual daemon, MCP and contract paths
+* **hosts:** one install path; drop backups and old cleanup
+* **storage:** delete legacy store formats and upgrade paths
+* **code-index:** shrink index artifacts, share across worktrees
+
+### Features
+
+* **dashboard:** agents rings and timeline; fitted and matrix work views ([a757213](https://github.com/ScriptedAlchemy/tracedecay/commit/a7572132fe761531428b507cdf91939c23a674af))
+* **dashboard:** agents topology reads per-node provider usage ([25167d6](https://github.com/ScriptedAlchemy/tracedecay/commit/25167d69de58db017fbf2f3bd38f299038dc5c3f))
+* **dashboard:** brain registry as a measured point field ([0b84bab](https://github.com/ScriptedAlchemy/tracedecay/commit/0b84bab7b87090fd49cff34c5f449265d7ff2414))
+* **dashboard:** code cortex as a relief field ([dcca5df](https://github.com/ScriptedAlchemy/tracedecay/commit/dcca5dfe0e9245a9b90728b320bf3e8066737f8a))
+* **dashboard:** delivery lanes inbox and transit journey ([4ac9710](https://github.com/ScriptedAlchemy/tracedecay/commit/4ac9710d9cd873d732d04cf6cc295288a167818c))
+* **dashboard:** explore agents and work renderers ([1df028f](https://github.com/ScriptedAlchemy/tracedecay/commit/1df028febcac77891351790fe5abce3eb31248ac))
+* **dashboard:** explore three brain field renderers ([94b51f1](https://github.com/ScriptedAlchemy/tracedecay/commit/94b51f1c44988cdaa7ee1e2a9653218281636c69))
+* **dashboard:** explore three cortex renderers ([e8e1191](https://github.com/ScriptedAlchemy/tracedecay/commit/e8e11918c0b921ce51d1958209a9eba24bc4ea2f))
+* **dashboard:** explore three delivery renderers ([49b0bae](https://github.com/ScriptedAlchemy/tracedecay/commit/49b0baeb61ff231c1664a6e11340d374a29e0f03))
+* **dashboard:** explore three knowledge renderers ([eb3726f](https://github.com/ScriptedAlchemy/tracedecay/commit/eb3726fc94bb2a958dc23935b2653768fa1eac8d))
+* **dashboard:** explore three loom scene renderers ([73b66dd](https://github.com/ScriptedAlchemy/tracedecay/commit/73b66dd89cdccf3bf8eaa24d6db34c6550765982))
+* **dashboard:** explore three trace renderers ([052849e](https://github.com/ScriptedAlchemy/tracedecay/commit/052849eeb487dfa39c6df3e979e24409d0e288e8))
+* **dashboard:** knowledge facts as provenance cameras ([46d0132](https://github.com/ScriptedAlchemy/tracedecay/commit/46d0132ceccd623711ba14ecbc3989135da1b0e8))
+* **dashboard:** loom branches from session parentage ([d89196b](https://github.com/ScriptedAlchemy/tracedecay/commit/d89196ba162d0d757c63412f29f772025f638065))
+* **dashboard:** one luminous loom scene with density zoom ([6ab055c](https://github.com/ScriptedAlchemy/tracedecay/commit/6ab055c8b42ffe5e9e520379db2e157f8a43c5ea))
+* **dashboard:** trace as a symbol anatomy plate ([ec7949c](https://github.com/ScriptedAlchemy/tracedecay/commit/ec7949ca909a9c433fe23f59dee9694de82ee1c8))
+* **loom:** carry session parentage and edit timestamps on the wire ([9323d44](https://github.com/ScriptedAlchemy/tracedecay/commit/9323d44ba03314d9c70935f6cb204c411e7ed2d0))
+* **sessions:** record edit times and tool-use ids on the wire ([8806c07](https://github.com/ScriptedAlchemy/tracedecay/commit/8806c07657e1425fdf90c8aada674f00d65a63b0))
+
+
+### Bug Fixes
+
+* **automation:** refuse managed skill records without timestamps ([fac6223](https://github.com/ScriptedAlchemy/tracedecay/commit/fac62231df31fce19413527a45b23835ae8dd0d9))
+* **automation:** report invalid skill records as one config error ([ef5fe39](https://github.com/ScriptedAlchemy/tracedecay/commit/ef5fe39156db49ff46d6908be75e875c912b29d1))
+* **bench:** clean hosts after late census failures ([cee5b99](https://github.com/ScriptedAlchemy/tracedecay/commit/cee5b99f3ea2bc90e7ea748fa80ca1679e11faeb))
+* **bench:** count portable process groups exactly ([76a458c](https://github.com/ScriptedAlchemy/tracedecay/commit/76a458c9135b69beae485938307eb95ade332253))
+* **bench:** count portable process groups exactly ([1fc5abd](https://github.com/ScriptedAlchemy/tracedecay/commit/1fc5abdd98b749ce81aeed772b996e6015e4be71))
+* **code-index:** scope receiver-call revision to Rust extraction ([859df31](https://github.com/ScriptedAlchemy/tracedecay/commit/859df31713c4bc8b5867e3d02510716ba92fc96e))
+* **contracts:** page callees at the lane budget; probe per-op pages ([74146ce](https://github.com/ScriptedAlchemy/tracedecay/commit/74146ce69270dca989acac6c001f5a7b6ed6e7e4))
+* **daemon:** await retryable cold-root admission ([#1962](https://github.com/ScriptedAlchemy/tracedecay/issues/1962)) ([7130b6f](https://github.com/ScriptedAlchemy/tracedecay/commit/7130b6fd124f9b1d7e4432708ec36ca5e8e88927))
+* **daemon:** close released store runtimes at shutdown ([6dd079b](https://github.com/ScriptedAlchemy/tracedecay/commit/6dd079b370a66ede845e1dbecb04254d77592ae1))
+* **daemon:** keep live operation streams across composition shutdown ([c761af6](https://github.com/ScriptedAlchemy/tracedecay/commit/c761af61dbdeefd709bc55de8483611e52586247))
+* **daemon:** release profile and scout store leases at shutdown ([dbb14c6](https://github.com/ScriptedAlchemy/tracedecay/commit/dbb14c68123872af7c7fded0de0cde3172412dc2))
+* **daemon:** unify Windows project root identity ([#1969](https://github.com/ScriptedAlchemy/tracedecay/issues/1969)) ([ca4ebd1](https://github.com/ScriptedAlchemy/tracedecay/commit/ca4ebd1a45615abfe8fb494c871f3608a6fd5b95))
+* **dashboard:** 44px targets and 320px reflow on canvas workspaces ([127c7f2](https://github.com/ScriptedAlchemy/tracedecay/commit/127c7f2c2d48eb3675946d6edf741b046584c84a))
+* **dashboard:** a camera frame with withheld facts comes first ([35c35a8](https://github.com/ScriptedAlchemy/tracedecay/commit/35c35a8dce6d16e06b19a2eb3d8b2305c4a42ca1))
+* **dashboard:** contain the Brain field at 320 ([6e74ffe](https://github.com/ScriptedAlchemy/tracedecay/commit/6e74ffe56679bec3f092e56977f9445cb7be904f))
+* **dashboard:** Delivery hint strip no longer covers the last lane ([89dd8d1](https://github.com/ScriptedAlchemy/tracedecay/commit/89dd8d1ffc5bef9cc9ddaef1128f0bc276a35e5a))
+* **dashboard:** draw a withheld fact and count only undrawn ones ([a761c4c](https://github.com/ScriptedAlchemy/tracedecay/commit/a761c4c4c410a10801ec1972c2224b01505ee746))
+* **dashboard:** draw kinds from a fixed cool ordinal ramp ([e5a1f00](https://github.com/ScriptedAlchemy/tracedecay/commit/e5a1f0037862b9adbf56f7d6d5bfd5a2f33a9dee))
+* **dashboard:** fit the cortex camera once, not from k = 1 ([9712d72](https://github.com/ScriptedAlchemy/tracedecay/commit/9712d721d537a8033021326c273b6b09fc22b62f))
+* **dashboard:** give observatory titles and lane select 44px targets ([8ded446](https://github.com/ScriptedAlchemy/tracedecay/commit/8ded446eb8f921d7b01be507d461dfa5f9882592))
+* **dashboard:** give workflows panel radii and subtle hairlines ([633844c](https://github.com/ScriptedAlchemy/tracedecay/commit/633844c538f85eb97dc5be16102c566f2c79e388))
+* **dashboard:** keep night ink inside the optical window in light ([4f9ee93](https://github.com/ScriptedAlchemy/tracedecay/commit/4f9ee936af8d1fb1823586696ae23f53e2d4d051))
+* **dashboard:** legend sentences in Plex Sans, values in Mono ([2ff3548](https://github.com/ScriptedAlchemy/tracedecay/commit/2ff3548e1e805ebdecf15be3a0677a04cad32e08))
+* **dashboard:** night ink for the cortex HUD in light ([aef4760](https://github.com/ScriptedAlchemy/tracedecay/commit/aef476099976046262402bfff911416750c7a933))
+* **dashboard:** one hover, selection and grade language on canvases ([3e700a3](https://github.com/ScriptedAlchemy/tracedecay/commit/3e700a37af4f09c35efaab66b01667a303fba9a9))
+* **dashboard:** one Loom tab stop with an arrow-key event walk ([bfc5855](https://github.com/ScriptedAlchemy/tracedecay/commit/bfc58555b31815cb8eb957656a72aa4736a3c544))
+* **dashboard:** reflow Loom's zoom and tail controls at 320 ([338ffb7](https://github.com/ScriptedAlchemy/tracedecay/commit/338ffb798957eb4f642d09372fb1b93ee8fb3571))
+* **dashboard:** register the scatter series the memory projection draws ([e553287](https://github.com/ScriptedAlchemy/tracedecay/commit/e553287424d16b0135ece525d8aad3453476c6e8))
+* **dashboard:** restore agents and cortex files swept into 0b84bab7b8 ([cf77177](https://github.com/ScriptedAlchemy/tracedecay/commit/cf771775f9ce346b02aaac7854b2054615e2605d))
+* **dashboard:** restore the cortex relief field reverted by ee7a83f146 ([933858a](https://github.com/ScriptedAlchemy/tracedecay/commit/933858af6a2aedffd2dffd787e34b67892afda6e))
+* **dashboard:** set shell and owned workspaces on 14px body type ([2bb6411](https://github.com/ScriptedAlchemy/tracedecay/commit/2bb6411d6ed5f76ae92e1d7792f34e38cbc4a4c3))
+* **dashboard:** size loom tick pitch to its label ([fbafa57](https://github.com/ScriptedAlchemy/tracedecay/commit/fbafa57f0887ecd68b002753c55eac1d28d79742))
+* **dashboard:** stack the shell register below sm ([c74a0c2](https://github.com/ScriptedAlchemy/tracedecay/commit/c74a0c2e8ad503df5ba46040be2440ee8273c02b))
+* **dashboard:** Work relation kinds ride end markers, not dashes ([1fbc75b](https://github.com/ScriptedAlchemy/tracedecay/commit/1fbc75b687aaa7c675175f71b1564d21cec9065d))
+* **extraction:** keep BASIC underscore names, adjacent C docstrings ([a2d66e7](https://github.com/ScriptedAlchemy/tracedecay/commit/a2d66e738510294d0dc38708eaa91f256bd54fa0))
+* **fs:** unlock file leases before close; continue legacy removal ([0c1e2d1](https://github.com/ScriptedAlchemy/tracedecay/commit/0c1e2d154797d7ac140a5265b568c55b7a14d7bb))
+* **global-db:** type authority schema drift as a reset refusal ([e1182fd](https://github.com/ScriptedAlchemy/tracedecay/commit/e1182fd5cef1c779a995f9d402d44fa70a0b788a))
+* **graph:** disclose incomplete Rust method caller coverage ([4c556ba](https://github.com/ScriptedAlchemy/tracedecay/commit/4c556ba3c0f239b3ef1611b0cff83818e6259f8c))
+* **graph:** report partial callers for unresolved receivers ([6d0329f](https://github.com/ScriptedAlchemy/tracedecay/commit/6d0329fe4f5f58bd9e2a43ae4c813a6a9df0da8a))
+* **graph:** retain parser member identity across Rust call trivia ([a194558](https://github.com/ScriptedAlchemy/tracedecay/commit/a194558d53cd8795e57e659c822f9aed1b6994ad))
+* **graph:** suppress proved call sites from caller omissions ([ce9c043](https://github.com/ScriptedAlchemy/tracedecay/commit/ce9c0431e83541daefc4d24d2a2fa7006a9d715f))
+* **hosts:** activate Gemini's context-MCP component set ([#1977](https://github.com/ScriptedAlchemy/tracedecay/issues/1977)) ([05e0d1e](https://github.com/ScriptedAlchemy/tracedecay/commit/05e0d1e8e220ac90bfa85aa79e13af8a4ac88c90))
+* **hosts:** edit Codex config.toml in place, keep operator bytes ([0b9171f](https://github.com/ScriptedAlchemy/tracedecay/commit/0b9171fdd4f8044b32bb04e496c023d49689998f))
+* **hosts:** edit JSON host configs in place, keep operator bytes ([b3b4229](https://github.com/ScriptedAlchemy/tracedecay/commit/b3b42294452ef28c10fc45139c33fd819c74c937))
+* **hosts:** reinstall a stale same-version Claude plugin cache ([#1976](https://github.com/ScriptedAlchemy/tracedecay/issues/1976)) ([ca0017d](https://github.com/ScriptedAlchemy/tracedecay/commit/ca0017d0e992d1982569702bd5d44b4fdc2b014b))
+* **hosts:** unlock abandoned host config locks explicitly ([759c5a3](https://github.com/ScriptedAlchemy/tracedecay/commit/759c5a340d6d6dc64580cc8d43282b362bdf0ca2))
+* **install:** match release assets without a SIGPIPE-prone pipe ([3c88d55](https://github.com/ScriptedAlchemy/tracedecay/commit/3c88d55c97812e655210c976f137ed226a4e8d87))
+* **install:** match release assets without a SIGPIPE-prone pipe ([51add02](https://github.com/ScriptedAlchemy/tracedecay/commit/51add02e9ecd6efca4a9a4a7b5e238eec471a5eb))
+* **lint:** box oversized results and clear workspace clippy denials ([7b85689](https://github.com/ScriptedAlchemy/tracedecay/commit/7b85689d8cb50509a62a618447b46afad8fafe1a))
+* **mcp:** answer ping on stateless rmcp connections ([aff170d](https://github.com/ScriptedAlchemy/tracedecay/commit/aff170dc588717c7bcf959364edf63e10404d0fc))
+* **mcp:** carry typed tool problems as MCP structured content ([b81a3bd](https://github.com/ScriptedAlchemy/tracedecay/commit/b81a3bd70a913b7c539573a4f1175b28a2dff7c7))
+* **mcp:** drop notifications after a refused rmcp initialize ([d043d74](https://github.com/ScriptedAlchemy/tracedecay/commit/d043d740f3074c9ef5f0f508d30c2b0d01431cd3))
+* **mcp:** treat params emptied by lifted _meta as absent ([9b18616](https://github.com/ScriptedAlchemy/tracedecay/commit/9b18616d79053728d24f7f6dcf39ec52f0c94277))
+* **runtime:** page true relation counts and share tool trailers ([b0a219b](https://github.com/ScriptedAlchemy/tracedecay/commit/b0a219baae95cb04c0c10e5b03ef169be787d1ea))
+* **sessions:** anchor summaries built from summaries ([1c4410d](https://github.com/ScriptedAlchemy/tracedecay/commit/1c4410d5924afa53f1c32e3c126f41235c453d63))
+* **sessions:** resolve summarizer binaries only through configuration ([b418065](https://github.com/ScriptedAlchemy/tracedecay/commit/b4180653f4613895f88b53ddbb00c829ca29a202))
+* **test:** gate the shell summarizer fixtures to Unix ([a72d799](https://github.com/ScriptedAlchemy/tracedecay/commit/a72d7992e5f0034b2e304035a451386d62f2c674))
+* **test:** gate the systemd socket snapshot test to Unix ([d36d4f2](https://github.com/ScriptedAlchemy/tracedecay/commit/d36d4f246bfcf7a4549bb329c1eb6b378b157afd))
+* **test:** isolate response-handle fixture profile ([#1965](https://github.com/ScriptedAlchemy/tracedecay/issues/1965)) ([338773e](https://github.com/ScriptedAlchemy/tracedecay/commit/338773ef9df97e3934d1d759c9ad8b6c0efb395f))
+* **test:** mount the host CLI fixture provisioner on Windows ([423f7c9](https://github.com/ScriptedAlchemy/tracedecay/commit/423f7c9d0e225b8f3853fa8d6c46eb7a32f33e6e))
+* **test:** release production fixture leases ([#1966](https://github.com/ScriptedAlchemy/tracedecay/issues/1966)) ([9dffa1a](https://github.com/ScriptedAlchemy/tracedecay/commit/9dffa1a16f339b221eaa551648425bf2e6cbe7f2))
+* **windows:** compare admitted roots in their published spelling ([434f18d](https://github.com/ScriptedAlchemy/tracedecay/commit/434f18d8498bbfb469201db2edff2aea97a7c822))
+* **windows:** honor held handles in file lifecycle checks ([145ca13](https://github.com/ScriptedAlchemy/tracedecay/commit/145ca1341630d638fd20ccbf7ade73b24a3a0789))
+* **windows:** look up transcript checkpoints by identity key ([4e3da64](https://github.com/ScriptedAlchemy/tracedecay/commit/4e3da64702b6914636dc7a2de3a2d2f56bbfa1c9))
+* **windows:** recover scope retention and long private archives ([#1958](https://github.com/ScriptedAlchemy/tracedecay/issues/1958)) ([348d940](https://github.com/ScriptedAlchemy/tracedecay/commit/348d940b94e0ee298e5e4dd53a3d28b7f418a514))
+* **windows:** recover scope retention and long private archives ([#1958](https://github.com/ScriptedAlchemy/tracedecay/issues/1958)) ([7db00b0](https://github.com/ScriptedAlchemy/tracedecay/commit/7db00b06e080bcbe9b4ff3eb18a25ab10eaa9b0e))
+
+
+### Performance Improvements
+
+* **code-index:** shrink index artifacts, share across worktrees ([a7b08f2](https://github.com/ScriptedAlchemy/tracedecay/commit/a7b08f2032abce63884a4129a2b60aaabe6c88c5))
+* **rusqlite:** retire external-source history incrementally ([65fce46](https://github.com/ScriptedAlchemy/tracedecay/commit/65fce46352fba03e96415db418725bc027503db7))
+* **sessions:** one summary authority for LCM reads ([39523e5](https://github.com/ScriptedAlchemy/tracedecay/commit/39523e5553cedd0bdc2b513c51ba0dcae7ac58ea))
+* **sessions:** prune settled cursor advance rows ([364feb8](https://github.com/ScriptedAlchemy/tracedecay/commit/364feb8e1cd3029149b7f793751c27843fe8e36d))
+* **sessions:** store message text once in lcm_raw_messages ([bee48b9](https://github.com/ScriptedAlchemy/tracedecay/commit/bee48b916456993b2c97afa27eba8dcd851902d1))
+
+
+### Code Refactoring
+
+* **automation:** one wire form for skips and skill proposals ([807fac2](https://github.com/ScriptedAlchemy/tracedecay/commit/807fac208b9c3c1460b04a9ee521358540f30441))
+* **cli:** drop the automation config scope flag ([6688478](https://github.com/ScriptedAlchemy/tracedecay/commit/668847844b9e27b448505e17bf7f84557cb6cfe1))
+* **daemon:** collapse dual daemon, MCP and contract paths ([de31b69](https://github.com/ScriptedAlchemy/tracedecay/commit/de31b6935fe3b8b47b144cca869e6cfb55346c30))
+* **dashboard:** delete the Sigma graph renderer ([1e91ac5](https://github.com/ScriptedAlchemy/tracedecay/commit/1e91ac57b388041a510f7887a3cd3e58baf88354))
+* **dashboard:** generated contracts only; docs and SDK ([e489a10](https://github.com/ScriptedAlchemy/tracedecay/commit/e489a10badbede5407ebe966f148928621da666f))
+* **fs:** refuse unsafe roots instead of healing old layouts ([4b100b2](https://github.com/ScriptedAlchemy/tracedecay/commit/4b100b2fec87782f92fcc7c804e7feb618c4c130))
+* **hosts:** one install path; drop backups and old cleanup ([d69afda](https://github.com/ScriptedAlchemy/tracedecay/commit/d69afda0c2317552e45c0e9ab75adf91ffd23644))
+* **mcp:** serve graph and port reads through their daemon owner ([b0e807f](https://github.com/ScriptedAlchemy/tracedecay/commit/b0e807f118e29be1aebb80d6801e75b79a107833))
+* **retention:** stop collecting per-scope segment directories ([067f3a6](https://github.com/ScriptedAlchemy/tracedecay/commit/067f3a60b5361185a6396aef12e212711776c17f))
+* **search-eval:** evaluate on the production lexical artifact ([671f746](https://github.com/ScriptedAlchemy/tracedecay/commit/671f746f2e34cedc01b8e31ac332daa473988e30))
+* **storage:** delete legacy store formats and upgrade paths ([713e496](https://github.com/ScriptedAlchemy/tracedecay/commit/713e496559dc489d50b35d9f3b0e5ceb65a2e8ea))
+
 ## [0.1.0-beta.50](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.49...v0.1.0-beta.50) (2026-09-22)
 
 
