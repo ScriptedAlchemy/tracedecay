@@ -229,6 +229,69 @@ async fn reconcile_refuses_malformed_state_before_branch_mutation() {
 }
 
 #[tokio::test]
+async fn reconcile_resets_entry_without_head_sha_and_preserves_other_entries() {
+    let data_root = tempfile::tempdir().expect("data root");
+    let repo_root = tempfile::tempdir().expect("repository root");
+    let current = ManagedPr {
+        pr: 3,
+        head_branch: "feature-3".to_owned(),
+        head_sha: "sha-3".to_owned(),
+        worktree: data_root.path().join("pr-worktrees/pr-3"),
+        tracking_ref: "refs/tracedecay/pr/3".to_owned(),
+    };
+    let state_path = data_root.path().join("pr-autotrack.json");
+    std::fs::write(
+        &state_path,
+        serde_json::json!({
+            "managed": {
+                "tracedecay/autotrack/pr/3": current,
+                "tracedecay/autotrack/pr/5": {
+                    "pr": 5,
+                    "head_branch": "feature-5",
+                    "worktree": data_root.path().join("pr-worktrees/pr-5"),
+                    "tracking_ref": "refs/tracedecay/pr/5"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write state without head_sha");
+    let discovery = PrDiscovery {
+        open: vec![DiscoveredPr {
+            number: 3,
+            head_branch: "feature-3".to_owned(),
+            head_sha: "sha-3".to_owned(),
+        }],
+        ..PrDiscovery::default()
+    };
+    let daemon_administration = StoreAdministration::default();
+
+    let report = reconcile_project_with_administration(
+        repo_root.path(),
+        data_root.path(),
+        &discovery,
+        10,
+        PrStoreAdministration::state_only(&daemon_administration),
+    )
+    .await
+    .expect("an entry without head_sha must not block reconciliation");
+
+    assert_eq!(report.failures, Vec::<(String, String)>::new());
+    assert!(report.tracked.is_empty() && report.untracked.is_empty());
+    assert_eq!(report.reset_stale.len(), 1);
+    assert_eq!(report.reset_stale[0].label, "tracedecay/autotrack/pr/5");
+    assert!(report.reset_stale[0].detail.contains("head_sha"));
+    let persisted: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&state_path).expect("read state"))
+            .expect("persisted state is JSON");
+    assert_eq!(
+        persisted["managed"],
+        serde_json::json!({ "tracedecay/autotrack/pr/3": current }),
+        "the reset drops only the stale entry"
+    );
+}
+
+#[tokio::test]
 async fn reconcile_does_not_prepare_new_pr_without_scheduler_activation() {
     let data_root = tempfile::tempdir().unwrap();
     let repo_root = tempfile::tempdir().unwrap();
@@ -1359,6 +1422,7 @@ fn dashboard_managed_summary_reader_matches_canonical_state() {
                 },
             ),
         ]),
+        ..PrAutotrackState::default()
     };
     save_state(data_root.path(), &state).expect("write pr-autotrack state");
 

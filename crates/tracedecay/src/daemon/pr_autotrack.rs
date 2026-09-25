@@ -554,9 +554,21 @@ async fn reconcile_project_with_administration(
     let mut state = load_state(data_root)?;
     let mut report = ReconcileReport {
         skipped_forks: discovery.skipped_forks.clone(),
+        reset_stale: std::mem::take(&mut state.stale),
         ..Default::default()
     };
-    let mut state_dirty = false;
+    let mut state_dirty = !report.reset_stale.is_empty();
+    for stale in &report.reset_stale {
+        log_daemon_event(
+            "pr_autotrack",
+            &[
+                ("project", repo_root.display().to_string()),
+                ("action", "reset_stale".to_string()),
+                ("branch", stale.label.clone()),
+                ("reason", stale.detail.clone()),
+            ],
+        );
+    }
 
     // Desired label → discovered PR.
     let desired: BTreeMap<String, &DiscoveredPr> = discovery
