@@ -816,13 +816,11 @@ fn clone_index_is_ready_when_the_artifact_first_seals() {
         !latest.text_projection_needs_work(),
         "the first seal must leave no clone work behind"
     );
+    let settled = settled_clone_index_status(&latest);
     let tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Ready { observation } =
-        latest.clone_index_status(false, None)
+        settled
     else {
-        panic!(
-            "clone data must be available when the artifact first seals, got {:?}",
-            latest.clone_index_status(false, None)
-        );
+        panic!("clone data must be available when the artifact first seals, got {settled:?}");
     };
     assert!(
         observation
@@ -883,9 +881,7 @@ async fn dashboard_freshness_does_not_join_a_text_projection_slice() {
     while !latest.query_owners_are_ready() {
         latest.advance_text_serving(1).expect("advance text build");
     }
-    // The first status read computes the reader's clone census; warm it so
-    // the timed read below measures only whether it joins the held slot.
-    latest.clone_index_status(false, None);
+    settled_clone_index_status(&latest);
 
     let held_slot = latest.text_projection_build.lock_slot();
     let freshness = tokio::time::timeout(
@@ -901,6 +897,92 @@ async fn dashboard_freshness_does_not_join_a_text_projection_slice() {
     ));
 
     drop(held_slot);
+    registry.shutdown().await;
+}
+
+/// Clone status once the installed artifact's background census has landed.
+fn settled_clone_index_status(
+    latest: &super::super::LatestCodeTextGenerationV1,
+) -> tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1 {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let status = latest.clone_index_status(false, None);
+        if !matches!(
+            status,
+            tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Verifying { .. }
+        ) {
+            return status;
+        }
+        assert!(Instant::now() <= deadline, "the clone census never landed");
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// The clone census validates every stored clone payload, which is
+/// corpus-sized. Status used to compute it inline on the first read after
+/// each artifact install, so one `tracedecay_status` blocked for ~25 s during
+/// the initial build and background re-activation of a full index (#2016).
+/// While the census has not landed, status must answer at once with a typed
+/// in-progress clone state, and report the census once it lands.
+#[tokio::test]
+async fn dashboard_freshness_reports_a_pending_clone_census_without_computing_it() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn alpha() { one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let held_census = super::super::clone_census_gate::hold(store.path());
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount worktree");
+    let latest = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+    while !latest.query_owners_are_ready() {
+        latest.advance_text_serving(1).expect("advance text build");
+    }
+
+    let started = Instant::now();
+    let freshness = tokio::time::timeout(
+        Duration::from_millis(500),
+        registry.dashboard_freshness(fixture.path()),
+    )
+    .await
+    .expect("status must not wait for the clone census")
+    .expect("mounted dashboard freshness");
+    let elapsed = started.elapsed();
+    let Some(tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Verifying {
+        observation,
+    }) = freshness.clone_index
+    else {
+        panic!(
+            "a pending census must read as verifying, got {:?}",
+            freshness.clone_index
+        );
+    };
+    assert_eq!(
+        observation.coverage.source_bodies, None,
+        "coverage is unknown until the census lands"
+    );
+    assert!(observation.resources.bytes_on_disk.is_some());
+    assert!(elapsed < Duration::from_millis(500), "status took {elapsed:?}");
+
+    drop(held_census);
+    let tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Ready { observation } =
+        settled_clone_index_status(&latest)
+    else {
+        panic!("the released census must report ready coverage");
+    };
+    assert!(
+        observation
+            .coverage
+            .source_bodies
+            .is_some_and(|bodies| bodies > 0)
+    );
     registry.shutdown().await;
 }
 

@@ -281,6 +281,11 @@ pub enum CodeCloneIndexStatusV1 {
         observation: CodeCloneIndexObservationV1,
         reason: String,
     },
+    /// The artifact serves, and its clone census is still being computed in
+    /// the background, so the coverage counts are not known yet.
+    Verifying {
+        observation: CodeCloneIndexObservationV1,
+    },
 }
 
 impl Default for CodeCloneIndexStatusV1 {
