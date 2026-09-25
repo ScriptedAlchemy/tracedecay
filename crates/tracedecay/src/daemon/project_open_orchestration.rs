@@ -7,7 +7,7 @@
 use super::*;
 use tracedecay_daemon_service::shutdown::DaemonLifecycle;
 use tracedecay_runtime_core::logging::log_daemon_event;
-use tracedecay_runtime_core::path_safety::canonical_existing_identity;
+use tracedecay_runtime_core::path_safety::same_canonical_path;
 
 /// Bounds how long a foreground request waits for a route's background open.
 /// The open task itself is deliberately left running after the deadline.
@@ -173,9 +173,8 @@ pub(super) async fn ensure_registered_project_route(
                 tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Resolved(
                     identity,
                 ) => {
-                    let requested = canonical_existing_identity(project_path)
-                        .unwrap_or_else(|_| project_path.to_path_buf());
-                    requested_path_is_repository_root = identity.worktree_root == requested;
+                    requested_path_is_repository_root =
+                        same_canonical_path(&identity.worktree_root, project_path);
                     repository_common_dir = Some(identity.common_dir);
                     identity.worktree_root
                 }
@@ -201,12 +200,14 @@ pub(super) async fn ensure_registered_project_route(
     };
     let Some(context) = context else {
         let project_path =
-            canonical_existing_identity(project_path).map_err(|error| TraceDecayError::Config {
-                message: format!(
-                    "could not canonicalize project route '{}': {error}",
-                    project_path.display()
-                ),
-            })?;
+            project_path
+                .canonicalize()
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "could not canonicalize project route '{}': {error}",
+                        project_path.display()
+                    ),
+                })?;
         let profile_root = store_administration
             .profile_identity()?
             .profile_root()

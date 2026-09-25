@@ -51,7 +51,7 @@ struct RegisteredProject {
 async fn project_list_returns_the_registry_page_the_caller_asked_for() {
     let (cg, _env, _project_dir) = support::setup_empty_project().await;
     let profile_dir = support::test_temp_dir();
-    let profile_root = fs::canonicalize(profile_dir.path()).expect("profile root");
+    let profile_root = canonical_existing_identity(profile_dir.path()).expect("profile root");
     let alpha_root = git_repository(&profile_root.join("listed-alpha"), ALPHA_HEAD);
     let beta_root = directory(&profile_root.join("listed-beta"));
 
@@ -319,7 +319,7 @@ async fn project_list_reports_an_empty_registry_as_an_empty_listing() {
 async fn project_list_reports_a_broken_registry_as_a_tool_error() {
     let (cg, _env, _project_dir) = support::setup_empty_project().await;
     let profile_dir = support::test_temp_dir();
-    let profile_root = fs::canonicalize(profile_dir.path()).expect("profile root");
+    let profile_root = canonical_existing_identity(profile_dir.path()).expect("profile root");
     let beta_root = directory(&profile_root.join("listed-beta"));
     {
         let runtime = HostAdmissionTestRuntimeV1::profile(&profile_root)

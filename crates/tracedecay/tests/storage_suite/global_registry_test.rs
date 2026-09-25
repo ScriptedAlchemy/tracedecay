@@ -306,11 +306,10 @@ async fn registered_profile_runtime_creates_and_round_trips_registry_records() {
         .iter()
         .map(|alias| alias.alias_path.as_str())
         .collect();
-    let canonical_project_root = project_root
-        .canonicalize()
-        .unwrap()
-        .to_string_lossy()
-        .to_string();
+    let canonical_project_root =
+        tracedecay_runtime_core::path_safety::canonical_root_identity(&project_root)
+            .to_string_lossy()
+            .to_string();
     assert!(alias_paths.contains(&canonical_project_root.as_str()));
     assert!(
         alias_paths
