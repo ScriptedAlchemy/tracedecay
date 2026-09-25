@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  CODE_VIEWS,
   codeViewBlocker,
   codeViewNeedsFocus,
   codeViewsOffered,
@@ -24,10 +23,6 @@ describe('Code view locations', () => {
     });
   });
 
-  it('orders the lenses as the reader is shown them, Cortex first', () => {
-    expect(CODE_VIEWS).toEqual(['cortex', 'trace', 'shared-code', 'compare', 'atlas']);
-  });
-
   it('defaults unknown views to Cortex without losing a valid symbol focus', () => {
     expect(
       readCodeLocation(new URLSearchParams('view=core&symbol=symbol-42')),
@@ -37,35 +32,10 @@ describe('Code view locations', () => {
     });
   });
 
-  it('reads a published Topology link as Cortex with the same symbol', () => {
-    expect(readCodeLocation(new URLSearchParams('view=topology&symbol=symbol-42'))).toEqual({
-      view: 'cortex',
-      focusId: 'symbol-42',
-    });
-    expect(readCodeLocation(new URLSearchParams('view=cortex'))).toEqual({
-      view: 'cortex',
-      focusId: null,
-    });
-  });
-
-  it('maps published Trace and Core links into Trace with the same symbol', () => {
-    for (const legacyView of ['trace', 'core'] as const) {
-      expect(
-        readCodeLocation(
-          new URLSearchParams(
-            `structureLens=${legacyView}&structureFocus=symbol-42`,
-          ),
-        ),
-      ).toEqual({ view: 'trace', focusId: 'symbol-42' });
-    }
-  });
-
-  it('writes the default view without old or redundant query parameters', () => {
+  it('writes the default view without redundant query parameters', () => {
     expect(
       writeCodeLocation(
-        new URLSearchParams(
-          'view=trace&symbol=symbol-42&structureLens=core&structureFocus=old',
-        ),
+        new URLSearchParams('view=trace&symbol=symbol-42'),
         {
           view: 'cortex',
           focusId: null,

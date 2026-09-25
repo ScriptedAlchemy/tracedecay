@@ -44,9 +44,10 @@ async fn seed_fixture(profile: &tempfile::TempDir) -> RegisteredGlobalDbTestRunt
                  UNION ALL
                  SELECT value + 1 FROM rows WHERE value < {}
              )
-             INSERT INTO session_messages(
-                 provider, message_id, session_id, role, timestamp, ordinal, text,
-                 kind, model, tool_names, source_path, source_offset, metadata_json
+             INSERT INTO lcm_raw_messages(
+                 provider, message_id, session_id, role, timestamp, ordinal, content,
+                 kind, model, tool_names, source_path, source_offset, metadata_json,
+                 content_hash, storage_kind
              )
              SELECT
                  '{PROVIDER}',
@@ -61,7 +62,9 @@ async fn seed_fixture(profile: &tempfile::TempDir) -> RegisteredGlobalDbTestRunt
                  'tool',
                  NULL,
                  NULL,
-                 NULL
+                 NULL,
+                 'hash',
+                 'inline'
              FROM rows;",
             TOTAL_ROWS - 1
         ))

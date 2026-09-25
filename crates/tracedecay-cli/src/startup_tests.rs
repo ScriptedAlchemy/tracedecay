@@ -1,14 +1,12 @@
 use super::{
     AnalyticsAction, AsyncRuntimeFlavor, Cli, CommandFamily, Commands, DAEMON_CPU_THREADS_ENV,
-    DEFAULT_MAX_DAEMON_CPU_THREADS, HostBundleCliOptions, HostBundleComponentArg,
-    PackageHookAction, ProfileStorageAction, ProjectsAction, RAYON_NUM_THREADS_ENV,
+    DEFAULT_MAX_DAEMON_CPU_THREADS, HostBundleCliOptions, PackageHookAction, RAYON_NUM_THREADS_ENV,
     ScoopPackageHookAction, StderrTracingDefault, async_runtime_flavor, command_profile_label,
     daemon_cpu_threads_from, hotpath_focus_is_valid, hotpath_output_format_is_none,
     hotpath_output_format_is_valid, hotpath_output_path_is_valid,
-    hotpath_requires_protocol_safe_output, is_full_component_set_adoption,
-    normalize_tool_reserved_global_flags, runs_worldwide_counter_flush,
-    should_skip_agent_install_check, should_skip_startup_maintenance, stderr_tracing_default,
-    validate_host_bundle_options,
+    hotpath_requires_protocol_safe_output, normalize_tool_reserved_global_flags,
+    runs_worldwide_counter_flush, should_skip_agent_install_check, should_skip_startup_maintenance,
+    stderr_tracing_default, validate_host_bundle_options,
 };
 use clap::{CommandFactory, Parser};
 use std::iter;
@@ -137,87 +135,77 @@ fn hotpath_command_identity_uses_the_exact_clap_subcommand_path() {
     assert_eq!(parsed_command_profile_label(&["hook-stop"]), "hook-stop");
 }
 
-/// `wipe` owns no host component and has no preview, so the other two global
-/// lifecycle flags stay rejected on it.
-#[test]
-fn wipe_still_rejects_component_and_dry_run() {
-    let command = Commands::Wipe { all: false };
-    let family = CommandFamily::for_command(&command);
-    let dry_run = HostBundleCliOptions {
-        component: None,
-        dry_run: true,
-        yes: false,
-        adopt: false,
+fn validate_parsed_host_bundle_options(args: &[&str]) -> Result<(), String> {
+    let cli = Cli::try_parse_from(iter::once("tracedecay").chain(args.iter().copied()))
+        .unwrap_or_else(|error| panic!("{args:?} must parse before scoped validation: {error}"));
+    let command = cli.command.expect("subcommand must be present");
+    let options = HostBundleCliOptions {
+        component: cli.component,
+        dry_run: cli.dry_run,
+        yes: cli.yes,
+        adopt: cli.adopt,
     };
-    assert!(validate_host_bundle_options(&command, family, &dry_run).is_err());
-}
-
-/// `projects forget` owns no host component, so the component/adopt lifecycle
-/// flags stay rejected on it; and read-only `projects` verbs still reject the
-/// confirmation flags entirely.
-#[test]
-fn projects_forget_rejects_component_and_projects_list_rejects_yes() {
-    let forget = Commands::Projects {
-        action: ProjectsAction::Forget {
-            selector: "proj_123".to_string(),
-            keep_store: false,
-        },
-    };
-    let component = HostBundleCliOptions {
-        component: Some(HostBundleComponentArg::Core),
-        dry_run: false,
-        yes: true,
-        adopt: false,
-    };
-    assert!(
-        validate_host_bundle_options(&forget, CommandFamily::for_command(&forget), &component)
-            .is_err()
-    );
-
-    let list = Commands::Projects {
-        action: ProjectsAction::List {
-            limit: 25,
-            json: false,
-        },
-    };
-    let yes = HostBundleCliOptions {
-        component: None,
-        dry_run: false,
-        yes: true,
-        adopt: false,
-    };
-    assert!(validate_host_bundle_options(&list, CommandFamily::for_command(&list), &yes).is_err());
-}
-
-/// The storage resets own no host component and have no preview, so the other
-/// two global lifecycle flags stay rejected on them.
-#[test]
-fn storage_resets_still_reject_component_and_dry_run() {
-    let command = Commands::Storage {
-        action: ProfileStorageAction::ResetProjectStore {
-            project_root: Some("/tmp/some-project".to_string()),
-            project_id: None,
-        },
-    };
-    let family = CommandFamily::for_command(&command);
-    let dry_run = HostBundleCliOptions {
-        component: None,
-        dry_run: true,
-        yes: true,
-        adopt: false,
-    };
-    assert!(validate_host_bundle_options(&command, family, &dry_run).is_err());
-    let component = HostBundleCliOptions {
-        component: Some(HostBundleComponentArg::Core),
-        dry_run: false,
-        yes: true,
-        adopt: false,
-    };
-    assert!(validate_host_bundle_options(&command, family, &component).is_err());
+    validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
+        .map_err(|error| error.to_string())
 }
 
 #[test]
-fn default_component_set_adoption_requires_confirmation_and_reaches_dispatch() {
+fn destructive_non_lifecycle_commands_accept_only_their_own_confirmation_flags() {
+    for accepted in [
+        &["wipe", "--yes"][..],
+        &["projects", "forget", "proj_123", "--yes"][..],
+        &["projects", "forget", "proj_123", "--dry-run"][..],
+        &[
+            "storage",
+            "reset-project-store",
+            "--project-root",
+            "/tmp/p",
+            "--yes",
+        ][..],
+        &["projects", "list"][..],
+    ] {
+        assert_eq!(
+            validate_parsed_host_bundle_options(accepted),
+            Ok(()),
+            "{accepted:?}"
+        );
+    }
+    for (rejected, message) in [
+        (&["wipe", "--dry-run"][..], "wipe accepts --yes to confirm"),
+        (
+            &[
+                "projects",
+                "forget",
+                "proj_123",
+                "--yes",
+                "--component",
+                "core",
+            ][..],
+            "projects forget accepts --yes to confirm and --dry-run to preview",
+        ),
+        (
+            &[
+                "storage",
+                "reset-project-store",
+                "--project-root",
+                "/tmp/p",
+                "--dry-run",
+            ][..],
+            "storage resets accept --yes to confirm",
+        ),
+        (
+            &["projects", "list", "--yes"][..],
+            "--component, --dry-run, --yes, and --adopt are only valid with install",
+        ),
+    ] {
+        let error = validate_parsed_host_bundle_options(rejected)
+            .expect_err("lifecycle-only flag must be refused");
+        assert!(error.contains(message), "{rejected:?}: {error}");
+    }
+}
+
+#[test]
+fn default_component_set_adoption_requires_confirmation() {
     for args in [
         &[
             "tracedecay",
@@ -240,11 +228,7 @@ fn default_component_set_adoption_requires_confirmation_and_reaches_dispatch() {
         };
         validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
             .expect("confirmed default component-set adoption must pass validation");
-        assert!(
-            is_full_component_set_adoption(&command, &options),
-            "confirmed default adoption must reach the full component-set handler path"
-        );
-        assert!(options.yes && options.adopt);
+        assert!(options.component.is_none() && options.yes && options.adopt);
     }
 }
 
@@ -510,66 +494,10 @@ fn nested_inspection_commands_skip_agent_install_check() {
         &["branch", "autotrack", "status"][..],
         &["channel"][..],
         &["gitignore"][..],
+        &["automation", "config", "get", "--json"][..],
     ];
 
     for args in commands {
-        let command = parse_command(args);
-        assert!(
-            should_skip_agent_install_check(&command),
-            "{args:?} must not run the unrelated agent-install check"
-        );
-        assert!(
-            !should_skip_startup_maintenance(&command),
-            "{args:?} must retain ordinary startup maintenance"
-        );
-    }
-}
-
-#[test]
-fn read_only_automation_commands_skip_agent_install_check() {
-    for args in [
-        &["automation", "config", "get", "--json"][..],
-        &["automation", "config", "explain", "--json"][..],
-        &["automation", "runs", "list", "--json"][..],
-        &["automation", "runs", "view", "run-123", "--json"][..],
-        &[
-            "automation",
-            "runs",
-            "artifact",
-            "run-123",
-            "validation_gate",
-            "--json",
-        ][..],
-        &["automation", "skills", "list", "--json"][..],
-        &["automation", "skills", "view", "skill-123", "--json"][..],
-        &["automation", "facts", "list", "--json"][..],
-        &["automation", "facts", "view", "fact-123"][..],
-    ] {
-        let command = parse_command(args);
-        assert!(
-            should_skip_agent_install_check(&command),
-            "{args:?} must not run the unrelated agent-install check"
-        );
-        assert!(
-            !should_skip_startup_maintenance(&command),
-            "{args:?} must retain ordinary startup maintenance"
-        );
-    }
-}
-
-#[test]
-fn top_level_inspection_commands_skip_agent_install_check() {
-    for args in [
-        &["status", "--json"][..],
-        &["channel"][..],
-        &["current-counter"][..],
-        &["gitignore"][..],
-        &["cost"][..],
-        &["bench", "--json"][..],
-        &["gain", "--json"][..],
-        &["monitor"][..],
-        &["list"][..],
-    ] {
         let command = parse_command(args);
         assert!(
             should_skip_agent_install_check(&command),

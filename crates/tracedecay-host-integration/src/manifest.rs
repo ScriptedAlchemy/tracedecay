@@ -168,7 +168,7 @@ pub fn validate_relative_install_path(path: &Path) -> Result<(), HostBundleError
 }
 /// Bytes obtained from the verified embedded host bundle. They are checked
 /// against the cataloged artifact digest before any host path is touched and
-/// are never copied into receipts or journals.
+/// are never copied into receipts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostBundleArtifactContentV1 {
     pub relative_path: String,

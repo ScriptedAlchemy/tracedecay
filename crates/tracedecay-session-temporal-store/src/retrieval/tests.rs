@@ -15,18 +15,26 @@ use tracedecay_runtime_core::db::{
     engine::{Connection, Executor, TestConnection, Value as SqlValue},
 };
 use tracedecay_temporal_query::candidates::CandidateChannel;
+use tracedecay_temporal_query::execution::{
+    BindingDigest, ExecutionControl, ExecutionLimits, await_controlled,
+};
+use tracedecay_temporal_query::paging::{
+    CANDIDATE_READ_BUDGET, CandidateFieldCaps, CandidateReadState, PageLimits, PageRequest,
+    PageStatus,
+};
 use tracedecay_temporal_query::plan_temporal_candidates;
 use tracedecay_temporal_query::ports::{
-    BindingDigest, CANDIDATE_READ_BUDGET, CandidateFieldCaps, CandidateReadState, ExecutionControl,
-    ExecutionLimits, KernelVersions, PageLimits, PageRequest, PageStatus, ReadBudgetAccounting,
-    TemporalAuthorizedRoot, TemporalExecutionSnapshot, TemporalParticipantAuthorization,
-    TemporalParticipantGeneration, TemporalParticipantManifest, TemporalPortError,
-    TemporalPreparedCandidateCohort, TemporalRecord, TemporalRetrievalScope,
-    TemporalSnapshotRequest, TemporalSourceAccess, TemporalWatermarks, await_controlled,
-    begin_prepared_candidate_pull, commit_prepared_candidate_pull,
+    ReadBudgetAccounting, TemporalAuthorizedRoot, TemporalPortError, TemporalRecord,
+    TemporalRetrievalScope, TemporalSnapshotRequest, begin_prepared_candidate_pull,
+    commit_prepared_candidate_pull,
 };
 use tracedecay_temporal_query::ranking::RankingCandidate;
 use tracedecay_temporal_query::resolution::{SummarySourceState, ValidatedAuthorization};
+use tracedecay_temporal_query::snapshot::{
+    KernelVersions, TemporalExecutionSnapshot, TemporalParticipantAuthorization,
+    TemporalParticipantGeneration, TemporalParticipantManifest, TemporalPreparedCandidateCohort,
+    TemporalSourceAccess, TemporalWatermarks,
+};
 
 mod relation_graph_tests;
 
@@ -661,8 +669,7 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                 session_id, generation, occurrence_id, source_observation_id,
                 source_provider, projection_output_ordinal, retrieval_anchor_id,
                 message_id, turn_id, role, knowledge_at, valid_time_json,
-                evidence_json, sanitized_content_digest, sanitized_content_bytes,
-                snippet_text, index_text
+                evidence_json, sanitized_content_digest, sanitized_content_bytes, index_text
              ) VALUES
                 (
                     'session-plan-inside', 1, 'occurrence-plan-inside',
@@ -670,7 +677,6 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                     'message-plan-inside', 'turn-plan-inside', 'user', 20,
                     '{\"kind\":\"unknown\"}', '{}',
                     '0000000000000000000000000000000000000000000000000000000000000000', 38,
-                    'needle candidate derived needle inside',
                     'needle candidate derived needle inside'
                 ),
                 (
@@ -678,16 +684,14 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                     'observation-plan-inside', 'claude', 1, 'anchor-plan-inside-old',
                     'message-plan-inside-old', 'turn-plan-inside-old', 'assistant', 10,
                     '{\"kind\":\"unknown\"}', '{}',
-                    '0000000000000000000000000000000000000000000000000000000000000000', 27,
-                    'derived needle older member', 'derived needle older member'
+                    '0000000000000000000000000000000000000000000000000000000000000000', 27, 'derived needle older member'
                 ),
                 (
                     'session-plan-inside', 1, 'occurrence-plan-inside-last',
                     'observation-plan-inside', 'claude', 2, 'anchor-plan-inside-last',
                     'message-plan-inside-last', 'turn-plan-inside-last', 'assistant', 5,
                     '{\"kind\":\"unknown\"}', '{}',
-                    '0000000000000000000000000000000000000000000000000000000000000000', 26,
-                    'derived needle last member', 'derived needle last member'
+                    '0000000000000000000000000000000000000000000000000000000000000000', 26, 'derived needle last member'
                 ),
                 (
                     'session-plan-outside', 1, 'occurrence-plan-outside',
@@ -695,28 +699,29 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                     'message-plan-outside', 'turn-plan-outside', 'user', 30,
                     '{\"kind\":\"unknown\"}', '{}',
                     '0000000000000000000000000000000000000000000000000000000000000000', 39,
-                    'needle candidate derived needle outside',
                     'needle candidate derived needle outside'
                 );
              INSERT INTO session_summary_nodes (
-                summary_id, session_id, summary_anchor_id, summary_text, index_text,
+                summary_id, session_id, provider, conversation_id, depth, summary_anchor_id,
+                summary_text, summary_hash, summary_token_count, source_token_count,
                 source_horizon_json, publication_json, created_at
              ) VALUES
                 (
-                    'summary-plan-inside', 'session-plan-inside', 'anchor-plan-summary',
-                    'needle summary inside newest', 'needle summary inside newest', '{}',
+                    'summary-plan-inside', 'session-plan-inside', 'claude',
+                    'session-plan-inside', 0, 'anchor-plan-summary',
+                    'needle summary inside newest', 'hash', 1, 1, '{}',
                     '{\"provider\":\"claude\"}', 25
                 ),
                 (
-                    'summary-plan-inside-old', 'session-plan-inside',
-                    'anchor-plan-summary-old',
-                    'needle summary inside older', 'needle summary inside older', '{}',
+                    'summary-plan-inside-old', 'session-plan-inside', 'claude',
+                    'session-plan-inside', 0, 'anchor-plan-summary-old',
+                    'needle summary inside older', 'hash', 1, 1, '{}',
                     '{\"provider\":\"claude\"}', 15
                 ),
                 (
-                    'summary-plan-outside', 'session-plan-outside',
-                    'anchor-plan-summary-outside',
-                    'needle summary outside', 'needle summary outside', '{}',
+                    'summary-plan-outside', 'session-plan-outside', 'claude',
+                    'session-plan-outside', 0, 'anchor-plan-summary-outside',
+                    'needle summary outside', 'hash', 1, 1, '{}',
                     '{\"provider\":\"claude\"}', 35
                 );
              INSERT INTO session_summary_availability (
@@ -907,26 +912,22 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                 session_id, generation, occurrence_id, source_observation_id,
                 source_provider, projection_output_ordinal, retrieval_anchor_id,
                 role, knowledge_at, valid_time_json, evidence_json,
-                sanitized_content_digest, sanitized_content_bytes,
-                snippet_text, index_text
+                sanitized_content_digest, sanitized_content_bytes, index_text
              ) VALUES
                 (
                     'session-a', 1, 'same-id', 'observation-shared', 'claude', 0,
                     'same-anchor', 'user', 5, '{\"kind\":\"unknown\"}', '{}',
-                    '0000000000000000000000000000000000000000000000000000000000000000', 12,
-                    'same content', 'same content'
+                    '0000000000000000000000000000000000000000000000000000000000000000', 12, 'same content'
                 ),
                 (
                     'session-b', 1, 'same-id', 'observation-shared', 'claude', 0,
                     'same-anchor', 'user', 5, '{\"kind\":\"unknown\"}', '{}',
-                    '0000000000000000000000000000000000000000000000000000000000000000', 12,
-                    'same content', 'same content'
+                    '0000000000000000000000000000000000000000000000000000000000000000', 12, 'same content'
                 ),
                 (
                     'session-b', 1, 'source-b', 'observation-shared', 'claude', 1,
                     'source-anchor-b', 'user', 4, '{\"kind\":\"unknown\"}', '{}',
-                    '0000000000000000000000000000000000000000000000000000000000000000', 6,
-                    'source', 'source'
+                    '0000000000000000000000000000000000000000000000000000000000000000', 6, 'source'
                 );
              INSERT INTO session_assertions (
                 session_id, generation, assertion_id, assertion_kind,
@@ -976,7 +977,7 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                             \"sanitizer_version\":\"derived-sanitizer\"
                          }}}}',
                       '0000000000000000000000000000000000000000000000000000000000000000', 15,
-                      'member {index}', 'member {index}')",
+                      'member {index}')",
                     occurrence_id(index),
                     index + 5,
                 )
@@ -1025,8 +1026,7 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                     session_id, generation, occurrence_id, source_observation_id,
                     source_provider, projection_output_ordinal, retrieval_anchor_id,
                     role, knowledge_at, valid_time_json, evidence_json,
-                    sanitized_content_digest, sanitized_content_bytes,
-                    snippet_text, index_text
+                    sanitized_content_digest, sanitized_content_bytes, index_text
                  ) VALUES {occurrences};
                  INSERT INTO session_derived_evidence (
                     session_id, generation, evidence_kind, evidence_id,
@@ -1082,8 +1082,7 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                 session_id, generation, occurrence_id, source_observation_id,
                 source_provider, projection_output_ordinal, retrieval_anchor_id,
                 role, knowledge_at, valid_time_json, evidence_json,
-                sanitized_content_digest, sanitized_content_bytes,
-                snippet_text, index_text
+                sanitized_content_digest, sanitized_content_bytes, index_text
              ) VALUES (
                 'session-snapshot', 1,
                 'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
@@ -1098,8 +1097,7 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                         \"sanitizer_version\":\"derived-sanitizer\"
                     }
                 }',
-                '0000000000000000000000000000000000000000000000000000000000000000', 15,
-                'derived content', 'derived content'
+                '0000000000000000000000000000000000000000000000000000000000000000', 15, 'derived content'
              );
              INSERT INTO session_derived_evidence (
                 session_id, generation, evidence_kind, evidence_id,
@@ -1161,14 +1159,13 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                 session_id, generation, occurrence_id, source_observation_id,
                 source_provider, projection_output_ordinal, retrieval_anchor_id,
                 role, knowledge_at, valid_time_json, evidence_json,
-                sanitized_content_digest, sanitized_content_bytes,
-                snippet_text, index_text
+                sanitized_content_digest, sanitized_content_bytes, index_text
              ) VALUES (
                 'session-snapshot', 1, 'occurrence-oversized', 'observation-1',
                 'claude', 0, 'anchor-evidence', 'user', 1,
                 '{\"kind\":\"unknown\"}', ?1,
                 '0000000000000000000000000000000000000000000000000000000000000000',
-                5, 'snippet', 'index'
+                5, 'index'
              )",
             [oversized_json.clone()],
         )
@@ -1206,8 +1203,7 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                 session_id, generation, occurrence_id, source_observation_id,
                 source_provider, projection_output_ordinal, retrieval_anchor_id,
                 role, knowledge_at, valid_time_json, evidence_json,
-                sanitized_content_digest, sanitized_content_bytes,
-                snippet_text, index_text
+                sanitized_content_digest, sanitized_content_bytes, index_text
              ) VALUES (
                 'session-snapshot', 1, 'occurrence-claude', 'observation-claude',
                 'claude', 0, 'source-claude', 'user', 1, '{\"kind\":\"unknown\"}',
@@ -1215,15 +1211,15 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                   \"source_anchor_id\":\"source-claude\",
                   \"sanitization_receipt\":{\"receipt_id\":\"receipt-1\"}}',
                 '0000000000000000000000000000000000000000000000000000000000000000',
-                7,
-                'snippet', 'index'
+                7, 'index'
              );
              INSERT INTO session_summary_nodes (
-                summary_id, session_id, summary_anchor_id, summary_text, index_text,
+                summary_id, session_id, provider, conversation_id, depth, summary_anchor_id,
+                summary_text, summary_hash, summary_token_count, source_token_count,
                 source_horizon_json, publication_json, created_at
              ) VALUES (
-                'summary-provider', 'session-snapshot', 'anchor-summary-provider',
-                'summary', 'summary',
+                'summary-provider', 'session-snapshot', 'test', 'session-snapshot', 0,
+                'anchor-summary-provider', 'summary', 'hash', 1, 1,
                 '{\"knowledge_through\":1,\"valid_through\":null}', NULL, 1
              );
              INSERT INTO session_summary_availability (
@@ -1268,24 +1264,21 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                 session_id, generation, occurrence_id, source_observation_id,
                 source_provider, projection_output_ordinal, retrieval_anchor_id,
                 role, knowledge_at, valid_time_json, evidence_json,
-                sanitized_content_digest, sanitized_content_bytes,
-                snippet_text, index_text
+                sanitized_content_digest, sanitized_content_bytes, index_text
              ) VALUES
                 (
                     'session-snapshot', 1, 'summary-source-at-5',
                     'summary-history-observation', 'claude', 0, 'shared-summary-source',
                     'user', 5, '{\"kind\":\"known\",\"valid_at\":5}', '{}',
                     '0000000000000000000000000000000000000000000000000000000000000000',
-                    11,
-                    'source at 5', 'source at 5'
+                    11, 'source at 5'
                 ),
                 (
                     'session-snapshot', 1, 'summary-source-at-10',
                     'summary-history-observation', 'claude', 1, 'shared-summary-source',
                     'user', 10, '{\"kind\":\"known\",\"valid_at\":10}', '{}',
                     '0000000000000000000000000000000000000000000000000000000000000000',
-                    12,
-                    'source at 10', 'source at 10'
+                    12, 'source at 10'
                 );
              INSERT INTO session_current_entities (
                 session_id, generation, entity_kind, entity_id,
@@ -1295,17 +1288,18 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                 NULL, 'summary-source-at-10', '{}'
              );
              INSERT INTO session_summary_nodes (
-                summary_id, session_id, summary_anchor_id, summary_text, index_text,
+                summary_id, session_id, provider, conversation_id, depth, summary_anchor_id,
+                summary_text, summary_hash, summary_token_count, source_token_count,
                 source_horizon_json, publication_json, created_at
              ) VALUES
                 (
-                    'historical-summary', 'session-snapshot', 'historical-summary-anchor',
-                    'historical', 'historical',
+                    'historical-summary', 'session-snapshot', 'test', 'session-snapshot', 0,
+                    'historical-summary-anchor', 'historical', 'hash', 1, 1,
                     '{\"knowledge_through\":5,\"valid_through\":5}', NULL, 5
                 ),
                 (
-                    'successor-summary', 'session-snapshot', 'successor-summary-anchor',
-                    'successor', 'successor',
+                    'successor-summary', 'session-snapshot', 'test', 'session-snapshot', 0,
+                    'successor-summary-anchor', 'successor', 'hash', 1, 1,
                     '{\"knowledge_through\":10,\"valid_through\":10}', NULL, 10
                 );
              INSERT INTO session_summary_availability (

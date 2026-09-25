@@ -14,17 +14,16 @@ use admission::{validate_temporal_fts_contracts, validate_temporal_fts_match};
 const OPERATION: &str = "initialize session temporal schema";
 const MIGRATION_NAME: &str = "session-temporal";
 const SESSION_TEMPORAL_AUTHORITY: &str = "session temporal";
-const RELEASED_SESSION_TEMPORAL_SCHEMA_VERSION: i64 = 3;
 pub(crate) use tracedecay_session_temporal_store::SESSION_TEMPORAL_SCHEMA_VERSION;
 
 const TEMPORAL_FTS_CONTRACTS: &[(&str, &str)] = &[
     (
         "session_occurrences_fts",
-        "createvirtualtablesession_occurrences_ftsusingfts5(index_text,snippet_text,content='session_occurrences',content_rowid='rowid')",
+        "createvirtualtablesession_occurrences_ftsusingfts5(index_text,content='session_occurrences',content_rowid='rowid')",
     ),
     (
         "session_summary_nodes_fts",
-        "createvirtualtablesession_summary_nodes_ftsusingfts5(summary_text,index_text,content='session_summary_nodes',content_rowid='rowid')",
+        "createvirtualtablesession_summary_nodes_ftsusingfts5(summary_text,content='session_summary_nodes',content_rowid='rowid')",
     ),
 ];
 
@@ -34,12 +33,26 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
         version INTEGER NOT NULL CHECK(version > 0),
         applied_at INTEGER NOT NULL
     );
+    -- The one summary authority. LCM reads (grep, describe, expand, replay,
+    -- status, DAG) and temporal retrieval share these rows; a summary is
+    -- visible to LCM reads only while its availability in the session's
+    -- active generation is 'available'. Rows are immutable; retirement is an
+    -- availability state, never a delete.
     CREATE TABLE IF NOT EXISTS session_summary_nodes (
         summary_id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        depth INTEGER NOT NULL,
         summary_anchor_id TEXT NOT NULL,
         summary_text TEXT NOT NULL,
-        index_text TEXT NOT NULL,
+        summary_hash TEXT NOT NULL,
+        summary_token_count INTEGER NOT NULL,
+        source_token_count INTEGER NOT NULL,
+        source_time_start INTEGER,
+        source_time_end INTEGER,
+        expand_hint TEXT,
+        metadata_json TEXT,
         source_horizon_json TEXT NOT NULL CHECK(json_valid(source_horizon_json)),
         publication_json TEXT CHECK(publication_json IS NULL OR json_valid(publication_json)),
         created_at INTEGER NOT NULL,
@@ -49,6 +62,31 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
         ON session_summary_nodes(session_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_session_summary_nodes_root_created_order
         ON session_summary_nodes(created_at, session_id, summary_id);
+    CREATE INDEX IF NOT EXISTS idx_session_summary_nodes_session_depth_time
+        ON session_summary_nodes(
+            provider, session_id, depth, source_time_start, source_time_end, created_at
+        );
+    -- Covers the lcm_status depth rollup (COUNT + SUM per depth) so status
+    -- never reads summary_text records.
+    CREATE INDEX IF NOT EXISTS idx_session_summary_nodes_depth_tokens
+        ON session_summary_nodes(
+            provider, session_id, depth, summary_token_count, source_token_count
+        );
+
+    -- Ordered lineage of one summary: `source_id` is the raw `store_id`
+    -- rendered as text for 'raw_message' sources and the child `summary_id`
+    -- for 'summary_node' sources. Retention treats a raw row as
+    -- projection-durable once a row here covers it.
+    CREATE TABLE IF NOT EXISTS session_summary_sources (
+        summary_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+        source_kind TEXT NOT NULL CHECK(source_kind IN ('raw_message', 'summary_node')),
+        source_id TEXT NOT NULL,
+        PRIMARY KEY(summary_id, ordinal),
+        FOREIGN KEY(summary_id) REFERENCES session_summary_nodes(summary_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_session_summary_sources_source
+        ON session_summary_sources(source_kind, source_id, summary_id);
 
     CREATE TABLE IF NOT EXISTS session_relation_receipts (
         session_id TEXT NOT NULL,
@@ -358,7 +396,7 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
             AND sanitized_content_digest NOT GLOB '*[^0-9a-f]*'
         ),
         sanitized_content_bytes INTEGER NOT NULL CHECK(sanitized_content_bytes >= 0),
-        snippet_text TEXT NOT NULL,
+        snippet_text TEXT NOT NULL GENERATED ALWAYS AS (index_text) VIRTUAL,
         index_text TEXT NOT NULL,
         PRIMARY KEY(session_id, generation, occurrence_id),
         FOREIGN KEY(session_id, generation)
@@ -570,13 +608,11 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
 
     CREATE VIRTUAL TABLE IF NOT EXISTS session_occurrences_fts USING fts5(
         index_text,
-        snippet_text,
         content='session_occurrences',
         content_rowid='rowid'
     );
     CREATE VIRTUAL TABLE IF NOT EXISTS session_summary_nodes_fts USING fts5(
         summary_text,
-        index_text,
         content='session_summary_nodes',
         content_rowid='rowid'
     );

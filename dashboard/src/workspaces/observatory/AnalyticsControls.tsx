@@ -4,7 +4,7 @@
  * failures.
  *
  * Two real reads back parts of this surface, `GET /api/settings` for the
- * `user.upload_enabled.v1` profile setting, and `GET /api/storage/findings` for
+ * `user.upload_enabled.v1` profile setting, and `GET /api/doctor/findings?family=storage` for
  * the typed `retention_backlog` status. They are read independently: a failed
  * settings read must not blank the retention evidence, and neither may stand in
  * for the analytics collection mode, which nothing publishes.
@@ -65,7 +65,7 @@ export function AnalyticsControls({ reads }: { reads: ObservatoryAccountingReads
   return (
     <section className="border-b border-edge-subtle" aria-label="Analytics controls">
       <h2 className="px-4 pt-4 text-sm font-semibold tracking-tight">Analytics controls</h2>
-      <p className="px-4 pt-0.5 text-2xs text-text-muted">
+      <p className="px-4 pt-0.5 text-body text-text-muted">
         local mode, share staging age, retention and deletion, and egress failures for optional
         adoption analytics
       </p>
@@ -89,18 +89,18 @@ export function AnalyticsControls({ reads }: { reads: ObservatoryAccountingReads
                 }
               >
                 <span className="flex flex-wrap items-baseline gap-1.5">
-                  <span className="td-value text-2xs text-text-primary">{entry.label}</span>
-                  <span className="text-3xs text-text-muted">
+                  <span className="td-value text-sm text-text-primary">{entry.label}</span>
+                  <span className="text-sm text-text-muted">
                     {entry.exporter === 'none' ? 'no network exporter' : 'network exporter'}
                     {entry.isDefault ? ' · default' : ''}
                     {entry.requiresOptIn ? ' · explicit opt-in required' : ''}
                   </span>
                 </span>
-                <span className="text-3xs leading-snug text-text-muted">{entry.sentence}</span>
+                <span className="text-sm leading-snug text-text-muted">{entry.sentence}</span>
               </li>
             ))}
           </ul>
-          <p className="text-3xs leading-snug text-text-muted">
+          <p className="text-sm leading-snug text-text-muted">
             The canonical observatory projection marks the current mode only when a retained
             consent transition is complete. An unavailable mode is never read as{' '}
             <span className="td-value">Off</span>.
@@ -114,7 +114,7 @@ export function AnalyticsControls({ reads }: { reads: ObservatoryAccountingReads
           reason={staging.reason}
           marker="share_staging"
         >
-          <p className="text-3xs leading-snug text-text-muted">
+          <p className="text-sm leading-snug text-text-muted">
             Plan 26 gives staged share data 24 hours after opt-out. The latest retained consent
             receipt supplies this age when it recorded one; otherwise the daemon leaves it unknown.
           </p>
@@ -124,7 +124,7 @@ export function AnalyticsControls({ reads }: { reads: ObservatoryAccountingReads
           title="retention and deletion"
           state={
             findingsState.kind === 'ready'
-              ? retentionBacklogReading(findingsState.value.payload.kind_statuses).state
+              ? retentionBacklogReading(findingsState.value.payload.storage_kind_statuses).state
               : findingsState.state
           }
           detail={findingsState.kind === 'ready' ? 'retention backlog' : findingsState.detail}
@@ -133,21 +133,21 @@ export function AnalyticsControls({ reads }: { reads: ObservatoryAccountingReads
         >
           {findingsState.kind === 'ready' ? (
             <RetentionBacklog
-              reading={retentionBacklogReading(findingsState.value.payload.kind_statuses)}
+              reading={retentionBacklogReading(findingsState.value.payload.storage_kind_statuses)}
             />
           ) : (
-            <p className="text-3xs leading-snug text-text-muted">
+            <p className="text-sm leading-snug text-text-muted">
               the retention-backlog finding could not be read, so nothing is stated about it
             </p>
           )}
           <dl
-            className="flex flex-col gap-1 border-t border-edge-subtle pt-2 text-3xs leading-snug text-text-muted"
+            className="flex flex-col gap-1 border-t border-edge-subtle pt-2 text-sm leading-snug text-text-muted"
             data-analytics-retention="declared_policy"
             aria-label="Declared analytics retention policy"
           >
             {DECLARED_RETENTION_LIFECYCLES.map((lifecycle) => (
               <div key={lifecycle.id} className="flex min-w-0 gap-1.5">
-                <dt className="shrink-0 uppercase tracking-[0.08em]">{lifecycle.label}</dt>
+                <dt className="shrink-0 uppercase tracking-[0.08em] text-3xs">{lifecycle.label}</dt>
                 <dd className="min-w-0 break-words text-text-secondary">
                   {lifecycle.declared} · observed age{' '}
                   {lifecycle.observedAge ?? 'not published'}
@@ -155,7 +155,7 @@ export function AnalyticsControls({ reads }: { reads: ObservatoryAccountingReads
               </div>
             ))}
           </dl>
-          <p className="text-3xs leading-snug text-text-muted">
+          <p className="text-sm leading-snug text-text-muted">
             Those four lifetimes are declared policy, not measurements, no observed age is
             published for any of them. Product receipts and run history keep their own lifecycles
             and are never exported as adoption analytics, so their retention is not reported here.
@@ -169,7 +169,7 @@ export function AnalyticsControls({ reads }: { reads: ObservatoryAccountingReads
           reason={egress.reason}
           marker="egress"
         >
-          <p className="text-3xs leading-snug text-text-muted" data-egress-failures={egress.failures ?? 'unknown'}>
+          <p className="text-sm leading-snug text-text-muted" data-egress-failures={egress.failures ?? 'unknown'}>
             {egress.failures == null
               ? 'No failure count is shown. An unrecorded exporter attempt is not zero failures.'
               : `${egress.failures.toLocaleString()} failures were recorded by the canonical projection.`}
@@ -190,7 +190,7 @@ export function AnalyticsControls({ reads }: { reads: ObservatoryAccountingReads
           {settingsState.kind === 'ready' ? (
             <UploadSetting reading={uploadSettingReading(settingsState.value.payload)} />
           ) : (
-            <p className="text-3xs leading-snug text-text-muted">
+            <p className="text-sm leading-snug text-text-muted">
               the profile settings read did not resolve, so the setting is not stated
             </p>
           )}
@@ -230,7 +230,7 @@ function Block({
         <StateChip kind={state} detail={detail} />
       </div>
       {reason != null ? (
-        <p className="text-2xs leading-relaxed text-text-secondary">{reason}</p>
+        <p className="text-body leading-relaxed text-text-secondary">{reason}</p>
       ) : null}
       {children}
     </section>
@@ -240,11 +240,11 @@ function Block({
 function RetentionBacklog({ reading }: { reading: RetentionBacklogReading }) {
   return (
     <dl
-      className="flex flex-col gap-1 text-3xs leading-snug text-text-muted"
+      className="flex flex-col gap-1 text-sm leading-snug text-text-muted"
       data-retention-backlog-published={reading.published ? 'true' : 'false'}
     >
       <div className="flex min-w-0 gap-1.5">
-        <dt className="shrink-0 uppercase tracking-[0.08em]">observed entries</dt>
+        <dt className="shrink-0 uppercase tracking-[0.08em] text-3xs">observed entries</dt>
         <dd className="min-w-0 break-words text-text-secondary tabular" data-cell="numeric">
           {reading.observedEntries == null
             ? 'not published'
@@ -252,7 +252,7 @@ function RetentionBacklog({ reading }: { reading: RetentionBacklogReading }) {
         </dd>
       </div>
       <div className="flex min-w-0 gap-1.5">
-        <dt className="shrink-0 uppercase tracking-[0.08em]">source</dt>
+        <dt className="shrink-0 uppercase tracking-[0.08em] text-3xs">source</dt>
         <dd className="min-w-0 break-words text-text-secondary">{reading.reason}</dd>
       </div>
     </dl>
@@ -262,13 +262,13 @@ function RetentionBacklog({ reading }: { reading: RetentionBacklogReading }) {
 function UploadSetting({ reading }: { reading: UploadSettingReading }) {
   return (
     <>
-      <dl className="flex flex-col gap-1 text-3xs leading-snug text-text-muted">
+      <dl className="flex flex-col gap-1 text-sm leading-snug text-text-muted">
         <div className="flex min-w-0 gap-1.5">
-          <dt className="shrink-0 uppercase tracking-[0.08em]">setting</dt>
+          <dt className="shrink-0 uppercase tracking-[0.08em] text-3xs">setting</dt>
           <dd className="min-w-0 break-words text-text-secondary">{reading.settingKey}</dd>
         </div>
         <div className="flex min-w-0 gap-1.5">
-          <dt className="shrink-0 uppercase tracking-[0.08em]">value</dt>
+          <dt className="shrink-0 uppercase tracking-[0.08em] text-3xs">value</dt>
           <dd
             className="min-w-0 break-words text-text-secondary"
             data-upload-enabled={reading.enabled == null ? 'unknown' : String(reading.enabled)}
@@ -277,7 +277,7 @@ function UploadSetting({ reading }: { reading: UploadSettingReading }) {
           </dd>
         </div>
       </dl>
-      <p className="text-3xs leading-snug text-text-muted">{reading.disclaimer}</p>
+      <p className="text-sm leading-snug text-text-muted">{reading.disclaimer}</p>
     </>
   );
 }

@@ -31,8 +31,8 @@
 
 use tracedecay_contracts::{
     OpaqueCursor, WorkHistoryCoverageV1, WorkHistoryReadPortV1, WorkHistoryRequestV1,
-    WorkHistoryV1, WorkProductApplicationErrorV1, WorkProductPortContextV1,
-    WorkProductSelectionScopeV1, WorkRelationScopeV1,
+    WorkHistoryV1, WorkProductApplicationErrorV1, WorkProductAuthorizedRelationScopeV1,
+    WorkProductPortContextV1, WorkProductSelectionScopeV1,
 };
 
 use super::{covered_prefix, load_journal};
@@ -108,7 +108,9 @@ impl WorkHistoryReadPortV1 for WorkSqliteStorage {
 ///
 /// This mirrors the set the application re-derives when it checks the answer,
 /// so an event that would fail that check is never returned in the first place.
-fn selected_relation_scopes(selection: &WorkProductSelectionScopeV1) -> Vec<WorkRelationScopeV1> {
+fn selected_relation_scopes(
+    selection: &WorkProductSelectionScopeV1,
+) -> Vec<WorkProductAuthorizedRelationScopeV1> {
     selection
         .relation_scopes()
         .map_or_else(Vec::new, |relations| relations.iter().cloned().collect())

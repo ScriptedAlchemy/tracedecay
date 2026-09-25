@@ -1,6 +1,6 @@
 use schemars::JsonSchema;
 use tracedecay_tool_catalog::{
-    ApplicationSurfaceOperation, AvailabilityContract, BindingId, BindingStatus, BindingSurface,
+    ApplicationSurfaceOperation, AvailabilityContract, BindingId, BindingSurface,
     CancellationContract, CancellationPoint, CapabilityId, CatalogContributionInputV1,
     CatalogContributionV1, ContributionContractRef, ContributionId, CoverageContractRef,
     DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
@@ -19,12 +19,13 @@ use crate::capability_manifest::{
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
+use crate::retrieval::callable_code_catalog::CALLABLE_CODE_DEFAULT_PAGE_SIZE;
 use crate::retrieval::primitive_surface::{
-    CalleesResultV1, CalleesSurfaceRequestV1, ContextResultV1, ContextSurfaceRequestV1,
-    ImpactResultV1, ImpactSurfaceRequestV1, NodeResultV1, NodeSurfaceRequestV1, PortOrderResultV1,
-    PortOrderSurfaceRequestV1, PortStatusResultV1, PortStatusSurfaceRequestV1, RedundancyResultV1,
-    RedundancySurfaceRequestV1, RenamePreviewPrimitiveOutcomeV1, RenamePreviewPrimitiveRequestV1,
-    SimilarResultV1, SimilarSurfaceRequestV1, TodosResultV1, TodosSurfaceRequestV1,
+    ContextResultV1, ContextSurfaceRequestV1, ImpactResultV1, NodeDepthSurfaceRequestV1,
+    NodeResultV1, NodeSurfaceRequestV1, PortOrderResultV1, PortOrderSurfaceRequestV1,
+    PortStatusResultV1, PortStatusSurfaceRequestV1, RedundancyResultV1, RedundancySurfaceRequestV1,
+    RenamePreviewPrimitiveOutcomeV1, RenamePreviewPrimitiveRequestV1, SimilarResultV1,
+    SimilarSurfaceRequestV1, TodosResultV1, TodosSurfaceRequestV1,
 };
 use crate::retrieval::requests::{
     CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticsPrimitiveRequest,
@@ -37,7 +38,8 @@ use crate::retrieval::requests::{
     StorageStatusPrimitiveResult,
 };
 use crate::retrieval::symbol_graph::{
-    SymbolGraphPage, SymbolPrimitiveRecord, SymbolRelationRecord, TypeHierarchyRecord,
+    ImplementationRecord, SymbolGraphPage, SymbolPrimitiveRecord, SymbolRelationRecord,
+    TypeHierarchyRecord,
 };
 use crate::surface_contracts::{
     CodeCallersSurfaceRequest, CodeImplementationsSurfaceRequest,
@@ -87,13 +89,16 @@ pub fn application_catalog_contributions()
 /// Resolves the page size an omitted transport control receives from the
 /// canonical primitive descriptor.
 ///
-/// Operations outside this primitive family retain the inert page envelope's
-/// established value of 10.
+/// Operations outside this primitive family, the callable-code queries
+/// included, retain the inert page envelope's established value of
+/// [`CALLABLE_CODE_DEFAULT_PAGE_SIZE`].
 pub fn application_operation_default_page_size(operation: ApplicationSurfaceOperation) -> u32 {
     PRIMITIVE_READ_SPECS
         .iter()
         .find(|spec| spec.operation == operation.as_str())
-        .map_or(10, |spec| spec.default_page_size)
+        .map_or(CALLABLE_CODE_DEFAULT_PAGE_SIZE, |spec| {
+            spec.default_page_size
+        })
 }
 
 struct PrimitiveReadSpec {
@@ -147,13 +152,14 @@ fn primitive_lsp_methods(operation: &str) -> &'static [&'static str] {
 }
 
 const PRIMITIVE_READ_SPECS: &[PrimitiveReadSpec] = &[
-    primitive_spec("code_signature_search"),
-    primitive_spec("code_implementations"),
-    primitive_spec("code_type_hierarchy"),
-    primitive_spec("code_callers"),
+    // MCP and CLI callers cannot choose a page size, so these navigation reads
+    // default to a page that holds a typical answer; `meta.cursor` continues.
+    primitive_spec_with_default_page_size("code_signature_search", 50),
+    primitive_spec_with_default_page_size("code_implementations", 20),
+    primitive_spec_with_default_page_size("code_type_hierarchy", 100),
+    primitive_spec_with_default_page_size("code_callers", 100),
     primitive_spec("context"),
     primitive_spec("node"),
-    primitive_spec("callees"),
     primitive_spec("impact"),
     primitive_spec("similar"),
     primitive_spec("redundancy"),
@@ -192,10 +198,9 @@ const DASHBOARD_PRIMITIVE_SURFACES: [BindingSurface; 4] = [
 
 fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface] {
     match spec.operation {
-        // These established tool handlers retain their current wire schemas
-        // and rendering across the generic CLI fallback and MCP, while using
-        // this operation identity for canonical code-graph read admission.
-        "context" | "node" | "callees" | "impact" | "similar" | "redundancy" | "rename_preview"
+        // The project's graph-tool owner answers these for the tool surfaces
+        // only; their typed results render as the established tool output.
+        "context" | "node" | "impact" | "similar" | "redundancy" | "rename_preview"
         | "port_status" | "port_order" | "todos" => &CLI_MCP_PRIMITIVE_SURFACES,
         "health_read" | "storage_status" | "diagnostics_read" => &DASHBOARD_PRIMITIVE_SURFACES,
         _ => &PRE_DASHBOARD_PRIMITIVE_SURFACES,
@@ -229,8 +234,6 @@ fn clone_family_surface_bindings(
             operation: SurfaceOperationName::new(operation)?,
             protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
             required_features: Vec::new(),
-            status: BindingStatus::Current,
-            alias_of: None,
         })?);
         binding_ids.push(binding_id);
     }
@@ -240,16 +243,16 @@ fn clone_family_surface_bindings(
 fn primitive_read_description(operation: &str) -> &'static str {
     match operation {
         "code_signature_search" => {
-            "Find functions and methods by return type, parameter substrings, or async status. Use code_symbol_search for name or concept searches; this tool requires at least one signature filter."
+            "Find functions and methods by signature shape: `returns` (return-type substring), `params` (substrings that must all appear in the parameter list), or `is_async`; narrow with `scope.path_prefix`. At least one filter is required. Use symbol search for name or concept searches."
         }
         "code_implementations" => {
-            "Find types implementing a named trait, or functions and methods with a selected method name. Use code_type_hierarchy to traverse extends and implements relationships from a known node ID."
+            "Find every type implementing a trait (`selector: {\"selector\": \"trait\", \"name\": ...}`) or every function or method with a name (`selector: {\"selector\": \"method\", \"name\": ...}`). Each match carries its exact source body. Use type_hierarchy to traverse extends and implements relationships from a known node ID."
         }
         "code_type_hierarchy" => {
-            "Traverse extends and implements relationships from a symbol node ID returned by code_symbol_search or another graph read. Use code_implementations when starting from a trait or method name."
+            "Use for trait, interface, or class hierarchy questions before grepping `impl X for` or `extends X`: traverses the implementors and extenders of a type node ID up to `maximum_depth` (default 5). Use implementations when starting from a trait or method name."
         }
         "code_callers" => {
-            "Find symbols that call a known symbol node ID, up to the requested depth. Use call_chain when you need the shortest call path between two known node IDs."
+            "Who calls this: find references, usages, and call sites of a known symbol node ID up to `maximum_depth` (default 3). Coverage is partial when a call target cannot be resolved exactly. Use call_chain for the shortest call path between two known node IDs."
         }
         "redundancy" => {
             "Report bounded, token-verified exact and rename-normalized implementation families in the admitted repository. Results rank review candidates by repeated source bytes."
@@ -408,8 +411,6 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
                 operation: SurfaceOperationName::new(*method)?,
                 protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
                 required_features: Vec::new(),
-                status: BindingStatus::Current,
-                alias_of: None,
             })?);
             binding_ids.push(binding_id);
         }
@@ -565,7 +566,7 @@ fn primitive_executable_schemas(
     add!(
         "code_implementations",
         CodeImplementationsSurfaceRequest,
-        SymbolGraphPage<SymbolRelationRecord>
+        SymbolGraphPage<ImplementationRecord>
     );
     add!(
         "code_type_hierarchy",
@@ -578,8 +579,7 @@ fn primitive_executable_schemas(
         SymbolGraphPage<SymbolRelationRecord>
     );
     add!("context", ContextSurfaceRequestV1, ContextResultV1);
-    add!("callees", CalleesSurfaceRequestV1, CalleesResultV1);
-    add!("impact", ImpactSurfaceRequestV1, ImpactResultV1);
+    add!("impact", NodeDepthSurfaceRequestV1, ImpactResultV1);
     add!("node", NodeSurfaceRequestV1, NodeResultV1);
     add!("similar", SimilarSurfaceRequestV1, SimilarResultV1);
     add!("redundancy", RedundancySurfaceRequestV1, RedundancyResultV1);
@@ -688,8 +688,6 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
         operation: SurfaceOperationName::new("workspace/symbol")?,
         protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
         required_features: Vec::new(),
-        status: BindingStatus::Current,
-        alias_of: None,
     })?);
     binding_ids.push(lsp_binding_id);
     let capability = application_capability_manifest(ApplicationCapabilityManifestInput {
@@ -814,10 +812,9 @@ fn symbol_search_scope() -> Result<ScopeRequirement, ApplicationContractError> {
 mod tests {
     use super::*;
 
-    const ESTABLISHED_TOOL_PRIMITIVES: [&str; 10] = [
+    const ESTABLISHED_TOOL_PRIMITIVES: [&str; 9] = [
         "context",
         "node",
-        "callees",
         "impact",
         "similar",
         "redundancy",

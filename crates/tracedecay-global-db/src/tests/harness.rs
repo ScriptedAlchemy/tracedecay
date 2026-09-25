@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::TempDir;
 
 use crate::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_runtime_core::db::DaemonDatabaseScope;
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, Rows};
@@ -583,7 +584,7 @@ impl HostAdmissionTestRuntimeV1 {
             HOST_ADMISSION_TEST_BACKGROUND_CPU
                 .get_or_init(|| Arc::new(ProcessBackgroundCpuV1::new(NonZeroUsize::MIN))),
         );
-        tracedecay_sessions::runtime::codex::CodexDiscoveryHub::default()
+        tracedecay_sessions::runtime::hosts::codex::CodexDiscoveryHub::default()
             .configure_preparation_resources(memory, background_cpu)
             .map_err(
                 |error| tracedecay_domain::errors::TraceDecayError::Database {
@@ -809,7 +810,7 @@ impl HostAdmissionTestRuntimeV1 {
         provider: &str,
         session_id: &str,
         transcript_path: &std::path::Path,
-    ) -> tracedecay_domain::errors::Result<(i64, i64, i64, i64, i64, i64, i64)> {
+    ) -> tracedecay_domain::errors::Result<(i64, i64, i64, i64, i64, i64)> {
         let snapshot = self
             .session_database_for_test(scope)?
             .read_snapshot()
@@ -819,8 +820,6 @@ impl HostAdmissionTestRuntimeV1 {
                 "SELECT
                     (SELECT COUNT(*) FROM sessions
                      WHERE provider = ?1 AND session_id = ?2),
-                    (SELECT COUNT(*) FROM session_messages
-                     WHERE provider = ?1 AND session_id = ?2),
                     (SELECT COUNT(*) FROM lcm_raw_messages
                      WHERE provider = ?1 AND session_id = ?2),
                     (SELECT COUNT(*) FROM lcm_raw_messages_fts
@@ -828,14 +827,16 @@ impl HostAdmissionTestRuntimeV1 {
                        ON raw.store_id = lcm_raw_messages_fts.rowid
                      WHERE raw.provider = ?1 AND raw.session_id = ?2),
                     (SELECT COUNT(*) FROM lcm_raw_messages_fts),
-                    (SELECT COUNT(*) FROM lcm_summary_nodes
+                    (SELECT COUNT(*) FROM session_summary_nodes
                      WHERE provider = ?1 AND session_id = ?2),
                     (SELECT COUNT(*) FROM parse_offsets
                      WHERE file_path = ?3)",
                 tracedecay_runtime_core::db::engine::params![
                     provider,
                     session_id,
-                    transcript_path.to_string_lossy().as_ref()
+                    tracedecay_sessions::runtime::shared::path_identity_key(
+                        transcript_path.to_string_lossy().as_ref()
+                    )
                 ],
             )
             .await?;
@@ -852,7 +853,6 @@ impl HostAdmissionTestRuntimeV1 {
             row.get(3)?,
             row.get(4)?,
             row.get(5)?,
-            row.get(6)?,
         ))
     }
 
@@ -868,7 +868,7 @@ impl HostAdmissionTestRuntimeV1 {
             .await?;
         let deleted = transaction
             .execute(
-                "DELETE FROM session_messages WHERE provider = ?1 AND message_id = ?2",
+                "DELETE FROM lcm_raw_messages WHERE provider = ?1 AND message_id = ?2",
                 tracedecay_runtime_core::db::engine::params![provider, message_id],
             )
             .await?;
@@ -999,10 +999,10 @@ impl HostAdmissionTestRuntimeV1 {
         }
 
         let external_content = "canonical external payload";
-        let external_hash = tracedecay_lcm::util::sha256_hex(external_content.as_bytes());
-        let raw_hash = tracedecay_lcm::util::sha256_hex(b"canonical raw message");
-        let child_summary_hash = tracedecay_lcm::util::sha256_hex(b"canonical child summary");
-        let parent_summary_hash = tracedecay_lcm::util::sha256_hex(b"canonical parent summary");
+        let external_hash = sha256_hex(external_content.as_bytes());
+        let raw_hash = sha256_hex(b"canonical raw message");
+        let child_summary_hash = sha256_hex(b"canonical child summary");
+        let parent_summary_hash = sha256_hex(b"canonical parent summary");
         let payload_dir = database
             .db_path()
             .parent()
@@ -1033,48 +1033,64 @@ impl HostAdmissionTestRuntimeV1 {
                  );
                  INSERT INTO lcm_raw_messages(
                     provider, message_id, session_id, store_id, role, ordinal, timestamp,
-                    content, content_hash, storage_kind, payload_ref, snippet_text,
-                    index_text, legacy_source, legacy_truncated, metadata_json
+                    content, content_hash, storage_kind, payload_ref, metadata_json
                  ) VALUES (
                     'codex', 'message-a', 'session-a', 11, 'assistant', 0, 11,
                     'canonical raw message', '{raw_hash}', 'inline', NULL,
-                    'canonical raw message', 'canonical raw message', 0, 0,
                     '{raw_message_metadata}'
                  );
                  INSERT INTO lcm_raw_messages(
                     provider, message_id, session_id, store_id, role, ordinal, timestamp,
-                    content, content_hash, storage_kind, payload_ref, snippet_text,
-                    index_text, legacy_source, legacy_truncated, metadata_json
+                    content, content_hash, storage_kind, payload_ref, placeholder_text,
+                    metadata_json
                  ) VALUES (
                     'codex', 'message-b', 'session-a', 12, 'tool', 1, 12,
                     NULL, '{external_hash}', 'external', 'payload-a',
-                    'canonical external payload', 'canonical external payload', 0, 0,
+                    'canonical external payload',
                     '{external_message_metadata}'
                  );
-                 INSERT INTO lcm_summary_nodes(
-                    node_id, provider, conversation_id, session_id, depth, summary_text,
-                    summary_hash, summary_token_count, source_token_count,
-                    source_time_start, source_time_end, expand_hint, metadata_json, created_at
+                 INSERT INTO retrieval_anchors (
+                    anchor_id, anchor_json, owner_json, projection_generation
+                 ) VALUES ('summary-child-anchor', '{{}}', '{{}}', 'test'),
+                          ('summary-parent-anchor', '{{}}', '{{}}', 'test');
+                 INSERT INTO session_summary_nodes(
+                    summary_id, session_id, provider, conversation_id, depth,
+                    summary_anchor_id, summary_text, summary_hash, summary_token_count,
+                    source_token_count, source_time_start, source_time_end, expand_hint,
+                    metadata_json, source_horizon_json, created_at
                  ) VALUES (
-                    'summary-child', 'codex', 'session-a', 'session-a', 0,
-                    'canonical child summary', '{child_summary_hash}', 3, 3,
-                    11, 11, NULL, NULL, 13
+                    'summary-child', 'session-a', 'codex', 'session-a', 0,
+                    'summary-child-anchor', 'canonical child summary',
+                    '{child_summary_hash}', 3, 3, 11, 11, NULL, NULL, '{{}}', 13
                  );
-                 INSERT INTO lcm_summary_nodes(
-                    node_id, provider, conversation_id, session_id, depth, summary_text,
-                    summary_hash, summary_token_count, source_token_count,
-                    source_time_start, source_time_end, expand_hint, metadata_json, created_at
+                 INSERT INTO session_summary_nodes(
+                    summary_id, session_id, provider, conversation_id, depth,
+                    summary_anchor_id, summary_text, summary_hash, summary_token_count,
+                    source_token_count, source_time_start, source_time_end, expand_hint,
+                    metadata_json, source_horizon_json, created_at
                  ) VALUES (
-                    'summary-parent', 'codex', 'session-a', 'session-a', 1,
-                    'canonical parent summary', '{parent_summary_hash}', 3, 6,
-                    11, 12, NULL, NULL, 14
+                    'summary-parent', 'session-a', 'codex', 'session-a', 1,
+                    'summary-parent-anchor', 'canonical parent summary',
+                    '{parent_summary_hash}', 3, 6, 11, 12, NULL, NULL, '{{}}', 14
                  );
-                 INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
+                 INSERT INTO session_summary_sources(summary_id, source_kind, source_id, ordinal)
                  VALUES ('summary-child', 'raw_message', '11', 0);
-                 INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
+                 INSERT INTO session_summary_sources(summary_id, source_kind, source_id, ordinal)
                  VALUES ('summary-parent', 'summary_node', 'summary-child', 0);
-                 INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
-                 VALUES ('summary-parent', 'raw_message', '12', 1);",
+                 INSERT INTO session_summary_sources(summary_id, source_kind, source_id, ordinal)
+                 VALUES ('summary-parent', 'raw_message', '12', 1);
+                 INSERT INTO session_temporal_generations(
+                    session_id, generation, state, frozen_watermarks_json, created_at
+                 ) VALUES ('session-a', 1, 'building', '{{}}', 10);
+                 UPDATE session_temporal_generations SET state = 'ready', ready_at = 10
+                  WHERE session_id = 'session-a' AND generation = 1;
+                 UPDATE session_temporal_generations SET state = 'active', activated_at = 10
+                  WHERE session_id = 'session-a' AND generation = 1;
+                 INSERT INTO session_summary_availability(
+                    session_id, generation, summary_id, availability,
+                    source_horizon_json, checked_at
+                 ) VALUES ('session-a', 1, 'summary-child', 'available', '{{}}', 13),
+                          ('session-a', 1, 'summary-parent', 'available', '{{}}', 14);",
                 byte_count = external_content.len(),
                 char_count = external_content.chars().count(),
             ))

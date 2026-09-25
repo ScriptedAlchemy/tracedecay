@@ -1,6 +1,6 @@
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_global_db::ParseOffset;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::{TranscriptStore, TranscriptStoreError, TranscriptWriteBatch};
 
@@ -15,7 +15,6 @@ async fn profile_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
 #[derive(Debug, PartialEq, Eq)]
 struct StoreCounts {
     sessions: i64,
-    projections: i64,
     raw_messages: i64,
     raw_fts: i64,
     all_raw_fts: i64,
@@ -40,12 +39,11 @@ async fn store_counts(
         .unwrap();
     StoreCounts {
         sessions: counts.0,
-        projections: counts.1,
-        raw_messages: counts.2,
-        raw_fts: counts.3,
-        all_raw_fts: counts.4,
-        summaries: counts.5,
-        cursors: counts.6,
+        raw_messages: counts.1,
+        raw_fts: counts.2,
+        all_raw_fts: counts.3,
+        summaries: counts.4,
+        cursors: counts.5,
     }
 }
 
@@ -141,7 +139,6 @@ async fn transcript_batch_survives_restart_and_replay_is_idempotent() {
         store_counts(&reopened, "cursor", "restart-session", &transcript_path).await,
         StoreCounts {
             sessions: 1,
-            projections: 2,
             raw_messages: 2,
             raw_fts: 2,
             all_raw_fts: 2,
@@ -236,7 +233,6 @@ async fn late_cursor_failure_rolls_back_every_transcript_write_then_retries() {
         store_counts(&db, "codex", "atomic-session", &transcript_path).await,
         StoreCounts {
             sessions: 0,
-            projections: 0,
             raw_messages: 0,
             raw_fts: 0,
             all_raw_fts: 0,
@@ -271,7 +267,6 @@ async fn late_cursor_failure_rolls_back_every_transcript_write_then_retries() {
         store_counts(&reopened, "codex", "atomic-session", &transcript_path).await,
         StoreCounts {
             sessions: 1,
-            projections: 2,
             raw_messages: 2,
             raw_fts: 2,
             all_raw_fts: 2,
@@ -313,7 +308,6 @@ async fn invalid_batch_mutates_no_transcript_state() {
         store_counts(&db, "cursor", "expected-session", &transcript_path).await,
         StoreCounts {
             sessions: 0,
-            projections: 0,
             raw_messages: 0,
             raw_fts: 0,
             all_raw_fts: 0,
@@ -462,7 +456,6 @@ async fn stale_higher_batch_is_rejected_until_reparsed_from_durable_cursor() {
         store_counts(&db, "cursor", "concurrent-session", &transcript_path).await,
         StoreCounts {
             sessions: 1,
-            projections: 3,
             raw_messages: 3,
             raw_fts: 3,
             all_raw_fts: 3,
@@ -553,7 +546,6 @@ async fn concurrent_full_batches_converge_without_split_brain_or_partial_writes(
         store_counts(&db, "cursor", "concurrent-full-session", &transcript_path,).await,
         StoreCounts {
             sessions: 1,
-            projections: 1,
             raw_messages: 1,
             raw_fts: 1,
             all_raw_fts: 1,
@@ -637,7 +629,7 @@ async fn concurrent_full_batches_converge_without_split_brain_or_partial_writes(
     ));
 
     // Transcript persistence never projects summary nodes: a `kind = "summary"`
-    // transcript message is durable raw evidence, and `lcm_summary_nodes` rows
+    // transcript message is durable raw evidence, and `session_summary_nodes` rows
     // are only ever written by the immutable-summary publication path
     // (`lcm_publish_immutable_summary_guarded`, which LCM compression reaches
     // through `dag::insert_summary_node`). See
@@ -647,7 +639,6 @@ async fn concurrent_full_batches_converge_without_split_brain_or_partial_writes(
         store_counts(&db, "cursor", "concurrent-full-session", &transcript_path,).await,
         StoreCounts {
             sessions: 1,
-            projections: 3,
             raw_messages: 3,
             raw_fts: 3,
             all_raw_fts: 3,
@@ -661,7 +652,7 @@ async fn concurrent_full_batches_converge_without_split_brain_or_partial_writes(
 /// summarization pipeline recognizes. `native_summary_evidence` scans
 /// `session_messages` for a non-empty body plus `kind = "summary"` and the
 /// provider's metadata discriminators, and only a recognized row reaches
-/// compression, the sole production writer of `lcm_summary_nodes`. Dropping
+/// compression, the sole production writer of `session_summary_nodes`. Dropping
 /// or rewriting either column at persist time would strand every host
 /// compaction with no failing count to show for it.
 #[tokio::test]
@@ -699,7 +690,6 @@ async fn transcript_summary_message_keeps_native_compaction_evidence() {
         store_counts(&db, "codex", "codex-compaction-session", &transcript_path).await,
         StoreCounts {
             sessions: 1,
-            projections: 1,
             raw_messages: 1,
             raw_fts: 1,
             all_raw_fts: 1,
@@ -715,7 +705,8 @@ async fn transcript_summary_message_keeps_native_compaction_evidence() {
     let connection = rusqlite::Connection::open(&snapshot_path).unwrap();
     let (text, kind, metadata_json) = connection
         .query_row(
-            "SELECT text, kind, metadata_json FROM session_messages
+            "SELECT COALESCE(content, placeholder_text, ''), kind, metadata_json
+             FROM lcm_raw_messages
              WHERE provider = ?1 AND session_id = ?2",
             ("codex", "codex-compaction-session"),
             |row| {
@@ -836,7 +827,6 @@ async fn concurrent_empty_advances_converge_to_highest_compatible_offset_without
         store_counts(&db, "cursor", "parsed-but-empty", &transcript_path).await,
         StoreCounts {
             sessions: 0,
-            projections: 0,
             raw_messages: 0,
             raw_fts: 0,
             all_raw_fts: 0,
@@ -897,7 +887,6 @@ async fn duplicate_empty_advances_are_idempotent_under_concurrency() {
         store_counts(&db, "cursor", "duplicate-empty", &transcript_path).await,
         StoreCounts {
             sessions: 0,
-            projections: 0,
             raw_messages: 0,
             raw_fts: 0,
             all_raw_fts: 0,

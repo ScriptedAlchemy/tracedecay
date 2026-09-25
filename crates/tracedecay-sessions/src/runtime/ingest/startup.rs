@@ -149,7 +149,7 @@ pub async fn ingest_user_global_sources_for_startup_with_db_and_codex_state<
     registry_db: &A,
     profile_root: &Path,
     cancellation: &ObservationCancellation,
-    codex_state: (&crate::runtime::codex::CodexDiscoveryHub, &str),
+    codex_state: (&crate::runtime::hosts::codex::CodexDiscoveryHub, &str),
 ) -> TranscriptIngestOutcome {
     ingest_user_global_sources_for_startup_inner(
         (brain_id, profile_id, registered),
@@ -183,7 +183,7 @@ async fn ingest_user_global_sources_for_startup_inner<A: SessionIngestAuthority>
     registry_db: &A,
     profile_root: &Path,
     cancellation: &ObservationCancellation,
-    codex_discovery: Option<(&crate::runtime::codex::CodexDiscoveryHub, &str)>,
+    codex_discovery: Option<(&crate::runtime::hosts::codex::CodexDiscoveryHub, &str)>,
 ) -> TranscriptIngestOutcome {
     if cancellation.is_cancelled() {
         return TranscriptIngestOutcome::new(

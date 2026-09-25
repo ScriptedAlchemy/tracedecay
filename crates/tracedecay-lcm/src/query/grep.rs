@@ -222,7 +222,16 @@ pub(super) async fn raw_grep_hits(
         )
         .await;
     }
-    let mut values = vec![Value::Text(query_plan.fts_query.clone())];
+    let content_query = if query_plan.fts_query.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "{}({})",
+            crate::schema::RAW_FTS_CONTENT_COLUMN_FILTER,
+            query_plan.fts_query
+        )
+    };
+    let mut values = vec![Value::Text(content_query)];
     let mut filters = Vec::new();
     push_grep_provider_filter(request, "r.provider", &mut filters, &mut values);
     push_raw_grep_filters(
@@ -306,12 +315,12 @@ pub(super) async fn summary_grep_hits(
     };
     let order_by = grep_order_by(request.sort, SUMMARY_GREP_RECENCY_EXPR, None);
     let sql = format!(
-        "SELECT n.provider, n.session_id, n.node_id, n.summary_text
-         FROM lcm_summary_nodes_fts
-         JOIN lcm_summary_nodes n ON n.rowid = lcm_summary_nodes_fts.rowid
-         WHERE lcm_summary_nodes_fts MATCH ?
+        "SELECT n.provider, n.session_id, n.summary_id, n.summary_text
+         FROM session_summary_nodes_fts
+         JOIN session_summary_nodes n ON n.rowid = session_summary_nodes_fts.rowid
+         WHERE session_summary_nodes_fts MATCH ?
            {filter_sql}
-         ORDER BY {order_by}, n.node_id
+         ORDER BY {order_by}, n.summary_id
          LIMIT ?"
     );
     let mut rows = conn.query(&sql, values).await?;
@@ -591,10 +600,10 @@ async fn summary_like_grep_hits(
     values.push(Value::Integer(fetch_limit as i64));
     let order_by = grep_order_by(request.sort, SUMMARY_GREP_RECENCY_EXPR, None);
     let sql = format!(
-        "SELECT n.provider, n.session_id, n.node_id, n.summary_text, 0.0 AS rank
-         FROM lcm_summary_nodes n
+        "SELECT n.provider, n.session_id, n.summary_id, n.summary_text, 0.0 AS rank
+         FROM session_summary_nodes n
          WHERE {}
-         ORDER BY {order_by}, n.node_id
+         ORDER BY {order_by}, n.summary_id
          LIMIT ?",
         filters.join(" AND "),
     );
@@ -678,22 +687,15 @@ fn push_summary_grep_filters(
     values: &mut Vec<Value>,
 ) {
     // Immutable lineage remains retained after supersession; only active,
-    // available summaries are eligible for current retrieval.
-    filters.push(
-        "EXISTS (
-            SELECT 1 FROM session_temporal_generations generation
-            JOIN session_summary_availability availability
-              ON availability.session_id = generation.session_id
-             AND availability.generation = generation.generation
-            WHERE generation.session_id = n.session_id AND generation.state = 'active'
-              AND availability.summary_id = n.node_id
-              AND availability.availability = 'available'
-         ) AND NOT EXISTS (
+    // available summaries are eligible for current retrieval, and none while
+    // the session has an unconverged raw revision.
+    filters.push(format!(
+        "{} AND NOT EXISTS (
             SELECT 1 FROM lcm_summary_convergence_dirty_raw dirty
             WHERE dirty.provider = n.provider AND dirty.session_id = n.session_id
-         )"
-        .to_string(),
-    );
+         )",
+        crate::schema::SUMMARY_VISIBLE_SQL
+    ));
     if let Some(session_id) = session_id {
         filters.push("n.session_id = ?".to_string());
         values.push(Value::Text(session_id.to_string()));
@@ -707,11 +709,11 @@ fn push_summary_grep_filters(
         filters.push(
             "EXISTS (
                 SELECT 1
-                FROM lcm_summary_sources ss
+                FROM session_summary_sources ss
                 JOIN lcm_raw_messages sr
                   ON ss.source_kind = 'raw_message'
                  AND sr.store_id = CAST(ss.source_id AS INTEGER)
-                WHERE ss.node_id = n.node_id
+                WHERE ss.summary_id = n.summary_id
                   AND (json_extract(sr.metadata_json, '$.source') = ? OR sr.metadata_json LIKE ?)
              )"
             .to_string(),

@@ -2,8 +2,9 @@
 //!
 //! `shutdown_owner_phases` names every retained background owner and hands it
 //! to the shutdown coordinator as (cancel, join) pairs in dependency order:
-//! producers first, then the invocation registry that admits provider work,
-//! then the store-settling reapers. The phase deadline bounds every join and
+//! manual branch publications and project opens first, then the invocation
+//! registry that holds the owners they register and admits provider work,
+//! then the remaining producers and the store-settling reapers. The phase deadline bounds every join and
 //! reports a typed timeout under the owner's name.
 //!
 //! The `cancel` side is not decoration. `prepare_shutdown_owner_phases` runs
@@ -11,9 +12,10 @@
 //! an owner that only cancels inside its join future is not actually told to
 //! stop until its phase is reached, and if the coordinator aborts the drain
 //! runner first, it is never told at all and keeps running past the terminal
-//! receipt. Owners with a cheap synchronous stop (`invocation`, `maintenance`,
-//! `git_watcher`) therefore supply a real `cancel`; a `|| {}` cancel side is
-//! only correct where no synchronous stop exists.
+//! receipt. Owners with a cheap synchronous stop (`project_open`,
+//! `invocation`, `maintenance`, `git_watcher`) therefore supply a real
+//! `cancel`; a `|| {}` cancel side is only correct where no synchronous stop
+//! exists.
 
 use std::sync::Arc;
 
@@ -49,6 +51,7 @@ impl DaemonEngine {
             self.store_administration
                 .session_temporal_refresh_schedulers(),
         );
+        let refresh_services = self.store_administration.clone();
         let automation_join = self.clone();
 
         let replay_join = self.store_administration.clone();
@@ -82,6 +85,24 @@ impl DaemonEngine {
                     }
                 },
             )],
+            // An admitted open registers its owners with the invocation
+            // registry, so it must settle before that registry drains: it
+            // either registers in time to be released or stops at a
+            // cancellation boundary before registering anything.
+            vec![ShutdownOwner::with_deadline_status(
+                "project_open",
+                {
+                    let project_open_cancel = project_open.clone();
+                    move || project_open_cancel.cancel_all()
+                },
+                move |_| async move {
+                    if project_open.shutdown().await {
+                        ShutdownStatus::Clean
+                    } else {
+                        ShutdownStatus::TimedOut
+                    }
+                },
+            )],
             vec![ShutdownOwner::with_deadline_status(
                 "invocation",
                 {
@@ -91,17 +112,6 @@ impl DaemonEngine {
                 move |_| async move { invocation_join.shutdown().await },
             )],
             vec![
-                ShutdownOwner::with_deadline_status(
-                    "project_open",
-                    || {},
-                    move |_| async move {
-                        if project_open.shutdown().await {
-                            ShutdownStatus::Clean
-                        } else {
-                            ShutdownStatus::TimedOut
-                        }
-                    },
-                ),
                 ShutdownOwner::new(
                     "automation",
                     {
@@ -114,6 +124,9 @@ impl DaemonEngine {
                 ),
                 ShutdownOwner::new("session_temporal_refresh", || {}, async move {
                     session_refresh.shutdown().await;
+                    refresh_services
+                        .release_profile_session_refresh_services()
+                        .await;
                 }),
                 ShutdownOwner::new(
                     "host_admission_replay",

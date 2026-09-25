@@ -158,7 +158,7 @@ export function EvidencePanel({
           data-evidence-panel-button={summary.id}
           aria-pressed={selected}
           aria-controls={EVIDENCE_INSPECTOR_ID}
-          className="td-title min-w-0 truncate text-left text-text-primary after:absolute after:inset-0 after:content-[''] focus-visible:outline-none"
+          className="td-title -my-[8px] min-h-[var(--touch-target-min)] min-w-[var(--touch-target-min)] truncate text-left text-text-primary after:absolute after:inset-0 after:content-[''] focus-visible:outline-none"
           onClick={() => onSelect(summary.id)}
           onFocus={() => onPreview(summary.id)}
           onBlur={onPreviewEnd}
@@ -185,7 +185,7 @@ export function EvidencePanel({
  * reason, and nothing drawn that could be mistaken for a measurement. */
 export function BlockedBody({ summary }: { summary: EvidenceSummary }) {
   return (
-    <p className="text-2xs leading-relaxed text-text-muted" data-evidence-blocked={summary.state}>
+    <p className="text-body leading-relaxed text-text-muted" data-evidence-blocked={summary.state}>
       <span className="text-text-secondary">{evidenceStateLabel(summary.state)}</span>
       {summary.stateDetail ? ` · ${summary.stateDetail}` : ''}
       {' · '}nothing is drawn in place of the reading

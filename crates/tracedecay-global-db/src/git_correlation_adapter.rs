@@ -67,18 +67,12 @@ pub struct GitEvidenceConvergenceStats {
     /// Conservative signal: a full page means another retained-history page
     /// may exist and callers must not describe this pass as fully drained.
     pub backfill_page_saturated: bool,
-    /// The verified head predated the indexed projector and this pass
-    /// re-published its unchanged content under the current projector so
-    /// bounded reads can serve it.
-    pub reprojected_legacy_head: bool,
 }
 
 impl GitEvidenceConvergenceStats {
     /// Whether this pass durably changed Git evidence or its session frontier.
     pub fn committed_progress(&self) -> bool {
-        self.replayed_publications > 0
-            || self.backfill.committed_progress()
-            || self.reprojected_legacy_head
+        self.replayed_publications > 0 || self.backfill.committed_progress()
     }
 }
 
@@ -284,7 +278,6 @@ where
                     pending_publications: None,
                     backfill: BackfillStats::default(),
                     backfill_page_saturated: false,
-                    reprojected_legacy_head: false,
                 },
                 later_failure: error,
             });
@@ -298,7 +291,6 @@ where
                 pending_publications,
                 backfill: BackfillStats::default(),
                 backfill_page_saturated: false,
-                reprojected_legacy_head: false,
             },
             Some(later_failure),
         );
@@ -313,58 +305,19 @@ where
                         pending_publications,
                         backfill: BackfillStats::default(),
                         backfill_page_saturated: false,
-                        reprojected_legacy_head: false,
                     },
                     later_failure: error,
                 });
             }
             Err(error) => return Err(error),
         };
-    let mut progress = GitEvidenceConvergenceStats {
+    let progress = GitEvidenceConvergenceStats {
         replayed_publications,
         pending_publications,
         backfill_page_saturated: backfill_outcome.stats.sessions_scanned == backfill_session_limit,
         backfill: backfill_outcome.stats,
-        reprojected_legacy_head: false,
     };
-    if let Some(later_failure) = backfill_outcome.later_failure {
-        return settle_git_evidence_convergence(progress, Some(later_failure));
-    }
-    match reproject_legacy_git_evidence_head(session_store).await {
-        Ok(reprojected) => {
-            progress.reprojected_legacy_head = reprojected;
-            settle_git_evidence_convergence(progress, None)
-        }
-        Err(error) => settle_git_evidence_convergence(progress, Some(error)),
-    }
-}
-
-/// Re-publishes a verified head that predates the indexed projector. Every
-/// ordinary publication re-projects the head as a side effect; this covers a
-/// project whose evidence never changes again, so its bounded reads do not
-/// stay unavailable indefinitely.
-async fn reproject_legacy_git_evidence_head<S: GitCorrelationSessionStore>(
-    session_store: &S,
-) -> Result<bool, GitCorrelationError> {
-    let identity =
-        git_evidence_projection_identity(GraphNamespace::new(GIT_EVIDENCE_GRAPH_NAMESPACE)?)?;
-    match open_git_evidence_graph_view(
-        session_store.graph_runtime()?,
-        &identity,
-        Arc::new(NeverCancelled),
-    )? {
-        GitEvidenceGraphHead::Legacy { .. } => {
-            session_store
-                .publish_graph_evidence_owned(
-                    "projector-upgrade".to_owned(),
-                    Vec::new(),
-                    Vec::new(),
-                )
-                .await?;
-            Ok(true)
-        }
-        GitEvidenceGraphHead::Unpublished | GitEvidenceGraphHead::Indexed(_) => Ok(false),
-    }
+    settle_git_evidence_convergence(progress, backfill_outcome.later_failure)
 }
 
 /// Adapter over an already-open project-sessions database.
@@ -538,9 +491,7 @@ where
     }
 
     /// Opens the bounded, generation-bound query view without decoding any
-    /// span or commit payload. `Ok(None)` is the never-published empty start;
-    /// a head published by the pre-index projector is a typed unavailable
-    /// state until the next publication (or convergence pass) re-projects it.
+    /// span or commit payload. `Ok(None)` is the never-published empty start.
     #[hotpath::measure(label = "global_db.git_correlation.graph_view")]
     pub fn git_evidence_graph_view(
         &self,
@@ -554,11 +505,6 @@ where
         )? {
             GitEvidenceGraphHead::Indexed(view) => Ok(Some(view)),
             GitEvidenceGraphHead::Unpublished => Ok(None),
-            GitEvidenceGraphHead::Legacy { generation } => {
-                Err(GitCorrelationError::Unavailable(format!(
-                    "verified Git evidence generation `{generation}` predates the indexed projector; the next publication re-projects it"
-                )))
-            }
         }
     }
 
@@ -961,8 +907,8 @@ mod tests {
     use tokio::sync::Notify;
     use tracedecay_domain::ProjectId;
     use tracedecay_graph_db::{
-        GraphDbError, GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace,
-        GraphProjectionIdentity, NeverCancelled, VerifiedGraphSnapshot,
+        GraphDbError, GraphGenerationManifest, GraphIdempotencyKey, GraphProjectionIdentity,
+        NeverCancelled, VerifiedGraphSnapshot,
     };
     use tracedecay_runtime_core::RuntimeOperationTaskOwnerV1;
     use tracedecay_runtime_core::db::{
@@ -972,10 +918,8 @@ mod tests {
     use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1;
     use tracedecay_sessions::runtime::SessionRecord;
     use tracedecay_sessions::runtime::git_correlation::{
-        CommitRelationFilter, GitCorrelationError, GitEvidenceProjectionV1,
-        GitEvidenceProjectorRevision, GitRefFilter, GitReflogSource, GitScopeFilter,
-        SessionGitSpan, SessionsForQuery, SpanObservation, SpanSource, SystemGit,
-        git_evidence_projection_identity, legacy_git_evidence_manifest_for_test,
+        CommitRelationFilter, GitCorrelationError, GitRefFilter, GitScopeFilter, SessionsForQuery,
+        SpanObservation, SpanSource, SystemGit,
     };
     use tracedecay_store::{FactReadControl, StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 
@@ -1218,7 +1162,6 @@ mod tests {
             pending_publications: Some(0),
             backfill: Default::default(),
             backfill_page_saturated: false,
-            reprojected_legacy_head: false,
         };
         let failure = GitCorrelationError::Unavailable("git log failed".to_owned());
 
@@ -1271,37 +1214,6 @@ mod tests {
         assert_eq!(projection.projection().spans()[0].last_ts, 12);
     }
 
-    /// A repository whose history is readable but empty, so the convergence
-    /// pass's attribution sweep can run against fixture worktrees.
-    struct EmptyHistoryGit;
-
-    impl GitReflogSource for EmptyHistoryGit {
-        fn reflog(&self, _worktree: &std::path::Path) -> Option<String> {
-            Some(String::new())
-        }
-
-        fn current_branch(&self, _worktree: &std::path::Path) -> Option<String> {
-            Some("main".to_owned())
-        }
-
-        fn commit_reference_exists(
-            &self,
-            _worktree: &std::path::Path,
-            _reference: &str,
-        ) -> Result<bool, GitCorrelationError> {
-            Ok(true)
-        }
-
-        fn commit_log(
-            &self,
-            _worktree: &std::path::Path,
-            _branch: &str,
-            _since: i64,
-        ) -> Option<String> {
-            Some(String::new())
-        }
-    }
-
     fn released_snapshot_gate() -> mpsc::Receiver<()> {
         let (release, blocked) = mpsc::channel();
         release.send(()).unwrap();
@@ -1333,11 +1245,6 @@ mod tests {
             .git_evidence_projection()
             .unwrap()
             .expect("published evidence");
-        assert_eq!(
-            full.projector_revision(),
-            GitEvidenceProjectorRevision::Current
-        );
-
         let health = fixture.store.correlation_index_health().await.unwrap();
         assert_eq!(health, full.health(None));
         assert!(health.projection_available);
@@ -1381,121 +1288,6 @@ mod tests {
                 "session.git-evidence-runtime".to_owned()
             )])
         );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn legacy_head_is_unavailable_until_convergence_reprojects_it() {
-        let fixture =
-            GitEvidenceRuntimeFixture::open("legacy-head", released_snapshot_gate(), false).await;
-        let identity =
-            git_evidence_projection_identity(GraphNamespace::new("project").unwrap()).unwrap();
-        // The attribution sweep only scans worktrees that exist on disk.
-        let worktree = fixture._root.path().to_string_lossy().into_owned();
-        let projection = GitEvidenceProjectionV1::new(
-            "legacy-watermark",
-            vec![SessionGitSpan {
-                span_id: "legacy-span".to_owned(),
-                provider: "codex".to_owned(),
-                session_id: "session.legacy".to_owned(),
-                thread_id: None,
-                branch: Some("main".to_owned()),
-                worktree,
-                first_ts: 10,
-                last_ts: 12,
-                event_count: 2,
-                source: SpanSource::Ingest,
-            }],
-            Vec::new(),
-        )
-        .unwrap();
-        let legacy = legacy_git_evidence_manifest_for_test(identity, &projection).unwrap();
-        let legacy_generation = legacy.generation.clone();
-        fixture
-            .runtime
-            .publish_verified_manifest(
-                &legacy,
-                GraphIdempotencyKey::new("legacy-head").unwrap(),
-                Arc::new(AtomicBool::new(false)),
-            )
-            .unwrap();
-
-        for error in [
-            fixture
-                .store
-                .sessions_for_with_relation(&branch_query("main"), CommitRelationFilter::Produced)
-                .await
-                .unwrap_err(),
-            fixture.store.correlation_index_health().await.unwrap_err(),
-            fixture
-                .store
-                .sessions_for_with_relation_and_presence(
-                    &branch_query("main"),
-                    CommitRelationFilter::Produced,
-                )
-                .await
-                .unwrap_err(),
-        ] {
-            assert!(
-                matches!(&error, GitCorrelationError::Unavailable(detail)
-                    if detail.contains("predates the indexed projector")),
-                "{error}"
-            );
-        }
-        // The rows themselves stay fully recoverable.
-        let recovered = fixture
-            .store
-            .git_evidence_projection()
-            .unwrap()
-            .expect("legacy head recovers");
-        assert_eq!(
-            recovered.projector_revision(),
-            GitEvidenceProjectorRevision::LegacyV1
-        );
-        assert_eq!(recovered.projection(), &projection);
-
-        let convergence = fixture
-            .store
-            .converge_session_git_evidence(&EmptyHistoryGit, 1, 1)
-            .await
-            .unwrap();
-        assert!(convergence.later_failure().is_none(), "{convergence:?}");
-        assert!(convergence.stats().reprojected_legacy_head);
-        assert!(convergence.committed_progress());
-
-        let health = fixture.store.correlation_index_health().await.unwrap();
-        assert_eq!((health.span_count, health.commit_count), (1, 0));
-        assert_ne!(
-            health.generation.as_deref(),
-            Some(legacy_generation.as_str())
-        );
-        let hits = fixture
-            .store
-            .sessions_for_with_relation(&branch_query("main"), CommitRelationFilter::Produced)
-            .await
-            .unwrap();
-        assert_eq!(
-            hits.iter()
-                .map(|hit| hit.session_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["session.legacy"]
-        );
-        assert_eq!(
-            fixture
-                .store
-                .git_evidence_projection()
-                .unwrap()
-                .unwrap()
-                .projector_revision(),
-            GitEvidenceProjectorRevision::Current
-        );
-
-        // An indexed head is not re-projected again.
-        let settled = fixture
-            .store
-            .converge_session_git_evidence(&EmptyHistoryGit, 1, 1)
-            .await
-            .unwrap();
-        assert!(!settled.stats().reprojected_legacy_head);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

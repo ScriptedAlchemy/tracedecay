@@ -1813,8 +1813,7 @@ mod tests {
             "status": AutomationRunStatus::Skipped,
             "accepted_count": 0,
             "rejected_count": 0,
-            "error": "no_skill_writer_evidence",
-            "fallback_status": "no_skill_writer_evidence",
+            "error": "no_session_evidence",
             "started_at": "1",
             "completed_at": "2"
         }))

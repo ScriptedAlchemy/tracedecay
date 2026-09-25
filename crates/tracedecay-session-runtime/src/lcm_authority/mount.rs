@@ -11,9 +11,10 @@ use tracedecay_contracts::{
     DisclosureClass, RequestContext, RequestId,
 };
 use tracedecay_domain::{ActorId, UtcMicros};
+use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_session_memory::context::{
-    CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, RequestBudgets,
-    ResolvedSessionIdentity, application_observed_at, session_application_grant_digest,
+    CapabilityDigest, ConfigurationDigest, PolicyDigest, RequestBudgets, ResolvedSessionIdentity,
+    application_observed_at, session_application_grant_digest,
 };
 use tracedecay_session_memory::session::SessionRequestBinding;
 use tracedecay_session_memory::session::lcm::{

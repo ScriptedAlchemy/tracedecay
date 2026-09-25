@@ -298,18 +298,6 @@ pub(crate) fn record_pages(count: u64) {
     }
 }
 
-#[inline(always)]
-pub(crate) fn record_seal_bytes(bytes: u64) {
-    #[cfg(feature = "hotpath")]
-    {
-        hotpath::gauge!("code_index_seal_bytes").set(bytes);
-    }
-    #[cfg(not(feature = "hotpath"))]
-    {
-        let _ = bytes;
-    }
-}
-
 /// Start of one production-owner generation build. The matching observation
 /// ends only after the immutable generation has been published and is
 /// queryable through that owner; daemon scheduling/wake latency is measured

@@ -58,7 +58,6 @@ pub async fn run_cold_store_page(
     profile_root: &Path,
     profile_database: &RegisteredGlobalDb,
     orphan_store_gc_days: Option<u64>,
-    incident_debris_retention_days: Option<u64>,
     cancellation: &CancellationToken,
 ) -> tracedecay_domain::errors::Result<ColdStorePageReportV1> {
     let checkpoint_path = checkpoint_path(profile_root);
@@ -72,16 +71,6 @@ pub async fn run_cold_store_page(
         COLD_STORE_PAGE_LIMIT,
     )
     .await?;
-    let retention_now =
-        if orphan_store_gc_days.is_some() || incident_debris_retention_days.is_some() {
-            Some(now_secs_i64().map_err(|message| {
-                tracedecay_domain::errors::TraceDecayError::Config {
-                    message: message.to_owned(),
-                }
-            })?)
-        } else {
-            None
-        };
     let mut report = ColdStorePageReportV1::default();
     for entry in &page.entries {
         let outcome = classify_cold_store_state(
@@ -106,12 +95,12 @@ pub async fn run_cold_store_page(
         }
     }
     if let Some(days) = orphan_store_gc_days {
-        let findings = orphan_stores::classify_stores(
-            &page.entries,
-            retention_now.ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-                message: "maintenance retention clock unavailable".to_owned(),
-            })?,
-        );
+        let now = now_secs_i64().map_err(|message| {
+            tracedecay_domain::errors::TraceDecayError::Config {
+                message: message.to_owned(),
+            }
+        })?;
+        let findings = orphan_stores::classify_stores(&page.entries, now);
         let plan = orphan_stores::plan_collection(findings, retention_window_secs(days));
         let (outcome, _) =
             orphan_stores::execute_registered_collection(profile_database, &plan, profile_root)
@@ -126,22 +115,13 @@ pub async fn run_cold_store_page(
             report.outcome = ColdStorePageOutcomeV1::Unreadable;
         }
     }
-    if let Some(days) = incident_debris_retention_days {
-        let sweep = incident_debris::sweep_incident_debris(
-            &page.entries,
-            profile_root,
-            retention_window_secs(days),
-            retention_now.ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-                message: "maintenance retention clock unavailable".to_owned(),
-            })?,
-        );
-        report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(sweep.reclaimed_bytes);
-        report.unavailable_stores = report
-            .unavailable_stores
-            .saturating_add(sweep.errors.len() as u64);
-        if !sweep.errors.is_empty() {
-            report.outcome = ColdStorePageOutcomeV1::Unreadable;
-        }
+    let sweep = incident_debris::sweep_incident_debris(&page.entries, profile_root);
+    report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(sweep.reclaimed_bytes);
+    report.unavailable_stores = report
+        .unavailable_stores
+        .saturating_add(sweep.errors.len() as u64);
+    if !sweep.errors.is_empty() {
+        report.outcome = ColdStorePageOutcomeV1::Unreadable;
     }
     let project_ids = page
         .entries

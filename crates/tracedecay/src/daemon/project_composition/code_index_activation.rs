@@ -9,6 +9,7 @@ use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeIndexDemandAdmissionV1, CodeIndexDemandV1, query_runtime::QueryRuntimeMountErrorV1,
 };
 use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 /// Inputs the deferred mount closure re-clones on every activation attempt.
 /// Bundled so the builder keeps one argument list instead of ten positional
@@ -233,7 +234,7 @@ async fn mount_core_query_authority_from_project_sessions(
             "project session database is not mounted".to_owned(),
         ));
     };
-    let cursor_keys = session_db
+    let cursor_keys = SessionTemporalAccess::new(&*session_db)
         .load_session_cursor_key_provider_result()
         .await
         .map_err(|error| QueryRuntimeMountErrorV1::FallbackKeyUnavailable(error.to_string()))?;
@@ -545,10 +546,10 @@ mod tests {
         assert!(
             sink(
                 root.clone(),
-                crate::mcp::server::CodeIndexDemandV1::OperatorReconcile
+                tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandV1::OperatorReconcile
             )
             .await
-                == crate::mcp::server::CodeIndexDemandAdmissionV1::Queued,
+                == tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandAdmissionV1::Queued,
             "a pre-mount reconcile request must be accepted, not dropped"
         );
 
@@ -622,12 +623,12 @@ mod tests {
         let hook_sink = code_index_hook_sink(Arc::clone(&activation));
         assert_eq!(
             hook_sink(root.clone(), vec!["lib.rs".to_owned()]).await,
-            crate::mcp::server::CodeIndexDemandAdmissionV1::RefusedByPolicy
+            tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandAdmissionV1::RefusedByPolicy
         );
         let probe_sink = code_index_freshness_probe_sink(registry.clone(), Arc::clone(&activation));
         assert_eq!(
             probe_sink(root.clone()).await,
-            crate::mcp::server::CodeIndexDemandAdmissionV1::RefusedByPolicy
+            tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandAdmissionV1::RefusedByPolicy
         );
         let sink = code_index_reconcile_sink(Arc::clone(&activation));
         // The daemon's own whole-worktree demands, a `workspaceOpen` /
@@ -639,10 +640,10 @@ mod tests {
         assert!(
             sink(
                 root.clone(),
-                crate::mcp::server::CodeIndexDemandV1::Reconcile
+                tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandV1::Reconcile
             )
             .await
-                == crate::mcp::server::CodeIndexDemandAdmissionV1::RefusedByPolicy,
+                == tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandAdmissionV1::RefusedByPolicy,
             "an automatic whole-worktree demand must honour the linked-worktree watch policy"
         );
         for _ in 0..8 {
@@ -656,10 +657,10 @@ mod tests {
         assert!(
             sink(
                 root.clone(),
-                crate::mcp::server::CodeIndexDemandV1::OperatorReconcile
+                tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandV1::OperatorReconcile
             )
             .await
-                == crate::mcp::server::CodeIndexDemandAdmissionV1::Queued,
+                == tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandAdmissionV1::Queued,
             "explicit reconcile demand must be accepted on a linked worktree"
         );
         tokio::time::timeout(std::time::Duration::from_secs(5), async {

@@ -63,11 +63,11 @@ fn assert_problem(response: &Value, expected: Value) {
     );
     assert_eq!(problem["diagnostic"], expected["diagnostic"], "{problem}");
     assert_eq!(
-        response["result"]["problem"]["kind"], problem["kind"],
+        response["result"]["structuredContent"]["problem"]["kind"], problem["kind"],
         "the structured MCP problem must match the text envelope: {response}"
     );
     assert_eq!(
-        response["result"]["problem"]["message"], problem["message"],
+        response["result"]["structuredContent"]["problem"]["message"], problem["message"],
         "the structured MCP problem must match the text envelope: {response}"
     );
 }

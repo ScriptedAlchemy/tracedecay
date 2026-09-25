@@ -152,7 +152,6 @@ pub struct LcmLifecycleStatusV1 {
 pub struct LcmRedactionStatusV1 {
     pub enabled: bool,
     pub lossy_records: i64,
-    pub legacy_truncated_count: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -237,7 +236,7 @@ pub enum LcmDoctorProjectionStateV1 {
 
 /// The temporal projection's serving state at diagnosis time. A store whose
 /// schema is healthy can still have nothing to serve while history is being
-/// re-derived (for example after a scoped observation reset); this is where
+/// re-derived (for example on a fresh profile); this is where
 /// that state is named instead of being read as absent data.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -299,8 +298,6 @@ pub struct LcmMessageV1 {
     pub content_hash: Option<String>,
     pub storage_kind: LcmStorageKindV1,
     pub payload_ref: Option<String>,
-    pub legacy_source: bool,
-    pub legacy_truncated: bool,
     pub metadata_json: Option<String>,
 }
 
@@ -443,8 +440,6 @@ pub struct LcmRawMessageV1 {
     pub content_hash: String,
     pub storage_kind: LcmStorageKindV1,
     pub payload_ref: Option<String>,
-    pub legacy_source: bool,
-    pub legacy_truncated: bool,
     pub metadata_json: Option<String>,
 }
 
@@ -461,8 +456,6 @@ pub struct LcmRawMessageMetadataV1 {
     pub content_hash: String,
     pub storage_kind: LcmStorageKindV1,
     pub payload_ref: Option<String>,
-    pub legacy_source: bool,
-    pub legacy_truncated: bool,
     pub metadata_json: Option<String>,
 }
 
@@ -504,8 +497,6 @@ pub struct LcmExpansionV1 {
     pub payload_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_current_session: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub externalized_note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_pagination: Option<LcmSourcePaginationV1>,
 }

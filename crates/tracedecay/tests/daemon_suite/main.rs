@@ -34,6 +34,8 @@ mod invocation_primitives;
 mod socket_lifecycle_test;
 #[cfg(unix)]
 mod stale_client_resilience_test;
+#[cfg(unix)]
+mod store_shutdown_checkpoint_test;
 mod workflow_handoff_test;
 
 #[test]

@@ -1,8 +1,10 @@
 use tracedecay_code_extraction::{DartExtractor, LanguageExtractor};
 use tracedecay_domain::*;
 
+include!("support/edges.rs");
+
 fn extract(source: &str) -> ExtractionResult {
-    DartExtractor.extract("test.dart", source)
+    DartExtractor.extract_artifact("test.dart", source).result
 }
 
 #[test]
@@ -222,44 +224,22 @@ fn test_dart_async_function_detection() {
 fn test_dart_call_site_tracking() {
     let result = extract("void main() {\n  print('hello');\n  greet('world');\n}");
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let calls: Vec<_> = result
+    let calls: Vec<&str> = result
         .unresolved_refs
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
+        .map(|r| r.reference_name.as_str())
         .collect();
-    assert!(
-        calls.len() >= 2,
-        "Expected at least 2 calls, got {}: {:?}",
-        calls.len(),
-        calls
-    );
-    assert!(
-        calls.iter().any(|c| c.reference_name == "print"),
-        "Expected a call to 'print', calls: {:?}",
-        calls
-    );
-    assert!(
-        calls.iter().any(|c| c.reference_name == "greet"),
-        "Expected a call to 'greet', calls: {:?}",
-        calls
-    );
+    assert_eq!(calls, ["print", "greet"]);
 }
 
 #[test]
 fn test_dart_contains_edges() {
     let result = extract("class Foo {\n  void bar() {}\n}");
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let contains_edges: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    // File -> Class, Class -> Method
-    assert!(
-        contains_edges.len() >= 2,
-        "Expected at least 2 Contains edges, got {}: {:?}",
-        contains_edges.len(),
-        contains_edges
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Contains),
+        [("test.dart", "Foo"), ("Foo", "bar")]
     );
 }
 
@@ -292,7 +272,7 @@ fn test_dart_private_field_visibility() {
         .iter()
         .filter(|n| n.kind == NodeKind::Field)
         .collect();
-    assert!(!fields.is_empty());
+    assert_eq!(fields.len(), 1);
     let private_field = fields.iter().find(|n| n.name == "_count").unwrap();
     assert_eq!(private_field.visibility, Visibility::Private);
 }
@@ -421,10 +401,6 @@ class OldWidget {
         .iter()
         .filter(|e| e.kind == EdgeKind::Annotates)
         .collect();
-    assert!(
-        !annotates_edges.is_empty(),
-        "expected Annotates edges, found none"
-    );
     assert_eq!(
         annotates_edges.len(),
         annots.len(),

@@ -1,9 +1,10 @@
 # Force LF line endings for test fixtures. Tree-sitter grammars
 # expect Unix line endings and produce wrong parse trees with CRLF.
 tests/fixtures/** text eol=lf
-# The embedded SQL fixture's definitions feed the exact configuration schema
-# digest; checkout line-ending conversion must not change those definitions.
-crates/tracedecay-global-db/src/configuration/store/tests/fixtures/configuration-registry-revision3.sql text eol=lf
+# Embedded SQL is executed verbatim and its stored definitions feed exact
+# schema-shape digests; a CRLF checkout rewrites those definitions and makes
+# a released shape read as foreign.
+*.sql text eol=lf
 # The search-quality candidate workload pins each corpus document against the
 # blob in the pinned source tree, and the packaged evaluator assets are pulled
 # into the binary with include_bytes! under a pinned digest. One corpus

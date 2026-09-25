@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::{
-    CanonicalClaudeSanitizationReceiptMaterialV1, ComponentVersion, DurableClaudeObservationV1,
+    CanonicalClaudeSanitizationReceiptMaterialV1, ComponentVersion, DurableObservationV1,
     ObservationContractError, ObservationId, ObservationIdentityMaterialV1,
     ObservationOrderingDomainV1, ObservationSourceIdentityV1, PayloadReferenceV1, RetentionClass,
     SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId,
@@ -17,7 +17,7 @@ use super::detect::{
     redact_sensitive_values,
 };
 use super::structural_id::{StructuralIdProtectionError, protect_sensitive_structural_id};
-use super::{ParseLimits, ParsedClaudeRecordV1, ParsedPolicyLimitViolation};
+use super::{ParseLimits, ParsedObservationRecordV1, ParsedPolicyLimitViolation};
 
 pub(crate) const CLAUDE_SANITIZER_VERSION_V1: &str = "privacy.claude-record.v1";
 pub(crate) const OBSERVATION_SANITIZER_VERSION_V1: &str = "privacy.observation-record.v1";
@@ -229,7 +229,7 @@ impl ClaudeRecordSanitizerV1 {
     /// Sanitizes a parser-issued token without decoding or parsing the record again.
     pub fn sanitize_parsed(
         &self,
-        parsed: ParsedClaudeRecordV1,
+        parsed: ParsedObservationRecordV1,
         mut identity: ObservationIdentityMaterialV1,
         retention_class: RetentionClass,
     ) -> Result<ClaudeSanitizationOutcomeV1, PrivacySanitizerError> {
@@ -338,7 +338,7 @@ impl ClaudeRecordSanitizerV1 {
             Some(payload_reference),
         )?;
         let observation =
-            DurableClaudeObservationV1::new(identity, receipt, retention_class, detected.payload)?;
+            DurableObservationV1::new(identity, receipt, retention_class, detected.payload)?;
         let sanitized_record = SanitizedClaudeRecordV1::issue(&observation);
         Ok(ClaudeSanitizationOutcomeV1::Durable {
             observation: Box::new(observation),
@@ -592,10 +592,10 @@ fn validate_canonical_structural_identity(
 /// Its constructor is private so a raw `serde_json::Value` cannot be relabeled
 /// as sanitized by provider adapters.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SanitizedClaudeRecordV1(Box<DurableClaudeObservationV1>);
+pub struct SanitizedClaudeRecordV1(Box<DurableObservationV1>);
 
 impl SanitizedClaudeRecordV1 {
-    fn issue(observation: &DurableClaudeObservationV1) -> Self {
+    fn issue(observation: &DurableObservationV1) -> Self {
         Self(Box::new(observation.clone()))
     }
 
@@ -611,7 +611,7 @@ impl SanitizedClaudeRecordV1 {
 #[derive(Clone, Debug)]
 pub enum ClaudeSanitizationOutcomeV1 {
     Durable {
-        observation: Box<DurableClaudeObservationV1>,
+        observation: Box<DurableObservationV1>,
         sanitized_record: SanitizedClaudeRecordV1,
         findings: Vec<SanitizationFindingV1>,
     },
@@ -630,7 +630,7 @@ pub type SanitizedObservationRecordV1 = SanitizedClaudeRecordV1;
 pub type ObservationSanitizationOutcomeV1 = ClaudeSanitizationOutcomeV1;
 
 impl ClaudeSanitizationOutcomeV1 {
-    pub fn durable_observation(&self) -> Option<&DurableClaudeObservationV1> {
+    pub fn durable_observation(&self) -> Option<&DurableObservationV1> {
         match self {
             Self::Durable { observation, .. } => Some(observation),
             Self::Rejected { .. } | Self::Quarantined { .. } => None,

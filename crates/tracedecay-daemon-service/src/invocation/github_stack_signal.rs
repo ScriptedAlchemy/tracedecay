@@ -166,7 +166,7 @@ fn github_stack_signal_evidence(
 ) -> Result<ApplicationOutcome<serde_json::Value>, ApplicationProblem> {
     let execution = OperationReceipt::completed(
         observed_at,
-        current_micros(),
+        now_micros(),
         deadline,
         OperationBudgetUsage::default(),
     )

@@ -44,7 +44,14 @@ use super::analytics_api::{
     AnalyticsOverviewPayloadV1, AnalyticsSubagentTreePayloadV1, AnalyticsUnderusedPayloadV1,
     AnalyticsUsageSummaryV1,
 };
+use super::automation_fact_receipts_api::AutomaticFactReceiptsPayloadV1;
+use super::automation_jobs_api::AutomationJobsPayloadV1;
+use super::automation_outcomes_api::AutomationOutcomesPayloadV1;
+use super::automation_run_api::{
+    AutomationRunArtifactPayloadV1, AutomationRunArtifactsPayloadV1, AutomationRunsPayloadV1,
+};
 use super::automation_scheduler_api::AutomationSchedulerStatusV1;
+use super::automation_skills_api::AutomationSkillsPayloadV1;
 use super::code_read_api::RevisionPairUnionLayoutV1;
 use super::delivery_api::{DeliveryInboxV1, DeliveryOverviewV1};
 use super::doctor_findings_api::DoctorFindingsPayloadV1;
@@ -63,17 +70,18 @@ use super::lcm_api::{
 use super::loom_api::LoomTemporalPayloadV1;
 use super::memory_api::{
     MemoryFactDetailPayloadV1, MemoryOverviewPayloadV1, MemoryStatusPayloadV1,
+    MemoryTrustHistoryPayloadV1,
+};
+use super::memory_service::{
+    MemoryOplogPayloadV1, MemoryProjectionPayloadV1, MemorySimilarityPayloadV1,
 };
 use super::projects::{ProjectContextPayloadV1, ProjectsPayloadV1};
 use super::read_model::{DASHBOARD_SCHEMA_REVISION_V1, DashboardEnvelopeV1};
 use super::remote_status_api::RemoteOperationalStatusPayloadV1;
-use super::savings_api::{
-    SavingsModelsPayloadV1, SavingsOverviewPayloadV1, SavingsSessionsPayloadV1,
-};
+use super::savings_api::{SavingsModelsPayloadV1, SavingsOverviewPayloadV1};
 use super::settings_api::{
     CodeIndexWorkerSettingsPatch, ProjectSettingsPatch, SettingsPayloadV1, UserSettingsPatch,
 };
-use super::storage_findings_api::StorageFindingsPayloadV1;
 use super::storage_telemetry_api::StorageTelemetryPayloadV1;
 use super::work_api::registered_route_contracts as registered_work_route_contracts;
 use crate::application::feedback::observations::FeedbackObservationReadModelV1;
@@ -84,7 +92,6 @@ use tracedecay_contracts::code_index_freshness::CodeIndexFreshnessPayloadV1;
 struct DashboardContractCatalogV1 {
     envelope: DashboardEnvelopeV1<DashboardPayloadMarkerV1>,
     storage_telemetry: StorageTelemetryPayloadV1,
-    storage_findings: StorageFindingsPayloadV1,
     doctor_findings: DoctorFindingsPayloadV1,
     remote_operational_status: RemoteOperationalStatusPayloadV1,
     explorer_query_run: ExplorerQueryRunV1,
@@ -103,6 +110,10 @@ struct DashboardContractCatalogV1 {
     memory_overview: DashboardEnvelopeV1<Option<MemoryOverviewPayloadV1>>,
     memory_status: DashboardEnvelopeV1<Option<MemoryStatusPayloadV1>>,
     memory_fact_detail: DashboardEnvelopeV1<Option<MemoryFactDetailPayloadV1>>,
+    memory_trust_history: MemoryTrustHistoryPayloadV1,
+    memory_projection: MemoryProjectionPayloadV1,
+    memory_similarity: MemorySimilarityPayloadV1,
+    memory_oplog: MemoryOplogPayloadV1,
     analytics_overview: DashboardEnvelopeV1<Option<AnalyticsOverviewPayloadV1>>,
     analytics_usage: DashboardEnvelopeV1<Option<AnalyticsUsageSummaryV1>>,
     analytics_agents: DashboardEnvelopeV1<Option<AnalyticsAgentsPayloadV1>>,
@@ -117,7 +128,6 @@ struct DashboardContractCatalogV1 {
     analytics_underused: DashboardEnvelopeV1<Option<AnalyticsUnderusedPayloadV1>>,
     analytics_diagnostics: DashboardEnvelopeV1<Option<AnalyticsDiagnosticsPayloadV1>>,
     savings_overview: DashboardEnvelopeV1<Option<SavingsOverviewPayloadV1>>,
-    savings_sessions: SavingsSessionsPayloadV1,
     savings_models: SavingsModelsPayloadV1,
     lcm_session: DashboardEnvelopeV1<Option<LcmSessionPayloadV1>>,
     lcm_timeline: DashboardEnvelopeV1<Option<LcmTimelinePayloadV1>>,
@@ -218,6 +228,13 @@ struct DashboardContractCatalogV1 {
     /// Served identically by `GET /api/automation/scheduler/status` and by the
     /// `pause`/`resume` controls, which re-read rather than acknowledge.
     automation_scheduler_status: AutomationSchedulerStatusV1,
+    automation_jobs: AutomationJobsPayloadV1,
+    automation_skills: AutomationSkillsPayloadV1,
+    automation_fact_receipts: AutomaticFactReceiptsPayloadV1,
+    automation_runs: AutomationRunsPayloadV1,
+    automation_run_artifacts: AutomationRunArtifactsPayloadV1,
+    automation_run_artifact: AutomationRunArtifactPayloadV1,
+    automation_outcomes: AutomationOutcomesPayloadV1,
     fact_store_curate_request: FactStoreCurateRequestV1,
     automation_run: AutomationRunResultV1,
     automation_problem: AutomationRunProblemV1,
@@ -581,7 +598,6 @@ mod tests {
             "MemoryEntityRowV1",
             "AnalyticsOverviewPayloadV1",
             "SavingsOverviewPayloadV1",
-            "SavingsSessionsPayloadV1",
             "SavingsModelsPayloadV1",
             "SavingsProviderSpendV1",
             "SavingsProviderDayPointV1",

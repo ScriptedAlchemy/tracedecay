@@ -10,10 +10,10 @@ use tracedecay_domain::UtcMicros;
 
 use tracedecay_daemon_protocol::DaemonInvocationProblem;
 
-use super::super::super::current_micros;
 use super::super::workflow_run_control::workflow_run_storage_problem;
 use super::super::{RegisteredWorkRuntime, work_background_context};
 use super::reconcile_workflow_fan_out;
+use tracedecay_contracts::now_micros;
 
 const RECOVERY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -80,7 +80,7 @@ fn reconcile_active_workflow_fan_out_page(
             &services,
             &context,
             projection,
-            current_micros(),
+            now_micros(),
             Arc::clone(&attempt_processes),
             project_root,
             observability_producer.clone(),
@@ -113,7 +113,7 @@ fn reconcile_active_workflow_fan_out_page(
             &services,
             &context,
             &projection,
-            current_micros(),
+            now_micros(),
             observability_producer.clone(),
         );
     }
@@ -141,7 +141,7 @@ fn resume_work_attempts_for_workflow_recovery(
         .resume(
             context,
             &tracedecay_contracts::ResumeWorkAttemptsCommand {
-                occurred_at: current_micros(),
+                occurred_at: now_micros(),
             },
         )
         .map_err(|error| {
@@ -179,9 +179,7 @@ fn workflow_fan_out_recovery_context(
         registered.grant.clone(),
         RequestId::new("workflow-fan-out-startup-recovery")?,
         Deadline::new(UtcMicros(
-            current_micros()
-                .0
-                .saturating_add(BACKGROUND_DEADLINE_MICROS),
+            now_micros().0.saturating_add(BACKGROUND_DEADLINE_MICROS),
         ))?,
         CancellationContext::active("cancel.workflow-fan-out-startup-recovery")?,
     )

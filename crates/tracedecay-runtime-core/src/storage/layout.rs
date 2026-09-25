@@ -136,15 +136,6 @@ pub fn profile_sharded_layout(
     profile_root: &Path,
     marker: &EnrollmentMarker,
 ) -> Result<StoreLayout> {
-    if marker.storage_mode != StorageMode::ProfileSharded {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "enrollment marker for '{}' uses storage_mode={:?}, not profile_sharded",
-                project_root.display(),
-                marker.storage_mode
-            ),
-        });
-    }
     validate_project_id(&marker.project_id).map_err(|message| TraceDecayError::Config {
         message: format!(
             "invalid enrollment marker for '{}': {message}",

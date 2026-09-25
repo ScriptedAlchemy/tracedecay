@@ -23,22 +23,20 @@ use std::path::{Path, PathBuf};
 
 use tracedecay_global_db::registry_maintenance::{RootLivenessV1, probe_root};
 
+mod collection;
 mod fence;
 mod pages;
-mod quarantine;
 mod unregistered_page;
 pub use fence::{
     StoreContentEntry, StoreContentEntryKind, StoreContentFence, StoreContentInventory,
     StoreDirectoryFence, StoreFileIdentity, StoreRootIdentity,
 };
-#[cfg(test)]
-pub(crate) use quarantine::read_pending_quarantine_receipts;
 pub use unregistered_page::UnregisteredSweepCompletionV1;
+pub(super) use unregistered_page::read_project_directory_page;
 pub use unregistered_page::{
     DEFAULT_UNREGISTERED_STORE_PAGE_LIMIT, UnregisteredStoreSweepReport,
     UnregisteredStoreSweepRequestV1, sweep_unregistered_store_page,
 };
-pub(super) use unregistered_page::{ProjectDirectoryWorkV1, read_project_directory_page};
 
 /// One profile-sharded store observed on disk, paired with the registry
 /// identity that points at it. This is the pure input to classification so the
@@ -80,7 +78,7 @@ pub struct StoreCensusEntry {
     /// prior store's eligibility merely by copying its payload mtimes.
     pub expected_data_root_fence: StoreDirectoryFence,
     /// Complete no-follow child content/identity fence. Collection rechecks it
-    /// only after atomically moving the store into a same-parent quarantine.
+    /// on the opened store directory immediately before deleting it.
     pub expected_content_fence: StoreContentFence,
     pub expected_manifest_bytes: Option<Vec<u8>>,
     /// Registered graph-scope database paths, relative to `data_root`. Scopes
@@ -270,27 +268,11 @@ pub struct CollectedStore {
     pub size_bytes: u64,
 }
 
-/// The exact filesystem mutation that failed during orphan-store retirement.
+/// The exact filesystem mutation that failed while deleting an orphan store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CollectionMutationOperation {
-    ReserveQuarantineName,
-    PublishQuarantineJournal,
-    PublishQuarantineRenameMarker,
-    RenameLiveLeafToQuarantine,
-    RestoreLiveLeafFromQuarantine,
-    ProbeRecoveryJournal,
-    ValidateRestoredStoreIdentity,
-    ClearRecoveryJournal,
-    MarkRetirementCommitted,
     RecursiveRemove,
     ParentSync,
-}
-
-/// Whether a mutation failure is a known external-owner deferral.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CollectionMutationFailureClassification {
-    RetryableDeferred,
-    NonRetryable,
 }
 
 /// Structured evidence for a failed orphan-store filesystem mutation.
@@ -299,47 +281,18 @@ pub struct CollectionMutationFailure {
     pub operation: CollectionMutationOperation,
     pub raw_os_error: Option<i32>,
     pub target_path: PathBuf,
-    pub expected_root_identity: Option<StoreRootIdentity>,
-    pub classification: CollectionMutationFailureClassification,
 }
 
 impl CollectionMutationFailure {
-    pub fn retryable(&self) -> bool {
-        self.classification == CollectionMutationFailureClassification::RetryableDeferred
-    }
-
     pub(crate) fn from_io_error(
         operation: CollectionMutationOperation,
         target_path: PathBuf,
-        expected_root_identity: Option<StoreRootIdentity>,
         error: &std::io::Error,
     ) -> Self {
-        let raw_os_error = error.raw_os_error();
-        let classification = if cfg!(windows) && matches!(raw_os_error, Some(5 | 32 | 33)) {
-            CollectionMutationFailureClassification::RetryableDeferred
-        } else {
-            CollectionMutationFailureClassification::NonRetryable
-        };
         Self {
             operation,
-            raw_os_error,
+            raw_os_error: error.raw_os_error(),
             target_path,
-            expected_root_identity,
-            classification,
-        }
-    }
-
-    pub(crate) fn without_native_error(
-        operation: CollectionMutationOperation,
-        target_path: PathBuf,
-        expected_root_identity: Option<StoreRootIdentity>,
-    ) -> Self {
-        Self {
-            operation,
-            raw_os_error: None,
-            target_path,
-            expected_root_identity,
-            classification: CollectionMutationFailureClassification::NonRetryable,
         }
     }
 }
@@ -370,36 +323,11 @@ pub struct CollectionFailure {
     pub kind: CollectionFailureKind,
 }
 
-/// A truthful recovery receipt for a store moved to the retention quarantine.
-/// A failed post-move proof never becomes an invisible failure: either the
-/// original name was restored, or the moved bytes remain at the named sibling
-/// for a later reconciliation pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CollectionRecoveryAction {
-    Restored,
-    RetainedForRecovery,
-    /// Registry retirement committed, but the irreversible delete has not yet
-    /// been durably confirmed. A journal-backed retry owns this state.
-    DeleteUnconfirmed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CollectionRecoveryReceipt {
-    pub store_id: String,
-    pub original_path: PathBuf,
-    pub quarantine_path: PathBuf,
-    /// The path that currently owns the bytes (or, after a remove/sync
-    /// ambiguity, the exact path whose deletion remains unconfirmed).
-    pub actual_path: PathBuf,
-    pub action: CollectionRecoveryAction,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CollectionOutcome {
     pub collected: Vec<CollectedStore>,
     pub reclaimed_bytes: u64,
     pub errors: Vec<CollectionFailure>,
-    pub recovery_receipts: Vec<CollectionRecoveryReceipt>,
     /// A bounded pass may have completed only a prefix of its plan. This is
     /// never reported as a successful empty collection.
     pub completion: CollectionCompletionV1,
@@ -413,6 +341,13 @@ pub enum CollectionCompletionV1 {
     DeadlineExceeded,
 }
 
+pub use collection::execute_registered_collection;
+pub(crate) use collection::{CollectionControl, execute_unregistered_collection_controlled};
+#[cfg(test)]
+pub(crate) use collection::{
+    execute_registered_collection_controlled, execute_unregistered_collection,
+    unbounded_collection_control,
+};
 pub use pages::{
     OrphanSweepReport, StoreCensusPageV1, UnregisteredCollectionPlan, UnregisteredStoreFinding,
     build_store_census, build_store_census_page, plan_unregistered_collection,
@@ -423,13 +358,6 @@ pub(crate) use pages::{census_unregistered_project_dirs, sweep_orphan_stores};
 pub(crate) use pages::{
     dir_size_bytes, dir_size_bytes_controlled, manifest_names_abandoned_root,
     newest_mtime_secs_controlled,
-};
-pub use quarantine::execute_registered_collection;
-pub(crate) use quarantine::{CollectionControl, execute_unregistered_collection_controlled};
-#[cfg(test)]
-pub(crate) use quarantine::{
-    execute_registered_collection_controlled, execute_unregistered_collection,
-    unbounded_collection_control,
 };
 
 #[cfg(test)]

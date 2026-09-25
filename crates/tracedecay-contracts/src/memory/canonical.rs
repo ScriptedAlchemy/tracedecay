@@ -6,7 +6,7 @@ use std::future::Future;
 use thiserror::Error;
 use tracedecay_domain::{
     DomainError, FactEventId, FactId, FactLineageEventV1, FactOwnerV1, RetrievalAnchorId,
-    RetrievalAnchorRecordV2, UtcMicros,
+    RetrievalAnchorRecord, UtcMicros,
 };
 
 #[derive(Debug, Error)]
@@ -403,7 +403,7 @@ pub trait RetrievalAnchorPort {
     fn get_retrieval_anchor(
         &self,
         query: Self::Query,
-    ) -> impl Future<Output = Result<Option<RetrievalAnchorRecordV2>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<Option<RetrievalAnchorRecord>, Self::Error>> + Send;
 }
 
 pub struct MemoryApplication<P> {
@@ -613,7 +613,7 @@ impl<P: RetrievalAnchorPort> MemoryApplication<P> {
     pub async fn get_retrieval_anchor(
         &self,
         query: MemoryRetrievalAnchorQuery<P::Query>,
-    ) -> Result<Option<RetrievalAnchorRecordV2>, MemoryUseCaseError<P::Error>> {
+    ) -> Result<Option<RetrievalAnchorRecord>, MemoryUseCaseError<P::Error>> {
         let MemoryRetrievalAnchorQuery {
             owner,
             anchor_id,

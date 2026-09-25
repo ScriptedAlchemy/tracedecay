@@ -21,8 +21,8 @@ Cross-project scan of ~32 project transcripts (~161 MB) backing the gap analysis
 The 23× ratio of Bash : tracedecay for code research is the headline. Three highest-volume
 gaps, compile diagnostics, file-symbol skeletons, and AST-pattern search, are responsible
 for roughly 60% of it. New entries below (`tracedecay_diagnostics`, `tracedecay_unsafe_patterns`,
-`tracedecay_signature_search`, etc.) target each in turn; the existing `tracedecay_outline`
-proposal already covers the symbol-skeleton case and is reinforced by the new evidence.
+`tracedecay_signature_search`, etc.) target each in turn; `tracedecay_source_outline`
+covers the symbol-skeleton case.
 
 ---
 
@@ -97,42 +97,16 @@ for languages without exhaustive struct checking.
 
 ---
 
-## `tracedecay_outline`
+## File symbol skeleton (`tracedecay_source_outline`)
 
 **Trigger:** In quality-improvement sessions, the common opening move was
 `wc -l src/main.rs && grep -n "^pub fn\|^pub struct\|^pub enum\|^impl"`, a "get bearings"
-sweep before diving into a large file. `tracedecay_module_api` shows only the public API;
-`tracedecay_context` is heavier than needed when you just want navigation landmarks.
-The cross-project scan found **618** invocations of this pattern, the single largest
-grep category, confirming it as a recurring opening move on essentially any large file.
+sweep before diving into a large file. The cross-project scan found **618** invocations of
+this pattern, the single largest grep category.
 
-**Gap:** No lightweight "what's in this file?" dump that includes private symbols with line numbers.
-
-**Proposed API:**
-```json
-{ "file": "src/tracedecay.rs" }
-{ "file": "src/tracedecay.rs", "kinds": ["function", "struct", "impl"] }
-```
-
-**Backend:** The outline uses the optional external `ast-grep` CLI capability,
-the same dependency family as structural refactor tools such as
-`tracedecay_ast_grep_rewrite`. It requires `ast-grep` >= 0.44 on `PATH` because
-outline support depends on the CLI's `outline` command. There is no
-backend-selection argument.
-
-**Returns:** A flat list of `{kind, name, line, visibility}` for every top-level symbol in the
-file, sorted by line. No code bodies, just the map. The response should also preserve the
-DB-backed TraceDecay symbols for the same file in the same payload, so callers get the fresh
-CLI outline without losing indexed graph symbols, ids, or qualified names needed for
-follow-up graph calls.
-
-**Install guidance:** `tracedecay doctor` should report when `ast-grep` is
-missing or older than 0.44. After installing or updating `ast-grep`, rerun
-`tracedecay install` or `tracedecay update-plugin` as appropriate so agent
-integrations refresh their generated tool surfaces and guidance.
-
-**Value:** Turns "where is X defined in this file?" from a Read + manual scan into a single
-call. Also useful as a pre-flight before `tracedecay_context`, orient first, then zoom.
+**Status:** Shipped as `tracedecay_source_outline` (`{ "file": "src/tracedecay.rs" }`). It
+returns every indexed symbol in one file, including private ones, with line ranges and node
+IDs for follow-up graph calls. It returns no code bodies.
 
 ---
 
@@ -243,8 +217,8 @@ signature shape, return types, parameter types, generic bounds, attributes.
 sub-pattern. Implementation can reuse the AST matcher already feeding `tracedecay_ast_grep_rewrite`.
 
 **Value:** Unlocks signature-based refactoring questions that currently force a grep
-+ manual filter. Smaller volume than `tracedecay_outline` but high token cost when it
-does come up, a single signature query can replace dozens of file Reads.
++ manual filter. The volume is smaller than the symbol-skeleton greps, but the token cost is
+high when it does come up. A single signature query can replace dozens of file Reads.
 
 ---
 
@@ -360,33 +334,15 @@ last call within a session, rather than a new top-level tool.
 
 ---
 
-## `tracedecay_body` implemented
-
-**Status:** Shipped. Handler at `src/mcp/tools/handlers.rs:handle_body`, definition at
-`src/mcp/tools/definitions.rs:def_body`. Tests in `tests/mcp_handler_test.rs` (3 cases).
+## Symbol body by name
 
 **Trigger:** In `claurst` (a Rust project separate from tracedecay), the dominant navigation
 pattern was `grep -A 20 "pub fn resolve_provider_api_key"`, reading a function or constant body
-by name without knowing which file it lives in. The same `grep -A N` form appeared 15+ times for
-functions, constants (`CCH_SEED`, `ANTHROPIC_BETA_HEADER`, `CLIENT_ID`), and struct fields.
-TraceDecay was not active for that project, but the pattern maps directly to what
-`tracedecay_search` + file offset `Read` + manual body extraction would do in three steps.
+by name without knowing which file it lives in.
 
-**Gap (closed):** No tool took a symbol name and returned its source body in a single call.
-The previous flow was: `tracedecay_search` → read `file:line` → `Read` with offset → extract
-manually.
-
-**Shipped API:**
-```json
-{ "symbol": "resolve_provider_api_key" }
-{ "symbol": "CCH_SEED", "limit": 5 }
-{ "symbol": "GraphStats::last_sync_at" }
-```
-
-**Returns:** `match_count` and a `matches` array. Each match has: `id`, `name`,
-`qualified_name`, `kind`, `file`, `start_line`, `end_line`, `signature`, `body`. Exact name
-matches are preferred over fuzzy matches; falls back to ranked search results when no exact
-match exists.
+**Status:** Shipped as two calls. `tracedecay_find_exact_symbol` (or `tracedecay_search`
+for partial names) returns the node ID. `tracedecay_source_body` with that node ID returns
+the exact body and its 1-based line range.
 
 ---
 
@@ -428,10 +384,10 @@ scan, where measurable.
 
 | Tool | Status | Evidence | Complexity | Impact |
 |---|---|---|---|---|
-| `tracedecay_body` | ✅ shipped | 1571 targeted Reads + 52 sed -n | Low | **High** |
-| `tracedecay_todos` | ✅ shipped | scattered across projects | Low | Medium |
+| `tracedecay_source_body` | shipped | 1571 targeted Reads + 52 sed -n | Low | **High** |
+| `tracedecay_todos` | shipped | scattered across projects | Low | Medium |
 | `tracedecay_diagnostics` | proposed | 777 cargo invocations | High (compiler integration) | **Very high** |
-| `tracedecay_outline` | proposed | 618 symbol-skeleton greps | Low (optional ast-grep CLI outline + DB symbols) | **High** |
+| `tracedecay_source_outline` | shipped | 618 symbol-skeleton greps | Low | **High** |
 | `tracedecay_unsafe_patterns` | proposed | recurring in review/audit | Low (AST predicates) | High |
 | `tracedecay_implementations` | proposed | tracedecay 22ff55cd, 67f09223 | Low (method edges) | High |
 | `tracedecay_signature_search` | proposed | smaller volume, high token cost | Medium (AST matcher) | High |
@@ -445,9 +401,8 @@ scan, where measurable.
 
 **Build order recommendation (revised after telemetry scan):**
 
-1. `tracedecay_outline`, optional `ast-grep` CLI outline with DB-backed TraceDecay symbols
-   preserved in the same payload; requires `ast-grep` >= 0.44 and addresses the single
-   largest grep category (618 hits). One afternoon.
+1. File symbol skeleton, shipped as `tracedecay_source_outline`. It addresses the single
+   largest grep category (618 hits).
 2. `tracedecay_unsafe_patterns`. AST predicates on top of the existing matcher. Replaces a
    recurring review-time grep family. Half-day.
 3. `tracedecay_diagnostics`, biggest single Bash : tracedecay gap. Highest impact even though

@@ -4,7 +4,7 @@ use crate::project::TraceDecay;
 use tracedecay_application::tracedecay::{
     add_local_counter, get_local_counter, get_tokens_saved, reset_local_counter, set_tokens_saved,
 };
-use tracedecay_configuration::TraceDecayConfig;
+use tracedecay_configuration::config::RuntimeTraceDecayConfig;
 use tracedecay_domain::errors::Result;
 
 impl TraceDecay {
@@ -67,7 +67,7 @@ impl TraceDecay {
     }
 
     /// Returns a reference to the current configuration.
-    pub fn get_config(&self) -> &TraceDecayConfig {
+    pub fn get_config(&self) -> &RuntimeTraceDecayConfig {
         &self.config
     }
 

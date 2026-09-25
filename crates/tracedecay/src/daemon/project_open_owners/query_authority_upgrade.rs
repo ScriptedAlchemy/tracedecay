@@ -11,6 +11,7 @@ use tracedecay_code_index_runtime::code_index_scheduler::query_runtime::{
 use tracedecay_contracts::ResolvedScope;
 
 use super::DaemonInvocationState;
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 /// Spawns the deferred query-authority waiter on the project owner.
 ///
@@ -63,7 +64,10 @@ async fn try_deferred_mount(
     scope: &ResolvedScope,
     session_db: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
 ) -> DeferredMountAttemptV1 {
-    let cursor_keys = match session_db.load_session_cursor_key_provider_result().await {
+    let cursor_keys = match SessionTemporalAccess::new(&**session_db)
+        .load_session_cursor_key_provider_result()
+        .await
+    {
         Ok(cursor_keys) => cursor_keys,
         Err(error) => {
             tracing::warn!(

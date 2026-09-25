@@ -8,9 +8,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay::mcp::McpServer;
-use tracedecay::project::{TraceDecay, TraceDecayOpenOptions};
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_mcp::transport::{ChannelTransport, McpTransport};
+use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::storage::resolve_response_handle_root;
 
 /// Creates a temporary Rust project and returns a direct protocol server.
@@ -101,6 +101,24 @@ pub(crate) fn jsonrpc_request(id: Value, method: &str, params: Value) -> String 
     .unwrap()
 }
 
+/// The protocol version [`spec_initialize_request`] requests; `rmcp` keeps a
+/// supported initialize-era version, so it is also the negotiated version.
+pub(crate) const INITIALIZE_PROTOCOL_VERSION: &str = "2025-11-25";
+
+/// A spec-valid MCP `initialize`: `protocolVersion`, `capabilities`, and
+/// `clientInfo` are all required.
+pub(crate) fn spec_initialize_request(id: Value) -> String {
+    jsonrpc_request(
+        id,
+        "initialize",
+        json!({
+            "protocolVersion": INITIALIZE_PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "tracedecay-protocol-test", "version": "0"}
+        }),
+    )
+}
+
 pub(crate) fn response_handle_dir(cg: &TraceDecay) -> PathBuf {
     resolve_response_handle_root(cg.project_root())
         .unwrap_or_else(|err| panic!("failed to resolve test response handle root: {err}"))
@@ -110,15 +128,6 @@ pub(crate) fn jsonrpc_notification(method: &str) -> String {
     serde_json::to_string(&json!({
         "jsonrpc": "2.0",
         "method": method
-    }))
-    .unwrap()
-}
-
-pub(crate) fn jsonrpc_notification_with_params(method: &str, params: Value) -> String {
-    serde_json::to_string(&json!({
-        "jsonrpc": "2.0",
-        "method": method,
-        "params": params
     }))
     .unwrap()
 }
@@ -260,13 +269,14 @@ pub(crate) async fn mcp_runtime_events(
     global_db_path: &std::path::Path,
     session_id: &str,
 ) -> Vec<tracedecay_global_db::AnalyticsEventRecord> {
-    let runtime = tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(
-        global_db_path
-            .parent()
-            .expect("global db has a profile root"),
-    )
-    .await
-    .expect("registered profile runtime opens at isolated path");
+    let runtime =
+        tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(
+            global_db_path
+                .parent()
+                .expect("global db has a profile root"),
+        )
+        .await
+        .expect("registered profile runtime opens at isolated path");
     runtime
         .query_profile_analytics_events_for_test(&tracedecay_global_db::AnalyticsEventQuery {
             provider: Some("mcp".to_string()),

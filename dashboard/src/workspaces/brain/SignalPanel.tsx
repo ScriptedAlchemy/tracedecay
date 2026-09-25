@@ -132,7 +132,7 @@ export function SignalPanel({
           <p className="td-legend">no events observed yet</p>
         )}
         <details className="max-w-sm text-2xs">
-          <summary className="cursor-pointer">Inspect admitted events ({pulses.length} retained)</summary>
+          <summary className="min-h-[var(--touch-target-min)] cursor-pointer content-center">Inspect admitted events ({pulses.length} retained)</summary>
           <div className="mt-2 max-h-56 overflow-auto">
             {pulses.length === 0 ? <p>No admitted event is retained. Transcript target unavailable.</p> : (
               <ol aria-label="Retained admitted events" className="space-y-1">

@@ -21,12 +21,12 @@
  */
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
 import type {
-  OplogPayload,
-  ProjectionPayload,
-  SimilarityPayload,
-  TrustDetailAvailability,
-  TrustHistoryPayload,
-} from '../../data/query/memory.ts';
+  MemoryFeedbackDetailsAvailabilityV1,
+  MemoryOplogPayloadV1,
+  MemoryProjectionPayloadV1,
+  MemorySimilarityPayloadV1,
+  MemoryTrustHistoryPayloadV1,
+} from '../../contracts/generated.ts';
 
 /* ---- trust history ------------------------------------------------------- */
 
@@ -43,12 +43,12 @@ export interface TrustHistoryReading {
   readonly net: number | null;
   /** How many events carry each detail availability, zeroes included, so the
    * panel can state "3 of 11 redacted" rather than only listing the survivors. */
-  readonly availability: Readonly<Record<TrustDetailAvailability, number>>;
+  readonly availability: Readonly<Record<MemoryFeedbackDetailsAvailabilityV1, number>>;
 }
 
-export function trustHistoryReading(payload: TrustHistoryPayload): TrustHistoryReading {
+export function trustHistoryReading(payload: MemoryTrustHistoryPayloadV1): TrustHistoryReading {
   const events = payload.trust_history;
-  const availability: Record<TrustDetailAvailability, number> = {
+  const availability: Record<MemoryFeedbackDetailsAvailabilityV1, number> = {
     available: 0,
     redacted: 0,
     unknown: 0,
@@ -78,7 +78,7 @@ export function trustHistoryReading(payload: TrustHistoryPayload): TrustHistoryR
 /** The state a feedback event's detail is in. `available` is not a state chip , 
  * the detail is simply shown, so this is only called for the other two. */
 export function trustDetailState(
-  availability: TrustDetailAvailability,
+  availability: MemoryFeedbackDetailsAvailabilityV1,
 ): DomainStateKind | null {
   switch (availability) {
     case 'available':
@@ -101,7 +101,7 @@ export interface ProjectionReading {
   readonly projected: boolean;
   /** What the panel says the axes mean, or that they mean nothing. */
   readonly note: string;
-  readonly points: ProjectionPayload['points'];
+  readonly points: MemoryProjectionPayloadV1['points'];
   /** Drawing extents, `null` when there is nothing to draw. */
   readonly extent: { x: [number, number]; y: [number, number] } | null;
   /** Categories present, ranked by population, for the legend. */
@@ -110,7 +110,7 @@ export interface ProjectionReading {
   readonly dim: number;
 }
 
-export function projectionReading(payload: ProjectionPayload): ProjectionReading {
+export function projectionReading(payload: MemoryProjectionPayloadV1): ProjectionReading {
   const points = payload.points;
   const projected = payload.method === 'pca' && points.length >= 2;
   const counts = new Map<string, number>();
@@ -172,7 +172,7 @@ export interface SimilarityReading {
   readonly denominators: string;
 }
 
-export function similarityReading(payload: SimilarityPayload): SimilarityReading {
+export function similarityReading(payload: MemorySimilarityPayloadV1): SimilarityReading {
   const distribution = payload.score_distribution;
   const returned = payload.pairs.length;
   const capped = returned < payload.limit ? false : null;
@@ -194,14 +194,14 @@ export function similarityReading(payload: SimilarityPayload): SimilarityReading
 /* ---- oplog --------------------------------------------------------------- */
 
 export interface OplogReading {
-  readonly events: OplogPayload['events'];
+  readonly events: MemoryOplogPayloadV1['events'];
   /** Operations by name, ranked, for the summary rail. */
   readonly operations: readonly { op: string; count: number }[];
   /** The store's own read failure, when it had one. */
   readonly storeError: string | null;
 }
 
-export function oplogReading(payload: OplogPayload): OplogReading {
+export function oplogReading(payload: MemoryOplogPayloadV1): OplogReading {
   const counts = new Map<string, number>();
   for (const event of payload.events) {
     counts.set(event.op, (counts.get(event.op) ?? 0) + 1);

@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use std::path::PathBuf;
+use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
 use tracedecay_store::ProjectMemoryFactStore;
 
 use crate::automation::automatic_facts::{
@@ -335,6 +336,7 @@ pub(super) fn rejected_session_reflector_run(
     run: &AgentTaskRunContext<'_>,
     config: &AutomationConfig,
     reason: &str,
+    budget_stage: Option<SessionRetrievalBudgetStageV1>,
     evidence_hash: Option<String>,
 ) -> SessionReflectorAutomationRun {
     let (report, record) = unpersisted_rejected_parts(
@@ -342,6 +344,7 @@ pub(super) fn rejected_session_reflector_run(
         config,
         AgentTaskKind::SessionReflector,
         reason,
+        budget_stage,
         evidence_hash,
         "session_reflector",
     );
@@ -682,6 +685,7 @@ fn run_session_reflector_for_store_with_publication_inner<'a, A: ProjectMemoryFa
             "session_reflector",
             options.trigger,
             config,
+            backend.executable(),
             AgentTaskKind::SessionReflector,
         )
         .with_ledger_publication(ledger_publication)
@@ -700,12 +704,14 @@ fn run_session_reflector_for_store_with_publication_inner<'a, A: ProjectMemoryFa
                 SessionReflectorEvidenceOutcome::Ready(bundle) => bundle,
                 SessionReflectorEvidenceOutcome::Skipped {
                     reason,
+                    budget_stage,
                     evidence_hash,
                 } => {
                     return Ok(rejected_session_reflector_run(
                         &run,
                         config,
                         reason,
+                        budget_stage,
                         evidence_hash,
                     ));
                 }

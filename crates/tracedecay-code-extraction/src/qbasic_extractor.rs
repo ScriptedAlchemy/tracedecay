@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
-use crate::common::{ExtractionState, local_node_id};
+use crate::common::{ExtractionState, basic_identifier_text, local_node_id};
 use crate::complexity::{ComplexityMetrics, QBASIC_COMPLEXITY, count_complexity};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
@@ -156,7 +156,7 @@ impl QBasicExtractor {
         let Some(id_node) = find_direct_child_by_kind(const_stmt, "identifier") else {
             return;
         };
-        let name = state.node_text(id_node);
+        let name = basic_identifier_text(state.source, id_node);
 
         let start_line = line.start_position().row as u32;
         let end_line = line.end_position().row as u32;
@@ -223,7 +223,7 @@ impl QBasicExtractor {
         let Some(id_node) = find_direct_child_by_kind(dim_var, "identifier") else {
             return;
         };
-        let name = state.node_text(id_node);
+        let name = basic_identifier_text(state.source, id_node);
 
         let start_line = line.start_position().row as u32;
         let end_line = line.end_position().row as u32;
@@ -280,7 +280,7 @@ impl QBasicExtractor {
         let Some(name_node) = node.child_by_field_name("name") else {
             return;
         };
-        let name = state.node_text(name_node);
+        let name = basic_identifier_text(state.source, name_node);
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -355,7 +355,7 @@ impl QBasicExtractor {
     /// Visit a `type_member` inside a TYPE block and emit a Field node.
     fn visit_type_member(state: &mut ExtractionState, member: TsNode<'_>) {
         let name = match find_direct_child_by_kind(member, "identifier") {
-            Some(id_node) => state.node_text(id_node),
+            Some(id_node) => basic_identifier_text(state.source, id_node),
             None => return,
         };
 
@@ -420,7 +420,7 @@ impl QBasicExtractor {
         let Some(name_node) = node.child_by_field_name("name") else {
             return;
         };
-        let name = state.node_text(name_node);
+        let name = basic_identifier_text(state.source, name_node);
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -497,7 +497,7 @@ impl QBasicExtractor {
         let Some(name_node) = node.child_by_field_name("name") else {
             return;
         };
-        let name = state.node_text(name_node);
+        let name = basic_identifier_text(state.source, name_node);
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -566,7 +566,7 @@ impl QBasicExtractor {
     /// Extract a call reference from a `call_statement` node.
     fn extract_call_from_call_statement(state: &mut ExtractionState, call_stmt: TsNode<'_>) {
         let target_name = match find_direct_child_by_kind(call_stmt, "identifier") {
-            Some(id_node) => state.node_text(id_node),
+            Some(id_node) => basic_identifier_text(state.source, id_node),
             None => return,
         };
 

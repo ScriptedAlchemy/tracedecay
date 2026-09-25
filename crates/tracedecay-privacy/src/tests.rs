@@ -15,11 +15,11 @@ use super::detect::{
 };
 use super::sanitize::OBSERVATION_SANITIZER_VERSION_V1;
 use super::{
-    CODE_SOURCE_SANITIZER_VERSION_V1, ClaudeRecordParseErrorV1, ClaudeRecordSanitizerV1,
-    ClaudeSanitizationOutcomeV1, ClaudeSanitizerPolicyV1, CodeSourceShapeV1, DetectionConfidenceV1,
+    CODE_SOURCE_SANITIZER_VERSION_V1, ClaudeRecordSanitizerV1, ClaudeSanitizationOutcomeV1,
+    ClaudeSanitizerPolicyV1, CodeSourceShapeV1, DetectionConfidenceV1,
     LcmSensitiveRedactionPolicyV1, MEMORY_FACT_SANITIZER_VERSION_V1, MemoryFactSanitizationV1,
-    PrivacyDetectorV1, PrivacySanitizerError, SanitizationActionV1, SanitizationFindingV1,
-    SanitizedPayloadVerificationError, parse_claude_record_v1,
+    ObservationRecordParseErrorV1, PrivacyDetectorV1, PrivacySanitizerError, SanitizationActionV1,
+    SanitizationFindingV1, SanitizedPayloadVerificationError,
     parse_normalized_observation_record_v1, parse_observation_record_v1,
     redact_lcm_sensitive_payload, sanitize_code_source_bytes, sanitize_memory_fact_payload,
     sanitize_provider_metadata_json, verify_memory_fact_sanitization,
@@ -58,8 +58,12 @@ fn sanitize_with_identity(
     record: &[u8],
     identity: ObservationIdentityMaterialV1,
 ) -> ClaudeSanitizationOutcomeV1 {
-    let parsed = parse_claude_record_v1(record, identity.position())
-        .expect("parse bounded sanitizer fixture");
+    let parsed = parse_observation_record_v1(
+        record,
+        identity.position(),
+        ObservationOrderingDomainV1::FileBytes,
+    )
+    .expect("parse bounded sanitizer fixture");
     sanitizer
         .sanitize_parsed(parsed, identity, retention_class())
         .expect("sanitizer should produce an outcome")
@@ -238,7 +242,9 @@ fn parsed_record_token_preserves_verified_source_evidence() {
     let range = ObservationSourceRangeV1::new(start, start + record.len() as u64)
         .expect("valid parsed-token range");
 
-    let parsed = parse_claude_record_v1(&record, range).expect("parse bounded Claude record");
+    let parsed =
+        parse_observation_record_v1(&record, range, ObservationOrderingDomainV1::FileBytes)
+            .expect("parse bounded Claude record");
 
     assert_eq!(parsed.encoded_len(), record.len());
     assert_eq!(*parsed.source_range(), range);
@@ -267,8 +273,9 @@ fn parsed_record_rejects_mismatched_range_and_canonical_oversize() {
     let mismatched = ObservationSourceRangeV1::new(0, record.len() as u64 + 1)
         .expect("non-empty mismatched range");
     assert_eq!(
-        parse_claude_record_v1(record, mismatched).err(),
-        Some(ClaudeRecordParseErrorV1::RangeLengthMismatch)
+        parse_observation_record_v1(record, mismatched, ObservationOrderingDomainV1::FileBytes)
+            .err(),
+        Some(ObservationRecordParseErrorV1::RangeLengthMismatch)
     );
 
     let at_limit = format!(
@@ -278,8 +285,12 @@ fn parsed_record_rejects_mismatched_range_and_canonical_oversize() {
     assert_eq!(at_limit.len(), 1_048_576);
     let at_limit_range =
         ObservationSourceRangeV1::new(0, 1_048_576).expect("non-empty at-limit range");
-    let admitted = parse_claude_record_v1(at_limit.as_bytes(), at_limit_range)
-        .expect("a record at the one-mebibyte limit is admitted");
+    let admitted = parse_observation_record_v1(
+        at_limit.as_bytes(),
+        at_limit_range,
+        ObservationOrderingDomainV1::FileBytes,
+    )
+    .expect("a record at the one-mebibyte limit is admitted");
     assert_eq!(
         admitted.value()["message"].as_str().map(str::len),
         Some(1_048_576 - br#"{"message":""}"#.len())
@@ -289,8 +300,13 @@ fn parsed_record_rejects_mismatched_range_and_canonical_oversize() {
     let oversized_range = ObservationSourceRangeV1::new(0, oversized.len() as u64)
         .expect("non-empty oversized range");
     assert_eq!(
-        parse_claude_record_v1(&oversized, oversized_range).err(),
-        Some(ClaudeRecordParseErrorV1::TooLarge)
+        parse_observation_record_v1(
+            &oversized,
+            oversized_range,
+            ObservationOrderingDomainV1::FileBytes
+        )
+        .err(),
+        Some(ObservationRecordParseErrorV1::TooLarge)
     );
 }
 
@@ -299,8 +315,12 @@ fn sanitize_parsed_consumes_token_without_reparsing_raw_bytes() {
     let mut record = serde_json::to_vec(&json!({"message": "ordinary parsed fixture"}))
         .expect("serialize parsed sanitizer fixture");
     let identity = identity_for(&record);
-    let parsed =
-        parse_claude_record_v1(&record, identity.position()).expect("parse sanitizer fixture once");
+    let parsed = parse_observation_record_v1(
+        &record,
+        identity.position(),
+        ObservationOrderingDomainV1::FileBytes,
+    )
+    .expect("parse sanitizer fixture once");
     record.fill(b'!');
 
     let outcome = ClaudeRecordSanitizerV1::claude_v1()
@@ -323,7 +343,12 @@ fn sanitize_parsed_rejects_identity_range_mismatch() {
         .expect("serialize range fixture");
     let shifted_range =
         ObservationSourceRangeV1::new(1, record.len() as u64 + 1).expect("valid shifted range");
-    let parsed = parse_claude_record_v1(&record, shifted_range).expect("parse shifted fixture");
+    let parsed = parse_observation_record_v1(
+        &record,
+        shifted_range,
+        ObservationOrderingDomainV1::FileBytes,
+    )
+    .expect("parse shifted fixture");
 
     let error = ClaudeRecordSanitizerV1::claude_v1()
         .expect("valid Claude V1 sanitizer")
@@ -385,7 +410,7 @@ fn provider_sanitizer_uses_provider_neutral_policy_and_receipt_domain() {
                     range,
                 ),
             )
-            .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
         },
     )
     .expect("parse provider fixture");
@@ -454,7 +479,7 @@ fn provider_sanitizer_allows_only_legacy_claude_to_omit_native_record_identity()
                         range,
                     ),
                 )
-                .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+                .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
             },
         )
         .unwrap();
@@ -520,7 +545,7 @@ fn provider_sanitizer_preserves_stable_public_structural_ids() {
                     range,
                 ),
             )
-            .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
         },
     )
     .unwrap();
@@ -589,7 +614,7 @@ fn provider_sanitizer_protects_credential_shaped_structural_ids_consistently() {
                     range,
                 ),
             )
-            .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
         },
     )
     .unwrap();
@@ -678,7 +703,7 @@ fn provider_neutral_workflow_fact_redaction_leaks_no_raw_secret() {
                     range,
                 ),
             )
-            .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
         },
     )
     .unwrap();
@@ -822,8 +847,13 @@ fn json_is_parsed_before_unknown_fields_are_scanned() {
     assert_eq!(malformed_record.pop(), Some(b'}'));
     let malformed_range = identity_for(&malformed_record).position();
     assert_eq!(
-        parse_claude_record_v1(&malformed_record, malformed_range).err(),
-        Some(ClaudeRecordParseErrorV1::Malformed)
+        parse_observation_record_v1(
+            &malformed_record,
+            malformed_range,
+            ObservationOrderingDomainV1::FileBytes
+        )
+        .err(),
+        Some(ObservationRecordParseErrorV1::Malformed)
     );
 }
 
@@ -1270,13 +1300,17 @@ fn invalid_records_stop_at_the_parser_and_policy_limited_records_have_no_payload
     let scalar = serde_json::to_vec(&json!("ordinary scalar")).expect("serialize scalar fixture");
 
     for (record, expected) in [
-        (Vec::new(), ClaudeRecordParseErrorV1::Empty),
-        (malformed, ClaudeRecordParseErrorV1::Malformed),
-        (scalar, ClaudeRecordParseErrorV1::NonObject),
+        (Vec::new(), ObservationRecordParseErrorV1::Empty),
+        (malformed, ObservationRecordParseErrorV1::Malformed),
+        (scalar, ObservationRecordParseErrorV1::NonObject),
     ] {
         let end = u64::try_from(record.len().max(1)).expect("test record length fits");
         let range = ObservationSourceRangeV1::new(0, end).expect("non-empty parser range");
-        assert_eq!(parse_claude_record_v1(&record, range).err(), Some(expected));
+        assert_eq!(
+            parse_observation_record_v1(&record, range, ObservationOrderingDomainV1::FileBytes)
+                .err(),
+            Some(expected)
+        );
     }
 
     let limited_policy = ClaudeSanitizerPolicyV1::claude_v1()
@@ -1287,8 +1321,12 @@ fn invalid_records_stop_at_the_parser_and_policy_limited_records_have_no_payload
     let oversized = serde_json::to_vec(&json!({ "message": "x".repeat(64) }))
         .expect("serialize oversized fixture");
     let identity = identity_for(&oversized);
-    let parsed = parse_claude_record_v1(&oversized, identity.position())
-        .expect("canonical parser accepts policy-limited fixture");
+    let parsed = parse_observation_record_v1(
+        &oversized,
+        identity.position(),
+        ObservationOrderingDomainV1::FileBytes,
+    )
+    .expect("canonical parser accepts policy-limited fixture");
     let outcome = limited_sanitizer
         .sanitize_parsed(parsed, identity, retention_class())
         .expect("limited sanitizer returns a typed outcome");
@@ -1309,8 +1347,12 @@ fn structure_bound_failures_are_quarantined_without_payloads() {
     let depth_record = serde_json::to_vec(&json!({ "a": { "b": { "c": "value" } } }))
         .expect("serialize depth fixture");
     let depth_identity = identity_for(&depth_record);
-    let depth_parsed = parse_claude_record_v1(&depth_record, depth_identity.position())
-        .expect("canonical parser accepts policy-limited depth fixture");
+    let depth_parsed = parse_observation_record_v1(
+        &depth_record,
+        depth_identity.position(),
+        ObservationOrderingDomainV1::FileBytes,
+    )
+    .expect("canonical parser accepts policy-limited depth fixture");
     let depth_outcome = ClaudeRecordSanitizerV1::new(depth_policy)
         .sanitize_parsed(depth_parsed, depth_identity, retention_class())
         .expect("limited sanitizer returns a typed outcome");
@@ -1328,8 +1370,12 @@ fn structure_bound_failures_are_quarantined_without_payloads() {
     let value_record =
         serde_json::to_vec(&json!({ "values": [1, 2, 3] })).expect("serialize value-count fixture");
     let value_identity = identity_for(&value_record);
-    let value_parsed = parse_claude_record_v1(&value_record, value_identity.position())
-        .expect("canonical parser accepts policy-limited value fixture");
+    let value_parsed = parse_observation_record_v1(
+        &value_record,
+        value_identity.position(),
+        ObservationOrderingDomainV1::FileBytes,
+    )
+    .expect("canonical parser accepts policy-limited value fixture");
     let value_outcome = ClaudeRecordSanitizerV1::new(value_policy)
         .sanitize_parsed(value_parsed, value_identity, retention_class())
         .expect("limited sanitizer returns a typed outcome");

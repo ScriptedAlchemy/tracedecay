@@ -76,34 +76,26 @@ pub struct CodeGenerationRetentionRecordV1 {
     /// Scope roots under the shared `code-index-v1/` parent that no live
     /// canonical project root names. Absent (zero) when the reporter could not
     /// prove the live-root set, which is also when nothing may be collected.
-    #[serde(default)]
     pub stranded_scope_count: u64,
-    #[serde(default = "zero_storage_bytes")]
     pub stranded_scope_bytes: StorageByteSizeV1,
     /// Sealed graph generation artifacts in the project graph store whose
     /// generation is no longer any projection's verified head. They are
     /// retired when a newer head installs; a count here means that
     /// retirement has not run since the last publication.
-    #[serde(default)]
     pub superseded_sealed_generation_count: u64,
-    #[serde(default = "zero_storage_bytes")]
     pub superseded_sealed_generation_bytes: StorageByteSizeV1,
     /// `.staging-*` directories a seal left under the sealed root: a build
     /// that never installed. Swept on the next store open.
-    #[serde(default)]
     pub abandoned_sealed_staging_count: u64,
-    #[serde(default = "zero_storage_bytes")]
     pub abandoned_sealed_staging_bytes: StorageByteSizeV1,
     /// Bytes of the sealed artifacts every projection's verified head serves
     /// from: the size the live staging container converges to once its
     /// duplicate and superseded rows are gone.
-    #[serde(default = "zero_storage_bytes")]
     pub sealed_head_generation_bytes: StorageByteSizeV1,
     /// On-disk bytes of the live staging container (`tracedecay.grafeo` and
     /// its WAL). Grafeo rewrites the container out of place on every
     /// checkpoint and truncates the dead generation, so this shrinks on its
     /// own once retired rows are deleted from the engine.
-    #[serde(default = "zero_storage_bytes")]
     pub live_graph_container_bytes: StorageByteSizeV1,
     /// Retirements the journal has already decided whose native rows are
     /// still in the live container: retirement tombstones awaiting their
@@ -111,14 +103,7 @@ pub struct CodeGenerationRetentionRecordV1 {
     /// hibernated engine is never opened just to delete: opening a
     /// multi-gigabyte LPG container costs about twice its size in RAM, so
     /// these wait for the next publication, which holds the engine open.
-    #[serde(default)]
     pub deferred_native_retirement_count: u64,
-}
-
-/// `serde(default)` needs a value, and `StorageByteSizeV1` deliberately has no
-/// `Default` impl; zero bytes is the only meaningful absence here.
-fn zero_storage_bytes() -> StorageByteSizeV1 {
-    StorageByteSizeV1::ZERO
 }
 
 impl CodeGenerationRetentionRecordV1 {
@@ -331,23 +316,5 @@ mod tests {
         assert!(record.validate().is_ok());
         assert!(!record.has_collectable_generations());
         assert!(record.has_stranded_scopes());
-    }
-
-    #[test]
-    fn stranded_scope_totals_default_to_zero_for_records_without_them() {
-        let record: CodeGenerationRetentionRecordV1 = serde_json::from_str(
-            r#"{
-                "store": "code-index-v1",
-                "superseded_generation_count": 3,
-                "superseded_generation_bytes": 3000,
-                "collectable_generation_count": 1,
-                "collectable_generation_bytes": 1000
-            }"#,
-        )
-        .expect("records predating scope reconciliation stay readable");
-
-        assert_eq!(record.stranded_scope_count, 0);
-        assert_eq!(record.stranded_scope_bytes, StorageByteSizeV1(0));
-        assert!(!record.has_stranded_scopes());
     }
 }

@@ -15,6 +15,9 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
 
 use super::*;
+use tracedecay_daemon_service::shutdown::DAEMON_CLIENT_DRAIN_DEADLINE;
+#[cfg(not(unix))]
+use tracedecay_daemon_service::shutdown::{DaemonLifecycle, ShutdownStatus};
 use tracedecay_runtime_core::logging::log_daemon_event;
 
 /// Slice of the shutdown budget reserved for writing the terminal shutdown
@@ -69,9 +72,10 @@ async fn run_foreground_loopback(
     remote_tls: Option<RemoteBrainTlsConfig>,
 ) -> Result<()> {
     let bootstrap_started = Instant::now();
-    let profile_root = crate::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
-        message: "could not determine TraceDecay user data directory".to_string(),
-    })?;
+    let profile_root =
+        tracedecay_project::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
+            message: "could not determine TraceDecay user data directory".to_string(),
+        })?;
     let catalog_prewarm = tokio::task::spawn_blocking(prewarm_static_daemon_bootstrap_catalog);
     let requested = default_loopback_endpoint();
     let _lifecycle_lease = hotpath::measure_block!("daemon.bootstrap.lifecycle_lease", {
@@ -163,7 +167,7 @@ async fn run_foreground_loopback(
         );
     }
     let lifecycle = DaemonLifecycle::default();
-    let sync_config = tracedecay_configuration::SyncConfig::default().with_env_overrides();
+    let sync_config = tracedecay_configuration::SyncConfig::default();
     let profile_database = store_administration.registered_profile_database().await?;
     let maintenance = maintenance::MaintenanceCoordinator::spawn(
         profile_root.clone(),
@@ -173,7 +177,6 @@ async fn run_foreground_loopback(
         sync_config.retention.clone(),
         maintenance::BranchStoreGcCadenceV1 {
             branch_gc_days: sync_config.branch_gc_days,
-            orphan_db_gc_days: sync_config.orphan_db_gc_days,
         },
     )
     .await;
@@ -504,9 +507,10 @@ async fn run_foreground_unix(
     remote_tls: Option<RemoteBrainTlsConfig>,
 ) -> Result<()> {
     let bootstrap_started = Instant::now();
-    let profile_root = crate::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
-        message: "could not determine TraceDecay user data directory".to_string(),
-    })?;
+    let profile_root =
+        tracedecay_project::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
+            message: "could not determine TraceDecay user data directory".to_string(),
+        })?;
     let catalog_prewarm = tokio::task::spawn_blocking(prewarm_static_daemon_bootstrap_catalog);
     let endpoint = DaemonEndpoint::Unix(socket_path);
     let _lifecycle = hotpath::measure_block!("daemon.bootstrap.lifecycle_lease", {
@@ -633,20 +637,19 @@ async fn run_foreground_unix(
             &[("endpoint", format!("https://{endpoint}/remote/"))],
         );
     }
-    let sync_config = tracedecay_configuration::SyncConfig::default().with_env_overrides();
+    let sync_config = tracedecay_configuration::SyncConfig::default();
     let profile_database = engine
         .store_administration
         .registered_profile_database()
         .await?;
     let maintenance = maintenance::MaintenanceCoordinator::spawn(
         profile_root.clone(),
-        profile_database.clone(),
+        profile_database,
         engine.store_administration.clone(),
         engine.invocation.code_index_schedulers.clone(),
         sync_config.retention.clone(),
         maintenance::BranchStoreGcCadenceV1 {
             branch_gc_days: sync_config.branch_gc_days,
-            orphan_db_gc_days: sync_config.orphan_db_gc_days,
         },
     )
     .await;
@@ -751,7 +754,7 @@ async fn run_foreground_unix(
     // each of them; awaiting its receipt keeps this fence active until those
     // owners have either joined or reported a typed timeout.
     let _codex_shutdown =
-        tracedecay_sessions::runtime::codex_app_server::begin_codex_app_server_shutdown();
+        tracedecay_sessions::runtime::hosts::codex_app_server::begin_codex_app_server_shutdown();
     log_daemon_event(
         "daemon_shutdown",
         &[("socket", socket_path.display().to_string())],

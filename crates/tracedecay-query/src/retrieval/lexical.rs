@@ -46,18 +46,12 @@ pub use self::projection::{
     CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
     CodeLexicalArtifactFinalizationPhaseV1, CodeLexicalArtifactFinalizationStepV1,
     CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactReaderV1,
-    CodeLexicalArtifactSectionDigestV1, CodeLexicalArtifactWriterRevisionV1,
-    CodeLexicalCloneIndexCensusV1, CodeLexicalCloneSuccessorV1,
+    CodeLexicalArtifactSectionDigestV1, CodeLexicalCloneIndexCensusV1, CodeLexicalCloneRouteV1,
     CodeLexicalImportMembershipWitnessV1, CodeLexicalProjectionMetadataV1,
     MAX_CLONE_EXACT_PAGE_MEMBERS_V1, MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1,
     PreparedCodeLexicalArtifactBatchV1, PreparedCodeLexicalArtifactPageV1,
     VerifiedCodeLexicalArtifactV1, code_lexical_artifact_build_memory_budget_for,
-};
-#[cfg(feature = "search-eval")]
-pub use self::projection::{
-    CodeExactProjectionAdapterV1, CodeLexicalProjectionAdapterV1, CodeLexicalProjectionBuildStepV1,
-    CodeLexicalProjectionBuildV1, LEXICAL_PROJECTION_BUILD_DEADLINE_MICROS_V1,
-    lexical_projection_build_deadline_micros,
+    code_lexical_artifact_content_key,
 };
 pub use self::routes::{
     LexicalAliasV1, LexicalAlternativeReasonV1, LexicalAnchorV1, LexicalRouteErrorV1,

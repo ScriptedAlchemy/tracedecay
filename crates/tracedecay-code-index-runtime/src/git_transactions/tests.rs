@@ -6,6 +6,7 @@ use std::time::Duration;
 use std::collections::BTreeSet;
 use std::sync::Mutex;
 
+use tracedecay_contracts::catalog_composition::CatalogCompositionError;
 use tracedecay_contracts::{
     CancellationStage, GitIndexApplyRequestV1, GitIndexTransactionPort,
     GitIndexTransactionPortError, OperationTermination,
@@ -22,7 +23,7 @@ use tracedecay_store::{
     GitIndexTransactionBeginResultV1, GitIndexTransactionStore, GitIndexTransactionStoreError,
     GitIndexTransactionStoreResult, GitIndexTransactionTerminalWriteV1,
 };
-use tracedecay_tool_catalog::CapabilityId;
+use tracedecay_tool_catalog::{CapabilityId, CatalogSnapshotBuilderV1, CatalogSnapshotV1};
 
 use super::owner::{DaemonGitAuthoritySource, DaemonGitIndexPolicyRecheck, preview_conflict_risk};
 use super::queue::{RepositoryMutationQueue, RepositoryMutationQueueError};
@@ -42,13 +43,8 @@ use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
 /// Registry owners take their catalog composer by construction, so these
 /// fixtures compose a real (contribution-free) snapshot rather than relying on
 /// whatever some other test installed first.
-fn test_catalog_snapshot() -> Result<
-    tracedecay_tool_catalog::CatalogSnapshotV1,
-    crate::ports::ApplicationCatalogSnapshotErrorV1,
-> {
-    tracedecay_tool_catalog::CatalogSnapshotBuilderV1::new()
-        .build()
-        .map_err(|error| crate::ports::ApplicationCatalogSnapshotErrorV1::new(error.to_string()))
+fn test_catalog_snapshot() -> Result<CatalogSnapshotV1, CatalogCompositionError> {
+    Ok(CatalogSnapshotBuilderV1::new().build()?)
 }
 
 #[test]

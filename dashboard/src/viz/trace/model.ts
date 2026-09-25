@@ -1,5 +1,5 @@
 /**
- * Measurement → layout for the TRACE surface.
+ * Measurement → model for the TRACE surface.
  *
  * This module turns what `GET /api/plugins/graph/node/{id}/neighbors` actually
  * returns into a `TraceModel`. It is pure, DOM-free and deterministic, and it
@@ -13,16 +13,14 @@
  * - `callers` / `callees` are `calls` edges ONLY, one ROW PER EDGE. A caller
  *   with three call sites appears three times with different `edge_line`, so
  *   the call-site count of a pair is the number of its rows. That count is the
- *   channel's width AND its spring stiffness, the drawn channel and the felt
- *   channel are the same number by construction.
+ *   length of the channel's bar on the plate's one call-site scale.
  * - `degree` is the node's total (in + out) edge count over ALL edge kinds.
- *   Subtracting the call sites this frame draws gives the edges it does not,
- *   which is what a dashed mouth reports.
+ *   Subtracting the call sites this frame draws gives the edges it does not.
  * - `edges` carries every edge kind incident on the focus, including
  *   `contains`. Membranes are derived from those rows and from nothing else,
  *   no shared-file-path guessing. When the payload carries no `contains` rows,
- *   `coverage.membranesAvailable` is false, the field draws no enclosures, and
- *   the caption says the wire did not carry them.
+ *   `coverage.membranesAvailable` is false and the readout says the wire did
+ *   not carry them.
  * - Both lists are truncated at `limit` (max 200). A list that comes back
  *   exactly at `limit` is a prefix, and `coverage.capped` records it.
  *
@@ -36,7 +34,6 @@ import type {
   GraphNodeV1,
 } from '../../contracts/generated.ts';
 import type {
-  SensoryChannel,
   TraceChannel,
   TraceChannelDirection,
   TraceCoverage,
@@ -44,26 +41,6 @@ import type {
   TraceModel,
   TraceNode,
 } from './types.ts';
-import type { SimSpec } from './sim.ts';
-
-/**
- * The world layout anchors live in.
- *
- * Narrower than the static sheet's 1440x1160, and deliberately: the drill-in
- * occupies the workspace's list column, not a full-bleed page, so a 1440-wide
- * world was being scaled to roughly half size and every label with it. Sizing
- * the world near the column's real width keeps the scale factor close to 1,
- * which is what makes the type legible without the renderer having to fight its
- * own transform.
- */
-export const TRACE_WORLD = Object.freeze({ width: 1200, height: 1040 });
-
-/** Vertical band the hop rings are spread across. */
-const ROW_TOP = 128;
-const ROW_BOTTOM = 940;
-/** Horizontal band nodes are placed in, leaving room for ring labels. */
-const COL_LEFT = 172;
-const COL_RIGHT = 1092;
 
 /**
  * Drawing budget. The plan caps a readable subgraph at 80–250 nodes; this
@@ -140,20 +117,6 @@ function callSites(list: NeighborRow[]): Map<string, { row: NeighborRow; calls: 
   return out;
 }
 
-/**
- * Order a ranked list so the highest-ranked member sits nearest the centre of
- * its row. A row that simply reads left-to-right by strength puts the strongest
- * channel at the far edge, where its ribbon has to cross the whole field.
- */
-function centreOut<T>(items: readonly T[]): T[] {
-  const out: T[] = [];
-  items.forEach((item, i) => {
-    if (i % 2 === 0) out.push(item);
-    else out.unshift(item);
-  });
-  return out;
-}
-
 /* ---- the build ---------------------------------------------------------- */
 
 interface Draft {
@@ -191,11 +154,6 @@ export function buildTraceModel(input: TraceModelInput): TraceModel {
   const pairCalls = new Map<string, { from: string; to: string; calls: number }>();
   /** Every symbol any fetched list named, drawn or not. */
   const named = new Set<string>([focus.id]);
-  /**
-   * Field names actually observed on neighbour rows. Read, never assumed,
-   * this is what decides which sensory channels this field may drive.
-   */
-  const rowFields = new Set<string>();
 
   function recordPair(from: string, to: string, calls: number): void {
     // NUL separator, written as an escape rather than as a raw byte: a literal
@@ -212,9 +170,6 @@ export function buildTraceModel(input: TraceModelInput): TraceModel {
   }
 
   function absorb(payload: NeighborsPayload, ownerId: string): void {
-    for (const row of [...rows(payload.callers), ...rows(payload.callees)]) {
-      for (const key of Object.keys(row)) rowFields.add(key);
-    }
     for (const [id, entry] of callSites(rows(payload.callers))) {
       named.add(id);
       recordPair(id, ownerId, entry.calls);
@@ -299,9 +254,9 @@ export function buildTraceModel(input: TraceModelInput): TraceModel {
     const b = drafts.get(to);
     if (!a || !b) continue;
     if (from === to) {
-      // Recursion. A real `calls` row, and a self-loop spring is undefined
-      // (zero length, no second body), so it is counted on the node and
-      // printed there rather than drawn as a channel or quietly discarded.
+      // Recursion. A real `calls` row that couples no two symbols, so it is
+      // counted on the node and printed there rather than drawn as a channel
+      // or quietly discarded.
       selfCallsOn.set(from, (selfCallsOn.get(from) ?? 0) + calls);
       callSitesOn.set(from, (callSitesOn.get(from) ?? 0) + calls);
       continue;
@@ -338,9 +293,8 @@ export function buildTraceModel(input: TraceModelInput): TraceModel {
     }
   }
   const membranes: TraceMembrane[] = [...byContainer]
-    // A one-member enclosure is a true `contains` edge but not an enclosure a
-    // reader can see the flow enter and leave, so it is not drawn as one. It
-    // remains a counted `contains` edge on its member's mouth.
+    // A one-member enclosure is a true `contains` edge but encloses nothing
+    // else on this frame, so it is not counted as a type the calls enter.
     .filter(([, entry]) => entry.of.length >= 2)
     .map(([id, entry]) => ({ id, label: entry.label, of: entry.of }))
     .sort((a, b) => a.id.localeCompare(b.id));
@@ -350,94 +304,27 @@ export function buildTraceModel(input: TraceModelInput): TraceModel {
     for (const member of membrane.of) membraneOf.set(member, membrane.id);
   }
 
-  /* ---- layout ----------------------------------------------------------- */
-  const ringsPresent = [...new Set([...drafts.values()].map((d) => d.ring))].sort((a, b) => a - b);
-  const rowY = new Map<number, number>();
-  ringsPresent.forEach((ring, i) => {
-    const span = ringsPresent.length > 1 ? (ROW_BOTTOM - ROW_TOP) / (ringsPresent.length - 1) : 0;
-    rowY.set(ring, ROW_TOP + span * i);
-  });
-
-  // Channel adjacency, weighted by call sites, for the barycentre pass below.
-  const neighboursOf = new Map<string, Array<{ other: string; calls: number }>>();
-  for (const channel of drawnChannels) {
-    if (!neighboursOf.has(channel.a)) neighboursOf.set(channel.a, []);
-    if (!neighboursOf.has(channel.b)) neighboursOf.set(channel.b, []);
-    neighboursOf.get(channel.a)!.push({ other: channel.b, calls: channel.calls });
-    neighboursOf.get(channel.b)!.push({ other: channel.a, calls: channel.calls });
-  }
-
-  const nodes: TraceNode[] = [];
-  const placedX = new Map<string, number>();
-  const centre = (COL_LEFT + COL_RIGHT) / 2;
-
-  /**
-   * Rings are laid out from the focus outward, and each ring is ordered by the
-   * call-site-weighted mean x of the neighbours already placed on the ring
-   * inside it, a one-pass barycentre ordering.
-   *
-   * Without it, ordering a ring by raw strength puts a symbol nowhere near the
-   * symbols it actually calls, and every channel has to cross the field to
-   * reach its partner. The resulting picture is a legible watershed instead of
-   * a hairball, and no measurement is touched: barycentre decides only which of
-   * several equally-valid x slots a node occupies within the row its HOP
-   * DISTANCE already assigned it.
-   */
-  const byDistance = [...ringsPresent].sort((a, b) => Math.abs(a) - Math.abs(b) || a - b);
-  for (const ring of byDistance) {
-    const inRing = [...drafts.values()].filter((d) => d.ring === ring);
-    const keyOf = (id: string): number => {
-      let weight = 0;
-      let sum = 0;
-      for (const { other, calls } of neighboursOf.get(id) ?? []) {
-        const x = placedX.get(other);
-        if (x === undefined) continue;
-        weight += calls;
-        sum += x * calls;
-      }
-      return weight > 0 ? sum / weight : centre;
-    };
-    const keys = new Map(inRing.map((draft) => [draft.id, keyOf(draft.id)]));
-    // Membrane siblings share their group's mean key, so a type's members stay
-    // adjacent and its enclosure is a compact box rather than a band spanning
-    // the whole field.
-    for (const membrane of membranes) {
-      const members = membrane.of.filter((id) => keys.has(id));
-      if (members.length < 2) continue;
-      const mean = members.reduce((sum, id) => sum + keys.get(id)!, 0) / members.length;
-      for (const id of members) keys.set(id, mean);
-    }
-    const ordered = inRing.sort(
+  /* ---- nodes: nearest hop first, then call sites, then id ------------- */
+  const nodes: TraceNode[] = [...drafts.values()]
+    .sort(
       (a, b) =>
-        keys.get(a.id)! - keys.get(b.id)! ||
+        Math.abs(a.ring) - Math.abs(b.ring) ||
+        a.ring - b.ring ||
         (callSitesOn.get(b.id) ?? 0) - (callSitesOn.get(a.id) ?? 0) ||
         a.id.localeCompare(b.id),
-    );
-    // The focus is the one node whose slot is not negotiable: it is the basin
-    // the whole field drains toward, so it sits dead centre.
-    const placed = ring === 0 ? centreOut(ordered) : ordered;
-    const y = rowY.get(ring)!;
-    placed.forEach((draft, i) => {
-      const span = placed.length > 1 ? (COL_RIGHT - COL_LEFT) / (placed.length - 1) : 0;
-      const x = placed.length > 1 ? COL_LEFT + span * i : centre;
-      const finalX = draft.id === focus.id ? centre : x;
-      placedX.set(draft.id, finalX);
-      const drawn = callSitesOn.get(draft.id) ?? 0;
-      nodes.push({
-        id: draft.id,
-        name: draft.name,
-        kind: draft.kind,
-        degree: draft.degree,
-        filePath: draft.filePath,
-        startLine: draft.startLine,
-        ring: draft.ring,
-        x0: finalX,
-        y0: y,
-        undrawnEdges: draft.degree == null ? null : Math.max(0, draft.degree - drawn),
-        selfCalls: selfCallsOn.get(draft.id) ?? 0,
-      });
-    });
-  }
+    )
+    .map((draft) => ({
+      id: draft.id,
+      name: draft.name,
+      kind: draft.kind,
+      degree: draft.degree,
+      filePath: draft.filePath,
+      startLine: draft.startLine,
+      ring: draft.ring,
+      undrawnEdges:
+        draft.degree == null ? null : Math.max(0, draft.degree - (callSitesOn.get(draft.id) ?? 0)),
+      selfCalls: selfCallsOn.get(draft.id) ?? 0,
+    }));
 
   /* ---- channel direction refinement: same membrane is a lateral move ---- */
   const channels: TraceChannel[] = drawnChannels.map((channel) => {
@@ -466,13 +353,10 @@ export function buildTraceModel(input: TraceModelInput): TraceModel {
     cappedAt: limit,
     capped,
     membranesAvailable: containsSeen > 0 || containsRows.length > 0,
-    rowFields: [...rowFields].sort(),
   };
 
   return {
     focusId: focus.id,
-    world: TRACE_WORLD,
-    rows: rowY,
     nodes,
     channels,
     membranes,
@@ -489,111 +373,6 @@ function directionOf(ringA: number, ringB: number): TraceChannelDirection {
   if (ringA === ringB) return 'in';
   const outer = Math.abs(ringA) >= Math.abs(ringB) ? ringA : ringB;
   return outer < 0 ? 'up' : 'down';
-}
-
-/**
- * Field names that would carry each unbound sensory measurement.
- *
- * These are candidate names, matched against `coverage.rowFields`, the fields
- * the payload actually delivered. The point of matching rather than asserting is
- * that a producer which starts serving one of these makes the channel go live
- * on its own; nothing here has to be re-edited, and the surface cannot end up
- * understating coverage it has been given. Matching is on the field's presence,
- * not on a host or provider name, because a capability is a property of the
- * response and not of who produced it.
- */
-export const SENSORY_FIELD_CANDIDATES = Object.freeze({
-  /** Cyclomatic complexity, for the texture/grain channel. */
-  complexity: Object.freeze([
-    'complexity',
-    'cyclomatic',
-    'cyclomatic_complexity',
-  ] as const),
-  /** Churn recency, for the warmth channel. */
-  churn: Object.freeze([
-    'churn',
-    'churn_recency',
-    'last_modified',
-    'last_modified_at',
-    'last_commit_at',
-  ] as const),
-  /** Symbol- or path-scoped live activity, for the pulse channel. */
-  activity: Object.freeze([
-    'activity',
-    'last_strike_at',
-    'activity_path',
-  ] as const),
-});
-
-function served(coverage: TraceCoverage, candidates: readonly string[]): string | null {
-  return candidates.find((name) => coverage.rowFields.includes(name)) ?? null;
-}
-
-/**
- * The five sensory channels, each resolved against the payload in hand.
- *
- * The sensory contract is app-wide and fixed, weight is always connectedness,
- * tension is always coupling, but which channels a given field can actually
- * DRIVE depends on what arrived. This returns all five either way, so the
- * surface can show a channel as inert instead of omitting it, and a reader
- * learns the same mapping everywhere even where a measurement is missing.
- */
-export function sensoryChannels(model: TraceModel): readonly SensoryChannel[] {
-  const c = model.coverage;
-  const anyDegree = model.nodes.some((node) => node.degree != null);
-  const callSiteTotal = model.channels.reduce((sum, channel) => sum + channel.calls, 0);
-  const complexityField = served(c, SENSORY_FIELD_CANDIDATES.complexity);
-  const churnField = served(c, SENSORY_FIELD_CANDIDATES.churn);
-  const activityField = served(c, SENSORY_FIELD_CANDIDATES.activity);
-
-  return [
-    {
-      feel: 'weight / inertia',
-      measurement: 'connectedness (degree)',
-      state: anyDegree ? 'measured' : 'not-on-this-wire',
-      staticEquivalent: 'sill width',
-      note: anyDegree
-        ? 'degree sets each body\'s mass, so hover latency, bloom depth and settle time all scale with it'
-        : 'no row on this payload carried a degree, so every body is at the mass floor and weight reads nothing',
-    },
-    {
-      feel: 'tension / deformation',
-      measurement: 'coupling strength (call sites on one edge)',
-      state: callSiteTotal > 0 ? 'measured' : 'not-on-this-wire',
-      staticEquivalent: 'channel thickness',
-      note:
-        callSiteTotal > 0
-          ? `each channel is a spring stiffened by its own call-site count (${callSiteTotal} across ${model.channels.length} channels), so dragging deforms the neighbourhood in proportion to coupling`
-          : 'no calls rows arrived, so no channel carries a spring',
-    },
-    {
-      feel: 'texture / grain',
-      measurement: 'cyclomatic complexity',
-      state: complexityField ? 'measured' : 'not-on-this-wire',
-      staticEquivalent: 'contour tightness',
-      note: complexityField
-        ? `driven by the payload's ${complexityField} field`
-        : 'this route\'s rows carry no complexity field, so the channel is inert, the symbols are not being claimed to be simple',
-    },
-    {
-      feel: 'warmth',
-      measurement: 'churn recency',
-      state: churnField ? 'measured' : 'not-on-this-wire',
-      staticEquivalent: 'heat tint held at its current value',
-      note: churnField
-        ? `driven by the payload's ${churnField} field`
-        : 'this route\'s rows carry no churn or last-modified field, so nothing is tinted, untinted here means unmeasured, not cold',
-    },
-    {
-      feel: 'pulse',
-      measurement: 'live activity',
-      state: activityField ? 'measured' : 'coarser-scope',
-      staticEquivalent: 'pinned-lit',
-      note: activityField
-        ? `driven by the payload's ${activityField} field`
-        : 'the live activity stream is project-scoped and carries no path, so no strike can be attributed to a symbol on this field',
-    },
-  ];
 }
 
 /**
@@ -625,50 +404,52 @@ export function coverageCaption(model: TraceModel): string {
   }
   parts.push(
     c.membranesAvailable
-      ? `${model.membranes.length} type ${model.membranes.length === 1 ? 'membrane' : 'membranes'} from contains edges`
-      : 'the payload carried no contains edges, so no type membranes are drawn, this says nothing about whether these symbols have types',
+      ? `${model.membranes.length} type ${model.membranes.length === 1 ? 'enclosure' : 'enclosures'} from contains edges`
+      : 'the payload carried no contains edges, which says nothing about whether these symbols have types',
   );
   return parts.join(' · ');
 }
 
-/** The `role="img"` description. Says what is drawn and what is left out. */
-export function fieldDescription(model: TraceModel): string {
-  const focus = model.nodes.find((node) => node.id === model.focusId);
-  const up = model.nodes.filter((node) => node.ring < 0).length;
-  const down = model.nodes.filter((node) => node.ring > 0).length;
-  const callSites = model.channels.reduce((sum, channel) => sum + channel.calls, 0);
-  return (
-    `Call topography of ${focus?.name ?? model.focusId}. ` +
-    `${up} calling symbols are drawn above it as tributaries and ${down} called symbols below it as a delta, ` +
-    `joined by ${model.channels.length} channels carrying ${callSites} call sites in total. ` +
-    `${coverageCaption(model)}. ` +
-    'The ranked list below carries the same symbols as text.'
-  );
+/** A symbol a fetched list named that the field does not draw. */
+export interface UndrawnNeighbour {
+  readonly id: string;
+  readonly filePath: string | null;
+  /** 1 when the focus's own list named it, 2 when an expanded neighbour's did. */
+  readonly hop: 1 | 2;
+  /** Side of the drawn symbol whose list named it first. */
+  readonly side: 'up' | 'down';
 }
 
 /**
- * Translate the model into the simulation's vocabulary: mass IS degree,
- * stiffness IS the call-site count, and the anchor IS the layout position. No
- * shaping and no normalisation that would launder the measurement, the
- * simulation's own parameters do the scaling, in one place, where they can be
- * read off a table.
- *
- * A node whose `degree` the payload omitted enters at the parameter floor
- * (`minMass`), because a body with no inertia is a numerical singularity, not
- * an honest zero. Its sill is drawn hollow by the renderer, so absence stays
- * visible.
+ * The symbols behind `coverage.namedButNotDrawn`, with the file each row
+ * carried, so a renderer can print the omission where it happens instead of
+ * only as one total. Read from the same payloads `buildTraceModel` absorbed.
  */
-export function buildSimSpec(model: TraceModel, seed = 20260725): SimSpec {
-  return {
-    seed,
-    nodes: model.nodes.map((node) => ({
-      id: node.id,
-      mass: node.degree ?? 0,
-      x0: node.x0,
-      y0: node.y0,
-    })),
-    springs: model.channels
-      .filter((channel) => channel.calls > 0)
-      .map((channel) => ({ a: channel.a, b: channel.b, stiffness: channel.calls })),
+export function undrawnNeighbours(
+  input: TraceModelInput,
+  model: TraceModel,
+): readonly UndrawnNeighbour[] {
+  const drawn = new Map(model.nodes.map((node) => [node.id, node.ring]));
+  const out = new Map<string, UndrawnNeighbour>();
+  const visit = (payload: NeighborsPayload, hop: 1 | 2, ownerRing: number) => {
+    for (const side of ['callers', 'callees'] as const) {
+      for (const row of rows(payload[side])) {
+        if (drawn.has(row.id) || out.has(row.id)) continue;
+        const up = hop === 1 ? side === 'callers' : ownerRing < 0;
+        out.set(row.id, {
+          id: row.id,
+          filePath: row.file_path ?? null,
+          hop,
+          side: up ? 'up' : 'down',
+        });
+      }
+    }
   };
+  visit(input.root, 1, 0);
+  for (const [seed, payload] of input.expanded) {
+    const ring = drawn.get(seed);
+    if (ring === undefined || Math.abs(ring) !== 1) continue;
+    visit(payload, 2, ring);
+  }
+  return [...out.values()];
 }

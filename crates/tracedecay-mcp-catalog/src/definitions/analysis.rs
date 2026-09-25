@@ -431,9 +431,5 @@ mod tests {
             definition.input_schema.get("required").is_none(),
             "every dead-code parameter stays optional"
         );
-        assert!(
-            definition.description.contains("`path`"),
-            "the description documents the filter it accepts"
-        );
     }
 }

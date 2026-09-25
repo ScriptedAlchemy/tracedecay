@@ -54,6 +54,8 @@ impl Drop for EnvVarGuard {
 /// This is the command-env subset shared by daemon journeys. It does not
 /// detach the process group or pin `XDG_RUNTIME_DIR`; callers that need the
 /// full hermetic daemon environment still use `apply_tracedecay_home_env`.
+/// Host CLIs launch only through the `lcm.summarizer_executables.v1` setting,
+/// which defaults to unconfigured, so no executable pin is needed here.
 pub fn apply_isolated_profile_env(command: &mut Command, home: &Path, profile: &Path) {
     command
         .env("HOME", home)

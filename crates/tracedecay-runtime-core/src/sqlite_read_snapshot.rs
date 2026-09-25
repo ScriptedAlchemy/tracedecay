@@ -15,7 +15,10 @@ use rusqlite::backup::StepResult;
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
+use tracedecay_private_fs::FileLease;
 use tracedecay_private_fs::framed_log::rename_noreplace;
+
+use crate::storage::retry_transient_file_op;
 
 #[path = "sqlite_snapshot_connection.rs"]
 mod connection;
@@ -660,7 +663,7 @@ enum SnapshotSourcePolicy {
 
 struct ScratchDirectory {
     path: PathBuf,
-    owner_lock: Option<File>,
+    owner_lock: Option<FileLease>,
 }
 
 impl Drop for ScratchDirectory {
@@ -1102,6 +1105,7 @@ fn create_scratch_directory(
     ensure_private_root(root, expected_uid)?;
     let cleanup_lock = open_private_lock(&root.join(".cleanup.lock"), true)?;
     cleanup_lock.lock()?;
+    let cleanup_lock = FileLease::held(cleanup_lock, "sqlite_read_snapshot.cleanup");
     cleanup_stale_directories(root)?;
     for _ in 0..100 {
         let id = NEXT_SNAPSHOT.fetch_add(1, Ordering::Relaxed);
@@ -1110,7 +1114,8 @@ fn create_scratch_directory(
             Ok(()) => {
                 let owner_lock = open_private_lock(&path.join(".owner.lock"), true)?;
                 owner_lock.lock()?;
-                cleanup_lock.unlock()?;
+                let owner_lock = FileLease::held(owner_lock, "sqlite_read_snapshot.owner");
+                cleanup_lock.release()?;
                 return Ok(ScratchDirectory {
                     path,
                     owner_lock: Some(owner_lock),
@@ -1312,27 +1317,33 @@ fn cleanup_stale_directories(root: &Path) -> io::Result<()> {
         if !name.to_string_lossy().starts_with("read-") {
             continue;
         }
-        let path = entry.path();
         // An owner releases its directory without the cleanup lock, so an
         // entry listed above can be gone by now. Gone is the state this
         // sweep wants; only a failure to reach a present entry is an error.
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.is_dir() => {}
-            Ok(_) => continue,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+        // Windows reports an entry mid-release as access denied until its
+        // last handle closes, which the transient-file retry waits out.
+        retry_transient_file_op(|| cleanup_stale_directory(&entry.path()))?;
+    }
+    Ok(())
+}
+
+fn cleanup_stale_directory(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    let removable = match open_private_lock(&path.join(".owner.lock"), false) {
+        Ok(lock) => lock.try_lock().map_err(std::io::Error::from).is_ok(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+        Err(error) => return Err(error),
+    };
+    if removable {
+        match fs::remove_dir_all(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
-        }
-        let removable = match open_private_lock(&path.join(".owner.lock"), false) {
-            Ok(lock) => lock.try_lock().map_err(std::io::Error::from).is_ok(),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => true,
-            Err(error) => return Err(error),
-        };
-        if removable {
-            match fs::remove_dir_all(&path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
         }
     }
     Ok(())

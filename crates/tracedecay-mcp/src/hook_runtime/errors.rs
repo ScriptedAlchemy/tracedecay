@@ -1,6 +1,6 @@
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionStatus};
-use tracedecay_sessions::runtime::claude_observation::ClaudeObservationIngestError;
+use tracedecay_sessions::runtime::hosts::claude_observation::ClaudeObservationIngestError;
 
 /// Builds a hook-runtime error that carries the admission status its authority
 /// actually reported.

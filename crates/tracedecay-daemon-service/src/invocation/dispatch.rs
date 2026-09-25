@@ -254,7 +254,7 @@ impl DaemonInvocationService {
                 emit_invocation_observation(
                     observations.as_ref(),
                     observation_subject.as_ref(),
-                    current_micros(),
+                    now_micros(),
                     FeedbackSourceEventV1::SurfaceArgumentRejected {
                         operation: feedback_observation_operation(operation),
                         route: delivery_route,
@@ -300,7 +300,7 @@ impl DaemonInvocationService {
                 DaemonInvocationProblem::Unavailable,
             );
         }
-        let dispatched_at = current_micros();
+        let dispatched_at = now_micros();
         if is_observable_operation(operation) {
             emit_invocation_observation(
                 observations.as_ref(),
@@ -327,6 +327,7 @@ impl DaemonInvocationService {
         let retained_runtime = runtimes.retained;
         let lsp_owner = runtimes.lsp_owner;
         let source_edit_owner = runtimes.source_edit;
+        let graph_tool_owner = runtimes.graph_tool;
 
         let response = match request.payload {
             DaemonInvocationPayload::GitRead {
@@ -603,6 +604,7 @@ impl DaemonInvocationService {
                     request_id,
                     ApplicationSurfaceOperation::FeedbackImpact,
                     PrimitiveRequest::Impact(request),
+                    None,
                     observed_at,
                     deadline,
                     cancellation,
@@ -622,6 +624,7 @@ impl DaemonInvocationService {
                     request_id,
                     ApplicationSurfaceOperation::AffectedTests,
                     PrimitiveRequest::AffectedFileTests(request),
+                    None,
                     observed_at,
                     deadline,
                     cancellation,
@@ -641,6 +644,7 @@ impl DaemonInvocationService {
                     request_id,
                     ApplicationSurfaceOperation::TestResults,
                     PrimitiveRequest::RecentTestResults(page),
+                    None,
                     observed_at,
                     deadline,
                     cancellation,
@@ -650,6 +654,7 @@ impl DaemonInvocationService {
             DaemonInvocationPayload::PrimitiveRead {
                 surface_operation,
                 request,
+                resolved_scope,
                 observed_at,
                 deadline,
                 cancellation,
@@ -661,6 +666,7 @@ impl DaemonInvocationService {
                     request_id,
                     surface_operation,
                     request,
+                    resolved_scope.as_ref(),
                     observed_at,
                     deadline,
                     cancellation,
@@ -671,6 +677,7 @@ impl DaemonInvocationService {
                 surface_operation,
                 request,
                 page,
+                resolved_scope,
                 observed_at,
                 deadline,
                 cancellation,
@@ -698,6 +705,7 @@ impl DaemonInvocationService {
                     request_id,
                     surface_operation,
                     request,
+                    resolved_scope.as_ref(),
                     observed_at,
                     deadline,
                     cancellation,
@@ -708,6 +716,7 @@ impl DaemonInvocationService {
                 surface_operation,
                 request,
                 page,
+                resolved_scope,
                 observed_at,
                 deadline,
                 cancellation,
@@ -720,6 +729,7 @@ impl DaemonInvocationService {
                     surface_operation,
                     request,
                     page,
+                    resolved_scope.as_ref(),
                     observed_at,
                     deadline,
                     cancellation,
@@ -794,6 +804,27 @@ impl DaemonInvocationService {
                     request,
                     resolved_scope,
                     observed_at,
+                    deadline,
+                    cancellation,
+                    request_cancellation,
+                ))
+                .await
+            }
+            DaemonInvocationPayload::GraphTool {
+                surface_operation,
+                arguments,
+                observed_at: _,
+                deadline,
+                cancellation,
+            } => {
+                let Some(owner) = graph_tool_owner else {
+                    return missing_registered_owner_problem(publication, request_id);
+                };
+                Box::pin(execute_graph_tool(
+                    request_id,
+                    owner,
+                    surface_operation,
+                    arguments,
                     deadline,
                     cancellation,
                     request_cancellation,

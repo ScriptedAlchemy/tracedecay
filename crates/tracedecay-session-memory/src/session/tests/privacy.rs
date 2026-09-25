@@ -25,8 +25,8 @@ use super::harness::{
     SAFE_PRIVACY_PAYLOAD,
 };
 use crate::context::{
-    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
-    RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    BranchId, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId, RequestBudgets,
+    ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
     application_observed_at, session_application_grant_digest,
 };
 use crate::session::{
@@ -35,6 +35,7 @@ use crate::session::{
     SessionRetrievalOutcome, SessionRetrievalService, SessionScopeAuthorizationRequest,
     SessionScopeAuthorizer, SessionTemporalQuery,
 };
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 const DIGEST: [u8; 32] = [0x5a; 32];
 

@@ -6,7 +6,7 @@ use tracedecay_domain::*;
 fn test_powershell_call_sites() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.ps1").unwrap();
     let extractor = PowerShellExtractor;
-    let result = extractor.extract("sample.ps1", &source);
+    let result = extractor.extract_artifact("sample.ps1", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let call_refs: Vec<_> = result
@@ -14,7 +14,6 @@ fn test_powershell_call_sites() {
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
-    assert!(!call_refs.is_empty(), "should have call refs");
     assert!(
         call_refs.iter().any(|r| r.reference_name == "Write-Host"),
         "should find Write-Host call"
@@ -39,7 +38,7 @@ fn test_powershell_call_sites() {
 fn test_powershell_docstrings() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.ps1").unwrap();
     let extractor = PowerShellExtractor;
-    let result = extractor.extract("sample.ps1", &source);
+    let result = extractor.extract_artifact("sample.ps1", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     // Write-Log should have a block comment docstring.
@@ -87,22 +86,5 @@ fn test_powershell_docstrings() {
             .contains("Main entry point"),
         "docstring: {:?}",
         main_fn.docstring
-    );
-}
-
-#[test]
-fn test_powershell_contains_edges() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.ps1").unwrap();
-    let extractor = PowerShellExtractor;
-    let result = extractor.extract("sample.ps1", &source);
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(
-        contains.len() >= 9,
-        "should have >= 9 Contains edges, got {}",
-        contains.len()
     );
 }

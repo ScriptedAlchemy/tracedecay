@@ -1,21 +1,18 @@
 mod codec;
 mod persist;
 mod refusal_census;
-mod reset;
 pub mod retention;
 mod schema;
 
 pub use refusal_census::{
     ObservationRefusalCensusV1, ObservationRefusalCountV1, ingest_refusal_read_from_censuses,
 };
-pub use reset::{ObservationAuthorityResetV1, reset_refused_observation_authority};
 pub(super) use schema::ensure_observation_schema;
-pub use schema::{OBSERVATION_AUTHORITY, OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION};
 
 use tracedecay_domain::{
-    AnchorSourceGenerationV2, CanonicalObservationIdV1, ObservationScopeV1,
-    ObservationSourceGenerationV1, RetrievalAnchorId, RetrievalAnchorRecordV2,
-    RetrievalAnchorTargetV2, VectorWatermark,
+    AnchorSourceGeneration, CanonicalObservationIdV1, ObservationScopeV1,
+    ObservationSourceGenerationV1, RetrievalAnchorId, RetrievalAnchorRecord, RetrievalAnchorTarget,
+    VectorWatermark,
 };
 use tracedecay_store::{
     ObservationStoreError, ObservationStoreResult, ObservedEvidenceAnchorResolution,
@@ -72,7 +69,7 @@ async fn resolve_owner_bound_anchor_record(
     conn: &impl QueryExecutor,
     owner: &ObservationScopeV1,
     anchor_id: &RetrievalAnchorId,
-) -> ObservationStoreResult<Option<RetrievalAnchorRecordV2>> {
+) -> ObservationStoreResult<Option<RetrievalAnchorRecord>> {
     let Some(observation_id) = read_observation_id_for_retrieval_anchor(conn, anchor_id).await?
     else {
         return Ok(None);
@@ -116,19 +113,19 @@ async fn resolve_owner_bound_anchor_record(
 }
 
 fn validate_exact_observation_provenance(
-    target: &RetrievalAnchorTargetV2,
-    source_generation: &AnchorSourceGenerationV2,
+    target: &RetrievalAnchorTarget,
+    source_generation: &AnchorSourceGeneration,
     source_observations: &[CanonicalObservationIdV1],
     observation_id: &CanonicalObservationIdV1,
     observation_generation: ObservationSourceGenerationV1,
 ) -> ObservationStoreResult<()> {
-    let RetrievalAnchorTargetV2::ExactObservation(target_observation_id) = target else {
+    let RetrievalAnchorTarget::ExactObservation(target_observation_id) = target else {
         return Ok(());
     };
     if target_observation_id != observation_id {
         return Err(ObservationStoreError::RetrievalAnchorObservationMismatch);
     }
-    if source_generation != &AnchorSourceGenerationV2::Observation(observation_generation) {
+    if source_generation != &AnchorSourceGeneration::Observation(observation_generation) {
         return Err(ObservationStoreError::RetrievalAnchorSourceGenerationMismatch);
     }
     if source_observations != std::slice::from_ref(observation_id) {
@@ -182,7 +179,7 @@ impl super::RegisteredGlobalDb {
         &self,
         owner: &ObservationScopeV1,
         anchor_id: &RetrievalAnchorId,
-    ) -> ObservationStoreResult<Option<RetrievalAnchorRecordV2>> {
+    ) -> ObservationStoreResult<Option<RetrievalAnchorRecord>> {
         let snapshot = self
             .read_snapshot()
             .await
@@ -232,8 +229,8 @@ mod tests {
         let canonical_id = observation_id("a");
         let other_id = observation_id("b");
         let generation = ObservationSourceGenerationV1::new(7).unwrap();
-        let target = RetrievalAnchorTargetV2::ExactObservation(canonical_id.clone());
-        let source_generation = AnchorSourceGenerationV2::Observation(generation);
+        let target = RetrievalAnchorTarget::ExactObservation(canonical_id.clone());
+        let source_generation = AnchorSourceGeneration::Observation(generation);
 
         assert!(
             validate_exact_observation_provenance(
@@ -248,7 +245,7 @@ mod tests {
         assert!(matches!(
             validate_exact_observation_provenance(
                 &target,
-                &AnchorSourceGenerationV2::Observation(
+                &AnchorSourceGeneration::Observation(
                     ObservationSourceGenerationV1::new(8).unwrap(),
                 ),
                 std::slice::from_ref(&canonical_id),
@@ -269,7 +266,7 @@ mod tests {
         ));
         assert!(matches!(
             validate_exact_observation_provenance(
-                &RetrievalAnchorTargetV2::ExactObservation(observation_id("c")),
+                &RetrievalAnchorTarget::ExactObservation(observation_id("c")),
                 &source_generation,
                 std::slice::from_ref(&canonical_id),
                 &canonical_id,

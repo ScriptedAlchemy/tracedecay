@@ -2,11 +2,14 @@ use super::*;
 
 #[tokio::test]
 async fn hermes_auxiliary_request_mode_returns_summary_contract() {
+    // Claude has no on-demand summarizer, so the daemon returns the pending
+    // contract. A provider that has one (Cursor, Codex) would launch that
+    // host's CLI from the ambient PATH with the operator's credentials.
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
-        "cursor",
+        "claude",
         "session-1",
         &["old-1", "old-2", "fresh-1", "fresh-2"],
     )
@@ -14,7 +17,7 @@ async fn hermes_auxiliary_request_mode_returns_summary_contract() {
 
     let response = db
         .lcm_compress(LcmCompressionRequest {
-            provider: "cursor".into(),
+            provider: "claude".into(),
             session_id: "session-1".into(),
             messages: Vec::new(),
             current_tokens: Some(1_000),

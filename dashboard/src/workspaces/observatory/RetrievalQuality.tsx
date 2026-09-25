@@ -86,7 +86,7 @@ function RetrievalReadModel({
     <>
       {truth}
       <dl
-        className="mx-4 mt-3 grid gap-x-4 gap-y-1 border border-edge-subtle bg-surface-1 px-3 py-2 text-3xs sm:grid-cols-2 xl:grid-cols-4"
+        className="mx-4 mt-3 grid gap-x-4 gap-y-1 border border-edge-subtle bg-surface-1 px-3 py-2 text-sm sm:grid-cols-2 xl:grid-cols-4"
         data-retrieval-current={model.current ? 'true' : 'false'}
         data-retrieval-measured={coverage.measured}
         data-retrieval-required={coverage.required}
@@ -102,7 +102,7 @@ function RetrievalReadModel({
       </dl>
 
       <div className="flex flex-col gap-4 px-4 py-3">
-        <p className="text-2xs leading-relaxed text-text-secondary" data-retrieval-summary="">
+        <p className="text-body leading-relaxed text-text-secondary" data-retrieval-summary="">
           {coverage.measured} of {coverage.required} required retrieval dimensions carry a figure.{' '}
           {coverage.required - coverage.measured} retain the daemon&apos;s unknown or partial state
           and reason rather than reading as zero.
@@ -174,7 +174,7 @@ function RetrievalFamilies({
           `${SUPPRESSION_FLOOR}-unit local suppression floor are withheld rather than printed.`
         }
       />
-      <p className="text-3xs leading-snug text-text-muted" data-retrieval-withheld={withheld}>
+      <p className="text-sm leading-snug text-text-muted" data-retrieval-withheld={withheld}>
         {withheld} of {rows.length} families are withheld above. A withheld cell is not a zero: the
         reading beside it says whether the count was below the suppression floor or whether the
         window could not prove the family was silent.

@@ -17,7 +17,7 @@ use super::{
 use serde::Serialize;
 use tracedecay_domain::{
     FactAssertionId, FactAssertionKindV1, FactAssertionV1, FactEventId, FactId, FactLineageEventV1,
-    FactOwnerV1, RetrievalAnchorId, RetrievalAnchorRecordV2, UtcMicros,
+    FactOwnerV1, RetrievalAnchorId, RetrievalAnchorRecord, UtcMicros,
 };
 use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
 use tracedecay_runtime_core::db::engine::{params, params_from_iter};
@@ -359,7 +359,7 @@ async fn ensure_referenced_anchors(
 async fn insert_or_verify_anchor(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
-    anchor: &RetrievalAnchorRecordV2,
+    anchor: &RetrievalAnchorRecord,
 ) -> FactStoreResult<()> {
     if anchor_exists(transaction, anchor.anchor_id()).await? {
         if anchor_matches(transaction, owner, anchor).await? {
@@ -418,7 +418,7 @@ async fn anchor_exists(
 pub(super) async fn anchor_matches(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
-    anchor: &RetrievalAnchorRecordV2,
+    anchor: &RetrievalAnchorRecord,
 ) -> FactStoreResult<bool> {
     let mut rows = transaction
         .query(

@@ -39,8 +39,7 @@ pub use ports::{
     FeedbackDiagnosticsRequest, FeedbackImpactPort, FeedbackImpactPortOutcome,
     FeedbackImpactRequest, FeedbackObservationPort, FeedbackPortFuture,
     FeedbackPublicationReadPort, FeedbackPublicationRecordState, FeedbackPublicationV1,
-    FeedbackRouteAdmission, FeedbackRouteAuthorizationPort, FeedbackRuntimeStatePort,
-    FeedbackRuntimeStateV1,
+    FeedbackRouteAuthorizationPort, FeedbackRuntimeStatePort, FeedbackRuntimeStateV1,
 };
 pub use proximity_read::{
     FeedbackProximityAccessKindV1, FeedbackProximityCloneHandleV1,

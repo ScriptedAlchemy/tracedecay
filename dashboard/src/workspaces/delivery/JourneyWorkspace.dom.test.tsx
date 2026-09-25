@@ -16,8 +16,8 @@ describe('JourneyWorkspace', () => {
   it('renders the field, the exact table with one row per episode, and the readouts', async () => {
     renderDelivery(INBOX, { route: `/delivery?mode=journey&pr=${PR_42}`, overview: OVERVIEW_ALPHA });
 
-    const field = await screen.findByRole('group', { name: 'PR journey field' });
-    expect(within(field).getAllByRole('button')).toHaveLength(EPISODES_42);
+    const transit = await screen.findByRole('list', { name: 'Delivery transit' });
+    expect(within(transit).getAllByRole('button', { pressed: false })).toHaveLength(EPISODES_42 - 1);
 
     const episodes = screen.getByRole('region', { name: 'Journey episodes' });
     const table = within(episodes).getByRole('table');
@@ -65,8 +65,6 @@ describe('JourneyWorkspace', () => {
     expect(within(gaps).getByText('Agents')).toBeTruthy();
     expect(within(gaps).queryByText('No gap reported by the joined authorities.')).toBeNull();
 
-    const lanes = screen.getByRole('list', { name: 'Journey lanes' });
-    expect(within(lanes).getAllByText('unavailable')).toHaveLength(2);
   });
 
   it('selects an episode through the URL and reads it in the inspector with a Compare pivot', async () => {
@@ -92,20 +90,20 @@ describe('JourneyWorkspace', () => {
       'https://github.com/example/alpha/pull/42#discussion_r1',
     );
 
-    const field = screen.getByRole('group', { name: 'PR journey field' });
-    expect(within(field).getByRole('button', { name: 'Reviews · src/ingest/retry.ts:142 · EXACT', pressed: true })).toBeTruthy();
+    const transit = screen.getByRole('list', { name: 'Delivery transit' });
+    expect(within(transit).getByRole('button', { name: /src\/ingest\/retry\.ts:142/, pressed: true })).toBeTruthy();
   });
 
-  it('selects from the field node and switches the review control once a thread is addressed', async () => {
+  it('selects from a transit station and switches the review control once a thread is addressed', async () => {
     const user = userEvent.setup();
     renderDelivery(INBOX, {
       route: `/delivery?mode=journey&pr=${PR_42}&thread=thread.1`,
       overview: OVERVIEW_ALPHA,
     });
-    const field = await screen.findByRole('group', { name: 'PR journey field' });
+    const transit = await screen.findByRole('list', { name: 'Delivery transit' });
     expect(screen.getByRole('button', { name: 'Continue review' })).toBeTruthy();
 
-    await user.click(within(field).getByRole('button', { name: /Checks · Integration tests/ }));
+    await user.click(within(transit).getByRole('button', { name: /Integration tests/ }));
     expect(screen.getByTestId('location').textContent).toContain('episode=checks%3Acheck.integration');
     const inspector = screen.getByRole('region', { name: 'Episode detail' });
     expect(within(inspector).getByText('.github/workflows/ci.yml')).toBeTruthy();
@@ -117,26 +115,23 @@ describe('JourneyWorkspace', () => {
     renderDelivery(INBOX, { route: `/delivery?mode=journey&pr=${PR_43}`, overview: OVERVIEW_ALPHA });
     const gaps = await screen.findByRole('region', { name: 'Journey gaps' });
     expect(within(gaps).getByText(/#43 is not among the 1 head-bound provider items/)).toBeTruthy();
-    const field = screen.getByRole('group', { name: 'PR journey field' });
-    expect(within(field).queryByRole('button', { name: /^Pull request ·/ })).toBeNull();
+    const transit = screen.getByRole('list', { name: 'Delivery transit' });
+    expect(within(transit).getByText('+12 −2 · 2 files').closest('button')).toBeNull();
   });
 
-  it('draws no provider node and names the required authority when the provider is not published', async () => {
+  it('draws no provider episode and names the required authority when the provider is not published', async () => {
     renderDelivery(INBOX, { route: `/delivery?mode=journey&pr=${PR_42}`, overview: OVERVIEW_LOCAL_ONLY });
-    const field = await screen.findByRole('group', { name: 'PR journey field' });
+    const transit = await screen.findByRole('list', { name: 'Delivery transit' });
     expect(screen.getAllByText(/requires github_read_authority/).length).toBeGreaterThanOrEqual(3);
     expect(screen.getAllByText(/requires ci_provider_read_authority/).length).toBeGreaterThanOrEqual(1);
-    expect(within(field).queryByRole('button', { name: /^Reviews ·/ })).toBeNull();
-    expect(within(field).queryByRole('button', { name: /^Checks ·/ })).toBeNull();
-    expect(within(field).queryByRole('button', { name: /^Pull request ·/ })).toBeNull();
-    expect(within(field).getAllByRole('button', { name: /^Commits ·/ })).toHaveLength(2);
-    const lanes = screen.getByRole('list', { name: 'Journey lanes' });
-    expect(within(lanes).getAllByText('unavailable')).toHaveLength(5);
+    expect(within(transit).queryByRole('button', { name: /Unit tests|Integration tests|src\/ingest\/retry\.ts:142/ })).toBeNull();
+    expect(within(transit).getByText('+120 −35 · 8 files').closest('button')).toBeNull();
+    expect(within(transit).getAllByRole('button', { name: /add retry backoff|cover backoff jitter/ })).toHaveLength(2);
   });
 
   it('exposes no provider mutation control', async () => {
     renderDelivery(INBOX, { route: `/delivery?mode=journey&pr=${PR_42}`, overview: OVERVIEW_ALPHA });
-    await screen.findByRole('group', { name: 'PR journey field' });
+    await screen.findByRole('list', { name: 'Delivery transit' });
     expect(screen.queryByRole('button', { name: /merge|rerun|re-run|resolve|approve/i })).toBeNull();
     expect(screen.getAllByText(/read-only provider/i).length).toBeGreaterThan(0);
   });

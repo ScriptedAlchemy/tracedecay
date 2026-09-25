@@ -23,15 +23,13 @@ pub(super) const GENERATION_COPY_STATEMENTS: &[&str] = &[
         source_provider, projection_output_ordinal, retrieval_anchor_id, thread_id,
         thread_grouping_json, turn_id, turn_grouping_json, message_id,
         agent_id, role, knowledge_at, valid_time_json, evidence_json,
-        sanitized_content_digest, sanitized_content_bytes,
-        snippet_text, index_text
+        sanitized_content_digest, sanitized_content_bytes, index_text
      )
      SELECT session_id, ?2, occurrence_id, source_observation_id,
             source_provider, projection_output_ordinal, retrieval_anchor_id, thread_id,
             thread_grouping_json, turn_id, turn_grouping_json, message_id,
             agent_id, role, knowledge_at, valid_time_json, evidence_json,
-            sanitized_content_digest, sanitized_content_bytes,
-            snippet_text, index_text
+            sanitized_content_digest, sanitized_content_bytes, index_text
      FROM session_occurrences WHERE session_id = ?1 AND generation = ?3",
     "INSERT INTO session_turn_members (
         session_id, generation, turn_id, occurrence_id, ordinal

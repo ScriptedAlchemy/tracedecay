@@ -267,7 +267,6 @@ pub(crate) fn coverage_summary(
             CodeSearchEligibilityV1::Eligible => {}
             CodeSearchEligibilityV1::Excluded { .. } => coverage.files_excluded += 1,
             CodeSearchEligibilityV1::Partial { .. } => coverage.files_partial += 1,
-            CodeSearchEligibilityV1::Unsupported { .. } => coverage.files_unsupported += 1,
         }
     }
     coverage
@@ -1955,11 +1954,15 @@ mod tests {
 
     #[test]
     fn rust_crate_qualified_names_stay_inside_their_cargo_source_root() {
-        let call = RustExtractor.extract(
-            "src/alpha/mod.rs",
-            "pub fn run() -> i32 { crate::beta::run() }",
-        );
-        let target = RustExtractor.extract("src/beta/mod.rs", "pub fn run() -> i32 { 1 }");
+        let call = RustExtractor
+            .extract_artifact(
+                "src/alpha/mod.rs",
+                "pub fn run() -> i32 { crate::beta::run() }",
+            )
+            .result;
+        let target = RustExtractor
+            .extract_artifact("src/beta/mod.rs", "pub fn run() -> i32 { 1 }")
+            .result;
         assert!(
             call.unresolved_refs
                 .iter()

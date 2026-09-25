@@ -17,21 +17,25 @@ use tracedecay_domain::{
 use super::candidates::{CandidateChannel, CandidatePlan};
 use super::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
 use super::cursor::{CursorError, verify_cursor};
+use super::execution::{BindingDigest, ExecutionLimits};
 use super::hydration::{
     HydrationAuthorization, HydrationDenial, HydrationFuture, HydrationGrant, HydrationSink,
     TemporalHydrationPort,
 };
+use super::paging::{CandidatePageSink, PageKey, PageRequest, PageStatus, TemporalRecordPageSink};
 use super::ports::{
-    BindingDigest, CandidatePageSink, ExecutionLimits, InMemoryCursorAuthenticator, KernelVersions,
-    PageKey, PageRequest, PageStatus, PortFuture, SummarySourceRecord, TemporalExecutionSnapshot,
-    TemporalParticipantAuthorization, TemporalParticipantGeneration, TemporalParticipantManifest,
-    TemporalPortError, TemporalPreparedCandidateCohort, TemporalReadPort, TemporalRecord,
-    TemporalRecordPageSink, TemporalSnapshotRequest, TemporalSourceAccess, TemporalWatermarks,
+    InMemoryCursorAuthenticator, PortFuture, SummarySourceRecord, TemporalPortError,
+    TemporalReadPort, TemporalRecord, TemporalSnapshotRequest,
 };
 use super::ranking::{DiversityLimits, RankingCandidate, RankingError};
 use super::resolution::summary::SummarySourceState;
 use super::resolution::types::{
     ResolutionAssertion, ResolutionEvidence, ResolutionOccurrence, ValidatedAuthorization,
+};
+use super::snapshot::{
+    KernelVersions, TemporalExecutionSnapshot, TemporalParticipantAuthorization,
+    TemporalParticipantGeneration, TemporalParticipantManifest, TemporalPreparedCandidateCohort,
+    TemporalSourceAccess, TemporalWatermarks,
 };
 use super::{
     TemporalKernelError, TemporalKernelRequest, execute_temporal_candidate_export,
@@ -72,8 +76,9 @@ impl FakeReadPort {
 }
 
 impl TemporalReadPort for FakeReadPort {
-    fn produce_candidate_page<'a>(
+    fn produce_candidate_page_for_scope<'a>(
         &'a self,
+        _scope: &'a super::ports::TemporalRetrievalScope,
         snapshot: &'a TemporalExecutionSnapshot,
         _plan: &'a CandidatePlan,
         request: PageRequest,
@@ -117,8 +122,9 @@ impl TemporalReadPort for FakeReadPort {
         })
     }
 
-    fn produce_temporal_record_page<'a>(
+    fn produce_temporal_record_page_for_scope<'a>(
         &'a self,
+        _scope: &'a super::ports::TemporalRetrievalScope,
         _snapshot: &'a TemporalExecutionSnapshot,
         candidates: &'a [RankingCandidate],
         request: PageRequest,
@@ -142,17 +148,6 @@ impl TemporalReadPort for FakeReadPort {
                 PageStatus::Complete
             })
         })
-    }
-
-    fn produce_temporal_record_page_for_scope<'a>(
-        &'a self,
-        _scope: &'a super::ports::TemporalRetrievalScope,
-        snapshot: &'a TemporalExecutionSnapshot,
-        candidates: &'a [RankingCandidate],
-        request: PageRequest,
-        sink: &'a mut TemporalRecordPageSink<'_>,
-    ) -> PortFuture<'a, PageStatus> {
-        self.produce_temporal_record_page(snapshot, candidates, request, sink)
     }
 }
 

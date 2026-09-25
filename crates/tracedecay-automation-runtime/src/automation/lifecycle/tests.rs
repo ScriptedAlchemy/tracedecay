@@ -64,6 +64,7 @@ fn pre_epoch_completion_clock_fails_before_ledger_mutation() {
         "run.pre-epoch",
         AutomationTrigger::ManualCli,
         &config,
+        None,
         AgentTaskKind::SessionReflector,
         "0",
         None,
@@ -87,6 +88,7 @@ fn terminal_clock_is_fresh_and_posteffect_failure_stays_typed() {
         "run.clock-progression",
         AutomationTrigger::ManualCli,
         &config,
+        None,
         AgentTaskKind::SessionReflector,
         "1",
         None,
@@ -219,6 +221,7 @@ async fn append_skip(
         "test",
         trigger,
         &config,
+        None,
         task,
     );
     run.gate().await.expect("gate");
@@ -333,6 +336,7 @@ async fn on_demand_triggers_bypass_only_scheduler_enablement() {
     ] {
         let (gate, _) = task_run_gate(
             &disabled,
+            None,
             temp.path(),
             sessions.db.as_ref(),
             AgentTaskKind::MemoryCurator,
@@ -351,6 +355,7 @@ async fn concurrent_on_demand_runs_share_the_canonical_task_lock() {
     let config = scheduler_enabled_config();
     let (first, _) = task_run_gate(
         &config,
+        None,
         temp.path(),
         sessions.db.as_ref(),
         AgentTaskKind::MemoryCurator,
@@ -364,6 +369,7 @@ async fn concurrent_on_demand_runs_share_the_canonical_task_lock() {
 
     let (concurrent, _) = task_run_gate(
         &config,
+        None,
         temp.path(),
         sessions.db.as_ref(),
         AgentTaskKind::MemoryCurator,
@@ -379,6 +385,7 @@ async fn concurrent_on_demand_runs_share_the_canonical_task_lock() {
     drop(first_lock);
     let (next, _) = task_run_gate(
         &config,
+        None,
         temp.path(),
         sessions.db.as_ref(),
         AgentTaskKind::MemoryCurator,
@@ -402,6 +409,7 @@ async fn scheduler_trigger_still_obeys_global_enablement() {
 
     let (gate, _) = task_run_gate(
         &disabled,
+        None,
         temp.path(),
         sessions.db.as_ref(),
         AgentTaskKind::MemoryCurator,
@@ -427,6 +435,7 @@ async fn on_demand_trigger_does_not_bypass_backend_or_host_admission() {
     };
     let (gate, _) = task_run_gate(
         &unavailable,
+        None,
         temp.path(),
         sessions.db.as_ref(),
         AgentTaskKind::MemoryCurator,
@@ -446,6 +455,7 @@ async fn on_demand_trigger_does_not_bypass_backend_or_host_admission() {
     };
     let (gate, _) = task_run_gate(
         &delegated,
+        None,
         temp.path(),
         sessions.db.as_ref(),
         AgentTaskKind::MemoryCurator,
@@ -486,6 +496,7 @@ async fn post_gate_scheduler_skip(dashboard_root: &Path, run_id: &str, reason: &
         "test",
         AutomationTrigger::Scheduler,
         &config,
+        None,
         AgentTaskKind::MemoryCurator,
     );
     let gate = run.gate().await.expect("gate");
@@ -544,6 +555,7 @@ async fn page_cursor_transitions_bypass_reason_only_skip_deduplication() {
             "test",
             AutomationTrigger::Scheduler,
             &config,
+            None,
             AgentTaskKind::MemoryCurator,
         );
         let SchedulerGate::Proceed(lock) = run.gate().await.expect("gate") else {
@@ -595,6 +607,7 @@ async fn append_path_relies_solely_on_caller_computed_repeat_flag() {
             "memory_curator",
             AutomationTrigger::Scheduler,
             &config,
+            None,
             task,
         );
         append_skipped_record(&run, None, "scheduler_interval_not_elapsed", false)
@@ -615,6 +628,7 @@ async fn append_path_relies_solely_on_caller_computed_repeat_flag() {
         "memory_curator",
         AutomationTrigger::Scheduler,
         &config,
+        None,
         task,
     );
     append_skipped_record(&run, None, "scheduler_interval_not_elapsed", true)

@@ -1,5 +1,5 @@
 //! Fixture-based tests for Cursor composer ingestion
-//! ([`tracedecay_sessions::runtime::cursor_composer`]).
+//! ([`tracedecay_sessions::runtime::hosts::cursor_composer`]).
 //!
 //! Each test builds a small synthetic `state.vscdb` (and, for the DAG test, a
 //! `store.db`) with rusqlite, then drives the read-only composer sweep and
@@ -16,8 +16,8 @@ use tracedecay_domain::{
 };
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::SessionProvider;
-use tracedecay_sessions::runtime::cursor::{CursorSweepSource, cursor_project_slug};
-use tracedecay_sessions::runtime::cursor_composer::CursorComposerSource;
+use tracedecay_sessions::runtime::hosts::cursor::{CursorSweepSource, cursor_project_slug};
+use tracedecay_sessions::runtime::hosts::cursor_composer::CursorComposerSource;
 use tracedecay_store::ObservationReplayRequest;
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
@@ -290,6 +290,209 @@ async fn composer_envelope_and_bubbles_ingest_rows() {
         }),
         "envelope todo t2 must project with native pending status"
     );
+}
+
+/// Current composer bubbles record a completed edit as `toolFormerData`
+/// (`edit_file_v2`, `params.relativeWorkspacePath`, `toolCallId`) and stamp the
+/// bubble with an RFC3339 `createdAt`. The session rollup carries that path
+/// and time; the tool row carries Cursor's own `toolCallId`. A two-line
+/// `toolCallId` is not canonical text and yields no tool_use_id, and a read
+/// tool records no edit.
+#[tokio::test]
+async fn composer_completed_edit_records_edit_time_and_tool_call_id() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let home = tmp.path().join("home");
+    let edited = project
+        .join("src/auth/mod.rs")
+        .to_string_lossy()
+        .into_owned();
+
+    let edit_bubble = serde_json::json!({
+        "type": 2,
+        "createdAt": "2026-06-02T06:53:42.994Z",
+        "toolFormerData": {
+            "tool": 38,
+            "toolIndex": 0,
+            "toolCallId": "call_2jug3QnkUS9kwSbiI4oSDy5a",
+            "status": "completed",
+            "name": "edit_file_v2",
+            "params": format!(
+                "{{\"relativeWorkspacePath\":\"{edited}\",\"noCodeblock\":true,\"cloudAgentEdit\":false}}"
+            ),
+            "result": "{\"diff\":\"...\"}"
+        }
+    });
+    let read_bubble = serde_json::json!({
+        "type": 2,
+        "createdAt": "2026-06-02T06:53:40.100Z",
+        "toolFormerData": {
+            "tool": 40,
+            "toolCallId": "call_9zFdmJsgGaH1vh3CTngFjF9Z\nfc_01ea5a7f47a9ffd6",
+            "status": "completed",
+            "name": "read_file_v2",
+            "params": "{\"targetFile\":\"/elsewhere/SKILL.md\",\"charsLimit\":1000000}",
+            "result": "{\"contents\":\"...\"}"
+        }
+    });
+    let env = envelope("comp-edit", &project, &["b-read", "b-edit"]);
+    let rows = vec![
+        kv("composerData:comp-edit", &env),
+        kv("bubbleId:comp-edit:b-read", &read_bubble),
+        kv("bubbleId:comp-edit:b-edit", &edit_bubble),
+    ];
+    write_state_vscdb(&home, &rows).await;
+    let db = open_project_session_db(&project).await.unwrap();
+    CursorComposerSource::with_home(&home)
+        .ingest(
+            &db.runtime().facade(),
+            &project,
+            db.project_id().clone(),
+            CAP,
+        )
+        .await
+        .expect("composer sweep");
+
+    let session = db.get_session("cursor", "comp-edit").await.unwrap();
+    let metadata: serde_json::Value =
+        serde_json::from_str(session.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        metadata["edited_files"],
+        serde_json::json!([{ "path": edited, "edited_at_micros": 1_780_383_222_994_000i64 }]),
+        "the completed edit_file_v2 call is the edit; the read is not"
+    );
+
+    let edit = db
+        .get_session_message("cursor", "comp-edit:b-edit")
+        .await
+        .expect("edit tool row");
+    assert_eq!(edit.kind.as_deref(), Some("tool_invocation"));
+    assert_eq!(
+        edit.timestamp,
+        Some(1_780_383_222),
+        "an RFC3339 bubble createdAt dates the row"
+    );
+    let edit_metadata: serde_json::Value =
+        serde_json::from_str(edit.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        edit_metadata["tool_use_id"],
+        "call_2jug3QnkUS9kwSbiI4oSDy5a"
+    );
+
+    let read = db
+        .get_session_message("cursor", "comp-edit:b-read")
+        .await
+        .expect("read tool row");
+    let read_metadata: serde_json::Value =
+        serde_json::from_str(read.metadata_json.as_deref().unwrap()).unwrap();
+    assert!(
+        read_metadata.get("tool_use_id").is_none(),
+        "a toolCallId that is not canonical text is not served: {read_metadata}"
+    );
+}
+
+/// A subagent composer's own `composerData.subagentInfo` names the composer
+/// that spawned it (`parentComposerId`) and the spawning `task_v2` calls
+/// (`toolCallIdHistory`, the spawn first, a later resume after it). The child
+/// row records that parent and the first call; a two-line call id is not
+/// canonical text and records no tool-use id.
+#[tokio::test]
+async fn composer_subagent_records_parent_composer_and_spawning_call() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let home = tmp.path().join("home");
+    let parent = "a719605d-a54b-4fde-a2ef-788315eb1fe9";
+    let resumed = "0010dbc8-fbea-4b3a-99fd-815fc0710739";
+    let two_line = "00176304-6298-40f7-9aa5-d87941aceaeb";
+    let mut resumed_env = envelope(resumed, &project, &["b-child"]);
+    resumed_env["subagentInfo"] = serde_json::json!({
+        "subagentType": 3,
+        "parentComposerId": parent,
+        "conversationLengthAtSpawn": 0,
+        "additionalData": {},
+        "subagentTypeName": "generalPurpose",
+        "toolCallId": "toolu_01766SVsC1MKckGDaHJAxQJy",
+        "toolCallIdHistory": ["toolu_01BfvUpPDVsdTXB76o79EzKy", "toolu_01766SVsC1MKckGDaHJAxQJy"],
+        "rootParentConversationId": parent
+    });
+    let mut two_line_env = envelope(two_line, &project, &["b-child"]);
+    two_line_env["subagentInfo"] = serde_json::json!({
+        "subagentType": 3,
+        "parentComposerId": parent,
+        "toolCallId": "call_ouLh9wXvSFzYQbsLYjvkKJrG\nfc_017f8a66dd091f035689fdb0275a64becbd7b86cce537183740067a8460f1",
+        "toolCallIdHistory": ["call_ouLh9wXvSFzYQbsLYjvkKJrG\nfc_017f8a66dd091f035689fdb0275a64becbd7b86cce537183740067a8460f1"]
+    });
+    let spawn_bubble = serde_json::json!({
+        "type": 2,
+        "createdAt": "2026-09-09T00:43:50.917Z",
+        "toolFormerData": {
+            "tool": 60,
+            "toolCallId": "toolu_01BfvUpPDVsdTXB76o79EzKy",
+            "status": "loading",
+            "name": "task_v2",
+            "additionalData": {"status": "running", "subagentComposerId": resumed, "backgrounded": true}
+        }
+    });
+    let child_bubble = serde_json::json!({
+        "type": 1,
+        "createdAt": "2026-09-09T00:44:20.460Z",
+        "text": "Review the writeback journal for redundant clones."
+    });
+    let rows = vec![
+        kv(
+            &format!("composerData:{parent}"),
+            &envelope(parent, &project, &["b-spawn"]),
+        ),
+        kv(&format!("bubbleId:{parent}:b-spawn"), &spawn_bubble),
+        kv(&format!("composerData:{resumed}"), &resumed_env),
+        kv(&format!("bubbleId:{resumed}:b-child"), &child_bubble),
+        kv(&format!("composerData:{two_line}"), &two_line_env),
+        kv(&format!("bubbleId:{two_line}:b-child"), &child_bubble),
+    ];
+    write_state_vscdb(&home, &rows).await;
+    let db = open_project_session_db(&project).await.unwrap();
+    CursorComposerSource::with_home(&home)
+        .ingest(
+            &db.runtime().facade(),
+            &project,
+            db.project_id().clone(),
+            CAP,
+        )
+        .await
+        .expect("composer sweep");
+
+    let mut parentage = Vec::new();
+    for id in [parent, resumed, two_line] {
+        let session = db.get_session("cursor", id).await.unwrap();
+        parentage.push((
+            id,
+            session.parent_session_id,
+            session.parent_tool_use_id,
+            session.is_subagent,
+        ));
+    }
+    let owned = |id: &str| Some(id.to_owned());
+    assert_eq!(
+        parentage,
+        vec![
+            (parent, None, None, false),
+            (
+                resumed,
+                owned(parent),
+                owned("toolu_01BfvUpPDVsdTXB76o79EzKy"),
+                true
+            ),
+            (two_line, owned(parent), None, true),
+        ]
+    );
+    // The spawning bubble's own tool-use id is the one the child names.
+    let spawn = db
+        .get_session_message("cursor", &format!("{parent}:b-spawn"))
+        .await
+        .expect("spawn tool row");
+    let metadata: serde_json::Value =
+        serde_json::from_str(spawn.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["tool_use_id"], "toolu_01BfvUpPDVsdTXB76o79EzKy");
 }
 
 /// The JSONL sweep skips any session id owned by the composer store, so the two

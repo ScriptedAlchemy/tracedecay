@@ -11,8 +11,8 @@ mod package_hook;
 mod work;
 mod workflow;
 pub use automation::{
-    AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationFactsAction,
-    AutomationRunsAction, AutomationSkillsAction,
+    AutomationAction, AutomationConfigAction, AutomationFactsAction, AutomationRunsAction,
+    AutomationSkillsAction,
 };
 use help::*;
 pub use package_hook::{PackageHookAction, ScoopPackageHookAction};
@@ -114,45 +114,6 @@ pub enum FeedbackRollbackAction {
     },
 }
 
-#[derive(Clone, Debug, Subcommand)]
-pub enum HostBundleAction {
-    /// List every host whose component-set lifecycle journal is awaiting recovery
-    Status,
-    /// Roll an interrupted host component transaction back to its pre-transaction state
-    ///
-    /// Recovery converges automatically when a second writer left the deployed
-    /// bytes equal to the pre-transaction backup or to the transaction's own
-    /// cataloged output. Genuinely foreign bytes stay fail-closed; pass
-    /// `--quarantine` to set the journal aside (backups are preserved) and
-    /// unblock the host.
-    Recover {
-        /// Recover only this agent's host journal (default: every pending host)
-        #[arg(long, value_parser = agent_value_parser())]
-        agent: Option<String>,
-        /// Set aside a journal that convergent recovery cannot resolve
-        #[arg(long)]
-        quarantine: bool,
-    },
-    /// Snapshot one installed component's managed artifact files.
-    ///
-    /// Requires the global `--yes` confirmation. The backup writer refuses an
-    /// unconfirmed receipt even though deployed files are not overwritten.
-    ArtifactBackup {
-        /// Agent whose selected component owns the managed artifacts
-        #[arg(long, value_parser = agent_value_parser())]
-        agent: String,
-    },
-    /// Restore managed artifact files without changing host registration
-    ArtifactRestore {
-        /// Agent whose selected component owns the managed artifacts
-        #[arg(long, value_parser = agent_value_parser())]
-        agent: String,
-        /// Lowercase 32-character hexadecimal artifact-backup receipt id
-        #[arg(long)]
-        backup_id: String,
-    },
-}
-
 /// Code intelligence for Rust codebases.
 #[derive(Parser)]
 #[command(
@@ -162,24 +123,24 @@ pub enum HostBundleAction {
     version = crate::product_runtime::PRODUCT_BUILD_VERSION
 )]
 pub struct Cli {
-    /// Select one compiled first-party host component; without it, lifecycle commands apply
-    /// the host's canonical component set atomically
+    /// Select one compiled first-party host component; without it, lifecycle commands run
+    /// the same receipt-backed lifecycle over the host's whole canonical component set
     #[arg(long, global = true, value_enum)]
     pub component: Option<HostBundleComponentArg>,
     /// Verify and print the exact signed lifecycle plan without mutating.
-    /// Valid only alongside the agent-lifecycle commands; dispatch enforces the
-    /// `--component` pairing so this global flag never demands `--component`
-    /// from unrelated subcommands (e.g. `branch gc`, `storage report`).
+    /// Valid only alongside the agent-lifecycle commands; dispatch enforces
+    /// that scope so this global flag never leaks onto unrelated subcommands
+    /// (e.g. `branch gc`, `storage report`).
     #[arg(long, global = true, conflicts_with = "yes")]
     pub dry_run: bool,
-    /// Confirm a first-party component mutation, or a `wipe`. Scope is enforced
+    /// Confirm a host lifecycle mutation, or a `wipe`. Scope is enforced
     /// in dispatch, not by a global clap `requires`, so it does not leak onto
     /// other commands.
     #[arg(long, global = true)]
     pub yes: bool,
     /// Confirm taking ownership of an existing file that no
-    /// TraceDecay receipt records. Required alongside `--yes` for
-    /// `reinstall --component`; the previous bytes are always backed up first,
+    /// TraceDecay receipt records. Required alongside `--yes` for install,
+    /// update-plugin, or reinstall; the previous bytes are replaced and not kept,
     /// and a file another owner claims is refused regardless of this flag.
     #[arg(long, global = true)]
     pub adopt: bool,
@@ -229,9 +190,6 @@ pub enum Commands {
     Sync {
         /// Project path (default: current directory)
         path: Option<String>,
-        /// Compatibility flag that queues the same authoritative reconciliation
-        #[arg(short, long)]
-        force: bool,
         /// Folders to skip during indexing (can be repeated)
         #[arg(long = "skip-folder", num_args = 1..)]
         skip_folders: Vec<String>,
@@ -362,16 +320,12 @@ pub enum Commands {
         #[arg(long, value_parser = agent_value_parser(), requires = "local")]
         agent: Option<String>,
     },
-    /// Refresh generated plugin code/assets for detected installs without
-    /// touching agent config files.
+    /// Update every installed agent's component set to this binary
     ///
-    /// Rewrites only tracedecay-generated artifacts, the Hermes plugin
-    /// (.py files, schemas.json, dashboard page) for the user integration,
-    /// the Cursor plugin bundle, the Codex plugin bundle/cache, and the Kiro
-    /// managed agent, re-baking the current binary path and version. Config
-    /// files (Hermes config.yaml, mcp.json, settings,
-    /// prompt rules) are left byte-for-byte intact; use `tracedecay reinstall`
-    /// to refresh those.
+    /// Runs the receipt-backed update lifecycle over each tracked agent's
+    /// canonical component set (or the one `--component` names), re-baking
+    /// the current binary path and version into its artifacts and host
+    /// registration.
     #[command(name = "update-plugin", after_help = UPDATE_PLUGIN_AFTER_HELP)]
     UpdatePlugin {
         /// Update one project-local integration in the current directory
@@ -404,16 +358,6 @@ pub enum Commands {
     FeedbackRollback {
         #[command(subcommand)]
         action: FeedbackRollbackAction,
-    },
-    /// Inspect or recover an interrupted first-party host component transaction
-    #[command(
-        name = "host-bundle",
-        long_about = HOST_BUNDLE_LONG_ABOUT,
-        after_help = HOST_BUNDLE_AFTER_HELP
-    )]
-    HostBundle {
-        #[command(subcommand)]
-        action: HostBundleAction,
     },
     /// PreToolUse hook handler (called by Claude Code, not by users directly)
     #[command(name = "hook-pre-tool-use", hide = true)]
@@ -1000,9 +944,6 @@ pub enum AnalyticsAction {
         /// Skip the hook-JSONL import pass before summarizing
         #[arg(long)]
         no_sync: bool,
-        /// Keep compatibility with JSON-capable diagnostics commands.
-        #[arg(long)]
-        json: bool,
     },
     /// Import hook_analytics.jsonl rows into the durable analytics_events table
     Sync,
@@ -1125,10 +1066,10 @@ pub(crate) struct SessionsSearchArgs {
     #[arg(long, default_value_t = 10)]
     pub(crate) limit: usize,
     /// Inclusive minimum message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like "last hour"
-    #[arg(long, alias = "time-from", alias = "start-time")]
+    #[arg(long)]
     pub(crate) since: Option<String>,
     /// Inclusive maximum message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like "last hour"
-    #[arg(long, alias = "time-to", alias = "end-time")]
+    #[arg(long)]
     pub(crate) until: Option<String>,
     /// Registered project id whose session store should be searched
     #[arg(long)]
@@ -1339,22 +1280,6 @@ pub enum ProfileStorageAction {
         /// New isolated restore directory.
         #[arg(long)]
         restore: String,
-    },
-    /// Reset exactly one refused authority so the next open recreates it at
-    /// the canonical schema. Applies only to a store whose open failed with
-    /// the typed ResetRequired state naming that authority; healthy
-    /// authorities are refused and nothing else in the store is touched.
-    /// Requires the global `--yes` confirmation and an exclusive maintenance
-    /// lease (the daemon cannot open a refused store, so recovery runs
-    /// offline).
-    #[command(name = "reset-authority")]
-    ResetAuthority {
-        /// Authority named by the ResetRequired state ("observations").
-        authority: String,
-        /// Sessions store carrying the refused authority (defaults to the
-        /// profile-scope user sessions store).
-        #[arg(long = "db")]
-        db: Option<String>,
     },
     /// Reset a project graph store whose open failed with the typed
     /// ResetRequired state (an incompatible schema this binary cannot upgrade

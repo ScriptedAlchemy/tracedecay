@@ -76,7 +76,7 @@ impl Fixture {
             "cline-retained-test",
         )
         .unwrap();
-        let anchor = tracedecay_store::build_observation_retrieval_anchor_v2(
+        let anchor = tracedecay_store::build_observation_retrieval_anchor(
             &observation,
             generation.clone(),
             UtcMicros(1),
@@ -459,71 +459,4 @@ async fn cline_cutover_requires_the_durable_retained_receipt_and_exact_revision(
         ),
         "a different retained payload revision cannot authorize the successor"
     );
-}
-
-/// A scoped observation reset destroys the stream the host-observation
-/// journal attested. Re-admitting the same observation id must be a rebuild
-/// (one pass, no conflict), not a retryable reuse of the prior command.
-#[tokio::test]
-async fn scoped_reset_readmits_the_same_host_observation_without_conflict() {
-    let directory = TempDir::new().unwrap();
-    let path = directory.path().join("sessions.db");
-    let first = observation(
-        ClineTranscriptStream::UiMessages,
-        false,
-        4,
-        "native-reset",
-        false,
-    );
-    {
-        let fixture = Fixture::open_at(
-            path.clone(),
-            TestDatabaseRuntimeMode::Initialize,
-            TempDir::new().unwrap(),
-        )
-        .await;
-        let receipt = fixture.persist(first.clone()).await;
-        fixture
-            .retained
-            .capture_host_observation(&receipt)
-            .await
-            .expect("first capture must persist the host-observation receipt");
-    }
-
-    {
-        let mut connection = rusqlite::Connection::open(&path).unwrap();
-        connection
-            .execute(
-                "DELETE FROM global_schema_migrations WHERE migration = ?1",
-                [tracedecay_global_db::observation::OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION],
-            )
-            .unwrap();
-        let report =
-            tracedecay_global_db::observation::reset_refused_observation_authority(&mut connection)
-                .expect("a store whose scheme marker was removed is refused and resettable");
-        assert!(
-            report.cleared_external_source_rows > 0,
-            "the reset must retire the host-observation journal: {report:?}"
-        );
-        let leftover: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM external_source_commit_receipts_v2",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(leftover, 0, "no prior receipt may survive the scoped reset");
-    }
-
-    let fixture = Fixture::open_at(path, TestDatabaseRuntimeMode::Existing, directory).await;
-    let receipt = fixture.persist(first).await;
-    let outcome = fixture.retained.capture_host_observation(&receipt).await;
-    assert!(
-        !matches!(
-            outcome,
-            Err(RuntimeExternalSourceErrorV1::IdempotencyConflict)
-        ),
-        "re-admission after reset must not conflict with the retired journal: {outcome:?}"
-    );
-    outcome.expect("re-admission must converge in one pass");
 }

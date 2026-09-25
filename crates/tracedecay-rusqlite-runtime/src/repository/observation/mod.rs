@@ -32,7 +32,8 @@ use authority::{
     persist_sanitization_receipt, read_cursor, verify_observation_authority,
 };
 use cursor_authority::{
-    COMMIT_SOURCE_CURSOR_SQL, READ_CURSOR_ADVANCE_SQL, RECORD_CURSOR_ADVANCE_SQL,
+    COMMIT_SOURCE_CURSOR_SQL, PRUNE_SUPERSEDED_CURSOR_ADVANCES_SQL, READ_CURSOR_ADVANCE_SQL,
+    RECORD_CURSOR_ADVANCE_SQL,
 };
 use rows::{
     decode_nonnegative, decode_observation_row, encoded_observation_row, observation_row_projection,
@@ -162,6 +163,10 @@ impl ObservationExecutor {
             params![source_json, scope_json, committed_cursor_json],
         )?;
         savepoint.execute(
+            PRUNE_SUPERSEDED_CURSOR_ADVANCES_SQL,
+            params![source_json, scope_json],
+        )?;
+        savepoint.execute(
             "INSERT INTO projection_queue (observation_id, observation_sequence)
              VALUES (?1, ?2)",
             params![observation.observation_id().as_str(), sequence],
@@ -221,6 +226,10 @@ impl ObservationExecutor {
         savepoint.execute(
             COMMIT_SOURCE_CURSOR_SQL,
             params![source_json, scope_json, encode(advance.next_cursor())?],
+        )?;
+        savepoint.execute(
+            PRUNE_SUPERSEDED_CURSOR_ADVANCES_SQL,
+            params![source_json, scope_json],
         )?;
         Ok(())
     }

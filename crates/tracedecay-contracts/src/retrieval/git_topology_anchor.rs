@@ -1,52 +1,52 @@
-//! Canonical V2 persistence port for Git topology retrieval anchors.
+//! Canonical persistence port for Git topology retrieval anchors.
 
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
 
 use tracedecay_domain::{
-    ObservationScopeV1, RetrievalAnchorId, RetrievalAnchorRecordV2, RetrievalAnchorTargetV2,
+    ObservationScopeV1, RetrievalAnchorId, RetrievalAnchorRecord, RetrievalAnchorTarget,
 };
 
-pub const MAX_GIT_TOPOLOGY_ANCHORS_PER_PUBLICATION_V2: usize = 4_096;
+pub const MAX_GIT_TOPOLOGY_ANCHORS_PER_PUBLICATION: usize = 4_096;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GitTopologyAnchorPublicationV2 {
+pub struct GitTopologyAnchorPublication {
     owner: ObservationScopeV1,
-    records: Vec<RetrievalAnchorRecordV2>,
+    records: Vec<RetrievalAnchorRecord>,
 }
 
-impl GitTopologyAnchorPublicationV2 {
+impl GitTopologyAnchorPublication {
     pub fn new(
         owner: ObservationScopeV1,
-        records: Vec<RetrievalAnchorRecordV2>,
-    ) -> Result<Self, GitTopologyAnchorAuthorityErrorV2> {
+        records: Vec<RetrievalAnchorRecord>,
+    ) -> Result<Self, GitTopologyAnchorAuthorityError> {
         owner
             .validate()
-            .map_err(|_| GitTopologyAnchorAuthorityErrorV2::Conflict)?;
-        if records.is_empty() || records.len() > MAX_GIT_TOPOLOGY_ANCHORS_PER_PUBLICATION_V2 {
-            return Err(GitTopologyAnchorAuthorityErrorV2::Conflict);
+            .map_err(|_| GitTopologyAnchorAuthorityError::Conflict)?;
+        if records.is_empty() || records.len() > MAX_GIT_TOPOLOGY_ANCHORS_PER_PUBLICATION {
+            return Err(GitTopologyAnchorAuthorityError::Conflict);
         }
         let mut has_topology = false;
         let mut anchor_ids = BTreeSet::new();
         for record in &records {
             record
                 .validate()
-                .map_err(|_| GitTopologyAnchorAuthorityErrorV2::Conflict)?;
+                .map_err(|_| GitTopologyAnchorAuthorityError::Conflict)?;
             if record.owner() != &owner || !record.aliases().is_empty() {
-                return Err(GitTopologyAnchorAuthorityErrorV2::Conflict);
+                return Err(GitTopologyAnchorAuthorityError::Conflict);
             }
             if !anchor_ids.insert(record.anchor_id().clone()) {
-                return Err(GitTopologyAnchorAuthorityErrorV2::Conflict);
+                return Err(GitTopologyAnchorAuthorityError::Conflict);
             }
             match record.target() {
-                RetrievalAnchorTargetV2::GitTopology(_) => has_topology = true,
-                RetrievalAnchorTargetV2::ExactRepositoryCommit { .. } => {}
-                _ => return Err(GitTopologyAnchorAuthorityErrorV2::Conflict),
+                RetrievalAnchorTarget::GitTopology(_) => has_topology = true,
+                RetrievalAnchorTarget::ExactRepositoryCommit { .. } => {}
+                _ => return Err(GitTopologyAnchorAuthorityError::Conflict),
             }
         }
         if !has_topology {
-            return Err(GitTopologyAnchorAuthorityErrorV2::Conflict);
+            return Err(GitTopologyAnchorAuthorityError::Conflict);
         }
         if records.iter().any(|record| {
             record
@@ -54,7 +54,7 @@ impl GitTopologyAnchorPublicationV2 {
                 .iter()
                 .any(|source| !anchor_ids.contains(source.anchor_id()))
         }) {
-            return Err(GitTopologyAnchorAuthorityErrorV2::Conflict);
+            return Err(GitTopologyAnchorAuthorityError::Conflict);
         }
         Ok(Self { owner, records })
     }
@@ -63,66 +63,66 @@ impl GitTopologyAnchorPublicationV2 {
         &self.owner
     }
 
-    pub fn records(&self) -> &[RetrievalAnchorRecordV2] {
+    pub fn records(&self) -> &[RetrievalAnchorRecord] {
         &self.records
     }
 
-    pub fn into_records(self) -> Vec<RetrievalAnchorRecordV2> {
+    pub fn into_records(self) -> Vec<RetrievalAnchorRecord> {
         self.records
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GitTopologyAnchorResolutionV2 {
+pub struct GitTopologyAnchorResolution {
     pub owner: ObservationScopeV1,
     pub anchor_id: RetrievalAnchorId,
 }
 
-impl GitTopologyAnchorResolutionV2 {
+impl GitTopologyAnchorResolution {
     pub fn new(
         owner: ObservationScopeV1,
         anchor_id: RetrievalAnchorId,
-    ) -> Result<Self, GitTopologyAnchorAuthorityErrorV2> {
+    ) -> Result<Self, GitTopologyAnchorAuthorityError> {
         owner
             .validate()
-            .map_err(|_| GitTopologyAnchorAuthorityErrorV2::Conflict)?;
+            .map_err(|_| GitTopologyAnchorAuthorityError::Conflict)?;
         anchor_id
             .validate()
-            .map_err(|_| GitTopologyAnchorAuthorityErrorV2::Conflict)?;
+            .map_err(|_| GitTopologyAnchorAuthorityError::Conflict)?;
         Ok(Self { owner, anchor_id })
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GitTopologyAnchorPublicationOutcomeV2 {
+pub enum GitTopologyAnchorPublicationOutcome {
     Published,
     Replayed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum GitTopologyAnchorResolutionOutcomeV2 {
-    Resolved(Box<RetrievalAnchorRecordV2>),
+pub enum GitTopologyAnchorResolutionOutcome {
+    Resolved(Box<RetrievalAnchorRecord>),
     Unavailable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GitTopologyAnchorAuthorityErrorV2 {
+pub enum GitTopologyAnchorAuthorityError {
     Unavailable,
     ResetRequired,
     Conflict,
 }
 
-pub type GitTopologyAnchorFutureV2<'a, T> =
-    Pin<Box<dyn Future<Output = Result<T, GitTopologyAnchorAuthorityErrorV2>> + Send + 'a>>;
+pub type GitTopologyAnchorFuture<'a, T> =
+    Pin<Box<dyn Future<Output = Result<T, GitTopologyAnchorAuthorityError>> + Send + 'a>>;
 
-pub trait GitTopologyAnchorAuthorityV2: Send + Sync {
+pub trait GitTopologyAnchorAuthority: Send + Sync {
     fn publish<'a>(
         &'a self,
-        publication: GitTopologyAnchorPublicationV2,
-    ) -> GitTopologyAnchorFutureV2<'a, GitTopologyAnchorPublicationOutcomeV2>;
+        publication: GitTopologyAnchorPublication,
+    ) -> GitTopologyAnchorFuture<'a, GitTopologyAnchorPublicationOutcome>;
 
     fn resolve<'a>(
         &'a self,
-        resolution: GitTopologyAnchorResolutionV2,
-    ) -> GitTopologyAnchorFutureV2<'a, GitTopologyAnchorResolutionOutcomeV2>;
+        resolution: GitTopologyAnchorResolution,
+    ) -> GitTopologyAnchorFuture<'a, GitTopologyAnchorResolutionOutcome>;
 }

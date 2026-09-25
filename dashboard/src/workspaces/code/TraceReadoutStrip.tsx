@@ -1,8 +1,8 @@
 /**
- * The instrument plate above the field.
+ * The readout strip above the anatomy plate.
  *
  * Every figure on it is counted by `readoutCells` from the same `TraceModel`
- * the canvas draws, so the plate cannot say one thing while the picture says
+ * the plate draws, so the strip cannot say one thing while the picture says
  * another. What is left for this module is the layout that makes seven readings
  * legible at every width, which is a presentation problem, not a measurement
  * one, and is the whole reason it is separate from the arithmetic.

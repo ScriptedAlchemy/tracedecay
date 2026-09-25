@@ -12,11 +12,19 @@ describe('bandScale', () => {
   });
 
   it('drops the fine tick step below the calendar band where it can afford to', () => {
-    for (const seconds of [6 * HOUR, 5 * DAY, 200 * DAY]) {
-      const ceiling =
-        bandScale(seconds) === 'hour' ? HOUR : bandScale(seconds) === 'day' ? DAY : 30 * DAY;
-      expect(tickStepFor(seconds, 900)).toBeLessThan(ceiling);
-    }
+    expect(tickStepFor(6 * HOUR, 900)).toBe(30 * 60);
+    expect(tickStepFor(5 * DAY, 1800)).toBe(12 * HOUR);
+    expect(tickStepFor(200 * DAY, 900)).toBe(14 * DAY);
+  });
+
+  it('never picks a step whose label is wider than its pitch', () => {
+    // A 7-day window at 1196px: 12-hour ticks would sit 85px apart under
+    // "Dec 28, 12:58 PM"-wide labels, so the ruler ticks daily instead.
+    const start = 1_700_000_000;
+    expect(tickStepFor(7 * DAY, 1196)).toBe(DAY);
+    const ticks = axisTicks({ start, end: start + 7 * DAY }, 1196);
+    expect(ticks).toHaveLength(7);
+    expect(ticks[1]!.x - ticks[0]!.x).toBeCloseTo(1196 / 7, 6);
   });
 
   it('keeps the coarse step when dropping under the band would crowd the axis', () => {

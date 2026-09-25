@@ -12,7 +12,7 @@ use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexIn
 
 mod builder;
 mod clone_census;
-mod clone_successor;
+mod clone_codec;
 mod fingerprints;
 mod format;
 mod postings;
@@ -27,7 +27,6 @@ pub use builder::{
     PreparedCodeLexicalArtifactBatchV1,
 };
 pub use clone_census::CodeLexicalCloneIndexCensusV1;
-pub use clone_successor::CodeLexicalCloneSuccessorV1;
 pub use fingerprints::{
     CLONE_FINGERPRINT_CANDIDATE_BODY_BUDGET_V1, CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1,
     CLONE_FINGERPRINT_POSTING_ROW_BUDGET_V1, CLONE_NEAR_MATCH_BODY_COMPARISON_BUDGET_V1,
@@ -41,6 +40,7 @@ pub use fingerprints::{
 pub use format::{
     CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactSectionDigestV1,
     CodeLexicalImportMembershipWitnessV1, VerifiedCodeLexicalArtifactV1,
+    code_lexical_artifact_content_key,
 };
 pub use prepared::PreparedCodeLexicalArtifactPageV1;
 pub use reader::{
@@ -48,7 +48,6 @@ pub use reader::{
     CloneExactFamilyArtifactCandidateV1, CloneExactFamilyArtifactPageV1,
     CodeExactLexicalArtifactReaderV1, CodeLexicalArtifactReaderV1, MAX_CLONE_EXACT_PAGE_MEMBERS_V1,
 };
-pub use schema::CodeLexicalArtifactWriterRevisionV1;
 
 /// Floor for the artifact build memory ledger.
 ///

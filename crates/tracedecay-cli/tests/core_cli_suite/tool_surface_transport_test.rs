@@ -118,15 +118,13 @@ fn tool_dry_run_reads_piped_args_in_either_order() {
     }
 }
 
-/// The diagnostics read is the one operation whose CLI/MCP spelling differs
-/// from its canonical identity. Both spellings must select the same advertised
-/// definition, so per-key flags parse against one schema whichever name the
-/// operator typed.
+/// The diagnostics read answers to its MCP spelling, with or without the
+/// `tracedecay_` prefix, and per-key flags parse against its advertised schema.
 #[test]
-fn tool_dry_run_resolves_diagnostics_by_identity_and_cli_spelling() {
+fn tool_dry_run_resolves_diagnostics_by_mcp_spelling() {
     let home = TempDir::new().expect("isolated home");
     let project = TempDir::new().expect("working directory");
-    for name in ["diagnostics_read", "diagnostics", "tracedecay_diagnostics"] {
+    for name in ["diagnostics", "tracedecay_diagnostics"] {
         let output = tracedecay_command_with_home(home.path())
             .current_dir(project.path())
             .args(["tool", name, "--scope", "workspace", "--dry-run"])

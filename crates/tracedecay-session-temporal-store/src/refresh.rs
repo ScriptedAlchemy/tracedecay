@@ -16,7 +16,7 @@ use tracedecay_store::{
     SessionRefreshStateV1, SessionRefreshTerminalStateV1, SessionStoreError, SessionStoreResult,
     SessionTemporalProjectionBatchReceiptV1, SessionTemporalProjectionBatchV1,
 };
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 use super::cursor_keys::ensure_active_session_cursor_key_in_transaction;
 use super::projection::{
@@ -2487,33 +2487,6 @@ mod tests {
             0,
             updated_at,
         )
-    }
-
-    #[test]
-    fn generation_copy_pages_keep_every_source_table() {
-        assert!(!GENERATION_COPY_STATEMENTS.is_empty());
-        for statement in GENERATION_COPY_STATEMENTS {
-            let table = generation_copy_source_table(statement)
-                .expect("every generation copy names its source table");
-            let insert = generation_copy_page_insert_sql(statement);
-            assert!(
-                insert.starts_with("INSERT OR IGNORE INTO"),
-                "{table}: a replayed page must not fail the primary key"
-            );
-            assert!(
-                insert.contains("AND rowid > ?4 AND rowid <= ?5"),
-                "{table}: a page must be a bounded rowid range"
-            );
-            let end_sql = generation_copy_page_end_sql(table);
-            assert!(end_sql.contains(&format!("FROM {table}")));
-            assert!(end_sql.contains("LIMIT 32"));
-            let resume_sql = generation_copy_resume_sql(table);
-            assert!(
-                resume_sql.contains("OFFSET"),
-                "{table}: a later pass must skip rows already committed"
-            );
-            assert!(resume_sql.contains(&format!("COUNT(*) FROM {table}")));
-        }
     }
 
     #[test]

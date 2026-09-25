@@ -6,11 +6,11 @@ import { useScope } from '../../data/scope/store.ts';
 import { resolveFixture } from '../../../stories/fixtures/data.ts';
 import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
 
-// The canvas is a WebGL renderer; this suite is about which reads compose the
+// The field is a canvas renderer; this suite is about which reads compose the
 // surface and what it says when one of them is legitimately unavailable.
-vi.mock('../../viz/graph/GraphCanvas.tsx', () => ({
-  GraphCanvas: ({ nodes, caption }: { nodes: unknown[]; caption: unknown }) => (
-    <div data-testid="graph-canvas" data-node-count={nodes.length}>
+vi.mock('./BrainField.tsx', () => ({
+  ScopedField: ({ nodes, caption }: { nodes: unknown[]; caption: unknown }) => (
+    <div data-testid="scoped-field" data-node-count={nodes.length}>
       {caption as never}
     </div>
   ),
@@ -149,8 +149,8 @@ describe('ScopedBrain', () => {
     vi.stubGlobal('fetch', fetchMock);
     renderScoped();
 
-    await waitFor(() => expect(screen.getByTestId('graph-canvas')).toBeTruthy());
-    expect(screen.getByTestId('graph-canvas').dataset['nodeCount']).toBe('2');
+    await waitFor(() => expect(screen.getByTestId('scoped-field')).toBeTruthy());
+    expect(screen.getByTestId('scoped-field').dataset['nodeCount']).toBe('2');
 
     // Every scoped read went through `/api/projects/{id}/…`; nothing asked the
     // daemon for the active project's state and labelled it as this one's.
@@ -194,6 +194,7 @@ describe('ScopedBrain', () => {
             report_coverage: null,
             known_families: ['storage'],
             schema_convergences: schemaConvergences,
+            storage_kind_statuses: [],
             note: 'schema convergence state',
           }, 'partial'),
         },
@@ -231,7 +232,7 @@ describe('ScopedBrain', () => {
     // sources say so, and each of them is telling the truth.
     await waitFor(() => expect(screen.getAllByText(/the read failed/i).length).toBeGreaterThan(0));
     expect(screen.queryByText(/graph field · not mounted/i)).toBeNull();
-    expect(screen.queryByTestId('graph-canvas')).toBeNull();
+    expect(screen.queryByTestId('scoped-field')).toBeNull();
     // The independently successful registry backbone remains available.
     expect(screen.getByRole('heading', { name: 'checkouts' })).toBeTruthy();
   });
@@ -267,7 +268,7 @@ describe('ScopedBrain', () => {
     for (const failure of screen.queryAllByText(/the read failed/i)) {
       expect(failure.tagName).toBe('LI');
     }
-    expect(screen.queryByTestId('graph-canvas')).toBeNull();
+    expect(screen.queryByTestId('scoped-field')).toBeNull();
   });
 
   /**
@@ -320,7 +321,7 @@ describe('ScopedBrain', () => {
     );
     renderScoped();
 
-    await waitFor(() => expect(screen.getByTestId('graph-canvas')).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId('scoped-field')).toBeTruthy());
     expect(screen.queryByText(/graph totals are unverified/i)).toBeNull();
     expect(readout('nodes')).toBe('0');
     expect(readout('edges')).toBe('0');
@@ -341,7 +342,7 @@ describe('ScopedBrain', () => {
     );
     renderScoped();
 
-    await waitFor(() => expect(screen.getByTestId('graph-canvas')).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId('scoped-field')).toBeTruthy());
     await waitFor(() => expect(readout('nodes')).toBe('—'));
     expect(readout('edges')).toBe('—');
     expect(readout('files')).toBe('—');
@@ -389,7 +390,7 @@ describe('ScopedBrain', () => {
     );
     renderScoped();
 
-    await waitFor(() => expect(screen.getByTestId('graph-canvas')).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId('scoped-field')).toBeTruthy());
     // The graph read is fine and stays measured: unavailability is per source.
     expect(readout('nodes')).toBe('1,204');
     expect(readout('files')).toBe('88');
@@ -425,7 +426,7 @@ describe('ScopedBrain', () => {
     );
     renderScoped();
 
-    await waitFor(() => expect(screen.getByTestId('graph-canvas')).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId('scoped-field')).toBeTruthy());
     expect(readout('facts')).toBe('0');
     expect(readout('entities')).toBe('12');
     expect(screen.queryByText(/no memory store/i)).toBeNull();

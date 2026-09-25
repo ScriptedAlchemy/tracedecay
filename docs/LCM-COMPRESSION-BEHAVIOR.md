@@ -26,6 +26,42 @@ anchors, then considers the older unsummarized backlog.
   than its source, the response records the fallback/rescue outcome instead of
   silently claiming a useful compaction.
 
+## On-demand summarizer executables
+
+When no host-native compaction summary exists, the daemon can ask a host CLI
+to write one. It runs `cursor-agent` for Cursor sessions and `codex`
+(app-server JSON-RPC) for Codex sessions. Those executables come only from the
+project setting `lcm.summarizer_executables.v1`, whose value has one entry per
+provider:
+
+```json
+{
+  "cursor_agent": { "state": "configured", "canonical_path": "/usr/local/bin/cursor-agent" },
+  "codex": { "state": "unconfigured" }
+}
+```
+
+Every provider defaults to `unconfigured`. The daemon never resolves a
+summarizer from `PATH` or from environment variables. An unconfigured provider
+leaves the pending page in the typed `cursor_agent_unconfigured` or
+`codex_app_server_unconfigured` state. A project shard whose configuration pin
+is not published reports `summarizer_configuration_unavailable`. Profile-wide
+session shards have no project configuration, so they stay unconfigured.
+
+Configured paths must be absolute. Set the value on the project layer with
+`tracedecay_configuration_set` or `tracedecay tool configuration_set`. The
+`TRACEDECAY_CURSOR_SUMMARY_*` and `TRACEDECAY_CODEX_SUMMARY_*` environment
+variables set the model, timeout, and workspace for a configured
+executable.
+
+The same `codex` entry is the only executable the automation backend spawns
+for `codex_app_server`. That backend runs the memory curator, session
+reflector, skill writer, user jobs, and Context Scout. While the entry is
+unconfigured, `backend_availability` reports the backend unavailable, and every
+task settles as `Unavailable` without a spawn. The durable backend identity
+records the opened configured file, so replacing that binary in place
+re-admits a task whose deterministic failure had settled.
+
 ## Replay and recovery
 
 Replay is ordered by source/store position, with summary blocks preceding raw

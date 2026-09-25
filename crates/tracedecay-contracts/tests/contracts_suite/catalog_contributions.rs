@@ -1,3 +1,4 @@
+use tracedecay_contracts::catalog_composition::build_application_catalog_snapshot;
 use tracedecay_contracts::feedback::{
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
 };
@@ -121,39 +122,12 @@ fn application_contribution_set_uses_registered_feedback_handlers() {
 }
 
 #[test]
-fn application_composition_excludes_planner_and_store_owned_surfaces() {
-    // Cargo.toml already keeps this crate free of store/transport deps; this
-    // composition check proves the public catalog API likewise exposes no
-    // planner/model-runtime ownership.
-    let contributions = application_catalog_contributions().unwrap();
-    assert!(!contributions.is_empty());
-    for capability in contributions
-        .iter()
-        .flat_map(|contribution| contribution.capabilities())
-    {
-        let capability_id = capability.capability_id().as_str();
-        assert!(
-            !capability_id.contains("planner")
-                && !capability_id.contains("model-runtime")
-                && !capability_id.contains("universal-retrieval"),
-            "application catalog must not own {capability_id}"
-        );
-        let use_case = capability.use_case_id().as_str();
-        assert!(
-            !use_case.contains("planner") && !use_case.contains("dispatcher"),
-            "application use cases must not own {use_case}"
-        );
-    }
-}
-
-#[test]
 fn verified_graph_mcp_reads_have_application_primitive_admission_identity() {
     let contribution = primitive_read_contribution().unwrap();
 
     for operation_name in [
         "context",
         "node",
-        "callees",
         "impact",
         "similar",
         "rename_preview",
@@ -186,8 +160,6 @@ fn verified_graph_mcp_reads_have_application_primitive_admission_identity() {
 
 #[test]
 fn similar_and_redundancy_use_the_current_protocol_revision_only() {
-    use tracedecay_tool_catalog::BindingStatus;
-
     let contribution = primitive_read_contribution().unwrap();
     for operation in ["similar", "redundancy"] {
         let mcp_bindings: Vec<_> = contribution
@@ -204,8 +176,6 @@ fn similar_and_redundancy_use_the_current_protocol_revision_only() {
             "{operation} must keep one MCP (surface, operation) binding"
         );
         let binding = mcp_bindings[0];
-        assert!(matches!(binding.status(), BindingStatus::Current));
-        assert_eq!(binding.alias_of(), None);
         assert!(
             binding.protocol_revisions().contains(1),
             "{operation} must accept the current protocol revision"
@@ -221,6 +191,26 @@ fn similar_and_redundancy_use_the_current_protocol_revision_only() {
 
 #[test]
 fn application_catalog_snapshot_admits_one_similar_redundancy_binding() {
-    tracedecay_contracts::catalog_composition::build_application_catalog_snapshot()
+    let snapshot = build_application_catalog_snapshot()
         .expect("catalog construction must succeed with one binding per surface-operation");
+    for operation in ["similar", "redundancy"] {
+        let capability_id = primitive_read_operation(operation)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{operation} primitive operation"))
+            .capability_id()
+            .clone();
+        let capability = snapshot
+            .capability(&capability_id)
+            .unwrap_or_else(|| panic!("{operation} is in the composed snapshot"));
+        let mcp_bindings: Vec<_> = capability
+            .binding_ids()
+            .iter()
+            .filter_map(|binding_id| snapshot.binding(binding_id))
+            .filter(|binding| binding.surface() == BindingSurface::Mcp)
+            .collect();
+        assert_eq!(mcp_bindings.len(), 1, "{operation}");
+        assert_eq!(mcp_bindings[0].operation().as_str(), operation);
+        assert_eq!(mcp_bindings[0].protocol_revisions().minimum(), 1);
+        assert_eq!(mcp_bindings[0].protocol_revisions().maximum(), 1);
+    }
 }

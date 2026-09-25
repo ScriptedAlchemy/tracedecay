@@ -13,7 +13,7 @@ def greet(name)
 end
 "#;
         let extractor = RubyExtractor;
-        let result = extractor.extract("greet.rb", source);
+        let result = extractor.extract_artifact("greet.rb", source).result;
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let fns: Vec<_> = result
             .nodes
@@ -42,7 +42,7 @@ class Dog
 end
 "#;
         let extractor = RubyExtractor;
-        let result = extractor.extract("dog.rb", source);
+        let result = extractor.extract_artifact("dog.rb", source).result;
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
         let classes: Vec<_> = result
@@ -58,10 +58,9 @@ end
             .iter()
             .filter(|n| n.kind == NodeKind::Method)
             .collect();
-        assert!(
-            methods.len() >= 2,
-            "expected >= 2 methods, got {}",
-            methods.len()
+        assert_eq!(
+            methods.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+            ["initialize", "bark", "species"]
         );
         assert!(methods.iter().any(|m| m.name == "bark"));
 
@@ -79,7 +78,7 @@ module Utils
 end
 "#;
         let extractor = RubyExtractor;
-        let result = extractor.extract("utils.rb", source);
+        let result = extractor.extract_artifact("utils.rb", source).result;
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let modules: Vec<_> = result
             .nodes
@@ -104,7 +103,7 @@ class Cat < Animal
 end
 "#;
         let extractor = RubyExtractor;
-        let result = extractor.extract("animals.rb", source);
+        let result = extractor.extract_artifact("animals.rb", source).result;
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let classes: Vec<_> = result
             .nodes
@@ -130,7 +129,7 @@ module Config
 end
 "#;
         let extractor = RubyExtractor;
-        let result = extractor.extract("config.rb", source);
+        let result = extractor.extract_artifact("config.rb", source).result;
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let consts: Vec<_> = result
             .nodes
@@ -157,7 +156,7 @@ class Outer
 end
 "#;
         let extractor = RubyExtractor;
-        let result = extractor.extract("nested.rb", source);
+        let result = extractor.extract_artifact("nested.rb", source).result;
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let classes: Vec<_> = result
             .nodes
@@ -172,7 +171,7 @@ end
     #[test]
     fn test_ruby_empty_source() {
         let extractor = RubyExtractor;
-        let result = extractor.extract("empty.rb", "");
+        let result = extractor.extract_artifact("empty.rb", "").result;
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let files: Vec<_> = result
             .nodes

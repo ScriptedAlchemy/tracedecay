@@ -8,15 +8,14 @@ use serde_json::Value;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use tempfile::TempDir;
-use tracedecay::config::USER_DATA_DIR_ENV;
-use tracedecay::config::discover_project_root;
-use tracedecay::project::{TraceDecay, TraceDecayOpenOptions};
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay_configuration::{TraceDecayConfig, get_config_path, load_config};
 use tracedecay_global_db::{ProjectObservationStoreError, StoreInstanceUpsert};
 use tracedecay_mcp::response_handles::{
     ResponseHandleLookup, retrieve_response_handle, store_response_handle,
 };
+use tracedecay_project::config::USER_DATA_DIR_ENV;
+use tracedecay_project::config::discover_project_root;
+use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::branch_meta::{self, BranchMeta};
 use tracedecay_runtime_core::path_safety::{
     canonical_root_identity, plain_git_args, plain_host_path,
@@ -24,9 +23,9 @@ use tracedecay_runtime_core::path_safety::{
 use tracedecay_runtime_core::storage::{
     EnrollmentMarker, PrivateStoreIo, ProjectPath, STORE_MANIFEST_FILENAME,
     STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreArtifactPath, StoreKind, StoreManifest,
-    default_profile_project_id, profile_sharded_layout, read_legacy_enrollment_marker,
-    read_repository_identity_marker, read_store_manifest, repository_identity_path, resolve_layout,
-    resolve_lcm_payload_root, resolve_project_session_db_path, resolve_response_handle_root,
+    default_profile_project_id, profile_sharded_layout, read_repository_identity_marker,
+    read_store_manifest, repository_identity_path, resolve_layout, resolve_lcm_payload_root,
+    resolve_project_session_db_path, resolve_response_handle_root,
     write_repository_identity_marker, write_store_manifest, write_store_manifest_to_path,
 };
 
@@ -87,8 +86,8 @@ impl Drop for HomeGuard {
 }
 
 /// Fabricates a retired legacy `<root>/.tracedecay/enrollment.json` exactly as
-/// a user leftover would look. Production never writes this; tests use it only
-/// to prove legacy adoption and legacy-ignoring behavior.
+/// a user leftover would look. Production never writes or reads this; tests
+/// use it only to prove the leftover is ignored.
 fn write_enrollment(root: &Path) {
     fs::create_dir_all(root.join(".tracedecay")).unwrap();
     fs::write(
@@ -120,7 +119,7 @@ fn assert_path_eq(actual: impl AsRef<Path>, expected: impl AsRef<Path>) {
 }
 
 fn maintenance_profile_root() -> PathBuf {
-    tracedecay::config::user_data_dir().expect("test profile root")
+    tracedecay_project::config::user_data_dir().expect("test profile root")
 }
 
 fn prepare_maintenance_profile(profile_root: &Path) {

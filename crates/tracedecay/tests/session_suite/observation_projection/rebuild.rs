@@ -75,20 +75,24 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
     let anchor_store_id = raw_store_ids_before[0].1;
     let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
     raw_conn
-        .execute(
-            "INSERT INTO lcm_summary_nodes (
-                node_id, provider, conversation_id, session_id, depth, summary_text,
-                summary_hash, summary_token_count, source_token_count
+        .execute_batch(
+            "INSERT INTO retrieval_anchors (
+                anchor_id, anchor_json, owner_json, projection_generation
+             ) VALUES ('summary.rebuild-store-id.anchor', '{}', '{}', 'test');
+             INSERT INTO session_summary_nodes (
+                summary_id, session_id, provider, conversation_id, depth, summary_anchor_id,
+                summary_text, summary_hash, summary_token_count, source_token_count,
+                source_horizon_json, created_at
              ) VALUES (
-                'summary.rebuild-store-id', 'claude', 'session-rebuild',
-                'session-rebuild', 0, 'stable raw identity summary', 'hash.fixture', 4, 8
+                'summary.rebuild-store-id', 'session-rebuild', 'claude', 'session-rebuild', 0,
+                'summary.rebuild-store-id.anchor', 'stable raw identity summary',
+                'hash.fixture', 4, 8, '{}', 1
              )",
-            (),
         )
         .unwrap();
     raw_conn
         .execute(
-            "INSERT INTO lcm_summary_sources (node_id, source_kind, source_id, ordinal)
+            "INSERT INTO session_summary_sources (summary_id, source_kind, source_id, ordinal)
              VALUES ('summary.rebuild-store-id', 'raw_message', ?1, 0)",
             rusqlite::params![anchor_store_id.to_string()],
         )
@@ -118,11 +122,11 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
     let identity = raw_conn
         .query_row(
             "SELECT source.source_id, lifecycle.current_frontier_store_id
-             FROM lcm_summary_sources AS source
+             FROM session_summary_sources AS source
              JOIN lcm_lifecycle_state AS lifecycle
                ON lifecycle.provider = 'claude'
               AND lifecycle.conversation_id = 'session-rebuild'
-             WHERE source.node_id = 'summary.rebuild-store-id'",
+             WHERE source.summary_id = 'summary.rebuild-store-id'",
             (),
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
         )
@@ -173,7 +177,6 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
     assert_eq!(projection_counts(&tmp).await, (1, 0, 0, 1, 0, 3));
     assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 0);
     assert_eq!(table_count(&tmp, "lcm_raw_messages_fts").await, 0);
-    assert_eq!(table_count(&tmp, "session_messages_fts").await, 0);
 
     let rebuilt_full = rebuild_projection_to_completion(&store, 3).await;
     assert_eq!(rebuilt_full.projected_rows(), 3);
@@ -181,7 +184,6 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
     assert_eq!(projection_counts(&tmp).await, (1, 3, 3, 1, 0, 0));
     assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 3);
     assert_eq!(table_count(&tmp, "lcm_raw_messages_fts").await, 3);
-    assert_eq!(table_count(&tmp, "session_messages_fts").await, 3);
     assert_eq!(
         projected_message_texts(&tmp).await,
         incrementally_projected_texts
@@ -434,14 +436,14 @@ async fn rebuild_preserves_output_referenced_by_another_projector_version() {
     add_other_projector_owner(&tmp, candidate.observation_id()).await;
 
     rebuild_projection_to_completion(&store, 0).await;
-    assert_eq!(table_count(&tmp, "session_messages").await, 1);
+    assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 1);
     assert_eq!(
         table_count(&tmp, "observation_projection_provenance").await,
         2
     );
 
     rebuild_projection_to_completion(&store, 1).await;
-    assert_eq!(table_count(&tmp, "session_messages").await, 1);
+    assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 1);
     assert_eq!(
         table_count(&tmp, "observation_projection_provenance").await,
         2

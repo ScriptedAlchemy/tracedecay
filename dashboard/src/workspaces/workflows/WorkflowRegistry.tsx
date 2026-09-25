@@ -26,7 +26,7 @@ import {
  */
 
 const INPUT_CLASS =
-  'min-h-[var(--touch-target-min)] w-full rounded-sm border border-edge bg-surface-1 px-2 font-mono text-2xs text-text-primary placeholder:text-text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent';
+  'min-h-[var(--touch-target-min)] w-full rounded-panel border border-edge-subtle bg-surface-1 px-2 font-mono text-sm text-text-primary placeholder:text-text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent';
 
 export function WorkflowRegistryPanel({
   result,
@@ -65,8 +65,8 @@ export function WorkflowRegistryPanel({
       elevation="well"
       bodyClassName="flex min-w-0 flex-col gap-2 p-2"
       footer={
-        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-3xs text-text-muted">
-          <span className="td-value text-3xs" data-testid="workflow-registry-count">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-sm text-text-muted">
+          <span className="td-value text-xs" data-testid="workflow-registry-count">
             {result?.outcome === 'value'
               ? `${entries.length} ${entries.length === 1 ? 'definition' : 'definitions'} · ${versionTotal} ${versionTotal === 1 ? 'version' : 'versions'}${query.trim() === '' ? '' : ` · ${visible.length} shown`}`
               : 'registry unread'}
@@ -78,7 +78,7 @@ export function WorkflowRegistryPanel({
         </div>
       }
     >
-      <label className="flex min-w-0 flex-col gap-0.5 text-3xs text-text-muted" htmlFor={searchId}>
+      <label className="flex min-w-0 flex-col gap-0.5 text-sm text-text-muted" htmlFor={searchId}>
         <span className="td-legend">Filter by identity</span>
         <input
           id={searchId}
@@ -103,14 +103,14 @@ export function WorkflowRegistryPanel({
           detail="the daemon answered: no workflow definitions are registered in this scope"
         />
       ) : visible.length === 0 ? (
-        <p className="text-3xs text-text-muted" data-testid="workflow-registry-no-match">
+        <p className="text-sm text-text-muted" data-testid="workflow-registry-no-match">
           No registered identity contains "{query.trim()}". {entries.length} remain registered.
         </p>
       ) : (
         <div className="min-w-0">
           <div
             aria-hidden
-            className="flex items-baseline justify-between gap-2 border-b border-edge-subtle px-2 pb-1 text-3xs"
+            className="flex items-baseline justify-between gap-2 border-b border-edge-subtle px-2 pb-1 text-sm"
           >
             <span className="td-legend min-w-0 truncate">identity · latest · versions · steps</span>
             <span className="td-legend shrink-0">disposition</span>
@@ -187,14 +187,14 @@ function RegistryRow({
         ) : null}
         <span className="flex min-w-0 items-center justify-between gap-2">
           <span
-            className="td-value min-w-0 truncate text-2xs text-text-primary"
+            className="td-value min-w-0 truncate text-sm text-text-primary"
             title={entry.definitionId}
           >
             {entry.definitionId}
           </span>
           <DispositionCell receipt={receipt} className="shrink-0" />
         </span>
-        <span className="td-value flex min-w-0 flex-wrap gap-x-2 text-3xs text-text-muted">
+        <span className="td-value flex min-w-0 flex-wrap gap-x-2 text-xs text-text-muted">
           <span data-cell="numeric">v{entry.latest.definition_version}</span>
           <span data-cell="numeric">
             {entry.versions.length} {entry.versions.length === 1 ? 'version' : 'versions'}
@@ -233,15 +233,15 @@ export function DispositionCell({
   }
   return (
     <span
-      className={cn('inline-flex min-w-0 items-center gap-1.5 text-3xs', className)}
+      className={cn('inline-flex min-w-0 items-center gap-1.5 text-sm', className)}
       data-disposition={receipt.disposition.state}
       title={`answered ${new Date(receipt.answeredAtMillis).toISOString()} · revision ${receipt.disposition.revision}`}
     >
       <Lamp tone={lifecycleStateTone(receipt.disposition.state)} />
-      <span className="uppercase tracking-[0.1em] text-text-secondary">
+      <span className="uppercase tracking-[0.1em] text-text-secondary text-3xs">
         {receipt.disposition.state}
       </span>
-      <span className="td-value text-3xs text-text-muted" data-cell="numeric">
+      <span className="td-value text-xs text-text-muted" data-cell="numeric">
         r{receipt.disposition.revision}
       </span>
     </span>
@@ -271,7 +271,7 @@ export function RegistryInspectPanel({
       bodyClassName="p-2.5"
     >
       {entry === null ? (
-        <p className="text-3xs text-text-muted">
+        <p className="text-sm text-text-muted">
           Hover or focus a registry row to inspect it here. Click or press Enter to select; inspection
           never changes the selection.
         </p>
@@ -293,7 +293,7 @@ function InspectBody({ entry, receipts }: { entry: RegistryEntry; receipts: Rece
         </span>
         <GradeTag grade="EXACT" source="registry" />
       </div>
-      <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-3xs">
+      <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-sm">
         <InspectFact label="latest version" value={`v${latest.definition_version}`} />
         <InspectFact label="versions served" value={String(entry.versions.length)} />
         <InspectFact label="steps (latest)" value={String(latest.steps.length)} />
@@ -318,7 +318,7 @@ function InspectBody({ entry, receipts }: { entry: RegistryEntry; receipts: Rece
         <DigestLine label="configuration" digest={latest.pinned_configuration_digest} />
         <DigestLine label="catalog" digest={latest.pinned_catalog_digest} />
       </div>
-      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 border-t border-edge-subtle pt-2 text-3xs">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 border-t border-edge-subtle pt-2 text-sm">
         <span className="td-legend">disposition</span>
         <DispositionCell receipt={receipt} />
         {receipt === null ? (
@@ -344,7 +344,7 @@ function InspectFact({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex min-w-0 flex-col gap-0.5">
       <dt className="td-legend">{label}</dt>
-      <dd className="td-value min-w-0 truncate text-3xs text-text-secondary" title={value}>
+      <dd className="td-value min-w-0 truncate text-xs text-text-secondary" title={value}>
         {value}
       </dd>
     </div>
@@ -355,9 +355,9 @@ function InspectFact({ label, value }: { label: string; value: string }) {
  * carries the full string and the cell wraps at 200% zoom instead of clipping. */
 export function DigestLine({ label, digest }: { label: string; digest: string }) {
   return (
-    <div className="flex min-w-0 items-baseline gap-2 text-3xs">
-      <span className="w-20 shrink-0 uppercase tracking-[0.08em] text-text-muted">{label}</span>
-      <span className="td-value min-w-0 break-all text-3xs text-text-secondary" title={digest}>
+    <div className="flex min-w-0 items-baseline gap-2 text-sm">
+      <span className="w-20 shrink-0 uppercase tracking-[0.08em] text-text-muted text-3xs">{label}</span>
+      <span className="td-value min-w-0 break-all text-xs text-text-secondary" title={digest}>
         {digest}
       </span>
     </div>

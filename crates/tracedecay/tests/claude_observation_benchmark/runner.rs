@@ -9,21 +9,21 @@ use tracedecay_store::{
     ObservationReplayRequest, SESSION_MESSAGE_PROJECTOR_VERSION, StoredObservation,
 };
 
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::sqlite_read_snapshot::open_immutable_read_only;
 use tracedecay_runtime_core::storage::{
     read_repository_identity_marker, write_repository_identity_marker,
 };
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::observation::ObservationCancellation;
-use tracedecay_sessions::runtime::claude::ClaudeSource;
-use tracedecay_sessions::runtime::claude_observation::{
+use tracedecay_sessions::runtime::hosts::claude::ClaudeSource;
+use tracedecay_sessions::runtime::hosts::claude_observation::{
     ClaudeObservationIngestStats, ingest_source_with_observations_with_admission,
 };
-use tracedecay_sessions::runtime::cline_like::{
+use tracedecay_sessions::runtime::hosts::cline_like::{
     ClineLikeSource, capture_cline_like_snapshot_observations,
 };
-use tracedecay_sessions::runtime::{codex, cursor, hermes, kiro};
+use tracedecay_sessions::runtime::{hosts::codex, hosts::cursor, hosts::hermes, hosts::kiro};
 
 /// Installs the process-wide background CPU authority these benchmarks need.
 ///
@@ -35,7 +35,7 @@ use tracedecay_sessions::runtime::{codex, cursor, hermes, kiro};
 /// delegates to the same helper `HostAdmissionTestRuntimeV1` uses instead of
 /// racing it with a benchmark-private handle.
 fn ensure_background_cpu_authority() {
-    tracedecay::test_support::host_admission::ensure_process_background_cpu_authority()
+    tracedecay_project::test_support::host_admission::ensure_process_background_cpu_authority()
         .expect("install process capture authorities for the benchmark");
 }
 
@@ -216,7 +216,7 @@ impl Fixture {
         let mut rows = snapshot
             .query(
                 "SELECT
-                    (SELECT COUNT(*) FROM session_messages WHERE provider = 'claude'),
+                    (SELECT COUNT(*) FROM lcm_raw_messages WHERE provider = 'claude'),
                     COUNT(*),
                     COALESCE(SUM(message_created), 0)
                  FROM observation_projection_provenance

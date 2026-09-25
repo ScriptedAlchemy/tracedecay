@@ -113,7 +113,7 @@ export function StatusStrip({ queryActivity }: { queryActivity?: ReactNode } = {
           {feed.detail !== null && (
             // The state is carried by the word, not the swatch; the reason is
             // the one thing a reader needs to know that the word cannot hold.
-            <span className="td-value min-w-0 truncate text-3xs normal-case text-text-muted">
+            <span className="td-value min-w-0 truncate text-xs normal-case text-text-muted">
               {feed.detail}
             </span>
           )}
@@ -153,14 +153,14 @@ function WorkspaceRegisters() {
             data-state={register.state}
             className="flex min-w-0 items-center gap-1.5"
           >
-            <span className="td-value max-w-56 truncate text-2xs">{register.value}</span>
+            <span className="td-value max-w-56 truncate text-xs">{register.value}</span>
             {/* The qualifier yields first: with the shell's own four cells and
               * three workspace registers, a 1440px strip has room for every
               * state word or every detail, not both. The word carries the
               * state; the detail returns from `2xl` and stays on the title. */}
             {register.detail ? (
               <span
-                className="td-value min-w-0 max-w-64 truncate text-3xs text-text-muted max-2xl:hidden"
+                className="td-value min-w-0 max-w-64 truncate text-xs text-text-muted max-2xl:hidden"
                 title={register.detail}
               >
                 {register.detail}
@@ -241,11 +241,11 @@ export function QueryActivityStatus() {
   if (activeQuery !== undefined) {
     return (
       <Cell icon={Search} label="Query">
-        <span className="td-value max-w-64 truncate text-2xs" role="status">
+        <span className="td-value max-w-64 truncate text-xs" role="status">
           {activeQuery.label}
         </span>
         {queryActivities.length > 1 ? (
-          <span className="td-value text-3xs text-text-muted">
+          <span className="td-value text-xs text-text-muted">
             +{queryActivities.length - 1}
           </span>
         ) : null}
@@ -269,7 +269,7 @@ export function QueryActivityStatus() {
 
   return lastCancellation === null ? null : (
     <Cell icon={Search} label="Query">
-      <span className="td-value max-w-72 truncate text-2xs" role="status">
+      <span className="td-value max-w-72 truncate text-xs" role="status">
         cancelled · {lastCancellation.label}
       </span>
     </Cell>
@@ -387,7 +387,7 @@ export function RegistryAuthorityStatus() {
       >
         <span className="td-value text-2xs uppercase">{registry.value}</span>
         {registry.detail !== null && (
-          <span className="td-value min-w-0 truncate text-3xs normal-case text-text-muted">
+          <span className="td-value min-w-0 truncate text-xs normal-case text-text-muted">
             {registry.detail}
           </span>
         )}

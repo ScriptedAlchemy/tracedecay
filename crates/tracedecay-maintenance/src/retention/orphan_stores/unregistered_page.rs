@@ -13,13 +13,9 @@ use super::fence::{
     capture_store_content_fence_controlled, capture_store_directory_fence,
     open_store_directory_nofollow,
 };
-use super::quarantine::{
-    QuarantineRecoveryOutcome, quarantine_recovery_entry, recover_named_store_quarantine,
-};
 use super::{
-    CollectionCompletionV1, CollectionControl, CollectionFailure, CollectionFailureKind,
-    CollectionOutcome, CollectionRecoveryAction, CollectionRecoveryReceipt, StoreContentFence,
-    StoreDirectoryFence, UnregisteredCollectionPlan, UnregisteredStoreFinding,
+    CollectionCompletionV1, CollectionControl, CollectionFailureKind, CollectionOutcome,
+    StoreContentFence, StoreDirectoryFence, UnregisteredCollectionPlan, UnregisteredStoreFinding,
     dir_size_bytes_controlled, execute_unregistered_collection_controlled,
     manifest_names_abandoned_root, newest_mtime_secs_controlled, plan_unregistered_collection,
 };
@@ -28,16 +24,9 @@ pub const DEFAULT_UNREGISTERED_STORE_PAGE_LIMIT: usize = 8;
 const MAX_UNREGISTERED_STORE_PAGE_LIMIT: usize = 64;
 const UNREGISTERED_STORE_DIRECTORY_ENTRY_MULTIPLIER: usize = 8;
 
-pub(in crate::retention) enum ProjectDirectoryWorkV1 {
-    Project(String),
-    Quarantine {
-        project_id: String,
-        quarantine_name: String,
-    },
-}
-
 pub(in crate::retention) struct ProjectDirectoryPageV1 {
-    pub entries: Vec<ProjectDirectoryWorkV1>,
+    /// Valid `project_id` leaf names under `projects/`.
+    pub entries: Vec<String>,
     pub next_cursor: Option<String>,
     /// Raw directory or portable-inventory entries consumed to produce this
     /// slice. Summing pages exposes nonlinear rescans without timing heuristics.
@@ -109,24 +98,21 @@ pub async fn sweep_unregistered_store_page(
             CollectionOutcome::default(),
         )));
     }
-    let mut recovery_outcome = CollectionOutcome::default();
     let census = census_unregistered_project_dirs_page(
         db,
         profile_root,
         request.cursor.as_deref(),
         limit,
         request.now,
-        request.apply,
         request.cancellation,
         request.deadline,
-        &mut recovery_outcome,
     )
     .await?;
     let Some((findings, next_cursor)) = census else {
         return Ok(observed_page_report(interrupted_report(
             UnregisteredSweepCompletionV1::interrupted(request.cancellation, request.deadline)
                 .unwrap_or(UnregisteredSweepCompletionV1::DeadlineExceeded),
-            recovery_outcome,
+            CollectionOutcome::default(),
         )));
     };
     let plan = plan_unregistered_collection(findings, request.retention_secs);
@@ -134,7 +120,7 @@ pub async fn sweep_unregistered_store_page(
         return Ok(observed_page_report(UnregisteredStoreSweepReport {
             plan,
             applied: false,
-            outcome: recovery_outcome,
+            outcome: CollectionOutcome::default(),
             next_cursor,
             completion: UnregisteredSweepCompletionV1::Complete,
         }));
@@ -145,26 +131,18 @@ pub async fn sweep_unregistered_store_page(
         return Ok(observed_page_report(UnregisteredStoreSweepReport {
             plan: UnregisteredCollectionPlan::default(),
             applied: false,
-            outcome: recovery_outcome,
+            outcome: CollectionOutcome::default(),
             next_cursor: request.cursor,
             completion,
         }));
     }
-    let mut outcome = execute_unregistered_collection_controlled(
+    let outcome = execute_unregistered_collection_controlled(
         db,
         &plan,
         profile_root,
         CollectionControl::new(request.cancellation, request.deadline),
     )
     .await?;
-    outcome.reclaimed_bytes = outcome
-        .reclaimed_bytes
-        .saturating_add(recovery_outcome.reclaimed_bytes);
-    outcome.collected.extend(recovery_outcome.collected);
-    outcome.errors.extend(recovery_outcome.errors);
-    outcome
-        .recovery_receipts
-        .extend(recovery_outcome.recovery_receipts);
     let completion = match outcome.completion {
         CollectionCompletionV1::Complete => UnregisteredSweepCompletionV1::Complete,
         CollectionCompletionV1::Cancelled => UnregisteredSweepCompletionV1::Cancelled,
@@ -228,10 +206,8 @@ async fn census_unregistered_project_dirs_page(
     cursor: Option<&str>,
     limit: usize,
     now: i64,
-    recover_interrupted_quarantines: bool,
     cancellation: &CancellationToken,
     deadline: MonotonicDeadline,
-    recovery_outcome: &mut CollectionOutcome,
 ) -> tracedecay_domain::errors::Result<Option<(Vec<UnregisteredStoreFinding>, Option<String>)>> {
     let projects_dir = profile_root.join("projects");
     let interrupted =
@@ -241,166 +217,57 @@ async fn census_unregistered_project_dirs_page(
         return Ok(None);
     };
     let next_cursor = page.next_cursor;
-    let mut recovered_project_ids = HashSet::new();
     let mut findings = Vec::with_capacity(page.entries.len());
-    for work in page.entries {
+    for name in page.entries {
         if UnregisteredSweepCompletionV1::interrupted(cancellation, deadline).is_some() {
             return Ok(None);
         }
-        let ProjectDirectoryWorkV1::Quarantine {
-            project_id,
-            quarantine_name,
-        } = work
-        else {
-            let ProjectDirectoryWorkV1::Project(name) = work else {
-                continue;
-            };
-            let control = CollectionControl::new(cancellation, deadline);
-            let is_registered = match control.race(db.code_project_exists(&name)).await {
-                Ok(Ok(exists)) => exists,
-                Ok(Err(error)) => return Err(error),
-                Err(_) => return Ok(None),
-            };
-            if is_registered {
-                continue;
-            }
-            if recovered_project_ids.contains(&name) {
-                continue;
-            }
-            let data_root = projects_dir.join(&name);
-            let metadata = match std::fs::symlink_metadata(&data_root) {
-                Ok(metadata) => metadata,
-                Err(_) => continue,
-            };
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                continue;
-            }
-            let expected_data_root_fence = capture_store_directory_fence(profile_root, &data_root)
-                .unwrap_or(StoreDirectoryFence::Unverifiable);
-            let expected_content_fence = match capture_store_content_fence_controlled(
-                profile_root,
-                &data_root,
-                CollectionControl::new(cancellation, deadline),
-            ) {
+        let control = CollectionControl::new(cancellation, deadline);
+        let is_registered = match control.race(db.code_project_exists(&name)).await {
+            Ok(Ok(exists)) => exists,
+            Ok(Err(error)) => return Err(error),
+            Err(_) => return Ok(None),
+        };
+        if is_registered {
+            continue;
+        }
+        let data_root = projects_dir.join(&name);
+        let metadata = match std::fs::symlink_metadata(&data_root) {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            continue;
+        }
+        let expected_data_root_fence = capture_store_directory_fence(profile_root, &data_root)
+            .unwrap_or(StoreDirectoryFence::Unverifiable);
+        let expected_content_fence =
+            match capture_store_content_fence_controlled(profile_root, &data_root, control) {
                 Ok(fence) => fence,
                 Err(CollectionFailureKind::Cancelled) => return Ok(None),
                 Err(_) => StoreContentFence::Unverifiable,
             };
-            if UnregisteredSweepCompletionV1::interrupted(cancellation, deadline).is_some() {
-                return Ok(None);
-            }
-            let last_write_secs = match newest_mtime_secs_controlled(&data_root, control) {
-                Ok(mtime) => mtime,
-                Err(CollectionFailureKind::Cancelled) => return Ok(None),
-                Err(_) => return Ok(None),
-            };
-            let size_bytes = match dir_size_bytes_controlled(&data_root, control) {
-                Ok(size) => size,
-                Err(CollectionFailureKind::Cancelled) => return Ok(None),
-                Err(_) => return Ok(None),
-            };
-            let abandoned_root = manifest_names_abandoned_root(&data_root, profile_root);
-            findings.push(UnregisteredStoreFinding {
-                project_dir_name: name,
-                data_root,
-                age_secs: now.saturating_sub(last_write_secs).max(0),
-                size_bytes,
-                expected_payload_mtime_secs: last_write_secs,
-                expected_data_root_fence,
-                expected_content_fence,
-                abandoned_root,
-            });
-            continue;
-        };
-        if recover_interrupted_quarantines {
-            if recovered_project_ids.contains(&project_id) {
-                continue;
-            }
-            let data_root = projects_dir.join(&project_id);
-            let record_recovery = match recover_named_store_quarantine(
-                profile_root,
-                &data_root,
-                std::ffi::OsStr::new(&quarantine_name),
-                &projects_dir,
-                CollectionControl::new(cancellation, deadline),
-            ) {
-                Ok(Some(QuarantineRecoveryOutcome::Removed {
-                    journal_failure, ..
-                })) => {
-                    recovered_project_ids.insert(project_id.clone());
-                    if let Some(failure) = journal_failure {
-                        recovery_outcome.errors.push(CollectionFailure {
-                            store_id: project_id.clone(),
-                            kind: CollectionFailureKind::RemoveFailed(failure),
-                        });
-                    }
-                    None
-                }
-                Ok(Some(QuarantineRecoveryOutcome::Restored {
-                    restored_path,
-                    failure,
-                })) => {
-                    recovered_project_ids.insert(project_id.clone());
-                    Some((
-                        projects_dir.join(&quarantine_name),
-                        restored_path,
-                        if failure.is_some() {
-                            CollectionRecoveryAction::RetainedForRecovery
-                        } else {
-                            CollectionRecoveryAction::Restored
-                        },
-                        failure,
-                    ))
-                }
-                Ok(Some(QuarantineRecoveryOutcome::Retained {
-                    quarantine_path,
-                    actual_path,
-                    failure,
-                })) => {
-                    recovered_project_ids.insert(project_id.clone());
-                    Some((
-                        quarantine_path.clone(),
-                        actual_path,
-                        CollectionRecoveryAction::RetainedForRecovery,
-                        failure,
-                    ))
-                }
-                Ok(None) => None,
-                Err(kind) => {
-                    recovery_outcome.errors.push(CollectionFailure {
-                        store_id: project_id.clone(),
-                        kind,
-                    });
-                    None
-                }
-            };
-            if let Some((quarantine_path, actual_path, action, failure)) = record_recovery {
-                recovery_outcome
-                    .recovery_receipts
-                    .push(CollectionRecoveryReceipt {
-                        store_id: project_id.clone(),
-                        original_path: data_root.clone(),
-                        actual_path,
-                        quarantine_path,
-                        action,
-                    });
-                if let Some(failure) = failure {
-                    recovery_outcome.errors.push(CollectionFailure {
-                        store_id: project_id.clone(),
-                        kind: CollectionFailureKind::RemoveFailed(failure),
-                    });
-                }
-                recovery_outcome.errors.push(CollectionFailure {
-                    store_id: project_id,
-                    kind: CollectionFailureKind::PayloadChanged,
-                });
-            }
+        if UnregisteredSweepCompletionV1::interrupted(cancellation, deadline).is_some() {
+            return Ok(None);
         }
+        let Ok(last_write_secs) = newest_mtime_secs_controlled(&data_root, control) else {
+            return Ok(None);
+        };
+        let Ok(size_bytes) = dir_size_bytes_controlled(&data_root, control) else {
+            return Ok(None);
+        };
+        let abandoned_root = manifest_names_abandoned_root(&data_root, profile_root);
+        findings.push(UnregisteredStoreFinding {
+            project_dir_name: name,
+            data_root,
+            age_secs: now.saturating_sub(last_write_secs).max(0),
+            size_bytes,
+            expected_payload_mtime_secs: last_write_secs,
+            expected_data_root_fence,
+            expected_content_fence,
+            abandoned_root,
+        });
     }
-    // Directory inventories preserve discovery order. A live leaf can precede
-    // its quarantine; recovery invalidates that earlier census just as it
-    // prevents a later one, so neither may reach collection in this admission.
-    findings.retain(|finding| !recovered_project_ids.contains(&finding.project_dir_name));
     Ok(Some((findings, next_cursor)))
 }
 
@@ -578,13 +445,8 @@ pub(in crate::retention) fn read_project_directory_page(
         })?;
         scanned = scanned.saturating_add(1);
         entries_scanned = entries_scanned.saturating_add(1);
-        if let Some((project_id, quarantine_name)) = quarantine_recovery_entry(&name) {
-            work.push(ProjectDirectoryWorkV1::Quarantine {
-                project_id,
-                quarantine_name,
-            });
-        } else if tracedecay_runtime_core::storage::validate_project_id(&name).is_ok() {
-            work.push(ProjectDirectoryWorkV1::Project(name));
+        if portable_inventory_entry_is_valid(&name) {
+            work.push(name);
         }
         if work.len() == limit || scanned >= scan_limit {
             return Ok(Some(ProjectDirectoryPageV1 {
@@ -665,8 +527,7 @@ fn portable_inventory_matches(path: &Path, signature: &str) -> bool {
 }
 
 pub(super) fn portable_inventory_entry_is_valid(name: &str) -> bool {
-    quarantine_recovery_entry(name).is_some()
-        || tracedecay_runtime_core::storage::validate_project_id(name).is_ok()
+    tracedecay_runtime_core::storage::validate_project_id(name).is_ok()
 }
 
 fn clear_portable_inventory_complete(inventory: &Path) -> std::io::Result<()> {

@@ -47,7 +47,6 @@ pub(super) fn project_projection_metadata(
     location_provenance: &'static str,
 ) -> HermesProjectionMetadata {
     let presentation_path = match location_provenance {
-        "profile_pin" => source.legacy_project_pin.as_deref(),
         "session_cwd" => row.session_cwd.as_deref().map(Path::new),
         _ => None,
     }

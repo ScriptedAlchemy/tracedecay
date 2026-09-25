@@ -3,7 +3,8 @@
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::util::{JsonError, internal_error, json_error};
@@ -17,8 +18,7 @@ use tracedecay_automation_runtime::automation::managed_skills::{
     load_managed_skill, managed_skill_dir, managed_skill_root,
 };
 use tracedecay_automation_runtime::automation::skill_usage::{
-    skill_improvement_recommendations, stale_skill_recommendations, summarize_skill_usage,
-    summarize_skill_usage_for,
+    skill_improvement_recommendations, stale_skill_recommendations, summarize_skill_usage_for,
 };
 use tracedecay_automation_runtime::automation::skill_writer::ManagedSkillDeploymentReceipt;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
@@ -52,32 +52,25 @@ pub struct ManagedSkillUpdateRequest {
     update: ManagedSkillUpdate,
 }
 
+/// `GET /api/automation/skills`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct AutomationSkillsPayloadV1 {
+    skills: Vec<ManagedSkill>,
+    count: usize,
+}
+
 #[hotpath::measure(label = "dashboard_api.skills.list", future = true)]
-pub async fn list(State(state): State<DashboardState>) -> ApiResult {
+pub async fn list(
+    State(state): State<DashboardState>,
+) -> std::result::Result<Json<AutomationSkillsPayloadV1>, JsonError> {
     let profile_root = profile_root(&state)?;
     let skills = list_managed_skills(profile_root)
         .await
         .map_err(|err| internal_error(&err))?;
-    let skill_metadata = skills
-        .iter()
-        .map(|skill| skill.metadata.clone())
-        .collect::<Vec<_>>();
-    let usage_summaries = summarize_skill_usage(profile_root, &skills)
-        .await
-        .map_err(|err| internal_error(&err))?;
-    let stale_recommendations =
-        stale_skill_recommendations(&usage_summaries, current_timestamp(), 60 * 60 * 24 * 90);
-    let improvement_recommendations = skill_improvement_recommendations(&usage_summaries);
-    Ok(Json(json!({
-        "profile_root": profile_root.display().to_string(),
-        "skills_root": managed_skill_root(profile_root).display().to_string(),
-        "count": skills.len(),
-        "skills": skills,
-        "skill_metadata": skill_metadata,
-        "usage_summaries": usage_summaries,
-        "stale_recommendations": stale_recommendations,
-        "improvement_recommendations": improvement_recommendations,
-    })))
+    Ok(Json(AutomationSkillsPayloadV1 {
+        count: skills.len(),
+        skills,
+    }))
 }
 
 #[hotpath::measure(label = "dashboard_api.skills.view", future = true)]

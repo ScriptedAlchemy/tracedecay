@@ -4,13 +4,13 @@
 //! collapsed into a Cursor project-filter miss or a Codex v2 cursor miss.
 
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     ClineTranscriptStream, ObservationSourceIdentityV1, ProviderId, SessionId,
 };
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::runtime::SessionProvider;
-use tracedecay_sessions::runtime::cline_like::ClineLikeSource;
-use tracedecay_sessions::runtime::cursor::ingest_cursor_transcript_event;
+use tracedecay_sessions::runtime::hosts::cline_like::ClineLikeSource;
+use tracedecay_sessions::runtime::hosts::cursor::ingest_cursor_transcript_event;
 
 use crate::cline_like::{parse_offset_for_task_history, vscode_storage_root, write_task};
 use crate::codex::write_codex_rollout_with_structured_events;
@@ -125,7 +125,8 @@ async fn codex_registered_ingest_uses_the_host_v2_source_identity() {
     ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Codex)).await;
 
     let expected =
-        tracedecay_sessions::runtime::codex::codex_observation_source_v2(session_id).unwrap();
+        tracedecay_sessions::runtime::hosts::codex::codex_observation_source_v2(session_id)
+            .unwrap();
     let cursor = db
         .runtime()
         .project_observation_source_cursor_for_test(&expected)

@@ -90,7 +90,7 @@ function fixture(): TemporalSceneModel {
     },
     cursor: { x: 320, laneId: ROOT, xBasis: 'time' },
     counts: { lanesTotal: 7, lanesVisible: 3, lanesCollapsed: 4, eventsTotal: 12, eventsDrawn: 6, eventsCulled: 0, eventsWithheld: 4, eventsFiltered: 0, eventsFolded: 2, relationsTotal: 2, relationsDrawn: 1, relationsWithheld: 1 },
-    denseDefault: false,
+    denseDepth: null,
   };
 }
 
@@ -133,7 +133,6 @@ function renderScene(overrides: Partial<TemporalSceneProps> = {}) {
     <TemporalScene
       model={model}
       ariaLabel="Temporal execution field"
-      tailLabel="LOADED END"
       reducedMotion={true}
       {...handlers}
       {...overrides}
@@ -166,7 +165,7 @@ describe('TemporalScene', () => {
       expect(container.querySelector('[data-scene-layer="canvas"]')).toBeTruthy();
       expect(container.querySelector('[data-scene-layer="unavailable"]')).toBeNull();
       expect(calls).toContain('stroke');
-      expect(calls).toContain('bezierCurveTo');
+      expect(calls).toContain('arcTo');
       expect(screen.queryByRole('status')).toBeNull();
     });
 
@@ -176,6 +175,15 @@ describe('TemporalScene', () => {
       expect(container.querySelector('[data-scene-layer="unavailable"]')).toBeTruthy();
       expect(screen.getByRole('status').textContent).toContain('scene layer unavailable');
       expect(container.querySelectorAll('[data-event]').length).toBe(model.nodes.length);
+    });
+  });
+
+  describe('cursor and tail', () => {
+    it('draws the reveal cursor at the model x', () => {
+      const { container } = renderScene();
+      const cursor = container.querySelector('[data-cursor]')!;
+      expect(cursor.getAttribute('x1')).toBe('320');
+      expect(container.querySelector('[data-cursor-mark]')?.getAttribute('data-cursor-basis')).toBe('time');
     });
   });
 
@@ -199,6 +207,29 @@ describe('TemporalScene', () => {
       expect(onSelectEvent).toHaveBeenCalledTimes(2);
     });
 
+    it('walks the glyphs from one scene tab stop with arrows, Home, End and Enter', () => {
+      const { container, model, onSelectEvent } = renderScene();
+      const overlay = container.querySelector('svg[data-scene-layer="overlay"]')!;
+      expect(overlay.getAttribute('tabindex')).toBe('0');
+      for (const glyph of container.querySelectorAll('[data-event]')) expect(glyph.getAttribute('tabindex')).toBe('-1');
+      const position = () => container.querySelector('[data-event-position]')?.textContent;
+      const current = () => container.querySelector('[data-event-current]')!;
+      const total = model.nodes.length;
+      expect(position()).toBe(`event 1 of ${total}`);
+      fireEvent.keyDown(overlay, { key: 'ArrowRight' });
+      expect(position()).toBe(`event 2 of ${total}`);
+      expect(overlay.getAttribute('aria-activedescendant')).toBe(current().id);
+      fireEvent.keyDown(overlay, { key: 'End' });
+      expect(position()).toBe(`event ${total} of ${total}`);
+      fireEvent.keyDown(overlay, { key: 'ArrowRight' });
+      expect(position()).toBe(`event ${total} of ${total}`);
+      fireEvent.keyDown(overlay, { key: 'Home' });
+      expect(position()).toBe(`event 1 of ${total}`);
+      const first = current().getAttribute('data-event');
+      fireEvent.keyDown(overlay, { key: 'Enter' });
+      expect(onSelectEvent).toHaveBeenLastCalledWith(first);
+    });
+
     it('declares a sequence-placed node as recorded order', () => {
       const { container } = renderScene();
       const sequenced = container.querySelector('[data-event="n-msg"]')!;
@@ -214,6 +245,8 @@ describe('TemporalScene', () => {
       expect(onInspect).toHaveBeenLastCalledWith(model.nodes.find((entry) => entry.id === 'n-tool'));
       const otherLane = container.querySelector(`[data-lane-group='${CHILD}']`) as SVGGElement;
       expect(otherLane.style.opacity).toBe('0.55');
+      // Hover dims the unrelated and draws nothing on the hovered mark.
+      expect(tool.querySelector('rect[fill="none"][stroke="var(--raw-graph-accent)"], line[stroke="var(--raw-graph-accent)"]')).toBeNull();
       fireEvent.mouseOut(tool);
       expect(onInspect).toHaveBeenLastCalledWith(null);
       expect(otherLane.style.opacity).toBe('1');
@@ -257,15 +290,6 @@ describe('TemporalScene', () => {
       for (const grade of ['EXACT', 'EXPLICIT', 'INFERRED', 'AMBIGUOUS', 'STALE', 'UNAVAILABLE']) {
         expect(screen.getByText(grade)).toBeTruthy();
       }
-    });
-  });
-
-  describe('cursor and tail', () => {
-    it('draws the reveal cursor at the model x and the tail marker label', () => {
-      const { container } = renderScene();
-      const cursor = container.querySelector('[data-cursor]')!;
-      expect(cursor.getAttribute('x1')).toBe('320');
-      expect(screen.getByText('LOADED END')).toBeTruthy();
     });
   });
 

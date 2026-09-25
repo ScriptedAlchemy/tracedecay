@@ -31,8 +31,10 @@ class SdkPublishWorkflowPolicyTests(unittest.TestCase):
         self.assertNotEqual(workflow, self.workflow, "mutation must change the workflow")
         with tempfile.TemporaryDirectory() as scratch:
             path = Path(scratch) / "release.yml"
-            path.write_text(workflow, encoding="utf-8")
             self.checker.WORKFLOW_PATH = path
+            path.write_text(self.workflow, encoding="utf-8")
+            self.checker.main()
+            path.write_text(workflow, encoding="utf-8")
             with self.assertRaises(SystemExit):
                 self.checker.main()
 

@@ -63,19 +63,19 @@ export function HitInspector({
       <div className="flex flex-col gap-4" data-inspect-mode={mode}>
         <section className="flex flex-col gap-1.5">
           <MetaLabel>Source identity</MetaLabel>
-          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-2xs">
+          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-body">
             <dt className="text-text-muted">Lane</dt>
             <dd className="text-text-secondary">{spec.label}</dd>
             <dt className="text-text-muted">Source class</dt>
-            <dd className="td-value text-2xs text-text-secondary">{evidence.sourceClass}</dd>
+            <dd className="td-value text-sm text-text-secondary">{evidence.sourceClass}</dd>
             <dt className="text-text-muted">Identity</dt>
-            <dd className="td-value text-2xs text-text-secondary" data-evidence-grade={evidence.identity}>
+            <dd className="td-value text-sm text-text-secondary" data-evidence-grade={evidence.identity}>
               {evidence.identity}
             </dd>
             {identityKey ? (
               <>
                 <dt className="text-text-muted">{identityKey.field}</dt>
-                <dd className="min-w-0 break-all font-mono text-2xs text-text-primary">
+                <dd className="min-w-0 break-all font-mono text-sm text-text-primary">
                   {identityKey.value}
                 </dd>
               </>
@@ -87,7 +87,7 @@ export function HitInspector({
                   <Highlight
                     text={hit.context}
                     terms={terms}
-                    className="break-all font-mono text-2xs text-text-secondary"
+                    className="break-all font-mono text-sm text-text-secondary"
                   />
                 </dd>
               </>
@@ -156,15 +156,15 @@ export function HitInspector({
                 ariaLabel={`${hit.signal.field} ${hit.signal.value}`}
               />
               <span className="tabular text-xs text-text-primary">{hit.signal.display}</span>
-              <span className="font-mono text-2xs text-text-muted">{hit.signal.field}</span>
+              <span className="font-mono text-sm text-text-muted">{hit.signal.field}</span>
             </span>
-            <span className="text-2xs text-text-muted">{hit.signal.basis}</span>
+            <span className="text-body text-text-muted">{hit.signal.basis}</span>
           </section>
         ) : null}
 
         <section className="flex flex-col gap-1.5">
           <MetaLabel>Why this is here</MetaLabel>
-          <p className="text-2xs leading-relaxed text-text-secondary">
+          <p className="text-body leading-relaxed text-text-secondary">
             {terms.length === 0 ? (
               <>
                 Browsing {spec.browseLabel}; position {hit.rank} is the order the daemon
@@ -186,7 +186,7 @@ export function HitInspector({
 
         <section className="flex flex-col gap-1.5">
           <MetaLabel>Provenance</MetaLabel>
-          <p className="text-2xs leading-relaxed text-text-muted">{evidence.basis}</p>
+          <p className="text-body leading-relaxed text-text-muted">{evidence.basis}</p>
           <CodePivot hit={hit} />
           {sessionId ? (
             <SessionContextDetails
@@ -257,7 +257,7 @@ function CodePivot({ hit }: { hit: Hit }) {
   return (
     <Link
       to={`${pathname}?${params.toString()}`}
-      className="td-hit inline-flex w-fit items-center gap-1.5 border border-edge-subtle px-2 text-2xs text-text-secondary hover:border-accent hover:text-text-primary"
+      className="td-hit inline-flex w-fit items-center gap-1.5 border border-edge-subtle px-2 text-body text-text-secondary hover:border-accent hover:text-text-primary"
     >
       Open symbol in Code
       <ArrowUpRight aria-hidden size={11} />
@@ -282,7 +282,7 @@ function SessionContextDetails({
     return (
       <section className="flex flex-col gap-1.5">
         <MetaLabel>Session context</MetaLabel>
-        <p className="text-2xs leading-relaxed text-text-muted">
+        <p className="text-body leading-relaxed text-text-muted">
           Session <span className="font-mono">{sessionId}</span>. Select this row to read its
           size and context; inspecting does not open reads.
         </p>
@@ -318,7 +318,7 @@ function SessionContextDetails({
     <section className="flex flex-col gap-2">
       <MetaLabel>Session context</MetaLabel>
       {sizePayload ? (
-        <dl className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 text-2xs">
+        <dl className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 text-body">
           <dt className="text-text-muted">Messages</dt>
           <dd className="tabular text-text-secondary">
             {sizePayload.counts.message_count.toLocaleString()}
@@ -337,7 +337,7 @@ function SessionContextDetails({
       ) : null}
       {contextPayload ? (
         <>
-          <p className="text-2xs leading-relaxed text-text-muted">
+          <p className="text-body leading-relaxed text-text-muted">
             Loaded {contextPayload.messages.length.toLocaleString()} raw messages and{' '}
             {contextPayload.summary_nodes.length.toLocaleString()} summary nodes in{' '}
             {contextPayload.order} order

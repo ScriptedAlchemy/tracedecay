@@ -64,6 +64,7 @@ use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Dispatch, Event, Metadata, Subscriber};
 
+use crate::schema_contract::invariants::SOURCE_CURSOR_ADVANCE_DELETE_GUARD_SQL;
 use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_rusqlite_runtime::repository::observation_cursor_authority::COMMIT_SOURCE_CURSOR_SQL;
@@ -339,7 +340,7 @@ fn anchored_write_with_cursor(
         "collision-test",
     )
     .unwrap();
-    let anchor = tracedecay_store::build_observation_retrieval_anchor_v2(
+    let anchor = tracedecay_store::build_observation_retrieval_anchor(
         write.observation(),
         projection_generation.clone(),
         UtcMicros(1),
@@ -667,7 +668,7 @@ type ProjectedSessionRow = (
     Option<String>,
 );
 
-/// Projected `session_messages` row captured verbatim from a clean drain.
+/// Projected message row captured verbatim from a clean drain.
 type ProjectedMessageRow = (
     String,
     String,
@@ -682,6 +683,7 @@ type ProjectedMessageRow = (
     Option<String>,
     Option<i64>,
     Option<String>,
+    String,
 );
 
 async fn provenance_rows(runtime: &HostAdmissionTestRuntimeV1) -> Vec<ProvenanceRow> {
@@ -1327,9 +1329,10 @@ async fn drain_provenance_collision_with_existing_output_converges_to_durable_sk
         .unwrap();
     transaction
         .execute(
-            "INSERT INTO session_messages
-                (provider, message_id, session_id, role, ordinal, text)
-             VALUES (?1, ?2, ?3, 'assistant', 0, 'stale era output')",
+            "INSERT INTO lcm_raw_messages
+                (provider, message_id, session_id, role, ordinal, content, content_hash,
+                 storage_kind)
+             VALUES (?1, ?2, ?3, 'assistant', 0, 'stale era output', 'h', 'inline')",
             params![COLLISION_PROVIDER, "stale-era-output", session_id.as_str()],
         )
         .await
@@ -1398,7 +1401,7 @@ async fn drain_provenance_collision_with_existing_output_converges_to_durable_sk
         0
     );
     assert_eq!(table_count(&runtime, "observation_workflow_facts").await, 0);
-    assert_eq!(table_count(&runtime, "session_messages").await, 1);
+    assert_eq!(table_count(&runtime, "lcm_raw_messages").await, 1);
     assert_eq!(table_count(&runtime, "sessions").await, 1);
     // The retained observation row itself stays immutable.
     let stored = store
@@ -1442,7 +1445,7 @@ async fn drain_provenance_collision_with_existing_output_converges_to_durable_sk
 }
 
 /// A provenance binding that names a different output but has no backing
-/// `session_messages` row is corrupt authority, not an existing-output
+/// message row is corrupt authority, not an existing-output
 /// collision. It must stay a hard `ProvenanceCollision`: the checkpoint and
 /// queue remain in place and the ghost provenance row is not deleted.
 #[tokio::test]
@@ -1499,7 +1502,7 @@ async fn drain_keeps_ghost_provenance_binding_a_hard_error() {
     transaction.commit().await.unwrap();
     let stale_rows = provenance_rows(&runtime).await;
     assert_eq!(stale_rows.len(), 1);
-    assert_eq!(table_count(&runtime, "session_messages").await, 0);
+    assert_eq!(table_count(&runtime, "lcm_raw_messages").await, 0);
 
     let error = store
         .project_observation(observation.observation_id())
@@ -2605,14 +2608,14 @@ fn replace_vibe_eof(transcript: &Path, body: &str) {
 }
 
 async fn run_vibe_trigger(
-    source: &tracedecay_sessions::runtime::vibe::VibeSource,
+    source: &tracedecay_sessions::runtime::hosts::vibe::VibeSource,
     workspace: &Path,
     admission: &ProductionJsonlAdmission,
 ) -> Result<
-    tracedecay_sessions::runtime::vibe::VibeCaptureOutcome,
+    tracedecay_sessions::runtime::hosts::vibe::VibeCaptureOutcome,
     tracedecay_sessions::runtime::source::TranscriptIngestError,
 > {
-    tracedecay_sessions::runtime::vibe::capture_vibe_observations(
+    tracedecay_sessions::runtime::hosts::vibe::capture_vibe_observations(
         admission,
         source,
         workspace,
@@ -2637,7 +2640,7 @@ async fn vibe_jsonl_eof_refusal_survives_retention_generation_and_restart_withou
     std::fs::create_dir_all(&workspace).unwrap();
     let vibe_home = tmp.path().join("vibe-home");
     let transcript = write_vibe_fixture(&vibe_home, &workspace, "original eof record");
-    let source = tracedecay_sessions::runtime::vibe::VibeSource::with_vibe_home(&vibe_home)
+    let source = tracedecay_sessions::runtime::hosts::vibe::VibeSource::with_vibe_home(&vibe_home)
         .for_user_scope(Vec::new());
     let runtime = HostAdmissionTestRuntimeV1::profile_with_session_capture_resources(
         tmp.path().join("profile"),
@@ -2941,11 +2944,7 @@ async fn failed_coverage_advance_leaves_no_visible_refusal_marker() {
         .await
         .unwrap();
     transaction
-        .execute_batch(
-            "CREATE TRIGGER source_cursor_advances_immutable_delete_v1 BEFORE DELETE ON \
-             source_cursor_advances BEGIN SELECT RAISE(ABORT, \
-             'source cursor advances are immutable'); END",
-        )
+        .execute_batch(SOURCE_CURSOR_ADVANCE_DELETE_GUARD_SQL)
         .await
         .unwrap();
     transaction.commit().await.unwrap();
@@ -3316,10 +3315,11 @@ async fn already_positioned_cursor_replay_with_new_command_bytes_is_a_duplicate(
     .unwrap();
     let generation = ObservationSourceGenerationV1::new(7).unwrap();
     let cursor_at = |offset: u64, resume_fingerprint: u64| {
-        ObservationSourceCursorV1::new(
+        ObservationSourceCursorV1::for_ordering(
             source.clone(),
             ObservationScopeV1::Profile,
             generation,
+            ObservationOrderingDomainV1::FileBytes,
             offset,
         )
         .unwrap()
@@ -3541,9 +3541,9 @@ async fn drain_keeps_corrupt_provenance_with_matching_output_a_hard_error() {
     drop(rows);
     let mut rows = scratch_snapshot
         .query(
-            "SELECT provider, message_id, session_id, role, timestamp, ordinal, text, kind,
-                    model, tool_names, source_path, source_offset, metadata_json
-             FROM session_messages",
+            "SELECT provider, message_id, session_id, role, timestamp, ordinal, content, kind,
+                    model, tool_names, source_path, source_offset, metadata_json, content_hash
+             FROM lcm_raw_messages",
             (),
         )
         .await
@@ -3563,6 +3563,7 @@ async fn drain_keeps_corrupt_provenance_with_matching_output_a_hard_error() {
         message_row.get(10).unwrap(),
         message_row.get(11).unwrap(),
         message_row.get(12).unwrap(),
+        message_row.get(13).unwrap(),
     );
     drop(rows);
 
@@ -3625,10 +3626,11 @@ async fn drain_keeps_corrupt_provenance_with_matching_output_a_hard_error() {
         .unwrap();
     transaction
         .execute(
-            "INSERT INTO session_messages
-                (provider, message_id, session_id, role, timestamp, ordinal, text, kind, model,
-                 tool_names, source_path, source_offset, metadata_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO lcm_raw_messages
+                (provider, message_id, session_id, role, timestamp, ordinal, content, kind, model,
+                 tool_names, source_path, source_offset, metadata_json, content_hash,
+                 storage_kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 'inline')",
             params![
                 projected_message.0.as_str(),
                 projected_message.1.as_str(),
@@ -3643,6 +3645,7 @@ async fn drain_keeps_corrupt_provenance_with_matching_output_a_hard_error() {
                 projected_message.10.as_deref(),
                 projected_message.11,
                 projected_message.12.as_deref(),
+                projected_message.13.as_str(),
             ],
         )
         .await

@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use tracedecay_agent_hosts::agents::context_scout::ports::context_scout_candidates_from_publication;
+use tracedecay_agent_hosts::agents::context_scout::address_registry::context_scout_candidates_from_publication;
 use tracedecay_agent_hosts::agents::context_scout::{
     ContextScoutControlV1, ContextScoutDecisionV1, ContextScoutEvidenceEnvelopeExt,
     ContextScoutLimitsV1, ContextScoutRuntimeModeV1, ContextScoutSelectionInputV1,

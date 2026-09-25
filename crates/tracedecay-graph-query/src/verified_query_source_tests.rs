@@ -20,8 +20,6 @@ use super::verified_query_test_support::{
 };
 use super::{VerifiedGraphQuery, VerifiedGraphQueryRequest, open_verified_graph_query};
 use crate::SourceReadContext;
-use crate::context::read_modes::ReadMode;
-use crate::context::source_read::SourceReadRequest;
 
 async fn test_database(path: &Path) -> Database {
     crate::register_test_schema_installer();
@@ -96,17 +94,6 @@ fn assert_denied(error: tracedecay_domain::errors::TraceDecayError) {
     assert!(!retryable);
 }
 
-fn full_read_request(project_id: &str) -> SourceReadRequest<'_> {
-    SourceReadRequest {
-        file: "src/lib.rs",
-        mode: ReadMode::Full,
-        line_range: None,
-        raw_lines: None,
-        include_symbols: false,
-        project_id,
-    }
-}
-
 #[test]
 fn unbound_query_refuses_source_reads() {
     let query = fixture_query("project.verified-query-source.a");
@@ -142,29 +129,6 @@ async fn resolve_rejects_absolute_path_under_another_project_root() {
                 .is_some_and(|(code, _, _)| code == "code-graph-denied"),
         "foreign root must fail closed, got {error}"
     );
-}
-
-#[tokio::test]
-async fn read_source_rejects_request_project_id_outside_bound_source() {
-    let home = tempfile::tempdir().expect("temp");
-    let project_a = home.path().join("project-a");
-    std::fs::create_dir_all(&project_a).expect("project a");
-    let db = test_database(&project_a.join("bound.db")).await;
-    let query =
-        fixture_query("project.verified-query-source.a").with_source(SourceReadContext::new(
-            project_a,
-            db,
-            true,
-            "project.verified-query-source.a".to_owned(),
-        ));
-    let error = match query
-        .read_source(full_read_request("project.verified-query-source.b"))
-        .await
-    {
-        Ok(_) => panic!("foreign request project id must be denied"),
-        Err(error) => error,
-    };
-    assert_denied(error);
 }
 
 #[tokio::test]

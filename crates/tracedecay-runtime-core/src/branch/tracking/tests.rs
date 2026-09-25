@@ -29,12 +29,7 @@ async fn tracking_a_new_branch_publishes_metadata_without_creating_a_database() 
         crate::config::db_filename(&td),
         "single-store tracking must reference the canonical main database"
     );
-    assert!(entry.served_by_project_store());
     assert_eq!(entry.parent.as_deref(), Some("main"));
-    assert!(
-        !td.join("branches").exists(),
-        "tracking must not create a per-branch database"
-    );
 
     assert_eq!(
         rollback_prepared_branch_tracking(&td, &prepared).unwrap(),

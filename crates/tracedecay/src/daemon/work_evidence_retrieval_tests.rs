@@ -31,13 +31,14 @@ async fn registered_project_session_hydrates_provider_qualified_task_evidence() 
     let project_id = id::<ProjectId>("project.work-task-session");
     let repository_id = id::<RepositoryId>("repository.work-task-session");
     let worktree_id = id::<WorktreeId>("worktree.work-task-session");
-    let runtime = crate::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
-        profile.path(),
-        &project,
-        project_id.clone(),
-    )
-    .await
-    .expect("registered project session runtime");
+    let runtime =
+        tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
+            profile.path(),
+            &project,
+            project_id.clone(),
+        )
+        .await
+        .expect("registered project session runtime");
     let database = runtime
         .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
         .expect("registered project session database");

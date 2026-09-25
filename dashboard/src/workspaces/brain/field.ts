@@ -53,6 +53,34 @@ export interface FieldNode {
   vitality: number;
   x: number;
   y: number;
+  /** The packed cell this body belongs to, or null when it stands alone. */
+  cell: string | null;
+}
+
+/**
+ * A crowded recency × mass cell. When four or more projects share one cell
+ * and cannot clear each other, they are packed into a rank-ordered grid
+ * inside it (heaviest first, then by id), so they separate as the reader
+ * zooms instead of piling onto one point. Position inside a packed cell is
+ * rank, not exact mass; the cell's bounds are still the measurement, and the
+ * members' exact values stay printed.
+ */
+export interface FieldCell {
+  id: string;
+  column: number;
+  /** Member ids in rank order. */
+  members: string[];
+  /** Centre and size in field units. */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Distance between neighbouring packed members, in field units. */
+  spacing: number;
+  /** Largest member radius, so a renderer knows when members stop overlapping. */
+  maxRadius: number;
+  /** Sum of member indexed mass. */
+  mass: number;
 }
 
 export interface FieldEdge {
@@ -97,6 +125,8 @@ export interface RegistryField {
   vitalityHorizonDays: number;
   /** Repositories that contributed a hub (more than one checkout). */
   sharedRepoCount: number;
+  /** Packed cells, in column then cell order. Empty when nothing crowds. */
+  cells: FieldCell[];
   /** The axis frame, so the camera shows the whole scale rather than only the
    * part of it that is currently occupied. An empty column is a reading. */
   extent: { x: [number, number]; y: [number, number] };
@@ -220,6 +250,12 @@ const COLUMN_HALF_WIDTH = 0.42;
 export const MASS_AXIS_HEIGHT = 2.9;
 /** Step size for the sideways nudges that keep bodies off each other. */
 const NUDGE = 0.06;
+/** Height of one mass cell, the unit crowded bodies are packed into. */
+export const CELL_HEIGHT = 0.25;
+/** Fewer crowded bodies than this overlap in place rather than pack. */
+const PACK_MIN = 4;
+/** Width of a packed cell's grid, inside the column's own half-width. */
+const PACK_WIDTH = 2 * COLUMN_HALF_WIDTH * 0.95;
 /** A body's drawn radius in field units, so the clearance test knows how much
  * room each one actually takes. The scene sizes bodies by the square root of
  * mass, and this mirrors that curve, otherwise the two heaviest projects in a
@@ -276,6 +312,8 @@ export function composeRegistryField(
 
   const placedById = new Map<string, { x: number; y: number }>();
   const nodes: FieldNode[] = [];
+  const cells: FieldCell[] = [];
+  const lastCell = Math.floor(MASS_AXIS_HEIGHT / CELL_HEIGHT);
   for (const [index, bucket] of [...byColumn.entries()].sort((a, b) => a[0] - b[0])) {
     // Heaviest first, then by id: mass decides who gets the uncontested centre
     // line, and the id tiebreak keeps the result independent of payload order.
@@ -283,29 +321,77 @@ export function composeRegistryField(
       (a, b) =>
         indexedMass(b) - indexedMass(a) || a.project_id.localeCompare(b.project_id),
     );
-    const settledHere: Array<{ offset: number; y: number; radius: number }> = [];
+    const byCell = new Map<number, Array<{ project: ProjectRegistryEntry; y: number; radius: number }>>();
     for (const project of ordered) {
       const mass = indexedMass(project);
       // Sigma's y grows DOWNWARD on screen, so heavier has to be the larger
       // y for mass to read as height.
-      const y =
-        ((Math.log1p(mass) - axisLow) / axisSpan) * MASS_AXIS_HEIGHT;
-      const radius = bodyRadius(mass, massCeiling);
-      const offset = clearOffset(y, radius, settledHere);
-      const x = index + offset;
-      settledHere.push({ offset, y, radius });
+      const y = ((Math.log1p(mass) - axisLow) / axisSpan) * MASS_AXIS_HEIGHT;
+      const cell = Math.min(lastCell, Math.floor(y / CELL_HEIGHT));
+      const members = byCell.get(cell) ?? [];
+      members.push({ project, y, radius: bodyRadius(mass, massCeiling) });
+      byCell.set(cell, members);
+    }
+    const settledHere: Array<{ offset: number; y: number; radius: number }> = [];
+    const place = (project: ProjectRegistryEntry, x: number, y: number, cell: string | null): void => {
       placedById.set(project.project_id, { x, y });
       nodes.push({
         id: project.project_id,
         label: project.label,
         kind: project.kind,
-        degree: mass,
+        degree: indexedMass(project),
         vitality: recencyVitality(project.last_seen_at, nowSeconds, horizonDays),
         x,
         y,
+        cell,
+      });
+    };
+    // Heavy cells first, so the heaviest projects keep their measured place.
+    for (const [cellIndex, members] of [...byCell.entries()].sort((a, b) => b[0] - a[0])) {
+      const tentative: Array<{ offset: number; y: number; radius: number }> = [];
+      let crowded = false;
+      for (const member of members) {
+        const { offset, clear } = clearOffset(member.y, member.radius, [...settledHere, ...tentative]);
+        if (!clear && members.length >= PACK_MIN) {
+          crowded = true;
+          break;
+        }
+        tentative.push({ offset, y: member.y, radius: member.radius });
+      }
+      if (!crowded || members.length < PACK_MIN) {
+        members.forEach((member, rank) => place(member.project, index + tentative[rank]!.offset, member.y, null));
+        settledHere.push(...tentative);
+        continue;
+      }
+      const id = `cell:${index}:${cellIndex}`;
+      const height = CELL_HEIGHT * 0.92;
+      const cols = Math.max(1, Math.round(Math.sqrt((members.length * PACK_WIDTH) / height)));
+      const rows = Math.ceil(members.length / cols);
+      const dx = PACK_WIDTH / cols;
+      const dy = height / rows;
+      const centreY = (cellIndex + 0.5) * CELL_HEIGHT;
+      const spacing = rows > 1 ? Math.min(dx, dy) : dx;
+      members.forEach((member, rank) => {
+        const x = index - PACK_WIDTH / 2 + dx * ((rank % cols) + 0.5);
+        const y = centreY + height / 2 - dy * (Math.floor(rank / cols) + 0.5);
+        place(member.project, x, y, id);
+        settledHere.push({ offset: x - index, y, radius: spacing / 2 });
+      });
+      cells.push({
+        id,
+        column: index,
+        members: members.map((member) => member.project.project_id),
+        x: index,
+        y: centreY,
+        width: PACK_WIDTH,
+        height,
+        spacing,
+        maxRadius: Math.max(...members.map((member) => member.radius)),
+        mass: members.reduce((sum, member) => sum + indexedMass(member.project), 0),
       });
     }
   }
+  cells.sort((a, b) => a.column - b.column || b.y - a.y);
 
   // Shared-checkout repositories, and only those. The hub is the git directory
   // itself; its edges say "these working copies are the same repository", which
@@ -340,6 +426,7 @@ export function composeRegistryField(
       ),
       x: centroid.x,
       y: centroid.y,
+      cell: null,
     });
     for (const project of group.projects) {
       if (!placedById.has(project.project_id)) continue;
@@ -370,6 +457,7 @@ export function composeRegistryField(
     mass: summarizeMass(projects, axisLow, axisSpan),
     vitalityHorizonDays: horizonDays,
     sharedRepoCount,
+    cells,
     extent: {
       x: [-xMargin, RECENCY_COLUMNS.length - 1 + xMargin],
       y: [-bottomPad, MASS_AXIS_HEIGHT + topPad],
@@ -421,19 +509,16 @@ function summarizeMass(
  * offset within a column costs nothing, an offset across one would be a lie
  * about when the project was last seen.
  *
- * A real registry does exhaust that width, thirty-odd projects all seen in the
- * same week, holding much the same amount, want the same point. When no offset
- * clears, the body takes the one that leaves the most room rather than the
- * centre line, so a crowded column reads as a dense band with structure in it
- * instead of a pile on its axis. Bodies there genuinely do overlap, which is
- * the truth: those projects are in the same place because they measure the
- * same.
+ * When no offset clears, the body takes the one that leaves the most room
+ * rather than the centre line and reports that it did not clear. A few such
+ * bodies overlap in place, which is the truth: they measure the same. A
+ * crowd of them is packed into its mass cell instead (see `FieldCell`).
  */
 function clearOffset(
   y: number,
   radius: number,
   settled: ReadonlyArray<{ offset: number; y: number; radius: number }>,
-): number {
+): { offset: number; clear: boolean } {
   const steps = Math.floor(COLUMN_HALF_WIDTH / NUDGE);
   let roomiest = 0;
   let mostRoom = -Infinity;
@@ -447,14 +532,14 @@ function clearOffset(
           Math.hypot(point.offset - offset, point.y - y) - (point.radius + radius),
         );
       }
-      if (room >= 0) return offset;
+      if (room >= 0) return { offset, clear: true };
       if (room > mostRoom) {
         mostRoom = room;
         roomiest = offset;
       }
     }
   }
-  return roomiest;
+  return { offset: roomiest, clear: false };
 }
 
 /** One of the three counts a registry entry carries, summarised across the

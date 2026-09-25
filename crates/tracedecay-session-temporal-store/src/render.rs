@@ -148,8 +148,6 @@ mod tests {
                 content_hash: "hash".to_string(),
                 storage_kind: LcmStorageKind::Inline,
                 payload_ref: None,
-                legacy_source: false,
-                legacy_truncated: false,
                 metadata_json: None,
             }),
             raw_message_metadata: None,
@@ -175,7 +173,6 @@ mod tests {
             summary_sources: vec![source(1), source(2), source(3), source(4)],
             payload_ref: None,
             from_current_session: None,
-            externalized_note: None,
             source_pagination: None,
         };
         let hydration = vec![
@@ -269,7 +266,6 @@ mod tests {
             summary_sources: Vec::new(),
             payload_ref: None,
             from_current_session: None,
-            externalized_note: None,
             source_pagination: None,
         };
 

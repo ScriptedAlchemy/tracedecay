@@ -87,13 +87,14 @@ async fn run_scope_set_compare_and_swap() {
         tokio::net::UnixStream::pair().expect("scope-set socket pair");
     let server_engine = engine.clone();
     let server_task = tokio::spawn(async move {
-        Box::pin(super::super::serve_socket_client(
+        Box::pin(super::serve_authenticated_test_client(
             server_stream,
             server_engine,
         ))
         .await
     });
     let (reader, mut writer) = client_stream.into_split();
+    super::write_test_auth_preface(&mut writer).await;
     let mut reader = tokio::io::BufReader::new(reader);
     writer
         .write_all(handshake.to_line().expect("handshake").as_bytes())

@@ -1,9 +1,11 @@
+mod analytics;
 mod envelope;
 mod evidence;
 mod problem;
 mod receipt;
 mod stream;
 
+pub use analytics::{ContextMemoryAnalyticsV1, InvocationAnalyticsV1};
 pub use envelope::{
     APPLICATION_PROBLEM_REVISION, ApplicationEnvelope, ApplicationOutcome,
     ApplicationProblemEnvelope, ApplicationProblemRecord, ApplicationResult, MAX_PROBLEM_DETAILS,

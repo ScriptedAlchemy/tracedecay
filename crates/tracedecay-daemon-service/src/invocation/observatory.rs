@@ -128,7 +128,7 @@ pub(super) async fn execute_observatory_read(
             );
         }
     };
-    let finished_at = current_micros();
+    let finished_at = now_micros();
     let authority = match authorization
         .recheck_publication(&context, &operation, &admission, finished_at)
         .await
@@ -157,7 +157,7 @@ fn observatory_evidence(
 ) -> Result<DaemonFeedbackResult, ApplicationProblem> {
     let execution = OperationReceipt::completed(
         observed_at,
-        current_micros(),
+        now_micros(),
         deadline,
         OperationBudgetUsage::default(),
     )

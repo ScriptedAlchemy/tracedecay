@@ -46,36 +46,37 @@ impl ProjectRuntimeRegistryV1 {
 
     #[hotpath::skip]
     async fn drain_roots(&self, roots: &BTreeSet<PathBuf>) -> bool {
-        let retired = tokio::time::timeout(crate::TASK_ABORT_DEADLINE, async {
-            loop {
-                let mut changed = self.reservation_changed.subscribe();
-                let retired = {
-                    let fences = self.lock_root_fences();
-                    let mut current = self.lock_runtimes();
-                    (fences.requests_drained(roots)
-                        && roots.iter().all(|root| {
-                            current
-                                .get(root)
-                                .is_none_or(|runtime| runtime.reservations.is_empty())
-                        }))
-                    .then(|| {
-                        roots
-                            .iter()
-                            .filter_map(|root| {
-                                current.remove(root).map(|runtime| (root.clone(), runtime))
-                            })
-                            .collect::<BTreeMap<_, _>>()
-                    })
-                };
-                if let Some(retired) = retired {
-                    break retired;
+        let retired =
+            tokio::time::timeout(tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE, async {
+                loop {
+                    let mut changed = self.reservation_changed.subscribe();
+                    let retired = {
+                        let fences = self.lock_root_fences();
+                        let mut current = self.lock_runtimes();
+                        (fences.requests_drained(roots)
+                            && roots.iter().all(|root| {
+                                current
+                                    .get(root)
+                                    .is_none_or(|runtime| runtime.reservations.is_empty())
+                            }))
+                        .then(|| {
+                            roots
+                                .iter()
+                                .filter_map(|root| {
+                                    current.remove(root).map(|runtime| (root.clone(), runtime))
+                                })
+                                .collect::<BTreeMap<_, _>>()
+                        })
+                    };
+                    if let Some(retired) = retired {
+                        break retired;
+                    }
+                    if changed.changed().await.is_err() {
+                        break BTreeMap::new();
+                    }
                 }
-                if changed.changed().await.is_err() {
-                    break BTreeMap::new();
-                }
-            }
-        })
-        .await;
+            })
+            .await;
         match retired {
             Ok(mut runtimes) => {
                 let mut clean = shut_down_advisory(&runtimes).await;

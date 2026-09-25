@@ -9,7 +9,7 @@ use tempfile::TempDir;
 use super::super::get_tool_definitions;
 use super::dispatch_test_support::*;
 use super::*;
-use crate::config::lock_user_data_dir_test_env;
+use tracedecay_project::config::lock_user_data_dir_test_env;
 
 /// Records the daemon operation every multi-root tool routes to, then refuses
 /// it. The refusal is the point: it proves the MCP name reached the closed
@@ -266,7 +266,7 @@ fn git_dispatch_family_is_visible_to_the_server_horizon() {
             "{tool_name} dispatches through the git family",
         );
     }
-    assert!(!tool_dispatches_git_reads("tracedecay_outline"));
+    assert!(!tool_dispatches_git_reads("tracedecay_files"));
     assert!(!tool_dispatches_git_reads("tracedecay_diagnostics"));
 }
 
@@ -329,44 +329,6 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
                 "{} has no canonical Workflow operation entry",
                 definition.name
             ),
-            McpToolDispatchGroup::RetainedApplication => {
-                let composition = retained_mcp_composition().unwrap_or_else(|error| {
-                    panic!("{} catalog composition failed: {error}", definition.name)
-                });
-                let profile = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).unwrap();
-                let operation = RetainedSurfaceOperation::from_tool_name(&definition.name)
-                    .unwrap_or_else(|| {
-                        panic!("{} has no retained-surface handler entry", definition.name)
-                    });
-                let operation_name = SurfaceOperationName::new(operation.as_str()).unwrap();
-                let capability = composition
-                    .snapshot()
-                    .resolve_binding(
-                        &profile,
-                        BindingSurface::Mcp,
-                        &operation_name,
-                        1,
-                        &BTreeSet::new(),
-                    )
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "{} action {} catalog binding is not callable",
-                            definition.name,
-                            operation.as_str()
-                        )
-                    });
-                let expected = retained_surface_application_operation(operation).unwrap();
-                assert_eq!(capability.capability_id(), expected.capability_id());
-                assert_eq!(capability.use_case_id(), expected.use_case_id());
-                assert!(
-                    composition
-                        .bind_handler(capability.use_case_id(), &())
-                        .is_some(),
-                    "{} action {} application handler is not registered",
-                    definition.name,
-                    operation.as_str()
-                );
-            }
             group => {
                 assert_eq!(
                     dispatch_group_for_tool(&definition.name),
@@ -417,7 +379,7 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
 }
 
 #[test]
-fn graph_reader_selector_dispatch_policy_is_allowlisted() {
+fn registered_project_selector_dispatch_policy_matches_tool_schemas() {
     for tool in get_tool_definitions().expect("tool definitions") {
         let properties = &tool.input_schema["properties"];
         let schema_has_registered_project_selector = properties.get("project_selector").is_some();
@@ -455,37 +417,6 @@ fn graph_reader_selector_dispatch_policy_is_allowlisted() {
                 tool.name
             );
         }
-    }
-
-    for tool_name in [
-        // `tracedecay_search` resolves a daemon-owned code-index search
-        // authority that is bound to the active project, so a selector
-        // would run the active authority against a different graph.
-        "tracedecay_search",
-        "tracedecay_str_replace",
-        "tracedecay_run_affected_tests",
-        "tracedecay_status",
-        "tracedecay_health",
-        "tracedecay_dead_code",
-    ] {
-        assert!(
-            !tool_accepts_registered_project_selector(tool_name),
-            "{tool_name} should not be routed by the pure graph-reader selector policy"
-        );
-    }
-
-    // Pure graph reads that need nothing but the selected project's graph
-    // must accept a selector.
-    for tool_name in [
-        "tracedecay_type_hierarchy",
-        "tracedecay_outline",
-        "tracedecay_read",
-        "tracedecay_body",
-    ] {
-        assert!(
-            tool_accepts_registered_project_selector(tool_name),
-            "{tool_name} should route through the graph-reader selector policy"
-        );
     }
 }
 
@@ -651,7 +582,10 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     let meta = tracedecay_runtime_core::branch_meta::BranchMeta::new("main");
     tracedecay_runtime_core::branch_meta::save_branch_meta(&layout.data_root, &meta).unwrap();
     let cg = runtime
-        .open_project_graph_for_test(&project, crate::project::TraceDecayOpenOptions::default())
+        .open_project_graph_for_test(
+            &project,
+            tracedecay_project::project::TraceDecayOpenOptions::default(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -871,11 +805,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     // tracking ref rather than the user-visible branch name.
     let mut branch_meta = tracedecay_runtime_core::branch_meta::load_branch_meta(&layout.data_root)
         .expect("main branch metadata");
-    branch_meta.add_branch(
-        "feature",
-        tracedecay_runtime_core::config::DB_FILENAME,
-        "main",
-    );
+    branch_meta.add_branch("feature", "main");
     tracedecay_runtime_core::branch_meta::save_branch_meta(&layout.data_root, &branch_meta)
         .unwrap();
     run_git_in(&project, &["checkout", "-b", "feature"]);
@@ -1199,16 +1129,20 @@ async fn selected_project_retrieve_finds_selected_project_response_handle() {
     let target_server = crate::mcp::McpServer::new_with_host_admission_test_runtime_for_test(
         target,
         None,
-        crate::test_support::host_admission::ProjectScopedTestRuntimeV1::new(target_runtime)
-            .expect("target project-scoped runtime"),
+        tracedecay_project::test_support::host_admission::ProjectScopedTestRuntimeV1::new(
+            target_runtime,
+        )
+        .expect("target project-scoped runtime"),
     )
     .await
     .expect("target retained server");
     let server = crate::mcp::McpServer::new_with_retained_test_servers_for_test(
         active,
         None,
-        crate::test_support::host_admission::ProjectScopedTestRuntimeV1::new(active_runtime)
-            .expect("active project-scoped runtime"),
+        tracedecay_project::test_support::host_admission::ProjectScopedTestRuntimeV1::new(
+            active_runtime,
+        )
+        .expect("active project-scoped runtime"),
         vec![target_server],
     )
     .await
@@ -1633,16 +1567,14 @@ async fn graph_tools_reject_blank_node_ids_and_zero_depth_with_typed_errors() {
         TraceDecay::init_test_fixture_with_registered_runtime(&project, "project.blank-node-id")
             .await
             .unwrap();
-    for tool_name in [
-        "tracedecay_impact",
-        "tracedecay_callers",
-        "tracedecay_callees",
-        "tracedecay_node",
+    for (tool_name, operation) in [
+        ("tracedecay_impact", ApplicationSurfaceOperation::Impact),
+        ("tracedecay_node", ApplicationSurfaceOperation::Node),
     ] {
         for blank in ["", "   "] {
-            let error = dispatch_graph_tools(
-                tool_name,
+            let error = super::compute_graph_tool_for_owner(
                 &cg,
+                operation,
                 json!({"node_id": blank}),
                 None,
                 verified_graph_options(&cg, ToolCallRegistryOptions::default()),
@@ -1660,14 +1592,10 @@ async fn graph_tools_reject_blank_node_ids_and_zero_depth_with_typed_errors() {
     // Handlers clamp depth with `min(max)`, which leaves an explicit zero
     // intact, so a valid node id still reaches the guard from this side.
     let node_id = "symbol.blank-probe";
-    for tool_name in [
-        "tracedecay_impact",
-        "tracedecay_callers",
-        "tracedecay_callees",
-    ] {
-        let error = dispatch_graph_tools(
-            tool_name,
+    for (tool_name, operation) in [("tracedecay_impact", ApplicationSurfaceOperation::Impact)] {
+        let error = super::compute_graph_tool_for_owner(
             &cg,
+            operation,
             json!({"node_id": node_id, "max_depth": 0}),
             None,
             verified_graph_options(&cg, ToolCallRegistryOptions::default()),
@@ -1942,12 +1870,93 @@ async fn a_stale_served_graph_read_carries_the_typed_freshness_trailer() {
     cg.close();
 }
 
+/// The graph-tool owner reports the generation it served on the completion,
+/// so the envelope carries the stale seat and every surface renders the same
+/// trailer from it.
+#[tokio::test]
+async fn graph_tool_owner_reports_the_served_generation_for_the_trailer() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().unwrap();
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("graph-tool-trailer");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        &project,
+        "project.graph-tool-trailer",
+    )
+    .await
+    .unwrap();
+
+    let stale = super::compute_graph_tool_for_owner(
+        &cg,
+        ApplicationSurfaceOperation::Todos,
+        json!({}),
+        None,
+        verified_graph_stale_options(&cg, ToolCallRegistryOptions::default()),
+    )
+    .await
+    .expect("a stale-served graph tool still answers");
+    let served = stale.code_graph.clone().expect("served generation");
+    assert_eq!(served.generation, "generation.mcp-verified-graph-fixture.1");
+    assert!(served.freshness.is_stale());
+    let rendered = tracedecay_mcp::handlers::graph_tool::render_graph_tool(
+        Some(cg.project_root()),
+        &json!({}),
+        stale,
+    )
+    .unwrap();
+    let rendered = serde_json::to_string(&rendered.value).unwrap();
+    assert!(
+        rendered.contains(
+            "code_graph_freshness: stale, serving the last complete generation \
+             generation.mcp-verified-graph-fixture.1 (sealed 1m ago) while the code index rebuilds"
+        ),
+        "{rendered}"
+    );
+
+    let current = super::compute_graph_tool_for_owner(
+        &cg,
+        ApplicationSurfaceOperation::Todos,
+        json!({}),
+        None,
+        verified_graph_options(&cg, ToolCallRegistryOptions::default()),
+    )
+    .await
+    .expect("a current graph tool answers");
+    assert!(
+        !current
+            .code_graph
+            .as_ref()
+            .expect("served generation")
+            .freshness
+            .is_stale()
+    );
+    let rendered = tracedecay_mcp::handlers::graph_tool::render_graph_tool(
+        Some(cg.project_root()),
+        &json!({}),
+        current,
+    )
+    .unwrap();
+    assert!(
+        !serde_json::to_string(&rendered.value)
+            .unwrap()
+            .contains("code_graph_freshness")
+    );
+
+    cg.close();
+}
+
 #[test]
-fn unavailable_effect_contract_fails_before_handler_dispatch() {
-    assert!(super::ensure_mcp_dispatch_available("tracedecay_lcm_doctor").is_ok());
-    assert!(super::ensure_mcp_dispatch_available("tracedecay_lcm_compress").is_err());
-    assert!(super::ensure_mcp_dispatch_available("tracedecay_dashboard").is_ok());
-    assert!(super::ensure_mcp_dispatch_available("tracedecay_search").is_ok());
+fn uncataloged_tool_fails_before_handler_dispatch() {
+    let error = super::ensure_mcp_dispatch_available("tracedecay_lcm_compress").unwrap_err();
+    let TraceDecayError::Config { message } = error else {
+        panic!("a tool with no dispatch contract must be a typed Config error: {error:?}");
+    };
+    assert_eq!(
+        message,
+        "advertised MCP tool 'tracedecay_lcm_compress' has no dispatch contract"
+    );
 }
 
 #[tokio::test]
@@ -2262,7 +2271,7 @@ async fn admin_sync_reports_terminal_publication_corruption_without_queueing() {
     let reconcile_sink: crate::mcp::server::CodeIndexReconcileSink = std::sync::Arc::new(
         move |_, _| {
             Box::pin(async move {
-                crate::mcp::server::CodeIndexDemandAdmissionV1::Terminal(
+                tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandAdmissionV1::Terminal(
                     tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1 {
                         reason: "the publication authority is corrupt and requires an index reset: injected sync refusal".to_owned(),
                         blocked_reason: Some(

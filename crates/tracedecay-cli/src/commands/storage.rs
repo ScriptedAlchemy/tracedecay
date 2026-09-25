@@ -497,7 +497,7 @@ async fn wipe_under_profile_offline(
         let project_paths = if all {
             Vec::new()
         } else {
-            global::gather_target_projects(false, home_tracedecay).await?
+            global::gather_target_projects(false).await?
         };
         let mut targets = Vec::new();
         for path in &project_paths {
@@ -632,8 +632,8 @@ fn handle_list_inner(
     Box::pin(async move {
         use tracedecay_runtime_core::text::format_token_count;
 
-        let home_tracedecay = tracedecay::config::user_data_dir();
-        let project_paths = global::gather_target_projects(all, &home_tracedecay).await?;
+        let home_tracedecay = tracedecay_project::config::user_data_dir();
+        let project_paths = global::gather_target_projects(all).await?;
 
         if !all && project_paths.is_empty() {
             println!("No tracedecay projects found in current folder, parents, or children.");
@@ -826,7 +826,7 @@ fn append_orphan_manifest_rows(
         .collect();
     let report = tracedecay_global_db::registry_maintenance::inspect_profile_store_orphans(
         profile_root,
-        tracedecay::project::current_timestamp(),
+        tracedecay_runtime_core::tracedecay::current_timestamp(),
     );
     for plan in report.plans {
         if plan.status

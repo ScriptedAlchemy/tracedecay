@@ -108,6 +108,7 @@ mod tests {
             backend_attempt_count: 0,
             backend_attempts: Vec::new(),
             fallback_status: None,
+            session_evidence_budget_stage: None,
             report_ref: Some(json!({"run_id": "run-42"})),
             artifacts: Vec::new(),
             started_at: "1700000000".to_owned(),
@@ -192,25 +193,5 @@ mod tests {
             automation_funnel_observation_from_record(&record),
             Err("invalid_completed_at")
         );
-    }
-
-    #[test]
-    fn legacy_reused_scheduler_skip_keeps_its_exact_rfc3339_observation_time() {
-        let mut record = ledger_record(AutomationRunStatus::Skipped);
-        record.schema_version = 1;
-        record.run_id = "legacy-reused-scheduler-skip".to_owned();
-        record.started_at = "1970-01-01T00:00:00Z".to_owned();
-        record.completed_at = "1970-01-01T00:00:01.123456Z".to_owned();
-        record.completed_at_micros = None;
-        record.error = Some("scheduler_interval_not_elapsed".to_owned());
-
-        // Reused scheduler skips pass their exact prior row through this same
-        // mapper after durable abandonment; no second timestamp path exists.
-        let (observation, observed_at) =
-            automation_funnel_observation_from_record(&record).expect("valid legacy exact row");
-
-        assert_eq!(observed_at, UtcMicros(1_123_456));
-        assert_eq!(observation.run_ref, "legacy-reused-scheduler-skip");
-        assert_eq!(observation.terminal, AutomationTerminalV1::Skipped);
     }
 }

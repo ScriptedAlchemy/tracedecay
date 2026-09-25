@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tracedecay_domain::{
     DomainError, FactAssertionId, FactAssertionKindV1, FactAssertionV1, FactCurationActionV1,
     FactEventId, FactId, FactIdentityMaterialV1, FactLineageEventKindV1, FactLineageEventV1,
-    FactOwnerV1, ManifestDigest, RetrievalAnchorId, RetrievalAnchorRecordV2, canonical_sha256,
+    FactOwnerV1, ManifestDigest, RetrievalAnchorId, RetrievalAnchorRecord, canonical_sha256,
 };
 
 use super::{FactStoreError, FactStoreResult, validate_owned_fact_id};
@@ -52,7 +52,7 @@ pub struct FactWriteBatch {
     identity_material: Option<FactIdentityMaterialV1>,
     assertion: Option<FactAssertionV1>,
     events: Vec<FactLineageEventV1>,
-    new_anchors: Vec<RetrievalAnchorRecordV2>,
+    new_anchors: Vec<RetrievalAnchorRecord>,
     referenced_anchor_ids: Vec<RetrievalAnchorId>,
     expected_last_event_id: Option<FactEventId>,
 }
@@ -64,7 +64,7 @@ impl FactWriteBatch {
         owner: FactOwnerV1,
         assertion: Option<FactAssertionV1>,
         events: Vec<FactLineageEventV1>,
-        new_anchors: Vec<RetrievalAnchorRecordV2>,
+        new_anchors: Vec<RetrievalAnchorRecord>,
         referenced_anchor_ids: Vec<RetrievalAnchorId>,
         expected_last_event_id: Option<FactEventId>,
     ) -> FactStoreResult<Self> {
@@ -216,7 +216,7 @@ impl FactWriteBatch {
         &self.events
     }
 
-    pub fn new_anchors(&self) -> &[RetrievalAnchorRecordV2] {
+    pub fn new_anchors(&self) -> &[RetrievalAnchorRecord] {
         &self.new_anchors
     }
 
@@ -237,7 +237,7 @@ impl FactWriteBatch {
         Option<FactIdentityMaterialV1>,
         Option<FactAssertionV1>,
         Vec<FactLineageEventV1>,
-        Vec<RetrievalAnchorRecordV2>,
+        Vec<RetrievalAnchorRecord>,
         Vec<RetrievalAnchorId>,
         Option<FactEventId>,
     ) {
@@ -313,7 +313,7 @@ fn invalid_normalized_tag_batch() -> FactStoreError {
 }
 
 fn validate_anchor_lineage(
-    new_anchors: &[RetrievalAnchorRecordV2],
+    new_anchors: &[RetrievalAnchorRecord],
     referenced_anchor_ids: &[RetrievalAnchorId],
 ) -> FactStoreResult<()> {
     let referenced = referenced_anchor_ids.iter().collect::<BTreeSet<_>>();

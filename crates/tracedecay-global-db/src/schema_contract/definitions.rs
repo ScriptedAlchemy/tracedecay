@@ -5,6 +5,9 @@ pub(super) struct Column {
     pub(super) not_null: bool,
     pub(super) default_value: Option<&'static str>,
     pub(super) primary_key_ordinal: i64,
+    /// `pragma_table_xinfo.hidden`: 0 for a stored column, 2 for a virtual
+    /// generated column, which occupies no row bytes.
+    pub(super) hidden: i64,
 }
 
 const fn column(
@@ -20,6 +23,18 @@ const fn column(
         not_null,
         default_value,
         primary_key_ordinal,
+        hidden: 0,
+    }
+}
+
+const fn virtual_column(name: &'static str, declared_type: &'static str, not_null: bool) -> Column {
+    Column {
+        name,
+        declared_type,
+        not_null,
+        default_value: None,
+        primary_key_ordinal: 0,
+        hidden: 2,
     }
 }
 
@@ -73,49 +88,6 @@ macro_rules! table {
         }
     };
 }
-
-pub(super) const SESSION_TEMPORAL_PROJECTION_RECEIPTS_V3: Table = table!(
-    "session_temporal_projection_receipts",
-    [
-        column("session_id", "TEXT", true, None, 1),
-        column("generation", "INTEGER", true, None, 2),
-        column("batch_ordinal", "INTEGER", true, None, 3),
-        column("batch_digest", "TEXT", true, None, 0),
-        column("frozen_watermarks_json", "TEXT", true, None, 0),
-        column("source_through", "INTEGER", true, None, 0),
-        column("projection_through", "INTEGER", true, None, 0),
-        column("occurrence_count", "INTEGER", true, None, 0),
-        column("occurrence_digest", "TEXT", true, None, 0),
-        column("dimension_count", "INTEGER", true, None, 0),
-        column("dimension_digest", "TEXT", true, None, 0),
-        column("copy_count", "INTEGER", true, None, 0),
-        column("copy_digest", "TEXT", true, None, 0),
-        column("assertion_count", "INTEGER", true, None, 0),
-        column("assertion_digest", "TEXT", true, None, 0),
-        column("supersession_count", "INTEGER", true, None, 0),
-        column("supersession_digest", "TEXT", true, None, 0),
-        column("current_count", "INTEGER", true, None, 0),
-        column("current_digest", "TEXT", true, None, 0),
-        column("fts_count", "INTEGER", true, None, 0),
-        column("fts_digest", "TEXT", true, None, 0),
-        column("committed_at", "INTEGER", true, None, 0),
-    ],
-    [
-        foreign_key(
-            "session_id",
-            "session_temporal_generations",
-            "session_id",
-            "CASCADE"
-        ),
-        foreign_key_sequence(
-            "generation",
-            "session_temporal_generations",
-            "generation",
-            "CASCADE",
-            1
-        ),
-    ]
-);
 
 const SESSION_TEMPORAL_PROJECTION_RECEIPTS_V4: Table = table!(
     "session_temporal_projection_receipts",
@@ -848,8 +820,6 @@ pub(super) const TABLES: &[Table] = &[
             column("output_message_id", "TEXT", true, None, 4),
             column("message_json", "TEXT", true, None, 0),
             column("content_hash", "TEXT", true, None, 0),
-            column("snippet_text", "TEXT", true, None, 0),
-            column("index_text", "TEXT", true, None, 0),
         ],
         [
             foreign_key(
@@ -1029,9 +999,18 @@ pub(super) const TABLES: &[Table] = &[
         [
             column("summary_id", "TEXT", false, None, 1),
             column("session_id", "TEXT", true, None, 0),
+            column("provider", "TEXT", true, None, 0),
+            column("conversation_id", "TEXT", true, None, 0),
+            column("depth", "INTEGER", true, None, 0),
             column("summary_anchor_id", "TEXT", true, None, 0),
             column("summary_text", "TEXT", true, None, 0),
-            column("index_text", "TEXT", true, None, 0),
+            column("summary_hash", "TEXT", true, None, 0),
+            column("summary_token_count", "INTEGER", true, None, 0),
+            column("source_token_count", "INTEGER", true, None, 0),
+            column("source_time_start", "INTEGER", false, None, 0),
+            column("source_time_end", "INTEGER", false, None, 0),
+            column("expand_hint", "TEXT", false, None, 0),
+            column("metadata_json", "TEXT", false, None, 0),
             column("source_horizon_json", "TEXT", true, None, 0),
             column("publication_json", "TEXT", false, None, 0),
             column("created_at", "INTEGER", true, None, 0),
@@ -1040,6 +1019,21 @@ pub(super) const TABLES: &[Table] = &[
             "summary_anchor_id",
             "retrieval_anchors",
             "anchor_id",
+            "NO ACTION"
+        )]
+    ),
+    table!(
+        "session_summary_sources",
+        [
+            column("summary_id", "TEXT", true, None, 1),
+            column("ordinal", "INTEGER", true, None, 2),
+            column("source_kind", "TEXT", true, None, 0),
+            column("source_id", "TEXT", true, None, 0),
+        ],
+        [foreign_key(
+            "summary_id",
+            "session_summary_nodes",
+            "summary_id",
             "NO ACTION"
         )]
     ),
@@ -1401,7 +1395,7 @@ pub(super) const TABLES: &[Table] = &[
             column("evidence_json", "TEXT", true, None, 0),
             column("sanitized_content_digest", "TEXT", true, None, 0),
             column("sanitized_content_bytes", "INTEGER", true, None, 0),
-            column("snippet_text", "TEXT", true, None, 0),
+            virtual_column("snippet_text", "TEXT", true),
             column("index_text", "TEXT", true, None, 0),
         ],
         [
@@ -2062,6 +2056,40 @@ pub(super) const INDEXES: &[Index] = &[
         columns: &["created_at", "session_id", "summary_id"],
     },
     Index {
+        table: "session_summary_nodes",
+        name: Some("idx_session_summary_nodes_session_depth_time"),
+        unique: false,
+        origin: "c",
+        columns: &[
+            "provider",
+            "session_id",
+            "depth",
+            "source_time_start",
+            "source_time_end",
+            "created_at",
+        ],
+    },
+    Index {
+        table: "session_summary_nodes",
+        name: Some("idx_session_summary_nodes_depth_tokens"),
+        unique: false,
+        origin: "c",
+        columns: &[
+            "provider",
+            "session_id",
+            "depth",
+            "summary_token_count",
+            "source_token_count",
+        ],
+    },
+    Index {
+        table: "session_summary_sources",
+        name: Some("idx_session_summary_sources_source"),
+        unique: false,
+        origin: "c",
+        columns: &["source_kind", "source_id", "summary_id"],
+    },
+    Index {
         table: "session_external_payload_manifests",
         name: Some("idx_session_external_payload_manifests_session"),
         unique: false,
@@ -2409,71 +2437,3 @@ pub(super) const INDEXES: &[Index] = &[
         columns: &["session_id", "generation", "availability"],
     },
 ];
-
-#[cfg(test)]
-mod tests {
-    use super::{INDEXES, TABLES};
-
-    const REBUILD_TABLES: &[&str] = &[
-        "observation_projection_rebuild_provider_usage",
-        "observation_projection_rebuilds",
-        "observation_projection_rebuild_aliases",
-        "observation_projection_rebuild_sessions",
-        "observation_projection_rebuild_messages",
-        "observation_projection_rebuild_provenance",
-        "observation_projection_rebuild_dispositions",
-        "observation_projection_rebuild_workflow_facts",
-    ];
-
-    #[test]
-    fn rebuild_schema_contract_registration_is_complete() {
-        let tables = TABLES
-            .iter()
-            .map(|table| table.name)
-            .filter(|name| name.starts_with("observation_projection_rebuild"))
-            .collect::<Vec<_>>();
-        assert_eq!(tables, REBUILD_TABLES);
-
-        let indexes = INDEXES
-            .iter()
-            .filter(|index| index.table.starts_with("observation_projection_rebuild"))
-            .map(|index| (index.table, index.name, index.unique, index.columns))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            indexes,
-            vec![
-                (
-                    "observation_projection_rebuilds",
-                    None,
-                    true,
-                    &["projector_version", "generation"] as &[_],
-                ),
-                (
-                    "observation_projection_rebuild_provenance",
-                    Some("idx_projection_rebuild_provenance_output"),
-                    false,
-                    &[
-                        "projector_version",
-                        "generation",
-                        "output_provider",
-                        "output_message_id",
-                    ],
-                ),
-                (
-                    "observation_projection_rebuild_workflow_facts",
-                    Some("idx_projection_rebuild_workflow_goal"),
-                    false,
-                    &[
-                        "projector_version",
-                        "generation",
-                        "provider",
-                        "session_id",
-                        "semantic_kind",
-                        "provider_reference",
-                        "observation_sequence",
-                    ],
-                ),
-            ]
-        );
-    }
-}

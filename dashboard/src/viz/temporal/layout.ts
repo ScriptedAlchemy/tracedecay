@@ -233,11 +233,32 @@ export function layoutTemporalScene(
 
   // --- collapse & visibility -------------------------------------------------
   const denseDefault = lanes.length > options.denseLaneThreshold;
+  // A dense page bundles at the deepest hierarchy level whose lanes still fit
+  // the threshold: a lone orchestrator opens onto its workstreams, not into
+  // one bundle of everything.
+  let denseDepth: number | null = null;
+  if (denseDefault) {
+    denseDepth = 0;
+    for (let depth = 1; lanes.filter((lane) => lane.depth <= depth).length <= options.denseLaneThreshold; depth += 1) {
+      if (!lanes.some((lane) => lane.depth > depth)) break;
+      denseDepth = depth;
+    }
+  }
+  // Workstream zoom bundles where the work first fans out: the shallowest
+  // level at which more than one session delegates.
+  let workstreamDepth = 0;
+  const maxDepth = lanes.reduce((max, lane) => Math.max(max, lane.depth), 0);
+  for (let depth = 0; depth <= maxDepth; depth += 1) {
+    if (lanes.filter((lane) => lane.depth === depth && (childrenOf.get(lane.id)?.length ?? 0) > 0).length > 1) {
+      workstreamDepth = depth;
+      break;
+    }
+  }
   const isCollapsed = (lane: JourneyLane): boolean => {
     if ((childrenOf.get(lane.id)?.length ?? 0) === 0) return false;
     switch (zoom) {
       case 'workstream':
-        return true;
+        return lane.depth === workstreamDepth;
       case 'agent':
       case 'event':
         break;
@@ -247,7 +268,7 @@ export function layoutTemporalScene(
       }
     }
     if (branches.collapsed.has(lane.id)) return true;
-    return denseDefault && lane.depth === 0 && !branches.expanded.has(lane.id);
+    return lane.depth === denseDepth && !branches.expanded.has(lane.id);
   };
   const collapsedIds = new Set(lanes.filter(isCollapsed).map((lane) => lane.id));
   // The bundle a lane is hidden under is its outermost collapsed ancestor.
@@ -425,6 +446,7 @@ export function layoutTemporalScene(
   // --- nodes -----------------------------------------------------------------
   const nodes: SceneNode[] = [];
   const nodeById = new Map<string, SceneNode>();
+  const linkedEventIds = new Map<string, string>();
   const gutterYOf = (lane: SceneLane): number =>
     lane.y + lane.height / 2 - SEQUENCE_GUTTER_RISE_PX;
   const undatedByLane = new Map<string, SceneNode[]>();
@@ -467,6 +489,7 @@ export function layoutTemporalScene(
       };
       nodes.push(scene);
       nodeById.set(scene.id, scene);
+      if (node.event.linkedEventId !== undefined) linkedEventIds.set(scene.id, node.event.linkedEventId);
       if (scene.xBasis === 'sequence') laneUndated.push(scene);
     });
     if (laneUndated.length > 0) undatedByLane.set(sceneLane.id, laneUndated);
@@ -502,14 +525,16 @@ export function layoutTemporalScene(
       relationsWithheld += 1;
       continue;
     }
-    if (relation.time === null) continue;
+    // A fork bound to a drawn tool-call glyph leaves from that glyph.
+    const origin = relation.fromEventId === undefined ? undefined : nodeById.get(relation.fromEventId);
+    const px = origin ? origin.x : relation.time === null ? null : x(relation.time);
+    if (px === null) continue;
     const targetId = standInFor(relation.toLaneId);
     if (targetId === null || targetId === parent.id) continue;
     const target = sceneLaneById.get(targetId);
     if (!target) continue;
-    const px = x(relation.time);
     if (!inWindow(px)) continue;
-    const py = parent.y;
+    const py = origin ? origin.y : parent.y;
     const ty = target.y;
     const k = Math.min(28, Math.max(8, Math.abs(ty - py) * 0.35));
     const childFocus = focusFor(relation.toLaneId);
@@ -545,6 +570,23 @@ export function layoutTemporalScene(
         weight: null,
       });
     }
+  }
+
+  for (const node of nodes) {
+    const linkedId = linkedEventIds.get(node.id);
+    const call = linkedId === undefined ? undefined : nodeById.get(linkedId);
+    if (!call) continue;
+    paths.push({
+      id: `edit_link:${node.id}→${call.id}`,
+      kind: 'edit_link',
+      fromId: node.id,
+      toId: call.id,
+      grade: 'exact',
+      basis: 'edit recorded in the same second as the tool call',
+      focus: node.focus,
+      controls: [node.x, node.y, call.x, call.y],
+      weight: null,
+    });
   }
 
   // --- clusters --------------------------------------------------------------
@@ -641,9 +683,12 @@ export function layoutTemporalScene(
         return { ...base, x: sceneLane.x1, y: sceneLane.y };
       case 'parent_outside_page':
       case 'parent_cycle':
+      case 'parentage_conflict':
       case 'parentage_unavailable':
       case 'handoff_unavailable':
         return { ...base, x: sceneLane.x0, y: sceneLane.y };
+      case 'edit_time_unrecorded':
+        return { ...base, x: (sceneLane.x0 + sceneLane.x1) / 2, y: sceneLane.y + Math.min(10, sceneLane.height * 0.3) };
       case 'undated_events':
         return {
           ...base,
@@ -789,6 +834,6 @@ export function layoutTemporalScene(
       relationsDrawn,
       relationsWithheld,
     },
-    denseDefault,
+    denseDepth,
   };
 }

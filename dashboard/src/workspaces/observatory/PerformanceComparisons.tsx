@@ -69,7 +69,7 @@ function ComparisonReadModel({
     <>
       {truth}
       <dl
-        className="mx-4 mt-3 grid gap-x-4 gap-y-1 border border-edge-subtle bg-surface-1 px-3 py-2 text-3xs sm:grid-cols-2 xl:grid-cols-4"
+        className="mx-4 mt-3 grid gap-x-4 gap-y-1 border border-edge-subtle bg-surface-1 px-3 py-2 text-sm sm:grid-cols-2 xl:grid-cols-4"
         data-comparisons-current={model.current ? 'true' : 'false'}
       >
         <Field label="horizon">
@@ -138,11 +138,11 @@ function Disposition({
         <div className="flex flex-wrap items-center gap-2">
           <StateChip kind={reached.state} detail={reached.label} />
         </div>
-        <p className="text-2xs leading-relaxed text-text-secondary">{reason}</p>
-        <p className="text-3xs leading-snug text-text-muted">{reached.meaning}</p>
+        <p className="text-body leading-relaxed text-text-secondary">{reason}</p>
+        <p className="text-sm leading-snug text-text-muted">{reached.meaning}</p>
       </div>
 
-      <dl className="flex flex-col gap-1 border-t border-edge-subtle pt-2 text-3xs leading-snug text-text-muted">
+      <dl className="flex flex-col gap-1 border-t border-edge-subtle pt-2 text-sm leading-snug text-text-muted">
         {others.map((candidate) => {
           const presentation = dispositionPresentation(candidate);
           return (
@@ -151,7 +151,7 @@ function Disposition({
               className="flex min-w-0 gap-1.5"
               data-comparison-disposition-not-reached={candidate}
             >
-              <dt className="shrink-0 uppercase tracking-[0.08em]">{presentation.label}</dt>
+              <dt className="shrink-0 uppercase tracking-[0.08em] text-3xs">{presentation.label}</dt>
               <dd className="min-w-0 break-words text-text-secondary">
                 not reached · {presentation.meaning}
               </dd>

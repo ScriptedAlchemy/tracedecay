@@ -2,13 +2,15 @@ use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_code_extraction::SwiftExtractor;
 use tracedecay_domain::*;
 
+include!("support/edges.rs");
+
 #[test]
 fn test_swift_extract_imports() {
     let source = r#"import Foundation
 import UIKit
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("sample.swift", source);
+    let result = extractor.extract_artifact("sample.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let uses: Vec<_> = result
         .nodes
@@ -36,7 +38,7 @@ class Base {
 }
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("base.swift", source);
+    let result = extractor.extract_artifact("base.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let classes: Vec<_> = result
@@ -63,7 +65,7 @@ fn test_swift_class_inheritance() {
 class Connection: Base {}
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("conn.swift", source);
+    let result = extractor.extract_artifact("conn.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let extends: Vec<_> = result
@@ -71,7 +73,13 @@ class Connection: Base {}
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Extends)
         .collect();
-    assert!(!extends.is_empty(), "expected Extends refs for inheritance");
+    assert_eq!(
+        extends
+            .iter()
+            .map(|x| x.reference_name.as_str())
+            .collect::<Vec<_>>(),
+        ["Base"]
+    );
     assert!(
         extends.iter().any(|r| r.reference_name == "Base"),
         "expected Extends ref to Base"
@@ -87,7 +95,7 @@ class Foo {
 }
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("funcs.swift", source);
+    let result = extractor.extract_artifact("funcs.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let fns: Vec<_> = result
@@ -119,7 +127,7 @@ fn test_swift_struct_with_fields_and_methods() {
 }
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("point.swift", source);
+    let result = extractor.extract_artifact("point.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let structs: Vec<_> = result
@@ -135,10 +143,9 @@ fn test_swift_struct_with_fields_and_methods() {
         .iter()
         .filter(|n| n.kind == NodeKind::Property)
         .collect();
-    assert!(
-        props.len() >= 2,
-        "expected >= 2 properties, got {}",
-        props.len()
+    assert_eq!(
+        props.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+        ["x", "y"]
     );
 
     let methods: Vec<_> = result
@@ -160,7 +167,7 @@ fn test_swift_enum_with_variants() {
 }
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("log.swift", source);
+    let result = extractor.extract_artifact("log.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let enums: Vec<_> = result
@@ -192,7 +199,7 @@ protocol Serializable {
 }
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("proto.swift", source);
+    let result = extractor.extract_artifact("proto.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let ifaces: Vec<_> = result
@@ -229,7 +236,7 @@ fn test_swift_extension() {
 }
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("ext.swift", source);
+    let result = extractor.extract_artifact("ext.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let exts: Vec<_> = result
@@ -256,7 +263,7 @@ fn test_swift_constructor() {
 }
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("foo.swift", source);
+    let result = extractor.extract_artifact("foo.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let ctors: Vec<_> = result
@@ -279,7 +286,7 @@ func main() {
 }
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("main.swift", source);
+    let result = extractor.extract_artifact("main.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let call_refs: Vec<_> = result
@@ -287,7 +294,6 @@ func main() {
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
-    assert!(!call_refs.is_empty(), "should have call refs");
     assert!(
         call_refs.iter().any(|r| r.reference_name == "print"),
         "should find print call"
@@ -304,7 +310,7 @@ fn test_swift_docstrings() {
 func setup() {}
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("doc.swift", source);
+    let result = extractor.extract_artifact("doc.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let fns: Vec<_> = result
@@ -333,17 +339,10 @@ fn test_swift_contains_edges() {
 }
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("foo.swift", source);
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    // File contains: Class; Class contains: Property, Method
-    assert!(
-        contains.len() >= 3,
-        "should have >= 3 Contains edges, got {}",
-        contains.len()
+    let result = extractor.extract_artifact("foo.swift", source).result;
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Contains),
+        [("foo.swift", "Foo"), ("Foo", "bar"), ("Foo", "baz")]
     );
 }
 
@@ -352,7 +351,7 @@ fn test_swift_typealias() {
     let source = r#"typealias CompletionHandler = (Bool) -> Void
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("alias.swift", source);
+    let result = extractor.extract_artifact("alias.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let aliases: Vec<_> = result
@@ -369,7 +368,7 @@ fn test_swift_top_level_const() {
     let source = r#"let maxConnections = 100
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("const.swift", source);
+    let result = extractor.extract_artifact("const.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let consts: Vec<_> = result
@@ -389,7 +388,7 @@ fn test_swift_visibility_private() {
 }
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("vis.swift", source);
+    let result = extractor.extract_artifact("vis.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let secret = result
@@ -416,7 +415,7 @@ fn test_swift_async_function() {
 }
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("async.swift", source);
+    let result = extractor.extract_artifact("async.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let connect = result
@@ -443,7 +442,7 @@ fn test_swift_annotation_extraction() {
 }
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("attrs.swift", source);
+    let result = extractor.extract_artifact("attrs.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let annots: Vec<_> = result
@@ -453,50 +452,20 @@ fn test_swift_annotation_extraction() {
         .collect();
 
     let annot_names: Vec<&str> = annots.iter().map(|a| a.name.as_str()).collect();
-
-    assert!(
-        annot_names.contains(&"objc"),
-        "expected 'objc' annotation, got: {:?}",
-        annot_names
-    );
-
-    assert!(
-        annot_names.contains(&"discardableResult"),
-        "expected 'discardableResult' annotation, got: {:?}",
-        annot_names
-    );
-
-    assert!(
-        annot_names.contains(&"available"),
-        "expected 'available' annotation, got: {:?}",
-        annot_names
-    );
-
-    // Verify Annotates edges exist
-    let annotates_edges: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Annotates)
-        .collect();
-    assert!(
-        !annotates_edges.is_empty(),
-        "expected Annotates edges, found none"
-    );
+    assert_eq!(annot_names, ["objc", "discardableResult", "available"]);
     assert_eq!(
-        annotates_edges.len(),
-        annots.len(),
-        "each AnnotationUsage should have an Annotates edge"
+        edge_pairs(&result, EdgeKind::Annotates),
+        [
+            ("objc", "MyController"),
+            ("discardableResult", "doWork"),
+            ("available", "newFeature")
+        ]
     );
-
-    // Verify Annotates unresolved refs exist
-    let annotates_refs: Vec<_> = result
+    let annot_refs: Vec<&str> = result
         .unresolved_refs
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Annotates)
+        .map(|r| r.reference_name.as_str())
         .collect();
-    assert_eq!(
-        annotates_refs.len(),
-        annots.len(),
-        "each AnnotationUsage should have an Annotates unresolved ref"
-    );
+    assert_eq!(annot_refs, ["objc", "discardableResult", "available"]);
 }

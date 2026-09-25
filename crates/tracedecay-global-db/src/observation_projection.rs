@@ -15,10 +15,7 @@ pub use rebuild::{
     converge_projection_predecessor, project_observation, project_queued_observations,
     rebuild_projection,
 };
-pub(crate) use schema::{
-    OBSERVATION_PROJECTION_BINDING_TRIGGERS_SQL, OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL,
-    OBSERVATION_PROJECTION_SCHEMA_SQL,
-};
+pub(crate) use schema::OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL;
 pub(super) use schema::{
     ensure_observation_projection_performance_indexes, ensure_observation_projection_schema,
 };
@@ -28,5 +25,6 @@ pub(crate) use state::rearm_queued_projection_retries;
 pub(super) use state::verify_projection_rows;
 pub(super) use state::{
     ProjectionOutputAuthority, ProjectionRowsBatch, load_verified_session, read_output_authorities,
-    read_projection_rows_batch, resolve_output_projection, verify_projection_rows_from_records,
+    read_projection_rows_batch, resolve_output_projection, stored_output_digest,
+    stored_row_matches, verify_projection_rows_from_records,
 };

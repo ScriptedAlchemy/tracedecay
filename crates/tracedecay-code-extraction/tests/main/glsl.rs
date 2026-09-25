@@ -4,10 +4,14 @@ use tracedecay_code_extraction::GlslExtractor;
 use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_domain::*;
 
+include!("support/edges.rs");
+
 #[test]
 fn test_glsl_file_node_is_root() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
-    let result = GlslExtractor.extract("sample.glsl", &source);
+    let result = GlslExtractor
+        .extract_artifact("sample.glsl", &source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let files: Vec<_> = result
         .nodes
@@ -21,7 +25,9 @@ fn test_glsl_file_node_is_root() {
 #[test]
 fn test_glsl_extract_functions() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
-    let result = GlslExtractor.extract("sample.glsl", &source);
+    let result = GlslExtractor
+        .extract_artifact("sample.glsl", &source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fns: Vec<_> = result
         .nodes
@@ -51,7 +57,9 @@ fn test_glsl_extract_functions() {
 #[test]
 fn test_glsl_extract_structs() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
-    let result = GlslExtractor.extract("sample.glsl", &source);
+    let result = GlslExtractor
+        .extract_artifact("sample.glsl", &source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let structs: Vec<_> = result
         .nodes
@@ -72,7 +80,9 @@ fn test_glsl_extract_structs() {
 #[test]
 fn test_glsl_extract_struct_fields() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
-    let result = GlslExtractor.extract("sample.glsl", &source);
+    let result = GlslExtractor
+        .extract_artifact("sample.glsl", &source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fields: Vec<_> = result
         .nodes
@@ -98,7 +108,9 @@ fn test_glsl_extract_struct_fields() {
 #[test]
 fn test_glsl_extract_uniforms() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
-    let result = GlslExtractor.extract("sample.glsl", &source);
+    let result = GlslExtractor
+        .extract_artifact("sample.glsl", &source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let consts: Vec<_> = result
         .nodes
@@ -125,7 +137,9 @@ fn test_glsl_extract_uniforms() {
 #[test]
 fn test_glsl_extract_in_out_declarations() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
-    let result = GlslExtractor.extract("sample.glsl", &source);
+    let result = GlslExtractor
+        .extract_artifact("sample.glsl", &source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fields: Vec<_> = result
         .nodes
@@ -157,7 +171,9 @@ fn test_glsl_extract_in_out_declarations() {
 #[test]
 fn test_glsl_extract_preproc_defines() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
-    let result = GlslExtractor.extract("sample.glsl", &source);
+    let result = GlslExtractor
+        .extract_artifact("sample.glsl", &source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let consts: Vec<_> = result
         .nodes
@@ -174,7 +190,9 @@ fn test_glsl_extract_preproc_defines() {
 #[test]
 fn test_glsl_extract_const_globals() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
-    let result = GlslExtractor.extract("sample.glsl", &source);
+    let result = GlslExtractor
+        .extract_artifact("sample.glsl", &source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let consts: Vec<_> = result
         .nodes
@@ -188,32 +206,27 @@ fn test_glsl_extract_const_globals() {
 #[test]
 fn test_glsl_function_docstrings() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
-    let result = GlslExtractor.extract("sample.glsl", &source);
+    let result = GlslExtractor
+        .extract_artifact("sample.glsl", &source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fresnel = result
         .nodes
         .iter()
         .find(|n| n.name == "fresnelSchlick")
         .unwrap();
-    assert!(
-        fresnel.docstring.is_some(),
-        "fresnelSchlick should have a docstring"
-    );
-    assert!(
-        fresnel
-            .docstring
-            .as_ref()
-            .unwrap()
-            .contains("Fresnel-Schlick"),
-        "docstring: {:?}",
-        fresnel.docstring
+    assert_eq!(
+        fresnel.docstring.as_deref(),
+        Some("Compute the Fresnel-Schlick approximation.")
     );
 }
 
 #[test]
 fn test_glsl_function_signatures() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
-    let result = GlslExtractor.extract("sample.glsl", &source);
+    let result = GlslExtractor
+        .extract_artifact("sample.glsl", &source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let dist = result
         .nodes
@@ -234,20 +247,68 @@ fn test_glsl_function_signatures() {
 #[test]
 fn test_glsl_contains_edges() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
-    let result = GlslExtractor.extract("sample.glsl", &source);
+    let result = GlslExtractor
+        .extract_artifact("sample.glsl", &source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let contains: Vec<_> = result
-        .edges
+    let contains = edge_pairs(&result, EdgeKind::Contains);
+    let nested: Vec<_> = contains
         .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
+        .filter(|(parent, _)| *parent != "sample.glsl")
+        .copied()
         .collect();
-    assert!(!contains.is_empty(), "should have Contains edges");
+    assert_eq!(
+        nested,
+        [
+            ("PointLight", "position"),
+            ("PointLight", "color"),
+            ("PointLight", "intensity"),
+            ("PointLight", "radius"),
+            ("Material", "albedo"),
+            ("Material", "metallic"),
+            ("Material", "roughness"),
+        ]
+    );
+    let top_level: Vec<&str> = contains
+        .iter()
+        .filter(|(parent, _)| *parent == "sample.glsl")
+        .map(|(_, child)| *child)
+        .collect();
+    assert_eq!(
+        top_level,
+        [
+            "MAX_LIGHTS",
+            "aPosition",
+            "aNormal",
+            "aTexCoord",
+            "vWorldPos",
+            "vNormal",
+            "vTexCoord",
+            "uModelMatrix",
+            "uViewMatrix",
+            "uProjectionMatrix",
+            "uTime",
+            "PointLight",
+            "Material",
+            "uLights",
+            "uNumLights",
+            "uMaterial",
+            "PI",
+            "fresnelSchlick",
+            "distributionGGX",
+            "geometrySchlickGGX",
+            "calculatePointLight",
+            "main",
+        ]
+    );
 }
 
 #[test]
 fn test_glsl_call_sites() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
-    let result = GlslExtractor.extract("sample.glsl", &source);
+    let result = GlslExtractor
+        .extract_artifact("sample.glsl", &source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let calls: Vec<_> = result
         .unresolved_refs
@@ -276,7 +337,9 @@ fn test_glsl_call_sites() {
 #[test]
 fn test_glsl_complexity_metrics() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
-    let result = GlslExtractor.extract("sample.glsl", &source);
+    let result = GlslExtractor
+        .extract_artifact("sample.glsl", &source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let calc = result
         .nodes

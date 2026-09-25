@@ -6,10 +6,6 @@ import { MemoryRouter } from 'react-router';
 import { CodePage } from './CodePage.tsx';
 import { resolveFixture } from '../../../stories/fixtures/data.ts';
 
-vi.mock('../../viz/graph/GraphCanvas.tsx', () => ({
-  GraphCanvas: () => <div data-testid="graph-canvas" />,
-}));
-
 /**
  * Zeros this page measured, against reads it never got.
  *
@@ -201,16 +197,6 @@ describe('the URL-stable Code view shell', () => {
     );
   });
 
-  it('reads a published Topology link as the Cortex lens', async () => {
-    vi.stubGlobal('fetch', serveFixtures());
-    renderCode('/code?view=topology&symbol=sym-0');
-
-    expect(await screen.findByRole('region', { name: 'Cortex' })).toBeTruthy();
-    expect(
-      screen.getByRole('button', { name: 'Cortex' }).getAttribute('aria-current'),
-    ).toBe('page');
-  });
-
   it('restores Atlas as a disabled, truthful unavailable view', async () => {
     vi.stubGlobal(
       'fetch',
@@ -251,22 +237,6 @@ describe('the URL-stable Code view shell', () => {
     expect(document.activeElement).toBe(trace);
     expect(trace.getAttribute('aria-current')).toBe('page');
     expect(await screen.findByRole('heading', { name: /trace ·/i })).toBeTruthy();
-  });
-
-  it('maps a published Core URL into Trace without losing its symbol', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
-        const { pathname, search } = new URL(String(input), 'http://localhost');
-        return jsonOk(resolveFixture(pathname, search));
-      }),
-    );
-    renderCode('/code?structureLens=core&structureFocus=sym-0');
-
-    expect(await screen.findByRole('heading', { name: /trace ·/i })).toBeTruthy();
-    expect(
-      screen.getByRole('button', { name: 'Trace' }).getAttribute('aria-current'),
-    ).toBe('page');
   });
 
   it('restores Shared Code from the URL and gates it on a selected symbol', async () => {

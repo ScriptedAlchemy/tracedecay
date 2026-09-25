@@ -408,11 +408,11 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
             let connection = match connection::open(&worker_open_path, ConnectionMode::Reader) {
                 Ok(connection) => connection,
                 Err(error) if error.is_open_failure() => {
-                    let _ = started.send(Err(ReaderStartError::OpenFailed));
+                    let _ = started.send(Err(ReaderStartError::OpenFailed(error)));
                     return;
                 }
-                Err(_) => {
-                    let _ = started.send(Err(ReaderStartError::ReadOnlySetupFailed));
+                Err(error) => {
+                    let _ = started.send(Err(ReaderStartError::ReadOnlySetupFailed(error)));
                     return;
                 }
             };
@@ -429,13 +429,12 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
             };
             // Opening and policy verification do not enter the database schema.
             // Complete WAL-index recovery before this worker can race admitted writes.
-            if connection
-                .query_row("SELECT count(*) FROM sqlite_schema", [], |row| {
+            if let Err(error) =
+                connection.query_row("SELECT count(*) FROM sqlite_schema", [], |row| {
                     row.get::<_, i64>(0)
                 })
-                .is_err()
             {
-                let _ = started.send(Err(ReaderStartError::ReadOnlySetupFailed));
+                let _ = started.send(Err(ReaderStartError::SchemaProbeFailed(error)));
                 return;
             }
             let _keep_pinned_database_alive = locator;

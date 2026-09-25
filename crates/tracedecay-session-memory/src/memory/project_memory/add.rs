@@ -1,6 +1,7 @@
 //! Canonical project-memory add preflight and execution.
 
 use crate::memory::trust::DEFAULT_TRUST;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracedecay_domain::{
@@ -22,7 +23,7 @@ use super::validate_project_memory_add_outcome;
 /// Transport adapters own their wire DTOs. This single use-case request owns
 /// the boundary between unsanitized user intent and the canonical store
 /// command, so callers cannot accidentally bypass payload sanitization.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectMemoryFactAddRequest {
     pub content: String,
@@ -30,6 +31,7 @@ pub struct ProjectMemoryFactAddRequest {
     pub source_label: Option<String>,
     pub tags: Vec<String>,
     pub entities: Vec<String>,
+    #[schemars(with = "Option<f64>")]
     pub trust: Option<Confidence>,
     pub metadata: Value,
 }

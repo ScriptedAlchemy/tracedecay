@@ -5,11 +5,11 @@ use std::path::{Path, PathBuf};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
+use super::collection::{RegularFileSnapshot, read_regular_file};
 use super::fence::{
     StoreContentFence, StoreDirectoryFence, capture_store_content_fence,
     capture_store_content_fence_controlled, capture_store_directory_fence,
 };
-use super::quarantine::{RegularFileSnapshot, read_regular_file};
 use super::unregistered_page::{
     DEFAULT_UNREGISTERED_STORE_PAGE_LIMIT, UnregisteredStoreSweepReport,
     UnregisteredStoreSweepRequestV1, UnregisteredSweepCompletionV1, sweep_unregistered_store_page,
@@ -20,8 +20,8 @@ use super::{
 };
 #[cfg(test)]
 use super::{
-    CollectionFailure, classify_stores, execute_registered_collection, plan_collection,
-    quarantine::store_finding_is_profile_contained,
+    CollectionFailure, classify_stores, collection::store_finding_is_profile_contained,
+    execute_registered_collection, plan_collection,
 };
 
 pub(super) struct StoreWalkStats {
@@ -623,11 +623,10 @@ pub(crate) fn manifest_names_abandoned_root(data_root: &Path, profile_root: &Pat
         )
 }
 
-/// Deletes unregistered directories through the same two-phase boundary:
-/// content/durable inspection and quarantine first, then a short final
-/// still-unregistered confirmation before the irreversible phase.
+/// Deletes unregistered directories after content/durable inspection and a
+/// short final still-unregistered confirmation.
 ///
-/// Compatibility convenience for one bounded read/apply page. The daemon uses
+/// Convenience for one bounded read/apply page. The daemon uses
 /// [`sweep_unregistered_store_page`] directly so it can persist the returned
 /// cursor across maintenance cadences; Doctor deliberately receives one
 /// bounded preview rather than a hidden full-profile traversal.

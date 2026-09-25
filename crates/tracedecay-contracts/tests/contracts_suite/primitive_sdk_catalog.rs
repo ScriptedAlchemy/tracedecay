@@ -1,45 +1,46 @@
-use std::collections::BTreeSet;
-
+use serde_json::json;
 use tracedecay_contracts::sdk_executable_binding_registry;
 use tracedecay_tool_catalog::{OperationId, SdkTransportBindingV1};
-
-const TYPED_PRIMITIVE_OPERATIONS: [&str; 9] = [
-    "callees",
-    "context",
-    "impact",
-    "node",
-    "port_order",
-    "port_status",
-    "rename_preview",
-    "similar",
-    "todos",
-];
 
 #[test]
 fn established_primitive_tools_are_typed_sdk_operations() {
     let registry = sdk_executable_binding_registry().expect("canonical SDK registry");
-    let expected = TYPED_PRIMITIVE_OPERATIONS
-        .iter()
-        .map(|operation| format!("operation.application.{operation}"))
-        .collect::<BTreeSet<_>>();
 
-    for operation_id in expected {
+    for (operation, required) in [
+        ("context", json!(["task"])),
+        ("impact", json!(["node_id"])),
+        ("node", json!(["node_id"])),
+        ("port_order", json!(["source_dir"])),
+        ("port_status", json!(["source_dir", "target_dir"])),
+        ("rename_preview", json!(["node_id"])),
+        (
+            "similar",
+            json!([
+                "project_id",
+                "repository_id",
+                "target",
+                "match_classes",
+                "result_limit",
+                "work_limit"
+            ]),
+        ),
+        ("todos", json!([])),
+    ] {
+        let operation_id = format!("operation.application.{operation}");
         let binding = registry
             .get(&OperationId::new(operation_id.clone()).expect("operation ID"))
             .and_then(|availability| availability.binding())
             .unwrap_or_else(|| panic!("{operation_id} must be executable"));
-        assert!(matches!(
-            binding.transport(),
-            SdkTransportBindingV1::McpTool { tool_name }
-                if tool_name == &format!(
-                    "tracedecay_{}",
-                    operation_id.trim_start_matches("operation.application.")
-                )
-        ));
-        assert_eq!(binding.request_schema().body()["type"], "object");
-        assert_ne!(
-            binding.result_schema().body(),
-            &serde_json::Value::Bool(true)
+        assert!(
+            matches!(
+                binding.transport(),
+                SdkTransportBindingV1::McpTool { tool_name }
+                    if tool_name == &format!("tracedecay_{operation}")
+            ),
+            "{operation}"
         );
+        let request = binding.request_schema().body();
+        let observed_required = request.get("required").cloned().unwrap_or(json!([]));
+        assert_eq!(observed_required, required, "{operation}");
     }
 }

@@ -174,7 +174,7 @@ fn assert_admission_round(round: &AdmissionRound, session_elapsed: Duration, ses
     assert_under_budget("lexical admission", *lexical_elapsed, ADMISSION_BUDGET);
     assert_admitted_with_results("tracedecay_grep", lexical, "results");
     assert_under_budget("graph admission", *graph_elapsed, ADMISSION_BUDGET);
-    assert_admitted_with_results("tracedecay_body", graph, "matches");
+    assert_admitted_with_results("tracedecay_find_exact_symbol", graph, "matches");
     assert_under_budget(
         "ordinary session admission",
         session_elapsed,
@@ -655,7 +655,7 @@ async fn wait_for_preserved_discovery(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() {
-    let _profile = crate::config::PinnedUserDataDir::new();
+    let _profile = tracedecay_project::config::PinnedUserDataDir::new();
     let isolation = tempfile::TempDir::new().expect("isolated home/profile");
     let project = isolation.path().join("project");
     seed_project(&project);
@@ -702,8 +702,8 @@ async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() 
                 timed_raw(
                     &harness,
                     &project,
-                    "tracedecay_body",
-                    json!({"symbol": PROBE_SYMBOL, "format": "json"}),
+                    "tracedecay_find_exact_symbol",
+                    json!({"name": PROBE_SYMBOL, "format": "json"}),
                 ),
                 // This round proves admission, so one evidence result keeps
                 // response-handle storage outside the concurrency assertion.

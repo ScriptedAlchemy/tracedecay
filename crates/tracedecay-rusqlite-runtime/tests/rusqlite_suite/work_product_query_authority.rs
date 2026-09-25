@@ -31,10 +31,11 @@ use tracedecay_contracts::{
     ResolvedScope, SelectedWorkEvidenceV1, VerifiedWorkGraphVersionV1, WorkEvidenceExpandRequestV1,
     WorkEvidenceSelectRequestV1, WorkGraphReadRequestV1, WorkGraphReadV1,
     WorkGraphSelectionCoverageV1, WorkHistoryCoverageV1, WorkHistoryRequestV1,
-    WorkHistoryServiceV1, WorkHistoryV1, WorkProductApplicationErrorV1, WorkProductBindingV1,
-    WorkProductEvidenceServiceV1, WorkProductExpectedAuthorityV1, WorkProductMutationIdentityV1,
-    WorkProductMutationReceiptV1, WorkProductMutationServiceV1, WorkProductReadServiceV1,
-    WorkProductRevisionPinsV1, WorkProductSelectionScopeV1, WorkRelationScopeV1,
+    WorkHistoryServiceV1, WorkHistoryV1, WorkProductApplicationErrorV1,
+    WorkProductAuthorizedRelationScopeV1, WorkProductBindingV1, WorkProductEvidenceServiceV1,
+    WorkProductExpectedAuthorityV1, WorkProductMutationIdentityV1, WorkProductMutationReceiptV1,
+    WorkProductMutationServiceV1, WorkProductReadServiceV1, WorkProductRevisionPinsV1,
+    WorkProductSelectionScopeV1,
 };
 use tracedecay_domain::{
     AcceptanceCriterionId, ActorId, CatalogGenerationId, ConfigurationRevisionId, InitiativeId,
@@ -68,10 +69,12 @@ fn binding() -> WorkProductBindingV1 {
 }
 
 fn repository_selection() -> WorkProductSelectionScopeV1 {
-    WorkProductSelectionScopeV1::relations(BTreeSet::from([WorkRelationScopeV1::Repository {
-        project_id: id(PROJECT),
-        repository_id: id(REPOSITORY),
-    }]))
+    WorkProductSelectionScopeV1::relations(BTreeSet::from([
+        WorkProductAuthorizedRelationScopeV1::Repository {
+            project_id: id(PROJECT),
+            repository_id: id(REPOSITORY),
+        },
+    ]))
     .unwrap()
 }
 

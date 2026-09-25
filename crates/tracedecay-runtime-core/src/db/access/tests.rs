@@ -127,7 +127,7 @@ fn profile_project_databases_share_the_profile_scope() {
     let temp = tempfile::tempdir().unwrap();
     let profile = temp.path().join("profile");
     let first = profile.join("projects/first/graph.db");
-    let second = profile.join("projects/second/branches/main.db");
+    let second = profile.join("projects/second/tracedecay.db");
     std::fs::create_dir_all(first.parent().unwrap()).unwrap();
     std::fs::create_dir_all(second.parent().unwrap()).unwrap();
 
@@ -271,21 +271,6 @@ fn writer_owner_intent_is_bounded_and_single_line() {
     let owner = writer_owner("token", &intent);
     assert!(!owner.intent.contains('\n'));
     assert!(owner.intent.len() <= 256);
-}
-
-#[test]
-fn fallback_scope_is_unambiguous_only_with_one_profile_owner() {
-    assert_eq!(fallback_scoped_runtime_role(0, 0).unwrap(), None);
-    assert_eq!(
-        fallback_scoped_runtime_role(1, 0).unwrap(),
-        Some(DatabaseAuthorityRole::Maintenance)
-    );
-    assert_eq!(
-        fallback_scoped_runtime_role(0, 1).unwrap(),
-        Some(DatabaseAuthorityRole::Daemon)
-    );
-    assert!(fallback_scoped_runtime_role(1, 1).is_err());
-    assert!(fallback_scoped_runtime_role(2, 0).is_err());
 }
 
 /// Reproduces the macOS `/var` -> `/private/var` scope-key shape on any unix

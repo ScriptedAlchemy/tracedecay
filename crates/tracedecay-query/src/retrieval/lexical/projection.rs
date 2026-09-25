@@ -7,9 +7,10 @@ use tracedecay_domain::{
     BoundedSanitizedText, CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1,
     CodeSearchChunkId, CodeSearchChunkV1, CompactCandidate, ComponentRevision, EvidenceRole,
     ExactAdmissionProof, ExactFieldV1, ExactTechnicalTermKindV1, ExactTechnicalTermV1,
-    FileOccurrenceId, FixedPointScore, LanguageDescriptorRevision, LogicalEvidenceId, RepositoryId,
-    RetrievalAnchorId, RetrieverKind, ScoreDomainId, SourceFreshness, SourceOccurrenceId,
-    exact_search_canonical, split_subtokens, technical_tokens, validate_code_logical_path,
+    FileOccurrenceId, FixedPointScore, LanguageDescriptorRevision, LogicalEvidenceId,
+    ManifestDigest, ProjectId, RepositoryId, RetrievalAnchorId, RetrieverKind, ScoreDomainId,
+    SourceFreshness, SourceOccurrenceId, WorktreeId, exact_search_canonical, split_subtokens,
+    technical_tokens, validate_code_logical_path,
 };
 
 use super::{
@@ -22,8 +23,6 @@ use crate::retrieval::ports::{
 };
 
 mod artifact;
-#[cfg(feature = "search-eval")]
-mod in_memory;
 
 pub use artifact::{
     CLONE_FINGERPRINT_CANDIDATE_BODY_BUDGET_V1, CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1,
@@ -43,18 +42,11 @@ pub use artifact::{
     CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
     CodeLexicalArtifactFinalizationPhaseV1, CodeLexicalArtifactFinalizationStepV1,
     CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactReaderV1,
-    CodeLexicalArtifactSectionDigestV1, CodeLexicalArtifactWriterRevisionV1,
-    CodeLexicalCloneIndexCensusV1, CodeLexicalCloneSuccessorV1,
+    CodeLexicalArtifactSectionDigestV1, CodeLexicalCloneIndexCensusV1,
     CodeLexicalImportMembershipWitnessV1, MAX_CLONE_EXACT_PAGE_MEMBERS_V1,
     MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1, PreparedCodeLexicalArtifactBatchV1,
     PreparedCodeLexicalArtifactPageV1, VerifiedCodeLexicalArtifactV1,
-    code_lexical_artifact_build_memory_budget_for,
-};
-#[cfg(feature = "search-eval")]
-pub use in_memory::{
-    CodeExactProjectionAdapterV1, CodeLexicalProjectionAdapterV1, CodeLexicalProjectionBuildStepV1,
-    CodeLexicalProjectionBuildV1, LEXICAL_PROJECTION_BUILD_DEADLINE_MICROS_V1,
-    lexical_projection_build_deadline_micros,
+    code_lexical_artifact_build_memory_budget_for, code_lexical_artifact_content_key,
 };
 
 const BM25_K1_MILLIS: u64 = 1_200;
@@ -74,11 +66,37 @@ pub struct CodeLexicalProjectionMetadataV1 {
     pub exact_retriever_revision: ComponentRevision,
     pub lexical_retriever_revision: ComponentRevision,
     pub exact_score_domain: ScoreDomainId,
+    /// The route the projection's clone occurrences belong to; `None` when
+    /// the opener carries no clone authority.
+    pub clone_route: Option<CodeLexicalCloneRouteV1>,
+}
+
+/// Project, worktree, and snapshot of the generation an artifact is opened
+/// for. Clone occurrences are stored without them, so identical trees in
+/// different worktrees share one artifact and each opener supplies its own.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeLexicalCloneRouteV1 {
+    pub project_id: ProjectId,
+    pub worktree_id: Option<WorktreeId>,
+    pub snapshot_digest: ManifestDigest,
 }
 
 impl CodeLexicalProjectionMetadataV1 {
     fn validate(&self) -> Result<(), RetrievalPortError> {
         self.generation.validate().map_err(contract_error)?;
+        if let Some(route) = &self.clone_route {
+            if self.repository_id.is_none() {
+                return Err(RetrievalPortError::Contract(
+                    "a clone route requires the projection's repository".to_owned(),
+                ));
+            }
+            route.project_id.validate().map_err(contract_error)?;
+            if let Some(worktree_id) = &route.worktree_id {
+                worktree_id.validate().map_err(contract_error)?;
+            }
+            route.snapshot_digest.validate().map_err(contract_error)?;
+        }
         if let Some(repository_id) = &self.repository_id {
             repository_id.validate().map_err(contract_error)?;
         }
@@ -661,7 +679,7 @@ impl LexicalFieldTextV1 for ProjectedChunkV1 {
     }
 }
 
-/// Row identity shared by the in-memory projection and the artifact reader.
+/// Row identity the artifact builder and reader share.
 trait LexicalIndexedRow {
     fn chunk_id(&self) -> &CodeSearchChunkId;
     fn anchor(&self) -> &CodeSearchChunkAnchorV1;
@@ -863,8 +881,8 @@ fn add_score(scores: &mut BTreeMap<LexicalFieldV1, u64>, field: LexicalFieldV1, 
         .or_insert(score);
 }
 
-/// Shared exact/fuzzy/phrase/proximity scoring for the in-memory projection
-/// and the artifact reader. Callers supply term frequencies and BM25 inputs;
+/// Exact/fuzzy/phrase/proximity scoring for artifact rows. Callers supply
+/// term frequencies and BM25 inputs;
 /// the loop, fuzzy discount, phrase boost, and echo penalty stay one place.
 #[allow(clippy::too_many_arguments)]
 fn score_lexical_row(

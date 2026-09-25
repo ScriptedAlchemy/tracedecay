@@ -3,10 +3,11 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tracedecay_domain::NativeHostIdentityV1;
 use tracedecay_domain::UtcMicros;
 use tracedecay_hooks::delivery_spool::HookDeliverySpoolError;
 use tracedecay_hooks::{
-    HookDeliveryReceiptSpoolV1, HookHostV1, NativeHookCaptureOutcomeV1, NativeHookCaptureSourceV1,
+    HookDeliveryReceiptSpoolV1, NativeHookCaptureOutcomeV1, NativeHookCaptureSourceV1,
 };
 
 use crate::cli::Commands;
@@ -14,107 +15,107 @@ use crate::cli::Commands;
 const NATIVE_CAPTURE_COMMANDS: &[(&str, NativeHookCaptureSourceV1)] = &[
     (
         "hook-prompt-submit",
-        NativeHookCaptureSourceV1::Host(HookHostV1::ClaudeCode),
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::ClaudeCode),
     ),
     (
         "hook-stop",
-        NativeHookCaptureSourceV1::Host(HookHostV1::ClaudeCode),
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::ClaudeCode),
     ),
     (
         "hook-claude-session-start",
-        NativeHookCaptureSourceV1::Host(HookHostV1::ClaudeCode),
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::ClaudeCode),
     ),
     (
         "hook-claude-post-tool-use",
-        NativeHookCaptureSourceV1::Host(HookHostV1::ClaudeCode),
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::ClaudeCode),
     ),
     (
         "hook-claude-subagent-start",
-        NativeHookCaptureSourceV1::Host(HookHostV1::ClaudeCode),
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::ClaudeCode),
     ),
     (
         "hook-kiro-pre-tool-use",
-        NativeHookCaptureSourceV1::Host(HookHostV1::Kiro),
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::Kiro),
     ),
     (
         "hook-kiro-prompt-submit",
-        NativeHookCaptureSourceV1::Host(HookHostV1::Kiro),
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::Kiro),
     ),
     (
         "hook-kiro-post-tool-use",
-        NativeHookCaptureSourceV1::Host(HookHostV1::Kiro),
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::Kiro),
     ),
     (
         "hook-cursor-subagent-start",
-        NativeHookCaptureSourceV1::Host(HookHostV1::CursorDesktop),
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::CursorDesktop),
     ),
     (
         "hook-cursor-post-tool-use",
-        NativeHookCaptureSourceV1::Host(HookHostV1::CursorDesktop),
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::CursorDesktop),
     ),
     (
         "hook-cursor-before-submit-prompt",
-        NativeHookCaptureSourceV1::Host(HookHostV1::CursorDesktop),
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::CursorDesktop),
     ),
     (
         "hook-cursor-pre-compact",
-        NativeHookCaptureSourceV1::Host(HookHostV1::CursorDesktop),
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::CursorDesktop),
     ),
     (
         "hook-cursor-after-file-edit",
-        NativeHookCaptureSourceV1::Host(HookHostV1::CursorDesktop),
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::CursorDesktop),
     ),
     (
         "hook-cursor-session-start",
-        NativeHookCaptureSourceV1::Host(HookHostV1::CursorDesktop),
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::CursorDesktop),
     ),
     (
         "hook-cursor-session-end",
-        NativeHookCaptureSourceV1::Host(HookHostV1::CursorDesktop),
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::CursorDesktop),
     ),
     (
         "hook-cursor-after-shell",
-        NativeHookCaptureSourceV1::Host(HookHostV1::CursorDesktop),
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::CursorDesktop),
     ),
     (
         "hook-cursor-workspace-open",
-        NativeHookCaptureSourceV1::Host(HookHostV1::CursorDesktop),
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::CursorDesktop),
     ),
     (
         "hook-cursor-stop",
-        NativeHookCaptureSourceV1::Host(HookHostV1::CursorDesktop),
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::CursorDesktop),
     ),
     (
         "hook-codex-session-start",
-        NativeHookCaptureSourceV1::Host(HookHostV1::Codex),
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::Codex),
     ),
     (
         "hook-codex-user-prompt-submit",
-        NativeHookCaptureSourceV1::Host(HookHostV1::Codex),
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::Codex),
     ),
     (
         "hook-codex-subagent-start",
-        NativeHookCaptureSourceV1::Host(HookHostV1::Codex),
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::Codex),
     ),
     (
         "hook-codex-post-tool-use",
-        NativeHookCaptureSourceV1::Host(HookHostV1::Codex),
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::Codex),
     ),
     (
         "hook-codex-stop",
-        NativeHookCaptureSourceV1::Host(HookHostV1::Codex),
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::Codex),
     ),
     (
         "hook-hermes-terminal-receipt",
-        NativeHookCaptureSourceV1::Host(HookHostV1::Hermes),
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::Hermes),
     ),
     (
         "hook-kimi-event",
-        NativeHookCaptureSourceV1::Host(HookHostV1::KimiCode),
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::KimiCode),
     ),
     (
         "hook-opencode-event",
-        NativeHookCaptureSourceV1::Host(HookHostV1::OpenCode),
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::OpenCode),
     ),
     (
         "hook-opencode-tool-after",
@@ -139,7 +140,7 @@ pub(crate) fn try_run(args: &[OsString]) -> Option<i32> {
         tracedecay_agent_hosts::hooks::record_native_capture_invoked(
             &tracedecay::hook_runtime(),
             std::env::current_dir().ok().as_deref(),
-            HookHostV1::ClaudeCode,
+            NativeHostIdentityV1::ClaudeCode,
             Some("preToolUse"),
             &std::env::var("TOOL_INPUT").unwrap_or_default(),
         );
@@ -240,7 +241,7 @@ fn capture_command_name(command: &Commands) -> Option<&'static str> {
 /// be refused for. The response hooks' output write waits the same way.
 fn open_delivery_receipt_spool(
     data_root: &Path,
-    host: HookHostV1,
+    host: NativeHostIdentityV1,
 ) -> Result<HookDeliveryReceiptSpoolV1, HookDeliverySpoolError> {
     HookDeliveryReceiptSpoolV1::open_within(
         tracedecay_hooks::hook_delivery_receipt_spool_root(data_root, host),

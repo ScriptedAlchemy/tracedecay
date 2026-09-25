@@ -169,7 +169,7 @@ impl FailingRestoreFixture {
         let log = dir.path().join("systemctl.log");
         std::fs::write(
             &systemctl,
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = start ] && exit 7\n[ \"$2\" = is-enabled ] && echo enabled\nexit 0\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = start ] && exit 7\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
         )
         .expect("fake systemctl");
         std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
@@ -335,25 +335,45 @@ fn strict_restoration_requires_readiness_only_for_running_state() {
     ));
 }
 
+/// Publishes the authority record beside `socket` that probes resolve it
+/// through. Hold the authority for as long as the socket should be served.
 #[cfg(unix)]
-fn serve_probe_response(
+pub(super) fn seed_socket_authority(
+    socket: &std::path::Path,
+) -> tracedecay_daemon_identity::authority::DaemonAuthority {
+    tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
+        socket.parent().expect("socket parent"),
+        &tracedecay_daemon_protocol::DaemonEndpoint::Unix(socket.to_path_buf()),
+        TEST_BUILD_VERSION,
+    )
+    .expect("seed daemon authority")
+}
+
+#[cfg(unix)]
+fn read_auth_preface(reader: &mut impl BufRead, expected_auth_token: &str) -> usize {
+    let mut line = String::new();
+    let read = reader.read_line(&mut line).expect("read auth preface");
+    if read > 0 {
+        let preface = tracedecay_daemon_protocol::DaemonAuthPreface::from_line(line.trim())
+            .expect("parse auth preface");
+        assert!(preface.authenticate(expected_auth_token));
+    }
+    read
+}
+
+#[cfg(unix)]
+pub(super) fn serve_probe_response(
     listener: UnixListener,
     name: &'static str,
     version: &'static str,
-    expected_auth_token: Option<String>,
+    expected_auth_token: String,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept readiness probe");
         let mut reader =
             std::io::BufReader::new(stream.try_clone().expect("clone readiness stream"));
+        read_auth_preface(&mut reader, &expected_auth_token);
         let mut line = String::new();
-        if let Some(expected_auth_token) = expected_auth_token {
-            reader.read_line(&mut line).expect("read auth preface");
-            let preface = tracedecay_daemon_protocol::DaemonAuthPreface::from_line(line.trim())
-                .expect("parse auth preface");
-            assert!(preface.authenticate(&expected_auth_token));
-            line.clear();
-        }
         reader.read_line(&mut line).expect("read handshake");
         line.clear();
         reader.read_line(&mut line).expect("read initialize");
@@ -431,6 +451,7 @@ fn serve_counted_authenticated_probe(
 fn serve_identity_probes(
     listener: UnixListener,
     versions: Vec<&'static str>,
+    expected_auth_token: String,
 ) -> (Arc<AtomicUsize>, std::sync::mpsc::Receiver<usize>) {
     let served = Arc::new(AtomicUsize::new(0));
     let count = Arc::clone(&served);
@@ -444,6 +465,11 @@ fn serve_identity_probes(
                 continue;
             };
             let mut reader = std::io::BufReader::new(clone);
+            assert_ne!(
+                read_auth_preface(&mut reader, &expected_auth_token),
+                0,
+                "readiness connection closed without an auth preface"
+            );
             let mut line = String::new();
             assert_ne!(
                 reader
@@ -488,8 +514,14 @@ fn daemon_protocol_probe_requires_current_tracedecay_identity() {
     let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, profile.path());
 
     let ready_socket = profile.path().join("ready.sock");
+    let mut authority = seed_socket_authority(&ready_socket);
     let ready_listener = UnixListener::bind(&ready_socket).expect("bind ready socket");
-    let ready_server = serve_probe_response(ready_listener, "tracedecay", TEST_BUILD_VERSION, None);
+    let ready_server = serve_probe_response(
+        ready_listener,
+        "tracedecay",
+        TEST_BUILD_VERSION,
+        authority.auth_token().to_owned(),
+    );
     assert_eq!(
         super::probe::daemon_readiness_probe(
             &ready_socket,
@@ -502,8 +534,18 @@ fn daemon_protocol_probe_requires_current_tracedecay_identity() {
     ready_server.join().expect("join ready server");
 
     let stale_socket = profile.path().join("stale.sock");
+    authority
+        .publish_endpoint(&tracedecay_daemon_protocol::DaemonEndpoint::Unix(
+            stale_socket.clone(),
+        ))
+        .expect("publish stale endpoint");
     let stale_listener = UnixListener::bind(&stale_socket).expect("bind stale socket");
-    let stale_server = serve_probe_response(stale_listener, "tracedecay", "0.0.0-stale", None);
+    let stale_server = serve_probe_response(
+        stale_listener,
+        "tracedecay",
+        "0.0.0-stale",
+        authority.auth_token().to_owned(),
+    );
     assert_eq!(
         super::probe::daemon_readiness_probe(
             &stale_socket,
@@ -552,6 +594,7 @@ fn daemon_readiness_probe_classifies_connect_and_protocol_failures() {
     ));
 
     let connectable_socket = profile.path().join("connectable.sock");
+    let _authority = seed_socket_authority(&connectable_socket);
     let _listener = UnixListener::bind(&connectable_socket).expect("bind connectable socket");
     let connectable = super::probe::daemon_readiness_probe(
         &connectable_socket,
@@ -573,6 +616,16 @@ fn connectable_socket_is_not_a_live_daemon_until_initialize_answers() {
     let _env_lock = lock_user_data_dir_test_env();
     let profile = TempDir::new().expect("profile temp dir");
     let silent_socket = profile.path().join("silent.sock");
+    let mut authority = seed_socket_authority(&silent_socket);
+    let token = authority.auth_token().to_owned();
+    let mut serve_next = |socket: &std::path::Path| {
+        authority
+            .publish_endpoint(&tracedecay_daemon_protocol::DaemonEndpoint::Unix(
+                socket.to_path_buf(),
+            ))
+            .expect("publish probe endpoint");
+        UnixListener::bind(socket).expect("bind probe socket")
+    };
     let _listener = UnixListener::bind(&silent_socket).expect("bind silent socket");
     let silent = super::probe::probe_daemon_process_with_timeout(
         &silent_socket,
@@ -586,12 +639,11 @@ fn connectable_socket_is_not_a_live_daemon_until_initialize_answers() {
     assert!(!silent.names_tracedecay());
 
     let ready_socket = profile.path().join("ready.sock");
-    let ready_listener = UnixListener::bind(&ready_socket).expect("bind ready socket");
     let server = serve_probe_response(
-        ready_listener,
+        serve_next(&ready_socket),
         "tracedecay",
         env!("CARGO_PKG_VERSION"),
-        None,
+        token.clone(),
     );
     let ready = super::probe::probe_daemon_process_with_timeout(
         &ready_socket,
@@ -604,8 +656,12 @@ fn connectable_socket_is_not_a_live_daemon_until_initialize_answers() {
     assert!(ready.version_matches());
 
     let stale_socket = profile.path().join("stale-version.sock");
-    let stale_listener = UnixListener::bind(&stale_socket).expect("bind stale socket");
-    let stale_server = serve_probe_response(stale_listener, "tracedecay", "0.0.0-old", None);
+    let stale_server = serve_probe_response(
+        serve_next(&stale_socket),
+        "tracedecay",
+        "0.0.0-old",
+        token.clone(),
+    );
     let stale = super::probe::probe_daemon_process_with_timeout(
         &stale_socket,
         env!("CARGO_PKG_VERSION"),
@@ -618,8 +674,12 @@ fn connectable_socket_is_not_a_live_daemon_until_initialize_answers() {
     );
 
     let foreign_socket = profile.path().join("foreign.sock");
-    let foreign_listener = UnixListener::bind(&foreign_socket).expect("bind foreign socket");
-    let foreign_server = serve_probe_response(foreign_listener, "not-tracedecay", "0.1.0", None);
+    let foreign_server = serve_probe_response(
+        serve_next(&foreign_socket),
+        "not-tracedecay",
+        "0.1.0",
+        token,
+    );
     let foreign = super::probe::probe_daemon_process_with_timeout(
         &foreign_socket,
         env!("CARGO_PKG_VERSION"),
@@ -646,8 +706,14 @@ fn daemon_reachable_requires_an_initialize_answer() {
     drop(missing_guard);
 
     let ready_socket = profile.path().join("ready.sock");
+    let authority = seed_socket_authority(&ready_socket);
     let listener = UnixListener::bind(&ready_socket).expect("bind ready socket");
-    let server = serve_probe_response(listener, "tracedecay", env!("CARGO_PKG_VERSION"), None);
+    let server = serve_probe_response(
+        listener,
+        "tracedecay",
+        env!("CARGO_PKG_VERSION"),
+        authority.auth_token().to_owned(),
+    );
     let ready_guard = EnvVarGuard::set(SOCKET_ENV, &ready_socket);
     assert!(
         super::daemon_reachable(),
@@ -683,6 +749,7 @@ fn daemon_socket_connectable_separates_a_slow_daemon_from_no_daemon() {
     // The cold-start case: a daemon is accepting but has not answered
     // initialize inside the one-second reachability probe.
     let silent = profile.path().join("silent.sock");
+    let _authority = seed_socket_authority(&silent);
     let _listener = UnixListener::bind(&silent).expect("bind silent socket");
     let silent_guard = EnvVarGuard::set(SOCKET_ENV, &silent);
     assert!(
@@ -702,8 +769,14 @@ fn daemon_status_reports_the_initialize_proof_not_only_the_socket() {
     let _env_lock = lock_user_data_dir_test_env();
     let profile = TempDir::new().expect("profile temp dir");
     let socket = profile.path().join("status.sock");
+    let authority = seed_socket_authority(&socket);
     let listener = UnixListener::bind(&socket).expect("bind status socket");
-    let server = serve_probe_response(listener, "tracedecay", env!("CARGO_PKG_VERSION"), None);
+    let server = serve_probe_response(
+        listener,
+        "tracedecay",
+        env!("CARGO_PKG_VERSION"),
+        authority.auth_token().to_owned(),
+    );
     let status = super::service_status(&socket, env!("CARGO_PKG_VERSION"));
     server.join().expect("join status server");
     assert!(
@@ -769,6 +842,29 @@ fn daemon_readiness_probe_classifies_authentication_denial() {
 }
 
 #[cfg(target_os = "linux")]
+#[cfg(target_os = "linux")]
+#[test]
+fn unreachable_systemd_user_manager_is_an_error_not_a_stopped_unit() {
+    let dir = TempDir::new().expect("temp dir");
+    let systemctl = dir.path().join("systemctl");
+    std::fs::write(
+        &systemctl,
+        "#!/bin/sh\necho 'Failed to connect to bus: No medium found' >&2\nexit 1\n",
+    )
+    .expect("fake systemctl");
+    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
+        .expect("systemctl permissions");
+    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
+
+    let error = runner
+        .service_state(&dir.path().join("daemon.sock"))
+        .expect_err("an unreachable user manager has no unit state");
+    let message = error.to_string();
+    assert!(message.contains("reported no unit state"), "{message}");
+    assert!(message.contains("Failed to connect to bus"), "{message}");
+}
+
+#[cfg(unix)]
 #[test]
 fn running_service_snapshot_uses_one_authenticated_connection() {
     let _env_lock = lock_user_data_dir_test_env();
@@ -1431,7 +1527,7 @@ fn refresh_installed_service_preserves_existing_socket_path() {
     let stopped = dir.path().join("systemctl.stopped");
     std::fs::write(
             &systemctl,
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && [ -f \"$TRACEDECAY_SYSTEMCTL_STOPPED\" ] && exit 3\n[ \"$2\" = stop ] && touch \"$TRACEDECAY_SYSTEMCTL_STOPPED\"\n[ \"$2\" = start ] && rm -f \"$TRACEDECAY_SYSTEMCTL_STOPPED\"\nexit 0\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && [ -f \"$TRACEDECAY_SYSTEMCTL_STOPPED\" ] && { echo inactive; exit 3; }\n[ \"$2\" = stop ] && touch \"$TRACEDECAY_SYSTEMCTL_STOPPED\"\n[ \"$2\" = start ] && rm -f \"$TRACEDECAY_SYSTEMCTL_STOPPED\"\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
         )
         .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
@@ -1477,8 +1573,13 @@ fn refresh_installed_service_preserves_existing_socket_path() {
         TEST_BUILD_VERSION,
     )
     .expect("refresh service");
+    let authority = seed_socket_authority(&custom_socket);
     let listener = UnixListener::bind(&custom_socket).expect("bind managed daemon socket");
-    let (_served, _) = serve_identity_probes(listener, vec![TEST_BUILD_VERSION]);
+    let (_served, _) = serve_identity_probes(
+        listener,
+        vec![TEST_BUILD_VERSION],
+        authority.auth_token().to_owned(),
+    );
     super::restore_installed_service_after_update_with_runner(
         &runner,
         previous_state,
@@ -1501,7 +1602,7 @@ fn refresh_installed_service_preserves_existing_socket_path() {
         systemctl_log_contains_sequence(
             &commands,
             &[
-                "--user is-active --quiet tracedecay.service",
+                "--user is-active tracedecay.service",
                 "--user is-enabled tracedecay.service",
                 "--user stop tracedecay.service",
                 "--user daemon-reload",
@@ -1512,67 +1613,6 @@ fn refresh_installed_service_preserves_existing_socket_path() {
         ),
         "refresh must only reload; restore of the previously running-enabled state must reload, enable, and start, got:\n{commands}"
     );
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn refresh_installed_service_migrates_overlong_generated_socket_path() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let dir = TempDir::new().expect("temp dir");
-    let config_home = dir.path().join("config");
-    let fake_bin = dir.path().join("bin");
-    let home = dir.path().join("home");
-    let profile = dir.path().join("p".repeat(120)).join(".tracedecay");
-    std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
-    std::fs::create_dir_all(&home).expect("home dir");
-
-    let systemctl = fake_bin.join("systemctl");
-    std::fs::write(
-        &systemctl,
-        "#!/bin/sh\n[ \"$2\" = is-enabled ] && echo enabled\nexit 0\n",
-    )
-    .expect("fake systemctl");
-    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
-        .expect("systemctl permissions");
-    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
-
-    let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
-    let _home_guard = EnvVarGuard::set("HOME", &home);
-    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile);
-
-    let legacy_socket = profile.join("daemon.sock");
-    let expected_socket = super::default_socket_path().expect("short default socket");
-    assert_ne!(legacy_socket, expected_socket);
-
-    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
-    std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
-    std::fs::write(
-        &service_path,
-        format!(
-            "[Unit]\nDescription=TraceDecay daemon\n\n[Service]\nExecStart=/old/tracedecay daemon run --socket {}\n",
-            legacy_socket.display()
-        ),
-    )
-    .expect("existing service unit");
-
-    let spec = DaemonServiceSpec {
-        tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
-        socket_path: expected_socket.clone(),
-        data_dir_override: Some(profile),
-        remote_tls: None,
-    };
-    let outcome = super::refresh_installed_service_with_state_and_runner(
-        &runner,
-        &spec,
-        Some(DaemonServiceState::StoppedEnabled),
-        TEST_BUILD_VERSION,
-    )
-    .expect("refresh service");
-
-    assert_eq!(outcome, Some(service_path.clone()));
-    let unit = std::fs::read_to_string(service_path).expect("service unit");
-    assert!(unit.contains(&format!("--socket {}", expected_socket.display())));
-    assert!(!unit.contains(&legacy_socket.display().to_string()));
 }
 
 #[cfg(target_os = "linux")]
@@ -1590,7 +1630,7 @@ fn restore_quiesced_service_starts_existing_unit_without_rewriting_it() {
     let log = dir.path().join("systemctl.log");
     std::fs::write(
         &systemctl,
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\nexit 0\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
     )
     .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
@@ -1609,8 +1649,13 @@ fn restore_quiesced_service_starts_existing_unit_without_rewriting_it() {
         custom_socket.display()
     );
     std::fs::write(&service_path, &original_unit).expect("existing service unit");
+    let authority = seed_socket_authority(&custom_socket);
     let listener = UnixListener::bind(&custom_socket).expect("bind managed daemon socket");
-    let (served, acknowledged) = serve_identity_probes(listener, vec![TEST_BUILD_VERSION]);
+    let (served, acknowledged) = serve_identity_probes(
+        listener,
+        vec![TEST_BUILD_VERSION],
+        authority.auth_token().to_owned(),
+    );
 
     super::restore_installed_service_after_update_with_runner(
         &runner,
@@ -1659,7 +1704,7 @@ fn restore_after_update_does_not_activate_a_held_stopped_unit() {
     let log = dir.path().join("systemctl.log");
     std::fs::write(
         &systemctl,
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\nexit 0\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
     )
     .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
@@ -1777,7 +1822,7 @@ fn restore_after_update_waits_for_authenticated_daemon_identity() {
     let systemctl = fake_bin.join("systemctl");
     std::fs::write(
         &systemctl,
-        "#!/bin/sh\n[ \"$2\" = is-enabled ] && echo enabled\nexit 0\n",
+        "#!/bin/sh\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
     )
     .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
@@ -1797,12 +1842,16 @@ fn restore_after_update_waits_for_authenticated_daemon_identity() {
         ),
     )
     .expect("existing service unit");
+    let authority = seed_socket_authority(&socket_path);
     let listener = UnixListener::bind(&socket_path).expect("bind managed daemon socket");
     // The first identity answer is a stale daemon; restore must keep polling
     // until the expected version answers instead of trusting the systemctl
     // exit status.
-    let (served, acknowledged) =
-        serve_identity_probes(listener, vec!["0.0.0-stale", TEST_BUILD_VERSION]);
+    let (served, acknowledged) = serve_identity_probes(
+        listener,
+        vec!["0.0.0-stale", TEST_BUILD_VERSION],
+        authority.auth_token().to_owned(),
+    );
 
     super::restore_installed_service_after_update(
         DaemonServiceState::RunningEnabled,
@@ -1841,7 +1890,7 @@ fn start_service_reloads_units_and_requires_authenticated_identity() {
     let started = dir.path().join("systemctl.started");
     std::fs::write(
             &systemctl,
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && [ ! -f \"$TRACEDECAY_SYSTEMCTL_STARTED\" ] && exit 3\n[ \"$2\" = start ] && : > \"$TRACEDECAY_SYSTEMCTL_STARTED\"\nexit 0\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && [ ! -f \"$TRACEDECAY_SYSTEMCTL_STARTED\" ] && { echo inactive; exit 3; }\n[ \"$2\" = start ] && : > \"$TRACEDECAY_SYSTEMCTL_STARTED\"\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
         )
         .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
@@ -1863,8 +1912,13 @@ fn start_service_reloads_units_and_requires_authenticated_identity() {
         ),
     )
     .expect("existing service unit");
+    let authority = seed_socket_authority(&socket_path);
     let listener = UnixListener::bind(&socket_path).expect("bind managed daemon socket");
-    let (served, acknowledged) = serve_identity_probes(listener, vec![TEST_BUILD_VERSION]);
+    let (served, acknowledged) = serve_identity_probes(
+        listener,
+        vec![TEST_BUILD_VERSION],
+        authority.auth_token().to_owned(),
+    );
 
     super::start_service(TEST_BUILD_VERSION).expect("start service");
 
@@ -1898,7 +1952,7 @@ fn wait_for_installed_service_state_rejects_identity_mismatch_at_the_deadline() 
     let systemctl = fake_bin.join("systemctl");
     std::fs::write(
         &systemctl,
-        "#!/bin/sh\n[ \"$2\" = is-enabled ] && echo enabled\nexit 0\n",
+        "#!/bin/sh\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
     )
     .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
@@ -1918,8 +1972,13 @@ fn wait_for_installed_service_state_rejects_identity_mismatch_at_the_deadline() 
         ),
     )
     .expect("existing service unit");
+    let authority = seed_socket_authority(&socket_path);
     let listener = UnixListener::bind(&socket_path).expect("bind managed daemon socket");
-    let (_served, _) = serve_identity_probes(listener, vec!["0.0.0-stale"]);
+    let (_served, _) = serve_identity_probes(
+        listener,
+        vec!["0.0.0-stale"],
+        authority.auth_token().to_owned(),
+    );
 
     let error = super::wait_for_installed_service_state_with(
         &runner,
@@ -1952,7 +2011,7 @@ fn wait_for_installed_service_state_rejects_unresponsive_socket_at_the_deadline(
     let systemctl = fake_bin.join("systemctl");
     std::fs::write(
         &systemctl,
-        "#!/bin/sh\n[ \"$2\" = is-enabled ] && echo enabled\nexit 0\n",
+        "#!/bin/sh\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
     )
     .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
@@ -2069,7 +2128,7 @@ fn refresh_installed_service_preserves_stopped_state() {
     let log = dir.path().join("systemctl.log");
     std::fs::write(
             &systemctl,
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-active ] && exit 3\n[ \"$2\" = is-enabled ] && echo enabled\nexit 0\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-active ] && { echo inactive; exit 3; }\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
         )
         .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
@@ -2109,7 +2168,7 @@ fn refresh_installed_service_preserves_stopped_state() {
     .expect("refresh service");
 
     let commands = std::fs::read_to_string(log).expect("systemctl log");
-    assert!(commands.contains("--user is-active --quiet tracedecay.service"));
+    assert!(commands.contains("--user is-active tracedecay.service"));
     assert!(
         !commands.contains("enable tracedecay.service"),
         "a stopped-enabled service is already enabled; refresh must not mutate its lifecycle"
@@ -2127,7 +2186,7 @@ fn systemd_service_state_detects_runtime_mask() {
     let systemctl = fake_bin.join("systemctl");
     std::fs::write(
             &systemctl,
-            "#!/bin/sh\n[ \"$2\" = is-active ] && exit 3\n[ \"$2\" = is-enabled ] && { echo masked-runtime; exit 1; }\nexit 0\n",
+            "#!/bin/sh\n[ \"$2\" = is-active ] && { echo inactive; exit 3; }\n[ \"$2\" = is-enabled ] && { echo masked-runtime; exit 1; }\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
         )
         .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tracedecay_domain::{
-    AnchorProvenanceRelationV2, CanonicalObservationEnvelopeV1, CopyProofV1, DurableObservationV1,
+    AnchorProvenanceRelation, CanonicalObservationEnvelopeV1, CopyProofV1, DurableObservationV1,
     LogicalCopyRecordV1, MessageOccurrenceRecordV1, RetrievalAnchorRecord, SessionAuthorityClassV1,
     SessionId, TemporalAssertionKindV1, TemporalAssertionRecordV1, TemporalValidityV1, UtcMicros,
     derive_exact_observation_anchor_id,
@@ -14,9 +14,9 @@ use tracedecay_store::{
     SessionMessageProjection, SessionStoreError, SessionStoreResult,
     SessionTemporalProjectionBatchReceiptV1, SessionTemporalProjectionBatchV1,
 };
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
-use crate::support::derive_projection;
+use tracedecay_store::derive_canonical_projection;
 
 use super::super::query::{
     PERSIST_OPERATION, encode_watermarks, frontier_i64, generation_i64, now_micros,
@@ -220,8 +220,8 @@ async fn canonical_occurrence_projection(
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
     let output_count =
         usize::try_from(output_count).map_err(|error| storage(PERSIST_OPERATION, error))?;
-    let projection =
-        derive_projection(&observation).map_err(|error| storage(PERSIST_OPERATION, error))?;
+    let projection = derive_canonical_projection(&observation)
+        .map_err(|error| storage(PERSIST_OPERATION, error))?;
     let envelope = observation_envelope(&observation)?;
     let mut outputs = projection.messages().cloned().collect::<Vec<_>>();
     outputs.sort_unstable_by_key(SessionMessageProjection::output_ordinal);
@@ -413,10 +413,10 @@ async fn persist_occurrence(
                 thread_id, thread_grouping_json, turn_id, turn_grouping_json,
                 message_id, agent_id, role, knowledge_at, valid_time_json,
                 evidence_json, sanitized_content_digest, sanitized_content_bytes,
-                snippet_text, index_text
+                index_text
              ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21
+                ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20
              )",
             params![
                 batch.session_id().as_str(),
@@ -450,7 +450,6 @@ async fn persist_occurrence(
                 evidence,
                 sanitized_content_digest,
                 sanitized_content_bytes,
-                sanitized_content,
                 sanitized_content,
             ],
         )
@@ -960,7 +959,7 @@ pub(super) async fn validate_copy_proof(
                         && canonical_source.as_deref()
                             == Some(copy.copied_from_occurrence_id.as_str())
                         && anchor.source_anchors().iter().any(|lineage| {
-                            lineage.relation() == AnchorProvenanceRelationV2::CopiedFrom
+                            lineage.relation() == AnchorProvenanceRelation::CopiedFrom
                                 && lineage.anchor_id() == assertion_anchor_id
                         })
                 })
@@ -1225,20 +1224,20 @@ pub(super) async fn validate_assertion(
 }
 
 pub(super) const fn assertion_kind_for_relation(
-    relation: AnchorProvenanceRelationV2,
+    relation: AnchorProvenanceRelation,
 ) -> Option<TemporalAssertionKindV1> {
     match relation {
-        AnchorProvenanceRelationV2::Corrects => Some(TemporalAssertionKindV1::Corrects),
-        AnchorProvenanceRelationV2::Contradicts => Some(TemporalAssertionKindV1::Contradicts),
-        AnchorProvenanceRelationV2::Supersedes => Some(TemporalAssertionKindV1::Supersedes),
-        AnchorProvenanceRelationV2::Supports => Some(TemporalAssertionKindV1::Supports),
-        AnchorProvenanceRelationV2::CapturedFrom
-        | AnchorProvenanceRelationV2::Produced
-        | AnchorProvenanceRelationV2::Observed
-        | AnchorProvenanceRelationV2::ExecutedIn
-        | AnchorProvenanceRelationV2::Discussed
-        | AnchorProvenanceRelationV2::CopiedFrom
-        | AnchorProvenanceRelationV2::DerivedFrom => None,
+        AnchorProvenanceRelation::Corrects => Some(TemporalAssertionKindV1::Corrects),
+        AnchorProvenanceRelation::Contradicts => Some(TemporalAssertionKindV1::Contradicts),
+        AnchorProvenanceRelation::Supersedes => Some(TemporalAssertionKindV1::Supersedes),
+        AnchorProvenanceRelation::Supports => Some(TemporalAssertionKindV1::Supports),
+        AnchorProvenanceRelation::CapturedFrom
+        | AnchorProvenanceRelation::Produced
+        | AnchorProvenanceRelation::Observed
+        | AnchorProvenanceRelation::ExecutedIn
+        | AnchorProvenanceRelation::Discussed
+        | AnchorProvenanceRelation::CopiedFrom
+        | AnchorProvenanceRelation::DerivedFrom => None,
     }
 }
 

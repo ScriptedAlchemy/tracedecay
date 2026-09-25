@@ -1,11 +1,10 @@
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationIdV1,
     CanonicalObservationRelationsV1, CanonicalReasoningVisibilityV1, ComponentVersion,
-    DurableClaudeObservationV1, DurableObservationV1, ObservationId, ObservationIdentityMaterialV1,
+    DurableObservationV1, ObservationId, ObservationIdentityMaterialV1,
     ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
     PayloadDigestV1, PayloadReferenceV1, ProjectionGenerationId, ProviderId, RetentionClass,
@@ -13,6 +12,7 @@ use tracedecay_domain::{
     SensitivityV1, SessionId, UtcMicros, derive_exact_observation_anchor_id,
 };
 use tracedecay_global_db::GlobalDbObservationStore;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_store::{
@@ -20,9 +20,10 @@ use tracedecay_store::{
     ObservationProjectionStatus, ObservationProjectionStore, ObservationStore, ObservationWrite,
     ProjectionPersistOutcome, ProjectionRebuildOutcome, ProjectionSkipReason, ProjectionStoreError,
     SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
 
+use crate::claude_records;
 use crate::common::isolated_lcm_db_path;
 
 const GENERATION: u64 = 11;
@@ -46,10 +47,11 @@ fn cursor_in_generation(
     generation: u64,
     byte_offset: u64,
 ) -> ObservationSourceCursorV1 {
-    ObservationSourceCursorV1::new(
+    ObservationSourceCursorV1::for_ordering(
         source(session_id),
         ObservationScopeV1::Profile,
         ObservationSourceGenerationV1::new(generation).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
         byte_offset,
     )
     .unwrap()
@@ -69,14 +71,19 @@ fn receipt(receipt_id: &str, payload: &Value) -> SanitizationReceiptV1 {
     .unwrap()
 }
 
+/// A Claude transcript record read at `start..end`, persisted as the canonical
+/// envelope the host builds from it. Identity stays positional (file bytes in
+/// one source generation) so re-observing the same record in a later
+/// generation is a distinct observation whose output the projector must
+/// reconcile, which is what these suites exercise.
 fn observation(
     session_id: &str,
     start: u64,
     end: u64,
     receipt_id: &str,
-    payload: Value,
-) -> DurableClaudeObservationV1 {
-    observation_in_generation(session_id, GENERATION, start, end, receipt_id, payload)
+    native: Value,
+) -> DurableObservationV1 {
+    observation_in_generation(session_id, GENERATION, start, end, receipt_id, native)
 }
 
 fn observation_in_generation(
@@ -85,9 +92,10 @@ fn observation_in_generation(
     start: u64,
     end: u64,
     receipt_id: &str,
-    payload: Value,
-) -> DurableClaudeObservationV1 {
-    DurableClaudeObservationV1::new(
+    native: Value,
+) -> DurableObservationV1 {
+    let payload = claude_records::canonical_envelope(&native, session_id, start, end);
+    DurableObservationV1::new(
         ObservationIdentityMaterialV1::new(
             source(session_id),
             ObservationScopeV1::Profile,
@@ -251,7 +259,7 @@ fn anchored_write(write: ObservationWrite) -> AnchoredObservationWrite {
     let authorization =
         build_observation_resolution_authorization_v1(write.observation(), "projection-test")
             .unwrap();
-    let anchor = build_observation_retrieval_anchor_v2(
+    let anchor = build_observation_retrieval_anchor(
         write.observation(),
         generation.clone(),
         UtcMicros(1),
@@ -262,7 +270,7 @@ fn anchored_write(write: ObservationWrite) -> AnchoredObservationWrite {
 }
 
 fn write(
-    observation: DurableClaudeObservationV1,
+    observation: DurableObservationV1,
     expected_cursor: Option<ObservationSourceCursorV1>,
 ) -> AnchoredObservationWrite {
     let next_cursor = cursor_in_generation(
@@ -275,7 +283,7 @@ fn write(
 
 async fn persist(
     store: &GlobalDbObservationStore,
-    observation: DurableClaudeObservationV1,
+    observation: DurableObservationV1,
     expected_cursor: Option<ObservationSourceCursorV1>,
 ) -> u64 {
     match store
@@ -307,18 +315,14 @@ async fn rebuild_projection_to_completion(
     panic!("projection rebuild did not complete within the bounded test budget");
 }
 
+/// One assistant transcript row. Claude projects a row under its `uuid`, so
+/// `message_id` is the projected message id; `message.id` is the API message
+/// id shared by every row of one response and does not name the output.
 fn conversational_payload(message_id: &str, text: &str) -> Value {
-    json!({
-        "type": "assistant",
-        "uuid": format!("record-{message_id}"),
-        "timestamp": "2025-06-15T15:06:40Z",
-        "message": {
-            "id": message_id,
-            "role": "assistant",
-            "content": [{"type": "text", "text": text}],
-            "model": "claude-sonnet-4"
-        }
-    })
+    let mut record = claude_records::assistant_record(text);
+    record["uuid"] = Value::from(message_id);
+    record["message"]["id"] = Value::from(format!("api-{message_id}"));
+    record
 }
 
 async fn table_count(tmp: &TempDir, table: &str) -> i64 {
@@ -379,17 +383,18 @@ async fn search_session_messages(
     let mut statement = conn
         .prepare(
             "SELECT message.message_id, message.role, message.timestamp, message.ordinal,
-                    message.text, message.kind, message.model, message.tool_names,
-                    message.source_path, message.source_offset
-             FROM session_messages_fts
-             JOIN session_messages AS message ON message.rowid = session_messages_fts.rowid
+                    COALESCE(message.content, message.placeholder_text, ''), message.kind,
+                    message.model, message.tool_names, message.source_path,
+                    message.source_offset
+             FROM lcm_raw_messages_fts
+             JOIN lcm_raw_messages AS message ON message.store_id = lcm_raw_messages_fts.rowid
              JOIN sessions AS session
                ON session.provider = message.provider
               AND session.session_id = message.session_id
-             WHERE session_messages_fts MATCH ?1
+             WHERE lcm_raw_messages_fts MATCH ?1
                AND message.provider = 'claude'
                AND session.project_key = 'user'
-             ORDER BY bm25(session_messages_fts)
+             ORDER BY bm25(lcm_raw_messages_fts)
              LIMIT ?2",
         )
         .unwrap();
@@ -516,7 +521,7 @@ async fn audited_projection_fixture(session_id: &str, message_id: &str) -> TempD
 async fn projection_counts(tmp: &TempDir) -> (i64, i64, i64, i64, i64, i64) {
     (
         table_count(tmp, "sessions").await,
-        table_count(tmp, "session_messages").await,
+        table_count(tmp, "lcm_raw_messages").await,
         table_count(tmp, "observation_projection_provenance").await,
         table_count(tmp, "observation_projection_checkpoints").await,
         table_count(tmp, "observation_projection_dispositions").await,
@@ -582,7 +587,10 @@ async fn all_projected_message_texts(tmp: &TempDir) -> Vec<String> {
 
 async fn projected_message_texts_where(tmp: &TempDir, predicate: &str) -> Vec<String> {
     let conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
-    let sql = format!("SELECT text FROM session_messages {predicate} ORDER BY message_id");
+    let sql = format!(
+        "SELECT COALESCE(content, placeholder_text, '') FROM lcm_raw_messages {predicate}
+         ORDER BY message_id"
+    );
     let mut statement = conn.prepare(&sql).unwrap();
     statement
         .query_map((), |row| row.get(0))

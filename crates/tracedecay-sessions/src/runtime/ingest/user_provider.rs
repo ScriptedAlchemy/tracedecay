@@ -11,7 +11,8 @@ use crate::runtime::source::{
 };
 use crate::runtime::store_port::TranscriptIngestStore;
 use crate::runtime::{
-    SessionProvider, claude_observation, cline_like, hermes, kimi, kiro, opencode, vibe,
+    SessionProvider, hosts::claude_observation, hosts::cline_like, hosts::hermes, hosts::kimi,
+    hosts::kiro, hosts::opencode, hosts::vibe,
 };
 
 use super::failure::{
@@ -105,7 +106,8 @@ pub(super) struct UserProviderUnit<'a, S> {
     pub(super) candidate: SessionProvider,
     pub(super) max_new_bytes: u64,
     pub(super) cancellation: &'a ObservationCancellation,
-    pub(super) codex_discovery: Option<(&'a crate::runtime::codex::CodexDiscoveryHub, &'a str)>,
+    pub(super) codex_discovery:
+        Option<(&'a crate::runtime::hosts::codex::CodexDiscoveryHub, &'a str)>,
 }
 
 impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
@@ -564,7 +566,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
 
 #[cfg(test)]
 mod tests {
-    use crate::runtime::claude_observation::{
+    use crate::runtime::hosts::claude_observation::{
         ClaudeObservationIngestError, ClaudeObservationIngestStats,
     };
     use crate::runtime::shared::TranscriptIngestStats;

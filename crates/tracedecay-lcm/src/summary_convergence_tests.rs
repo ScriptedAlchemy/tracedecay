@@ -72,17 +72,6 @@ async fn backfill_page_upserts_each_session_once_and_idles_without_work() {
             project_path TEXT NOT NULL,
             PRIMARY KEY(provider, session_id)
          );
-         CREATE TABLE session_messages (
-            provider TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            timestamp INTEGER,
-            ordinal INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            metadata_json TEXT,
-            PRIMARY KEY(provider, message_id)
-         );
          INSERT INTO sessions(provider, session_id, project_key, project_path)
          VALUES ('cursor', 'session-a', 'project', '/p'),
                 ('cursor', 'session-b', 'project', '/p'),
@@ -102,9 +91,9 @@ async fn backfill_page_upserts_each_session_once_and_idles_without_work() {
         conn.execute(
             "INSERT INTO lcm_raw_messages (
                 provider, message_id, session_id, role, ordinal, content,
-                content_hash, storage_kind, snippet_text, index_text, metadata_json
+                content_hash, storage_kind, metadata_json
              ) VALUES ('cursor', ?1, ?2, 'assistant', ?3, 'body',
-                       ?1, 'inline', 'body', 'body', '{}')",
+                       ?1, 'inline', '{}')",
             params![format!("message-{ordinal}"), session_for(ordinal), ordinal],
         )
         .await
@@ -251,9 +240,9 @@ async fn backfill_page_upserts_each_session_once_and_idles_without_work() {
     conn.execute(
         "INSERT INTO lcm_raw_messages (
             provider, message_id, session_id, role, ordinal, content,
-            content_hash, storage_kind, snippet_text, index_text, metadata_json
+            content_hash, storage_kind, metadata_json
          ) VALUES ('cursor', 'message-301', 'session-a', 'assistant', 301, 'body',
-                   'message-301', 'inline', 'body', 'body', '{}')",
+                   'message-301', 'inline', '{}')",
         (),
     )
     .await
@@ -289,10 +278,9 @@ async fn seed_preserved_role_filter_store(conn: &TestConnection) {
         conn.execute(
             "INSERT INTO lcm_raw_messages (
                  store_id, provider, message_id, session_id, role, ordinal,
-                 content, content_hash, storage_kind, snippet_text, index_text,
-                 metadata_json
+                 content, content_hash, storage_kind, metadata_json
              ) VALUES (?1, 'claude', ?2, 'preserved', ?3, ?1, 'body', ?2,
-                       'inline', 'body', 'body', '{}')",
+                       'inline', '{}')",
             params![store_id, message_id, role],
         )
         .await
@@ -312,17 +300,6 @@ async fn create_session_host_tables(conn: &TestConnection) {
             project_key TEXT NOT NULL,
             project_path TEXT NOT NULL,
             PRIMARY KEY(provider, session_id)
-         );
-         CREATE TABLE session_messages (
-            provider TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            timestamp INTEGER,
-            ordinal INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            metadata_json TEXT,
-            PRIMARY KEY(provider, message_id)
          );",
     )
     .await
@@ -513,17 +490,6 @@ async fn retained_queue_page_is_keyset_bounded_and_candidate_read_avoids_raw_cor
             project_path TEXT NOT NULL,
             PRIMARY KEY(provider, session_id)
          );
-         CREATE TABLE session_messages (
-            provider TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            timestamp INTEGER,
-            ordinal INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            metadata_json TEXT,
-            PRIMARY KEY(provider, message_id)
-         );
          INSERT INTO sessions(provider, session_id, project_key, project_path)
          VALUES ('cursor', 'large-corpus', 'project.large', '/large');",
     )
@@ -541,9 +507,9 @@ async fn retained_queue_page_is_keyset_bounded_and_candidate_read_avoids_raw_cor
             .execute(
                 "INSERT INTO lcm_raw_messages (
                     provider, message_id, session_id, role, ordinal, content,
-                    content_hash, storage_kind, snippet_text, index_text, metadata_json
+                    content_hash, storage_kind, metadata_json
                  ) VALUES ('cursor', ?1, 'large-corpus', 'assistant', ?2, 'body',
-                           ?1, 'inline', 'body', 'body', '{}')",
+                           ?1, 'inline', '{}')",
                 params![format!("message-{ordinal}"), ordinal],
             )
             .await
@@ -623,17 +589,6 @@ async fn current_profiles_install_the_unreleased_queue_shape_in_place() {
             project_key TEXT NOT NULL,
             project_path TEXT NOT NULL,
             PRIMARY KEY(provider, session_id)
-         );
-         CREATE TABLE session_messages (
-            provider TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            timestamp INTEGER,
-            ordinal INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            metadata_json TEXT,
-            PRIMARY KEY(provider, message_id)
          );",
     )
     .await
@@ -747,7 +702,6 @@ async fn current_profiles_install_the_unreleased_queue_shape_in_place() {
     for object in [
         "lcm_summary_convergence_invalidation_work",
         "lcm_summary_convergence_dirty_raw_seed",
-        "idx_lcm_summary_sources_source_node",
     ] {
         let mut rows = conn
             .query(
@@ -790,17 +744,6 @@ async fn protected_content_revision_requeues_a_current_session() {
             project_path TEXT NOT NULL,
             PRIMARY KEY(provider, session_id)
          );
-         CREATE TABLE session_messages (
-            provider TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            timestamp INTEGER,
-            ordinal INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            metadata_json TEXT,
-            PRIMARY KEY(provider, message_id)
-         );
          INSERT INTO sessions(provider, session_id, project_key, project_path)
          VALUES ('cursor', 'revised-session', 'project.revised', '/revised');",
     )
@@ -810,9 +753,9 @@ async fn protected_content_revision_requeues_a_current_session() {
     conn.execute(
         "INSERT INTO lcm_raw_messages (
             provider, message_id, session_id, role, ordinal, content,
-            content_hash, storage_kind, snippet_text, index_text, metadata_json
+            content_hash, storage_kind, metadata_json
          ) VALUES ('cursor', 'message-1', 'revised-session', 'assistant', 1,
-                   'old content', 'old-hash', 'inline', 'old content', 'old content',
+                   'old content', 'old-hash', 'inline',
                    '{\"ingest_protection\":{\"sanitization_receipt\":{}}}')",
         (),
     )
@@ -843,8 +786,7 @@ async fn protected_content_revision_requeues_a_current_session() {
 
     conn.execute(
         "UPDATE lcm_raw_messages
-         SET content = 'revised content', content_hash = 'revised-hash',
-             snippet_text = 'revised content', index_text = 'revised content'
+         SET content = 'revised content', content_hash = 'revised-hash'
          WHERE provider = 'cursor' AND message_id = 'message-1'",
         (),
     )
@@ -884,17 +826,6 @@ async fn protection_progress_cannot_overwrite_a_concurrent_raw_rewind() {
             project_path TEXT NOT NULL,
             PRIMARY KEY(provider, session_id)
          );
-         CREATE TABLE session_messages (
-            provider TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            timestamp INTEGER,
-            ordinal INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            metadata_json TEXT,
-            PRIMARY KEY(provider, message_id)
-         );
          INSERT INTO sessions(provider, session_id, project_key, project_path)
          VALUES ('cursor', 'protection-cas', 'project.cas', '/cas');",
     )
@@ -904,9 +835,9 @@ async fn protection_progress_cannot_overwrite_a_concurrent_raw_rewind() {
     conn.execute(
         "INSERT INTO lcm_raw_messages (
             provider, message_id, session_id, role, ordinal, content,
-            content_hash, storage_kind, snippet_text, index_text, metadata_json
+            content_hash, storage_kind, metadata_json
          ) VALUES ('cursor', 'message-1', 'protection-cas', 'assistant', 1,
-                   'old', 'old-hash', 'inline', 'old', 'old',
+                   'old', 'old-hash', 'inline',
                    '{\"ingest_protection\":{\"sanitization_receipt\":{}}}')",
         (),
     )
@@ -953,17 +884,6 @@ async fn disjoint_raw_revisions_drain_as_distinct_restart_safe_work_items() {
             project_path TEXT NOT NULL,
             PRIMARY KEY(provider, session_id)
          );
-         CREATE TABLE session_messages (
-            provider TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            timestamp INTEGER,
-            ordinal INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            metadata_json TEXT,
-            PRIMARY KEY(provider, message_id)
-         );
          INSERT INTO sessions(provider, session_id, project_key, project_path)
          VALUES ('cursor', 'disjoint-revisions', 'project.revised', '/revised');",
     )
@@ -974,9 +894,9 @@ async fn disjoint_raw_revisions_drain_as_distinct_restart_safe_work_items() {
         conn.execute(
             "INSERT INTO lcm_raw_messages (
                 provider, message_id, session_id, role, ordinal, content,
-                content_hash, storage_kind, snippet_text, index_text, metadata_json
+                content_hash, storage_kind, metadata_json
              ) VALUES ('cursor', ?1, 'disjoint-revisions', 'assistant', ?2,
-                       ?1, ?1, 'inline', ?1, ?1,
+                       ?1, ?1, 'inline',
                        '{\"ingest_protection\":{\"sanitization_receipt\":{}}}')",
             params![format!("message-{ordinal}"), ordinal],
         )

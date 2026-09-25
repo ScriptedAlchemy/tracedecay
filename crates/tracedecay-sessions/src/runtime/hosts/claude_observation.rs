@@ -10,9 +10,9 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tracedecay_domain::{
     DomainError, ObservationContractError, ObservationId, ObservationIdentityMaterialV1,
-    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceGenerationV1,
-    ObservationSourceIdentityV1, ObservationSourceRangeV1, RetentionClass, SanitizationReceiptV1,
-    SessionId,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+    RetentionClass, SanitizationReceiptV1, SessionId,
 };
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, NonDurableFrameReason, ObservationCursorAdvance,
@@ -27,7 +27,7 @@ use crate::observation::{
     CaptureClaudeObservationOutcome, CaptureClaudeObservationRequest,
     CaptureClaudeObservationRequestError, ObservationApplicationError, ObservationCancellation,
 };
-use crate::runtime::claude::{
+use crate::runtime::hosts::claude::{
     ClaudeFrameCoverage, ClaudeSkippedFrame, ClaudeSkippedFrameReason, ClaudeSource,
     ClaudeSourceFrame, identify_claude_source, try_scan_claude_source_frames_with_resume,
 };
@@ -36,8 +36,7 @@ use crate::runtime::shared::{StoredCursor, TranscriptIngestStats};
 use crate::runtime::snapshot_observation::host_admission_error;
 use crate::runtime::source::{
     HostProviderCoverage, JsonlResumeState, STRICT_JSONL_BATCH_BYTES, TranscriptDiscoveryBounds,
-    TranscriptIngestError, TranscriptSource, persist_host_provider_coverage,
-    run_blocking_transcript_section,
+    TranscriptIngestError, persist_host_provider_coverage, run_blocking_transcript_section,
 };
 use tracedecay_privacy::PrivacySanitizerError;
 
@@ -290,7 +289,13 @@ fn cursor_at(
     offset: u64,
     resume_checkpoint: Option<(u64, u64)>,
 ) -> Result<ObservationSourceCursorV1, ObservationContractError> {
-    let cursor = ObservationSourceCursorV1::new(source.clone(), scope.clone(), generation, offset)?;
+    let cursor = ObservationSourceCursorV1::for_ordering(
+        source.clone(),
+        scope.clone(),
+        generation,
+        ObservationOrderingDomainV1::FileBytes,
+        offset,
+    )?;
     Ok(
         resume_checkpoint.map_or(cursor.clone(), |(file_identity, resume_fingerprint)| {
             cursor.with_resume_checkpoint(file_identity, resume_fingerprint)
@@ -434,20 +439,9 @@ async fn capture_frame<A: HostAdmission + ?Sized>(
         }
     };
     match captured {
-        CaptureClaudeObservationOutcome::Persisted {
-            outcome,
-            sanitized_record,
-            ..
-        }
-        | CaptureClaudeObservationOutcome::AcceptedForReplay {
-            outcome,
-            sanitized_record,
-            ..
-        } => {
+        CaptureClaudeObservationOutcome::Persisted { outcome, .. }
+        | CaptureClaudeObservationOutcome::AcceptedForReplay { outcome, .. } => {
             let receipt = outcome.receipt();
-            if !frame.set_sanitized_record(*sanitized_record) {
-                return Err(ClaudeObservationIngestError::InvalidFrameState);
-            }
             Ok(FrameCaptureOutcome::Persisted(CapturedClaudeFrame {
                 committed_cursor: receipt.committed_cursor().clone(),
                 exact_duplicate: matches!(
@@ -1208,13 +1202,11 @@ async fn scheduled_source_paths<A: HostAdmission + ?Sized>(
     admission: &A,
     scope: &ObservationScopeV1,
     source: &ClaudeSource,
-    project_root: &Path,
 ) -> Result<(Vec<PathBuf>, usize), ClaudeObservationIngestError> {
     let discovery = hotpath::measure_block!(
         "sessions.hosts.claude.discover_blocking",
         run_blocking_transcript_section(|| {
-            source
-                .discover_transcript_paths(project_root, TranscriptDiscoveryBounds::default_walk())
+            source.discover_transcript_paths(TranscriptDiscoveryBounds::default_walk())
         })
     );
     let discovery_truncated = discovery.is_truncated();
@@ -1288,7 +1280,7 @@ where
         scope: &scope,
         cancellation: &cancellation,
     };
-    let (paths, deferred) = scheduled_source_paths(admission, &scope, source, project_root).await?;
+    let (paths, deferred) = scheduled_source_paths(admission, &scope, source).await?;
     let scheduled_source_count = paths.len();
     let mut stats = ClaudeObservationIngestStats {
         deferred_sources: u64::try_from(deferred).unwrap_or(u64::MAX),

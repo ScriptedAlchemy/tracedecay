@@ -8,16 +8,14 @@ pub use tracedecay_domain::configuration::{
 use crate::{AutomationError, Result, config_error};
 
 pub const DEFAULT_SCHEDULER_TICK_SECS: u64 = 60;
-pub const DEFAULT_ANALYTICS_EVENTS_RETENTION_DAYS: u32 = 180;
-pub const DEFAULT_LEGACY_SESSION_RETENTION_DAYS: u32 = 180;
+const DEFAULT_ANALYTICS_EVENTS_RETENTION_DAYS: u32 = 180;
+const DEFAULT_SESSION_MESSAGE_RETENTION_DAYS: u32 = 180;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetentionConfig {
     #[serde(default = "default_analytics_events_days")]
     pub analytics_events_days: Option<u32>,
-    #[serde(default = "default_legacy_session_days")]
-    pub session_messages_days: Option<u32>,
-    #[serde(default = "default_legacy_session_days")]
+    #[serde(default = "default_session_message_days")]
     pub lcm_raw_messages_days: Option<u32>,
 }
 
@@ -27,16 +25,15 @@ fn default_analytics_events_days() -> Option<u32> {
 }
 
 #[allow(clippy::unnecessary_wraps)]
-fn default_legacy_session_days() -> Option<u32> {
-    Some(DEFAULT_LEGACY_SESSION_RETENTION_DAYS)
+fn default_session_message_days() -> Option<u32> {
+    Some(DEFAULT_SESSION_MESSAGE_RETENTION_DAYS)
 }
 
 impl Default for RetentionConfig {
     fn default() -> Self {
         Self {
             analytics_events_days: default_analytics_events_days(),
-            session_messages_days: default_legacy_session_days(),
-            lcm_raw_messages_days: default_legacy_session_days(),
+            lcm_raw_messages_days: default_session_message_days(),
         }
     }
 }

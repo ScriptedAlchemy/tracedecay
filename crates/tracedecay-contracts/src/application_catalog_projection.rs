@@ -1,7 +1,7 @@
 use tracedecay_tool_catalog::{
-    BindingStatus, BindingSurface, CatalogContributionV1, CodecBindingKey,
-    ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
-    ExecutableUnavailableDispositionV1, OperationId, RouteExposureV1, ServiceId, SurfaceBindingV1,
+    BindingSurface, CatalogContributionV1, CodecBindingKey, ExecutableBindingAvailabilityV1,
+    ExecutableBindingRegistryV1, ExecutableBindingV1, ExecutableUnavailableDispositionV1,
+    OperationId, RouteExposureV1, ServiceId, SurfaceBindingV1,
 };
 
 use crate::{
@@ -31,11 +31,11 @@ pub(crate) fn project_application_executable_bindings(
     let handlers = application_handler_descriptors()?;
     let mut bindings = Vec::new();
     for contribution in application_catalog_contributions()? {
-        for surface in contribution.bindings().iter().filter(|binding| {
-            binding.surface() == projection.surface()
-                && matches!(binding.status(), BindingStatus::Current)
-                && !binding.is_alias()
-        }) {
+        for surface in contribution
+            .bindings()
+            .iter()
+            .filter(|binding| binding.surface() == projection.surface())
+        {
             if let Some(binding) =
                 project_availability(projection, &contribution, &handlers, surface, &exposure)?
             {

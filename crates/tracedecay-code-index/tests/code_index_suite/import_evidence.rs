@@ -3,27 +3,24 @@ use std::sync::Arc;
 use serde_json::Value;
 use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1};
 use tracedecay_code_index::{
-    chunks::{
-        ChunkingFailureV1, CodeFileIndexArtifactsV1, CodeIndexImportEvidenceV1, content_digest,
-    },
-    noncanonical::{NonCanonicalCauseV1, NonCanonicalReasonCodeV1},
+    chunks::{CodeIndexImportEvidenceV1, content_digest},
     production::{
         CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionErrorV1,
         CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1,
-        sealed_generation_payload_digest,
+        SEALED_GENERATION_FORMAT_REVISION_V1,
     },
 };
 use tracedecay_domain::{
     EdgeAuthorityV1, FileOccurrenceId, LanguageId, RelationEdgeKindV1, SanitizationReceiptId,
     SanitizedCodeFileV1, SensitivityLevelV1, SnapshotFileDispositionV1, SourceSpan,
-    SymbolOccurrenceId, canonical_sha256,
+    SymbolOccurrenceId,
 };
 
 use crate::{
     production_orchestration::{
         ActiveControl, ApplyingProjectionSink, SharedPublicationStore, config, request_with_source,
     },
-    support::id,
+    support::{PartitionedSealV1, id},
 };
 
 const FIRST_SOURCE: &str = concat!(
@@ -787,78 +784,41 @@ fn rust_parent_glob_does_not_override_a_local_type_binding() {
     );
 }
 
-fn sealed_envelope(generation: &CodeIndexPublishedGenerationV1) -> Value {
-    serde_json::from_slice(&generation.encode_sealed().expect("import generation seals"))
-        .expect("sealed generation JSON")
-}
-
-fn file_artifact(envelope: &Value, index: usize) -> CodeFileIndexArtifactsV1 {
-    serde_json::from_value(envelope["generation"]["files"][index]["artifacts"].clone())
-        .expect("file artifact JSON")
-}
-
-fn import_rows_mut(envelope: &mut Value, file_index: usize) -> &mut Vec<Value> {
-    envelope["generation"]["files"][file_index]["artifacts"]["imports"]
+fn import_rows_mut(file: &mut Value) -> &mut Vec<Value> {
+    file["artifacts"]["imports"]
         .as_array_mut()
         .expect("sealed file imports")
 }
 
-fn assert_serialized_artifact_has_no_self_digest(envelope: &Value, file_index: usize) {
-    let imports = serde_json::from_value::<Vec<CodeIndexImportEvidenceV1>>(
-        envelope["generation"]["files"][file_index]["artifacts"]["imports"].clone(),
-    )
-    .expect("forged canonical import rows");
-    let recomputed = canonical_sha256(&("attacker-controlled-import-rows", imports.as_slice()))
-        .expect("forged canonical import-row digest");
-    assert!(recomputed.as_str().starts_with("sha256:"));
-    assert!(
-        envelope["generation"]["files"][file_index]["artifacts"]
-            .get("import_rows_digest")
-            .is_none(),
-        "sealed file artifacts must not contain a recomputable self-digest authority"
-    );
-}
-
-fn reseal_import_envelope(mut envelope: Value) -> Vec<u8> {
-    let format_revision = u32::try_from(
-        envelope["generation"]["format_revision"]
-            .as_u64()
-            .expect("forged payload format revision"),
-    )
-    .expect("format revision fits u32");
-    let state_digest = sealed_generation_payload_digest(format_revision, &envelope["generation"])
-        .expect("forged payload state digest");
-    envelope["state_digest"] = Value::String(state_digest.as_str().to_owned());
-    serde_json::to_vec(&envelope).expect("forged sealed generation JSON")
-}
-
-fn resealed_import_payload_error(envelope: Value, mutation: &str) -> CodeIndexProductionErrorV1 {
-    let bytes = reseal_import_envelope(envelope);
-
-    match CodeIndexPublishedGenerationV1::decode_sealed(&bytes) {
-        Ok(_) => panic!("{mutation} restored after the outer state digest was recomputed"),
+/// Tamper the first file's sealed import rows, re-address the segment, and
+/// reseal the manifest, so the refusal comes from the restored file payload.
+fn tampered_import_payload_error(
+    sealed: &PartitionedSealV1,
+    mutation: &str,
+    mutate: impl FnOnce(&mut Vec<Value>),
+) -> CodeIndexProductionErrorV1 {
+    let tampered = sealed.with_tampered_file_segment(0, |file| mutate(import_rows_mut(file)));
+    match tampered.restore(&tampered.manifest) {
+        Ok(_) => panic!("{mutation} restored after the segment and manifest were re-addressed"),
         Err(error) => error,
     }
 }
 
-fn assert_resealed_import_payload_is_rejected(envelope: Value, mutation: &str) {
-    let _ = resealed_import_payload_error(envelope, mutation);
-}
-
-fn assert_sealed_envelope_restores(envelope: &Value) {
-    CodeIndexPublishedGenerationV1::decode_sealed(&reseal_import_envelope(envelope.clone()))
-        .expect("baseline generation restores");
+fn file_imports(generation: &CodeIndexPublishedGenerationV1) -> Vec<CodeIndexImportEvidenceV1> {
+    generation
+        .imports()
+        .iter()
+        .filter(|row| row.logical_path == "src/a.ts")
+        .cloned()
+        .collect()
 }
 
 #[test]
 fn file_import_artifacts_require_nondefault_canonical_rows() {
     let generation = published_import_generation();
-    let envelope = sealed_envelope(&generation);
-    let artifacts = file_artifact(&envelope, 0);
 
     assert_eq!(
-        artifacts
-            .imports
+        file_imports(&generation)
             .iter()
             .map(|row| (
                 row.logical_path.as_str(),
@@ -906,61 +866,47 @@ fn file_import_artifacts_require_nondefault_canonical_rows() {
             ),
         ]
     );
-    artifacts.validate().expect("canonical import rows");
 
-    let mut missing = envelope["generation"]["files"][0]["artifacts"].clone();
-    assert!(
-        missing
-            .as_object_mut()
-            .expect("file artifact object")
-            .remove("imports")
-            .is_some(),
-        "the serialized artifact must carry its required imports field"
-    );
-    let error = serde_json::from_value::<CodeFileIndexArtifactsV1>(missing)
+    let sealed = PartitionedSealV1::of(&generation);
+    let missing = sealed.with_tampered_file_segment(0, |file| {
+        assert!(
+            file["artifacts"]
+                .as_object_mut()
+                .expect("file artifact object")
+                .remove("imports")
+                .is_some(),
+            "the sealed artifact must carry its required imports field"
+        );
+    });
+    let error = missing
+        .restore(&missing.manifest)
         .expect_err("imports must be a required field without a serde default");
     assert!(
         error.to_string().contains("missing field `imports`"),
         "unexpected missing-imports error: {error}"
     );
-
-    let mut reordered = artifacts.clone();
-    reordered.imports.swap(0, 1);
-    let error = reordered
-        .validate()
-        .expect_err("source-order reversal must be rejected");
-    assert!(matches!(error, ChunkingFailureV1::NonCanonicalIdentity(_)));
-
-    let mut duplicated = artifacts;
-    let duplicate = duplicated.imports[0].clone();
-    duplicated.imports.insert(1, duplicate);
-    let error = duplicated
-        .validate()
-        .expect_err("duplicate import rows must be rejected");
-    assert!(matches!(error, ChunkingFailureV1::NonCanonicalIdentity(_)));
 }
 
 #[test]
 fn file_import_artifacts_bind_file_consistent_path_and_nonempty_span_to_indexed_extent() {
     let generation = published_import_generation();
-    let artifacts = file_artifact(&sealed_envelope(&generation), 0);
-    let indexed_end = artifacts
-        .chunks
-        .chunks
+    let imports = file_imports(&generation);
+    let indexed_end = generation
+        .chunks()
+        .chunks()
         .iter()
+        .filter(|chunk| chunk.anchor.file_occurrence_id.as_str() == "file.import.a")
         .map(|chunk| chunk.anchor.source_span.end_byte)
         .max()
         .expect("complete file has indexed chunks");
 
-    assert!(artifacts.imports.iter().all(|row| {
-        row.logical_path == "src/a.ts"
-            && row.file_occurrence_id == artifacts.chunks.document.file_occurrence_id
+    assert!(imports.iter().all(|row| {
+        row.file_occurrence_id.as_str() == "file.import.a"
             && !row.span.is_empty()
             && row.span.end_byte <= indexed_end
     }));
     assert_eq!(
-        artifacts
-            .imports
+        imports
             .iter()
             .map(|row| {
                 &FIRST_SOURCE[usize::try_from(row.span.start_byte).expect("span start")
@@ -968,42 +914,6 @@ fn file_import_artifacts_bind_file_consistent_path_and_nonempty_span_to_indexed_
             })
             .collect::<Vec<_>>(),
         vec!["Foo", "Bar as Baz"]
-    );
-
-    let mut wrong_file = artifacts.clone();
-    for row in &mut wrong_file.imports {
-        row.file_occurrence_id = id("file.foreign");
-    }
-    assert_eq!(
-        wrong_file.validate(),
-        Err(ChunkingFailureV1::GenerationMismatch)
-    );
-
-    let mut inconsistent_path = artifacts.clone();
-    inconsistent_path.imports[1].logical_path = "src/foreign.ts".to_owned();
-    assert_eq!(
-        inconsistent_path.validate(),
-        Err(ChunkingFailureV1::NonCanonicalIdentity(
-            NonCanonicalCauseV1::new(NonCanonicalReasonCodeV1::ImportMultiFile)
-        ))
-    );
-
-    let mut empty_span = artifacts.clone();
-    empty_span.imports[0].span.end_byte = empty_span.imports[0].span.start_byte;
-    assert_eq!(
-        empty_span.validate(),
-        Err(ChunkingFailureV1::NonCanonicalIdentity(
-            NonCanonicalCauseV1::new(NonCanonicalReasonCodeV1::ImportEmptySourceSpan)
-        ))
-    );
-
-    let mut out_of_bounds = artifacts;
-    out_of_bounds.imports[0].span.end_byte = indexed_end + 1;
-    assert_eq!(
-        out_of_bounds.validate(),
-        Err(ChunkingFailureV1::NonCanonicalIdentity(
-            NonCanonicalCauseV1::new(NonCanonicalReasonCodeV1::ImportExceedsFileExtent)
-        ))
     );
 }
 
@@ -1026,36 +936,39 @@ fn raw_use_and_imported_bindings_never_become_canonical_symbols() {
 }
 
 #[test]
-fn sealed_revision_nine_import_generation_round_trips_to_identical_bytes() {
+fn sealed_import_generation_round_trips_to_identical_bytes() {
     let first = published_import_generation();
-    let first_sealed = first.encode_sealed().expect("first generation seals");
-    let second_sealed = published_import_generation()
-        .encode_sealed()
-        .expect("identical generation seals");
-    assert_eq!(first_sealed, second_sealed);
+    let first_sealed = PartitionedSealV1::of(&first);
+    let second_sealed = PartitionedSealV1::of(&published_import_generation());
+    assert_eq!(first_sealed.manifest, second_sealed.manifest);
+    assert_eq!(first_sealed.segments, second_sealed.segments);
 
-    let envelope: Value = serde_json::from_slice(&first_sealed).expect("sealed generation JSON");
-    assert_eq!(envelope["generation"]["format_revision"], 9);
-    let restored =
-        CodeIndexPublishedGenerationV1::decode_sealed(&first_sealed).expect("rev9 restores");
+    assert_eq!(
+        first_sealed.envelope()["generation"]["format_revision"],
+        SEALED_GENERATION_FORMAT_REVISION_V1
+    );
+    let restored = first_sealed.restored();
     assert_eq!(restored.imports(), first.imports());
     assert_eq!(
-        restored.encode_sealed().expect("restored generation seals"),
-        first_sealed
+        PartitionedSealV1::of(&restored).manifest,
+        first_sealed.manifest
     );
 }
 
 #[test]
-fn sealed_import_generation_rejects_semantic_tampering_after_outer_digest_recompute() {
-    let generation = published_import_generation();
-    let mut envelope = sealed_envelope(&generation);
-    assert_sealed_envelope_restores(&envelope);
+fn sealed_import_generation_rejects_semantic_tampering_after_segment_readdress() {
+    let sealed = PartitionedSealV1::of(&published_import_generation());
+    sealed.restored();
+    assert!(
+        sealed.file_segment_payload(0)["artifacts"]
+            .get("import_rows_digest")
+            .is_none(),
+        "sealed file artifacts must not contain a recomputable self-digest authority"
+    );
 
-    import_rows_mut(&mut envelope, 0)[0]["imported_name"] = Value::String("Forged".to_owned());
-    file_artifact(&envelope, 0)
-        .validate()
-        .expect("binding-name tamper remains structurally canonical");
-    let error = resealed_import_payload_error(envelope, "binding-name tamper");
+    let error = tampered_import_payload_error(&sealed, "binding-name tamper", |rows| {
+        rows[0]["imported_name"] = Value::String("Forged".to_owned());
+    });
     assert!(
         error.to_string().contains("import_authority_mismatch"),
         "semantic tamper reached the wrong authority rejection: {error}"
@@ -1063,68 +976,37 @@ fn sealed_import_generation_rejects_semantic_tampering_after_outer_digest_recomp
 }
 
 #[test]
-fn sealed_import_generation_rejects_semantic_tampering_after_import_and_outer_digest_recompute() {
-    let generation = published_import_generation();
-    let mut envelope = sealed_envelope(&generation);
-    assert_sealed_envelope_restores(&envelope);
+fn sealed_import_generation_rejects_reorder_and_duplicate_after_segment_readdress() {
+    let sealed = PartitionedSealV1::of(&published_import_generation());
+    sealed.restored();
 
-    import_rows_mut(&mut envelope, 0)[0]["imported_name"] = Value::String("Forged".to_owned());
-    assert_serialized_artifact_has_no_self_digest(&envelope, 0);
-    file_artifact(&envelope, 0)
-        .validate()
-        .expect("self-consistent import digest remains structurally canonical");
-
-    let error = resealed_import_payload_error(
-        envelope,
-        "binding-name tamper with recomputed import-row digest",
-    );
-    assert!(
-        error.to_string().contains("import_authority_mismatch"),
-        "self-consistent import forgery reached the wrong authority rejection: {error}"
-    );
+    tampered_import_payload_error(&sealed, "row reorder", |rows| rows.swap(0, 1));
+    tampered_import_payload_error(&sealed, "duplicate row", |rows| {
+        let duplicate = rows[0].clone();
+        rows.insert(1, duplicate);
+    });
 }
 
 #[test]
-fn sealed_import_generation_rejects_reorder_and_duplicate_after_outer_digest_recompute() {
-    let generation = published_import_generation();
-    let envelope = sealed_envelope(&generation);
-    assert_sealed_envelope_restores(&envelope);
+fn sealed_import_generation_rejects_wrong_file_path_and_span_after_segment_readdress() {
+    let sealed = PartitionedSealV1::of(&published_import_generation());
+    sealed.restored();
 
-    let mut reordered = envelope.clone();
-    import_rows_mut(&mut reordered, 0).swap(0, 1);
-    assert_resealed_import_payload_is_rejected(reordered, "row reorder");
-
-    let mut duplicated = envelope;
-    let duplicate = import_rows_mut(&mut duplicated, 0)[0].clone();
-    import_rows_mut(&mut duplicated, 0).insert(1, duplicate);
-    assert_resealed_import_payload_is_rejected(duplicated, "duplicate row");
-}
-
-#[test]
-fn sealed_import_generation_rejects_wrong_file_path_and_span_after_outer_digest_recompute() {
-    let generation = published_import_generation();
-    let envelope = sealed_envelope(&generation);
-    assert_sealed_envelope_restores(&envelope);
-
-    let mut wrong_file = envelope.clone();
-    for row in import_rows_mut(&mut wrong_file, 0) {
-        row["file_occurrence_id"] = Value::String("file.foreign".to_owned());
-    }
-    assert_resealed_import_payload_is_rejected(wrong_file, "foreign file occurrence");
-
-    let mut wrong_path = envelope.clone();
-    for row in import_rows_mut(&mut wrong_path, 0) {
-        row["logical_path"] = Value::String("src/foreign.ts".to_owned());
-    }
-    assert_resealed_import_payload_is_rejected(wrong_path, "foreign logical path");
-
-    let mut empty_span = envelope.clone();
-    let start = import_rows_mut(&mut empty_span, 0)[0]["span"]["start_byte"].clone();
-    import_rows_mut(&mut empty_span, 0)[0]["span"]["end_byte"] = start;
-    assert_resealed_import_payload_is_rejected(empty_span, "empty source span");
-
-    let mut out_of_bounds = envelope;
-    import_rows_mut(&mut out_of_bounds, 0)[0]["span"]["end_byte"] =
-        Value::from(FIRST_SOURCE.len() as u64 + 1);
-    assert_resealed_import_payload_is_rejected(out_of_bounds, "out-of-bounds source span");
+    tampered_import_payload_error(&sealed, "foreign file occurrence", |rows| {
+        for row in rows {
+            row["file_occurrence_id"] = Value::String("file.foreign".to_owned());
+        }
+    });
+    tampered_import_payload_error(&sealed, "foreign logical path", |rows| {
+        for row in rows {
+            row["logical_path"] = Value::String("src/foreign.ts".to_owned());
+        }
+    });
+    tampered_import_payload_error(&sealed, "empty source span", |rows| {
+        let start = rows[0]["span"]["start_byte"].clone();
+        rows[0]["span"]["end_byte"] = start;
+    });
+    tampered_import_payload_error(&sealed, "out-of-bounds source span", |rows| {
+        rows[0]["span"]["end_byte"] = Value::from(FIRST_SOURCE.len() as u64 + 1);
+    });
 }

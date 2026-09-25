@@ -42,7 +42,6 @@ import pixelmatch from 'pixelmatch';
 import { PNG } from 'pngjs';
 import type { Server } from 'node:http';
 import { STORY_SURFACES } from './registry.ts';
-import { installApiFixtures } from './fixtures/route.ts';
 import { STILLNESS_INIT, startStaticServer } from '../e2e/static-server.ts';
 import {
   MIN_TOUCH_TARGET_PX,
@@ -65,6 +64,12 @@ const WIDTHS = [320, 768, 1440] as const;
 const VIEWPORT_HEIGHT = 900;
 const PORT = Number(process.env['AUDIT_PORT'] ?? 5173);
 const DIFF_MODE = process.argv.slice(2).includes('--diff');
+/** One instant for the fixture payloads and the page clock, so a capture's
+ * timestamps and relative ages are the same on every run. */
+const AUDIT_NOW_MS = Date.parse('2026-09-24T09:30:00Z');
+process.env['TD_FIXTURE_NOW_MS'] = String(AUDIT_NOW_MS);
+// Imported after the pin: the fixtures read their clock once, at load.
+const { installApiFixtures } = await import('./fixtures/route.ts');
 
 type Theme = (typeof THEMES)[number];
 type Width = (typeof WIDTHS)[number];
@@ -222,7 +227,9 @@ async function main(): Promise<void> {
     // for real here. Do not pin --use-angle: that would force software even on
     // a host that later has a GPU.
     browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext({ deviceScaleFactor: 1 });
+    // The stillness script below only stops CSS; charts and canvas fields
+    // animate on the app's reduced-motion preference, which reads this.
+    const context = await browser.newContext({ deviceScaleFactor: 1, reducedMotion: 'reduce' });
     const page = await context.newPage();
     // A crashed route renders the router's own accessible error boundary, which
     // screenshots happily. A page error therefore
@@ -231,6 +238,7 @@ async function main(): Promise<void> {
       pageErrors.push(error.message);
       console.error(`[audit] PAGEERROR ${error.message}`);
     });
+    await page.clock.setFixedTime(AUDIT_NOW_MS);
     await installApiFixtures(page);
     // Passed as source text, not a function: tsx compiles callbacks with
     // esbuild's `keepNames`, whose `__name` helper does not exist in the page.

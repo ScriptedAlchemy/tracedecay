@@ -3,7 +3,7 @@ use crate::common;
 use std::collections::BTreeSet;
 
 use tracedecay_tool_catalog::{
-    BindingId, BindingStatus, BindingSurface, CatalogContributionInputV1, CatalogContributionV1,
+    BindingId, BindingSurface, CatalogContributionInputV1, CatalogContributionV1,
     CatalogSnapshotBuilderV1, CatalogValidationError, ContributionId, ProfileBudget,
     ProfileDefinition, ProfileDefinitionInputV1, ProfileKind, ProtocolRevisionRange,
     SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName,
@@ -19,7 +19,7 @@ fn profile_budgets_reject_overflow_without_a_universal_tool_ceiling() {
     let profile_id = profile_id("profile.host-limited");
     let capability_id = capability_id("capability.source.read");
     let first_binding_id = BindingId::new("binding.source.read.cli").unwrap();
-    let second_binding_id = BindingId::new("binding.source.read.alias").unwrap();
+    let second_binding_id = BindingId::new("binding.source.get.cli").unwrap();
     let manifest = read_manifest(
         capability_id.clone(),
         use_case_id("use-case.source.read"),
@@ -35,8 +35,6 @@ fn profile_budgets_reject_overflow_without_a_universal_tool_ceiling() {
         operation: SurfaceOperationName::new("source read").unwrap(),
         protocol_revisions: ProtocolRevisionRange::new(1, 1).unwrap(),
         required_features: Vec::new(),
-        status: BindingStatus::Current,
-        alias_of: None,
     })
     .unwrap();
     let second_binding = SurfaceBindingV1::new(SurfaceBindingInputV1 {
@@ -46,8 +44,6 @@ fn profile_budgets_reject_overflow_without_a_universal_tool_ceiling() {
         operation: SurfaceOperationName::new("source get").unwrap(),
         protocol_revisions: ProtocolRevisionRange::new(1, 1).unwrap(),
         required_features: Vec::new(),
-        status: BindingStatus::Current,
-        alias_of: Some(first_binding_id),
     })
     .unwrap();
     let profile = ProfileDefinition::new(ProfileDefinitionInputV1 {
@@ -119,13 +115,21 @@ fn profile_absence_is_explicit_in_snapshot_discovery() {
         .add_contribution(contribution)
         .add_handler(handler_for(&manifest))
         .add_profile(profile(
-            primary_profile_id,
-            vec![capability_id],
+            primary_profile_id.clone(),
+            vec![capability_id.clone()],
             ample_budget(),
         ))
         .add_profile(compact_profile);
     let snapshot = builder.build().unwrap();
 
+    assert_eq!(
+        snapshot
+            .visible_capabilities(&primary_profile_id, &BTreeSet::new())
+            .into_iter()
+            .map(|capability| capability.capability_id())
+            .collect::<Vec<_>>(),
+        vec![&capability_id]
+    );
     assert!(
         snapshot
             .visible_capabilities(&compact_profile_id, &BTreeSet::new())

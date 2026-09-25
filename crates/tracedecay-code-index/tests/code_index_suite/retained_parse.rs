@@ -152,7 +152,7 @@ fn incremental_extraction_matches_cold_canonical_rows_and_visits_only_changed_ru
     assert!(incremental.metrics.visited_bytes < after.len());
     assert_eq!(
         normalize_extraction(incremental.result),
-        normalize_extraction(extractor.extract("src/lib.rs", after))
+        normalize_extraction(extractor.extract_artifact("src/lib.rs", after).result)
     );
     assert_eq!(
         initial.disposition,
@@ -211,7 +211,7 @@ fn composite_source_masking_preserves_incremental_astro_canonical_rows() {
     );
     assert_eq!(
         normalize_extraction(incremental.result),
-        normalize_extraction(extractor.extract("src/page.astro", after))
+        normalize_extraction(extractor.extract_artifact("src/page.astro", after).result)
     );
 }
 

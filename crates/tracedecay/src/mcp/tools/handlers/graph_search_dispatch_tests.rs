@@ -9,7 +9,7 @@ use tracedecay_domain::ExactClass;
 use tracedecay_mcp::ToolResult;
 use tracedecay_query::retrieval::lexical::LexicalRoutingV1;
 
-use crate::project::TraceDecay;
+use tracedecay_project::project::TraceDecay;
 
 fn completed_sparse_search() -> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
     completed_sparse_search_for_generation("generation.mcp-verified-graph-fixture.1")
@@ -112,7 +112,7 @@ fn search_test_options<'a>(
 }
 
 fn run_with_locked_user_data_dir(test: impl Future<Output = ()>) {
-    let _env_lock = crate::config::lock_user_data_dir_test_env();
+    let _env_lock = tracedecay_project::config::lock_user_data_dir_test_env();
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

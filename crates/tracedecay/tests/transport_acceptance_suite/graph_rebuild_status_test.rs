@@ -342,7 +342,7 @@ async fn background_refresh_and_reopen_report_only_servable_generations_inner() 
         &harness,
         &project,
         "tracedecay_admin_sync",
-        json!({"force": true, "format": "json"}),
+        json!({"format": "json"}),
     )
     .await;
     assert_eq!(receipt["status"], "queued", "refresh receipt: {receipt}");

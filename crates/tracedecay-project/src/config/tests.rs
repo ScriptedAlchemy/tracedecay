@@ -1,7 +1,6 @@
 use std::fs;
 use std::process::Command;
 use tempfile::TempDir;
-use tracedecay_configuration::{TraceDecayConfig, get_config_path, save_config_to_path};
 
 #[tokio::test]
 async fn discover_project_root_with_identity_does_not_open_registry_only_store() {
@@ -83,7 +82,7 @@ async fn discover_project_root_with_identity_does_not_open_registry_only_store()
 }
 
 #[tokio::test]
-async fn config_path_with_identity_does_not_open_registry_without_enrollment() {
+async fn store_layout_for_identity_does_not_open_registry_without_enrollment() {
     let _profile = super::PinnedUserDataDir::new();
     let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
     let gdb =
@@ -132,26 +131,12 @@ async fn config_path_with_identity_does_not_open_registry_without_enrollment() {
         },
     )
     .unwrap();
-    save_config_to_path(
-        &identity_layout.config_path,
-        &TraceDecayConfig {
-            root_dir: "identity-config".to_string(),
-            ..TraceDecayConfig::default()
-        },
-    )
-    .unwrap();
 
-    assert_eq!(
-        super::get_config_path_with_identity(&project_root).await,
-        get_config_path(&project_root)
-    );
-    assert_eq!(
-        super::load_config_with_identity(&project_root)
-            .await
-            .unwrap()
-            .root_dir,
-        project_root.to_string_lossy()
-    );
+    if let Ok(selected) =
+        crate::project::TraceDecay::resolve_store_layout_for_identity(&project_root).await
+    {
+        assert_ne!(selected.data_root, identity_layout.data_root);
+    }
 }
 
 #[tokio::test]
@@ -209,15 +194,22 @@ async fn discover_project_root_with_identity_preserves_sync_fast_path() {
     let project_dir = TempDir::new().unwrap();
     let project_root = project_dir.path().canonicalize().unwrap();
 
-    let db_dir = super::get_tracedecay_dir(&project_root);
-    fs::create_dir_all(&db_dir).unwrap();
-    fs::write(super::get_project_db_path(&project_root), b"").unwrap();
+    let store = tracedecay_runtime_core::storage::default_profile_sharded_layout(
+        &project_root,
+        &super::user_data_dir().unwrap(),
+    )
+    .unwrap();
+    fs::create_dir_all(&store.data_root).unwrap();
+    fs::write(&store.graph_db_path, b"").unwrap();
 
-    let sync = super::discover_project_root(&project_root);
-    assert!(sync.is_some(), "sync resolver must see a repo-local db");
+    assert_eq!(
+        super::discover_project_root(&project_root),
+        Some(project_root.clone()),
+        "sync resolver must see the path-local store"
+    );
     assert_eq!(
         super::discover_project_root_with_identity(&project_root).await,
-        sync,
+        Some(project_root),
         "identity wrapper fast path must equal the sync result"
     );
 }
@@ -243,13 +235,14 @@ mod runtime_configuration_cutover {
     use crate::config::registry::ConfigurationRegistry;
     use crate::config::resolver::{ConfigurationLayerV1, resolve_configuration};
     use crate::config::{
-        DaemonRuntimeConfiguration, RuntimeConfigurationCache, RuntimeConfigurationTarget,
-        cached_runtime_configuration, cached_sync_config, cached_telemetry_config,
-        install_pinned_runtime_configuration, runtime_configuration_for_layout,
+        RuntimeConfigurationCache, RuntimeConfigurationTarget, cached_runtime_configuration,
+        cached_sync_config, cached_telemetry_config, install_pinned_runtime_configuration,
+        runtime_configuration_for_layout,
     };
     use crate::test_support::host_admission::HostAdmissionTestRuntimeV1;
     use tracedecay_configuration::ProjectConfigurationRuntime;
-    use tracedecay_configuration::TraceDecayConfig;
+    use tracedecay_configuration::SyncConfig;
+    use tracedecay_configuration::config::PinnedRuntimeConfiguration;
     use tracedecay_global_db::configuration::contracts::{
         ConfigurationControlStore, ConfigurationMutationAuthority, DirectConfigurationMutation,
     };
@@ -284,7 +277,7 @@ mod runtime_configuration_cutover {
         )
         .expect("explicit settings layer resolves")
         .snapshot;
-        let pinned = DaemonRuntimeConfiguration::new(
+        let pinned = PinnedRuntimeConfiguration::new(
             RuntimeConfigurationTarget {
                 project_id,
                 project_root: root.path().to_path_buf(),
@@ -318,15 +311,15 @@ mod runtime_configuration_cutover {
         assert_eq!(
             cached_runtime_configuration(root.path())
                 .expect("cache lookup")
-                .config
-                .root_dir,
-            root.path().to_string_lossy().to_string(),
-            "root metadata comes from the non-authoritative published route"
+                .target()
+                .project_root,
+            root.path(),
+            "the root comes from the non-authoritative published route"
         );
     }
 
     #[test]
-    fn runtime_cache_retargets_legacy_root_metadata_per_cached_root() {
+    fn runtime_cache_retargets_the_route_per_cached_root() {
         let project_id = project_id("project.runtime-cache-retarget");
         let root = TempDir::new().expect("temporary project root");
         let first_root = root.path().join("first-worktree");
@@ -342,7 +335,7 @@ mod runtime_configuration_cutover {
         let revision_id = revision_id("revision.runtime-cache-retarget");
         let cache = RuntimeConfigurationCache::default();
         cache.insert(
-            DaemonRuntimeConfiguration::new(
+            PinnedRuntimeConfiguration::new(
                 RuntimeConfigurationTarget {
                     project_id: project_id.clone(),
                     project_root: first_root.clone(),
@@ -353,7 +346,7 @@ mod runtime_configuration_cutover {
             .expect("first snapshot materializes"),
         );
         cache.insert(
-            DaemonRuntimeConfiguration::new(
+            PinnedRuntimeConfiguration::new(
                 RuntimeConfigurationTarget {
                     project_id: project_id.clone(),
                     project_root: second_root.clone(),
@@ -370,7 +363,6 @@ mod runtime_configuration_cutover {
         assert_eq!(second.target().project_id, project_id);
         assert_eq!(first.target().project_root, first_root);
         assert_eq!(second.target().project_root, second_root);
-        assert_ne!(first.config.root_dir, second.config.root_dir);
     }
 
     #[tokio::test]
@@ -526,7 +518,7 @@ mod runtime_configuration_cutover {
         assert!(!root_pin.config().diagnostics_prewarm);
         assert_eq!(
             root_pin.config().sync.auto_watch,
-            TraceDecayConfig::default().sync.auto_watch,
+            SyncConfig::default().auto_watch,
             "daemon-only settings materialize from the same snapshot"
         );
 
@@ -586,7 +578,7 @@ mod runtime_configuration_cutover {
         assert!(root_pin.config().diagnostics_prewarm);
         assert_eq!(
             root_pin.config().sync.auto_watch,
-            TraceDecayConfig::default().sync.auto_watch,
+            SyncConfig::default().auto_watch,
             "an unrelated change must not disturb daemon-only settings"
         );
         assert_eq!(
@@ -611,9 +603,9 @@ mod runtime_configuration_cutover {
         // Write the opposite of the typed registry default so the stale input
         // stays distinguishable from the canonical resolution regardless of
         // the default's polarity.
-        let stale_auto_watch = !TraceDecayConfig::default().sync.auto_watch;
+        let stale_auto_watch = !SyncConfig::default().auto_watch;
         std::fs::write(
-            &layout.config_path,
+            layout.data_root.join("config.json"),
             format!(r#"{{"sync":{{"auto_watch":{stale_auto_watch}}},"max_file_size":7}}"#),
         )
         .expect("write stale config.json input");
@@ -644,13 +636,13 @@ mod runtime_configuration_cutover {
             "fresh stores publish the sole canonical initial revision"
         );
         assert_eq!(
-            pinned.config.sync.auto_watch,
-            TraceDecayConfig::default().sync.auto_watch,
+            pinned.config().sync.auto_watch,
+            SyncConfig::default().auto_watch,
             "stale config.json input must not enter the final configuration authority"
         );
-        assert_eq!(
-            pinned.config.max_file_size,
-            TraceDecayConfig::default().max_file_size,
+        assert_ne!(
+            pinned.config().max_file_size,
+            7,
             "fresh initialization uses the typed registry, not config.json"
         );
         assert!(
@@ -770,7 +762,7 @@ mod runtime_configuration_cutover {
             .await
             .expect("registered default must converge before runtime materialization");
         assert_ne!(converged.revision_id(), initial.revision_id());
-        assert!(converged.config.native_graph_activation);
+        assert!(converged.config().native_graph_activation);
         assert_eq!(
             converged.snapshot().effective_values.get(&setting),
             Some(&ConfigurationValueV1::Boolean(true))

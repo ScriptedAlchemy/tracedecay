@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::sync::LazyLock;
 
 use tracedecay_tool_catalog::{
-    ApplicationSurfaceOperation, BindingStatus, BindingSurface, CatalogValidationError,
+    ApplicationSurfaceOperation, BindingSurface, CatalogValidationError,
     ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1,
     ExecutableUnavailableDispositionV1, OperationId, RouteExposureV1,
     SdkExecutableBindingAvailabilityV1, SdkExecutableBindingRegistryV1, SdkExecutableBindingV1,
@@ -22,8 +22,7 @@ use crate::application_catalog_projection::{
 use crate::{
     ApplicationContractError, application_catalog_contributions,
     handoff_executable_binding_registry, multi_root::multi_root_executable_binding_registry,
-    retained_surface_executable_binding_registry, work_executable_binding_registry,
-    workflow_executable_binding_registry,
+    work_executable_binding_registry, workflow_executable_binding_registry,
 };
 
 /// Canonical executable HTTP projection for every application-surface handler.
@@ -109,7 +108,16 @@ pub fn application_http_route_path(operation: ApplicationSurfaceOperation) -> St
         | ApplicationSurfaceOperation::HealthRead
         | ApplicationSurfaceOperation::HealthDelta
         | ApplicationSurfaceOperation::StorageStatus
-        | ApplicationSurfaceOperation::DiagnosticsRead) => {
+        | ApplicationSurfaceOperation::DiagnosticsRead
+        | ApplicationSurfaceOperation::Context
+        | ApplicationSurfaceOperation::Node
+        | ApplicationSurfaceOperation::Impact
+        | ApplicationSurfaceOperation::Similar
+        | ApplicationSurfaceOperation::Redundancy
+        | ApplicationSurfaceOperation::RenamePreview
+        | ApplicationSurfaceOperation::PortStatus
+        | ApplicationSurfaceOperation::PortOrder
+        | ApplicationSurfaceOperation::Todos) => {
             format!("/primitives/{}", operation.as_str())
         }
         operation @ (ApplicationSurfaceOperation::ConfigurationList
@@ -139,21 +147,61 @@ pub fn application_http_route_path(operation: ApplicationSurfaceOperation) -> St
         | ApplicationSurfaceOperation::ContextScoutFeedback) => {
             format!("/context-scout/{}", operation.as_str())
         }
+        operation @ (ApplicationSurfaceOperation::StrReplace
+        | ApplicationSurfaceOperation::MultiStrReplace
+        | ApplicationSurfaceOperation::InsertAt
+        | ApplicationSurfaceOperation::AstGrepRewrite
+        | ApplicationSurfaceOperation::ReplaceSymbol
+        | ApplicationSurfaceOperation::InsertAtSymbol
+        | ApplicationSurfaceOperation::MoveSymbol
+        | ApplicationSurfaceOperation::RenameSymbol
+        | ApplicationSurfaceOperation::SourceEditReconcile
+        | ApplicationSurfaceOperation::SourceEditRollback) => {
+            format!("/source-edit/{}", operation.as_str())
+        }
+        operation @ (ApplicationSurfaceOperation::FactStoreCurate
+        | ApplicationSurfaceOperation::FactStoreAdd
+        | ApplicationSurfaceOperation::FactStoreSearch
+        | ApplicationSurfaceOperation::FactStoreProbe
+        | ApplicationSurfaceOperation::FactStoreRelated
+        | ApplicationSurfaceOperation::FactStoreReason
+        | ApplicationSurfaceOperation::FactStoreContradict
+        | ApplicationSurfaceOperation::FactStoreGet
+        | ApplicationSurfaceOperation::FactStoreUpdate
+        | ApplicationSurfaceOperation::FactStoreRemove
+        | ApplicationSurfaceOperation::FactStoreSupersede
+        | ApplicationSurfaceOperation::FactStoreList
+        | ApplicationSurfaceOperation::FactFeedback
+        | ApplicationSurfaceOperation::MemoryStatus
+        | ApplicationSurfaceOperation::SessionRefreshStatus
+        | ApplicationSurfaceOperation::SessionRefreshCancel
+        | ApplicationSurfaceOperation::SessionRefreshBegin
+        | ApplicationSurfaceOperation::MessageSearch
+        | ApplicationSurfaceOperation::SessionsFor
+        | ApplicationSurfaceOperation::Workflows
+        | ApplicationSurfaceOperation::LcmStatus
+        | ApplicationSurfaceOperation::LcmDoctor
+        | ApplicationSurfaceOperation::LcmLoadSession
+        | ApplicationSurfaceOperation::LcmGrep
+        | ApplicationSurfaceOperation::LcmDescribe
+        | ApplicationSurfaceOperation::LcmExpand
+        | ApplicationSurfaceOperation::LcmExpandQuery) => {
+            format!("/retained/{}", operation.as_str())
+        }
     }
 }
 
 /// Mounted executable authorities outside the canonical application surface.
 ///
 /// Application operations project as one registry above. Work, Workflow,
-/// retained, handoff, and multi-root keep separate entries because they have
-/// distinct operation identities and runtime owners.
+/// handoff, and multi-root keep separate entries because they have distinct
+/// operation identities and runtime owners.
 fn mounted_executable_binding_registries()
 -> Result<Vec<Cow<'static, ExecutableBindingRegistryV1>>, ApplicationContractError> {
     Ok(vec![
         Cow::Borrowed(application_http_executable_binding_registry()?),
         Cow::Borrowed(work_executable_binding_registry()?),
         Cow::Borrowed(workflow_executable_binding_registry()?),
-        Cow::Owned(retained_surface_executable_binding_registry()?),
         Cow::Owned(handoff_executable_binding_registry()?),
         Cow::Owned(multi_root_executable_binding_registry()?),
     ])
@@ -186,11 +234,7 @@ pub fn sdk_executable_binding_registry()
             contribution
                 .bindings()
                 .iter()
-                .filter(|binding| {
-                    binding.surface() == BindingSurface::Mcp
-                        && matches!(binding.status(), BindingStatus::Current)
-                        && !binding.is_alias()
-                })
+                .filter(|binding| binding.surface() == BindingSurface::Mcp)
                 .map(|binding| project_mcp_availability(mcp_registry, binding))
                 .collect::<Result<Vec<_>, _>>()?
                 .into_iter()
@@ -456,11 +500,6 @@ mod tests {
             .flat_map(|contribution| contribution.bindings().to_vec())
             .filter(|binding| {
                 binding.surface() == BindingSurface::Http
-                    && matches!(
-                        binding.status(),
-                        tracedecay_tool_catalog::BindingStatus::Current
-                    )
-                    && !binding.is_alias()
                     && binding.operation().as_str().starts_with("code_")
             })
             .map(|binding| {
@@ -659,14 +698,7 @@ mod tests {
         let mcp_bindings = contribution
             .bindings()
             .iter()
-            .filter(|surface| {
-                surface.surface() == BindingSurface::Mcp
-                    && matches!(
-                        surface.status(),
-                        tracedecay_tool_catalog::BindingStatus::Current
-                    )
-                    && !surface.is_alias()
-            })
+            .filter(|surface| surface.surface() == BindingSurface::Mcp)
             .collect::<Vec<_>>();
         assert!(
             !mcp_bindings.is_empty(),
@@ -701,14 +733,7 @@ mod tests {
         let expected = contributions
             .iter()
             .flat_map(|contribution| contribution.bindings())
-            .filter(|binding| {
-                binding.surface() == BindingSurface::Mcp
-                    && matches!(
-                        binding.status(),
-                        tracedecay_tool_catalog::BindingStatus::Current
-                    )
-                    && !binding.is_alias()
-            })
+            .filter(|binding| binding.surface() == BindingSurface::Mcp)
             .map(|binding| {
                 let operation =
                     ApplicationSurfaceOperation::from_tool_name(binding.operation().as_str())
@@ -732,14 +757,11 @@ mod tests {
 
         assert_eq!(actual, expected);
         for contribution in &contributions {
-            for surface in contribution.bindings().iter().filter(|binding| {
-                binding.surface() == BindingSurface::Mcp
-                    && matches!(
-                        binding.status(),
-                        tracedecay_tool_catalog::BindingStatus::Current
-                    )
-                    && !binding.is_alias()
-            }) {
+            for surface in contribution
+                .bindings()
+                .iter()
+                .filter(|binding| binding.surface() == BindingSurface::Mcp)
+            {
                 let operation =
                     ApplicationSurfaceOperation::from_tool_name(surface.operation().as_str())
                         .map_or_else(

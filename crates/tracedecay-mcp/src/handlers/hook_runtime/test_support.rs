@@ -25,7 +25,7 @@ pub(super) fn admission_test_envelope(
     tracedecay_hooks::HookEventEnvelopeV2 {
         schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
         event_id: [event_id; 16],
-        producer: tracedecay_hooks::HookHostV1::ClaudeCode,
+        producer: tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
         protected_session_id: [5; 32],
         project_id: [1; 16],
         repository_id: [2; 16],
@@ -41,7 +41,7 @@ pub(super) fn admission_test_envelope(
 }
 
 pub(super) fn admission_test_binding(epoch: u64) -> tracedecay_hooks::HookScopeBindingV1 {
-    let host = tracedecay_hooks::HookHostV1::ClaudeCode;
+    let host = tracedecay_domain::NativeHostIdentityV1::ClaudeCode;
     tracedecay_hooks::HookScopeBindingV1 {
         host,
         project_id: [1; 16],
@@ -202,7 +202,7 @@ pub(super) fn hook_v2_snapshot() -> tracedecay_hooks::HookConfigurationSnapshotV
         published_at: UtcMicros(1),
         expires_at: UtcMicros(100),
         binding: tracedecay_hooks::HookScopeBindingV1 {
-            host: tracedecay_hooks::HookHostV1::ClaudeCode,
+            host: tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
             project_id: [1; 16],
             repository_id: [2; 16],
             worktree_id: [3; 16],
@@ -220,7 +220,7 @@ pub(super) fn hook_v2_envelope_for_test() -> tracedecay_hooks::HookEventEnvelope
     tracedecay_hooks::HookEventEnvelopeV2 {
         schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
         event_id: [6; 16],
-        producer: tracedecay_hooks::HookHostV1::ClaudeCode,
+        producer: tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
         protected_session_id: [7; 32],
         project_id: [1; 16],
         repository_id: [2; 16],

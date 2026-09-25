@@ -25,9 +25,9 @@
 //! standalone server: the plugin bundle already carries `.mcp.json`.
 //!
 //! Note on rollback ownership: `CodexIntegration::host_registration_paths`
-//! already lists `~/.codex/config.toml` and its backup, so the component-set
-//! transaction stages that file before the registry command runs and can
-//! restore the pre-command document if the effect is rejected.
+//! already lists `~/.codex/config.toml`, so the component-set transaction
+//! observes that file before the registry command runs and can restore the
+//! pre-command document if the effect is rejected.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -38,10 +38,9 @@ use tracedecay_domain::canonical_sha256;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
-    AgentIntegration, DeferredUserAction, DoctorCounters, HealthcheckContext, InstallContext,
-    InstallScope, NonInteractiveInstallOutcome, TextFileMutation, UpdatePluginOutcome,
-    config_backup_path, load_json_file, load_json_file_strict, load_toml_file,
-    safe_write_json_file, safe_write_text_file, update_toml_config_transactionally,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, InstallScope,
+    JsonConfigDialect, JsonConfigMutation, load_json_file, load_json_file_strict, load_toml_file,
+    safe_write_text_file, update_json_config_transactionally, update_toml_config_transactionally,
 };
 
 /// The prefix every Codex activation key for this plugin starts with.
@@ -52,7 +51,6 @@ const CODEX_PLUGIN_ACTIVATION_KEY_PREFIX: &str = "tracedecay@";
 
 mod mcp_registry;
 mod plugin_registry;
-mod retired_entrypoints;
 
 pub struct CodexIntegration;
 
@@ -67,46 +65,6 @@ impl AgentIntegration for CodexIntegration {
 
     fn supports_local_install(&self) -> bool {
         true
-    }
-
-    fn preflight_non_interactive_install(
-        &self,
-        ctx: &InstallContext,
-    ) -> Result<NonInteractiveInstallOutcome> {
-        codex_non_interactive_install_state(&ctx.home, &ctx.tracedecay_bin, Vec::new())
-    }
-
-    fn interactive_activation_guidance(&self) -> Option<String> {
-        None
-    }
-
-    fn interactive_removal_guidance(&self) -> Option<String> {
-        None
-    }
-
-    fn prepare_non_interactive_install(
-        &self,
-        ctx: &InstallContext,
-    ) -> Result<NonInteractiveInstallOutcome> {
-        install_codex_plugin(&ctx.home, &ctx.tracedecay_bin)?;
-        // Core apply drives `codex plugin add` when the host CLI is present.
-        // When it is not, stop with the same backtick remediation preflight
-        // uses so operators (and lifecycle tests) can activate natively.
-        if plugin_registry::require_codex_plugin_cli().is_err() {
-            let marketplace_name = codex_exact_personal_marketplace_name(&ctx.home)
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| codex_cached_marketplace_name(&ctx.home));
-            return Ok(NonInteractiveInstallOutcome::DeferredUserAction(
-                DeferredUserAction {
-                    remediation: format!(
-                        "Codex activates plugins through its native cache. Run `codex plugin add tracedecay@{marketplace_name}` after TraceDecay stages the source package."
-                    ),
-                    staged_paths: Vec::new(),
-                },
-            ));
-        }
-        Ok(NonInteractiveInstallOutcome::Ready)
     }
 
     #[hotpath::measure(label = "hosts.agent.codex.project_install")]
@@ -144,49 +102,10 @@ impl AgentIntegration for CodexIntegration {
         let local = InstallContext {
             home: ctx.home.clone(),
             tracedecay_bin: ctx.tracedecay_bin.clone(),
-            tool_permissions: ctx.tool_permissions.clone(),
             project_root: Some(project_path.to_path_buf()),
             dashboard: ctx.dashboard,
         };
         uninstall_codex_repo_plugin_if_present(&local)
-    }
-
-    fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
-        let cached_install_present =
-            codex_exact_cache_manifest_path(&ctx.home)?.is_some_and(|path| path.is_file());
-        let source_present = codex_plugin_manifest_path(&ctx.home).exists();
-        let mut staged = Vec::new();
-        if cached_install_present || source_present {
-            // Codex owns its cache lifecycle. Refresh the marketplace source
-            // it will consume, but never materialise or replace a cache entry
-            // on the host's behalf.
-            staged.push(install_codex_personal_bootstrap(
-                &ctx.home,
-                &ctx.tracedecay_bin,
-            )?);
-        }
-
-        if let Some(project_path) = codex_update_project_path(ctx) {
-            let repo_dir = codex_repo_plugin_install_dir(&project_path);
-            if repo_dir.join(".codex-plugin/plugin.json").exists()
-                && codex_plugin_dir_is_tracedecay(&repo_dir)
-            {
-                install_codex_plugin_bundle(
-                    &repo_dir,
-                    &ctx.tracedecay_bin,
-                    InstallScope::ProjectLocal,
-                    &ctx.home,
-                )?;
-                staged.push(repo_dir);
-            }
-        }
-
-        if staged.is_empty() {
-            return Ok(UpdatePluginOutcome::NotInstalled);
-        }
-        // Activation also re-pins hook trust for the refreshed bundle.
-        self.activate_deployed_host_registration(ctx)?;
-        Ok(UpdatePluginOutcome::Refreshed(staged))
     }
 
     fn export_managed_skills(
@@ -354,10 +273,6 @@ impl AgentIntegration for CodexIntegration {
             codex_config_path(home),
             codex_personal_marketplace_path(home),
         ];
-        paths.extend([
-            config_backup_path(&codex_config_path(home)),
-            config_backup_path(&codex_personal_marketplace_path(home)),
-        ]);
         let current_cache = codex_plugin_current_cached_install_dir(home);
         paths.extend(codex_plugin_managed_paths(&current_cache));
         paths.sort();
@@ -376,8 +291,8 @@ impl AgentIntegration for CodexIntegration {
         // transaction that retires stale exports can still roll them back.
         if components.contains(&super::host_bundle::HostComponentV1::Core) {
             // `agent_targets` lives in automation-runtime and reads agent
-            // bytes through the host I/O bundle this crate owns, so preview,
-            // backup, and activate all inventory the same surface.
+            // bytes through the host I/O bundle this crate owns, so preview
+            // and activate inventory the same surface.
             if let Ok(managed) = tracedecay_automation_runtime::automation::agent_targets::managed_agent_transaction_paths(
                 &crate::host_io(),
                 home,
@@ -401,8 +316,16 @@ impl AgentIntegration for CodexIntegration {
             &ctx.home,
         )?;
         if !codex_plugin_is_natively_active(&ctx.home, Some(&ctx.tracedecay_bin))? {
-            let marketplace_name = codex_cached_marketplace_name(&ctx.home);
             let codex_cli = plugin_registry::require_codex_plugin_cli()?;
+            // `codex plugin add` resolves the catalog-deployed source through
+            // this entry; it is a registration path, so rollback restores it.
+            install_codex_marketplace_entry(
+                &codex_personal_marketplace_path(&ctx.home),
+                "personal",
+                "Personal",
+                CODEX_GLOBAL_PLUGIN_SOURCE_PATH,
+            )?;
+            let marketplace_name = codex_cached_marketplace_name(&ctx.home);
             plugin_registry::codex_plugin_add_with(&codex_cli, &ctx.home, &marketplace_name)?;
         }
         // Auto-trust the personal bundle's hooks whenever one is present:
@@ -574,21 +497,6 @@ fn record_codex_cached_plugin_registration_intents(home: &Path) -> Result<()> {
     Ok(())
 }
 
-fn codex_exact_cache_manifest_path(home: &Path) -> Result<Option<PathBuf>> {
-    let marketplace_name =
-        codex_exact_personal_marketplace_name(home).map_err(|()| TraceDecayError::Config {
-            message: format!(
-                "could not read exact Codex marketplace identity at {}",
-                codex_personal_marketplace_path(home).display()
-            ),
-        })?;
-    Ok(marketplace_name.map(|marketplace_name| {
-        codex_plugin_cached_root(home, &marketplace_name)
-            .join(crate::PRODUCT_VERSION)
-            .join(".codex-plugin/plugin.json")
-    }))
-}
-
 fn codex_plugin_cached_install_dirs(home: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     let mut marketplace_names = vec![
@@ -639,28 +547,6 @@ fn codex_update_project_path(ctx: &InstallContext) -> Option<PathBuf> {
     ctx.project_root
         .clone()
         .or_else(|| std::env::current_dir().ok())
-}
-
-#[hotpath::measure(label = "hosts.agent.codex.plugin_install")]
-fn install_codex_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
-    let install_dir = install_codex_personal_bootstrap(home, tracedecay_bin)?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Staged Codex plugin source at {}",
-        install_dir.display()
-    );
-    Ok(())
-}
-
-fn install_codex_personal_bootstrap(home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
-    let install_dir = codex_plugin_install_dir(home);
-    install_codex_plugin_bundle(&install_dir, tracedecay_bin, InstallScope::Global, home)?;
-    install_codex_marketplace_entry(
-        &codex_personal_marketplace_path(home),
-        "personal",
-        "Personal",
-        CODEX_GLOBAL_PLUGIN_SOURCE_PATH,
-    )?;
-    Ok(install_dir)
 }
 
 #[hotpath::measure(label = "hosts.agent.codex.repo_plugin_install")]
@@ -865,7 +751,6 @@ fn install_codex_managed_skill_overlay(
         tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(
             profile_home,
         );
-    super::retired_memory_digest::remove_state(&profile_root)?;
     tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
         &crate::host_io(),
         &profile_root,
@@ -880,7 +765,7 @@ fn write_codex_plugin_files(
     policy: CodexBundlePolicy,
 ) -> Result<()> {
     for (relative, rendered) in rendered_plugin_files(tracedecay_bin, policy)? {
-        safe_write_text_file(&install_dir.join(relative), &rendered, None)?;
+        safe_write_text_file(&install_dir.join(relative), &rendered)?;
     }
     Ok(())
 }
@@ -1291,7 +1176,7 @@ struct CodexHookTrustSyncOutcome {
 /// `~/.codex/config.toml` so Codex runs them without a manual `/hooks` approval.
 ///
 /// Uses the marketplace identity and hook payload actually installed on disk,
-/// pruning stale active/legacy-personal entries while preserving every other
+/// pruning stale active-marketplace entries while preserving every other
 /// plugin's and the user's own config. Hooks whose command does not exactly
 /// match a generated `TraceDecay` command are skipped (see
 /// [`codex_hook_command_invokes_tracedecay`]). The rewrite runs as a config
@@ -1300,105 +1185,98 @@ struct CodexHookTrustSyncOutcome {
 fn sync_codex_hook_trust(home: &Path, tracedecay_bin: &str) -> Result<CodexHookTrustSyncOutcome> {
     let (marketplace_name, entries) = codex_installed_hook_trust_entries(home)?;
     let config_path = codex_config_path(home);
-    let outcome = update_toml_config_transactionally(&config_path, |mut config| {
-        let table = config
-            .as_table_mut()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: format!("{} is not a TOML table", config_path.display()),
-            })?;
-        let hooks = table
-            .entry("hooks")
-            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
-        let hooks = hooks
-            .as_table_mut()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: format!("[hooks] in {} is not a table", config_path.display()),
-            })?;
-        let state = hooks
-            .entry("state")
-            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
-        let state = state
-            .as_table_mut()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: format!("[hooks.state] in {} is not a table", config_path.display()),
-            })?;
+    let outcome = update_toml_config_transactionally(&config_path, |config| {
+        let state = codex_hook_trust_state(config, &config_path)?;
 
-        // Drop trust for the active marketplace plus the legacy hard-coded
-        // `personal` identity before adding the exact installed payload.
-        // Foreign plugin and repo-local marketplace records remain untouched.
+        // Drop trust for the active marketplace that the installed payload no
+        // longer carries, and rewrite only records whose hash moved. Foreign
+        // plugin and repo-local marketplace records remain untouched.
         let current_prefix = codex_plugin_hook_trust_prefix(&marketplace_name);
-        let legacy_prefix = codex_plugin_hook_trust_prefix(CODEX_DEFAULT_MARKETPLACE_NAME);
+        let (trusted_entries, skipped_entries): (Vec<_>, Vec<_>) =
+            entries.iter().partition(|entry| {
+                codex_hook_command_invokes_tracedecay(&entry.command, tracedecay_bin)
+            });
         state.retain(|key, _| {
             !key.starts_with(&current_prefix)
-                && (current_prefix == legacy_prefix || !key.starts_with(&legacy_prefix))
+                || trusted_entries.iter().any(|entry| entry.trust_key == key)
         });
-
-        let mut trusted = 0usize;
-        let mut skipped = Vec::new();
-        for entry in &entries {
-            if !codex_hook_command_invokes_tracedecay(&entry.command, tracedecay_bin) {
-                skipped.push(entry.event_label.clone());
+        for entry in &trusted_entries {
+            let recorded = state
+                .get(&entry.trust_key)
+                .and_then(|record| record.get("trusted_hash"))
+                .and_then(toml_edit::Item::as_str);
+            if recorded == Some(entry.hash.as_str()) {
                 continue;
             }
-            let mut record = toml::value::Table::new();
-            record.insert(
-                "trusted_hash".to_string(),
-                toml::Value::String(entry.hash.clone()),
-            );
-            state.insert(entry.trust_key.clone(), toml::Value::Table(record));
-            trusted += 1;
+            let mut record = toml_edit::Table::new();
+            record.insert("trusted_hash", toml_edit::value(entry.hash.clone()));
+            state.insert(&entry.trust_key, toml_edit::Item::Table(record));
         }
-
-        let outcome = CodexHookTrustSyncOutcome { trusted, skipped };
-        // A truthful all-skip (or empty hook payload) leaves no trust records.
-        // That is not a serializer failure, announce treats it as Ok + guidance.
-        // Drop hollow `[hooks.state]`/`[hooks]` tables the same way prune does.
-        if state.is_empty() {
-            if let Some(hooks) = table.get_mut("hooks").and_then(toml::Value::as_table_mut) {
-                hooks.remove("state");
-                if hooks.is_empty() {
-                    table.remove("hooks");
-                }
-            }
-            let contents = render_codex_config(&config_path, &config)?;
-            return Ok((outcome, TextFileMutation::Write(contents)));
-        }
-
-        let contents = render_codex_config(&config_path, &config)?;
-        // Child trust records exist: Codex requires an explicit `[hooks.state]`
-        // parent. Missing child headers here means the serializer dropped
-        // entries we just inserted, a real contract breach.
-        let Some(updated) = with_explicit_hooks_state_parent(&contents) else {
-            return Err(TraceDecayError::Config {
-                message: "Codex hook trust state serialized without hook entries".to_string(),
-            });
+        let outcome = CodexHookTrustSyncOutcome {
+            trusted: trusted_entries.len(),
+            skipped: skipped_entries
+                .iter()
+                .map(|entry| entry.event_label.clone())
+                .collect(),
         };
-        Ok((outcome, TextFileMutation::Write(updated)))
+        // A truthful all-skip (or empty hook payload) leaves no trust records,
+        // and no hollow `[hooks.state]`/`[hooks]` tables, the same as prune.
+        drop_hollow_codex_hook_tables(config);
+        Ok(outcome)
     })?;
     eprintln!("\x1b[32m✔\x1b[0m Wrote {}", config_path.display());
     Ok(outcome)
 }
 
-fn render_codex_config(config_path: &Path, config: &toml::Value) -> Result<String> {
-    toml::to_string_pretty(config).map_err(|error| TraceDecayError::Config {
-        message: format!("failed to serialize {}: {error}", config_path.display()),
-    })
+/// The `[hooks.state]` table, created when absent. Codex's hook loader
+/// requires that parent header explicitly on disk, while `[hooks]` itself
+/// stays implicit unless the operator wrote it.
+fn codex_hook_trust_state<'a>(
+    config: &'a mut toml_edit::DocumentMut,
+    config_path: &Path,
+) -> Result<&'a mut toml_edit::Table> {
+    let not_a_table = |name: &str| TraceDecayError::Config {
+        message: format!("[{name}] in {} is not a table", config_path.display()),
+    };
+    let hooks = config
+        .as_table_mut()
+        .entry("hooks")
+        .or_insert_with(|| {
+            let mut hooks = toml_edit::Table::new();
+            hooks.set_implicit(true);
+            toml_edit::Item::Table(hooks)
+        })
+        .as_table_mut()
+        .ok_or_else(|| not_a_table("hooks"))?;
+    let state = hooks
+        .entry("state")
+        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| not_a_table("hooks.state"))?;
+    state.set_implicit(false);
+    Ok(state)
 }
 
-/// Codex's hook loader requires the parent table to be explicit on disk. The
-/// `toml` serializer otherwise emits only `[hooks.state."..."]` child tables,
-/// which parses equivalently but still triggers Codex's hook-review prompt.
-/// Returns `None` when no hook trust child tables are present, callers that
-/// just inserted records treat that as a serializer contract breach; callers
-/// that intentionally cleared state (prune / all-skip) fall back to the
-/// unshaped document.
-fn with_explicit_hooks_state_parent(contents: &str) -> Option<String> {
-    let child_offset = contents.find("[hooks.state.\"")?;
-    let mut updated = String::with_capacity(contents.len() + "[hooks.state]\n\n".len());
-    updated.push_str(&contents[..child_offset]);
-    updated.push_str("[hooks.state]\n\n");
-    updated.push_str(&contents[child_offset..]);
-    Some(updated)
+/// Remove an emptied `[hooks.state]`, then a `[hooks]` left holding nothing
+/// that the operator never wrote a header for.
+fn drop_hollow_codex_hook_tables(config: &mut toml_edit::DocumentMut) {
+    let root = config.as_table_mut();
+    let Some(hooks) = root
+        .get_mut("hooks")
+        .and_then(toml_edit::Item::as_table_mut)
+    else {
+        return;
+    };
+    if hooks
+        .get("state")
+        .and_then(toml_edit::Item::as_table)
+        .is_some_and(toml_edit::Table::is_empty)
+    {
+        hooks.remove("state");
+    }
+    if hooks.is_empty() && hooks.is_implicit() {
+        root.remove("hooks");
+    }
 }
 
 /// Remove every TraceDecay-managed `[hooks.state]` trust record from
@@ -1414,39 +1292,21 @@ fn prune_codex_hook_trust_records(home: &Path) -> Result<()> {
     if !config_path.exists() {
         return Ok(());
     }
-    let pruned = update_toml_config_transactionally(&config_path, |mut config| {
-        let Some(table) = config.as_table_mut() else {
-            return Err(TraceDecayError::Config {
-                message: format!("{} is not a TOML table", config_path.display()),
-            });
-        };
-        let Some(state) = table
+    let pruned = update_toml_config_transactionally(&config_path, |config| {
+        let Some(state) = config
             .get_mut("hooks")
-            .and_then(toml::Value::as_table_mut)
             .and_then(|hooks| hooks.get_mut("state"))
-            .and_then(toml::Value::as_table_mut)
+            .and_then(toml_edit::Item::as_table_mut)
         else {
-            return Ok((false, TextFileMutation::Unchanged));
+            return Ok(false);
         };
         let before = state.len();
         state.retain(|key, _| !key.starts_with(CODEX_PLUGIN_ACTIVATION_KEY_PREFIX));
         if state.len() == before {
-            return Ok((false, TextFileMutation::Unchanged));
+            return Ok(false);
         }
-        let state_empty = state.is_empty();
-        if state_empty
-            && let Some(hooks) = table.get_mut("hooks").and_then(toml::Value::as_table_mut)
-        {
-            hooks.remove("state");
-            if hooks.is_empty() {
-                table.remove("hooks");
-            }
-        }
-        let contents = render_codex_config(&config_path, &config)?;
-        // Foreign trust records that remain still need the explicit parent
-        // table Codex's hook loader requires.
-        let updated = with_explicit_hooks_state_parent(&contents).unwrap_or(contents);
-        Ok((true, TextFileMutation::Write(updated)))
+        drop_hollow_codex_hook_tables(config);
+        Ok(true)
     })?;
     if pruned {
         eprintln!(
@@ -1699,56 +1559,6 @@ fn codex_plugin_is_natively_active(home: &Path, tracedecay_bin: Option<&str>) ->
     })
 }
 
-fn codex_non_interactive_install_state(
-    home: &Path,
-    tracedecay_bin: &str,
-    staged_paths: Vec<PathBuf>,
-) -> Result<NonInteractiveInstallOutcome> {
-    if codex_plugin_is_natively_active(home, Some(tracedecay_bin))? {
-        return Ok(NonInteractiveInstallOutcome::Ready);
-    }
-    let exact_marketplace_name =
-        codex_exact_personal_marketplace_name(home).map_err(|()| TraceDecayError::Config {
-            message: format!(
-                "could not read Codex marketplace identity at {}",
-                codex_personal_marketplace_path(home).display()
-            ),
-        })?;
-    let marketplace_name = exact_marketplace_name
-        .clone()
-        .unwrap_or_else(|| codex_cached_marketplace_name(home));
-    let exact_cache_present = exact_marketplace_name.is_some_and(|marketplace_name| {
-        codex_plugin_cached_root(home, &marketplace_name)
-            .join(crate::PRODUCT_VERSION)
-            .join(".codex-plugin/plugin.json")
-            .is_file()
-    });
-    if codex_plugin_enabled(home).map_err(|()| TraceDecayError::Config {
-        message: format!(
-            "could not read Codex native plugin activation state at {}",
-            codex_config_path(home).display()
-        ),
-    })? && exact_cache_present
-    {
-        return Ok(NonInteractiveInstallOutcome::DeferredUserAction(
-            DeferredUserAction {
-                remediation: format!(
-                    "Codex's loaded TraceDecay cache is stale. Run `codex plugin add tracedecay@{marketplace_name}` to reinstall it, re-trust changed hooks, then retry the TraceDecay lifecycle."
-                ),
-                staged_paths,
-            },
-        ));
-    }
-    Ok(NonInteractiveInstallOutcome::DeferredUserAction(
-        DeferredUserAction {
-            remediation: format!(
-                "Codex activates plugins through its native cache. Run `codex plugin add tracedecay@{marketplace_name}` after TraceDecay stages the source package."
-            ),
-            staged_paths,
-        },
-    ))
-}
-
 fn codex_hook_state_table_is_explicit(contents: &str) -> bool {
     contents.lines().any(|line| line.trim() == "[hooks.state]")
 }
@@ -1812,76 +1622,85 @@ fn install_codex_marketplace_entry(
     display_name: &str,
     source_path: &str,
 ) -> Result<()> {
-    let mut marketplace = load_json_file_strict(marketplace_path)?;
-    if !marketplace.is_object() {
-        marketplace = json!({});
-    }
-    let existing_name = marketplace.get("name").and_then(|value| value.as_str());
-    if let Some(existing_name) = existing_name {
-        validate_codex_marketplace_name(existing_name)?;
-    }
-    let has_tracedecay_entry = marketplace
-        .get("plugins")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|plugins| {
-            plugins.iter().any(|entry| {
-                entry.get("name").and_then(|value| value.as_str()) == Some("tracedecay")
-            })
-        });
-    let should_write_identity =
-        existing_name.is_none() || (existing_name == Some("caveman-home") && has_tracedecay_entry);
-    if should_write_identity {
-        marketplace["name"] = json!(marketplace_name);
-    }
-    if !marketplace
-        .get("interface")
-        .is_some_and(serde_json::Value::is_object)
-    {
-        marketplace["interface"] = json!({});
-    }
-    if should_write_identity
-        || marketplace["interface"]
-            .get("displayName")
-            .and_then(|value| value.as_str())
-            .is_none()
-    {
-        marketplace["interface"]["displayName"] = json!(display_name);
-    }
-    if !marketplace
-        .get("plugins")
-        .is_some_and(serde_json::Value::is_array)
-    {
-        marketplace["plugins"] = json!([]);
-    }
-    let Some(plugins) = marketplace["plugins"].as_array_mut() else {
-        return Err(TraceDecayError::Config {
-            message: "failed to normalize Codex marketplace plugins to an array".to_string(),
-        });
-    };
-    plugins.retain(|entry| {
-        !matches!(
-            entry.get("name").and_then(|value| value.as_str()),
-            Some("tracedecay")
-        )
-    });
-    plugins.push(json!({
-        "name": "tracedecay",
-        "source": {
-            "source": "local",
-            "path": source_path,
+    let effective_marketplace_name = update_json_config_transactionally(
+        marketplace_path,
+        JsonConfigDialect::Json,
+        |mut marketplace| {
+            if !marketplace.is_object() {
+                marketplace = json!({});
+            }
+            let existing_name = marketplace.get("name").and_then(|value| value.as_str());
+            if let Some(existing_name) = existing_name {
+                validate_codex_marketplace_name(existing_name)?;
+            }
+            let has_tracedecay_entry = marketplace
+                .get("plugins")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|plugins| {
+                    plugins.iter().any(|entry| {
+                        entry.get("name").and_then(|value| value.as_str()) == Some("tracedecay")
+                    })
+                });
+            let should_write_identity = existing_name.is_none()
+                || (existing_name == Some("caveman-home") && has_tracedecay_entry);
+            if should_write_identity {
+                marketplace["name"] = json!(marketplace_name);
+            }
+            if !marketplace
+                .get("interface")
+                .is_some_and(serde_json::Value::is_object)
+            {
+                marketplace["interface"] = json!({});
+            }
+            if should_write_identity
+                || marketplace["interface"]
+                    .get("displayName")
+                    .and_then(|value| value.as_str())
+                    .is_none()
+            {
+                marketplace["interface"]["displayName"] = json!(display_name);
+            }
+            if !marketplace
+                .get("plugins")
+                .is_some_and(serde_json::Value::is_array)
+            {
+                marketplace["plugins"] = json!([]);
+            }
+            let Some(plugins) = marketplace["plugins"].as_array_mut() else {
+                return Err(TraceDecayError::Config {
+                    message: "failed to normalize Codex marketplace plugins to an array"
+                        .to_string(),
+                });
+            };
+            plugins.retain(|entry| {
+                !matches!(
+                    entry.get("name").and_then(|value| value.as_str()),
+                    Some("tracedecay")
+                )
+            });
+            plugins.push(json!({
+                "name": "tracedecay",
+                "source": {
+                    "source": "local",
+                    "path": source_path,
+                },
+                "policy": {
+                    "installation": "AVAILABLE",
+                    "authentication": "ON_INSTALL",
+                },
+                "category": "Productivity",
+            }));
+            let effective_marketplace_name = marketplace
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(marketplace_name)
+                .to_string();
+            Ok((
+                effective_marketplace_name,
+                JsonConfigMutation::Write(marketplace),
+            ))
         },
-        "policy": {
-            "installation": "AVAILABLE",
-            "authentication": "ON_INSTALL",
-        },
-        "category": "Productivity",
-    }));
-    let effective_marketplace_name = marketplace
-        .get("name")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or(marketplace_name)
-        .to_string();
-    safe_write_json_file(marketplace_path, &marketplace, None)?;
+    )?;
     eprintln!(
         "\x1b[32m✔\x1b[0m Added tracedecay to Codex {effective_marketplace_name} marketplace at {}",
         marketplace_path.display()
@@ -1915,64 +1734,6 @@ fn remove_codex_plugin_skills_dir(install_dir: &Path) -> Result<()> {
     } else if metadata.is_dir() {
         remove_codex_managed_skill_overlay(install_dir);
         remove_codex_plugin_managed_skills(install_dir, &skills_dir)?;
-    }
-    Ok(())
-}
-
-fn remove_codex_retired_autodiscovered_files(install_dir: &Path) -> Result<()> {
-    let managed = codex_plugin_managed_paths(install_dir)
-        .into_iter()
-        .collect::<HashSet<_>>();
-    for relative_root in ["agents", "commands", "hooks", "skills"] {
-        let root = install_dir.join(relative_root);
-        let Ok(metadata) = std::fs::symlink_metadata(&root) else {
-            continue;
-        };
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            continue;
-        }
-        let mut files =
-            super::collect_regular_files(&root).map_err(|error| TraceDecayError::Config {
-                message: format!(
-                    "failed to inventory retired Codex plugin files under {}: {error}",
-                    root.display()
-                ),
-            })?;
-        files.sort();
-        for file in files {
-            if managed.contains(&file) {
-                continue;
-            }
-            let Some(relative) = file
-                .strip_prefix(install_dir)
-                .ok()
-                .and_then(Path::to_str)
-                .map(|relative| relative.replace(std::path::MAIN_SEPARATOR, "/"))
-            else {
-                continue;
-            };
-            if !super::is_auto_discovered_entrypoint(&relative) {
-                continue;
-            }
-            let Ok(contents) = std::fs::read(&file) else {
-                continue;
-            };
-            if !retired_entrypoints::has_exact_identity(&relative, &contents) {
-                continue;
-            }
-            super::safe_remove_host_file(&file).map_err(|error| TraceDecayError::Config {
-                message: format!(
-                    "failed to remove retired TraceDecay plugin file {}: {error}",
-                    file.display()
-                ),
-            })?;
-        }
-        prune_empty_dirs(&root).map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "failed to prune retired Codex plugin directories under {}: {error}",
-                root.display()
-            ),
-        })?;
     }
     Ok(())
 }
@@ -2043,7 +1804,6 @@ fn remove_codex_plugin_install(install_dir: &Path) -> Result<()> {
         });
     }
     remove_codex_plugin_skills_dir(install_dir)?;
-    remove_codex_retired_autodiscovered_files(install_dir)?;
     if codex_plugin_dir_has_only_managed_files(install_dir) {
         std::fs::remove_dir_all(install_dir).map_err(|e| TraceDecayError::Config {
             message: format!("failed to remove {}: {e}", install_dir.display()),
@@ -2085,24 +1845,32 @@ fn remove_codex_marketplace_entry_at(marketplace_path: &Path, label: &str) -> Re
     if !marketplace_path.exists() {
         return Ok(());
     }
-    let mut marketplace = load_json_file_strict(marketplace_path)?;
-    let Some(plugins) = marketplace
-        .get_mut("plugins")
-        .and_then(|value| value.as_array_mut())
-    else {
-        return Ok(());
-    };
-    let before = plugins.len();
-    plugins.retain(|entry| {
-        !matches!(
-            entry.get("name").and_then(|value| value.as_str()),
-            Some("tracedecay")
-        )
-    });
-    if plugins.len() == before {
+    let removed = update_json_config_transactionally(
+        marketplace_path,
+        JsonConfigDialect::Json,
+        |mut marketplace| {
+            let Some(plugins) = marketplace
+                .get_mut("plugins")
+                .and_then(|value| value.as_array_mut())
+            else {
+                return Ok((false, JsonConfigMutation::Unchanged));
+            };
+            let before = plugins.len();
+            plugins.retain(|entry| {
+                !matches!(
+                    entry.get("name").and_then(|value| value.as_str()),
+                    Some("tracedecay")
+                )
+            });
+            if plugins.len() == before {
+                return Ok((false, JsonConfigMutation::Unchanged));
+            }
+            Ok((true, JsonConfigMutation::Write(marketplace)))
+        },
+    )?;
+    if !removed {
         return Ok(());
     }
-    safe_write_json_file(marketplace_path, &marketplace, None)?;
     eprintln!(
         "\x1b[32m✔\x1b[0m Removed tracedecay from Codex {label} marketplace at {}",
         marketplace_path.display()

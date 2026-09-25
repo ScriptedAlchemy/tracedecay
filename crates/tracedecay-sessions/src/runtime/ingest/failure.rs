@@ -7,7 +7,7 @@ use tracedecay_domain::ObservationSourceRangeV1;
 
 use crate::admission::HostAdmissionStatus;
 use crate::runtime::shared::TranscriptIngestStats;
-use crate::runtime::{claude_observation, source};
+use crate::runtime::{hosts::claude_observation, source};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ClaudeObservationFailureClass {

@@ -60,20 +60,6 @@ pub fn db_filename(data_dir: &Path) -> &'static str {
     DB_FILENAME
 }
 
-/// Full path to the repo-local graph database marker path.
-///
-/// Normal runtime graph storage resolves through [`crate::storage::StoreLayout`]
-/// into the user profile shard; this helper is only for explicit marker checks
-/// and migration cleanup.
-pub fn get_project_db_path(project_root: &Path) -> PathBuf {
-    get_tracedecay_dir(project_root).join(DB_FILENAME)
-}
-
-/// Returns true when the old repo-local `TraceDecay` graph DB exists at this root.
-pub fn has_project_database(project_root: &Path) -> bool {
-    project_root.join(TRACEDECAY_DIR).join(DB_FILENAME).exists()
-}
-
 /// User-level data directory. Runtime storage is always rooted at
 /// `~/.tracedecay` unless `TRACEDECAY_DATA_DIR` explicitly overrides it.
 pub fn user_data_dir() -> Option<PathBuf> {
@@ -190,8 +176,8 @@ fn canonicalize_data_dir(path: PathBuf) -> PathBuf {
 /// 1. **Explicit path** (`--path`/`-p`, tool `path` argument): used verbatim,
 ///    no discovery, and failure to open is fatal, never silently fall back.
 /// 2. **CWD walk-up** (this function via `resolve_path_with_discovery`):
-///    nearest ancestor of the working directory containing an initialised
-///    project database (see [`get_project_db_path`]).
+///    nearest ancestor of the working directory hosting a path-local profile
+///    store or, at a worktree root, a repository identity marker.
 ///
 /// `serve` forwards this routing metadata to the managed daemon. MCP
 /// `initialize` roots and registry aliases are resolved there; the proxy never
@@ -227,8 +213,7 @@ pub fn is_initialized_project_root(dir: &Path) -> bool {
 }
 
 fn directory_hosts_initialized_project(dir: &Path, at_worktree_root: bool) -> bool {
-    has_project_database(dir)
-        || crate::storage::has_path_local_profile_store(dir)
+    crate::storage::has_path_local_profile_store(dir)
         || (at_worktree_root && crate::storage::has_repository_identity_marker(dir))
 }
 

@@ -199,20 +199,14 @@ mod tests {
         )
         .unwrap();
 
-        super::super::install_registration_entries(
-            &config_path,
-            "/usr/bin/tracedecay",
-            true,
-            true,
-            true,
-        )
-        .unwrap();
+        super::super::install_registration_entries(&config_path, "/usr/bin/tracedecay", true, true)
+            .unwrap();
 
         let config = crate::agents::load_json_file_strict(&config_path).unwrap();
         assert_eq!(config["plugin"], host_written);
         assert!(config.pointer("/mcp/tracedecay").is_some());
 
-        super::super::remove_registration_entries(&config_path, true, true, true).unwrap();
+        super::super::remove_registration_entries(&config_path, true, true).unwrap();
 
         let config = crate::agents::load_json_file_strict(&config_path).unwrap();
         assert_eq!(
@@ -228,14 +222,8 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let config_path = home.path().join("opencode.json");
 
-        super::super::install_registration_entries(
-            &config_path,
-            "/usr/bin/tracedecay",
-            true,
-            true,
-            true,
-        )
-        .unwrap();
+        super::super::install_registration_entries(&config_path, "/usr/bin/tracedecay", true, true)
+            .unwrap();
 
         let config = crate::agents::load_json_file_strict(&config_path).unwrap();
         assert!(

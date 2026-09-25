@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use super::codec::{
     CONFIGURATION_PLAN_PAYLOAD_SCHEMA_VERSION, CONFIGURATION_SNAPSHOT_ENTRY_PAYLOAD_SCHEMA_VERSION,
-    StoredConfigurationPlanPayloadV2, StoredConfigurationSnapshotEntryV1,
+    StoredConfigurationPlanPayload, StoredConfigurationSnapshotEntryV1,
 };
 use super::{
     CandidateDispositionV1, ConfigurationCandidateV1, ConfigurationLayerIdV1,
@@ -88,7 +88,7 @@ fn encode_plan_payload(
     plan: &ConfigurationProtectedPlanRecordV1,
 ) -> ConfigurationStoreResult<Vec<u8>> {
     plan.validate().map_err(ConfigurationStoreError::from)?;
-    serde_json::to_vec(&StoredConfigurationPlanPayloadV2 {
+    serde_json::to_vec(&StoredConfigurationPlanPayload {
         schema_version: CONFIGURATION_PLAN_PAYLOAD_SCHEMA_VERSION,
         plan: plan.plan.clone(),
         operation: (&plan.operation).into(),

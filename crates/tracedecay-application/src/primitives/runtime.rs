@@ -522,6 +522,7 @@ pub fn open_primitive_project_runtime(
     let symbol_graph: Arc<dyn SymbolGraphPrimitivePort + Send + Sync> =
         Arc::new(CanonicalSymbolGraphAdapter::new(
             Arc::clone(&code_graph),
+            source_runtime.project_root().to_path_buf(),
             symbol_graph_cursors,
             ignored_dependency_admission,
         ));

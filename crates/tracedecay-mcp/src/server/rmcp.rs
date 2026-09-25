@@ -8,10 +8,11 @@
 use std::sync::Arc;
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, CustomNotification, ErrorCode,
-    ErrorData, Implementation, InitializeRequestParams, InitializeResult, ListResourcesResult,
-    ListToolsResult, MetaObject, ReadResourceRequestParams, ReadResourceResponse,
-    ReadResourceResult, ServerCapabilities, ServerConfig,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ClientCapabilities,
+    CustomNotification, CustomRequest, CustomResult, ErrorCode, ErrorData, Implementation,
+    InitializeRequestParams, InitializeResult, ListResourcesResult, ListToolsResult, MetaObject,
+    ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult,
+    RequestMetaObject, ServerCapabilities, ServerConfig,
 };
 use rmcp::service::{NotificationContext, RequestContext};
 use rmcp::{RoleServer, ServerHandler};
@@ -116,7 +117,7 @@ impl<L> RmcpSelectedProjectResponseAuthority<L> {
     }
 }
 
-/// Allows daemon routing to enrich the legacy `initialize` response without
+/// Allows daemon routing to enrich the `initialize` response without
 /// coupling this MCP module to daemon route types.
 pub type RmcpInitializeResponseDecorator =
     Arc<dyn Fn(&mut JsonRpcResponse) + Send + Sync + 'static>;
@@ -223,8 +224,8 @@ impl RmcpWorkDeliverySettlement {
 /// When cancel wins and `cancel_registered_request` finds a live registration,
 /// the sticky/worker path owns settlement, so this keeps awaiting `handling`.
 /// When cancel wins and the request is not registered yet, pass
-/// `cancellation_registered` so this waits for the same notify the legacy
-/// connection uses instead of dropping `handling` during route resolution.
+/// `cancellation_registered` so this waits for route resolution to register
+/// the request instead of dropping `handling` mid-route.
 /// Only a cancel that can never register (no notify channel) abandons.
 pub async fn await_dispatch_with_cancellation<F, C, N>(
     handling: F,
@@ -249,7 +250,7 @@ where
     }
     let notify = cancellation_registered?;
     // Cancel raced route resolution: keep polling handling while waiting for
-    // prepare_dispatch_control to register, same as the legacy connection.
+    // prepare_dispatch_control to register.
     loop {
         let registered = notify.notified();
         tokio::pin!(registered);
@@ -351,7 +352,7 @@ where
     async fn dispatch(
         &self,
         context: RequestContext<RoleServer>,
-        method: &'static str,
+        method: &str,
         params: McpDispatchParams<'_>,
     ) -> Result<JsonRpcResponse, ErrorData> {
         let queued_at = std::time::Instant::now();
@@ -384,7 +385,7 @@ where
     async fn dispatch_admitted(
         &self,
         context: RequestContext<RoleServer>,
-        method: &'static str,
+        method: &str,
         params: McpDispatchParams<'_>,
     ) -> Result<JsonRpcResponse, ErrorData> {
         // The wire identity is the one value internal dispatch genuinely keys
@@ -423,13 +424,12 @@ where
         connection: &mut C::Connection,
     ) -> Result<JsonRpcResponse, ErrorData> {
         let pre_cancelled = request_cancellation.is_cancelled();
-        let dispatch_cancellation = tracedecay_session_memory::context::CancellationToken::new();
+        let dispatch_cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
         if pre_cancelled {
             dispatch_cancellation.cancel();
         }
-        // The legacy MCP route already erases this shared dispatch authority
-        // before awaiting it. Keep the typed RMCP route at the same ownership
-        // boundary: the cancellation combinator otherwise stores the complete
+        // Erase the shared dispatch authority before awaiting it: the
+        // cancellation combinator otherwise stores the complete
         // catalog-dispatch future inline in rmcp's generated request future.
         let handling = self.context.dispatch(
             request,
@@ -501,10 +501,10 @@ where
         let _ = self
             .context
             .dispatch(
-                McpDispatchRequest::from_legacy(&request),
+                McpDispatchRequest::raw(&request),
                 self.timings_enabled,
                 &mut connection,
-                tracedecay_session_memory::context::CancellationToken::new(),
+                tracedecay_runtime_core::cancellation::CancellationToken::new(),
             )
             .await;
     }
@@ -540,10 +540,66 @@ where
             GuardedHandshakeTransport {
                 inner: transport,
                 handshake_settled: false,
+                pending_ping_answer: None,
             },
         )
         .await
     }
+}
+
+/// Whether a daemon connection's first request opens an `rmcp` session: an
+/// `initialize`, or a request carrying the SEP-2575 per-request client context
+/// `rmcp` serves without one.
+pub fn opens_rmcp_session(request: &JsonRpcRequest) -> bool {
+    request.method == "initialize"
+        || (request.id.is_some()
+            && request
+                .params
+                .as_ref()
+                .and_then(|params| params.get("_meta"))
+                .and_then(Value::as_object)
+                .is_some_and(|meta| {
+                    RequestMetaObject::DRAFT_REQUIRED_KEYS
+                        .iter()
+                        .all(|key| meta.contains_key(*key))
+                }))
+}
+
+/// Attaches this client's SEP-2575 per-request context to `params._meta` so a
+/// request sent on its own daemon connection needs no `initialize` session.
+///
+/// Notifications, `initialize`, and non-object params or `_meta` are left
+/// unchanged; `_meta` entries the caller already set win. Returns whether the
+/// request changed.
+pub fn attach_stateless_request_context(request: &mut JsonRpcRequest) -> bool {
+    if request.id.is_none() || request.method == "initialize" {
+        return false;
+    }
+    let Some(params) = request
+        .params
+        .get_or_insert_with(|| Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+    else {
+        return false;
+    };
+    let Some(meta) = params
+        .entry("_meta")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+    else {
+        return false;
+    };
+    let mut context = RequestMetaObject::new();
+    context.set_protocol_version(ProtocolVersion::LATEST);
+    context.set_client_capabilities(ClientCapabilities::default());
+    let mut attached = false;
+    for (key, value) in context.0.0 {
+        if let serde_json::map::Entry::Vacant(entry) = meta.entry(key) {
+            entry.insert(value);
+            attached = true;
+        }
+    }
+    attached
 }
 
 pub fn rmcp_response_result<T: DeserializeOwned>(
@@ -576,13 +632,31 @@ const MALFORMED_INITIALIZE_MESSAGE: &str = "initialize params are missing or mal
 /// returning a matching response", a transport mystery for what is a
 /// definitive protocol answer, exactly like the unparseable-handshake and
 /// rejected-auth refusals the daemon already writes before closing.
-struct GuardedHandshakeTransport<T> {
+///
+/// The guard also answers every `ping` itself. A connection whose first
+/// request carried SEP-2575 `_meta` instead of `initialize` is an inline
+/// lifecycle peer, and `rmcp`'s blanket `Service` impl refuses `ping` there
+/// with method-not-found (or invalid params without `_meta`) before
+/// `ServerHandler::ping` runs (rmcp 3.4, `handler/server.rs`). MCP requires
+/// an empty result to a ping at any time; hosts use it as a liveness probe.
+struct GuardedHandshakeTransport<T: rmcp::transport::Transport<RoleServer>> {
     inner: T,
     /// Set once a request that ends `rmcp`'s pre-initialize loop is forwarded.
     /// After that the guard is inert: a later stray `initialize` is an ordinary
-    /// request the adapter answers with a typed error of its own.
+    /// request the adapter answers with a typed error of its own. Before it,
+    /// non-request messages are dropped: `rmcp`'s pre-initialize loop fails on
+    /// them, so a pipelined `notifications/initialized` after a refused
+    /// initialize would end the connection the corrected handshake needs.
+    /// JSON-RPC forbids answering them, and nothing is in flight yet.
     handshake_settled: bool,
+    /// `rmcp` polls `receive` inside `select!`, so a ping answer is written
+    /// from here rather than from a receive future that may be dropped
+    /// mid-write.
+    pending_ping_answer: Option<PendingPingAnswer<T::Error>>,
 }
+
+type PendingPingAnswer<E> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), E>> + Send>>;
 
 impl<T> rmcp::transport::Transport<RoleServer> for GuardedHandshakeTransport<T>
 where
@@ -604,12 +678,28 @@ where
     {
         async move {
             loop {
+                if let Some(answer) = self.pending_ping_answer.as_mut() {
+                    let sent = answer.await;
+                    self.pending_ping_answer = None;
+                    sent.ok()?;
+                }
                 let message = self.inner.receive().await?;
+                if let rmcp::model::ClientJsonRpcMessage::Request(request) = &message
+                    && matches!(request.request, rmcp::model::ClientRequest::PingRequest(_))
+                {
+                    self.pending_ping_answer = Some(Box::pin(self.inner.send(
+                        rmcp::model::ServerJsonRpcMessage::response(
+                            rmcp::model::ServerResult::EmptyResult(rmcp::model::EmptyResult {}),
+                            request.id.clone(),
+                        ),
+                    )));
+                    continue;
+                }
                 if self.handshake_settled {
                     return Some(message);
                 }
                 let rmcp::model::ClientJsonRpcMessage::Request(request) = &message else {
-                    return Some(message);
+                    continue;
                 };
                 let malformed_initialize = request.request.method() == "initialize"
                     && !matches!(
@@ -617,10 +707,7 @@ where
                         rmcp::model::ClientRequest::InitializeRequest(_)
                     );
                 if !malformed_initialize {
-                    // `rmcp` answers a pre-initialize ping in place and keeps
-                    // waiting; any other request ends its handshake loop.
-                    self.handshake_settled =
-                        !matches!(request.request, rmcp::model::ClientRequest::PingRequest(_));
+                    self.handshake_settled = true;
                     return Some(message);
                 }
                 let refusal = rmcp::model::ServerJsonRpcMessage::error(
@@ -689,15 +776,40 @@ where
     #[hotpath::skip]
     async fn call_tool(
         &self,
-        request: CallToolRequestParams,
+        mut request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        // `rmcp` moves the wire `params._meta` into the request context; the
+        // caller deadline is read from the typed params.
+        if request.meta.is_none() && !context.meta.is_empty() {
+            request.meta = Some(context.meta.clone());
+        }
         let started =
             (self.timings_enabled || self.context.timings_enabled()).then(std::time::Instant::now);
-        let mut result = rmcp_response_result::<CallToolResult>(
-            self.dispatch(context, "tools/call", McpDispatchParams::ToolsCall(request))
-                .await?,
-        )?;
+        let mut response = self
+            .dispatch(context, "tools/call", McpDispatchParams::ToolsCall(request))
+            .await?;
+        // `CallToolResult` has no extension members, so the typed problem the
+        // dispatcher attaches beside `content` travels as structured content;
+        // otherwise a markdown-format refusal would reach clients only as prose.
+        let problem = response
+            .result
+            .as_mut()
+            .and_then(Value::as_object_mut)
+            .and_then(|result| result.remove("problem"));
+        let mut result = rmcp_response_result::<CallToolResult>(response)?;
+        if let Some(problem) = problem {
+            match result
+                .structured_content
+                .as_mut()
+                .and_then(Value::as_object_mut)
+            {
+                Some(structured) => {
+                    structured.insert("problem".to_owned(), problem);
+                }
+                None => result.structured_content = Some(json!({ "problem": problem })),
+            }
+        }
         if let Some(started) = started {
             result
                 .meta
@@ -756,6 +868,36 @@ where
         self.dispatch_notification(notification.method, notification.params)
             .await;
     }
+
+    /// A hook event arrives as a stateless request on its own daemon
+    /// connection; it is dispatched exactly like the notification form.
+    /// Any other custom request is an unknown method or a known one whose
+    /// params did not fit its typed DTO; the dispatch authority answers it
+    /// (method not found, invalid params) and accounts for it.
+    #[hotpath::skip]
+    async fn on_custom_request(
+        &self,
+        request: CustomRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CustomResult, ErrorData> {
+        if request.method == tracedecay_hooks::core_events::HOOK_EVENT_METHOD {
+            self.dispatch_notification(request.method, request.params)
+                .await;
+            return Ok(CustomResult::new(json!({})));
+        }
+        // `rmcp` lifts `params._meta` into the request context; the object it
+        // leaves empty is a request that carried no params of its own (the
+        // stdio proxy creates `params` only to hold that context).
+        let params = request
+            .params
+            .as_ref()
+            .filter(|params| params.as_object().is_none_or(|object| !object.is_empty()));
+        rmcp_response_result(
+            self.dispatch(context, &request.method, McpDispatchParams::Raw(params))
+                .await?,
+        )
+        .map(CustomResult::new)
+    }
 }
 
 fn rmcp_error(error: JsonRpcError) -> ErrorData {
@@ -807,9 +949,9 @@ mod tests {
     #[tokio::test]
     async fn rmcp_cancel_during_route_resolution_preserves_dispatch_until_registration() {
         // Cancel can win while route resolution still awaits, before
-        // prepare_dispatch_control registers. Legacy waits on
-        // cancellation_registered; RMCP must too so sticky sampling and the
-        // selected target still settle.
+        // prepare_dispatch_control registers. RMCP waits on
+        // cancellation_registered so sticky sampling and the selected target
+        // still settle.
         let registration = Arc::new(tokio::sync::Notify::new());
         let registered = Arc::new(AtomicBool::new(false));
         let cancel_attempts = Arc::new(AtomicUsize::new(0));

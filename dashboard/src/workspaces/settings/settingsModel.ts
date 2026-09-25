@@ -18,7 +18,7 @@
  * Therefore this model does NOT rank groups into a resolution stack and does
  * not claim that one group overrides another: nothing in the payload supports
  * it. What it does model is ORIGIN, the source each group is read from, which
- * the payload states directly via `config_path` / `config_endpoint`, and the
+ * the payload states directly via `config_endpoint`, and the
  * one place the payload carries genuine per-value provenance:
  * `environment.variables[]`, where `active` distinguishes an override that is
  * actually in force from one that is unset so a default applies.
@@ -99,9 +99,8 @@ export interface ConfigSection {
   readonly blurb: string;
   readonly origin: OriginKind;
   /** Path or endpoint the payload names for this group, when it names one. */
+  /** The API endpoint a section's values are read from, when stated. */
   readonly location: string | null;
-  /** How to read `location`: a filesystem path or an API endpoint. */
-  readonly locationKind: 'path' | 'endpoint' | null;
   /** Facts restated from keys the payload carries. Never inferred. */
   readonly notes: readonly string[];
   readonly rows: readonly ConfigRow[];
@@ -785,8 +784,7 @@ function buildSection(key: string, value: unknown): ConfigSection {
     title: meta?.title ?? humanize(key),
     blurb: sectionBlurb(key, value, meta?.blurb ?? 'Reported by the daemon'),
     origin: meta?.origin ?? 'resolved',
-    location: location?.value ?? null,
-    locationKind: location?.kind ?? null,
+    location,
     notes: readNotes(value),
     rows,
     settingCount,
@@ -802,19 +800,12 @@ function sectionBlurb(key: string, value: unknown, fallback: string): string {
 }
 
 /** Where a section's values live, when the payload says so. */
-function readLocation(
-  key: string,
-  value: unknown,
-): { value: string; kind: 'path' | 'endpoint' } | null {
+function readLocation(key: string, value: unknown): string | null {
   if (isRecord(value)) {
-    const path = value['config_path'] ?? value['legacy_config_path'];
-    if (typeof path === 'string' && path.length > 0) return { value: path, kind: 'path' };
     const endpoint = value['config_endpoint'];
-    if (typeof endpoint === 'string' && endpoint.length > 0) {
-      return { value: endpoint, kind: 'endpoint' };
-    }
+    if (typeof endpoint === 'string' && endpoint.length > 0) return endpoint;
   }
-  if (key === 'environment') return { value: 'process environment', kind: 'endpoint' };
+  if (key === 'environment') return 'process environment';
   return null;
 }
 
@@ -825,18 +816,6 @@ function readLocation(
 function readNotes(value: unknown): string[] {
   if (!isRecord(value)) return [];
   const notes: string[] = [];
-  if (value['legacy_config_read_only'] === true) {
-    notes.push('legacy config path is read-only');
-  }
-  const configPath = value['config_path'];
-  const legacyPath = value['legacy_config_path'];
-  if (
-    typeof configPath === 'string' &&
-    typeof legacyPath === 'string' &&
-    configPath === legacyPath
-  ) {
-    notes.push('config path and legacy path are the same file');
-  }
   if (value['enabled'] === false) notes.push('disabled');
   return notes;
 }

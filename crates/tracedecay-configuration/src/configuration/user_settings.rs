@@ -1,9 +1,9 @@
 //! User-profile projection over the canonical configuration control plane.
 //!
 //! Editable values come only from the daemon-owned resolved snapshot. The
-//! legacy `config.toml` remains a read-only metadata source for fields that are
-//! not settings (installed agents, cached version state, and automation
-//! discovery); transports cannot obtain a write capability for it.
+//! profile `config.toml` is read only for fields that are not settings
+//! (installed agents, cached version state, and automation discovery);
+//! transports cannot obtain a write capability for it.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -26,7 +26,6 @@ pub type UserSettingsFuture<'a, T> =
 
 #[derive(Clone, Debug)]
 pub struct UserSettingsSnapshotV1 {
-    pub legacy_config_path: String,
     pub configuration_snapshot_id: String,
     pub configuration_revision_id: String,
     pub upload_enabled: bool,
@@ -104,7 +103,7 @@ impl UserSettingsDaemonClient for ProductionUserSettingsDaemonClient {
                 .current()
                 .await
                 .map_err(|error| unavailable(format!("resolved configuration: {error}")))?;
-            let metadata = tokio::task::spawn_blocking(read_legacy_user_metadata)
+            let metadata = tokio::task::spawn_blocking(read_user_metadata)
                 .await
                 .map_err(|error| unavailable(format!("user settings metadata task: {error}")))??;
             user_settings_snapshot(&current, &profile_id, metadata)
@@ -112,20 +111,16 @@ impl UserSettingsDaemonClient for ProductionUserSettingsDaemonClient {
     }
 }
 
-struct LegacyUserMetadata {
-    path: String,
+struct UserMetadata {
     installed_agents: Vec<String>,
     cached_latest_version: String,
     automation: AutomationConfig,
 }
 
-fn read_legacy_user_metadata() -> Result<LegacyUserMetadata, UserSettingsAuthorityError> {
-    let path = tracedecay_session_memory::user_config::config_path()
-        .ok_or_else(|| unavailable("legacy user configuration path"))?;
+fn read_user_metadata() -> Result<UserMetadata, UserSettingsAuthorityError> {
     let config = UserConfig::load_strict()
-        .map_err(|error| unavailable(format!("legacy user configuration metadata: {error}")))?;
-    Ok(LegacyUserMetadata {
-        path: path.display().to_string(),
+        .map_err(|error| unavailable(format!("user configuration metadata: {error}")))?;
+    Ok(UserMetadata {
         installed_agents: config.installed_agents,
         cached_latest_version: config.cached_latest_version,
         automation: config.automation,
@@ -135,7 +130,7 @@ fn read_legacy_user_metadata() -> Result<LegacyUserMetadata, UserSettingsAuthori
 fn user_settings_snapshot(
     current: &crate::config::PinnedRuntimeConfiguration,
     profile_id: &UserProfileId,
-    metadata: LegacyUserMetadata,
+    metadata: UserMetadata,
 ) -> Result<UserSettingsSnapshotV1, UserSettingsAuthorityError> {
     validate_profile_provenance(current, profile_id)?;
     let upload_enabled = required_bool(current, USER_UPLOAD_ENABLED_SETTING_KEY)?;
@@ -143,7 +138,6 @@ fn user_settings_snapshot(
     let extraction_timeout_secs =
         required_unsigned(current, USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY)?;
     Ok(UserSettingsSnapshotV1 {
-        legacy_config_path: metadata.path,
         configuration_snapshot_id: current.snapshot().snapshot_id.as_str().to_owned(),
         configuration_revision_id: current.revision_id().as_str().to_owned(),
         upload_enabled,
@@ -306,7 +300,6 @@ mod tests {
 
     fn snapshot() -> UserSettingsSnapshotV1 {
         UserSettingsSnapshotV1 {
-            legacy_config_path: "/profile/config.toml".to_owned(),
             configuration_snapshot_id: "configuration.snapshot.fixture".to_owned(),
             configuration_revision_id: "configuration.revision.fixture".to_owned(),
             upload_enabled: false,

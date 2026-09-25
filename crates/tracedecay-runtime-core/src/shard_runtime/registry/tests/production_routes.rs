@@ -16,7 +16,7 @@ use tracedecay_store::{
     CodeShardScopeV1, ConsistencyModeV1, OperationPriorityV1, RuntimeCancellationIdV1,
     RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeReadOperationV1,
     RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestControlV1, RuntimeRequestProbeV1,
-    StorageRuntimeReadPort, StoreShardIdV1, StoreShardScopeV1, VerifiedStoreLocatorV1,
+    StoreShardIdV1, StoreShardScopeV1, VerifiedStoreLocatorV1,
 };
 
 use super::super::*;
@@ -216,8 +216,8 @@ async fn assert_health_route(handle: &StoreRuntimeClientLease, writer_expected: 
     );
 
     let (request, probe) = health_request(handle.binding());
-    let outcome = StorageRuntimeReadPort::read(handle, request, &probe)
-        .await
+    let outcome = handle
+        .dispatch_read(request, &probe)
         .expect("health data port must be mounted");
     assert!(matches!(
         outcome.value(),
@@ -534,9 +534,9 @@ async fn distinct_logical_shards_cannot_publish_two_writers_for_one_database() {
     ));
 }
 
-/// Rewinds a final-shape graph store to the pre-digest shape a v34 binary
-/// left behind: the payload-digest objects are dropped and the stamp moved
-/// back one step.
+/// Rewinds a final-shape graph store to the pre-digest shape a released v34
+/// binary left behind: the payload-digest objects are dropped and the stamp
+/// moved back one step.
 async fn rewind_to_pre_digest_shape(path: &Path) {
     let connection = crate::db::engine::TestConnection::open(path);
     connection
@@ -558,8 +558,11 @@ fn user_version(path: &Path) -> u32 {
         .unwrap()
 }
 
+/// A store at an older released schema is never upgraded in place, even by a
+/// write-authorized open: admission fails with the typed fresh-start refusal
+/// and leaves the stamp untouched.
 #[tokio::test]
-async fn existing_store_one_step_behind_is_stepped_by_write_authorized_admission() {
+async fn existing_store_at_an_older_schema_is_refused_even_with_write_authority() {
     let root = TempDir::new().unwrap();
     let resolver = Arc::new(FileResolver::default());
     resolver.push(seed_final_graph_db(&root, "profile.db").await);
@@ -577,64 +580,34 @@ async fn existing_store_one_step_behind_is_stepped_by_write_authorized_admission
         other => panic!("profile was not pinned: {other:?}"),
     };
     let authority =
-        crate::db::DatabaseAuthority::acquire_test(&project_path, "step an existing v34 store")
+        crate::db::DatabaseAuthority::acquire_test(&project_path, "open an older store")
             .expect("test database authority");
 
-    let project = open_published(
-        &registry,
-        StoreRuntimeOpenRequest::new_authorized(
-            project_shard("project.one-step-behind"),
+    let outcome = registry
+        .open(StoreRuntimeOpenRequest::new_authorized(
+            project_shard("project.older-schema"),
             incarnation(),
             Some(pin),
             authority,
-        ),
-    )
-    .await;
-
-    assert_health_route(&project, true).await;
-    assert_eq!(
-        user_version(&project_path),
-        crate::db::migrations::SCHEMA_VERSION,
-        "write-authorized admission must step the store to the final shape"
-    );
-}
-
-#[tokio::test]
-async fn existing_store_one_step_behind_is_refused_without_write_authority() {
-    let root = TempDir::new().unwrap();
-    let resolver = Arc::new(FileResolver::default());
-    resolver.push(seed_final_graph_db(&root, "profile.db").await);
-    let project_path = seed_final_graph_db(&root, "project.db").await;
-    rewind_to_pre_digest_shape(&project_path).await;
-    resolver.push(project_path.clone());
-    let registry = StoreRuntimeRegistry::new(resolver, Arc::new(LifecycleShardRuntimePublisher));
-    let _profile = open_published(
-        &registry,
-        StoreRuntimeOpenRequest::new(profile_shard(), incarnation(), None),
-    )
-    .await;
-    let pin = match registry.profile_authority_pin(&profile_shard()) {
-        ProfileAuthorityPinResult::Pinned(pin) => pin,
-        other => panic!("profile was not pinned: {other:?}"),
-    };
-
-    let outcome = registry
-        .open(project_request("project.one-step-behind", &pin))
+        ))
         .await;
 
     match outcome {
-        StoreRuntimeOpenResult::Failed(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-            message,
-            ..
-        }) => assert!(
-            message.contains("payload digest step is pending"),
-            "an unauthorized open must name the pending writer-side step: {message}"
-        ),
-        other => panic!("an open without write authority must not step the store: {other:?}"),
+        StoreRuntimeOpenResult::Failed(StoreRuntimeRegistryFailure::ResetRequired {
+            authority,
+            reason,
+        }) => {
+            assert_eq!(authority, "SQLite store");
+            assert!(
+                reason.contains("cannot be upgraded in place"),
+                "the refusal must name the fresh-start remedy: {reason}"
+            );
+        }
+        other => panic!("an older store must be refused, not upgraded: {other:?}"),
     }
     assert_eq!(
         user_version(&project_path),
         34,
-        "an open without write authority must leave the stamp alone"
+        "a refused open must leave the stamp alone"
     );
 }

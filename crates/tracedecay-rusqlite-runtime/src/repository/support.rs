@@ -30,13 +30,6 @@ pub(super) fn same_json(stored: &str, expected: &str) -> bool {
     }
 }
 
-pub(super) fn canonical_digest<T: Serialize + ?Sized>(value: &T) -> rusqlite::Result<String> {
-    let value = serde_json::to_value(value).map_err(|error| conversion(error.to_string()))?;
-    tracedecay_domain::canonical_sha256(&value)
-        .map(|digest| digest.as_str().to_owned())
-        .map_err(|error| conversion(error.to_string()))
-}
-
 pub(super) fn conversion(error: impl Display) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(0, Type::Text, error.to_string().into())
 }

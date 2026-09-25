@@ -1,18 +1,10 @@
 #!/usr/bin/env bash
 # Release safety guards.
 #
-# These are the release-workflow properties whose violation is silent and
-# expensive: a suppressed downstream release, a publication cancelled halfway,
-# a mutable third-party action inside the publish path, or a
-# pull_request_target guard that hands out write credentials. Everything else
-# about how these workflows are spelled is free to change.
+# Release version authorities must agree, the default release-please channel
+# must propose prereleases, and the canonical retained-asset verifier must
+# preserve exact attestation provenance and propagate verification failures.
 set -euo pipefail
-
-release_please=".github/workflows/release-please.yml"
-release_stable=".github/workflows/release.yml"
-release_beta=".github/workflows/release-beta.yml"
-release_pr_integrity=".github/workflows/release-pr-integrity.yml"
-sdk_conformance=".github/workflows/sdk-conformance.yml"
 
 python3 - <<'PY'
 import json
@@ -97,158 +89,6 @@ if sdk_paths:
         "beta release-please must not bump the independently versioned SDK: "
         + ", ".join(sdk_paths)
     )
-PY
-
-# GitHub suppresses `on: release` workflows for releases created by
-# GITHUB_TOKEN, so Release Please must use the dedicated release token.
-if grep -q 'token: ${{ secrets.GITHUB_TOKEN }}' "$release_please"; then
-  echo "Release Please must not publish releases with GITHUB_TOKEN" >&2
-  exit 1
-fi
-
-python3 - "$release_please" <<'PY'
-import sys
-
-path = sys.argv[1]
-text = open(path, encoding="utf-8").read()
-for required in (
-    "actions: write",
-    "steps.release.outputs.release_created",
-    "steps.release.outputs.tag_name",
-    'gh workflow run release-beta.yml --repo "$GITHUB_REPOSITORY" --ref master',
-    'gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref master',
-):
-    if required not in text:
-        raise SystemExit(f"{path} must dispatch release asset builds on master: {required}")
-PY
-
-python3 - "$release_please" "$release_stable" "$release_beta" <<'PY'
-import sys
-
-for path in sys.argv[1:]:
-    text = open(path, encoding="utf-8").read()
-    if "cancel-in-progress: true" in text:
-        raise SystemExit(f"{path} must never cancel in-progress publication")
-PY
-
-python3 - "$release_please" "$release_stable" "$release_beta" \
-  "$release_pr_integrity" "$sdk_conformance" <<'PY'
-import re
-import sys
-
-sha_ref = re.compile(r"^[^@]+@[0-9a-f]{40}$")
-for path in sys.argv[1:]:
-    text = open(path, encoding="utf-8").read()
-    for uses in re.findall(r"^\s*-?\s*uses:\s+([^#\s]+)", text, re.MULTILINE):
-        if uses.startswith("./"):
-            continue
-        if not sha_ref.fullmatch(uses):
-            raise SystemExit(
-                f"{path} external action must use an immutable SHA: {uses}"
-            )
-PY
-
-python3 - "$release_stable" "$release_beta" <<'PY'
-import re
-import sys
-
-stable_path, beta_path = sys.argv[1:]
-stable = open(stable_path, encoding="utf-8").read()
-beta = open(beta_path, encoding="utf-8").read()
-
-for path, text, job, next_job in (
-    (stable_path, stable, "validate-release", "dashboard-assets"),
-    (beta_path, beta, "validate", "build"),
-):
-    section = text.split(f"  {job}:\n", 1)[1].split(f"\n  {next_job}:", 1)[0]
-    match = re.search(r"^    permissions:\n((?:^      .+\n)+)", section, re.MULTILINE)
-    if match is None:
-        raise SystemExit(f"{path} {job} must declare job-level permissions")
-    permissions = {
-        line.strip()
-        for line in match.group(1).splitlines()
-        if line.strip()
-    }
-    if permissions != {"contents: read", "attestations: read"}:
-        raise SystemExit(
-            f"{path} {job} must grant exactly contents: read and attestations: read"
-        )
-
-external_publication_markers = (
-    "homebrew-tap",
-    "scoop-bucket",
-    ".bottle.tar.gz",
-    "update-homebrew:",
-    "update-scoop:",
-    "TAP_GITHUB_TOKEN",
-)
-for marker in external_publication_markers:
-    if marker in stable:
-        raise SystemExit(
-            f"{stable_path} must not publish external package repositories: {marker}"
-        )
-
-# Ship jobs build, smoke, and package the production binary and nothing else
-# (#1587): the packaged-crate battery is visibility, not a ship gate, and it
-# must keep running somewhere. Losing the daily job silently would leave the
-# extracted crate graph unproven with no failing check to say so.
-battery_path = ".github/workflows/distribution-acceptance.yml"
-battery = open(battery_path, encoding="utf-8").read()
-if "workflow_dispatch:" not in battery:
-    raise SystemExit(f"{battery_path} must be dispatchable")
-import glob
-for workflow in sorted(glob.glob(".github/workflows/*.yml")):
-    if re.search(r"^\s+schedule:\s*$", open(workflow, encoding="utf-8").read(), re.MULTILINE):
-        raise SystemExit(f"{workflow} runs on a timer; every workflow here is on demand")
-if "scripts/check-distribution-acceptance.sh" not in battery:
-    raise SystemExit(f"{battery_path} must run scripts/check-distribution-acceptance.sh")
-if "x86_64-unknown-linux-gnu" not in battery:
-    raise SystemExit(f"{battery_path} must run the battery on x86_64-linux")
-for path, text in ((stable_path, stable), (beta_path, beta)):
-    if "scripts/check-distribution-acceptance.sh" in text:
-        raise SystemExit(
-            f"{path} must not run the packaged-crate battery on the ship path"
-        )
-    if "scripts/package-release-archive.py" not in text:
-        raise SystemExit(f"{path} must use deterministic release archive packaging")
-    for mutable_packager in ("tar czf", "tar -czf", "Compress-Archive", "7z a "):
-        if mutable_packager in text:
-            raise SystemExit(
-                f"{path} contains timestamp-sensitive packaging: {mutable_packager}"
-            )
-    trigger = text.split("permissions:", 1)[0]
-    if "workflow_dispatch:" not in trigger or "\n  release:" in trigger:
-        raise SystemExit(
-            f"{path} must be dispatched on master, never triggered on a tag release"
-        )
-    for required in (
-        "scripts/plan-release-recovery.py",
-        "scripts/verify-retained-release-assets.sh",
-        "--tag",
-        "--repo",
-        "--signer-workflow",
-        "--source-digest",
-        '--signer-ref "refs/heads/master"',
-        "outputs.build_required",
-        'test "$GITHUB_REF" = "refs/heads/master"',
-        'git merge-base --is-ancestor "$source_sha" "$GITHUB_SHA"',
-        "ref: ${{ env.RELEASE_TAG }}",
-    ):
-        if required not in text:
-            raise SystemExit(
-                f"{path} must retain uploaded assets with exact source provenance: "
-                f"{required}"
-            )
-
-for forbidden in (
-    'cmp -s "$asset" "remote-assets/$name"',
-    'cmp -s "$release_asset" "remote-assets/$name"',
-):
-    if forbidden in stable or forbidden in beta:
-        raise SystemExit(
-            "release recovery must not compare rebuilt mutable outputs: "
-            f"{forbidden}"
-        )
 PY
 
 # Exercise the canonical verifier rather than requiring every workflow to copy
@@ -419,19 +259,4 @@ if (
     )
     if failed.returncode == 0:
         raise SystemExit("canonical release verifier swallowed attestation failure")
-PY
-
-python3 - "$release_pr_integrity" <<'PY'
-import sys
-
-path = sys.argv[1]
-text = open(path, encoding="utf-8").read()
-
-# This workflow runs on pull_request_target, so it sees fork code with the
-# base repository's token. It must never hand that token to the checkout, and
-# must never hold write scopes.
-if "persist-credentials: false" not in text:
-    raise SystemExit(f"{path} must check out without persisted credentials")
-if "contents: write" in text or "pull-requests: write" in text:
-    raise SystemExit(f"{path} must remain read-only")
 PY

@@ -305,7 +305,7 @@ impl StoreRuntimeRegistry {
         };
 
         if let Some(eviction) = eviction
-            && let Err(failure) = self.complete_project_code_eviction(eviction)
+            && let Err(failure) = self.complete_eviction(eviction)
         {
             self.fail_reserved_open(&key, attempt, &updates, failure.clone());
             return StoreRuntimeOpenBegin::Rejected(failure);

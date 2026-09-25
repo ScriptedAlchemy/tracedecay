@@ -30,6 +30,7 @@ use tracedecay_graph_query::{
 use tracedecay_runtime_core::runtime_telemetry::{
     GenerationCensusServingFreshness, GenerationCensusSnapshot, GenerationCensusUnavailableReason,
 };
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -363,7 +364,7 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
     // Activation issues verified graph reads; the project graph runtime binds
     // asynchronously after `project_memory` returns, so an unawaited bind
     // races activation into "not ready for verified reads".
-    crate::test_support::host_admission::await_bound_graph_runtime(
+    tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
         &project_database,
         "bind small persistent activation graph runtime",
     )
@@ -498,7 +499,7 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
         .project_memory(project_id.clone(), [fixture.path().to_path_buf()])
         .await
         .expect("project database");
-    crate::test_support::host_admission::await_bound_graph_runtime(
+    tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
         &project_database,
         "bind persistent historical cursor graph runtime",
     )
@@ -552,7 +553,7 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
         .profile_sessions()
         .await
         .expect("profile session database");
-    let cursor_keys = sessions
+    let cursor_keys = SessionTemporalAccess::new(&*sessions)
         .load_session_cursor_key_provider_result()
         .await
         .expect("cursor keys");
@@ -797,7 +798,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         .project_memory(project_id.clone(), [fixture.path().to_path_buf()])
         .await
         .expect("writable project database");
-    crate::test_support::host_admission::await_bound_graph_runtime(
+    tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
         &project_database,
         "bind stale graph status projection",
     )
@@ -874,7 +875,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         .project_memory(project_id.clone(), [fixture.path().to_path_buf()])
         .await
         .expect("restarted writable project database");
-    crate::test_support::host_admission::await_bound_graph_runtime(
+    tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
         &project_database,
         "bind restarted graph status projection",
     )
@@ -1307,7 +1308,7 @@ async fn restart_seats_the_retained_graph_while_its_text_owner_still_projects() 
         .project_memory(project_id.clone(), [fixture.path().to_path_buf()])
         .await
         .expect("writable project database");
-    crate::test_support::host_admission::await_bound_graph_runtime(
+    tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
         &project_database,
         "bind graph projection before restart",
     )
@@ -1355,7 +1356,7 @@ async fn restart_seats_the_retained_graph_while_its_text_owner_still_projects() 
         .project_memory(project_id.clone(), [fixture.path().to_path_buf()])
         .await
         .expect("restarted writable project database");
-    crate::test_support::host_admission::await_bound_graph_runtime(
+    tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
         &project_database,
         "bind restarted graph projection",
     )

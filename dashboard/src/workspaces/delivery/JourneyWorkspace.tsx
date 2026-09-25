@@ -27,7 +27,8 @@ import {
   type JourneyEpisode,
   type JourneyModel,
 } from './journey.ts';
-import { JourneyField } from './JourneyField.tsx';
+import { CompactRail, TransitField } from './TransitField.tsx';
+import { buildTransit } from './transit.ts';
 import { ProjectionLedger, laneStateDetail, overviewReadState } from './ProjectionLedger.tsx';
 
 /**
@@ -69,11 +70,12 @@ function JourneyBody({
 }) {
   const { navigate, location } = context;
   const model = useMemo(() => buildJourney(overview, { row, edges }), [overview, row, edges]);
+  const transit = useMemo(() => buildTransit(row, edges, model), [row, edges, model]);
   const selected = model.episodes.find((episode) => episode.id === location.episode) ?? null;
   const project = projectFor(context.inbox, row.project_id);
   const title = row.pull_request.identity?.title ?? row.pull_request.label;
   const servedLanes = model.lanes.filter((lane) => laneServes(lane.state)).length;
-  const control = 'td-hit inline-flex min-h-9 items-center border px-3 text-xs text-text-primary hover:bg-surface-2';
+  const control = 'td-hit inline-flex items-center border px-3 text-xs text-text-primary hover:bg-surface-2';
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-auto">
@@ -107,16 +109,18 @@ function JourneyBody({
         ]}
       />
 
-      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_22rem]">
-        <div className="flex min-w-0 flex-col border-r border-edge-subtle p-3">
-          <JourneyField
-            model={model}
+      <div className="grid grid-cols-1 lg:grid-cols-[12rem_minmax(0,1fr)]">
+        <CompactRail inbox={context.inbox} selectedId={row.id} onSelect={(id) => navigate({ pullRequest: id, episode: null })} />
+        <div className="flex min-w-0 flex-col p-3">
+          <TransitField
+            model={transit}
             selectedEpisodeId={location.episode}
-            onSelect={(episode) => navigate({ episode: episode.id })}
+            onSelectEpisode={(episode) => navigate({ episode })}
           />
-          <FieldLegend />
         </div>
-        <EpisodeInspector episode={selected} />
+        <div className="border-t border-edge-subtle lg:col-start-2">
+          <EpisodeInspector episode={selected} />
+        </div>
       </div>
 
       <EpisodeTable model={model} selectedId={location.episode} onSelect={(id) => navigate({ episode: id })} />
@@ -154,16 +158,6 @@ function timeKindLabel(kind: JourneyEpisode['timeKind']): string {
 
 function destinationLabel(href: string): string {
   return href.startsWith('/loom') ? 'Open in Loom' : 'Open in Code · Compare';
-}
-
-function FieldLegend() {
-  return (
-    <p aria-label="Journey legend" className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-3xs text-text-muted">
-      <span>● EVENT time · ◇ OBSERVED time · ▭ undated gutter · dashed lane = authority not served · edge grade</span>
-      <GradeMark grade="exact" />
-      <GradeMark grade="inferred" />
-    </p>
-  );
 }
 
 function EpisodeInspector({ episode }: { episode: JourneyEpisode | null }) {

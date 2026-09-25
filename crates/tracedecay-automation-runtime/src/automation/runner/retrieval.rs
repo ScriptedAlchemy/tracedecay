@@ -13,7 +13,10 @@ use std::time::Duration;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1;
+use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
+use tracedecay_contracts::retrieval::{
+    SessionRetrievalBudgetStageV1, SessionRetrievalStructuralRefusalV1,
+};
 use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     ProfileIdentityReadPort, RequestContext, RequestId,
@@ -29,9 +32,10 @@ use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_r
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_lcm::LcmScope;
+use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_session_memory::context::{
-    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
-    RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    BranchId, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId, RequestBudgets,
+    ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
     application_observed_at, session_application_grant_digest,
 };
 use tracedecay_session_memory::session::{
@@ -44,7 +48,7 @@ use tracedecay_session_memory::session::{
 use tracedecay_session_temporal_store::RegisteredGlobalDbSessionTemporalExecution;
 use tracedecay_temporal_query::TemporalKernelResult;
 use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
-use tracedecay_temporal_query::ports::ExecutionLimits;
+use tracedecay_temporal_query::execution::ExecutionLimits;
 use tracedecay_temporal_query::ranking::{DiversityLimits, RankedCandidate};
 
 pub(super) const AUTOMATION_SESSION_MAX_BYTES: u64 = 2 * 1024 * 1024;
@@ -566,81 +570,18 @@ pub(super) fn ranked_evidence_owner(ranked: &RankedCandidate) -> Option<(&str, &
     ))
 }
 
-pub(super) const fn automation_structural_refusal_reason(
+pub(super) const fn automation_structural_refusal_skip(
     refusal: SessionRetrievalStructuralRefusalV1,
-) -> &'static str {
+) -> (&'static str, Option<SessionRetrievalBudgetStageV1>) {
     match refusal {
-        SessionRetrievalStructuralRefusalV1::CursorManifestLimitExceeded {
-            kind: tracedecay_domain::CursorManifestLimitKindV1::Participants,
-            ..
-        } => "session_cursor_manifest_participants_limit_exceeded",
-        SessionRetrievalStructuralRefusalV1::CursorManifestLimitExceeded {
-            kind: tracedecay_domain::CursorManifestLimitKindV1::CanonicalBytes,
-            ..
-        } => "session_cursor_manifest_canonical_bytes_limit_exceeded",
-        SessionRetrievalStructuralRefusalV1::BudgetExhausted { stage, .. } => {
-            automation_budget_refusal_reason(stage)
-        }
-    }
-}
-
-const fn automation_budget_refusal_reason(
-    stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1,
-) -> &'static str {
-    use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
-
-    match stage {
-        SessionRetrievalBudgetStageV1::RequestResultLimit => {
-            "session_evidence_budget_exhausted_request_result_limit"
-        }
-        SessionRetrievalBudgetStageV1::RequestHydrationLimit => {
-            "session_evidence_budget_exhausted_request_hydration_limit"
-        }
-        SessionRetrievalBudgetStageV1::RequestContextBytes => {
-            "session_evidence_budget_exhausted_request_context_bytes"
-        }
-        SessionRetrievalBudgetStageV1::RequestCandidateBytes => {
-            "session_evidence_budget_exhausted_request_candidate_bytes"
-        }
-        SessionRetrievalBudgetStageV1::RequestRecordBytes => {
-            "session_evidence_budget_exhausted_request_record_bytes"
-        }
-        SessionRetrievalBudgetStageV1::RequestHydrationBytes => {
-            "session_evidence_budget_exhausted_request_hydration_bytes"
-        }
-        SessionRetrievalBudgetStageV1::EstimatorVersionMismatch => {
-            "session_evidence_budget_exhausted_estimator_version_mismatch"
-        }
-        SessionRetrievalBudgetStageV1::ExecutionWorkExhausted => {
-            "session_evidence_budget_exhausted_execution_work_exhausted"
-        }
-        SessionRetrievalBudgetStageV1::CandidateReadExhausted => {
-            "session_evidence_budget_exhausted_candidate_read_exhausted"
-        }
-        SessionRetrievalBudgetStageV1::RecordReadExhausted => {
-            "session_evidence_budget_exhausted_record_read_exhausted"
-        }
-        SessionRetrievalBudgetStageV1::KernelResultLimit => {
-            "session_evidence_budget_exhausted_kernel_result_limit"
-        }
-        SessionRetrievalBudgetStageV1::CursorManifestLimit => {
-            "session_evidence_budget_exhausted_cursor_manifest_limit"
-        }
-        SessionRetrievalBudgetStageV1::ParticipantManifestParticipants => {
-            "session_evidence_budget_exhausted_participant_manifest_participants"
-        }
-        SessionRetrievalBudgetStageV1::ParticipantManifestCanonicalBytes => {
-            "session_evidence_budget_exhausted_participant_manifest_canonical_bytes"
-        }
-        SessionRetrievalBudgetStageV1::HydrationBytes => {
-            "session_evidence_budget_exhausted_hydration_bytes"
-        }
-        SessionRetrievalBudgetStageV1::ContextBytes => {
-            "session_evidence_budget_exhausted_context_bytes"
-        }
-        SessionRetrievalBudgetStageV1::ContextTokens => {
-            "session_evidence_budget_exhausted_context_tokens"
-        }
+        SessionRetrievalStructuralRefusalV1::CursorManifestLimitExceeded { .. } => (
+            AutomationSkipReasonV1::SessionCursorManifestLimitExceeded.as_str(),
+            None,
+        ),
+        SessionRetrievalStructuralRefusalV1::BudgetExhausted { stage, .. } => (
+            AutomationSkipReasonV1::SessionEvidenceBudgetExhausted.as_str(),
+            Some(stage),
+        ),
     }
 }
 

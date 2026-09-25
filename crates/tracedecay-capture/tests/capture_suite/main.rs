@@ -7,7 +7,6 @@
 //! allocator) and `hotpath_coverage` (sets `HOTPATH_*` process environment
 //! variables) stay their own binaries.
 
-mod fixture_provenance;
 mod kiro;
 mod provider_identity;
 mod provider_usage_capture;

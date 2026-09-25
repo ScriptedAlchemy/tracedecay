@@ -29,11 +29,21 @@ import {
   type ScopeWritability,
 } from "../scope/store.ts";
 import {
+  AutomaticFactReceiptsPayloadV1Schema,
+  AutomationJobsPayloadV1Schema,
+  AutomationOutcomesPayloadV1Schema,
+  AutomationRunArtifactPayloadV1Schema,
+  AutomationRunArtifactsPayloadV1Schema,
+  AutomationRunsPayloadV1Schema,
   AutomationSchedulerStatusV1Schema,
+  AutomationSkillsPayloadV1Schema,
   ApplicationProblemEnvelopeSchema,
   AutomationRunResultV1Schema,
   ResolvedScopeSchema,
   type ApplicationProblemEnvelope,
+  type AutomaticFactReceipt,
+  type AutomationRunRowV1,
+  type AutomationRunsPayloadV1,
   type AutomationSchedulerStatusV1,
   type AutomationRunResultV1,
   type ResolvedScope,
@@ -178,152 +188,67 @@ export function useSchedulerControl() {
   return { ...mutation, writability };
 }
 
-/* ---- the three list routes ---------------------------------------------- */
+/* ---- list, run, and outcome reads ---------------------------------------- */
 
-/**
- * The list bodies, as the handlers that serve them actually emit them.
- *
- * Every field below is required because the route makes it unconditional:
- * `automation_jobs_api::list` answers `{jobs, count}`, `automation_skills_api::
- * list` answers `{…, count, skills, …}`, and the automatic-fact-receipts
- * list answers `{receipts, count, limit, error}`, each built by a `json!`
- * literal with no conditional key.
- *
- * That requiredness is load-bearing rather than pedantic. These schemas used to
- * make the collection optional (`skills?`, plus an `items?` alternative that no
- * handler has ever sent), and an optional array resolved through `?? []` into a
- * rendered "no managed skills". A store the daemon could not read, a renamed
- * field, a proxy's substituted body, all of them parsed clean and printed as a
- * queue that had been checked and found empty. Required fields route those
- * bodies to `unsupported_schema` in `fetchPayload` instead, which is what
- * `PayloadBoundary` renders as a state rather than as content.
- *
- * They live here, beside the fetchers, rather than on the page that draws them:
- * a wire contract is what the daemon sends, and a surface that owned its own
- * copy of one would be the second authority on a shape it does not serve.
- */
-/** `JobDelivery` (jobs.rs) is `#[serde(tag = "mode")]` over `file` and
- * `webhook`. The mode stays an open string so a delivery mode added to the
- * daemon renders as its own word rather than failing the whole jobs read. */
-const JobDeliverySchema = z
-  .object({
-    mode: z.string(),
-    path: z.string().nullable().optional(),
-    url: z.string().nullable().optional(),
-  })
-  .passthrough();
-
-/** `AutomationJob` (jobs.rs). `schedule`, `interval_secs`, `cooldown_secs`,
- * `skill_ids` and `pre_run_command` are `skip_serializing_if` on the struct,
- * so their absence on the wire is the daemon saying "not set", not a
- * truncated body. */
-const JobsPayloadSchema = z
-  .object({
-    jobs: z.array(
-      z
-        .object({
-          id: z.string(),
-          name: z.string(),
-          schedule: z.string().nullable().optional(),
-          enabled: z.boolean(),
-          interval_secs: z.number().nullable().optional(),
-          cooldown_secs: z.number().nullable().optional(),
-          skill_ids: z.array(z.string()).optional(),
-          pre_run_command: z.string().nullable().optional(),
-          delivery: JobDeliverySchema.optional(),
-          created_at: z.number().optional(),
-          updated_at: z.number().optional(),
-        })
-        .passthrough(),
-    ),
-    count: z.number(),
-  })
-  .passthrough();
-
-/** `ManagedSkill` (managed_skill_model.rs): `metadata.id`, `.title` and
- * `.state` are plain required fields on the struct, so they are read directly
- * rather than through the chain of `?? skill['name'] ?? index` fallbacks this
- * card used to carry, every one of which described a payload no route sends,
- * and the last of which printed an array index as if it were a skill. */
-const ManagedSkillStateSchema = z.enum(["active", "disabled", "archived"]);
-
-/** `ManagedSkillProvenance`: which authority wrote the skill. `source` is
- * `automation_run`, `user`, or `import` today; kept open so a new source
- * renders as its own word. */
-const ManagedSkillProvenanceSchema = z
-  .object({
-    source: z.string(),
-    actor: z.string(),
-    run_id: z.string().nullable().optional(),
-  })
-  .passthrough();
-
-const SkillsPayloadSchema = z
-  .object({
-    skills: z.array(
-      z
-        .object({
-          metadata: z
-            .object({
-              id: z.string(),
-              title: z.string(),
-              state: ManagedSkillStateSchema,
-              category: z.string().optional(),
-              targets: z.array(z.string()).optional(),
-              updated_at: z.number().optional(),
-              activated_at: z.number().nullable().optional(),
-              provenance: ManagedSkillProvenanceSchema.optional(),
-            })
-            .passthrough(),
-        })
-        .passthrough(),
-    ),
-    count: z.number(),
-  })
-  .passthrough();
-
-/** Automatic fact receipts are terminal daemon-owned outcomes. A receipt may
- * retain proposal and validation evidence, but this dashboard never sends an
- * approval or apply request. */
-const AutomaticFactStateSchema = z.enum(["applied", "quarantined"]);
-const AutomaticFactReceiptSchema = z
-  .object({
-    schema_version: z.number(),
-    apply_id: z.string(),
-    run_id: z.string(),
-    evidence_hash: z.string().optional(),
-    state: AutomaticFactStateSchema,
-    add_fact_request: z.object({ content: z.string() }).passthrough(),
-    item: z.unknown().optional(),
-    validation: z.unknown().optional(),
-    quarantine_reason: z.string().optional(),
-    applied_fact_id: z.string().optional(),
-    recorded_at_micros: z.number().int(),
-  })
-  .passthrough();
-
-const AutomaticFactReceiptsPayloadSchema = z
-  .object({
-    receipts: z.array(AutomaticFactReceiptSchema),
-    count: z.number(),
-    limit: z.number(),
-    error: z.string(),
-  })
-  .passthrough();
-
-export type JobRow = z.infer<typeof JobsPayloadSchema>["jobs"][number];
-export type SkillRow = z.infer<typeof SkillsPayloadSchema>["skills"][number];
-export type ManagedSkillState = z.infer<typeof ManagedSkillStateSchema>;
-export type AutomaticFactReceipt = z.infer<typeof AutomaticFactReceiptSchema>;
-export type AutomaticFactReceiptsPayload = z.infer<
-  typeof AutomaticFactReceiptsPayloadSchema
->;
+/** One applied or quarantined fact outcome's shape is fixed by its state:
+ * a surviving applied fact carries its identity and full recall telemetry and
+ * a recall verdict consistent with it; a lost applied fact carries identity
+ * and no telemetry; a quarantined receipt carries neither. JSON Schema cannot
+ * express these joint constraints, so a body that breaks one fails the parse
+ * rather than rendering a verdict its own numbers contradict. */
+export const AutomationOutcomesPayloadSchema = AutomationOutcomesPayloadV1Schema.superRefine(
+  (payload, context) => {
+    payload.facts.forEach((fact, index) => {
+      const issue = (message: string) =>
+        context.addIssue({ code: "custom", path: ["facts", index], message });
+      const telemetry = [
+        fact.retrieval_count,
+        fact.access_count,
+        fact.helpful_count,
+        fact.unhelpful_count,
+      ];
+      const hasTelemetry = telemetry.every((value) => value != null);
+      const noTelemetry =
+        telemetry.every((value) => value == null) && fact.last_recalled_at == null;
+      if (fact.state === "quarantined") {
+        if (fact.canonical_fact_id != null || !noTelemetry || fact.still_exists || fact.verdict !== "quarantined") {
+          issue("a quarantined receipt carries no fact identity, telemetry, or recall verdict");
+        }
+        return;
+      }
+      if (fact.canonical_fact_id == null) {
+        issue("an applied fact outcome must name its canonical fact");
+        return;
+      }
+      if (!fact.still_exists) {
+        if (!noTelemetry || !["deleted", "quarantined", "unavailable"].includes(fact.verdict)) {
+          issue("a lost applied fact carries no telemetry and a loss verdict");
+        }
+        return;
+      }
+      if (!hasTelemetry) {
+        issue("a surviving applied fact must carry its recall telemetry");
+        return;
+      }
+      const recalled = (fact.access_count ?? 0) > 0 || fact.last_recalled_at != null;
+      const expected =
+        recalled && (fact.helpful_count ?? 0) > 0
+          ? "recalled_and_helpful"
+          : recalled
+            ? "recalled"
+            : "never_recalled";
+      if (fact.verdict !== expected) {
+        issue("fact outcome verdict contradicts its recall telemetry");
+      }
+    });
+  },
+);
 
 export function useAutomationJobs() {
   return usePayload(
     ["automation", "jobs"],
     "/api/automation/jobs",
-    JobsPayloadSchema,
+    AutomationJobsPayloadV1Schema,
   );
 }
 
@@ -331,7 +256,7 @@ export function useAutomationSkills() {
   return usePayload(
     ["automation", "skills"],
     "/api/automation/skills",
-    SkillsPayloadSchema,
+    AutomationSkillsPayloadV1Schema,
   );
 }
 
@@ -340,241 +265,9 @@ export function useAutomationFactReceipts() {
   return usePayload(
     ["automation", "automatic-fact-receipts"],
     "/api/automation/automatic-fact-receipts",
-    AutomaticFactReceiptsPayloadSchema,
+    AutomaticFactReceiptsPayloadV1Schema,
   );
 }
-
-/** `automation_run_api::run_list` (`/api/automation/runs`): the newest ledger
- * records, projected by `run_history_row`. Every payload key below is
- * unconditional; `model`, `error`, `task_key`, `error_classification` and
- * `error_retryable` are nullable because the writer emits null when the
- * record never carried them. `task_key` is the exact per-job identity
- * (`user_job:<id>`) and is the only field a user job may be joined on. */
-const RunsPayloadSchema = z
-  .object({
-    runs: z.array(
-      z
-        .object({
-          run_id: z.string(),
-          task: z.string(),
-          task_key: z.string().nullable(),
-          trigger: z.string(),
-          backend: z.string(),
-          model: z.string().nullable(),
-          status: z.string(),
-          reviewed_count: z.number(),
-          accepted_count: z.number(),
-          rejected_count: z.number(),
-          skipped_count: z.number(),
-          error: z.string().nullable(),
-          error_classification: z.string().nullable(),
-          error_retryable: z.boolean().nullable(),
-          backend_attempt_count: z.number().int().nonnegative(),
-          started_at: z.string(),
-          completed_at: z.string(),
-          artifact_kinds: z.array(z.string()),
-        })
-        .strict(),
-    ),
-    count: z.number(),
-    limit: z.number(),
-    has_more: z.boolean(),
-    malformed_row_count: z.number().int().nonnegative(),
-    completeness: z.enum(["known", "partial"]),
-    error: z.string(),
-  })
-  .strict();
-
-/** `automation_run_api::artifact_list` (`/api/automation/runs/{id}/artifacts`):
- * the run's recorded artifacts plus the handler's own chain summary, which
- * carries the integrity verdict, verified, mismatched, unavailable, or failed
- *, computed server-side against the published chain. */
-const RunArtifactsPayloadSchema = z
-  .object({
-    run_id: z.string(),
-    artifacts: z.array(
-      z
-        .object({
-          kind: z.string(),
-          path: z.string(),
-          sha256: z.string(),
-          summary: z.string().optional(),
-          created_at: z.string(),
-        })
-        .passthrough(),
-    ),
-    artifact_chain: z
-      .object({
-        expected_kinds: z.array(z.string()),
-        present_kinds: z.array(z.string()),
-        metadata_complete: z.boolean(),
-        complete: z.boolean(),
-        integrity_status: z.string(),
-      })
-      .passthrough(),
-    count: z.number(),
-    error: z.string(),
-  })
-  .passthrough();
-
-/** The existing read-only payload route for one recorded artifact. The
- * artifact kind owns its payload shape, so the dashboard retains that value as
- * unknown and displays the daemon's JSON rather than inventing a parallel DTO. */
-const RunArtifactPayloadSchema = z
-  .object({
-    run_id: z.string(),
-    artifact: z
-      .object({
-        kind: z.string(),
-        path: z.string(),
-        sha256: z.string(),
-        summary: z.string().optional(),
-        created_at: z.string(),
-      })
-      .passthrough(),
-    payload: z.unknown(),
-    error: z.literal(""),
-  })
-  .passthrough();
-
-export type RunRow = z.infer<typeof RunsPayloadSchema>["runs"][number];
-export type RunsPayload = z.infer<typeof RunsPayloadSchema>;
-
-/** `AutomationTaskStatusV1.last_scheduler_run` is the most recent
- * scheduler-triggered `AutomationRunLedgerRecord`, typed `unknown` in the
- * generated contract because the record is the ledger's own shape rather than
- * a dashboard DTO. This reads the identity and outcome the scheduler bay
- * needs; the run's artifacts remain behind the run ledger and its routes. */
-export const SchedulerLastRunSchema = z
-  .object({
-    run_id: z.string(),
-    status: z.string(),
-    started_at: z.string(),
-    completed_at: z.string(),
-    error: z.string().nullable().optional(),
-    error_classification: z.string().nullable().optional(),
-    error_retryable: z.boolean().nullable().optional(),
-  })
-  .passthrough();
-export type SchedulerLastRun = z.infer<typeof SchedulerLastRunSchema>;
-export type RunArtifactsPayload = z.infer<typeof RunArtifactsPayloadSchema>;
-export type RunArtifactRow = RunArtifactsPayload["artifacts"][number];
-export type RunArtifactPayload = z.infer<typeof RunArtifactPayloadSchema>;
-
-const SkillOutcomeVerdictSchema = z.enum(["adopted", "ignored", "too_early"]);
-
-const SkillOutcomeSchema = z
-  .object({
-    skill_id: z.string(),
-    title: z.string().nullable().optional(),
-    activated_at: z.number(),
-    days_since_activation: z.number(),
-    views_since_activation: z.number(),
-    uses_since_activation: z.number(),
-    verdict: SkillOutcomeVerdictSchema,
-  })
-  .passthrough();
-
-const FactOutcomeIdentityFields = {
-  apply_id: z.string(),
-  run_id: z.string().optional(),
-  recorded_at: z.number().int(),
-  days_since_recorded: z.number().int(),
-} as const;
-
-const AvailableFactTelemetryFields = {
-  retrieval_count: z.number().int().nonnegative(),
-  access_count: z.number().int().nonnegative(),
-  helpful_count: z.number().int().nonnegative(),
-  unhelpful_count: z.number().int().nonnegative(),
-  last_recalled_at: z.number().int().optional(),
-} as const;
-
-const AbsentFactTelemetryFields = {
-  retrieval_count: z.never().optional(),
-  access_count: z.never().optional(),
-  helpful_count: z.never().optional(),
-  unhelpful_count: z.never().optional(),
-  last_recalled_at: z.never().optional(),
-} as const;
-
-const AvailableFactOutcomeSchema = z
-  .object({
-    ...FactOutcomeIdentityFields,
-    state: z.literal("applied"),
-    canonical_fact_id: z.string(),
-    ...AvailableFactTelemetryFields,
-    still_exists: z.literal(true),
-    verdict: z.enum([
-      "recalled_and_helpful",
-      "recalled",
-      "never_recalled",
-    ]),
-  })
-  .passthrough()
-  .superRefine((record, context) => {
-    const recalled =
-      record.access_count > 0 || record.last_recalled_at !== undefined;
-    const expectedVerdict =
-      recalled && record.helpful_count > 0
-        ? "recalled_and_helpful"
-        : recalled
-          ? "recalled"
-          : "never_recalled";
-    if (record.verdict !== expectedVerdict) {
-      context.addIssue({
-        code: "custom",
-        path: ["verdict"],
-        message: "fact outcome verdict contradicts its recall telemetry",
-      });
-    }
-  });
-
-const FactOutcomeSchema = z.union([
-  AvailableFactOutcomeSchema,
-  z
-    .object({
-      ...FactOutcomeIdentityFields,
-      state: z.literal("applied"),
-      canonical_fact_id: z.string(),
-      ...AbsentFactTelemetryFields,
-      still_exists: z.literal(false),
-      verdict: z.enum(["deleted", "quarantined", "unavailable"]),
-    })
-    .passthrough(),
-  z
-    .object({
-      ...FactOutcomeIdentityFields,
-      state: z.literal("quarantined"),
-      canonical_fact_id: z.never().optional(),
-      ...AbsentFactTelemetryFields,
-      still_exists: z.literal(false),
-      verdict: z.literal("quarantined"),
-    })
-    .passthrough(),
-]);
-
-/** Read-only adoption and recall outcomes produced by the daemon. */
-export const AutomationOutcomesPayloadSchema = z
-  .object({
-    generated_at: z.number(),
-    skills: z.array(SkillOutcomeSchema),
-    facts: z.array(FactOutcomeSchema),
-    snapshot: z
-      .object({
-        available: z.boolean(),
-        skills_refreshed_at: z.number().nullable(),
-        facts_refreshed_at: z.number().nullable(),
-      })
-      .passthrough(),
-    error: z.string(),
-  })
-  .passthrough();
-export type AutomationOutcomesPayload = z.infer<
-  typeof AutomationOutcomesPayloadSchema
->;
-export type SkillOutcome = AutomationOutcomesPayload["skills"][number];
-export type FactOutcome = AutomationOutcomesPayload["facts"][number];
 
 const FACT_STORE_CURATE_HTTP_BINDING_ID = "binding.http.fact_store_curate.v1";
 const FACT_STORE_CURATE_RESULT_SCHEMA_ID =
@@ -1213,7 +906,7 @@ export function useAutomationRuns() {
   return usePayload(
     ["automation", "runs"],
     "/api/automation/runs",
-    RunsPayloadSchema,
+    AutomationRunsPayloadV1Schema,
   );
 }
 
@@ -1232,7 +925,7 @@ export function useAutomationRunArtifacts(runId: string, enabled: boolean) {
   return usePayload(
     ["automation", "run-artifacts", runId],
     `/api/automation/runs/${encodeURIComponent(runId)}/artifacts`,
-    RunArtifactsPayloadSchema,
+    AutomationRunArtifactsPayloadV1Schema,
     { enabled },
   );
 }
@@ -1246,7 +939,7 @@ export function useAutomationRunArtifactPayload(
   return usePayload(
     ["automation", "run-artifact-payload", runId, kind],
     `/api/automation/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(kind)}`,
-    RunArtifactPayloadSchema,
+    AutomationRunArtifactPayloadV1Schema,
     { enabled },
   );
 }
@@ -1308,10 +1001,10 @@ export function talliedCapped<Row>(
 /** The ledger reader reports truncation and skipped malformed rows directly. */
 export function automationRunsReading(
   data: Pick<
-    RunsPayload,
+    AutomationRunsPayloadV1,
     "runs" | "count" | "has_more" | "malformed_row_count" | "completeness"
   >,
-): ListReading<RunRow> {
+): ListReading<AutomationRunRowV1> {
   const coherent = tallied(data.runs, data.count, "runs");
   if (!coherent.complete) return coherent;
   const omissions: string[] = [];

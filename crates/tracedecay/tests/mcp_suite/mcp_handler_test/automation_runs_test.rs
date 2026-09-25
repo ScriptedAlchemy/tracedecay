@@ -38,6 +38,7 @@ fn run_record(run_id: &str, completed_at: &str) -> AutomationRunLedgerRecord {
         backend_attempt_count: 1,
         backend_attempts: Vec::new(),
         fallback_status: None,
+        session_evidence_budget_stage: None,
         report_ref: None,
         artifacts: Vec::new(),
         started_at: "1782283199".to_owned(),

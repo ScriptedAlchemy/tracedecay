@@ -291,15 +291,14 @@ pub async fn prepare_branch_tracking_in_layout(
                 }
             })?;
             (
-                branch_meta::BranchMeta::for_legacy_single_db(tracedecay_dir, &default),
+                branch_meta::BranchMeta::new_for_dir(tracedecay_dir, &default),
                 true,
             )
         }
     };
-    let pruned_missing_branches = prune_missing_branch_dbs(tracedecay_dir, &mut meta);
 
     if meta.is_tracked(branch_name) {
-        if metadata_was_missing || pruned_missing_branches {
+        if metadata_was_missing {
             branch_meta::save_branch_meta(tracedecay_dir, &meta)?;
         }
         return Ok(BranchTrackingPreparation::AlreadyTracked);
@@ -319,8 +318,7 @@ pub async fn prepare_branch_tracking_in_layout(
     // The branch is served by the single project graph store; the metadata
     // entry records lineage and the branch's graph-publication slot. Save
     // before the caller syncs so the fenced publication finds the entry.
-    let db_file = crate::config::db_filename(tracedecay_dir).to_owned();
-    meta.add_branch(branch_name, &db_file, &parent);
+    meta.add_branch(branch_name, &parent);
     let entry = meta.branches.get(branch_name).cloned().ok_or_else(|| {
         tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(
@@ -388,92 +386,9 @@ async fn default_branch_bootstrap_persists_canonical_metadata() {
     let default = meta.branches.get("main").unwrap();
     assert_eq!(default.db_file, crate::config::db_filename(&data_dir));
     assert!(default.parent.is_none());
-    assert_eq!(default.created_at, "0");
-    assert_eq!(default.last_synced_at, "0");
+    assert!(default.created_at.parse::<u64>().unwrap() > 0);
+    assert_eq!(default.last_synced_at, default.created_at);
     assert!(!meta_path.with_extension("json.tmp").exists());
-    assert!(!data_dir.join("branches").exists());
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn already_tracked_branch_persists_pruned_missing_database_entries() {
-    let temp = tempfile::tempdir().unwrap();
-    let project_root = temp.path().join("repo");
-    std::fs::create_dir_all(&project_root).unwrap();
-    let data_dir = temp.path().join("profile-shard");
-    std::fs::create_dir_all(&data_dir).unwrap();
-    std::fs::write(data_dir.join(crate::config::DB_FILENAME), b"graph").unwrap();
-
-    let mut meta = crate::branch_meta::BranchMeta::new("main");
-    meta.add_branch("stale", "branches/missing.db", "main");
-    crate::branch_meta::save_branch_meta(&data_dir, &meta).unwrap();
-
-    let outcome = prepare_branch_tracking_in_layout(&project_root, "main", &data_dir)
-        .await
-        .unwrap();
-
-    assert!(matches!(outcome, BranchTrackingPreparation::AlreadyTracked));
-    let persisted = crate::branch_meta::load_branch_meta(&data_dir).unwrap();
-    assert!(!persisted.is_tracked("stale"));
-}
-
-#[cfg(test)]
-#[test]
-fn rollback_keeps_database_when_metadata_removal_cannot_be_saved() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_dir = temp.path();
-    let branches_dir = data_dir.join("branches");
-    std::fs::create_dir_all(&branches_dir).unwrap();
-    let db_path = branches_dir.join("feature.db");
-    std::fs::write(&db_path, b"graph").unwrap();
-
-    let mut meta = crate::branch_meta::BranchMeta::new("main");
-    meta.add_branch("feature", "branches/feature.db", "main");
-    crate::branch_meta::save_branch_meta(data_dir, &meta).unwrap();
-    std::fs::create_dir(data_dir.join("branch-meta.json.tmp")).unwrap();
-
-    let error = rollback_branch_tracking(data_dir, "feature", "branches/feature.db")
-        .expect_err("blocked metadata publication must fail rollback");
-
-    assert!(db_path.exists());
-    let persisted = crate::branch_meta::load_branch_meta(data_dir).unwrap();
-    assert!(persisted.is_tracked("feature"));
-    assert!(
-        error.to_string().contains("cannot retire failed branch"),
-        "unexpected rollback error: {error}"
-    );
-}
-
-#[cfg(test)]
-#[test]
-fn rollback_retires_metadata_and_leaves_database_family_for_collection() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_dir = temp.path();
-    let branches_dir = data_dir.join("branches");
-    std::fs::create_dir_all(&branches_dir).unwrap();
-    let db_path = branches_dir.join("feature.db");
-    for path in [
-        db_path.clone(),
-        db_path.with_extension("db-wal"),
-        db_path.with_extension("db-shm"),
-    ] {
-        std::fs::write(path, b"sqlite").unwrap();
-    }
-
-    let mut meta = crate::branch_meta::BranchMeta::new("main");
-    meta.add_branch("feature", "branches/feature.db", "main");
-    crate::branch_meta::save_branch_meta(data_dir, &meta).unwrap();
-
-    rollback_branch_tracking(data_dir, "feature", "branches/feature.db").unwrap();
-
-    assert!(db_path.exists());
-    assert!(db_path.with_extension("db-wal").exists());
-    assert!(db_path.with_extension("db-shm").exists());
-    assert!(
-        !crate::branch_meta::load_branch_meta(data_dir)
-            .unwrap()
-            .is_tracked("feature")
-    );
 }
 
 pub fn finalize_prepared_branch_tracking(tracedecay_dir: &Path, prepared: &PreparedBranchTracking) {
@@ -499,45 +414,6 @@ pub fn rollback_prepared_branch_tracking(
     }
     crate::branch_meta::save_branch_meta(tracedecay_dir, &meta)?;
     Ok(PreparedBranchRollbackOutcome::RolledBack)
-}
-
-#[cfg(test)]
-fn rollback_branch_tracking(
-    tracedecay_dir: &Path,
-    branch_name: &str,
-    db_file: &str,
-) -> tracedecay_domain::errors::Result<()> {
-    super::admin::rollback_published_branch_tracking(tracedecay_dir, branch_name, db_file)
-}
-
-fn prune_missing_branch_dbs(
-    tracedecay_dir: &Path,
-    meta: &mut crate::branch_meta::BranchMeta,
-) -> bool {
-    let missing: Vec<String> = meta
-        .branches
-        .iter()
-        .filter_map(|(name, entry)| {
-            if name == &meta.default_branch {
-                return None;
-            }
-            let path = tracedecay_dir.join(&entry.db_file);
-            (!path.exists()).then(|| name.clone())
-        })
-        .collect();
-    let changed = !missing.is_empty();
-    for name in missing {
-        meta.remove_branch(&name);
-    }
-    changed
-}
-
-/// Returns true if `branch` currently exists as a local `refs/heads/*` ref.
-///
-/// Thin alias over [`local_branch_exists`] under the name the branch-store GC
-/// design refers to; keeping both avoids churning existing call sites.
-pub fn is_branch_ref_present(project_root: &Path, branch: &str) -> bool {
-    local_branch_exists(project_root, branch)
 }
 
 /// Parses a `last_synced_at` / `created_at` unix-seconds string defensively.

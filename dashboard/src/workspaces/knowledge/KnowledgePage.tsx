@@ -7,7 +7,6 @@ import {
   type ReactNode,
 } from 'react';
 import type { EChartsOption } from 'echarts';
-
 import { ReadModelState, ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { Corners, Meter, Readout } from '../../ui/instrument.tsx';
 import { SearchField } from '../../ui/search/SearchField.tsx';
@@ -30,10 +29,10 @@ import {
 import { CurationConsole } from './CurationConsole.tsx';
 import { MemoryGeometry } from './MemoryGeometry.tsx';
 import { MemoryOplog } from './MemoryOplog.tsx';
-import { FactConstellation } from './FactConstellation.tsx';
+import { FactCameras } from './FactCameras.tsx';
 import { FactInspector } from './FactInspector.tsx';
 import { FactLedger, FactSortControl, MemoryCoverageNotices } from './FactLedger.tsx';
-import { composeConstellation } from './constellation.ts';
+import { composeFactScene, type FactScene } from './factScene.ts';
 import { useFactsAddress } from './factsAddress.ts';
 import { sortFacts } from './ledger.ts';
 import { cameraRegister, graphRegister, memoryRegister } from './knowledgeRegisters.ts';
@@ -133,11 +132,11 @@ function KnowledgeView({
 }
 
 /**
- * The Facts camera: the constellation over the ledger, with the inspector
- * beside them.
+ * The Facts camera: the provenance cameras over the ledger, with the
+ * inspector beside them.
  *
  * Three verbs, kept apart. INSPECT is the fact under the pointer or under
- * keyboard focus, on a constellation body or a ledger row, and it previews
+ * keyboard focus, on a camera row or a ledger row, and it previews
  * the bounded overview row without a fetch; it is sticky until Escape so a
  * reader can move into the inspector. SELECT is a click or Enter, lives in
  * the address, and reads the canonical detail and trust audit. SEARCH is the
@@ -177,7 +176,7 @@ function KnowledgeFacts({ onOpenGeometry }: { onOpenGeometry: () => void }) {
   const facts = holographic?.facts;
   const sorted = useMemo(() => sortFacts(facts ?? [], sort), [facts, sort]);
   const graph = holographic?.graph;
-  const constellation = useMemo(() => (graph ? composeConstellation(graph) : null), [graph]);
+  const scene = useMemo(() => (graph ? composeFactScene(graph, facts ?? []) : null), [graph, facts]);
 
   const detail = useEnvelope(
     ['memory', 'fact', String(selectedFactId ?? '')],
@@ -210,12 +209,8 @@ function KnowledgeFacts({ onOpenGeometry }: { onOpenGeometry: () => void }) {
   const mode =
     inspectedFactId !== null && inspectedFactId !== selectedFactId ? 'inspecting' : 'selected';
   const shownRow = shownFactId ? facts?.find((fact) => fact.fact_id === shownFactId) : undefined;
-  const shownNodeId =
-    shownFactId && constellation ? constellation.nodeIdByFact.get(shownFactId) : undefined;
-  const shownRelations =
-    shownNodeId && constellation
-      ? (constellation.nodes.find((node) => node.id === shownNodeId)?.degree ?? null)
-      : null;
+  const shownNodeId = shownFactId && scene ? scene.nodeIdByFact.get(shownFactId) : undefined;
+  const shownRelations = shownNodeId && scene ? (scene.byNode.get(shownNodeId)?.degree ?? null) : null;
 
   const reads = holographic?.reads;
   const overviewEnvelope = overview.data?.outcome === 'envelope' ? overview.data.envelope : null;
@@ -281,26 +276,28 @@ function KnowledgeFacts({ onOpenGeometry }: { onOpenGeometry: () => void }) {
                     </div>
                     <StoreReadouts summary={data.overview} statusMemory={statusMemory} />
                   </div>
-                  <Aperture
-                    data={data}
-                    constellation={constellation}
-                    inspectedFactId={inspectedFactId}
-                    selectedFactId={selectedFactId}
-                    onInspect={setInspectedFactId}
-                    onSelect={select}
-                  />
-                  <LedgerBay
-                    data={data}
-                    trust={trust}
-                    applied={applied}
-                    sorted={sorted}
-                    sort={sort}
-                    onSort={setSort}
-                    selectedFactId={selectedFactId}
-                    inspectedFactId={inspectedFactId}
-                    onInspect={setInspectedFactId}
-                    onSelect={select}
-                  />
+                  <div className="flex min-w-0 flex-col lg:min-h-0 lg:flex-1">
+                    <Aperture
+                      data={data}
+                      scene={scene}
+                      inspectedFactId={inspectedFactId}
+                      selectedFactId={selectedFactId}
+                      onInspect={setInspectedFactId}
+                      onSelect={select}
+                    />
+                    <LedgerBay
+                      data={data}
+                      trust={trust}
+                      applied={applied}
+                      sorted={sorted}
+                      sort={sort}
+                      onSort={setSort}
+                      selectedFactId={selectedFactId}
+                      inspectedFactId={inspectedFactId}
+                      onInspect={setInspectedFactId}
+                      onSelect={select}
+                    />
+                  </div>
                 </>
               );
             }}
@@ -342,19 +339,20 @@ function KnowledgeFacts({ onOpenGeometry }: { onOpenGeometry: () => void }) {
   );
 }
 
-/** The constellation, or the typed reason the graph is not drawn. The graph is
- * its own sub-read; a failed or refused graph must not render as an empty sky
- * over a healthy ledger. */
+/** The provenance cameras, or the typed reason the graph is not drawn. The
+ * graph is its own sub-read; a failed or refused graph must not render as an
+ * empty field over a healthy ledger. From `lg` the aperture holds 45% of the
+ * column and the ledger the rest, so the exact rows stay the larger share. */
 function Aperture({
   data,
-  constellation,
+  scene,
   inspectedFactId,
   selectedFactId,
   onInspect,
   onSelect,
 }: {
   data: MemoryHolographicPayloadV1;
-  constellation: ReturnType<typeof composeConstellation> | null;
+  scene: FactScene | null;
   inspectedFactId: string | null;
   selectedFactId: string | null;
   onInspect: (factId: string) => void;
@@ -367,10 +365,13 @@ function Aperture({
     graphRead.state === 'partial' ||
     graphRead.state === 'complete_zero_findings';
   return (
-    <div className="relative shrink-0 border-b border-edge-subtle p-3" data-testid="knowledge-aperture">
-      {drawable && constellation ? (
-        <FactConstellation
-          model={constellation}
+    <div
+      className="relative flex shrink-0 flex-col border-b border-edge-subtle p-1.5 lg:h-[45%] lg:min-h-0"
+      data-testid="knowledge-aperture"
+    >
+      {drawable && scene ? (
+        <FactCameras
+          scene={scene}
           inspectedFactId={inspectedFactId}
           selectedFactId={selectedFactId}
           onInspect={onInspect}
@@ -378,16 +379,16 @@ function Aperture({
           graphRead={graphRead}
         />
       ) : (
-        <div className="td-optic relative flex min-h-[200px] flex-col items-center justify-center gap-3 p-6 text-center">
+        <div className="td-optic relative flex min-h-[200px] flex-col items-center justify-center gap-3 p-6 text-center lg:h-full">
           <Corners tone="signal" />
-          <span className="td-title text-text-secondary">Fact constellation</span>
+          <span className="td-title text-text-secondary">Provenance cameras</span>
           <StateChip
             kind={graphRead?.state ?? 'unknown'}
             detail={graphRead?.error ?? graphRead?.code ?? 'memory graph read'}
           />
-          <p className="max-w-md text-xs leading-relaxed text-text-muted">
-            The memory graph sub-read did not serve a topology, so no constellation is drawn.
-            The ledger below is read separately and stands on its own.
+          <p className="max-w-md text-body leading-relaxed text-text-muted">
+            The memory graph sub-read did not serve a topology, so no field is drawn. The ledger
+            below is read separately and stands on its own.
           </p>
         </div>
       )}
@@ -617,7 +618,7 @@ function StoreSummary({
       </header>
       <div role="region" aria-label="Store summary" tabIndex={0} className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-2.5">
         <p className="text-2xs leading-relaxed text-text-muted">
-          Hover or focus a fact in the constellation or the ledger to inspect its bounded row;
+          Hover or focus a fact in the cameras or the ledger to inspect its bounded row;
           click or press Enter to select it and read its canonical detail and trust audit.
         </p>
         <TrustDistributionPlate distribution={distribution} />

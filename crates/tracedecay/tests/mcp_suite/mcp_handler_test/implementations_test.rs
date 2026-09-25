@@ -7,9 +7,9 @@
 //! the handler.
 
 use crate::support::{
-    ProductionCompositionFixture, extract_real_server_text, handle_real_server_tool_call,
-    handle_real_server_tool_call_raw, production_composition_fixture_with_sources,
-    warm_code_index_search,
+    ProductionCompositionFixture, dispatch_mcp_tool_call, extract_real_server_text,
+    handle_real_server_tool_call, handle_real_server_tool_call_raw,
+    production_composition_fixture_with_sources, warm_code_index_search,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -71,335 +71,178 @@ class Sketch {
 }
 "#;
 
+/// `(qualified_name, kind, file, line, end_line, body)` of one match.
+type Match = (String, String, String, u64, u64, String);
+
+fn matched(qualified_name: &str, kind: &str, file: &str, lines: (u64, u64), body: &str) -> Match {
+    (
+        qualified_name.to_owned(),
+        kind.to_owned(),
+        file.to_owned(),
+        lines.0,
+        lines.1,
+        body.to_owned(),
+    )
+}
+
+fn trait_selector(name: &str) -> Value {
+    json!({"selector": {"selector": "trait", "name": name}})
+}
+
+fn method_selector(name: &str) -> Value {
+    json!({"selector": {"selector": "method", "name": name}})
+}
+
 #[tokio::test]
 async fn implementations_returns_literal_bodies_for_trait_interface_and_method() {
     let fixture = indexed_project().await;
 
-    let widget = call_json(&fixture, json!({"trait": "Widget", "format": "json"})).await;
+    let widget = call_matches(&fixture, trait_selector("Widget")).await;
     assert_eq!(
-        ordered(widget, &["type", "file", "line"]),
-        json!({
-            "match_count": 2,
-            "implementations": [outline_widget(), solid_widget()]
-        }),
-        "trait lookup must return only Widget implementors and their method bodies"
+        widget,
+        vec![
+            matched(
+                "src/lib.rs::Outline",
+                "impl",
+                "src/lib.rs",
+                (17, 21),
+                "impl Widget for Outline {\n    fn paint(&self) -> &'static str {\n        \"outline\"\n    }\n}",
+            ),
+            matched(
+                "src/lib.rs::Solid",
+                "impl",
+                "src/lib.rs",
+                (7, 11),
+                "impl Widget for Solid {\n    fn paint(&self) -> &'static str {\n        \"solid\"\n    }\n}",
+            ),
+        ],
+        "trait lookup returns only Widget implementors, each with its impl body"
     );
 
-    let unused = call_json(&fixture, json!({"trait": "Unused", "format": "json"})).await;
-    assert_eq!(
-        unused,
-        json!({"match_count": 0, "implementations": []}),
-        "a trait with no implementors is an empty result, not a missing-name message"
+    assert!(
+        call_matches(&fixture, trait_selector("Unused"))
+            .await
+            .is_empty(),
+        "a trait with no implementors is an empty page"
+    );
+    assert!(
+        call_matches(&fixture, trait_selector("AbsentTrait"))
+            .await
+            .is_empty(),
+        "an absent trait is an empty page"
     );
 
-    let missing_trait =
-        call_text(&fixture, json!({"trait": "AbsentTrait", "format": "json"})).await;
     assert_eq!(
-        missing_trait,
-        "No trait or interface named 'AbsentTrait' found."
+        call_matches(&fixture, method_selector("paint")).await,
+        vec![
+            matched(
+                "src/lib.rs::<Outline as Widget>::paint",
+                "method",
+                "src/lib.rs",
+                (18, 20),
+                "    fn paint(&self) -> &'static str {\n        \"outline\"\n    }",
+            ),
+            matched(
+                "src/lib.rs::<Solid as Widget>::paint",
+                "method",
+                "src/lib.rs",
+                (8, 10),
+                "    fn paint(&self) -> &'static str {\n        \"solid\"\n    }",
+            ),
+            matched(
+                "src/lib.rs::Widget::paint",
+                "method",
+                "src/lib.rs",
+                (2, 2),
+                "    fn paint(&self) -> &'static str;",
+            ),
+            matched(
+                "src/lib.rs::paint",
+                "function",
+                "src/lib.rs",
+                (23, 25),
+                "pub fn paint() -> &'static str {\n    \"free\"\n}",
+            ),
+        ],
+        "method lookup returns every paint body, including the trait declaration and free function"
     );
 
-    let paint = call_json(&fixture, json!({"method": "paint", "format": "json"})).await;
     assert_eq!(
-        ordered(paint, &["qualified_name"]),
-        json!({
-            "match_count": 4,
-            "implementations": [
-                method_body(
-                    "src/lib.rs::<Outline as Widget>::paint",
-                    "method",
-                    "src/lib.rs",
-                    18,
-                    20,
-                    "fn paint(&self) -> &'static str",
-                    "    fn paint(&self) -> &'static str {\n        \"outline\"\n    }",
-                ),
-                method_body(
-                    "src/lib.rs::<Solid as Widget>::paint",
-                    "method",
-                    "src/lib.rs",
-                    8,
-                    10,
-                    "fn paint(&self) -> &'static str",
-                    "    fn paint(&self) -> &'static str {\n        \"solid\"\n    }",
-                ),
-                method_body(
-                    "src/lib.rs::Widget::paint",
-                    "method",
-                    "src/lib.rs",
-                    2,
-                    2,
-                    "fn paint(&self) -> &'static str",
-                    "    fn paint(&self) -> &'static str;",
-                ),
-                method_body(
-                    "src/lib.rs::paint",
-                    "function",
-                    "src/lib.rs",
-                    23,
-                    25,
-                    "pub fn paint() -> &'static str",
-                    "pub fn paint() -> &'static str {\n    \"free\"\n}",
-                ),
-            ]
-        }),
-        "method lookup must return every paint body, including the trait declaration and free function"
+        call_matches(&fixture, method_selector("weight")).await,
+        vec![matched(
+            "src/lib.rs::Solid::weight",
+            "method",
+            "src/lib.rs",
+            (28, 30),
+            "    fn weight(&self) -> u8 {\n        1\n    }",
+        )]
     );
 
-    let weight = call_json(&fixture, json!({"method": "weight", "format": "json"})).await;
     assert_eq!(
-        weight,
-        json!({
-            "match_count": 1,
-            "implementations": [
-                method_body(
-                    "src/lib.rs::Solid::weight",
-                    "method",
-                    "src/lib.rs",
-                    28,
-                    30,
-                    "fn weight(&self) -> u8",
-                    "    fn weight(&self) -> u8 {\n        1\n    }",
-                )
-            ]
-        })
-    );
-
-    let same_name_function =
-        call_json(&fixture, json!({"method": "Widget", "format": "json"})).await;
-    assert_eq!(
-        same_name_function,
-        json!({
-            "match_count": 1,
-            "implementations": [
-                method_body(
-                    "src/decoy.rs::Widget",
-                    "function",
-                    "src/decoy.rs",
-                    1,
-                    3,
-                    "pub fn Widget() -> u8",
-                    "pub fn Widget() -> u8 {\n    7\n}",
-                )
-            ]
-        }),
+        call_matches(&fixture, method_selector("Widget")).await,
+        vec![matched(
+            "src/decoy.rs::Widget",
+            "function",
+            "src/decoy.rs",
+            (1, 3),
+            "pub fn Widget() -> u8 {\n    7\n}",
+        )],
         "a function that only shares the trait's name is a method hit, not an implementor"
     );
-
-    let missing_method = call_text(
-        &fixture,
-        json!({"method": "absent_method", "format": "json"}),
-    )
-    .await;
-    assert_eq!(
-        missing_method,
-        "No function or method named 'absent_method' found."
-    );
-
-    let limited = call_json(
-        &fixture,
-        json!({"trait": "Widget", "limit": 1, "format": "json"}),
-    )
-    .await;
-    assert_eq!(limited["match_count"], 1);
-    assert_eq!(limited["implementations"].as_array().map(Vec::len), Some(1));
-    let only = &limited["implementations"][0];
     assert!(
-        only == &solid_widget() || only == &outline_widget(),
-        "limit 1 must return one complete Widget implementor, got {only}"
+        call_matches(&fixture, method_selector("absent_method"))
+            .await
+            .is_empty()
     );
 
-    let clamped = call_json(
-        &fixture,
-        json!({"trait": "Widget", "limit": 0, "format": "json"}),
+    assert_eq!(
+        call_matches(&fixture, trait_selector("Drawable")).await,
+        vec![matched(
+            "src/view.ts::Canvas",
+            "class",
+            "src/view.ts",
+            (5, 9),
+            "class Canvas implements Drawable {\n  draw(): string {\n    return \"canvas\";\n  }\n}",
+        )],
+        "interface lookup returns the implementing class body and not Sketch"
+    );
+
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production implementations server");
+    let markdown = dispatch_mcp_tool_call(
+        &server,
+        "tracedecay_implementations",
+        trait_selector("Widget"),
     )
     .await;
-    assert_eq!(clamped["match_count"], 1);
-    assert_eq!(clamped["implementations"].as_array().map(Vec::len), Some(1));
-    let clamped_only = &clamped["implementations"][0];
+    let markdown = markdown["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("markdown implementations text: {markdown}"));
     assert!(
-        clamped_only == &solid_widget() || clamped_only == &outline_widget(),
-        "limit 0 is clamped to one complete Widget implementor, got {clamped_only}"
+        markdown.contains("src/lib.rs::Solid (impl) src/lib.rs:7")
+            && markdown.contains("|         \"solid\""),
+        "markdown carries each match and its body: {markdown}"
     );
 
-    let drawable = call_json(&fixture, json!({"trait": "Drawable", "format": "json"})).await;
-    assert_eq!(
-        ordered(drawable, &["type", "file", "line"]),
-        json!({
-            "match_count": 1,
-            "implementations": [{
-                "type": "Canvas",
-                "qualified_name": "src/view.ts::Canvas",
-                "kind": "class",
-                "file": "src/view.ts",
-                "line": 5,
-                "trait": "src/view.ts::Drawable",
-                "methods": [{
-                    "name": "draw",
-                    "kind": "method",
-                    "line": 6,
-                    "signature": "draw(): string",
-                    "body": "  draw(): string {\n    return \"canvas\";\n  }"
-                }]
-            }]
-        }),
-        "interface lookup must return the implementing class body and not Sketch"
-    );
-
-    let draw = call_json(&fixture, json!({"method": "draw", "format": "json"})).await;
-    assert_eq!(
-        ordered(draw, &["qualified_name"]),
-        json!({
-            "match_count": 3,
-            "implementations": [
-                method_body(
-                    "src/view.ts::Canvas::draw",
-                    "method",
-                    "src/view.ts",
-                    6,
-                    8,
-                    "draw(): string",
-                    "  draw(): string {\n    return \"canvas\";\n  }",
-                ),
-                method_body(
-                    "src/view.ts::Drawable::draw",
-                    "method",
-                    "src/view.ts",
-                    2,
-                    2,
-                    "draw(): string",
-                    "  draw(): string;",
-                ),
-                method_body(
-                    "src/view.ts::Sketch::draw",
-                    "method",
-                    "src/view.ts",
-                    12,
-                    14,
-                    "draw(): string",
-                    "  draw(): string {\n    return \"sketch\";\n  }",
-                ),
-            ]
-        })
-    );
-
-    let missing = call_raw(&fixture, json!({})).await;
-    assert_eq!(
-        missing["error"]["code"], -32602,
-        "missing selector should be invalid params, got {missing}"
-    );
-    assert_eq!(
-        missing["error"]["message"],
-        "missing required parameter: 'trait' or 'method'"
-    );
-    assert_eq!(
-        missing["error"]["data"]["reason_code"],
-        "missing_required_parameter"
-    );
-    assert_eq!(
-        missing["error"]["data"]["tool"],
-        "tracedecay_implementations"
-    );
-    assert_eq!(missing["error"]["data"]["retryable"], false);
-
-    let conflict = call_raw(&fixture, json!({"trait": "Widget", "method": "paint"})).await;
-    assert_eq!(conflict["error"]["code"], -32603, "{conflict}");
-    assert_eq!(
-        conflict["error"]["message"],
-        "tool execution failed: config error: tracedecay_implementations: 'trait' and 'method' are mutually exclusive"
-    );
-    assert_eq!(
-        conflict["error"]["data"]["tool"],
-        "tracedecay_implementations"
-    );
+    for (arguments, context) in [
+        (json!({}), "a missing selector"),
+        (json!({"trait": "Widget"}), "the retired trait argument"),
+        (json!({"method": "paint"}), "the retired method argument"),
+        (
+            json!({"selector": {"selector": "trait", "name": "Widget"}, "limit": 1}),
+            "the retired limit argument",
+        ),
+    ] {
+        let refused = call_raw(&fixture, arguments).await;
+        assert_eq!(
+            refused["error"]["data"]["reason_code"], "application_surface_invalid_request",
+            "{context} must be a typed invalid request: {refused}"
+        );
+    }
 
     fixture.harness.shutdown().await;
-}
-
-fn solid_widget() -> Value {
-    json!({
-        "type": "Solid",
-        "qualified_name": "src/lib.rs::Solid",
-        "kind": "impl",
-        "file": "src/lib.rs",
-        "line": 7,
-        "trait": "src/lib.rs::Widget",
-        "methods": [{
-            "name": "paint",
-            "kind": "method",
-            "line": 8,
-            "signature": "fn paint(&self) -> &'static str",
-            "body": "    fn paint(&self) -> &'static str {\n        \"solid\"\n    }"
-        }]
-    })
-}
-
-fn outline_widget() -> Value {
-    json!({
-        "type": "Outline",
-        "qualified_name": "src/lib.rs::Outline",
-        "kind": "impl",
-        "file": "src/lib.rs",
-        "line": 17,
-        "trait": "src/lib.rs::Widget",
-        "methods": [{
-            "name": "paint",
-            "kind": "method",
-            "line": 18,
-            "signature": "fn paint(&self) -> &'static str",
-            "body": "    fn paint(&self) -> &'static str {\n        \"outline\"\n    }"
-        }]
-    })
-}
-
-fn method_body(
-    qualified_name: &str,
-    kind: &str,
-    file: &str,
-    line: u64,
-    end_line: u64,
-    signature: &str,
-    body: &str,
-) -> Value {
-    json!({
-        "name": qualified_name.rsplit("::").next().unwrap_or(qualified_name),
-        "qualified_name": qualified_name,
-        "kind": kind,
-        "file": file,
-        "line": line,
-        "end_line": end_line,
-        "signature": signature,
-        "body": body,
-    })
-}
-
-fn ordered(mut payload: Value, keys: &[&str]) -> Value {
-    let Some(items) = payload
-        .get_mut("implementations")
-        .and_then(Value::as_array_mut)
-    else {
-        return payload;
-    };
-    for item in items.iter_mut() {
-        if let Some(methods) = item.get_mut("methods").and_then(Value::as_array_mut) {
-            methods.sort_by(|left, right| {
-                (left["name"].as_str(), left["line"].as_u64())
-                    .cmp(&(right["name"].as_str(), right["line"].as_u64()))
-            });
-        }
-    }
-    items.sort_by(|left, right| {
-        keys.iter()
-            .map(|key| left[*key].to_string())
-            .collect::<Vec<_>>()
-            .cmp(
-                &keys
-                    .iter()
-                    .map(|key| right[*key].to_string())
-                    .collect::<Vec<_>>(),
-            )
-    });
-    payload
 }
 
 async fn indexed_project() -> ProductionCompositionFixture {
@@ -418,7 +261,9 @@ async fn indexed_project() -> ProductionCompositionFixture {
     fixture
 }
 
-async fn call_json(fixture: &ProductionCompositionFixture, arguments: Value) -> Value {
+/// Every match on the served page, sorted by qualified name.
+async fn call_matches(fixture: &ProductionCompositionFixture, mut arguments: Value) -> Vec<Match> {
+    arguments["format"] = json!("json");
     let server = fixture
         .harness
         .server(&fixture.project_root)
@@ -426,17 +271,31 @@ async fn call_json(fixture: &ProductionCompositionFixture, arguments: Value) -> 
     let result =
         handle_real_server_tool_call(&server, "tracedecay_implementations", arguments).await;
     let text = extract_real_server_text(&result);
-    serde_json::from_str(text).unwrap_or_else(|error| panic!("{error}\n{text}"))
-}
-
-async fn call_text(fixture: &ProductionCompositionFixture, arguments: Value) -> String {
-    let server = fixture
-        .harness
-        .server(&fixture.project_root)
-        .expect("production implementations server");
-    let result =
-        handle_real_server_tool_call(&server, "tracedecay_implementations", arguments).await;
-    extract_real_server_text(&result).to_owned()
+    let payload: Value =
+        serde_json::from_str(text).unwrap_or_else(|error| panic!("{error}\n{text}"));
+    let page = &payload["outcome"]["value"]["payload"];
+    assert!(
+        page["next_cursor"].is_null(),
+        "fixture fits one page: {page}"
+    );
+    let mut matches = page["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("implementations page has no items: {payload}"))
+        .iter()
+        .map(|item| {
+            let symbol = &item["symbol"];
+            (
+                symbol["qualified_name"].as_str().unwrap().to_owned(),
+                symbol["kind"].as_str().unwrap().to_owned(),
+                symbol["file"].as_str().unwrap().to_owned(),
+                symbol["line"].as_u64().unwrap(),
+                symbol["end_line"].as_u64().unwrap(),
+                item["body"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    matches.sort();
+    matches
 }
 
 async fn call_raw(fixture: &ProductionCompositionFixture, arguments: Value) -> Value {

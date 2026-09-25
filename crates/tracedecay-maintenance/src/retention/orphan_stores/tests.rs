@@ -2,24 +2,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use super::collection::{
+    DurableDatabaseInventoryV1, DurableMemoryCheck, check_store_durable_memory,
+    durable_check_scratch_root, durable_database_inventory, open_verified_store,
+};
 use super::fence::{capture_store_content_fence, capture_store_directory_fence};
 use super::pages::walk_store_stats;
-#[cfg(windows)]
-use super::quarantine::classify_recovery_journal_probe;
-use super::quarantine::{
-    DurableDatabaseInventoryV1, DurableMemoryCheck, PendingQuarantineReceiptV1,
-    QuarantineFinalizeOutcome, QuarantineKindV1, QuarantineRecoveryOutcome,
-    QuarantineRegistryFenceV1, QuarantineStoreOutcome, RegisteredQuarantineDecisionV1,
-    RegisteredQuarantineInventoryV1, RegisteredQuarantineRegistryStateV1,
-    check_store_durable_memory, durable_check_scratch_root, durable_database_inventory,
-    quarantine_candidate_namespace_available, quarantine_store_for_verified_collection,
-    quarantine_store_for_verified_collection_controlled,
-    read_registered_quarantine_intents_controlled, reconcile_existing_quarantine,
-    reconcile_registered_quarantine_inventory_with_classified_hook,
-    recover_existing_store_quarantine, recover_named_store_quarantine,
-    recover_named_store_quarantine_controlled, recover_registered_quarantine_intent_controlled,
-    reserve_quarantine_name_with_sequence,
-};
 use super::*;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
@@ -29,10 +17,6 @@ use tracedecay_runtime_core::storage::{
 };
 
 const DAY: i64 = 24 * 60 * 60;
-#[cfg(unix)]
-const OCCUPIED_RENAME_RAW_OS_ERROR: i32 = 17;
-#[cfg(windows)]
-const OCCUPIED_RENAME_RAW_OS_ERROR: i32 = 183;
 
 /// Same shape as the production convenience caller
 /// (`unbounded_collection_control`): a far-future monotonic deadline so
@@ -185,8 +169,8 @@ async fn seed_project(
     transaction.commit().await.unwrap();
 }
 
+mod collection;
 mod pages;
-mod quarantine;
 
 #[test]
 fn live_root_is_never_collected() {
@@ -262,88 +246,6 @@ fn live_git_common_dir_keeps_a_linked_worktree_store_live() {
     assert!(plan_collection(findings, 0).collect.is_empty());
 }
 
-#[tokio::test]
-async fn empty_plan_retains_registered_live_source_when_exact_row_is_absent() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let profile_root = tmp.path().join("profile");
-    std::fs::create_dir_all(&profile_root).unwrap();
-    let (_runtime, db) = open_registered_db(&profile_root).await;
-    let payload = b"absent row cannot authorize deleting contradictory live bytes";
-    let (data_root, quarantine_path) = prepare_registered_quarantine(
-        &db,
-        &profile_root,
-        "proj_registered_live_absent",
-        "store_registered_live_absent",
-        payload,
-    )
-    .await;
-    let expected = capture_store_content_fence(&profile_root, &quarantine_path).unwrap();
-    let StoreContentFence::Present(expected_inventory) = &expected else {
-        panic!("fixture must capture an exact present-store fence");
-    };
-    let expected_root_identity = expected_inventory.root.clone();
-    std::fs::rename(&quarantine_path, &data_root).unwrap();
-    let transaction = db.begin_write_transaction().await.unwrap();
-    assert_eq!(
-        transaction
-            .execute(
-                "DELETE FROM store_instances WHERE store_id = ?1",
-                tracedecay_runtime_core::db::engine::params!["store_registered_live_absent"],
-            )
-            .await
-            .unwrap(),
-        1
-    );
-    transaction.commit().await.unwrap();
-
-    let (outcome, retired) =
-        execute_registered_collection(&db, &CollectionPlan::default(), &profile_root)
-            .await
-            .unwrap();
-
-    assert_eq!(retired, 0);
-    assert_eq!(
-        outcome,
-        CollectionOutcome {
-            errors: vec![CollectionFailure {
-                store_id: "store_registered_live_absent".to_owned(),
-                kind: CollectionFailureKind::RemoveFailed(CollectionMutationFailure {
-                    operation: CollectionMutationOperation::ValidateRestoredStoreIdentity,
-                    raw_os_error: None,
-                    target_path: data_root.clone(),
-                    expected_root_identity: Some(expected_root_identity),
-                    classification: CollectionMutationFailureClassification::NonRetryable,
-                }),
-            }],
-            recovery_receipts: vec![CollectionRecoveryReceipt {
-                store_id: "store_registered_live_absent".to_owned(),
-                original_path: data_root.clone(),
-                quarantine_path: quarantine_path.clone(),
-                actual_path: data_root.clone(),
-                action: CollectionRecoveryAction::RetainedForRecovery,
-            }],
-            ..CollectionOutcome::default()
-        }
-    );
-    assert_eq!(
-        std::fs::read(data_root.join("payload.bin")).unwrap(),
-        payload
-    );
-    assert_eq!(
-        capture_store_content_fence(&profile_root, &data_root).unwrap(),
-        expected
-    );
-    assert!(!quarantine_path.exists());
-    assert_eq!(
-        read_pending_quarantine_receipts(&profile_root).unwrap(),
-        vec![PendingQuarantineReceiptV1 {
-            quarantine_path: quarantine_path.clone(),
-            actual_path: data_root,
-            retirement_committed: false,
-        }]
-    );
-}
-
 #[test]
 fn portable_inventory_other_profiles_progress_while_one_writer_is_paused() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -397,11 +299,7 @@ fn portable_inventory_other_profiles_progress_while_one_writer_is_paused() {
         .expect("another profile must progress before the paused writer is released")
         .unwrap()
         .unwrap();
-    assert!(matches!(
-        page.entries.as_slice(),
-        [super::unregistered_page::ProjectDirectoryWorkV1::Project(name)]
-            if name == "proj_independent"
-    ));
+    assert_eq!(page.entries, ["proj_independent"]);
 }
 
 /// Every platform uses an append-only durable inventory. A cancelled admission
@@ -496,10 +394,7 @@ fn unregistered_inventory_restart_converges_without_repeating_records() {
             .unwrap();
     let mut scanned = first.entries_scanned;
     let mut observed = std::collections::HashSet::new();
-    for entry in first.entries {
-        let super::unregistered_page::ProjectDirectoryWorkV1::Project(name) = entry else {
-            panic!("unexpected quarantine")
-        };
+    for name in first.entries {
         assert!(observed.insert(name));
     }
     let saved = first.next_cursor.unwrap();
@@ -520,10 +415,7 @@ fn unregistered_inventory_restart_converges_without_repeating_records() {
         .unwrap()
         .unwrap();
         scanned += page.entries_scanned;
-        for entry in page.entries {
-            let super::unregistered_page::ProjectDirectoryWorkV1::Project(name) = entry else {
-                panic!("unexpected quarantine")
-            };
+        for name in page.entries {
             assert!(observed.insert(name), "restart repeated a committed record");
         }
         cursor = page.next_cursor;
@@ -857,52 +749,4 @@ fn payload_fence_finding(data_root: PathBuf, expected_store_relpath: &str) -> Or
         expected_manifest_bytes: None,
         graph_scope_relpaths: Vec::new(),
     }
-}
-
-async fn prepare_registered_quarantine(
-    db: &RegisteredGlobalDb,
-    profile_root: &Path,
-    project_id: &str,
-    store_id: &str,
-    payload: &[u8],
-) -> (PathBuf, PathBuf) {
-    let data_root = seed_store(
-        db,
-        profile_root,
-        project_id,
-        store_id,
-        &profile_root.join("missing-project-root"),
-        1_700_000_000,
-    )
-    .await;
-    std::fs::write(data_root.join("payload.bin"), payload).unwrap();
-    let row = db
-        .try_list_store_instances_for_project(project_id)
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|row| row.store_id == store_id)
-        .unwrap();
-    let expected = capture_store_content_fence(profile_root, &data_root).unwrap();
-    let quarantine = quarantine_store_for_verified_collection_controlled(
-        profile_root,
-        &data_root,
-        &expected,
-        QuarantineKindV1::Registered,
-        project_id,
-        store_id,
-        Some(QuarantineRegistryFenceV1 {
-            store_relpath: row.store_relpath,
-            created_at: row.created_at,
-            last_write_at: row.last_write_at,
-        }),
-        unbounded_collection_control(),
-    )
-    .unwrap();
-    let QuarantineStoreOutcome::Verified(quarantine) = quarantine else {
-        panic!("fixture must reach a verified registered quarantine");
-    };
-    let quarantine_path = quarantine.quarantine_path().to_path_buf();
-    drop(quarantine);
-    (data_root, quarantine_path)
 }

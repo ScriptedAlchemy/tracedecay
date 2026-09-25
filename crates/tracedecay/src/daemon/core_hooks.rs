@@ -1,4 +1,4 @@
-//! Host hook events: daemon notification over the broker connection.
+//! Host hook events: one stateless daemon request over the broker connection.
 //!
 //! The wire metadata and event constructors are pure data and live in
 //! [`tracedecay_hooks::core_events`]. Only delivery, which needs the daemon
@@ -10,11 +10,11 @@ use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, timeout};
 use tracedecay_hooks::core_events::{DaemonHookEvent, HOOK_EVENT_METHOD, HookEventNotifyOutcomeV1};
 
-#[cfg(unix)]
-use tracedecay_daemon_identity::connection_for_socket_path;
-use tracedecay_daemon_identity::{ResolvedDaemonConnection, current_daemon_connection};
-#[cfg(unix)]
+use tracedecay_daemon_identity::{
+    ResolvedDaemonConnection, client_connection, current_daemon_connection,
+};
 use tracedecay_daemon_protocol::SOCKET_ENV;
+use tracedecay_mcp::server::attach_stateless_request_context;
 
 use super::{BrokerStream, JsonRpcRequest, write_daemon_preamble};
 
@@ -25,19 +25,11 @@ pub async fn notify_hook_event(
     project_path: &Path,
     event: DaemonHookEvent,
 ) -> HookEventNotifyOutcomeV1 {
-    let connection = {
-        #[cfg(unix)]
-        {
-            std::env::var_os(SOCKET_ENV)
-                .filter(|path| !path.is_empty())
-                .map(|path| connection_for_socket_path(Path::new(&path)))
-                .map_or_else(current_daemon_connection, Ok)
-        }
-        #[cfg(not(unix))]
-        {
-            current_daemon_connection()
-        }
-    };
+    let connection = std::env::var_os(SOCKET_ENV)
+        .filter(|path| !path.is_empty())
+        .map_or_else(current_daemon_connection, |path| {
+            client_connection(Path::new(&path))
+        });
     let Ok(connection) = connection else {
         return HookEventNotifyOutcomeV1::Unavailable;
     };
@@ -69,16 +61,20 @@ async fn notify_hook_event_to_connection(
     let Ok(params) = serde_json::to_value(event) else {
         return HookEventNotifyOutcomeV1::Malformed;
     };
-    let request = JsonRpcRequest {
+    // A stateless request, not a notification: its own daemon connection has
+    // no `initialize` session for a notification to ride. The result is not
+    // awaited, so delivery stays fire-and-forget.
+    let mut request = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
-        id: None,
+        id: Some(serde_json::Value::from(1)),
         method: HOOK_EVENT_METHOD.to_string(),
         params: Some(params),
     };
+    attach_stateless_request_context(&mut request);
     let Ok(line) = serde_json::to_string(&request) else {
         return HookEventNotifyOutcomeV1::Malformed;
     };
-    let Ok(stream) = BrokerStream::connect(&connection.endpoint).await else {
+    let Ok(stream) = BrokerStream::connect(connection.endpoint()).await else {
         return HookEventNotifyOutcomeV1::Unavailable;
     };
     let (_reader, mut writer) = stream.into_owned_split();
@@ -106,7 +102,6 @@ mod tests {
 
     use super::*;
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn missing_hook_socket_returns_typed_unavailable_without_retry_delay() {
         // Delivery builds the client handshake first, and that handshake reads
@@ -115,10 +110,11 @@ mod tests {
         // per-test process that does not would classify the socket outcome as
         // Malformed (no advertisable version) before it ever reaches the
         // connect this test covers.
-        crate::product_runtime::register_fixture_product_runtime();
+        tracedecay_project::product_runtime::register_fixture_product_runtime();
         let socket_dir = tempfile::tempdir().unwrap();
         let missing_socket = socket_dir.path().join("missing.sock");
-        let connection = connection_for_socket_path(&missing_socket);
+        let _authority = super::super::tests::seed_socket_authority(&missing_socket);
+        let connection = client_connection(&missing_socket).expect("seeded daemon authority");
         let started = Instant::now();
 
         let outcome = notify_hook_event_to_connection(

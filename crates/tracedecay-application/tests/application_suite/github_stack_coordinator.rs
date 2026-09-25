@@ -326,7 +326,15 @@ fn production_coordinator_materializes_all_four_states_and_exact_stack_anchors()
         snapshot.layers[0].head_ref_id.as_str(),
         "refs/heads/feature"
     );
-    assert!(enabled.snapshot_anchor_id.is_some());
+    assert_eq!(
+        enabled
+            .snapshot_anchor_id
+            .as_ref()
+            .map(RetrievalAnchorId::as_str),
+        Some(
+            "retrieval.v3.sha256:331a85c93b00160876582f934a2a61231d3849efdba0eb61baa4aa8746232ae0"
+        )
+    );
     assert_eq!(
         coordinator
             .observe_policy(
@@ -770,5 +778,14 @@ fn daemon_restart_returns_unavailable_until_a_delayed_exact_probe_upgrades_state
         upgraded.capability.state,
         tracedecay_domain::GitHubStackCapabilityStateV1::Enabled
     );
-    assert!(upgraded.snapshot.is_some());
+    let snapshot = upgraded.snapshot.as_ref().expect("upgraded snapshot");
+    assert_eq!(snapshot.final_target_ref_id.as_str(), "refs/heads/main");
+    assert_eq!(
+        snapshot.layers[0].pull_request.pull_request_id.as_str(),
+        "41"
+    );
+    assert_eq!(
+        snapshot.layers[0].head_ref_id.as_str(),
+        "refs/heads/feature"
+    );
 }

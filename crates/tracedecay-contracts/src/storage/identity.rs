@@ -23,9 +23,6 @@ application_identifier!(
     /// A store-relative path to an incident-debris artifact (for example
     /// `sessions.db.corrupt-1721692800`). Store-relative, never absolute.
     RelativeArtifactPathV1 => ("storage relative artifact path", 512),
-    /// The single logical quarantine location debris is collected into. A
-    /// store-relative directory name, never an absolute path.
-    QuarantineLocationV1 => ("storage quarantine location", 256),
 );
 
 /// A byte size measurement. A newtype keeps sizes from being confused with

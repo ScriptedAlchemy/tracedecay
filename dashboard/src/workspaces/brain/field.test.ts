@@ -358,3 +358,43 @@ describe('summarizeHoldings', () => {
     expect(summarizeHoldings([])).toBeNull();
   });
 });
+
+describe('packed cells', () => {
+  const crowd = (count: number) =>
+    Array.from({ length: count }, (_, index) => project(`p${String(index).padStart(2, '0')}`, 0.2, SINGLE));
+
+  it('packs a crowd that shares one recency × mass cell into a counted, rank-ordered grid', () => {
+    const field = composeRegistryField([group('crowd', crowd(12))], NOW);
+    expect(field.cells).toHaveLength(1);
+    const [cell] = field.cells;
+    expect(cell!.id).toBe('cell:0:0');
+    expect(cell!.members).toEqual(crowd(12).map((entry) => entry.project_id));
+    expect(cell!.mass).toBe(24);
+    expect(cell!.spacing).toBeCloseTo(0.115, 3);
+    const placed = field.nodes.filter((node) => node.cell === 'cell:0:0');
+    expect(placed).toHaveLength(12);
+    expect(new Set(placed.map((node) => `${node.x.toFixed(4)},${node.y.toFixed(4)}`)).size).toBe(12);
+    for (const node of placed) {
+      expect(Math.abs(node.x)).toBeLessThanOrEqual(0.42);
+      expect(Math.abs(node.y - cell!.y)).toBeLessThanOrEqual(cell!.height / 2);
+    }
+    // Rank order reads left to right, top row first.
+    expect(placed[0]!.x).toBeLessThan(placed[1]!.x);
+    expect(placed[0]!.y).toBeGreaterThan(placed[6]!.y);
+  });
+
+  it('leaves a few identical projects overlapping in place rather than packing them', () => {
+    const field = composeRegistryField([group('few', crowd(3))], NOW);
+    expect(field.cells).toEqual([]);
+    expect(field.nodes.every((node) => node.cell === null)).toBe(true);
+  });
+
+  it('packs the crowded cells of the real registry shape, with exact counts', () => {
+    const cells = composeRegistryField(liveRegistry(), NOW).cells;
+    expect(cells.map((cell) => [cell.id, cell.members.length, cell.mass, Number(cell.spacing.toFixed(3))])).toEqual([
+      ['cell:1:8', 4, 258, 0.199],
+      ['cell:1:3', 4, 30, 0.199],
+      ['cell:1:2', 4, 18, 0.199],
+    ]);
+  });
+});

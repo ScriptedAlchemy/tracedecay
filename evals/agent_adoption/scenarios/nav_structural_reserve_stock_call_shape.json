@@ -18,8 +18,7 @@
       "tracedecay_callers"
     ],
     "acceptable": [
-      "tracedecay_body",
-      "tracedecay_callers_for",
+      "tracedecay_source_body",
       "Read"
     ],
     "forbidden_first": [

@@ -232,8 +232,10 @@ generation.
   source, unsupported normalization, exhausted budget, or stale generation is
   not a complete empty result.
 - Update clone payloads, occurrences, and postings at changed-symbol
-  granularity. A no-op generation reuses them. Clone backfill never blocks
-  exact, lexical, graph, Git, diagnostic, or test retrieval.
+  granularity. A no-op generation reuses them. Clone postings seal with the
+  lexical artifact in its one build, so clone lookups serve as soon as lexical
+  search does; clone work never blocks graph, Git, diagnostic, or test
+  retrieval.
 - Repository, revision-pair, branch-diff, PR change-set, and
   authorized-project-set families select a frozen generation per included
   snapshot or project. Comparisons never collapse those selections into a
@@ -455,10 +457,15 @@ pub struct ProjectionBatchReceiptV1 {
   inputs match; recompute relation and attribution rows only for dependency
   closures invalidated by versioned evidence.
 - Keep generation identity exact per repository/worktree/ref/snapshot.
-  Content-addressed parse and chunk artifacts may be physically reused across
-  worktrees only when source content, language descriptor, extractor,
-  sanitizer, privacy domain, and key epoch match. Reuse never merges worktree,
-  occurrence, authorization, generation, or lineage identity.
+  Occurrence identity names repository content (repository, logical path,
+  content, and sanitization receipt), not the worktree holding it. Linked
+  worktrees sealing unchanged content share its occurrence identity and every
+  artifact derived from it (parse/chunk artifacts, sealed segments, read-bundle
+  artifacts) when source content, language descriptor, extractor, sanitizer,
+  privacy domain, and key epoch match. Sharing never merges worktree,
+  snapshot, authorization, generation, or lineage identity: each worktree's
+  manifest and generation bind its snapshot authority, and reads route by
+  exact worktree first and never fall back to another worktree's graph.
 - Coalesce superseded batches by exact worktree and content frontier. Bound
   queue depth/bytes and parser/publication concurrency, preserve fair progress
   across active worktrees, and cancel a build whose fenced snapshot can no
@@ -472,9 +479,10 @@ pub struct ProjectionBatchReceiptV1 {
 
 ### Identity and lineage
 
-- Generation-local occurrence identity is exact. Logical identity remains
-  stable only while its declared repository, language, qualified-structure,
-  and source-evidence tuple is unchanged.
+- Occurrence identity is exact for its repository content; a worktree or
+  generation binds it only through the manifest that names it. Logical
+  identity remains stable only while its declared repository, language,
+  qualified-structure, and source-evidence tuple is unchanged.
 - Record rename, move, split, merge, and structural-continuity candidates with
   method, evidence, confidence kind, alternatives, and abstention.
   Tree-sitter object reuse, path, line, qualified-name similarity, or shared
@@ -679,10 +687,11 @@ normal CI.
   manifest as one clean reconciliation. Rename pairs are stitched when the
   platform supplies stable file identity, and watcher overflow falls back to
   bounded `gix` reconciliation rather than a full rebuild or guessed deletion.
-- Two linked worktrees sharing unchanged blobs may reuse physical parse/chunk
-  artifacts, but publish different snapshot/generation/occurrence identities.
-  An edit in one worktree invalidates no generation or cache entry in the
-  other.
+- Two linked worktrees sharing unchanged blobs share their physical
+  artifacts and the unchanged files' occurrence identities, but publish
+  different snapshot and generation identities. A read routed to one
+  worktree's generation never returns content only its sibling holds, and an
+  edit in one worktree invalidates no generation or cache entry in the other.
 - Rename, move, split, merge, ambiguous-lineage, parse-error, deletion, and unsupported-language fixtures remain truthful.
 - Fixtures prove Tree-sitter reuse never becomes lineage, parse/extraction caps
   remain partial, every graph path preserves its weakest edge authority and

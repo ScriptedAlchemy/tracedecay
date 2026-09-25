@@ -67,11 +67,13 @@ export function ScopeBar({
     // Pinned to exactly 52 the bar could not take them, and a clip would cut
     // off the project name and its `unverified`/`not in registry` caveat at
     // precisely the zoom level someone would be using to read them.
-    <header className="flex min-h-[var(--shell-register)] shrink-0 items-stretch border-b border-edge-frame bg-surface-1">
+    // Below sm the scope and channel cannot share one row with the controls,
+    // so the register stacks on every page: scope first, controls beneath.
+    <header className="flex min-h-[var(--shell-register)] shrink-0 items-stretch border-b border-edge-frame bg-surface-1 max-sm:flex-wrap">
       {/* `min-w-0` without `overflow-hidden`: the horizontal containment comes
         * from `truncate` on the label itself, which shortens the name and
         * leaves the caveat beside it readable. */}
-      <div className="flex min-w-0 flex-1 items-stretch" aria-label="Active scope">
+      <div className="flex min-w-0 flex-1 items-stretch max-sm:basis-full" aria-label="Active scope">
         {scope.kind === 'project' ? (
           <button
             type="button"
@@ -96,7 +98,7 @@ export function ScopeBar({
               {annotation ? (
                 <span
                   data-scope-label-annotation={annotation}
-                  className="shrink-0 text-3xs text-text-secondary"
+                  className="shrink-0 text-xs text-text-secondary"
                 >
                   · {annotation}
                 </span>
@@ -105,7 +107,7 @@ export function ScopeBar({
             </span>
             <span className="flex min-w-0 items-center gap-1.5">
               <span className="td-legend">ID</span>
-              <span className="td-value truncate text-3xs text-text-secondary" data-scope-id>
+              <span className="td-value truncate text-xs text-text-secondary" data-scope-id>
                 {scope.projectId}
               </span>
             </span>
@@ -135,6 +137,7 @@ export function ScopeBar({
         onClick={onOpenPalette}
         className={cn(
           'flex shrink-0 flex-col items-start justify-center gap-1 border-r border-edge-subtle px-3',
+          'max-sm:ml-auto max-sm:min-h-[var(--touch-target-min)] max-sm:border-l max-sm:border-t',
           'hover:bg-surface-2',
         )}
         aria-label="Open command palette"
@@ -149,7 +152,7 @@ export function ScopeBar({
         type="button"
         onClick={toggleTheme}
         aria-label="Toggle theme"
-        className="flex w-[var(--touch-target-min)] shrink-0 items-center justify-center text-text-muted hover:bg-surface-2 hover:text-text-primary"
+        className="flex w-[var(--touch-target-min)] shrink-0 items-center justify-center text-text-muted hover:bg-surface-2 hover:text-text-primary max-sm:min-h-[var(--touch-target-min)] max-sm:border-t max-sm:border-edge-subtle"
       >
         <Sun aria-hidden size={14} className="hidden [[data-theme=light]_&]:block" />
         <Moon aria-hidden size={14} className="[[data-theme=light]_&]:hidden" />

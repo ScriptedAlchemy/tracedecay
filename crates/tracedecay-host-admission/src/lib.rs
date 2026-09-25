@@ -1109,7 +1109,7 @@ fn classify_git_evidence_error(
 
 fn accepted_for_external_source_replay(
     outcome: CaptureObservationOutcome,
-    receipt: tracedecay_store::SourceCommitReceiptV1,
+    receipt: tracedecay_store::SourceCommitReceiptSummaryV1,
 ) -> Result<CaptureObservationOutcome, HostAdmissionOutcome> {
     let CaptureObservationOutcome::Persisted {
         outcome,
@@ -1124,7 +1124,7 @@ fn accepted_for_external_source_replay(
     };
     let durable_observation_id = outcome.receipt().observation().observation_id().clone();
     let retry_handle = ExternalSourceProjectionRetryHandleV1::new(
-        receipt.source_frontier().binding().clone(),
+        receipt.binding().clone(),
         receipt.receipt_digest().clone(),
     );
     Ok(CaptureObservationOutcome::AcceptedForReplay {
@@ -1140,9 +1140,6 @@ fn accepted_for_external_source_replay(
 
 fn classify_store_error(error: &ObservationStoreError) -> HostAdmissionOutcome {
     let reason_code = match error {
-        ObservationStoreError::BatchRequiresScalarFallback { cause } => {
-            return HostAdmissionOutcome::batch_requires_scalar_fallback(*cause);
-        }
         ObservationStoreError::ObservationCollision { .. } => {
             return HostAdmissionOutcome::deterministic_content_refusal(
                 "observation_identity_collision",

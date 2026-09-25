@@ -15,6 +15,9 @@ mod rows;
 pub(crate) mod test_fixture;
 mod triggers;
 
+#[cfg(test)]
+pub(crate) use triggers::SOURCE_CURSOR_ADVANCE_DELETE_GUARD_SQL;
+
 use audit::{
     AuditCheckpoint, AuditProgress, audit_checkpoint_is_plausible, ensure_audit_checkpoint_schema,
     read_audit_checkpoint, validate_projection_authority_chunk,
@@ -32,11 +35,8 @@ use rows::{
     validate_receipt_authority_rows, validate_source_cursor_authority_chunk,
     validate_source_cursor_authority_rows,
 };
-pub use triggers::released_v3_invariant_triggers_intact;
 use triggers::{FOREIGN_KEY_AUDIT_QUERY, replace_trigger, trigger_contracts_intact};
 pub(super) use triggers::{INVARIANTS, Trigger};
-pub(crate) use triggers::{invariant_trigger_names_for_tables, invariant_trigger_sql_for_tables};
-
 const OPERATION: &str = "ensure global database authority invariants";
 const INCOMPLETE_EXHAUSTIVE_PASS: i64 = -1;
 const FOREIGN_KEY_AUDIT_PROGRESS: &str = "authority-invariants";

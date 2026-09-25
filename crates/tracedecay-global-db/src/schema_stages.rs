@@ -21,11 +21,7 @@ use tracedecay_runtime_core::{
     },
 };
 use tracedecay_rusqlite_runtime::repository::AUTHORIZED_SCOPE_SET_SCHEMA_V1;
-use tracedecay_rusqlite_runtime::runtime_ledger::{
-    COPY_RETIRED_IDEMPOTENCY_LEDGER_PAGE_SQL, DELETE_CONVERGED_IDEMPOTENCY_LEDGER_PAGE_SQL,
-    DROP_RETIRED_IDEMPOTENCY_LEDGER_SQL, RETIRED_IDEMPOTENCY_LEDGER_PRESENT_SQL,
-    RUNTIME_LEDGER_SCHEMA,
-};
+use tracedecay_rusqlite_runtime::runtime_ledger::RUNTIME_LEDGER_SCHEMA;
 use tracedecay_rusqlite_runtime::work::{
     RETIRE_WORK_EVENT_JOURNAL_V1, WORK_PRODUCT_SCHEMA_V1 as WORK_PRODUCT_GRAPH_JOURNAL_SCHEMA_V1,
     WORK_SCHEMA_V1,
@@ -228,87 +224,12 @@ const TRANSCRIPT_SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS idx_sessions_active_project_path
         ON sessions(project_path, provider, session_id)
         WHERE ended_at IS NULL;
-    CREATE TABLE IF NOT EXISTS session_messages (
-        provider TEXT NOT NULL,
-        message_id TEXT NOT NULL,
-        session_id TEXT NOT NULL,
-        role TEXT NOT NULL,
-        timestamp INTEGER,
-        ordinal INTEGER NOT NULL,
-        text TEXT NOT NULL,
-        kind TEXT,
-        model TEXT,
-        tool_names TEXT,
-        source_path TEXT,
-        source_offset INTEGER,
-        metadata_json TEXT,
-        PRIMARY KEY(provider, message_id),
-        FOREIGN KEY(provider, session_id)
-            REFERENCES sessions(provider, session_id) ON DELETE CASCADE
-    );
-    CREATE INDEX IF NOT EXISTS idx_session_messages_session
-        ON session_messages(provider, session_id, ordinal);
-    CREATE INDEX IF NOT EXISTS idx_session_messages_timestamp
-        ON session_messages(timestamp);
-    CREATE INDEX IF NOT EXISTS idx_session_messages_source
-        ON session_messages(source_path);
     CREATE TABLE IF NOT EXISTS session_backfill_meta (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL,
         updated_at INTEGER NOT NULL DEFAULT (unixepoch())
     );
-    CREATE VIRTUAL TABLE IF NOT EXISTS session_messages_fts USING fts5(
-        text, role, kind, model, tool_names,
-        content='session_messages', content_rowid='rowid'
-    );
-    CREATE TRIGGER IF NOT EXISTS session_messages_fts_insert
-        AFTER INSERT ON session_messages BEGIN
-            INSERT INTO session_messages_fts(rowid, text, role, kind, model, tool_names)
-            VALUES (NEW.rowid, NEW.text, NEW.role, NEW.kind, NEW.model, NEW.tool_names);
-        END;
-    CREATE TRIGGER IF NOT EXISTS session_messages_fts_delete
-        AFTER DELETE ON session_messages BEGIN
-            INSERT INTO session_messages_fts(
-                session_messages_fts, rowid, text, role, kind, model, tool_names
-            )
-            VALUES (
-                'delete', OLD.rowid, OLD.text, OLD.role, OLD.kind, OLD.model, OLD.tool_names
-            );
-        END;
-    CREATE TRIGGER IF NOT EXISTS session_messages_fts_update
-        AFTER UPDATE ON session_messages BEGIN
-            INSERT INTO session_messages_fts(
-                session_messages_fts, rowid, text, role, kind, model, tool_names
-            )
-            VALUES (
-                'delete', OLD.rowid, OLD.text, OLD.role, OLD.kind, OLD.model, OLD.tool_names
-            );
-            INSERT INTO session_messages_fts(rowid, text, role, kind, model, tool_names)
-            VALUES (NEW.rowid, NEW.text, NEW.role, NEW.kind, NEW.model, NEW.tool_names);
-        END;
 ";
-
-/// The activity read fetches a bounded LIMIT of rows per session, so a
-/// covering index buys little there, and copying `metadata_json` (kilobytes
-/// per message) into it doubled the table's footprint: on one store the index
-/// alone was 0.77 GB against 0.66 GB of table. The replacement covers the
-/// ordering columns and lets the scan fetch the blob from the table.
-///
-/// Both statements are store-sized, on a store with 184k messages the build
-/// measured 33 s and dropping the blob-covering predecessor 1 m 54 s, so
-/// neither belongs in the leased schema transaction, where each one outran
-/// the per-statement execution limit and failed every open. They run as
-/// separate independently durable batches on the long-lease migration writer:
-/// the replacement is durable before the predecessor is dropped, an
-/// interrupted migration never redoes a completed statement, and the activity
-/// read uses whichever of the two is present, so no reader waits for this.
-const SESSION_ACTIVITY_INDEX_MIGRATION_SQL: &[&str] = &[
-    "CREATE INDEX IF NOT EXISTS idx_session_messages_session_activity_v2
-        ON session_messages(
-            provider, session_id, timestamp, ordinal, message_id, kind, tool_names
-        );",
-    "DROP INDEX IF EXISTS idx_session_messages_session_activity;",
-];
 
 const DELIVERY_SETTLEMENT_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS delivery_fanout_events (
@@ -428,18 +349,7 @@ pub async fn ensure_registered_schema(
             "new registered schema installation was not classified fresh",
         ));
     }
-    ensure_fresh_authority_invariants(installation).await?;
-    // A fresh store's session table is empty, so the statements that cost a
-    // migration on a populated store cost nothing here: run them and the
-    // store is installed already converged, with the activity index present
-    // for its first read. Nothing can be carrying the retired external-source
-    // tables a fresh install never creates.
-    for sql in SESSION_ACTIVITY_INDEX_MIGRATION_SQL {
-        installation.execute_batch(sql).await.map_err(|error| {
-            global_db_operation_error("install the session activity index", error)
-        })?;
-    }
-    Ok(())
+    ensure_fresh_authority_invariants(installation).await
 }
 
 #[derive(Clone, Copy)]
@@ -484,17 +394,13 @@ struct RegisteredSchemaAdmissionClassification {
 #[hotpath::measure(future = true, label = "global_db.schema.query.classify")]
 async fn classify_registered_schema_admission(
     connection: &impl QueryExecutor,
-    binding: &tracedecay_store::StoreRuntimeBindingV1,
 ) -> tracedecay_domain::errors::Result<RegisteredSchemaAdmissionClassification> {
-    Box::pin(classify_registered_schema_authorities(connection, binding)).await
+    Box::pin(classify_registered_schema_authorities(connection)).await
 }
 
 async fn classify_registered_schema_authorities(
     connection: &impl QueryExecutor,
-    binding: &tracedecay_store::StoreRuntimeBindingV1,
 ) -> tracedecay_domain::errors::Result<RegisteredSchemaAdmissionClassification> {
-    crate::registered_legacy_relations::reject_legacy_session_relation_shape(connection, binding)
-        .await?;
     // The LCM authority classifies profile content first: a legacy or
     // version-skewed session store must surface its own ProfileResetRequired
     // state instead of being masked by the coarser workflow/configuration
@@ -558,6 +464,32 @@ async fn classify_registered_schema_authorities(
     })
 }
 
+/// Authority named by the typed reset an existing store receives when the
+/// composed authority schema (observation, projection, and anchor tables with
+/// their invariant triggers) drifted from the contract. No such shape migrates
+/// in place: the store stays untouched for the operator's reset decision. A
+/// fresh install failing the same check is a programming error and keeps its
+/// storage classification.
+const AUTHORITY_SCHEMA_AUTHORITY: &str = "authority schema";
+
+async fn validate_admitted_authority_schema(
+    conn: &impl QueryExecutor,
+    is_fresh: bool,
+) -> tracedecay_domain::errors::Result<()> {
+    validate_authority_schema_contract(conn)
+        .await
+        .map_err(|error| {
+            if is_fresh {
+                error
+            } else {
+                tracedecay_domain::errors::TraceDecayError::reset_required(
+                    AUTHORITY_SCHEMA_AUTHORITY,
+                    error.to_string(),
+                )
+            }
+        })
+}
+
 /// Installs the minimum schema and write guards required before a registered
 /// runtime may be published. Historical convergence remains separately
 /// resumable so daemon admission never waits for whole-store scans.
@@ -570,7 +502,7 @@ pub async fn ensure_registered_schema_for_admission(
         configuration_fresh,
         temporal_admission,
         workflow_admission,
-    } = classify_registered_schema_admission(installation, installation.binding()).await?;
+    } = classify_registered_schema_admission(installation).await?;
     let is_fresh = configuration_fresh.is_some();
     let force_exhaustive = !authority_invariant_triggers_intact(installation).await?;
     let transaction = installation
@@ -606,7 +538,7 @@ pub async fn ensure_registered_schema_for_admission(
                 global_db_operation_error("initialize LCM status performance indexes", error)
             })?;
     }
-    validate_authority_schema_contract(installation).await?;
+    validate_admitted_authority_schema(installation, is_fresh).await?;
     Ok(RegisteredSchemaConvergence {
         force_exhaustive,
         is_fresh,
@@ -950,126 +882,7 @@ async fn converge_registered_schema_on(
     database: &Database,
     convergence: RegisteredSchemaConvergence,
 ) -> tracedecay_domain::errors::Result<()> {
-    converge_store_sized_migrations(database).await?;
     ensure_authority_invariants(database, convergence.force_exhaustive, convergence.is_fresh).await
-}
-
-/// Copies the released WITHOUT ROWID ledger in bounded transactions after
-/// admission. Each committed page releases the canonical writer, and runtime
-/// submissions continue to consult V1 until the final exact-schema retirement.
-#[hotpath::measure(
-    future = true,
-    label = "global_db.schema.persist.converge_runtime_ledger"
-)]
-pub async fn converge_runtime_writer_ledger(
-    database: &Database,
-) -> tracedecay_domain::errors::Result<()> {
-    let installation = database
-        .begin_write_transaction("install current runtime writer ledger")
-        .await?;
-    installation
-        .execute_batch(RUNTIME_LEDGER_SCHEMA)
-        .await
-        .map_err(|error| {
-            global_db_operation_error("install current runtime writer ledger", error)
-        })?;
-    installation.commit().await?;
-
-    loop {
-        let transaction = database
-            .begin_write_transaction("converge runtime writer ledger page")
-            .await?;
-        let mut presence = transaction
-            .query(RETIRED_IDEMPOTENCY_LEDGER_PRESENT_SQL, ())
-            .await
-            .map_err(|error| {
-                global_db_operation_error("inspect retired runtime writer ledger", error)
-            })?;
-        let present = presence
-            .next()
-            .await
-            .map_err(|error| {
-                global_db_operation_error("read retired runtime writer ledger state", error)
-            })?
-            .is_some();
-        drop(presence);
-        if !present {
-            transaction.commit().await?;
-            return Ok(());
-        }
-
-        let copied = transaction
-            .execute(COPY_RETIRED_IDEMPOTENCY_LEDGER_PAGE_SQL, ())
-            .await
-            .map_err(|error| {
-                global_db_operation_error("copy retired runtime writer ledger page", error)
-            })?;
-        let retired = transaction
-            .execute(DELETE_CONVERGED_IDEMPOTENCY_LEDGER_PAGE_SQL, ())
-            .await
-            .map_err(|error| {
-                global_db_operation_error("retire converged runtime writer ledger page", error)
-            })?;
-        let mut remaining = transaction
-            .query("SELECT 1 FROM td_runtime_writer_idempotency_v1 LIMIT 1", ())
-            .await
-            .map_err(|error| {
-                global_db_operation_error("inspect runtime writer ledger convergence", error)
-            })?;
-        let has_remaining = remaining
-            .next()
-            .await
-            .map_err(|error| {
-                global_db_operation_error("read runtime writer ledger convergence", error)
-            })?
-            .is_some();
-        drop(remaining);
-        transaction.commit().await?;
-
-        if !has_remaining {
-            // Current binaries never append V1. Once the last bounded page is
-            // committed, no producer can repopulate the retired table before
-            // this separately authorized exact-schema statement removes it.
-            database
-                .execute_authority_revalidated_batch(
-                    "retire converged runtime writer ledger",
-                    DROP_RETIRED_IDEMPOTENCY_LEDGER_SQL,
-                )
-                .await?;
-            return Ok(());
-        }
-        if copied == 0 && retired == 0 {
-            return Err(global_db_operation_message(
-                "converge runtime writer ledger",
-                "retired and current idempotency authorities disagree",
-            ));
-        }
-    }
-}
-
-/// Runs the migrations whose cost scales with the store rather than with the
-/// schema.
-///
-/// Installation is cheap idempotent `CREATE ... IF NOT EXISTS` and belongs in
-/// the leased admission transaction. Rebuilding an index or rewriting rows
-/// does not: each of these measured tens of seconds to minutes on a real
-/// store, so inside that transaction they tripped the per-statement execution
-/// limit and made every open of a large store fail. They run here instead,
-/// after the fail-closed admission checks, on the long-lease migration
-/// writer, releasing the writer between units, so admission, retrieval, and
-/// ordinary writes never wait for them.
-#[hotpath::measure(future = true, label = "global_db.schema.persist.converge_migrations")]
-async fn converge_store_sized_migrations(
-    database: &Database,
-) -> tracedecay_domain::errors::Result<()> {
-    converge_migration_batches(
-        database,
-        "migrate the session activity index",
-        SESSION_ACTIVITY_INDEX_MIGRATION_SQL,
-    )
-    .await?;
-    tracedecay_runtime_core::db::migrate_retired_mutation_copy_tables(database).await?;
-    converge_runtime_writer_ledger(database).await
 }
 
 /// Synchronously converges an attached existing store's historical schema.
@@ -1128,8 +941,7 @@ pub async fn ensure_attached_registered_schema(
         configuration_fresh,
         temporal_admission,
         workflow_admission,
-    } = classify_registered_schema_admission(&read_connection, database.registered_binding())
-        .await?;
+    } = classify_registered_schema_admission(&read_connection).await?;
     let force_exhaustive = !authority_invariant_triggers_intact(&read_connection).await?;
     let transaction = database
         .begin_bulk_write_transaction("install attached registered global database schema")
@@ -1156,7 +968,7 @@ pub async fn ensure_attached_registered_schema(
         })?;
         transaction.commit().await?;
     }
-    validate_authority_schema_contract(&read_connection).await?;
+    validate_admitted_authority_schema(&read_connection, configuration_fresh.is_some()).await?;
     Ok(RegisteredSchemaConvergence {
         force_exhaustive,
         is_fresh: configuration_fresh.is_some(),

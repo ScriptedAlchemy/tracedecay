@@ -1,17 +1,11 @@
-//! Large-candidate cancel journey on both MCP transports.
+//! Large-candidate cancel journey on the production `rmcp` adapter.
 //!
-//! Premise the earlier family-checkpoint fixes shared: a unit checkpoint inside
-//! one scan finishes cancellation. Those checkpoints already stop lexical,
-//! exact, redundancy, and similar work, and the search permit is released when
-//! the scan observes the signal. What stayed open is the journey that starts
-//! at `notifications/cancelled` on each transport and ends at that same
-//! checkpoint: the request stops before the next candidate batch and the
-//! single search permit is free for the next call.
-//!
-//! Both transports already register one [`tracedecay_mcp::server::RetainedDispatchAuthority`]
-//! signal. This journey runs the production connection loop and the production
-//! `rmcp` adapter against that signal, on a corpus larger than one candidate
-//! batch, and checks the result the caller sees.
+//! A unit checkpoint inside one scan finishes cancellation, and the search
+//! permit is released when the scan observes the signal. This journey starts
+//! at `notifications/cancelled` and ends at that same checkpoint: the request
+//! stops before the next candidate batch and the single search permit is free
+//! for the next call. It runs on a corpus larger than one candidate batch and
+//! checks the result the caller sees.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -43,8 +37,8 @@ use tracedecay_runtime_core::config::PinnedUserDataDir;
 
 use super::McpServer;
 use super::construction::McpServerConstructionContext;
-use crate::project::TraceDecay;
-use crate::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_project::project::TraceDecay;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 
 /// One candidate batch is 128. The fixture is larger so the fourth control
 /// observation, the same boundary the executor permit test uses, is the next
@@ -171,24 +165,10 @@ struct MountedCorpus {
     _root: tempfile::TempDir,
 }
 
-enum Transport {
-    Legacy,
-    Rmcp,
-}
-
-impl Transport {
-    const fn name(&self) -> &'static str {
-        match self {
-            Self::Legacy => "legacy",
-            Self::Rmcp => "rmcp",
-        }
-    }
-}
-
 #[tokio::test(flavor = "current_thread")]
-async fn cancelled_large_candidate_search_stops_on_legacy_and_rmcp() {
+async fn cancelled_large_candidate_search_stops_before_the_next_batch() {
     let _profile = PinnedUserDataDir::new();
-    crate::product_runtime::register_fixture_product_runtime();
+    tracedecay_project::product_runtime::register_fixture_product_runtime();
     let corpus = mount_candidate_corpus().await;
     let authority = CodeIndexSearchAuthorityV1 {
         principal: PrincipalId::new("principal.cancel-journey.fixture").expect("principal"),
@@ -211,12 +191,8 @@ async fn cancelled_large_candidate_search_stops_on_legacy_and_rmcp() {
     admission
         .pause_at
         .store(NEXT_BATCH_CHECKPOINT, Ordering::SeqCst);
-    drive_cancel_journey(Transport::Legacy, &held.server, &admission, &resume_tx).await;
-    let seen = admission.scan_checkpoints.load(Ordering::SeqCst);
-    admission
-        .pause_at
-        .store(seen.saturating_add(NEXT_BATCH_CHECKPOINT), Ordering::SeqCst);
-    drive_cancel_journey(Transport::Rmcp, &held.server, &admission, &resume_tx).await;
+    let pause_at = admission.pause_at.load(Ordering::SeqCst);
+    drive_rmcp(&held.server, &admission, &resume_tx, pause_at).await;
 
     held.server.shutdown().await;
     corpus.registry.shutdown().await;
@@ -341,56 +317,6 @@ async fn open_search_server(
         server,
         _project: project,
         _runtime: runtime,
-    }
-}
-
-async fn drive_cancel_journey(
-    transport: Transport,
-    server: &Arc<McpServer>,
-    admission: &PausingAdmission,
-    _resume_tx: &std::sync::mpsc::Sender<()>,
-) {
-    let label = transport.name();
-    let pause_at = admission.pause_at.load(Ordering::SeqCst);
-    match transport {
-        Transport::Legacy => {
-            let (mut wire, sender, mut responses) =
-                tracedecay_mcp::transport::ChannelTransport::new();
-            let connection_server = Arc::clone(server);
-            let serving = tokio::spawn(async move {
-                connection_server
-                    .run_connection(&mut wire)
-                    .await
-                    .expect("legacy connection");
-            });
-            sender
-                .send(search_call(11, 8).to_string())
-                .expect("send legacy search");
-            tokio::select! {
-                () = wait_for_batch_pause(admission, label) => {}
-                response = read_channel_response(&mut responses, label) => {
-                    panic!("{label}: search settled before the batch checkpoint: {response}");
-                }
-            }
-            sender
-                .send(cancel_notification(11).to_string())
-                .expect("send legacy cancellation");
-            let cancelled = read_channel_response(&mut responses, label).await;
-            assert_cancelled_before_next_batch(&cancelled, admission, pause_at, label);
-            sender
-                .send(search_call(12, 1).to_string())
-                .expect("send legacy follow-up");
-            let admitted = read_channel_response(&mut responses, label).await;
-            assert_next_search_admitted(&admitted, label);
-            drop(sender);
-            tokio::time::timeout(Duration::from_secs(10), serving)
-                .await
-                .expect("legacy connection did not close")
-                .expect("join legacy connection");
-        }
-        Transport::Rmcp => {
-            drive_rmcp(server, admission, _resume_tx, pause_at).await;
-        }
     }
 }
 
@@ -583,29 +509,6 @@ async fn wait_for_batch_pause(admission: &PausingAdmission, label: &str) {
         });
 }
 
-fn assert_cancelled_before_next_batch(
-    response: &Value,
-    admission: &PausingAdmission,
-    pause_at: usize,
-    label: &str,
-) {
-    assert!(
-        response.get("result").is_none(),
-        "{label}: a cancelled search must not return a result page: {response}"
-    );
-    assert_eq!(
-        response["error"]["data"]["kind"],
-        json!("cancelled"),
-        "{label}: caller-visible cancellation: {response}"
-    );
-    assert_eq!(
-        response["error"]["data"]["reason_code"],
-        json!("tool_dispatch_cancelled"),
-        "{label}: the admitted tool must settle as cancelled, not as a transport mystery: {response}"
-    );
-    assert_scan_stopped(admission, pause_at, label);
-}
-
 fn assert_scan_stopped(admission: &PausingAdmission, pause_at: usize, label: &str) {
     assert_eq!(
         admission.scan_checkpoints.load(Ordering::SeqCst),
@@ -613,10 +516,6 @@ fn assert_scan_stopped(admission: &PausingAdmission, pause_at: usize, label: &st
         "{label}: the scan must stop at the checkpoint where cancellation was observed \
          and must not start the next candidate batch"
     );
-}
-
-fn assert_next_search_admitted(response: &Value, label: &str) {
-    assert_admitted_payload(&tool_payload(response, label), label);
 }
 
 fn assert_admitted_payload(payload: &Value, label: &str) {
@@ -638,18 +537,6 @@ fn assert_admitted_payload(payload: &Value, label: &str) {
     );
 }
 
-fn tool_payload(response: &Value, label: &str) -> Value {
-    assert!(
-        response.get("error").is_none(),
-        "{label}: transport error instead of the tool result: {response}"
-    );
-    let text = response["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap_or_else(|| panic!("{label}: tool text missing: {response}"));
-    serde_json::from_str(text)
-        .unwrap_or_else(|error| panic!("{label}: tool JSON ({error}): {text}"))
-}
-
 fn search_call(id: u64, limit: u64) -> Value {
     json!({
         "jsonrpc": "2.0",
@@ -664,25 +551,6 @@ fn search_call(id: u64, limit: u64) -> Value {
             }
         }
     })
-}
-
-fn cancel_notification(id: u64) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "method": "notifications/cancelled",
-        "params": {"requestId": id, "reason": "stop before the next candidate batch"}
-    })
-}
-
-async fn read_channel_response(
-    responses: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
-    label: &str,
-) -> Value {
-    let line = tokio::time::timeout(Duration::from_mins(1), responses.recv())
-        .await
-        .unwrap_or_else(|_| panic!("{label}: response timed out"))
-        .unwrap_or_else(|| panic!("{label}: connection closed"));
-    serde_json::from_str(line.trim()).unwrap_or_else(|error| panic!("{label}: {error}: {line}"))
 }
 
 fn git(root: &Path, args: &[&str]) {

@@ -1,7 +1,7 @@
 //! Ownership-aware lifecycle planning and read-only previews.
 //!
 //! Everything here observes host state and produces immutable mutation plans;
-//! nothing writes a host path, a receipt, or a journal.
+//! nothing writes a host path or a receipt.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -107,8 +107,8 @@ pub struct ObservedHostArtifactV1 {
 pub enum HostArtifactActionV1 {
     Noop,
     WriteNew,
-    BackupThenReplace,
-    BackupThenRemove,
+    Replace,
+    Remove,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -128,11 +128,9 @@ pub struct HostBundleLifecycleRequestV1 {
     pub hermes_profile_bindings: u8,
     /// Authorization to adopt receiptless observations at this component's
     /// cataloged deploy paths. True only when the operator explicitly
-    /// confirmed adoption (`--yes --adopt`) or the host adapter recognized
-    /// the receiptless deployment as a prior first-party bundle
-    /// ([`HostComponentSetRegistrationV1::receiptless_component_provenance`]).
-    /// A cataloged deploy path alone never grants this; byte-identical
-    /// staged deploys are adoptable without it.
+    /// confirmed adoption (`--yes --adopt`). A cataloged deploy path alone
+    /// never grants this; byte-identical staged deploys are adoptable without
+    /// it.
     pub adopt_receiptless: bool,
 }
 
@@ -200,7 +198,7 @@ pub fn plan_lifecycle_mutation(
     let rollback_required = mutations.iter().any(|mutation| {
         matches!(
             mutation.action,
-            HostArtifactActionV1::BackupThenReplace | HostArtifactActionV1::BackupThenRemove
+            HostArtifactActionV1::Replace | HostArtifactActionV1::Remove
         )
     });
     Ok(HostBundleMutationPlanV1 {
@@ -286,7 +284,7 @@ pub fn plan_complete_lifecycle_mutation(
     plan.rollback_required = plan.mutations.iter().any(|mutation| {
         matches!(
             mutation.action,
-            HostArtifactActionV1::BackupThenReplace | HostArtifactActionV1::BackupThenRemove
+            HostArtifactActionV1::Replace | HostArtifactActionV1::Remove
         )
     });
     Ok(plan)
@@ -317,9 +315,8 @@ pub(super) fn plan_artifact_action(
     }
     if state.ownership_marker.as_deref() != Some(artifact.ownership_marker.as_str()) {
         // Receiptless artifacts are adoptable only inside the boundary
-        // `adopts_pre_receipt_artifact` defines: byte-identical staged bytes,
-        // host-recognized legacy provenance, or the operator's explicit
-        // adoption. Everything else with a foreign or absent marker conflicts.
+        // `adopts_pre_receipt_artifact` defines: byte-identical staged bytes
+        // or the operator's explicit adoption. Everything else with a foreign or absent marker conflicts.
         if !adopts_pre_receipt_artifact(operation, artifact, state, adopt_receiptless) {
             let reason = if let Some(marker) = state.ownership_marker.as_deref() {
                 format!(
@@ -338,8 +335,7 @@ pub(super) fn plan_artifact_action(
                 )
             } else {
                 "a receiptless file at a cataloged deploy path is adopted only when it matches \
-                 the staged bytes, carries recognizable legacy first-party provenance, or the \
-                 operator re-runs with `--yes --adopt`"
+                 the staged bytes or the operator re-runs with `--yes --adopt`"
                     .to_string()
             };
             return Err(HostBundleError::OwnershipConflict(format!(
@@ -350,7 +346,7 @@ pub(super) fn plan_artifact_action(
         return Ok(if state.artifact_digest == Some(artifact.artifact_digest) {
             HostArtifactActionV1::Noop
         } else {
-            HostArtifactActionV1::BackupThenReplace
+            HostArtifactActionV1::Replace
         });
     }
     let owned_digest = state
@@ -359,7 +355,7 @@ pub(super) fn plan_artifact_action(
     match operation {
         HostBundleLifecycleOpV1::Uninstall => {
             if state.artifact_digest == Some(owned_digest) {
-                Ok(HostArtifactActionV1::BackupThenRemove)
+                Ok(HostArtifactActionV1::Remove)
             } else {
                 Err(HostBundleError::OwnershipConflict(format!(
                     "{}: deployed bytes no longer match the receipt-owned content; refusing to \
@@ -377,7 +373,7 @@ pub(super) fn plan_artifact_action(
             if state.artifact_digest == Some(artifact.artifact_digest) {
                 Ok(HostArtifactActionV1::Noop)
             } else if state.artifact_digest == Some(owned_digest) {
-                Ok(HostArtifactActionV1::BackupThenReplace)
+                Ok(HostArtifactActionV1::Replace)
             } else {
                 Err(HostBundleError::OwnershipConflict(format!(
                     "{}: deployed file was modified outside TraceDecay since its receipt was \
@@ -390,7 +386,7 @@ pub(super) fn plan_artifact_action(
             if state.artifact_digest == Some(artifact.artifact_digest) {
                 Ok(HostArtifactActionV1::Noop)
             } else {
-                Ok(HostArtifactActionV1::BackupThenReplace)
+                Ok(HostArtifactActionV1::Replace)
             }
         }
     }
@@ -413,13 +409,6 @@ pub(super) fn plan_artifact_action(
 ///   TraceDecay staged. Paths inside TraceDecay's own staging namespace
 ///   ([`HOST_BUNDLE_STAGE_ROOT_RELATIVE`]) extend this to divergent bytes,
 ///   because everything there is TraceDecay-staged by construction;
-/// * recognizable legacy provenance: the host adapter inspected the
-///   receiptless deployment and recognized a prior first-party bundle
-///   ([`HostComponentSetRegistrationV1::receiptless_component_provenance`]),
-///   e.g. a Cursor plugin directory whose own manifest names tracedecay.
-///   Live pre-receipt bundles restamp versions and binary paths every
-///   release, so they are never byte-identical, provenance is what lets
-///   `install`/`update-plugin` converge them without wedging;
 /// * explicit operator adoption: `--yes --adopt` claimed the path knowingly.
 ///
 /// `Uninstall` never adopts: it must not delete a file whose ownership it
@@ -606,8 +595,8 @@ fn component_set_plan_digest(
 
 /// Read-only host-root preview used by the official CLI. It verifies the
 /// manifest, reads existing receipts and artifact digests, and produces the
-/// same immutable plan as apply without creating control files, backups, or
-/// directories and without recovering an interrupted journal.
+/// same immutable plan as apply without creating control files or
+/// directories.
 pub fn dry_run_host_bundle_lifecycle_at(
     root: &Path,
     manifest: &HostBundleManifestV1,
@@ -705,13 +694,13 @@ pub fn dry_run_host_bundle_lifecycle_with_lifecycle_root_at(
         &orphan_observed,
         verifier,
     )?;
-    let backup_relative_paths = plan
+    let replaced_relative_paths = plan
         .mutations
         .iter()
         .filter(|mutation| {
             matches!(
                 mutation.action,
-                HostArtifactActionV1::BackupThenReplace | HostArtifactActionV1::BackupThenRemove
+                HostArtifactActionV1::Replace | HostArtifactActionV1::Remove
             )
         })
         .map(|mutation| mutation.relative_path.clone())
@@ -724,8 +713,7 @@ pub fn dry_run_host_bundle_lifecycle_with_lifecycle_root_at(
             operation_id: request.operation_id,
             host: manifest.host,
             component: manifest.component,
-            backup_relative_paths,
-            interrupted_recovery_required: plan.rollback_required,
+            replaced_relative_paths,
         },
         plan,
     })
@@ -773,11 +761,7 @@ pub fn dry_run_host_component_set_lifecycle_with_lifecycle_root_at<
                 expected_component: component.manifest.component,
                 explicit_confirmation: true,
                 hermes_profile_bindings: planning_request.lifecycle.hermes_profile_bindings,
-                adopt_receiptless: component_receiptless_adoption(
-                    &planning_request,
-                    registration,
-                    component.manifest.component,
-                ),
+                adopt_receiptless: planning_request.lifecycle.explicit_adoption,
             },
             operation_id: planning_request.operation_id,
         };
@@ -830,19 +814,6 @@ pub fn dry_run_host_component_set_lifecycle_with_lifecycle_root_at<
             || !competing_extension_claims.is_empty(),
         competing_extension_claims,
     })
-}
-
-/// Resolve per-component receiptless-adoption authority for a set request:
-/// the operator's explicit `--adopt` or the adapter's recognized legacy
-/// provenance. Preview and confirmed execute both resolve through this, so
-/// their plans agree; provenance drift between them surfaces as the ordinary
-/// plan/`StalePreview` mismatch.
-pub(super) fn component_receiptless_adoption<R: HostComponentSetRegistrationV1>(
-    request: &HostComponentSetExecutionRequestV1,
-    registration: &R,
-    component: HostComponentV1,
-) -> bool {
-    request.lifecycle.explicit_adoption || registration.receiptless_component_provenance(component)
 }
 
 /// Collect and normalise the adapter's claim discovery so preview, plan

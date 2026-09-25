@@ -29,10 +29,9 @@ use tracedecay_domain::UtcMicros;
 use tracedecay_domain::WorkDuplicateAdjudicationCommandV1;
 use tracedecay_tool_catalog::OperationId;
 
+use tracedecay_contracts::now_micros;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_daemon_protocol::{
-    DaemonInvocationDelivery, InvocationCancellationPolicy, invocation_now_micros,
-};
+use tracedecay_daemon_protocol::{DaemonInvocationDelivery, InvocationCancellationPolicy};
 use tracedecay_daemon_protocol::{
     DaemonInvocationOutcome, DaemonInvocationRequest, WorkApplicationInvocationV1,
     WorkApplicationOutcomeV1,
@@ -353,7 +352,7 @@ pub async fn invoke_work_cli_with_delivery(
         mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
             message: "could not allocate a Work CLI request id".to_owned(),
         })?;
-    let observed_at = invocation_now_micros();
+    let observed_at = now_micros();
     let deadline = Deadline::new(UtcMicros(
         observed_at.0.saturating_add(WORK_CLI_DEADLINE_MICROS),
     ))
@@ -420,6 +419,9 @@ pub async fn invoke_work_cli_with_delivery(
                 request_id: request_id.clone(),
                 scope,
                 outcome: erase_work_outcome(outcome)?,
+                touched_files: Vec::new(),
+                code_graph: None,
+                analytics: None,
             })
         }
         DaemonInvocationOutcome::ApplicationProblem { problem } => Err(

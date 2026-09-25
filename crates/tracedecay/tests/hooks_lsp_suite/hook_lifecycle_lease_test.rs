@@ -316,7 +316,8 @@ fn response_capable_native_hooks_use_each_hosts_stdout_contract() {
 
 #[test]
 fn native_hook_captures_only_bound_transport_spool_records() {
-    use tracedecay_hooks::{HookHostV1, HookSpoolConfigV1, HookSpoolV1};
+    use tracedecay_domain::NativeHostIdentityV1;
+    use tracedecay_hooks::{HookSpoolConfigV1, HookSpoolV1};
 
     let temp = tempfile::tempdir().unwrap();
     let opencode = include_str!(
@@ -325,7 +326,7 @@ fn native_hook_captures_only_bound_transport_spool_records() {
     let cases = [
         (
             "hook-claude-post-tool-use",
-            HookHostV1::ClaudeCode,
+            NativeHostIdentityV1::ClaudeCode,
             include_bytes!(
                 "../../../../crates/tracedecay-hooks/fixtures/host_events/claude/post_tool_use_write.json"
             )
@@ -333,19 +334,19 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         ),
         (
             "hook-stop",
-            HookHostV1::ClaudeCode,
+            NativeHostIdentityV1::ClaudeCode,
             include_bytes!("../../../../crates/tracedecay-hooks/fixtures/host_events/claude/stop.json")
                 .to_vec(),
         ),
         (
             "hook-codex-stop",
-            HookHostV1::Codex,
+            NativeHostIdentityV1::Codex,
             include_bytes!("../../../../crates/tracedecay-hooks/fixtures/host_events/codex/stop.json")
                 .to_vec(),
         ),
         (
             "hook-cursor-after-file-edit",
-            HookHostV1::CursorDesktop,
+            NativeHostIdentityV1::CursorDesktop,
             include_bytes!(
                 "../../../../crates/tracedecay-hooks/fixtures/host_events/cursor/after-file-edit.json"
             )
@@ -353,7 +354,7 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         ),
         (
             "hook-cursor-stop",
-            HookHostV1::CursorDesktop,
+            NativeHostIdentityV1::CursorDesktop,
             serde_json::to_vec(&serde_json::json!({
                 "hook_event_name": "stop",
                 "conversation_id": "cursor-stop-session",
@@ -366,7 +367,7 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         ),
         (
             "hook-hermes-terminal-receipt",
-            HookHostV1::Hermes,
+            NativeHostIdentityV1::Hermes,
             include_bytes!(
                 "../../../../crates/tracedecay-hooks/fixtures/host_events/hermes/terminal-receipt.json"
             )
@@ -374,7 +375,7 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         ),
         (
             "hook-kimi-event",
-            HookHostV1::KimiCode,
+            NativeHostIdentityV1::KimiCode,
             include_bytes!(
                 "../../../../crates/tracedecay-hooks/fixtures/host_events/kimi/post-tool-use-edit.json"
             )
@@ -382,12 +383,12 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         ),
         (
             "hook-opencode-event",
-            HookHostV1::OpenCode,
+            NativeHostIdentityV1::OpenCode,
             fixture_request(opencode, "stop"),
         ),
         (
             "hook-opencode-tool-after",
-            HookHostV1::OpenCode,
+            NativeHostIdentityV1::OpenCode,
             fixture_request(opencode, "post_tool_use"),
         ),
     ];

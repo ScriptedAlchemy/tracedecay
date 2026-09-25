@@ -36,6 +36,7 @@ tracing = "0.1"
 tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
 tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", version = "0.1.0", default-features = false }
+tracedecay-configuration = { path = "../tracedecay-configuration", version = "0.1.0" }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
@@ -57,6 +58,7 @@ tracedecay-application = { path = "../tracedecay-application", version = "0.1.0"
 hex = "0.4"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
+tracedecay-configuration = { path = "../tracedecay-configuration", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0", features = ["test-helpers"] }

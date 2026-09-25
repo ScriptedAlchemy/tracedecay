@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_runtime_core::db::engine::{Value, params_from_iter};
 
 use super::scope::LcmScopeSql;
@@ -669,7 +670,7 @@ async fn payload_has_integrity_mismatch(
         return Ok(true);
     }
     let bytes = fs::read(&path).map_err(|err| LcmError::Io(err.to_string()))?;
-    Ok(util::sha256_hex(&bytes) != metadata.content_hash)
+    Ok(sha256_hex(&bytes) != metadata.content_hash)
 }
 
 fn payload_root_contained(storage_root: &Path) -> bool {

@@ -9,7 +9,7 @@ use tracedecay_contracts::{
 
 #[tokio::test]
 async fn callers_report_unsupported_temporary_receivers_without_inventing_edges() {
-    let (fixture, _root) = graph_query_fixture_with_sources(|project| {
+    let fixture = graph_query_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
         fs::write(
             project.join("src/walk.rs"),
@@ -69,46 +69,6 @@ async fn callers_report_unsupported_temporary_receivers_without_inventing_edges(
         let target: Value = serde_json::from_str(extract_text(&target.value)).unwrap();
         assert_eq!(target.as_array().unwrap().len(), 1, "{target:#}");
         let node = target[0]["node_id"].as_str().unwrap().to_owned();
-        let legacy = call_production_tool(
-            &fixture,
-            "tracedecay_callers",
-            json!({"node_id": node, "max_depth": 1, "format": "json"}),
-            None,
-            None,
-        )
-        .await
-        .expect("legacy public callers");
-        let legacy: Value = serde_json::from_str(extract_text(&legacy.value)).unwrap();
-        assert_eq!(
-            legacy["coverage"]["completeness"], expected_completeness,
-            "{method}: {legacy:#}"
-        );
-        let legacy_names = legacy["callers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|caller| caller["name"].as_str().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(legacy_names, expected_names);
-
-        let bulk = call_production_tool(
-            &fixture,
-            "tracedecay_callers_for",
-            json!({"node_ids": [node], "kind": "calls", "format": "json"}),
-            None,
-            None,
-        )
-        .await
-        .expect("bulk public callers");
-        let bulk: Value = serde_json::from_str(extract_text(&bulk.value)).unwrap();
-        assert_eq!(
-            bulk["coverage"]["completeness"], expected_completeness,
-            "{bulk:#}"
-        );
-        assert_eq!(
-            bulk["callers"][&node].as_array().unwrap().len(),
-            expected_names.len()
-        );
         let mut arguments = serde_json::to_value(CodeCallersSurfaceRequest {
             node_id: node,
             maximum_depth: 1,
@@ -121,10 +81,9 @@ async fn callers_report_unsupported_temporary_receivers_without_inventing_edges(
         })
         .unwrap();
         arguments["format"] = json!("json");
-        let result =
-            call_production_tool(&fixture, "tracedecay_code_callers", arguments, None, None)
-                .await
-                .expect("public code callers");
+        let result = call_production_tool(&fixture, "tracedecay_callers", arguments, None, None)
+            .await
+            .expect("public callers");
         let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
         let evidence = &payload["outcome"]["value"];
         let names = evidence["payload"]["items"]

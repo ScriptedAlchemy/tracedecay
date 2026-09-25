@@ -1,35 +1,46 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ActivationField, lerpRgbTuple, luma, restingNodeTint } from './activation.ts';
+import { ActivationField, luma, restingNodeTint } from './activation.ts';
 
 describe('ActivationField subscription', () => {
-  it('stays silent when a strike carries no ids, nothing real happened', () => {
+  it('notifies on a strike that lands heat, and stays silent on one that carries no ids', () => {
     const field = new ActivationField();
     const listener = vi.fn();
     field.subscribe(listener);
     field.strike([], 1);
-    expect(listener).not.toHaveBeenCalled();
+    expect(listener).toHaveBeenCalledTimes(0);
+    expect(field.warm).toBe(false);
+
+    field.strike(['a'], 0.5);
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(field.warm).toBe(true);
+    expect(field.heatOf('a')).toBe(0.5);
   });
 
   it('never fires on its own: decay is not an event', () => {
     // The field has no clock. `tick` is decay bookkeeping driven by whoever is
     // already drawing; if it notified, a renderer would wake itself forever.
     const field = new ActivationField({ halfLifeMs: 100 });
-    field.strike(['a'], 1);
     const listener = vi.fn();
     field.subscribe(listener);
-    field.tick(0);
-    field.tick(1_000);
-    field.tick(2_000);
-    expect(listener).not.toHaveBeenCalled();
+    field.strike(['a'], 1);
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(field.tick(1_000)).toBe(true);
+    expect(field.tick(2_000)).toBe(false);
+    expect(listener).toHaveBeenCalledTimes(1);
     expect(field.warm).toBe(false);
   });
 
-  it('stops notifying once unsubscribed', () => {
+  it('stops notifying once unsubscribed, while strikes still land', () => {
     const field = new ActivationField();
     const listener = vi.fn();
-    field.subscribe(listener)();
+    const unsubscribe = field.subscribe(listener);
     field.strike(['a'], 1);
-    expect(listener).not.toHaveBeenCalled();
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    unsubscribe();
+    field.strike(['b'], 1);
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(field.heatOf('b')).toBe(1);
   });
 });
 
@@ -48,25 +59,20 @@ const DARK_KIND: [number, number, number] = [110, 205, 215];
 const LIGHT_KIND: [number, number, number] = [150, 170, 175];
 
 describe('restingNodeTint', () => {
-  it('leaves the dark theme unchanged: headroom already clears the floor', () => {
-    for (const vitality of [0, 0.25, 0.6, 1]) {
-      const mix = 0.34 + 0.66 * vitality;
-      const raw = lerpRgbTuple(DARK_SUBSTRATE, DARK_KIND, mix);
-      expect(restingNodeTint(DARK_SUBSTRATE, DARK_KIND, vitality, false)).toEqual(raw);
-    }
+  it('leaves the dark theme on the plain substrate-to-kind mix: headroom already clears the floor', () => {
+    expect(restingNodeTint(DARK_SUBSTRATE, DARK_KIND, 0, false)).toEqual([56, 90, 97]);
+    expect(restingNodeTint(DARK_SUBSTRATE, DARK_KIND, 0.25, false)).toEqual([69, 118, 126]);
+    expect(restingNodeTint(DARK_SUBSTRATE, DARK_KIND, 0.6, false)).toEqual([88, 159, 168]);
+    expect(restingNodeTint(DARK_SUBSTRATE, DARK_KIND, 1, false)).toEqual([110, 205, 215]);
   });
 
   it('keeps a fully-dormant light-theme node from washing into the substrate', () => {
+    // The un-nudged 0.34 mix of these fixtures is [213, 220, 223], about 28
+    // luma units under the paper; the nudge darkens it to clear the floor, up
+    // to integer-channel rounding.
     const tint = restingNodeTint(LIGHT_SUBSTRATE, LIGHT_KIND, 0, true);
-    const rawMix = lerpRgbTuple(LIGHT_SUBSTRATE, LIGHT_KIND, 0.34);
-    const rawOffset = luma(LIGHT_SUBSTRATE) - luma(rawMix);
-    const nudgedOffset = luma(LIGHT_SUBSTRATE) - luma(tint);
-    // The un-nudged 0.34 mix of these fixtures clears well under the floor;
-    // the nudge must close nearly all of that gap (integer-channel rounding
-    // accounts for the last fraction of a luma unit).
-    expect(rawOffset).toBeLessThan(30);
-    expect(nudgedOffset).toBeGreaterThanOrEqual(41);
-    expect(nudgedOffset).toBeGreaterThan(rawOffset);
+    expect(tint).toEqual([199, 206, 208]);
+    expect(luma(LIGHT_SUBSTRATE) - luma(tint)).toBeGreaterThanOrEqual(41);
   });
 
 });

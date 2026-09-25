@@ -42,7 +42,7 @@ PY
   `token_savior.server` over Python stdio.
 - **System prompt**, rewrites `SYSTEM_PROMPT_TS` to map each token-savior
   tool to its tracedecay equivalent (`find_symbol` →
-  `tracedecay_find_exact_symbol`, `get_function_source` → `tracedecay_body`,
+  `tracedecay_find_exact_symbol`, `get_function_source` → `tracedecay_source_body`,
   `get_full_context` → `tracedecay_context`, etc.). Where no tracedecay
   equivalent exists (`add_field_to_model`, `move_symbol`,
   `analyze_config`, `analyze_docker`), the prompt explicitly allows

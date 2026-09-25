@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # End-to-end proof that the TraceDecay Claude Code bundle installs through a
-# STOCK Claude Code CLI. TraceDecay stages the marketplace bundle; the stock
-# host itself performs marketplace registration, plugin install, enablement,
-# and component resolution, exactly the documented operator journey. Used by
-# the `claude-integration` CI job and runnable locally:
+# STOCK Claude Code CLI. `tracedecay install` deploys the marketplace bundle
+# and drives the host's own `claude plugin` commands inside its install
+# transaction; the stock host itself performs marketplace registration,
+# plugin install, enablement, and component resolution. Used by the
+# `claude-integration` CI job and runnable locally:
 #
 #   npm install --global @anthropic-ai/claude-code@<pinned>
 #   cargo build -p tracedecay-cli --bin tracedecay
@@ -27,7 +28,7 @@ stage=""
 main() {
     local tracedecay_bin claude_bin
     local fake_home project marketplace
-    local stage_output plugin_list details doctor_out
+    local plugin_list details doctor_out
 
     tracedecay_bin="$(resolve_tracedecay_bin)"
     claude_bin="${CLAUDE_BIN:-$(command -v claude || true)}"
@@ -54,29 +55,15 @@ main() {
     printf 'pub fn add(a: i32, b: i32) -> i32 { a + b }\n' > "$project/src/lib.rs"
     seed_throwaway_project "$project"
 
-    # Stage the marketplace bundle. Claude Code owns marketplace registration
-    # and enablement, so this step deliberately stops with handover guidance,
-    # the bundle on disk plus the exact stock commands to run next.
-    echo "== tracedecay install --agent claude (stages the marketplace bundle)"
-    set +e
-    stage_output="$(cd "$project" && HOME="$fake_home" XDG_CONFIG_HOME="$fake_home/.config" \
+    # Claude Code owns marketplace registration and enablement, so install
+    # runs the stock `claude plugin marketplace add` and `claude plugin
+    # install` itself and fails, rolling back, when that CLI cannot.
+    echo "== tracedecay install --agent claude (drives the stock claude plugin commands)"
+    (cd "$project" && PATH="$(dirname "$claude_bin"):$PATH" \
+        HOME="$fake_home" XDG_CONFIG_HOME="$fake_home/.config" \
         TRACEDECAY_DATA_DIR="$stage/profile" \
-        "$tracedecay_bin" install --agent claude 2>&1)"
-    set -e
-    echo "$stage_output"
+        timeout 360 "$tracedecay_bin" install --agent claude)
     test -f "$marketplace/.claude-plugin/marketplace.json"
-    echo "$stage_output" | grep -q "claude plugin marketplace add" || {
-        echo "error: staged install did not hand over to the stock host commands" >&2
-        return 1
-    }
-
-    echo "== stock claude plugin marketplace add"
-    (cd "$project" && HOME="$fake_home" timeout 180 \
-        "$claude_bin" plugin marketplace add "$marketplace")
-
-    echo "== stock claude plugin install"
-    (cd "$project" && HOME="$fake_home" timeout 180 \
-        "$claude_bin" plugin install tracedecay@tracedecay)
 
     echo "== stock claude plugin list"
     plugin_list="$(cd "$project" && HOME="$fake_home" timeout 180 \

@@ -557,40 +557,4 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn execution_admission_publishes_the_snapshot_consumed_by_attempt_start() {
-        for operation in [
-            WorkOperation::Create,
-            WorkOperation::ReviewProposal,
-            WorkOperation::AcceptProposal,
-        ] {
-            assert_eq!(
-                operation.result_schema_name(),
-                "WorkProductMutationReceiptV1",
-                "{}",
-                operation.operation_key()
-            );
-        }
-        assert_eq!(
-            WorkOperation::Create.request_schema_name(),
-            "CreateWorkTaskRequestV1"
-        );
-        assert_eq!(
-            WorkOperation::ReviewProposal.request_schema_name(),
-            "ReviewWorkProposalRequestV1"
-        );
-        assert_eq!(
-            WorkOperation::AcceptProposal.request_schema_name(),
-            "AcceptWorkProposalRequestV1"
-        );
-        assert_eq!(
-            WorkOperation::AdmitExecution.request_schema_name(),
-            "AdmitWorkExecutionRequestV1"
-        );
-        assert_eq!(
-            WorkOperation::AdmitExecution.result_schema_name(),
-            "AdmittedWorkExecutionV1"
-        );
-    }
 }

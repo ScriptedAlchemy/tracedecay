@@ -1,6 +1,6 @@
 //! Product-view observations emitted only from exact Work owner results.
 
-use tracedecay_contracts::{GeneratedWorkProposal, ReviewProposalDispositionV1};
+use tracedecay_contracts::{GeneratedWorkProposal, ReviewWorkProposalDispositionV1};
 use tracedecay_domain::{
     AppropriateRelianceObservedV1, AutomationFunnelObservedV1, AutomationTerminalV1,
     CoverageStateV1, ObservabilityPayloadV1, ObservabilityTerminalResultV1, ObservedTernaryV1,
@@ -103,7 +103,7 @@ pub fn record_reliance_decision(
     producer: Option<&BoundedObservabilityProducerV1>,
     proposal_ref: &str,
     command_ref: &str,
-    disposition: Option<ReviewProposalDispositionV1>,
+    disposition: Option<ReviewWorkProposalDispositionV1>,
     observed_at: UtcMicros,
 ) -> WorkOwnerObservationResultV1 {
     let Some(producer) = producer else {
@@ -111,10 +111,10 @@ pub fn record_reliance_decision(
     };
     let decision = match disposition {
         None => RelianceDecisionV1::Accepted,
-        Some(ReviewProposalDispositionV1::Rejected) => RelianceDecisionV1::Rejected,
+        Some(ReviewWorkProposalDispositionV1::Rejected) => RelianceDecisionV1::Rejected,
         // Superseding does not carry the rationale required to classify an
         // override, so it is deliberately not projected as reliance.
-        Some(ReviewProposalDispositionV1::Superseded) => {
+        Some(ReviewWorkProposalDispositionV1::Superseded) => {
             return WorkOwnerObservationResultV1::Unavailable;
         }
     };

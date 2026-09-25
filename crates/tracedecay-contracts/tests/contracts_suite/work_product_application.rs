@@ -14,12 +14,12 @@ use tracedecay_contracts::{
     WorkGraphReadPortV1, WorkGraphReadRequestV1, WorkGraphReadV1, WorkGraphSelectionCoverageV1,
     WorkGraphTimelineV1, WorkGraphVersionEntryV1, WorkHistoryCoverageV1, WorkHistoryReadPortV1,
     WorkHistoryRequestV1, WorkHistoryServiceV1, WorkHistoryV1, WorkProductApplicationErrorV1,
-    WorkProductBindingV1, WorkProductEventCommitOutcomeV1, WorkProductEventCommitV1,
-    WorkProductEventDraftV1, WorkProductEventPortErrorV1, WorkProductEventPortV1,
-    WorkProductEvidenceServiceV1, WorkProductExpectedAuthorityV1, WorkProductMutationIdentityV1,
-    WorkProductMutationServiceV1, WorkProductOwnerAuthorizationErrorV1,
-    WorkProductOwnerAuthorizationPortV1, WorkProductReadServiceV1, WorkProductRevisionPinsV1,
-    WorkProductSelectionScopeV1, WorkRelationScopeV1,
+    WorkProductAuthorizedRelationScopeV1, WorkProductBindingV1, WorkProductEventCommitOutcomeV1,
+    WorkProductEventCommitV1, WorkProductEventDraftV1, WorkProductEventPortErrorV1,
+    WorkProductEventPortV1, WorkProductEvidenceServiceV1, WorkProductExpectedAuthorityV1,
+    WorkProductMutationIdentityV1, WorkProductMutationServiceV1,
+    WorkProductOwnerAuthorizationErrorV1, WorkProductOwnerAuthorizationPortV1,
+    WorkProductReadServiceV1, WorkProductRevisionPinsV1, WorkProductSelectionScopeV1,
 };
 use tracedecay_domain::{
     ActorId, BrainId, CatalogGenerationId, ConfigurationRevisionId, InitiativeId, ManifestDigest,
@@ -47,10 +47,12 @@ fn binding() -> WorkProductBindingV1 {
 }
 
 fn repository_selection() -> WorkProductSelectionScopeV1 {
-    WorkProductSelectionScopeV1::relations(BTreeSet::from([WorkRelationScopeV1::Repository {
-        project_id: id("project.work.fixture"),
-        repository_id: id("repository.work.fixture"),
-    }]))
+    WorkProductSelectionScopeV1::relations(BTreeSet::from([
+        WorkProductAuthorizedRelationScopeV1::Repository {
+            project_id: id("project.work.fixture"),
+            repository_id: id("repository.work.fixture"),
+        },
+    ]))
     .unwrap()
 }
 
@@ -114,10 +116,10 @@ impl WorkProductOwnerAuthorizationPortV1 for RegisteredOwner {
             WorkProductSelectionScopeV1::ProfileOwnedNoGit => true,
             WorkProductSelectionScopeV1::Relations { relation_scopes } => {
                 relation_scopes.iter().all(|relation| match relation {
-                    WorkRelationScopeV1::Project { project_id } => {
+                    WorkProductAuthorizedRelationScopeV1::Project { project_id } => {
                         project_id == &context.scope().project_id
                     }
-                    WorkRelationScopeV1::Repository {
+                    WorkProductAuthorizedRelationScopeV1::Repository {
                         project_id,
                         repository_id,
                     } => {

@@ -187,8 +187,7 @@ fn restore_once(
         CodeIndexPublishedGenerationV1::decode_partitioned_sealed(manifest, |request, buffer| {
             read_segment(segments, request, buffer)
         })
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "generation manifest is not a partitioned manifest".to_owned())?;
+        .map_err(|error| error.to_string())?;
     let mut coverage = restored
         .analysis_coverage()
         .map(|(path, _)| path.to_owned())

@@ -5,7 +5,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::admission::test_support::MemoryHostAdmission;
-use crate::runtime::claude::{scan_claude_source_frames, try_scan_claude_source_frames};
+use crate::runtime::hosts::claude::scan_claude_source_frames;
 
 #[path = "tests/projection.rs"]
 mod projection;
@@ -213,24 +213,23 @@ async fn production_vertical_persists_only_sanitized_payload_and_searchable_v1_r
     );
     let source = fixture.source("production-session");
     assert_eq!(
-        source.transcript_paths(&fixture.profile),
+        source
+            .discover_transcript_paths(TranscriptDiscoveryBounds::default_walk())
+            .paths,
         vec![fixture.transcript.clone()]
     );
-    let (scheduled, deferred) = scheduled_source_paths(
-        &fixture.admission,
-        &ObservationScopeV1::Profile,
-        &source,
-        &fixture.profile,
-    )
-    .await
-    .unwrap();
+    let (scheduled, deferred) =
+        scheduled_source_paths(&fixture.admission, &ObservationScopeV1::Profile, &source)
+            .await
+            .unwrap();
     assert_eq!(scheduled, vec![fixture.transcript.clone()]);
     assert_eq!(deferred, 0);
     let identity = identify_claude_source(&fixture.transcript).unwrap();
-    let scan = try_scan_claude_source_frames(
+    let scan = try_scan_claude_source_frames_with_resume(
         identity,
         StoredCursor::default(),
         Some(STRICT_JSONL_BATCH_BYTES),
+        None,
     )
     .unwrap()
     .unwrap();
@@ -352,7 +351,7 @@ async fn registered_claude_ingest_api_routes_through_observation_authority() {
     fixture.write_record("legacy API searchable", "legacy-api-secret");
     let stats = crate::runtime::with_transcript_source_home(
         fixture.home.clone(),
-        crate::runtime::claude::ingest_user_sessions_with_admission(
+        crate::runtime::hosts::claude::ingest_user_sessions_with_admission(
             &fixture.profile,
             Some("legacy-api-session".to_string()),
             Vec::new(),

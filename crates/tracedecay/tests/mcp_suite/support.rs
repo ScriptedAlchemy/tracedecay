@@ -21,11 +21,6 @@ use tempfile::TempDir;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 #[cfg(feature = "test-transport")]
 use tracedecay::mcp::McpServer;
-use tracedecay::project::TraceDecay;
-#[cfg(feature = "test-transport")]
-use tracedecay::test_support::host_admission::{
-    HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1,
-};
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::errors::TraceDecayError;
 #[cfg(feature = "test-transport")]
@@ -37,13 +32,18 @@ use tracedecay_domain::{
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
     ObservationSourceRangeV1, PayloadAccessState, PayloadReferenceV1, ProjectId,
     ProjectionGenerationId, ProjectionOutputOrdinalV1, ProviderId, RetentionClass,
-    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, SanitizationReceiptId,
+    RetrievalAnchorRecord, RetrievalAnchorRecordParts, SanitizationReceiptId,
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
     SessionId, SessionProjectionGenerationV1, UtcMicros, derive_exact_observation_anchor_id,
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_mcp::McpTransport;
 use tracedecay_mcp::ToolResult;
+use tracedecay_project::project::TraceDecay;
+#[cfg(feature = "test-transport")]
+use tracedecay_project::test_support::host_admission::{
+    HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1,
+};
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::admission::HostAdmissionScope;
@@ -55,10 +55,10 @@ use tracedecay_store::{
     SessionFrozenWatermarksV1, SessionGenerationActivationRequestV1,
     SessionGenerationRebuildRequestV1, SessionTemporalCapabilitiesV1, SessionTemporalCapabilityV1,
     SessionTemporalProjectionBatchV1, SessionTemporalProjectionStore, SessionTemporalSnapshotV1,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
 #[cfg(feature = "test-transport")]
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 pub(crate) use crate::common::{ProcessEnvGuard, lock_process_env};
 
@@ -504,7 +504,7 @@ fn pin_production_composition_profile(
 ) -> (common::EnvVarGuard, common::EnvVarGuard) {
     let profile_root = harness.profile_root();
     let data_dir_guard =
-        common::EnvVarGuard::set(tracedecay::config::USER_DATA_DIR_ENV, profile_root);
+        common::EnvVarGuard::set(tracedecay_project::config::USER_DATA_DIR_ENV, profile_root);
     let global_db_guard =
         common::EnvVarGuard::set(common::GLOBAL_DB_ENV, profile_root.join("global.db"));
     let response_handle_root =
@@ -1044,14 +1044,14 @@ impl HomeEnvGuard {
     pub(crate) fn set(_process_env: &ProcessEnvGuard, home: &Path) -> Self {
         let previous_home = std::env::var_os("HOME");
         let previous_userprofile = std::env::var_os("USERPROFILE");
-        let previous_data_dir = std::env::var_os(tracedecay::config::USER_DATA_DIR_ENV);
+        let previous_data_dir = std::env::var_os(tracedecay_project::config::USER_DATA_DIR_ENV);
         let home = canonicalize_test_dir(home);
         unsafe {
             std::env::set_var("HOME", &home);
             std::env::set_var("USERPROFILE", &home);
             std::env::set_var(
-                tracedecay::config::USER_DATA_DIR_ENV,
-                home.join(tracedecay::config::TRACEDECAY_DIR),
+                tracedecay_project::config::USER_DATA_DIR_ENV,
+                home.join(tracedecay_project::config::TRACEDECAY_DIR),
             );
         }
         Self {
@@ -1074,8 +1074,10 @@ impl Drop for HomeEnvGuard {
                 None => std::env::remove_var("USERPROFILE"),
             }
             match self.previous_data_dir.take() {
-                Some(value) => std::env::set_var(tracedecay::config::USER_DATA_DIR_ENV, value),
-                None => std::env::remove_var(tracedecay::config::USER_DATA_DIR_ENV),
+                Some(value) => {
+                    std::env::set_var(tracedecay_project::config::USER_DATA_DIR_ENV, value)
+                }
+                None => std::env::remove_var(tracedecay_project::config::USER_DATA_DIR_ENV),
             }
         }
     }
@@ -1823,14 +1825,14 @@ pub(crate) async fn persist_temporal_lcm_observation_with_access(
     let authorization =
         build_observation_resolution_authorization_v1(&observation, "observation-capture.v1")
             .unwrap();
-    let base_anchor = build_observation_retrieval_anchor_v2(
+    let base_anchor = build_observation_retrieval_anchor(
         &observation,
         projection_generation.clone(),
         ingested_at,
         authorization,
     )
     .unwrap();
-    let anchor = RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+    let anchor = RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
         target: base_anchor.target().clone(),
         owner: base_anchor.owner().clone(),
         aliases: base_anchor.aliases().to_vec(),

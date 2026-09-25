@@ -9,17 +9,15 @@ use tracedecay_mcp::server::{
     ApplicationCancellationRegistration, DispatchControl, DispatchControlRequest,
     DispatchSettlement, DispatchToolPolicy, PreparedDispatchControl, dispatch_cancelled_error,
 };
+use tracedecay_mcp::tools::response_trailers::{
+    ToolTokenAccounting, record_token_accounting, response_token_count,
+};
 use tracedecay_mcp::{
     ToolResult, mark_semantic_tool_error, semantic_failure_reason, server::resources_list_result,
     tool_error_response, tool_result_has_semantic_error,
 };
 use tracedecay_runtime_core::db::migrations::render_expected_final_schema_markdown;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
-
-/// Prefix of the out-of-band token-accounting block appended after a tool's
-/// payload. `tracedecay tool` routes blocks carrying it to stderr so a JSON
-/// payload on stdout stays a single document for scripts and hosts.
-pub const TOKEN_ACCOUNTING_FOOTER_PREFIX: &str = "tracedecay_metrics:";
 
 mod tool_dispatch;
 
@@ -52,12 +50,6 @@ impl Drop for ToolActivityPublishRunning {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
     }
-}
-
-struct ToolTokenAccounting {
-    raw_file_tokens: u64,
-    response_tokens: u64,
-    net_saved_tokens: u64,
 }
 
 pub(super) fn invocation_target_for_route(
@@ -274,11 +266,11 @@ impl McpServer {
                     .map(|id| tool_error_response(id, &request.method, &error));
             }
         };
-        Box::pin(self.handle_request_for_connection(
-            request,
+        Box::pin(self.dispatch_envelope(
+            McpDispatchRequest::raw(request),
             self.timings_enabled(),
             &mut connection,
-            false,
+            tracedecay_runtime_core::cancellation::CancellationToken::new(),
         ))
         .await
     }
@@ -313,33 +305,6 @@ impl McpServer {
         }
     }
 
-    /// Dispatches a request parsed off the legacy line-oriented JSON-RPC
-    /// transport.
-    ///
-    /// A thin adapter onto [`Self::dispatch_envelope`]: the raw params are
-    /// borrowed from the parsed request exactly as before, so this transport's
-    /// behavior and wire bytes are unchanged by the typed envelope.
-    #[hotpath::skip]
-    pub(crate) async fn handle_request_for_connection(
-        &self,
-        request: &JsonRpcRequest,
-        timings_enabled: bool,
-        connection: &mut ConnectionRouteState,
-        pre_cancelled: bool,
-    ) -> Option<JsonRpcResponse> {
-        let cancellation = tracedecay_session_memory::context::CancellationToken::new();
-        if pre_cancelled {
-            cancellation.cancel();
-        }
-        Box::pin(self.dispatch_envelope(
-            McpDispatchRequest::from_legacy(request),
-            timings_enabled,
-            connection,
-            cancellation,
-        ))
-        .await
-    }
-
     /// The single dispatch authority behind every MCP transport.
     ///
     /// Reads the request only through [`McpDispatchRequest`] accessors, so a
@@ -352,7 +317,7 @@ impl McpServer {
         request: McpDispatchRequest<'_>,
         timings_enabled: bool,
         connection: &mut ConnectionRouteState,
-        cancellation: tracedecay_session_memory::context::CancellationToken,
+        cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
     ) -> Option<JsonRpcResponse> {
         // A response lease belongs to exactly one request. Production
         // transports take it before writing; direct callers drop it with this
@@ -973,21 +938,6 @@ impl McpServer {
             .or_insert_with(|| json!(elapsed_us));
     }
 
-    fn response_token_count(result: &ToolResult) -> u64 {
-        result
-            .value
-            .get("content")
-            .and_then(|content| content.as_array())
-            .map_or(0, |content| {
-                let total_chars: usize = content
-                    .iter()
-                    .filter_map(|item| item.get("text").and_then(|text| text.as_str()))
-                    .map(str::len)
-                    .sum();
-                (total_chars / 4) as u64
-            })
-    }
-
     /// Resolves the raw-read counterfactual from the retained cache, falling
     /// back to bounded metadata reads for files owned by the current response.
     ///
@@ -1044,41 +994,42 @@ impl McpServer {
         tool_name: &str,
         result: &mut ToolResult,
     ) -> ToolTokenAccounting {
+        // A result the shared renderer already accounted carries its figures
+        // and footer; only persist them.
+        let accounting = match result.token_accounting() {
+            Some(accounting) => accounting,
+            None => self.account_unrendered_result(cg, result).await,
+        };
+        self.spawn_token_accounting_persist(
+            cg.project_root(),
+            tool_name,
+            accounting.net_saved_tokens(),
+            accounting.raw_file_tokens,
+        );
+        self.maybe_flush_worldwide();
+        accounting
+    }
+
+    async fn account_unrendered_result(
+        &self,
+        cg: &TraceDecay,
+        result: &mut ToolResult,
+    ) -> ToolTokenAccounting {
         // Estimate approximate token count of the graph response
         // ("after"), before any banners/metrics lines are appended.
-        let response_tokens = Self::response_token_count(result);
+        let response_tokens = response_token_count(result);
         // "Before" counterfactual: reading every referenced file raw,
         // in full. Counters credit only the net saving per call,
         // before minus what this response actually delivered.
         let raw_file_tokens = self
             .raw_file_tokens(cg.project_root(), &result.touched_files)
             .await;
-        let net_saved_tokens = raw_file_tokens.saturating_sub(response_tokens);
-        self.spawn_token_accounting_persist(
-            cg.project_root(),
-            tool_name,
-            net_saved_tokens,
-            raw_file_tokens,
-        );
-        self.maybe_flush_worldwide();
-
-        // Append per-call token savings to the response content.
-        if raw_file_tokens > 0
-            && let Some(content) = result
-                .value
-                .get_mut("content")
-                .and_then(|c| c.as_array_mut())
-        {
-            content.push(json!({"type": "text", "text": format!(
-                "\n{TOKEN_ACCOUNTING_FOOTER_PREFIX} before={raw_file_tokens} after={response_tokens}"
-            )}));
-        }
-
-        ToolTokenAccounting {
+        let accounting = ToolTokenAccounting {
             raw_file_tokens,
             response_tokens,
-            net_saved_tokens,
-        }
+        };
+        record_token_accounting(result, accounting);
+        accounting
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1109,15 +1060,15 @@ impl McpServer {
         let savings_db = self.accounting_db.clone();
         let analytics_db = self.global_db.clone();
         if savings_db.is_some() || analytics_db.is_some() {
+            let net_saved_tokens = accounting.net_saved_tokens();
             let ToolTokenAccounting {
                 raw_file_tokens,
                 response_tokens,
-                net_saved_tokens,
             } = accounting;
             let project_path_str =
                 RegisteredGlobalDb::canonical_project_key(accounting_project_root);
             let tool_name_owned = tool_name.to_string();
-            let ts = crate::project::current_timestamp();
+            let ts = tracedecay_runtime_core::tracedecay::current_timestamp();
             let failure_reason = (analytics_outcome == "error")
                 .then(|| semantic_failure_reason(result))
                 .flatten();
@@ -1192,31 +1143,16 @@ impl McpServer {
     }
 
     #[hotpath::measure(label = "mcp.server.tools_call.complete.version_check")]
-    fn append_version_notice(
-        &self,
-        result: &mut ToolResult,
-        connection_notifications: &std::sync::Mutex<Vec<Value>>,
-    ) {
-        // Prepend the version-update warning and queue the corresponding
-        // protocol notification. The check serves the cached answer and
-        // refreshes in the background, so completion never awaits the fetch.
-        if let Some(warning) = self.check_version_update() {
-            if let Some(content) = result
+    fn append_version_notice(&self, result: &mut ToolResult) {
+        // The check serves the cached answer and refreshes in the background,
+        // so completion never awaits the fetch.
+        if let Some(warning) = self.check_version_update()
+            && let Some(content) = result
                 .value
                 .get_mut("content")
                 .and_then(|c| c.as_array_mut())
-            {
-                content.insert(0, json!({"type": "text", "text": &warning}));
-            }
-            recover_lock(connection_notifications).push(json!({
-                "jsonrpc": "2.0",
-                "method": "notifications/message",
-                "params": {
-                    "level": "warning",
-                    "logger": "tracedecay",
-                    "data": warning
-                }
-            }));
+        {
+            content.insert(0, json!({"type": "text", "text": warning}));
         }
     }
 
@@ -1255,7 +1191,6 @@ impl McpServer {
         let client_name = connection_server.client_name();
         let connection_client_name = client_name.as_deref();
         let connection_instance_id = connection_server.connection_identity.instance_id();
-        let connection_notifications = &connection_server.pending_notifications;
         let DispatchedToolCall {
             cg,
             selected_owner,
@@ -1318,7 +1253,7 @@ impl McpServer {
                     )
                     .await;
                 }
-                self.append_version_notice(&mut result, connection_notifications);
+                self.append_version_notice(&mut result);
                 self.prepend_index_warnings(selected_owner.is_none(), &mut result);
                 hotpath::measure_block!(
                     "mcp.server.tools_call.complete.response",
@@ -1380,7 +1315,7 @@ impl McpServer {
 
     fn message_search_worker_is_unavailable(&self, tool_name: &str, arguments: &Value) -> bool {
         if tool_name != "tracedecay_message_search"
-            || arguments.get("catch_up").and_then(Value::as_bool) != Some(true)
+            || arguments.get("require_fresh").and_then(Value::as_bool) != Some(true)
         {
             return false;
         }
@@ -1461,7 +1396,7 @@ impl McpServer {
         params: ToolCallParams<'_>,
         timings_enabled: bool,
         connection: &mut ConnectionRouteState,
-        cancellation: tracedecay_session_memory::context::CancellationToken,
+        cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
     ) -> JsonRpcResponse {
         let started = timings_enabled.then(std::time::Instant::now);
         let mut response = Box::pin(self.handle_tools_call_inner(
@@ -1490,7 +1425,7 @@ impl McpServer {
         params: ToolCallParams<'_>,
         timings_enabled: bool,
         connection: &mut ConnectionRouteState,
-        cancellation: tracedecay_session_memory::context::CancellationToken,
+        cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
     ) -> JsonRpcResponse {
         let PreparedToolCall {
             tool_name,
@@ -1683,17 +1618,9 @@ impl McpServer {
                 )
                 .await)
         };
-        let dispatch_outcome = if connection.connection_owns_dispatch()
-            && control.permits_connection_owned_execution()
-        {
-            control
-                .run_connection_owned(dispatch_server.dispatch_authority.registry(), worker)
-                .await
-        } else {
-            control
-                .run_retained(dispatch_server.dispatch_authority.registry(), worker)
-                .await
-        };
+        let dispatch_outcome = control
+            .run_retained(dispatch_server.dispatch_authority.registry(), worker)
+            .await;
         // Safety: each guard is dropped exactly once, here, after the worker
         // has settled, and neither is used again.
         unsafe {
@@ -1886,7 +1813,6 @@ mod git_read_control_tests {
                 "{tool_name} must carry the caller cancellation signal into the verified graph"
             );
         }
-        assert!(!tool_supports_live_cancellation("tracedecay_outline"));
         for tool_name in [
             "tracedecay_git_status",
             "tracedecay_git_diff",
@@ -2034,8 +1960,6 @@ mod git_read_control_tests {
     #[test]
     fn non_git_reads_stay_outside_the_controlled_read_horizon() {
         for tool_name in [
-            "tracedecay_outline",
-            "tracedecay_body",
             "tracedecay_dead_code",
             "tracedecay_health",
             "tracedecay_context",

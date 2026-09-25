@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tracedecay::project::TraceDecay;
+use tracedecay_project::project::TraceDecay;
 
 use crate::support::{extract_json, handle_tool_call, setup_empty_project};
 
@@ -66,7 +66,7 @@ async fn runtime_reports_this_process_and_the_admitted_store_files() {
     );
     assert_eq!(
         payload["tracedecay_version"].as_str(),
-        Some(tracedecay::version::build_version().expect("fixture product runtime"))
+        Some(tracedecay_project::version::build_version().expect("fixture product runtime"))
     );
     assert!(payload.get("doctor_report").is_none());
     assert!(payload.get("session_temporal_health").is_none());

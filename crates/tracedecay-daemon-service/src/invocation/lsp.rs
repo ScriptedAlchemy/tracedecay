@@ -28,7 +28,7 @@ pub(super) fn admit_lsp_control(
             ApplicationProblem::cancelled_before_admission(),
         )));
     }
-    if deadline.is_elapsed_at(current_micros()) {
+    if deadline.is_elapsed_at(now_micros()) {
         return Err(Box::new(DaemonInvocationResponse::application_problem(
             request_id,
             ApplicationProblem::timed_out_before_admission(),
@@ -234,7 +234,7 @@ impl DaemonInvocationService {
         )
         .ok()?;
         if request_cancellation.is_some_and(CancellationToken::is_cancelled)
-            || deadline.is_elapsed_at(current_micros())
+            || deadline.is_elapsed_at(now_micros())
         {
             return None;
         }
@@ -308,7 +308,7 @@ impl DaemonInvocationService {
         let authority = AuthorityReceipt::from_context(&context, policy, observed_at).ok()?;
         let execution = OperationReceipt::completed(
             observed_at,
-            current_micros(),
+            now_micros(),
             deadline,
             OperationBudgetUsage::default(),
         )
@@ -378,8 +378,10 @@ impl DaemonInvocationService {
         let project_runtimes_clean = self.project_runtimes.shut_down_all().await;
         step("project_runtimes_shut_down");
         self.session_holder_databases.lock().await.clear();
-        self.operation_events.expire_all().await;
-        step("operation_events_expired");
+        // The operation-event authority is process-global, not owned by this
+        // composition: only frontiers without a live producer expire here.
+        self.operation_events.expire_idle().await;
+        step("idle_operation_events_expired");
         let lease_shutdown_clean = lease_shutdown.is_ok();
         if let Err(problem) = lease_shutdown {
             tracing::error!(
@@ -677,7 +679,7 @@ impl DaemonInvocationService {
                 &mut session.next_delivery_sequence,
                 frame,
                 access.session_id(),
-                current_micros(),
+                now_micros(),
             );
         }
         let frame = outbound.and_then(|frame| String::from_utf8(frame).ok());

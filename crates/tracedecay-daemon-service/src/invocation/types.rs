@@ -399,7 +399,8 @@ impl BoundedHookOrchestratorV1 {
                 entry.cancellation.cancel();
             }
         }
-        let deadline = tokio::time::Instant::now() + crate::TASK_ABORT_DEADLINE;
+        let deadline =
+            tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
         for mut task in tasks {
             match tokio::time::timeout_at(deadline, &mut task).await {
                 Ok(Ok(())) => {}

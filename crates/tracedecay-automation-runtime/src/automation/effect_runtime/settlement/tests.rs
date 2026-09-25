@@ -39,6 +39,10 @@ impl crate::automation::backend::AgentTaskBackend for NeverAutomationBackend {
     > {
         panic!("disabled retained automation must not invoke its backend")
     }
+
+    fn executable(&self) -> Option<&std::path::Path> {
+        None
+    }
 }
 
 use tracedecay_domain::test_fixtures::digest;
@@ -141,8 +145,6 @@ fn admission(run_id: &str, request_id: &str) -> DurableAutomationAdmission {
                 project_id: scope.project_id.clone(),
             },
             recovery_problem: reset_problem(&request_id, &scope, &request),
-            retirement: None,
-            reset_source_digest: None,
         },
     })
 }
@@ -195,8 +197,6 @@ fn session_reflector_admission(run_id: &str, request_id: &str) -> DurableAutomat
             project_id: admission.scope.project_id.clone(),
         },
         recovery_problem: reset_problem(&admission.request_id, &admission.scope, &request),
-        retirement: None,
-        reset_source_digest: None,
     };
     admission.request = request;
     seal_effect_authority(admission)
@@ -683,7 +683,6 @@ fn session_evidence_timeout_ledger_projects_a_typed_terminal() {
         "rejected_count": 0,
         "skipped_count": 1,
         "error": "session_evidence_timed_out",
-        "fallback_status": "session_evidence_timed_out",
         "started_at": "100",
         "completed_at": "100",
         "completed_at_micros": 100_000_000,
@@ -732,39 +731,48 @@ fn durable_admission_accepts_distinct_run_and_retained_effect_input_digests() {
 }
 
 #[test]
-fn legacy_terminal_wire_shape_migrates_without_losing_replay() {
+fn inline_terminal_wire_shape_is_rejected_without_rewrite() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("legacy-terminal.json");
-    let admitted = admission("run.legacy-journal", "request.legacy-journal");
-    let terminal = success_terminal(&admitted, "run.legacy-journal");
-    let legacy = json!({
-        "admission": admitted,
-        "state": {
-            "state": "terminal",
-            "terminal": terminal,
-        },
-    });
-    std::fs::write(
-        &path,
-        serde_json::to_vec_pretty(&legacy).expect("legacy bytes"),
-    )
-    .expect("legacy journal");
-
-    let requested = admission("run.legacy-journal", "request.legacy-journal");
+    let current = temp.path().join("current-terminal.json");
+    let admitted = admission("run.inline-journal", "request.inline-journal");
+    let terminal = success_terminal(&admitted, "run.inline-journal");
+    assert!(matches!(
+        reserve_or_replay_blocking(&current, admitted.clone()).expect("reserve"),
+        ReservationResult::Execute { .. }
+    ));
+    persist_terminal_blocking(&current, &admitted, terminal.clone()).expect("persist terminal");
+    let mut journal: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&current).expect("current journal"))
+            .expect("current journal json");
+    assert_eq!(journal["state"]["state"], "terminal");
+    assert_eq!(journal["state"]["value"]["terminal"]["schema_version"], 1);
     let ReservationResult::Replay {
-        terminal: replayed, ..
-    } = reserve_or_replay_blocking(&path, requested).expect("legacy replay")
+        terminal: replay, ..
+    } = reserve_or_replay_blocking(&current, admitted.clone()).expect("current replay")
     else {
-        panic!("legacy terminal must replay")
+        panic!("current nested terminal must replay")
     };
-    assert_eq!(replayed, terminal);
-    let migrated: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).expect("migrated bytes"))
-            .expect("migrated journal");
-    assert_eq!(migrated["state"]["state"], "terminal");
-    assert!(migrated["state"].get("terminal").is_none());
-    assert_eq!(migrated["state"]["value"]["terminal"]["schema_version"], 1);
-    assert!(terminal_sidecar_path(&path).expect("sidecar").exists());
+    assert_eq!(replay, terminal);
+
+    let path = temp.path().join("inline-terminal.json");
+    journal["state"] = json!({
+        "state": "terminal",
+        "terminal": terminal,
+    });
+    let inline = serde_json::to_vec_pretty(&journal).expect("inline bytes");
+    std::fs::write(&path, &inline).expect("inline journal");
+
+    let Err(error) = reserve_or_replay_blocking(&path, admitted) else {
+        panic!("inline terminal journal must be rejected")
+    };
+    assert!(
+        error
+            .to_string()
+            .contains(r#"string "terminal", expected "state" or "value""#),
+        "unexpected rejection: {error}"
+    );
+    assert_eq!(std::fs::read(&path).expect("preserved bytes"), inline);
+    assert!(!terminal_sidecar_path(&path).expect("sidecar").exists());
 }
 
 #[test]
@@ -830,7 +838,7 @@ fn reserved_read_removes_an_orphan_terminal_sidecar() {
     // replaying or re-executing.
     assert!(matches!(
         reserve_or_replay_blocking(&path, admitted).expect("orphan cleanup enters recovery"),
-        ReservationResult::Recover { .. }
+        ReservationResult::Recover
     ));
     assert!(!sidecar.exists());
 }
@@ -1043,7 +1051,6 @@ fn journal_sidecar_and_index_publishers_stage_mode_0600() {
     let record = DurableAutomationRecord {
         admission: admission.clone(),
         state: DurableAutomationState::Reserved,
-        legacy_terminal: None,
     };
     write_record_with_publisher(&journal_path, &record, |temporary, destination| {
         assert_private_unix_stage_and_replace(temporary, destination, "automation terminal journal")
@@ -1396,7 +1403,6 @@ fn bound_state_stabilization_rereads_after_parent_sync() {
     let replacement = DurableAutomationRecord {
         admission,
         state: DurableAutomationState::Reserved,
-        legacy_terminal: None,
     };
 
     let error = stabilize_bound_record_after_visibility_with(&path, &visible, |path, _| {
@@ -1422,7 +1428,6 @@ fn oversized_journal_prewrite_preserves_the_valid_reservation() {
                 .expect("binding"),
             publication: None,
         },
-        legacy_terminal: None,
     };
 
     assert!(write_record(&path, &oversized).is_err());
@@ -1448,7 +1453,7 @@ fn foreign_external_reservation_closes_indeterminate_without_a_second_execution(
 
     let mut reopened = original.clone();
     reopened.process_run_id = "process.external-journal.reopened".to_owned();
-    let ReservationResult::Recover { .. } =
+    let ReservationResult::Recover =
         reserve_or_replay_blocking(&path, reopened.clone()).expect("recover external reservation")
     else {
         panic!("foreign external reservation must recover")
@@ -1609,27 +1614,6 @@ fn recovery_authority_digest_rejects_every_mutable_recovery_and_digest_domain() 
     *recovery_problem = changed_problem;
     mutations.push(("memory recovery problem", changed));
 
-    let mut changed = original.clone();
-    let AutomationRecoveryBinding::Memory { retirement, .. } = &mut changed.recovery else {
-        panic!("memory admission must carry memory recovery")
-    };
-    *retirement = Some(super::retirement::RetirementBinding {
-        source_digest: format!("sha256:{}", "d".repeat(64)),
-        archive_name: format!("fact_proposals.{}.json", "d".repeat(64)),
-    });
-    mutations.push(("memory retirement", changed));
-
-    let mut changed = original.clone();
-    let AutomationRecoveryBinding::Memory {
-        reset_source_digest,
-        ..
-    } = &mut changed.recovery
-    else {
-        panic!("memory admission must carry memory recovery")
-    };
-    *reset_source_digest = Some(format!("sha256:{}", "e".repeat(64)));
-    mutations.push(("memory reset source", changed));
-
     let external = external_admission_for_job(
         "run.external-authority-binding",
         "request.external-authority-binding",
@@ -1698,7 +1682,7 @@ fn abandoned_same_process_reservation_enters_recovery_without_reexecution() {
 
     assert!(matches!(
         reserve_or_replay_blocking(&path, original).expect("recover dropped authority"),
-        ReservationResult::Recover { .. }
+        ReservationResult::Recover
     ));
 }
 
@@ -1718,7 +1702,6 @@ async fn direct_recover_retires_spool_staged_before_prepared_binding() {
         "accepted_count": 0,
         "rejected_count": 0,
         "error": "no_memory_curator_evidence",
-        "fallback_status": "no_memory_curator_evidence",
         "started_at": "1",
         "completed_at": "2"
     }))
@@ -1737,7 +1720,7 @@ async fn direct_recover_retires_spool_staged_before_prepared_binding() {
     drop(claim);
     assert!(matches!(
         reserve_or_replay_blocking(&path, original.clone()).expect("direct recover"),
-        ReservationResult::Recover { .. }
+        ReservationResult::Recover
     ));
 
     super::discard_direct_recovery_unbound_spools(temp.path(), &path, &original)
@@ -1818,87 +1801,6 @@ fn physical_reopen_retains_original_grant_when_current_registration_rotates() {
 }
 
 #[test]
-fn project_open_crash_recovery_defers_retirement_until_exact_finalization() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("terminal.json");
-    let mut original = admission("run.memory-retirement", "request.memory-retirement");
-    let binding = super::retirement::RetirementBinding {
-        source_digest: format!("sha256:{}", "a".repeat(64)),
-        archive_name: format!("fact_proposals.{}.json", "a".repeat(64)),
-    };
-    let AutomationRecoveryBinding::Memory { retirement, .. } = &mut original.recovery else {
-        panic!("memory admission must carry memory recovery")
-    };
-    *retirement = Some(binding.clone());
-    reserve_or_replay_blocking(&path, original.clone()).expect("reserve retirement");
-    let mut reopened = original.clone();
-    reopened.process_run_id = "process.memory-journal.reopened".to_owned();
-    let ReservationResult::Recover { retirement } =
-        reserve_or_replay_blocking(&path, reopened.clone()).expect("recover crashed reservation")
-    else {
-        panic!("crashed retirement must require canonical receipt recovery")
-    };
-    assert_eq!(retirement, Some(binding.clone()));
-    let reopened_record = read_indexed_record_blocking(&path)
-        .expect("physical reopen")
-        .expect("reserved retirement");
-    assert_eq!(reopened_record.admission().retirement(), Some(&binding));
-    assert_eq!(
-        recovery_index::special_recovery_defer_reason(reopened_record.admission(), true,),
-        Some("retirement_requires_exact_finalization")
-    );
-    assert_eq!(
-        recovery_index::special_recovery_defer_reason(reopened_record.admission(), false,),
-        None
-    );
-    assert!(!reopened_record.is_terminal());
-    assert!(matches!(
-        reserve_or_replay_blocking(&path, reopened)
-            .expect("deferred retirement remains recoverable"),
-        ReservationResult::Recover { .. }
-    ));
-}
-
-#[test]
-fn project_open_crash_recovery_preserves_shipped_reset_digest_until_exact_diagnostic() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("terminal.json");
-    let mut original = admission("run.memory-reset", "request.memory-reset");
-    let reset_digest = format!("sha256:{}", "b".repeat(64));
-    let AutomationRecoveryBinding::Memory {
-        reset_source_digest,
-        ..
-    } = &mut original.recovery
-    else {
-        panic!("memory admission must carry memory recovery")
-    };
-    *reset_source_digest = Some(reset_digest.clone());
-    reserve_or_replay_blocking(&path, original.clone()).expect("reserve shipped reset");
-    let mut reopened = original.clone();
-    reopened.process_run_id = "process.memory-journal.reopened".to_owned();
-    assert!(matches!(
-        reserve_or_replay_blocking(&path, reopened.clone()).expect("recover crashed reset"),
-        ReservationResult::Recover { .. }
-    ));
-    let reopened_record = read_indexed_record_blocking(&path)
-        .expect("physical reopen")
-        .expect("reserved shipped reset");
-    assert_eq!(
-        reopened_record.admission().reset_source_digest(),
-        Some(reset_digest.as_str())
-    );
-    assert_eq!(
-        recovery_index::special_recovery_defer_reason(reopened_record.admission(), true,),
-        Some("shipped_proposals_require_exact_reset_diagnostic")
-    );
-    assert!(!reopened_record.is_terminal());
-    assert!(matches!(
-        reserve_or_replay_blocking(&path, reopened).expect("deferred reset remains recoverable"),
-        ReservationResult::Recover { .. }
-    ));
-}
-
-#[test]
 fn foreign_reservation_recovery_persists_exact_partial_terminal() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("terminal.json");
@@ -1908,7 +1810,7 @@ fn foreign_reservation_recovery_persists_exact_partial_terminal() {
     reopened.process_run_id = "process.memory-journal.reopened".to_owned();
     assert!(matches!(
         reserve_or_replay_blocking(&path, reopened.clone()).expect("recover"),
-        ReservationResult::Recover { .. }
+        ReservationResult::Recover
     ));
     let partial = partial_terminal(&original);
     let stored = persist_recovered_terminal_blocking(&path, &reopened, partial.clone(), None)
@@ -2017,7 +1919,6 @@ fn physical_reopen_rejects_a_corrupt_swapped_terminal() {
             .expect("swapped sidecar"),
             publication: None,
         },
-        legacy_terminal: None,
     };
     write_private_test_file(
         &path,
@@ -3120,7 +3021,7 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
     let cancellation = CancellationSignal::active("cancellation.corrupt-spool-recovery")
         .expect("recovery cancellation");
     let recovery_index::AutomationEffectRecoveryPreparation::Pending(preparation) =
-        recovery_index::prepare_reserved_automation_effect_recovery(dashboard_root, &cancellation)
+        recovery_index::prepare_reserved_automation_effect_recovery(dashboard_root)
             .await
             .expect("prepare canonical recovery")
     else {

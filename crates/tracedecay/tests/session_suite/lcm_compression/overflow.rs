@@ -392,11 +392,10 @@ async fn oversized_authoritative_summary_is_preserved_exactly() {
     assert_eq!(response.reason, "compressed_backlog");
     let summary = &response.summary_nodes[0];
     assert_eq!(summary.summary_text, exact_summary);
-    assert!(!response.fallback_used);
 }
 
 #[tokio::test]
-async fn authoritative_summary_reports_no_fallback_attempt_state() {
+async fn authoritative_summary_reports_attempt_state() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     insert_raw_messages(
@@ -427,7 +426,6 @@ async fn authoritative_summary_reports_no_fallback_attempt_state() {
     assert_eq!(response.status, "ok");
     assert_eq!(response.reason, "compressed_backlog");
     assert_eq!(response_json["compression_attempts"], 1);
-    assert_eq!(response_json["fallback_used"], false);
     assert!(response_json["retry_status"].is_null());
     assert!(response.frontier.maintenance_debt.is_empty());
     assert_eq!(response_json["replay_over_budget"], false);
@@ -472,7 +470,6 @@ async fn critical_pressure_catch_up_reports_attempts_debt_and_budget_state() {
     assert_eq!(response.reason, "forced_overflow_recovery");
     assert_eq!(response.summary_nodes_created, 4);
     assert_eq!(response_json["compression_attempts"], 4);
-    assert_eq!(response_json["fallback_used"], false);
     assert_eq!(
         response_json["retry_status"].as_str(),
         Some("critical_pressure_catch_up")

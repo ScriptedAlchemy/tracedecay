@@ -1,9 +1,8 @@
 //! Host configuration file IO shared by every agent integration: lenient and
-//! strict JSON/JSONC/TOML loaders, backup-then-atomic-replace writers with
+//! strict JSON/JSONC/TOML loaders, atomic-replace writers with
 //! durable write intents, host file metadata capture, and the binary and
 //! host-directory probes installers embed into generated config.
 
-use std::borrow::Cow;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
@@ -12,8 +11,9 @@ use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::text_file_transaction::{self, TextFileMutation, update_config_file_transactionally};
+use super::text_file_transaction::{self, TextFileMutation, update_text_file_transactionally};
 
+mod json_edit;
 #[cfg(test)]
 mod tests;
 
@@ -39,6 +39,10 @@ pub enum JsonConfigDialect {
 }
 
 impl JsonConfigDialect {
+    fn parse_options(self) -> jsonc_parser::ParseOptions {
+        json_edit::parse_options(self == Self::Jsonc)
+    }
+
     /// Strict parse of already-observed config contents for a write path.
     /// Missing or blank content is a fresh `{}`; anything unparseable is a
     /// typed error so a transform never runs against fabricated state.
@@ -46,17 +50,42 @@ impl JsonConfigDialect {
         if contents.trim().is_empty() {
             return Ok(serde_json::json!({}));
         }
-        let (dialect_label, parseable) = match self {
-            Self::Json => ("JSON", Cow::Borrowed(contents)),
-            Self::Jsonc => ("JSONC", Cow::Owned(strip_jsonc_comments(contents))),
+        let parsed = match self {
+            Self::Json => serde_json::from_str(contents).map_err(|e| e.to_string()),
+            Self::Jsonc => json_edit::parse_json_text(contents, &self.parse_options()),
         };
-        serde_json::from_str(&parseable).map_err(|e| TraceDecayError::Config {
+        parsed.map_err(|e| TraceDecayError::Config {
             message: format!(
-                "cannot parse {} as {dialect_label}: {e}\n  \
+                "cannot parse {} as {}: {e}\n  \
                  Hint: fix the JSON syntax manually and re-run the command,\n  \
                  or delete the file to start fresh",
-                path.display()
+                path.display(),
+                match self {
+                    Self::Json => "JSON",
+                    Self::Jsonc => "JSONC",
+                }
             ),
+        })
+    }
+
+    /// Replacement text for a config whose observed contents are `existing`
+    /// and whose intended value is `value`. Only members whose values differ
+    /// are rewritten; the operator's comments, key order and formatting
+    /// around them are kept byte-for-byte, so removing what an install added
+    /// restores the original file exactly. Blank contents are a fresh file.
+    pub(super) fn render_edit(
+        self,
+        path: &Path,
+        existing: &str,
+        value: &serde_json::Value,
+    ) -> Result<String> {
+        if existing.trim().is_empty() {
+            return render_json_config(path, value);
+        }
+        json_edit::edit_json_text(existing, value, &self.parse_options()).map_err(|e| {
+            TraceDecayError::Config {
+                message: format!("cannot update {}: {e}", path.display()),
+            }
         })
     }
 }
@@ -82,98 +111,7 @@ pub fn load_json_file_strict(path: &Path) -> Result<serde_json::Value> {
     JsonConfigDialect::Json.parse_for_edit(path, &contents)
 }
 
-pub fn config_backup_path(path: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.bak", path.display()))
-}
-
-/// Create a backup copy of a config file before modifying it.
-///
-/// The backup itself is written atomically: content is first written to a
-/// staging file (`.bak.new`), then renamed to `.bak`. This ensures the
-/// `.bak` file is never half-written even if the process is killed.
-///
-/// Returns `Ok(Some(backup_path))` when a backup was created, or `Ok(None)`
-/// when the file did not exist (nothing to back up).
-///
-/// # Error conditions
-/// - File exists but cannot be read (permissions, I/O error).
-/// - Staging file cannot be written (disk full, permissions).
-/// - Staging file cannot be renamed to `.bak` (cross-device, permissions).
-#[hotpath::measure(label = "agent_hosts.agents.host_config.backup")]
-pub fn backup_config_file(path: &Path) -> Result<Option<PathBuf>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let backup_path = config_backup_path(path);
-    let staging_path = PathBuf::from(format!("{}.bak.new", path.display()));
-
-    let content = std::fs::read(path).map_err(|e| TraceDecayError::Config {
-        message: format!(
-            "failed to read {} for backup: {e}\n  \
-             Hint: check file permissions",
-            path.display()
-        ),
-    })?;
-    std::fs::write(&staging_path, &content).map_err(|e| {
-        std::fs::remove_file(&staging_path).ok();
-        TraceDecayError::Config {
-            message: format!(
-                "failed to write backup staging file {}: {e}\n  \
-                 Hint: check available disk space and permissions",
-                staging_path.display()
-            ),
-        }
-    })?;
-    // The backup holds the same secrets as the original (host configs can
-    // carry credential env values), so it must not be published with the
-    // umask-default mode: copy the original's permission identity onto the
-    // staging file before it becomes `.bak`.
-    let original_metadata =
-        capture_host_file_metadata(path).map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "failed to capture metadata for {} before backup: {error}",
-                path.display()
-            ),
-        })?;
-    restore_host_file_metadata(&staging_path, &original_metadata).map_err(|error| {
-        std::fs::remove_file(&staging_path).ok();
-        TraceDecayError::Config {
-            message: format!(
-                "failed to apply original permissions to backup staging file {}: {error}",
-                staging_path.display()
-            ),
-        }
-    })?;
-    let backup_metadata =
-        capture_host_file_metadata(&staging_path).map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "failed to inspect backup staging file {}: {error}",
-                staging_path.display()
-            ),
-        })?;
-    persist_host_config_write_intent(&backup_path, &content, Some(&backup_metadata))?;
-
-    // Atomic rename staging → .bak
-    std::fs::rename(&staging_path, &backup_path).map_err(|e| {
-        std::fs::remove_file(&staging_path).ok();
-        TraceDecayError::Config {
-            message: format!(
-                "failed to create backup {}: {e}\n  \
-                 Hint: check file permissions",
-                backup_path.display()
-            ),
-        }
-    })?;
-
-    Ok(Some(backup_path))
-}
-
 /// Write a JSON value to a file via atomic rename.
-///
-/// The caller is responsible for creating the backup via
-/// [`backup_config_file`] before loading the config. Pass the backup path
-/// here so that it can be mentioned in error messages and used for restore
-/// if the rename somehow leaves the target in a bad state.
 ///
 /// # Strategy
 ///
@@ -187,18 +125,14 @@ pub fn backup_config_file(path: &Path) -> Result<Option<PathBuf>> {
 /// - Atomic staging or publication failure (permissions, disk full).
 ///
 /// In every error case the original file remains intact.
-pub fn safe_write_json_file(
-    path: &Path,
-    value: &serde_json::Value,
-    backup: Option<&Path>,
-) -> Result<()> {
+pub fn safe_write_json_file(path: &Path, value: &serde_json::Value) -> Result<()> {
     let content = render_json_config(path, value)?;
-    safe_write_bytes_file(path, content.as_bytes(), backup)
+    safe_write_bytes_file(path, content.as_bytes())
 }
 
-/// Serialize a JSON config value for publication: pretty-printed, re-parse
+/// Serialize a JSON config value for a fresh file: pretty-printed, re-parse
 /// validated, trailing newline.
-pub(super) fn render_json_config(path: &Path, value: &serde_json::Value) -> Result<String> {
+fn render_json_config(path: &Path, value: &serde_json::Value) -> Result<String> {
     let pretty = serde_json::to_string_pretty(value).map_err(|e| TraceDecayError::Config {
         message: format!("failed to serialize JSON for {}: {e}", path.display()),
     })?;
@@ -228,20 +162,19 @@ pub(crate) enum JsonConfigMutation {
 /// config. The transform sees the value parsed strictly from the exact bytes
 /// the write lock observed, so a concurrent writer can no longer slip between
 /// load and publish, and a corrupt config is a typed error instead of a
-/// silently-empty object. Rewrites and removals of an existing file leave a
-/// `.bak` (issue #63).
+/// silently-empty object.
 pub(crate) fn update_json_config_transactionally<T>(
     path: &Path,
     dialect: JsonConfigDialect,
     update: impl FnOnce(serde_json::Value) -> Result<(T, JsonConfigMutation)>,
 ) -> Result<T> {
-    update_config_file_transactionally(path, |existing| {
+    update_text_file_transactionally(path, |existing| {
         let settings = dialect.parse_for_edit(path, existing)?;
         let (output, mutation) = update(settings)?;
         let mutation = match mutation {
             JsonConfigMutation::Unchanged => TextFileMutation::Unchanged,
             JsonConfigMutation::Write(value) => {
-                TextFileMutation::Write(render_json_config(path, &value)?)
+                TextFileMutation::Write(dialect.render_edit(path, existing, &value)?)
             }
             JsonConfigMutation::Remove => TextFileMutation::Remove,
         };
@@ -250,16 +183,42 @@ pub(crate) fn update_json_config_transactionally<T>(
 }
 
 /// TOML sibling of [`update_json_config_transactionally`]. The transform
-/// returns the serialized replacement text itself because TOML publication
-/// may need post-serialization shaping (Codex's explicit `[hooks.state]`
-/// parent table).
+/// edits the document parsed from the exact bytes the write lock observed;
+/// every table, key, comment and blank line it leaves alone publishes
+/// byte-for-byte, so removing what an install added restores the original
+/// file. A document edited down to nothing removes the file.
 pub(crate) fn update_toml_config_transactionally<T>(
     path: &Path,
-    update: impl FnOnce(toml::Value) -> Result<(T, TextFileMutation)>,
+    update: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<T>,
 ) -> Result<T> {
-    update_config_file_transactionally(path, |existing| {
-        let value = parse_toml_config(path, existing)?;
-        update(value)
+    update_text_file_transactionally(path, |existing| {
+        let mut document =
+            existing
+                .parse::<toml_edit::DocumentMut>()
+                .map_err(|e| TraceDecayError::Config {
+                    message: format!(
+                        "failed to parse {} as TOML: {e}. Refusing to overwrite, fix the file or remove it manually.",
+                        path.display()
+                    ),
+                })?;
+        let output = update(&mut document)?;
+        let mut rendered = document.to_string();
+        // Rendering terminates the last line; keep a file that had no final
+        // newline without one.
+        if !existing.is_empty() && !existing.ends_with('\n') && rendered.ends_with('\n') {
+            rendered.pop();
+            if rendered.ends_with('\r') {
+                rendered.pop();
+            }
+        }
+        let mutation = if rendered == existing {
+            TextFileMutation::Unchanged
+        } else if rendered.trim().is_empty() {
+            TextFileMutation::Remove
+        } else {
+            TextFileMutation::Write(rendered)
+        };
+        Ok((output, mutation))
     })
 }
 
@@ -268,8 +227,8 @@ pub(crate) fn update_toml_config_transactionally<T>(
 /// Mirrors [`safe_write_json_file`] for generated prompt/rule files that are
 /// plain text rather than structured JSON. The target is not opened for writing
 /// until the final rename, so a failed write leaves the original untouched.
-pub fn safe_write_text_file(path: &Path, contents: &str, backup: Option<&Path>) -> Result<()> {
-    safe_write_bytes_file(path, contents.as_bytes(), backup)
+pub fn safe_write_text_file(path: &Path, contents: &str) -> Result<()> {
+    safe_write_bytes_file(path, contents.as_bytes())
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -371,18 +330,17 @@ pub fn restore_host_file_metadata(
 /// that metadata before returning. This authority is shared by every host:
 /// existing config symlinks are always refused so no integration can redirect
 /// a lifecycle write outside its inventoried path.
-pub fn safe_write_bytes_file(path: &Path, contents: &[u8], backup: Option<&Path>) -> Result<()> {
-    safe_write_bytes_file_with_metadata(path, contents, backup, None)
+pub fn safe_write_bytes_file(path: &Path, contents: &[u8]) -> Result<()> {
+    safe_write_bytes_file_with_metadata(path, contents, None)
 }
 
 #[hotpath::measure(label = "agent_hosts.agents.host_config.write")]
 pub fn safe_write_bytes_file_with_metadata(
     path: &Path,
     contents: &[u8],
-    backup: Option<&Path>,
     replacement_metadata: Option<&HostFileMetadataIdentityV1>,
 ) -> Result<()> {
-    text_file_transaction::write_bytes_file_locked(path, contents, backup, replacement_metadata)
+    text_file_transaction::write_bytes_file_locked(path, contents, replacement_metadata)
 }
 
 #[cfg(test)]
@@ -526,11 +484,7 @@ pub(super) fn test_pause_host_config_write(path: &Path, boundary: TestHostConfig
 /// exercised against a real torn install.
 #[cfg(feature = "test-transport")]
 pub(super) fn test_abort_after_host_config_write(path: &Path) {
-    if (std::env::var_os("TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE").is_some()
-        && !path
-            .file_name()
-            .and_then(std::ffi::OsStr::to_str)
-            .is_some_and(|name| name.ends_with(".bak") || name.ends_with(".tracedecay-original")))
+    if std::env::var_os("TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE").is_some()
         || std::env::var_os("TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE_PATH")
             .is_some_and(|expected| Path::new(&expected) == path)
     {
@@ -829,77 +783,6 @@ fn path_component_eq(actual: &std::ffi::OsStr, expected: impl AsRef<std::ffi::Os
     }
 }
 
-/// Remove explicitly retired sibling plugin trees.
-///
-/// Both the retired suffix and ownership manifest are allow-listed: a name
-/// prefix alone is never ownership evidence. A sibling is removed only when it
-/// is a real directory, its suffix is known to have been created by
-/// `TraceDecay`, and one host-specific manifest parses with `name = "tracedecay"`.
-#[hotpath::measure(label = "agent_hosts.agents.plugin.sweep_siblings")]
-pub(crate) fn sweep_superseded_plugin_siblings(
-    current_dir: &Path,
-    ownership_manifests: &[&str],
-) -> Result<()> {
-    const RETIRED_SUFFIXES: &[&str] = &["pre-v2-adopt"];
-
-    let Some(parent) = current_dir.parent() else {
-        return Ok(());
-    };
-    let Some(current_name) = current_dir.file_name().and_then(|name| name.to_str()) else {
-        return Ok(());
-    };
-    let prefix = format!("{current_name}.");
-    let entries = match std::fs::read_dir(parent) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "failed to inspect plugin siblings in {}: {error}",
-                    parent.display()
-                ),
-            });
-        }
-    };
-
-    for entry in entries {
-        let entry = entry.map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "failed to inspect a plugin sibling in {}: {error}",
-                parent.display()
-            ),
-        })?;
-        let file_type = entry.file_type().map_err(|error| TraceDecayError::Config {
-            message: format!("failed to inspect {}: {error}", entry.path().display()),
-        })?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let retired = name
-            .strip_prefix(&prefix)
-            .is_some_and(|suffix| RETIRED_SUFFIXES.contains(&suffix));
-        if !file_type.is_dir() || !retired {
-            continue;
-        }
-        let sibling = entry.path();
-        let owned = ownership_manifests.iter().any(|relative| {
-            load_json_file(&sibling.join(relative))
-                .get("name")
-                .and_then(serde_json::Value::as_str)
-                == Some("tracedecay")
-        });
-        if !owned {
-            continue;
-        }
-        std::fs::remove_dir_all(&sibling).map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "failed to remove superseded tracedecay plugin {}: {error}",
-                sibling.display()
-            ),
-        })?;
-    }
-    Ok(())
-}
-
 /// Recursively collect every regular file under `root` (following the same
 /// hand-rolled walk both the Cursor and Codex installers rely on).
 #[hotpath::measure(label = "agent_hosts.agents.fs.collect_regular_files")]
@@ -1061,104 +944,11 @@ pub fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Strip `//` line comments, `/* */` block comments, and trailing commas
-/// before `}` / `]` from a JSONC string, then parse with `serde_json`.
-/// Falls back to `serde_json::json!({})` on any parse failure.
+/// Parse a JSONC string (comments and trailing commas allowed), falling back
+/// to `serde_json::json!({})` on any parse failure. Read-only paths only.
 pub fn parse_jsonc(input: &str) -> serde_json::Value {
-    let stripped = strip_jsonc_comments(input);
-    serde_json::from_str(&stripped).unwrap_or_else(|_| serde_json::json!({}))
-}
-
-/// Internal helper: removes JSONC comments and trailing commas.
-pub(super) fn strip_jsonc_comments(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let chars: Vec<char> = input.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
-    let mut in_string = false;
-
-    while i < len {
-        // Handle string literals (skip comment stripping inside strings).
-        if in_string {
-            if chars[i] == '\\' && i + 1 < len {
-                out.push(chars[i]);
-                out.push(chars[i + 1]);
-                i += 2;
-                continue;
-            }
-            if chars[i] == '"' {
-                in_string = false;
-            }
-            out.push(chars[i]);
-            i += 1;
-            continue;
-        }
-
-        // Start of string.
-        if chars[i] == '"' {
-            in_string = true;
-            out.push(chars[i]);
-            i += 1;
-            continue;
-        }
-
-        // Line comment `//`.
-        if chars[i] == '/' && i + 1 < len && chars[i + 1] == '/' {
-            // Skip until newline.
-            while i < len && chars[i] != '\n' {
-                i += 1;
-            }
-            continue;
-        }
-
-        // Block comment `/* ... */`.
-        if chars[i] == '/' && i + 1 < len && chars[i + 1] == '*' {
-            i += 2;
-            while i + 1 < len && !(chars[i] == '*' && chars[i + 1] == '/') {
-                i += 1;
-            }
-            i += 2; // consume `*/`
-            continue;
-        }
-
-        out.push(chars[i]);
-        i += 1;
-    }
-
-    // Remove trailing commas before `}` or `]`.
-    // Simple regex-free approach: repeatedly collapse ", <whitespace> }" patterns.
-    remove_trailing_commas(&out)
-}
-
-/// Removes trailing commas that appear immediately before `}` or `]` (with
-/// optional whitespace/newlines in between).
-fn remove_trailing_commas(input: &str) -> String {
-    // We scan for comma, optional whitespace, then `}` or `]`.
-    let bytes = input.as_bytes();
-    let len = bytes.len();
-    let mut out = Vec::with_capacity(len);
-    let mut i = 0;
-
-    while i < len {
-        if bytes[i] == b',' {
-            // Peek ahead past whitespace.
-            let mut j = i + 1;
-            while j < len
-                && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\n' || bytes[j] == b'\r')
-            {
-                j += 1;
-            }
-            if j < len && (bytes[j] == b'}' || bytes[j] == b']') {
-                // Skip the comma; whitespace will be included normally.
-                i += 1;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-
-    String::from_utf8(out).unwrap_or_else(|_| input.to_string())
+    json_edit::parse_json_text(input, &JsonConfigDialect::Jsonc.parse_options())
+        .unwrap_or_else(|_| serde_json::json!({}))
 }
 
 /// Read a file and parse it as JSONC. Falls back to `json!({})` if the file

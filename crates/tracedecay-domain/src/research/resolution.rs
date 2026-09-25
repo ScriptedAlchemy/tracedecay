@@ -1,4 +1,6 @@
 use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::sync::{LazyLock, RwLock};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -10,6 +12,7 @@ use super::id::{
 };
 use super::retrieval::{PayloadAccessState, PrivacyDomainBoundLocatorDigest};
 use super::watermark::VectorWatermark;
+use crate::observation::PayloadReferenceV1;
 
 /// Deterministic relationship between an observed store state and the state
 /// frozen into a retrieval anchor.
@@ -84,9 +87,68 @@ impl ResolutionAuthorizationV1 {
         self.capability_id.validate()?;
         self.canonical_request_digest.validate()
     }
+
+    /// The authorization an authority namespace grants one canonical request.
+    /// Every field but the request digest is a function of the namespace.
+    pub fn for_authority(
+        authority: &str,
+        canonical_request_digest: PrivacyDomainBoundLocatorDigest,
+    ) -> Result<Self, DomainError> {
+        Ok(Self {
+            resolved_scope_id: ScopeResolutionId::new(format!("scope.{authority}"))?,
+            privacy_domain_id: PrivacyDomainId::new(format!("privacy.{authority}"))?,
+            access_policy_digest: authority_access_policy_digest(authority)?,
+            capability_id: CapabilityId::new(format!("capability.{authority}"))?,
+            canonical_request_digest,
+        })
+    }
+
+    /// The namespace this authorization is the [`Self::for_authority`]
+    /// derivation of, if it is one.
+    pub fn derived_authority(&self) -> Option<&str> {
+        let authority = self.resolved_scope_id.as_str().strip_prefix("scope.")?;
+        Self::for_authority(authority, self.canonical_request_digest.clone())
+            .is_ok_and(|derived| &derived == self)
+            .then_some(authority)
+    }
 }
 
-/// Outcome of resolving a V2 anchor. This describes identity resolution and
+/// Upper bound on memoized access-policy digests. Authority namespaces are
+/// compile-time constants in production; the bound only stops a caller with
+/// unbounded namespaces from growing the memo.
+const MAX_MEMOIZED_ACCESS_POLICY_DIGESTS: usize = 64;
+
+/// Access-policy digests keyed by authority namespace. The digest binds only
+/// the authorization domain and the namespace, so every resolution in one
+/// namespace shares it; deriving it per anchor would put a canonical-JSON
+/// encode and a SHA-256 on every anchor read.
+static ACCESS_POLICY_DIGESTS: LazyLock<RwLock<HashMap<String, String>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// The access-policy digest an authority namespace binds its resolutions to.
+pub fn authority_access_policy_digest(authority: &str) -> Result<AccessPolicyDigest, DomainError> {
+    if let Ok(memo) = ACCESS_POLICY_DIGESTS.read()
+        && let Some(digest) = memo.get(authority)
+    {
+        return AccessPolicyDigest::new(digest.clone());
+    }
+    let digest = PayloadReferenceV1::for_payload(&serde_json::json!({
+        "domain": "tracedecay.observation-anchor.authorization.v1",
+        "authority": authority,
+    }))
+    .map_err(|error| DomainError::CanonicalSerialization(error.to_string()))?
+    .digest()
+    .as_str()
+    .to_owned();
+    if let Ok(mut memo) = ACCESS_POLICY_DIGESTS.write()
+        && memo.len() < MAX_MEMOIZED_ACCESS_POLICY_DIGESTS
+    {
+        memo.insert(authority.to_owned(), digest.clone());
+    }
+    AccessPolicyDigest::new(digest)
+}
+
+/// Outcome of resolving an anchor. This describes identity resolution and
 /// freshness, while [`PayloadAccessState`] independently describes whether the
 /// retained payload may be accessed.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]

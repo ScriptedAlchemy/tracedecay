@@ -224,7 +224,7 @@ pub fn load_table() -> &'static PriceTable {
     })
 }
 
-/// JSON payload for `GET /api/plugins/savings/pricing`.
+/// Bundled pricing provenance and per-model rates as JSON.
 pub fn pricing_payload() -> Value {
     let table = load_table();
     let mut models = Map::new();

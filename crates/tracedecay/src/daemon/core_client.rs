@@ -12,7 +12,9 @@ use tokio::time::{Duration, Instant, timeout};
 use tracedecay_daemon_control::default_socket_path;
 #[cfg(not(unix))]
 use tracedecay_daemon_identity::current_daemon_connection;
-use tracedecay_daemon_identity::{ResolvedDaemonConnection, client_connection};
+use tracedecay_daemon_identity::{
+    DAEMON_AUTHORITY_UNAVAILABLE, ResolvedDaemonConnection, client_connection,
+};
 pub(crate) use tracedecay_daemon_protocol::DAEMON_TOOL_LIVENESS_POLL_INTERVAL;
 pub(crate) use tracedecay_daemon_protocol::connection::{
     DAEMON_RESTART_GRACE, DAEMON_RESTART_POLL_INTERVAL, daemon_connect_failure_advice,
@@ -20,14 +22,15 @@ pub(crate) use tracedecay_daemon_protocol::connection::{
 };
 pub use tracedecay_daemon_protocol::daemon_tool_response_bound;
 use tracedecay_daemon_protocol::tool_request_deadline;
+use tracedecay_mcp::server::attach_stateless_request_context;
 
-#[cfg(unix)]
-use super::unavailable_error;
 use super::{
     BrokerStream, DaemonClientDeadline, DaemonHandshake, JsonRpcError, JsonRpcRequest,
     JsonRpcResponse, PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, Result,
     TraceDecayError, error_is_project_open_retryable, tool_call_transport_error_is_retryable,
 };
+#[cfg(unix)]
+use tracedecay_daemon_service::logging::unavailable_error;
 
 /// The caller's request deadline as an absolute wall-clock instant, for the
 /// wire.
@@ -75,20 +78,20 @@ pub(crate) async fn ensure_daemon_connection_live(
 
     timeout(
         DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT,
-        BrokerStream::connect(&connection.endpoint),
+        BrokerStream::connect(connection.endpoint()),
     )
     .await
     .map_err(|_| TraceDecayError::Config {
         message: format!(
             "daemon health check timed out at '{}' while request '{request_label}' was awaiting a response; the request was already sent and was not retried",
-            connection.endpoint
+            connection.endpoint()
         ),
     })?
     .map(|_| ())
     .map_err(|error| TraceDecayError::Config {
         message: format!(
             "daemon became unreachable at '{}' while request '{request_label}' was awaiting a response: {error}; the request was already sent and was not retried",
-            connection.endpoint
+            connection.endpoint()
         ),
     })
 }
@@ -119,7 +122,7 @@ pub(crate) async fn write_daemon_preamble(
 ) -> Result<()> {
     tracedecay_daemon_protocol::write_daemon_handshake_preamble(
         writer,
-        connection.auth_token.as_deref(),
+        connection.auth_token(),
         handshake,
     )
     .await
@@ -164,18 +167,22 @@ pub(crate) async fn connect_to_current_daemon_within(
 /// duplicated. Non-transient errors (e.g. permission denied) fail immediately.
 #[cfg(unix)]
 pub(crate) async fn connect_with_restart_grace(
-    connection: &ResolvedDaemonConnection,
+    socket_path: &Path,
     grace: Duration,
     poll_interval: Duration,
 ) -> Result<BrokerStream> {
-    let (_, stream) =
-        connect_with_restart_grace_resolving(|| Ok(connection.clone()), grace, poll_interval)
-            .await?;
+    let (_, stream) = connect_with_restart_grace_resolving(
+        || client_connection(socket_path),
+        grace,
+        poll_interval,
+    )
+    .await?;
     Ok(stream)
 }
 
 /// Resolves endpoint authority on every retry because a daemon restart rotates
-/// both its authority epoch and authentication token.
+/// both its authority epoch and authentication token, and a daemon's first
+/// start writes its record only moments before it binds.
 #[hotpath::measure(label = "daemon.core.connect_restart_grace", future = true)]
 async fn connect_with_restart_grace_resolving(
     mut resolve: impl FnMut() -> Result<ResolvedDaemonConnection>,
@@ -184,21 +191,28 @@ async fn connect_with_restart_grace_resolving(
 ) -> Result<(ResolvedDaemonConnection, BrokerStream)> {
     let deadline = Instant::now() + grace;
     loop {
-        let connection = resolve()?;
-        match BrokerStream::connect(&connection.endpoint).await {
+        let connection = match resolve() {
+            Ok(connection) => connection,
+            Err(error) if authority_absent(&error) && Instant::now() < deadline => {
+                tokio::time::sleep(poll_interval).await;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        match BrokerStream::connect(connection.endpoint()).await {
             Ok(stream) => return Ok((connection, stream)),
             Err(TraceDecayError::Io(err)) => {
                 if !is_transient_daemon_connect_error(err.kind()) || Instant::now() >= deadline {
                     return Err(if is_transient_daemon_connect_error(err.kind()) {
                         tracedecay_daemon_protocol::daemon_connect_failure(
-                            &connection.endpoint,
+                            connection.endpoint(),
                             &err,
                         )
                     } else {
                         TraceDecayError::Config {
                             message: format!(
                                 "could not connect to TraceDecay daemon endpoint '{}': {err}. {}",
-                                connection.endpoint,
+                                connection.endpoint(),
                                 daemon_connect_failure_advice(err.kind())
                             ),
                         }
@@ -209,6 +223,12 @@ async fn connect_with_restart_grace_resolving(
             Err(error) => return Err(error),
         }
     }
+}
+
+fn authority_absent(error: &TraceDecayError) -> bool {
+    error
+        .project_route_context()
+        .is_some_and(|(code, retryable, _)| code == DAEMON_AUTHORITY_UNAVAILABLE && retryable)
 }
 
 #[hotpath::measure(label = "daemon.core.call_tool", future = true)]
@@ -261,12 +281,13 @@ pub(crate) async fn call_tool_with_liveness_poll(
             tracedecay_mcp::tool_call_deadline_meta(wire_request_deadline_micros(deadline)),
         );
     }
-    let request = JsonRpcRequest {
+    let mut request = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         id: Some(id.clone()),
         method: "tools/call".to_string(),
         params: Some(params),
     };
+    attach_stateless_request_context(&mut request);
 
     let write = async {
         write_daemon_preamble(&mut writer, &connection, handshake).await?;

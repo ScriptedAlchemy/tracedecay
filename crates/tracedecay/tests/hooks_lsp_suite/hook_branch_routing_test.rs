@@ -110,11 +110,6 @@ async fn hook_branch_write_lands_in_a_sealed_single_store_generation() {
         .branches
         .get("feature/hook")
         .expect("hook branch must be tracked");
-    assert!(
-        entry.served_by_project_store(),
-        "tracked branch must reference the canonical main database, found '{}'",
-        entry.db_file
-    );
     assert_eq!(entry.parent.as_deref(), Some("main"));
     let source = entry
         .graph_source

@@ -28,7 +28,7 @@ use super::super::runtime::{
     SourceOutlinePrimitiveRequest, SourceOutlinePrimitiveResult, StorageStatusHistoryPointV1,
     StorageStatusPrimitiveRequest, StorageStatusPrimitiveResult,
 };
-use super::super::symbol_graph::symbol_record;
+use super::super::symbol_graph::{read_symbol_source_body, symbol_record};
 use super::{
     AuthenticatedDiagnosticCursorAuthorityV1, DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
     all_code_graph_symbols, completed, diagnostics_result, diagnostics_unavailable,
@@ -571,18 +571,16 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                 let Some(end_line) = metadata.start_line.checked_add(line_span) else {
                     return failed(EvidenceDomain::Source, now_observed());
                 };
-                let path = self.source_runtime.project_root().join(&file);
-                let Ok(content) = tokio::fs::read_to_string(&path).await else {
+                let Ok(body) = read_symbol_source_body(
+                    self.source_runtime.project_root(),
+                    &file,
+                    metadata.start_line,
+                    end_line,
+                )
+                .await
+                else {
                     return failed(EvidenceDomain::Source, now_observed());
                 };
-                let start = metadata.start_line as usize;
-                let end = end_line as usize;
-                let body = content
-                    .lines()
-                    .skip(start)
-                    .take(end.saturating_sub(start).saturating_add(1))
-                    .collect::<Vec<_>>()
-                    .join("\n");
                 completed(
                     SourceBodyPrimitiveResult {
                         node_id: occurrence.as_str().to_owned(),

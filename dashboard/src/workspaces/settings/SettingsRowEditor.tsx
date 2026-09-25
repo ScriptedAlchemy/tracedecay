@@ -49,7 +49,7 @@ export function SettingsRowEditor({
             onChange={(event) => onChange(globLines(event.target.value))}
             className={`${settingsInputClass} h-auto min-h-16 py-1.5 font-mono`}
           />
-          <span className="text-3xs text-text-muted">one glob per line</span>
+          <span className="text-sm text-text-muted">one glob per line</span>
           <FieldError id={errorId} error={error} />
         </div>
       );
@@ -68,7 +68,7 @@ export function SettingsRowEditor({
             className={`${settingsInputClass} font-mono`}
           />
           {binding.input === 'duration' ? (
-            <span className="text-3xs text-text-muted">a duration like 2s, 15s, or 1m</span>
+            <span className="text-sm text-text-muted">a duration like 2s, 15s, or 1m</span>
           ) : null}
           <FieldError id={errorId} error={error} />
         </div>
@@ -87,7 +87,7 @@ export function SettingsRowEditor({
               checked={value === true}
               onChange={(event) => onChange(event.target.checked)}
             />
-            <span className="td-value min-w-0 pr-2 text-2xs">
+            <span className="td-value min-w-0 pr-2 text-sm">
               {value === true ? 'true' : 'false'}
             </span>
           </label>
@@ -153,9 +153,9 @@ function WorkerSelectionEditor({
             checked={selection.mode === 'automatic'}
             onChange={() => onChange({ mode: 'automatic' })}
           />
-          <span className="min-w-0 pr-2 text-2xs">
+          <span className="min-w-0 pr-2 text-body">
             Automatic
-            <span className="block text-3xs text-text-muted">
+            <span className="block text-sm text-text-muted">
               the daemon chooses a memory-safe number of available cores
             </span>
           </span>
@@ -169,9 +169,9 @@ function WorkerSelectionEditor({
               checked={selection.mode === 'exact'}
               onChange={() => onChange({ mode: 'exact', workers: exactWorkers })}
             />
-            <span className="min-w-0 pr-2 text-2xs">Exact number of cores</span>
+            <span className="min-w-0 pr-2 text-body">Exact number of cores</span>
           </label>
-          <label className="grid gap-1 text-3xs text-text-muted">
+          <label className="grid gap-1 text-sm text-text-muted">
             <span>Code-index worker count</span>
             <input
               type="number"
@@ -191,13 +191,13 @@ function WorkerSelectionEditor({
           </label>
         </div>
       </div>
-      <p className="text-3xs text-text-muted">
+      <p className="text-sm text-text-muted">
         {status
           ? `The running daemon admits up to ${maximum} exact workers, bounded by ${status.available_logical_cpus} logical CPUs and ${status.memory_safe_workers} memory-safe workers.`
           : 'Current CPU and memory admission limits are unavailable; an exact count is judged when the daemon restarts.'}
       </p>
       {status?.environment_override_workers != null ? (
-        <p className="border border-state-unsupported-schema bg-surface-0 p-2 text-2xs text-text-primary">
+        <p className="border border-state-unsupported-schema bg-surface-0 p-2 text-body text-text-primary">
           TRACEDECAY_INDEX_WORKERS={status.environment_override_workers} overrides the persisted
           worker selection for this running daemon.
         </p>
@@ -214,7 +214,7 @@ function readSelection(value: unknown): CodeIndexWorkerSelectionV1 {
 export function FieldError({ id, error }: { id?: string; error?: string | undefined }) {
   if (!error) return null;
   return (
-    <p id={id} role="alert" className="text-2xs text-state-error">
+    <p id={id} role="alert" className="text-body text-state-error">
       {error}
     </p>
   );

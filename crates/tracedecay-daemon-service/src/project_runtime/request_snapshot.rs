@@ -36,6 +36,7 @@ pub struct ProjectRequestRuntimesV1 {
     pub retained: Option<RegisteredRetainedRuntime>,
     pub lsp_owner: Option<DaemonLspInvocationOwner>,
     pub source_edit: Option<Arc<crate::project_owner_registration::ProjectSourceEditOwnerV1>>,
+    pub graph_tool: Option<crate::invocation::RegisteredGraphToolOwnerV1>,
 }
 
 /// The owners of the registered runtime as they stood under the admission
@@ -50,6 +51,7 @@ pub(super) struct AdmittedProjectRuntimeV1 {
     retained: Option<RegisteredRetainedRuntime>,
     lsp_owner: Option<DaemonLspInvocationOwner>,
     source_edit: Option<Arc<crate::project_owner_registration::ProjectSourceEditOwnerV1>>,
+    graph_tool: Option<crate::invocation::RegisteredGraphToolOwnerV1>,
 }
 
 impl AdmittedProjectRuntimeV1 {
@@ -65,6 +67,7 @@ impl AdmittedProjectRuntimeV1 {
             retained: runtime.retained.clone(),
             lsp_owner: runtime.lsp_owner.clone(),
             source_edit: runtime.source_edit.clone(),
+            graph_tool: runtime.graph_tool.clone(),
         }
     }
 }
@@ -225,6 +228,7 @@ impl ProjectRequestRuntimesV1 {
             retained: admitted.retained.clone(),
             lsp_owner: admitted.lsp_owner.clone(),
             source_edit: admitted.source_edit.clone(),
+            graph_tool: admitted.graph_tool.clone(),
             _request_lease: Some(request_lease),
         }
     }

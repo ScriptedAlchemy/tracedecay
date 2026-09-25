@@ -334,9 +334,6 @@ pub fn apply_context_warming_budget(defs: &mut [ToolDefinition], budget: u8) {
 /// Tools whose backing dependency is missing on the current host are
 /// filtered out so the model never sees a tool that will immediately
 /// fail when called. The host `ast-grep` CLI gates rewrite support.
-/// `tracedecay_outline` remains advertised and reports its runtime
-/// `ast-grep outline` requirement from the handler, because the Cursor
-/// plugin docs/rules intentionally teach agents to start there.
 pub fn get_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogError> {
     let mut definitions = get_maximal_tool_definitions()?;
     retain_host_available_tool_definitions(&mut definitions);
@@ -394,8 +391,6 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_ast_grep_search(),
         def_retrieve(),
         def_context(request_schema("context")?),
-        def_callers(),
-        def_callees(request_schema("callees")?),
         def_impact(request_schema("impact")?),
         def_node(request_schema("node")?),
         def_status(),
@@ -432,7 +427,6 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_commit_context(),
         def_pr_context(),
         def_test_map(),
-        def_type_hierarchy(),
         def_branch_search(),
         def_branch_diff(),
         def_branch_list(),
@@ -446,12 +440,9 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_runtime(),
         def_dsm(),
         def_test_risk(),
-        def_body(),
         def_todos(request_schema("todos")?),
-        def_callers_for(),
         def_by_qualified_name(),
         def_signature(),
-        def_impls(),
         def_diagnose(),
         def_derives(),
         def_run_affected_tests(),
@@ -479,12 +470,8 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_lcm_describe(),
         def_lcm_expand(),
         def_lcm_expand_query(),
-        def_read(),
-        def_outline(),
-        def_implementations(),
         def_unsafe_patterns(),
         def_config(),
-        def_signature_search(),
         def_constructors(),
         def_field_sites(),
         def_replace_symbol(),
@@ -658,19 +645,14 @@ const FORMAT_CAPABLE_NON_APPLICATION_TOOL_NAMES: &[&str] = &[
     "tracedecay_grep",
     "tracedecay_ast_grep_search",
     "tracedecay_context",
-    "tracedecay_callers",
-    "tracedecay_callees",
     "tracedecay_impact",
     "tracedecay_node",
     "tracedecay_similar",
     "tracedecay_redundancy",
     "tracedecay_rename_preview",
-    "tracedecay_implementations",
-    "tracedecay_callers_for",
     "tracedecay_find_exact_symbol",
     "tracedecay_by_qualified_name",
     "tracedecay_signature",
-    "tracedecay_impls",
     "tracedecay_derives",
     // info
     "tracedecay_status",
@@ -678,12 +660,8 @@ const FORMAT_CAPABLE_NON_APPLICATION_TOOL_NAMES: &[&str] = &[
     "tracedecay_project_search",
     "tracedecay_project_context",
     "tracedecay_files",
-    "tracedecay_body",
     "tracedecay_todos",
-    "tracedecay_read",
-    "tracedecay_outline",
     "tracedecay_config",
-    "tracedecay_signature_search",
     "tracedecay_port_status",
     "tracedecay_port_order",
     // git
@@ -780,7 +758,6 @@ const FORMAT_CAPABLE_NON_APPLICATION_TOOL_NAMES: &[&str] = &[
     "tracedecay_dashboard",
     "tracedecay_retrieve",
     "tracedecay_analytics",
-    "tracedecay_type_hierarchy",
 ];
 
 static FORMAT_CAPABLE_TOOL_NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
@@ -817,10 +794,8 @@ pub fn tool_defaults_to_markdown(tool_name: &str) -> bool {
             | "tracedecay_fact_store_supersede"
             | "tracedecay_fact_store_list"
             | "tracedecay_files"
-            | "tracedecay_read"
             | "tracedecay_skill_list"
             | "tracedecay_skill_view"
-            | "tracedecay_type_hierarchy"
     )
 }
 
@@ -852,6 +827,7 @@ fn add_format_property(definitions: &mut [ToolDefinition]) -> Result<(), McpCata
             json!({
                 "type": "string",
                 "enum": ["markdown", "json"],
+                "default": "markdown",
                 "description": "Output format. Default 'markdown' (compact, LLM-optimized; no tables). 'json' for machine-readable output."
             }),
         );

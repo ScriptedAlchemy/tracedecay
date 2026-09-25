@@ -34,7 +34,7 @@ export function EvidenceTruthStrip({
   return (
     <div
       className={cn(
-        'flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-text-muted tabular',
+        'flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-text-muted tabular',
         className,
       )}
       aria-label="Evidence"
@@ -54,7 +54,7 @@ export function EvidenceTruthStrip({
         isEvidenceQuality(scoreKind) ? (
           <EvidencePattern quality={scoreKind} />
         ) : (
-          <span className="uppercase tracking-wide">{scoreKind}</span>
+          <span className="uppercase tracking-wide text-3xs">{scoreKind}</span>
         )
       ) : null}
     </div>

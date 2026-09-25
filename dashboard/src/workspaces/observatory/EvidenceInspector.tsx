@@ -59,7 +59,7 @@ function Fact({
   return (
     <div className="flex min-w-0 flex-col gap-0.5" {...attrs}>
       <dt className="td-legend">{label}</dt>
-      <dd className="min-w-0 break-words text-2xs leading-relaxed text-text-secondary">
+      <dd className="min-w-0 break-words text-body leading-relaxed text-text-secondary">
         {children}
       </dd>
     </div>
@@ -139,11 +139,11 @@ function NoSelection() {
   return (
     <div className="flex flex-col gap-2" data-inspector-empty>
       <p className="td-title text-text-primary">Nothing selected</p>
-      <p className="text-2xs leading-relaxed text-text-muted">
+      <p className="text-body leading-relaxed text-text-muted">
         Hover a panel or a timeline mark to preview its evidence here. Click, or press Enter on it,
         to select it and open its exact evidence below the grid. Escape returns to the selection.
       </p>
-      <p className="text-3xs leading-relaxed text-text-muted">
+      <p className="text-sm leading-relaxed text-text-muted">
         Each panel reports its own state. There is no aggregate health here: a measured panel says
         nothing about its neighbours.
       </p>
@@ -193,7 +193,7 @@ function InspectorBody({
         <Fact label="Coverage" attrs={{ 'data-inspector-fact': 'coverage' }}>
           <span className="flex items-center gap-2">
             <Meter fraction={percent == null ? null : percent / 100} height="row" className="w-16 shrink-0" />
-            <span className="td-value text-2xs" data-cell="numeric">
+            <span className="td-value text-sm" data-cell="numeric">
               {percent == null ? '—' : `${percent}%`}
             </span>
           </span>
@@ -231,7 +231,7 @@ function InspectorBody({
           ) : (
             <ul className="space-y-0.5">
               {summary.declaredActions.map((action) => (
-                <li key={`${action.kind}:${action.operation}`} className="font-mono text-3xs">
+                <li key={`${action.kind}:${action.operation}`} className="font-mono text-xs">
                   {action.kind} · {action.operation}
                 </li>
               ))}
@@ -252,7 +252,7 @@ function InspectorBody({
               title={summary.refreshOperation}
               data-operation={summary.refreshOperation}
             >
-              <span className="inline-flex h-7 items-center gap-1.5 border border-edge-subtle bg-surface-2 px-2.5 text-2xs font-medium text-text-secondary group-hover:text-text-primary">
+              <span className="inline-flex h-7 items-center gap-1.5 border border-edge-subtle bg-surface-2 px-2.5 text-body font-medium text-text-secondary group-hover:text-text-primary">
                 <RefreshCw aria-hidden size={12} className={refreshing ? 'animate-spin' : undefined} />
                 {refreshing ? 'Re-reading' : 'Re-read'}
               </span>
@@ -277,7 +277,7 @@ function InspectorBody({
                 <li key={link.path}>
                   <Link
                     to={scopedWorkspacePath(scope, link.path)}
-                    className="td-hit -my-2 border-b border-accent/60 text-2xs text-text-primary hover:border-accent"
+                    className="td-hit -my-2 border-b border-accent/60 text-body text-text-primary hover:border-accent"
                     data-cross-link={link.path}
                   >
                     {link.label}
@@ -315,7 +315,7 @@ function FindingDetail({
         <span aria-hidden className="td-rule" />
         <button
           type="button"
-          className="td-hit -my-2 text-3xs text-text-muted hover:text-text-primary"
+          className="td-hit -my-2 text-sm text-text-muted hover:text-text-primary"
           onClick={onClear}
           aria-label="Clear selected finding"
         >
@@ -326,18 +326,18 @@ function FindingDetail({
         {doctorFamilyLabel(entry.finding.family)}
         {entry.storage_kind ? ` · ${storageFindingLabel(entry.storage_kind)}` : ''}
       </p>
-      <p className="flex items-center gap-1.5 text-2xs" data-evidence-state={entry.finding.state}>
+      <p className="flex items-center gap-1.5 text-body" data-evidence-state={entry.finding.state}>
         <span aria-hidden className={cn('size-1.5', presentation.dotClass)} />
         <span className={presentation.tokenClass}>{presentation.label}</span>
         <span className="text-text-muted">· coverage {entry.finding.coverage.completeness}</span>
       </p>
-      <p className="text-2xs leading-relaxed text-text-secondary">{entry.finding.coverage.statement}</p>
+      <p className="text-body leading-relaxed text-text-secondary">{entry.finding.coverage.statement}</p>
       <ul className="space-y-0.5" aria-label="Finding evidence references">
         {entry.finding.evidence.length === 0 ? (
-          <li className="text-3xs text-text-muted">no evidence references carried</li>
+          <li className="text-sm text-text-muted">no evidence references carried</li>
         ) : (
           entry.finding.evidence.map((evidence, index) => (
-            <li key={`${evidence.family}:${evidence.reference}:${index}`} className="break-all font-mono text-3xs text-text-muted">
+            <li key={`${evidence.family}:${evidence.reference}:${index}`} className="break-all font-mono text-xs text-text-muted">
               {evidence.family} · {evidence.reference}
             </li>
           ))

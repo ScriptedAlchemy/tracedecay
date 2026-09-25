@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { INBOX, INBOX_BRANCH_ONLY } from '../../test/deliveryFixtures.ts';
 import { PR_8, renderDelivery } from '../../test/renderDelivery.tsx';
+import { LANE_FIELD_LABEL } from './LaneField.tsx';
 
 const WORK_UMBRELLA = 'shared_work_objective%3Awork.retry-backoff';
 const AGENT_UMBRELLA = 'shared_agent%3Aagent.claude-code';
@@ -44,7 +45,7 @@ describe('UmbrellaWorkspace', () => {
     expect(readout(bar, 'projects spanned')).toBe('2');
     expect(readout(bar, 'unresolved edges')).toBe('0');
 
-    expect(screen.getByRole('group', { name: 'Delivery outcome field' })).toBeTruthy();
+    expect(screen.getByRole('group', { name: LANE_FIELD_LABEL })).toBeTruthy();
     expect(screen.getByText(/Umbrella · Shared Work objective · work.retry-backoff/)).toBeTruthy();
     expect(screen.getByTestId('location').textContent).not.toContain('umbrella=');
   });
@@ -95,7 +96,7 @@ describe('UmbrellaWorkspace', () => {
     expect(await screen.findByText('Umbrella correlation unavailable')).toBeTruthy();
     expect(screen.getByText(/served no cross-PR correlation edge/)).toBeTruthy();
     expect(screen.getByText(/Proximity never groups/)).toBeTruthy();
-    expect(screen.queryByRole('group', { name: 'Delivery outcome field' })).toBeNull();
+    expect(screen.queryByRole('group', { name: LANE_FIELD_LABEL })).toBeNull();
     expect(screen.queryByRole('region', { name: 'Umbrella outcomes' })).toBeNull();
     expect(screen.queryByLabelText('Umbrella readings')).toBeNull();
 
@@ -114,7 +115,7 @@ describe('UmbrellaWorkspace', () => {
     expect(within(table).getAllByText('AGENT / INFERRED')).toHaveLength(2);
     expect(within(table).getAllByRole('button', { name: 'Journey' })).toHaveLength(4);
     expect(within(table).getAllByRole('columnheader')).toHaveLength(9);
-    expect(screen.queryByRole('group', { name: 'Delivery outcome field' })).toBeNull();
+    expect(screen.queryByRole('group', { name: LANE_FIELD_LABEL })).toBeNull();
     expect(screen.getByRole('group', { name: 'Layout' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'table', pressed: true })).toBeTruthy();
   });

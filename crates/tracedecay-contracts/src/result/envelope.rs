@@ -91,6 +91,9 @@ pub enum ApplicationOutcome<T> {
     Evidence(EvidencePacket<T>),
     Preview(PreviewResult<T>),
     Effect(EffectResult<T>),
+    /// An operation-owned typed result that carries its own receipts, such as
+    /// a source-edit result with its durable effect, or a rendered document.
+    Result(T),
 }
 
 impl<T> ApplicationOutcome<T> {
@@ -99,6 +102,7 @@ impl<T> ApplicationOutcome<T> {
             Self::Evidence(result) => result.payload.as_ref(),
             Self::Preview(result) => result.payload.as_ref(),
             Self::Effect(result) => result.payload.as_ref(),
+            Self::Result(result) => Some(result),
         }
     }
 }
@@ -111,6 +115,16 @@ pub struct ApplicationEnvelope<T> {
     pub request_id: RequestId,
     pub scope: ResolvedScope,
     pub outcome: ApplicationOutcome<T>,
+    /// Project-relative files the operation read, reported for session
+    /// activity beside the result rather than inside it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub touched_files: Vec<String>,
+    /// The code-graph generation a graph-backed operation served, so every
+    /// surface can report a stale seat beside the result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_graph: Option<crate::retrieval::ServedCodeGraphGenerationV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analytics: Option<super::InvocationAnalyticsV1>,
 }
 
 impl<T> ApplicationEnvelope<T> {
@@ -125,6 +139,9 @@ impl<T> ApplicationEnvelope<T> {
             request_id,
             scope,
             outcome: ApplicationOutcome::Evidence(packet),
+            touched_files: Vec::new(),
+            code_graph: None,
+            analytics: None,
         }
     }
 
@@ -139,6 +156,9 @@ impl<T> ApplicationEnvelope<T> {
             request_id,
             scope,
             outcome: ApplicationOutcome::Preview(preview),
+            touched_files: Vec::new(),
+            code_graph: None,
+            analytics: None,
         }
     }
 
@@ -153,6 +173,9 @@ impl<T> ApplicationEnvelope<T> {
             request_id,
             scope,
             outcome: ApplicationOutcome::Effect(effect),
+            touched_files: Vec::new(),
+            code_graph: None,
+            analytics: None,
         }
     }
 }

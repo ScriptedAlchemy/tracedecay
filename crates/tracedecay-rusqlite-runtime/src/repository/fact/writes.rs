@@ -7,7 +7,7 @@
 use rusqlite::{OptionalExtension, Savepoint, params};
 use tracedecay_domain::{
     FactCurationActionV1, FactEventId, FactId, FactIdentityMaterialV1, FactLineageEventKindV1,
-    FactLineageEventV1, FactOwnerV1, PayloadAccessState, RetrievalAnchorRecordV2,
+    FactLineageEventV1, FactOwnerV1, PayloadAccessState, RetrievalAnchorRecord,
 };
 use tracedecay_store::FactWriteBatch;
 
@@ -87,7 +87,7 @@ pub(super) fn ensure_fact(
 pub(super) fn insert_anchor(
     savepoint: &Savepoint<'_>,
     owner: &OwnerColumns,
-    anchor: &RetrievalAnchorRecordV2,
+    anchor: &RetrievalAnchorRecord,
 ) -> rusqlite::Result<()> {
     let encoded = encode(anchor)?;
     let stored = savepoint

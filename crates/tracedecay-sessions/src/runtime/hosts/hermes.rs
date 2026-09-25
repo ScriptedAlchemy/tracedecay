@@ -30,6 +30,7 @@ mod state_db;
 #[cfg(test)]
 mod tests;
 
+pub use ingest::ingest_user_sessions_capped_with_admission;
 pub use ingest::{
     HermesSweepOutcome, ProjectIngestDestination, ingest_for_project, ingest_for_project_capped,
     ingest_for_project_capped_with_admission,
@@ -37,7 +38,6 @@ pub use ingest::{
     ingest_homes_capped, ingest_homes_capped_with_admission, ingest_homes_for_projects,
     ingest_user_homes, ingest_user_homes_capped, ingest_user_sessions_capped,
 };
-pub use ingest::{ingest_legacy_pinned_profile, ingest_user_sessions_capped_with_admission};
 
 #[cfg(all(test, windows))]
 use coverage::sqlite_incarnation;

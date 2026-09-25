@@ -11,8 +11,8 @@ use tracedecay_automation_runtime::automation::scheduler::{
 
 use super::super::{
     DaemonHandshake, apply_project_automation_patch_via_surface, enter_test_daemon_database_scope,
-    initialize_test_project, isolate_codex_app_server_binary, test_client_identity_for,
-    test_daemon_engine_for_profile, test_handshake_defaults,
+    initialize_test_project, test_client_identity_for, test_daemon_engine_for_profile,
+    test_handshake_defaults,
 };
 
 #[tokio::test]
@@ -46,7 +46,6 @@ fn automation_scheduler_tick_fits_the_daemon_worker_stack() {
 
 async fn paused_tick_scenario() {
     let dir = TempDir::new().expect("temp dir");
-    let _codex_bin = isolate_codex_app_server_binary(dir.path());
     let project = dir.path().canonicalize().expect("canonical temp dir");
     let client_identity = test_client_identity_for(project.join("profile"));
     std::fs::create_dir_all(project.join("src")).expect("src dir");

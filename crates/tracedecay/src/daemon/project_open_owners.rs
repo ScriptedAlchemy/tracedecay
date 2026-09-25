@@ -38,6 +38,7 @@ use tracedecay_daemon_service::{
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_lsp::analyzer::broker::AdmittedLspProvider;
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 mod advisory_runtime;
 mod automation_effect_recovery;
@@ -80,7 +81,7 @@ async fn install_project_open_source_edit_owners(
 
 pub(crate) async fn install_project_open_source_edit_preview_owner(
     server: &McpServer,
-    graph: Arc<crate::project::TraceDecay>,
+    graph: Arc<tracedecay_project::project::TraceDecay>,
     code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     project_root: &Path,
     project_id: &str,
@@ -129,6 +130,11 @@ pub(crate) async fn install_project_open_source_edit_owners_for_test(
     let graph = server.cg().await;
     if server.daemon_invocation_service().is_none() {
         return Ok(false);
+    }
+    if let Some(scope) = server.admitted_project_scope() {
+        server
+            .register_graph_tool_owner(graph.project_root(), scope)
+            .await?;
     }
     let Some(code_graph) = server.code_graph_projection_read_port() else {
         // A directly constructed test server carries no production code-graph
@@ -812,7 +818,10 @@ async fn register_project_query_authority(
     session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     scope: ResolvedScope,
 ) {
-    let cursor_keys = match session_db.load_session_cursor_key_provider_result().await {
+    let cursor_keys = match SessionTemporalAccess::new(&*session_db)
+        .load_session_cursor_key_provider_result()
+        .await
+    {
         Ok(cursor_keys) => cursor_keys,
         Err(error) => {
             tracing::debug!(

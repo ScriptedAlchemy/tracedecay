@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -31,11 +32,12 @@ use tracedecay_graph_db::{
     GraphLabel, GraphNamespace, GraphProjectorRevision, GraphProperty, GraphPropertyName,
     GraphRelationId, GraphRelationKind, NeverCancelled, VerifiedGraphSnapshot,
 };
-use tracedecay_temporal_query::ports::{
-    BindingDigest, KernelVersions, TemporalExecutionSnapshot, TemporalSnapshotRequest,
-    TemporalWatermarks,
-};
+use tracedecay_temporal_query::execution::BindingDigest;
+use tracedecay_temporal_query::ports::TemporalSnapshotRequest;
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+use tracedecay_temporal_query::snapshot::{
+    KernelVersions, TemporalExecutionSnapshot, TemporalWatermarks,
+};
 use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
 
 use super::symbol_graph::{
@@ -317,7 +319,12 @@ fn adapter(
         let port: Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1> = scheduler;
         port
     });
-    CanonicalSymbolGraphAdapter::new(fixture.graph.clone(), fixture.cursor.clone(), scheduler)
+    CanonicalSymbolGraphAdapter::new(
+        fixture.graph.clone(),
+        PathBuf::new(),
+        fixture.cursor.clone(),
+        scheduler,
+    )
 }
 
 fn port_context(fixture: &Fixture) -> SymbolGraphPortContext<'_> {

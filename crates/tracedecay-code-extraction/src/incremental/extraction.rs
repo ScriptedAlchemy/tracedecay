@@ -1,4 +1,4 @@
-use tracedecay_domain::{ExtractionResult, NodeKind, SourceSpan};
+use tracedecay_domain::{NodeKind, SourceSpan};
 
 use super::{
     ParseCompleteness, ParseError, ParseInputEdit, ParseReport, ParseResetReason, ParseReuse,
@@ -7,31 +7,12 @@ use super::{
 use crate::LanguageExtractor;
 use crate::extraction_artifact::{ExtractedImportEvidenceV1, ExtractionArtifactV1};
 use crate::parsed_extraction::{
-    ParsedExtraction, ParsedExtractionArtifactV1, ParsedExtractionDisposition,
-    ParsedExtractionResetReason, ParsedExtractionScope, ParsedTraversalMetrics,
-    merge_changed_extraction, superseded_previous_nodes,
+    ParsedExtractionArtifactV1, ParsedExtractionDisposition, ParsedExtractionResetReason,
+    ParsedExtractionScope, ParsedTraversalMetrics, merge_changed_extraction,
+    superseded_previous_nodes,
 };
 
 impl RetainedParseDocument {
-    /// Produce a complete canonical legacy graph from the retained tree.
-    pub fn extract_canonical(
-        &self,
-        extractor: &dyn LanguageExtractor,
-        report: &ParseReport,
-        previous: Option<&ExtractionResult>,
-    ) -> Result<ParsedExtraction, ParseError> {
-        // Only the Noop and Incremental paths read the prior extraction; the
-        // Initial and Reset paths must not pay its deep clone.
-        let previous_artifact = match report.reuse {
-            ParseReuse::Noop | ParseReuse::Incremental => {
-                previous.cloned().map(ExtractionArtifactV1::from_result)
-            }
-            ParseReuse::Initial | ParseReuse::Reset { .. } => None,
-        };
-        self.extract_canonical_artifact(extractor, report, previous_artifact.as_ref())
-            .map(ParsedExtractionArtifactV1::into_parsed)
-    }
-
     /// Produce a complete graph and structured evidence artifact from the
     /// current retained tree. Incremental deltas replace every affected import
     /// statement's rows, including when deletion produces no replacement row.
@@ -184,7 +165,9 @@ impl RetainedParseDocument {
                 // fallback does not re-enter the full traversal span.
                 crate::hotpath_observe::measure_markdown_composite_fallback(|| {
                     ExtractionArtifactV1::from_result(
-                        extractor.extract(self.identity.logical_path(), &self.source),
+                        extractor
+                            .extract_artifact(self.identity.logical_path(), &self.source)
+                            .result,
                     )
                 }),
                 ParsedExtractionResetReason::CompositeGrammar,

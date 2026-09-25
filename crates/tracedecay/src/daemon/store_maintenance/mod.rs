@@ -8,7 +8,7 @@ use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegis
 use tracedecay_runtime_core::branch::BranchAdminAction;
 
 use super::branch_admin::StoreAdministration;
-use crate::project::TraceDecay;
+use tracedecay_project::project::TraceDecay;
 use tracedecay_runtime_core::logging::log_daemon_event;
 
 /// Runs branch-store GC for a project through the daemon administration
@@ -20,7 +20,6 @@ pub(super) async fn run_gc(
     administration: &StoreAdministration,
     schedulers: &CodeIndexSchedulerRegistryV1,
     branch_gc_days: u64,
-    orphan_db_gc_days: u64,
     cg: &TraceDecay,
 ) -> bool {
     let root = cg.project_root();
@@ -35,7 +34,6 @@ pub(super) async fn run_gc(
             data_root,
             BranchAdminAction::Gc,
             branch_gc_days,
-            orphan_db_gc_days,
         )
         .await;
     let report = match report {
@@ -53,16 +51,12 @@ pub(super) async fn run_gc(
         }
     };
 
-    if !report.removed_branches.is_empty() || !report.removed_orphan_dbs.is_empty() {
+    if !report.removed_branches.is_empty() {
         log_daemon_event(
             "retention_branch_gc",
             &[
                 ("project", root.display().to_string()),
                 ("removed_tracked", report.removed_branches.len().to_string()),
-                (
-                    "removed_orphans",
-                    report.removed_orphan_dbs.len().to_string(),
-                ),
             ],
         );
     }

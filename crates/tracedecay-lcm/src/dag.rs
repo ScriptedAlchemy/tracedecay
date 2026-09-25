@@ -15,7 +15,7 @@ use tracedecay_runtime_core::db::engine::{QueryExecutor, Value, params};
 use super::types::{LcmImmutableSummaryPublication, LcmSummaryPublicationReceipt};
 use super::{
     LcmError, LcmExpandedSummarySource, LcmRawMessage, LcmRawMessageMetadata, LcmSourceRef,
-    LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeDraft, raw, util,
+    LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeDraft, raw, schema, util,
 };
 
 #[derive(Clone)]
@@ -176,7 +176,7 @@ async fn expand_summary_nodes_with_content(
         return Ok(Vec::new());
     }
     let requested = hotpath::future!(
-        load_summary_nodes_by_ids(conn, node_ids, include_content),
+        load_summary_nodes_by_ids(conn, node_ids, include_content, SummaryRead::Visible),
         label = "sessions.lcm.expand.summary.fetch"
     )
     .await?;
@@ -209,7 +209,7 @@ async fn expand_summary_nodes_with_content(
     )
     .await?;
     let child_sources = hotpath::future!(
-        load_summary_nodes_by_ids(conn, &child_node_ids, include_content),
+        load_summary_nodes_by_ids(conn, &child_node_ids, include_content, SummaryRead::Lineage),
         label = "sessions.lcm.expand.summary.fetch"
     )
     .await?;
@@ -334,7 +334,7 @@ pub struct LcmUncondensedSummaryNode {
 
 /// CTE prefix shared by [`load_uncondensed_summary_nodes`] and its work
 /// measurement: the available unparented roots of one session and, per root,
-/// the descendants reachable through `lcm_summary_sources`.
+/// the descendants reachable through `session_summary_sources`.
 ///
 /// `lineage` holds one `(root_id, source_kind, source_id)` row per *distinct*
 /// descendant. The recursive `UNION` (not `UNION ALL`) makes SQLite's queue a
@@ -345,18 +345,18 @@ pub struct LcmUncondensedSummaryNode {
 /// corrupted cyclic lineage revisits nothing and still yields the complete
 /// reachable minimum instead of a depth-truncated one.
 const UNCONDENSED_LINEAGE_CTE: &str = "WITH RECURSIVE unparented AS (
-       SELECT n.node_id, n.provider, n.conversation_id, n.session_id, n.depth,
+       SELECT n.summary_id, n.provider, n.conversation_id, n.session_id, n.depth,
               n.summary_text, n.summary_hash, n.summary_token_count,
               n.source_token_count, n.source_time_start, n.source_time_end,
               n.expand_hint, n.metadata_json, n.created_at
-       FROM lcm_summary_nodes n
+       FROM session_summary_nodes n
        JOIN session_temporal_generations generation
          ON generation.session_id = n.session_id
         AND generation.state = 'active'
        JOIN session_summary_availability availability
          ON availability.session_id = generation.session_id
         AND availability.generation = generation.generation
-        AND availability.summary_id = n.node_id
+        AND availability.summary_id = n.summary_id
         AND availability.availability = 'available'
        WHERE n.provider = ?1 AND n.session_id = ?2
          -- Fail closed only while a raw revision's invalidation
@@ -375,25 +375,25 @@ const UNCONDENSED_LINEAGE_CTE: &str = "WITH RECURSIVE unparented AS (
          )
          AND NOT EXISTS (
            SELECT 1
-           FROM lcm_summary_sources s
+           FROM session_summary_sources s
            JOIN session_summary_availability parent_availability
              ON parent_availability.session_id = generation.session_id
             AND parent_availability.generation = generation.generation
-            AND parent_availability.summary_id = s.node_id
+            AND parent_availability.summary_id = s.summary_id
             AND parent_availability.availability = 'available'
            WHERE s.source_kind = 'summary_node'
-             AND s.source_id = n.node_id
+             AND s.source_id = n.summary_id
          )
      ),
      lineage(root_id, source_kind, source_id) AS (
-       SELECT s.node_id, s.source_kind, s.source_id
-       FROM lcm_summary_sources s
-       JOIN unparented u ON u.node_id = s.node_id
+       SELECT s.summary_id, s.source_kind, s.source_id
+       FROM session_summary_sources s
+       JOIN unparented u ON u.summary_id = s.summary_id
        UNION
        SELECT l.root_id, s.source_kind, s.source_id
        FROM lineage l
-       JOIN lcm_summary_sources s
-         ON l.source_kind = 'summary_node' AND s.node_id = l.source_id
+       JOIN session_summary_sources s
+         ON l.source_kind = 'summary_node' AND s.summary_id = l.source_id
      ),
      first_raw AS (
        SELECT root_id, MIN(CAST(source_id AS INTEGER)) AS first_source_store_id
@@ -407,18 +407,18 @@ const UNCONDENSED_LINEAGE_CTE: &str = "WITH RECURSIVE unparented AS (
 fn uncondensed_summary_nodes_sql() -> String {
     format!(
         "{UNCONDENSED_LINEAGE_CTE}
-         SELECT u.node_id, u.provider, u.conversation_id, u.session_id, u.depth,
+         SELECT u.summary_id, u.provider, u.conversation_id, u.session_id, u.depth,
                 u.summary_text, u.summary_hash, u.summary_token_count,
                 u.source_token_count, u.source_time_start, u.source_time_end,
                 u.expand_hint, u.metadata_json, u.created_at,
                 first_raw.first_source_store_id
          FROM unparented u
-         LEFT JOIN first_raw ON first_raw.root_id = u.node_id
+         LEFT JOIN first_raw ON first_raw.root_id = u.summary_id
          ORDER BY first_raw.first_source_store_id IS NULL,
                   first_raw.first_source_store_id,
                   u.depth DESC,
                   u.source_time_start IS NULL, u.source_time_start,
-                  u.created_at, u.node_id"
+                  u.created_at, u.summary_id"
     )
 }
 
@@ -556,10 +556,21 @@ async fn load_raw_messages_by_store_ids(
     }
 }
 
+/// Which summary rows a by-id load may return.
+#[derive(Clone, Copy)]
+enum SummaryRead {
+    /// Entry points: only summaries visible under [`schema::SUMMARY_VISIBLE_SQL`].
+    Visible,
+    /// Children of an already-visible summary: its immutable lineage, read as
+    /// published so the parent's expansion stays complete.
+    Lineage,
+}
+
 async fn load_summary_nodes_by_ids(
     conn: &(impl QueryExecutor + ?Sized),
     node_ids: &[String],
     include_content: bool,
+    read: SummaryRead,
 ) -> Result<BTreeMap<String, LcmSummaryNode>, LcmError> {
     let unique_node_ids = node_ids
         .iter()
@@ -571,7 +582,7 @@ async fn load_summary_nodes_by_ids(
         return Ok(BTreeMap::new());
     }
     let summary_text = if include_content {
-        "summary_text"
+        "n.summary_text"
     } else {
         "'' AS summary_text"
     };
@@ -581,12 +592,17 @@ async fn load_summary_nodes_by_ids(
             continue;
         }
         let placeholders = util::sql_in_placeholders(chunk.len());
+        let visibility = match read {
+            SummaryRead::Visible => schema::SUMMARY_VISIBLE_SQL,
+            SummaryRead::Lineage => "1",
+        };
         let node_sql = format!(
-            "SELECT node_id, provider, conversation_id, session_id, depth, {summary_text},
-                    summary_hash, summary_token_count, source_token_count, source_time_start,
-                    source_time_end, expand_hint, metadata_json, created_at
-             FROM lcm_summary_nodes
-             WHERE node_id IN ({placeholders})"
+            "SELECT n.summary_id, n.provider, n.conversation_id, n.session_id, n.depth,
+                    {summary_text}, n.summary_hash, n.summary_token_count,
+                    n.source_token_count, n.source_time_start, n.source_time_end,
+                    n.expand_hint, n.metadata_json, n.created_at
+             FROM session_summary_nodes n
+             WHERE n.summary_id IN ({placeholders}) AND {visibility}"
         );
         let values = chunk
             .iter()
@@ -618,10 +634,10 @@ async fn load_summary_nodes_by_ids(
             nodes.insert(node_id, node);
         }
         let source_sql = format!(
-            "SELECT node_id, source_kind, source_id
-             FROM lcm_summary_sources
-             WHERE node_id IN ({placeholders})
-             ORDER BY node_id, ordinal"
+            "SELECT summary_id, source_kind, source_id
+             FROM session_summary_sources
+             WHERE summary_id IN ({placeholders})
+             ORDER BY summary_id, ordinal"
         );
         let mut source_rows = conn.query(&source_sql, values).await?;
         while let Some(row) = source_rows.next().await? {
@@ -751,9 +767,6 @@ mod lineage_tests {
         )
         .await
         .expect("session schema");
-        conn.execute_batch(test_support::SESSION_GENERATION_SCHEMA)
-            .await
-            .expect("session generation schema");
         schema::ensure_lcm_schema(&conn).await.expect("lcm schema");
         conn.execute(
             "INSERT INTO sessions(provider, session_id, project_key, project_path)
@@ -769,8 +782,8 @@ mod lineage_tests {
     async fn seed(conn: &TestConnection, session_id: &str, nodes: &[FixtureNode]) {
         for fixture in nodes {
             conn.execute(
-                "INSERT INTO lcm_summary_nodes(
-                    node_id, provider, conversation_id, session_id, depth, summary_text,
+                "INSERT INTO session_summary_nodes(
+                    summary_id, provider, conversation_id, session_id, depth, summary_text,
                     summary_hash, summary_token_count, source_token_count, created_at
                  ) VALUES (?1, ?2, ?3, ?3, ?4, ?1, ?5, 1, 1, ?6)",
                 params![
@@ -806,7 +819,7 @@ mod lineage_tests {
                     LcmSourceRef::SummaryNode { node_id } => ("summary_node", node_id.clone()),
                 };
                 conn.execute(
-                    "INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
+                    "INSERT INTO session_summary_sources(summary_id, source_kind, source_id, ordinal)
                      VALUES (?1, ?2, ?3, ?4)",
                     params![
                         fixture.node_id.as_str(),

@@ -4,12 +4,10 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracedecay_code_extraction::ExtractedCloneBodyV1;
 pub use tracedecay_code_extraction::{
-    CloneBodyEligibilityV1, CloneBodyRenameStatusV1, ConservativeCloneTokenV1,
-};
-use tracedecay_code_extraction::{
-    CloneBodyRenameIssueV1, CloneBodyTokenizationIssueV1, CloneBodyTokenizationStatusV1,
-    ExtractedCloneBodyV1,
+    CloneBodyEligibilityV1, CloneBodyRenameIssueV1, CloneBodyRenameStatusV1,
+    CloneBodyTokenizationIssueV1, CloneBodyTokenizationStatusV1, ConservativeCloneTokenV1,
 };
 use tracedecay_domain::{
     CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, SourceSpan, SymbolOccurrenceId,
@@ -409,37 +407,69 @@ impl CodeIndexCloneBodyV1 {
     }
 }
 
+/// Everything a clone payload holds except its digests, which are a pure
+/// function of these fields.
+pub struct CloneBodyPayloadPartsV1 {
+    pub language: String,
+    pub symbol_kind: String,
+    pub token_count: u32,
+    pub conservative_normalization_revision: u16,
+    pub conservative_tokens: Arc<[ConservativeCloneTokenV1]>,
+    pub tokenization_status: CloneBodyTokenizationStatusV1,
+    pub tokenization_issues: Vec<CloneBodyTokenizationIssueV1>,
+    pub rename_normalization_revision: Option<u16>,
+    pub rename_tokens: Option<Arc<[ConservativeCloneTokenV1]>>,
+    pub rename_coverage: CloneBodyRenameStatusV1,
+    pub rename_issues: Vec<CloneBodyRenameIssueV1>,
+}
+
 impl CloneBodyPayloadV1 {
     pub fn from_extracted(body: &ExtractedCloneBodyV1) -> Result<Self, String> {
-        let digests = clone_payload_digests(ClonePayloadDigestInputV1 {
-            language: body.language.as_str(),
-            symbol_kind: body.symbol_kind.as_str(),
-            token_count: body.non_trivia_token_count,
-            conservative_revision: body.normalization_revision,
-            conservative_tokens: &body.conservative_tokens,
-            tokenization_status: body.tokenization_status,
-            tokenization_issues: &body.tokenization_issues,
-            rename_revision: body.rename_normalization_revision,
-            rename_tokens: body.rename_tokens.as_deref(),
-            rename_coverage: body.rename_status,
-            rename_issues: &body.rename_issues,
-        })?;
-        Ok(Self {
-            payload_digest: digests.payload,
+        Self::from_parts(CloneBodyPayloadPartsV1 {
             language: body.language.clone(),
             symbol_kind: body.symbol_kind.as_str().to_owned(),
-            body_digest: digests.body,
             token_count: body.non_trivia_token_count,
             conservative_normalization_revision: body.normalization_revision,
-            conservative_digest: digests.conservative,
             conservative_tokens: Arc::clone(&body.conservative_tokens),
             tokenization_status: body.tokenization_status,
             tokenization_issues: body.tokenization_issues.clone(),
             rename_normalization_revision: body.rename_normalization_revision,
-            rename_digest: digests.rename,
             rename_tokens: body.rename_tokens.clone(),
             rename_coverage: body.rename_status,
             rename_issues: body.rename_issues.clone(),
+        })
+    }
+
+    pub fn from_parts(parts: CloneBodyPayloadPartsV1) -> Result<Self, String> {
+        let digests = clone_payload_digests(ClonePayloadDigestInputV1 {
+            language: &parts.language,
+            symbol_kind: &parts.symbol_kind,
+            token_count: parts.token_count,
+            conservative_revision: parts.conservative_normalization_revision,
+            conservative_tokens: &parts.conservative_tokens,
+            tokenization_status: parts.tokenization_status,
+            tokenization_issues: &parts.tokenization_issues,
+            rename_revision: parts.rename_normalization_revision,
+            rename_tokens: parts.rename_tokens.as_deref(),
+            rename_coverage: parts.rename_coverage,
+            rename_issues: &parts.rename_issues,
+        })?;
+        Ok(Self {
+            payload_digest: digests.payload,
+            language: parts.language,
+            symbol_kind: parts.symbol_kind,
+            body_digest: digests.body,
+            token_count: parts.token_count,
+            conservative_normalization_revision: parts.conservative_normalization_revision,
+            conservative_digest: digests.conservative,
+            conservative_tokens: parts.conservative_tokens,
+            tokenization_status: parts.tokenization_status,
+            tokenization_issues: parts.tokenization_issues,
+            rename_normalization_revision: parts.rename_normalization_revision,
+            rename_digest: digests.rename,
+            rename_tokens: parts.rename_tokens,
+            rename_coverage: parts.rename_coverage,
+            rename_issues: parts.rename_issues,
         })
     }
 

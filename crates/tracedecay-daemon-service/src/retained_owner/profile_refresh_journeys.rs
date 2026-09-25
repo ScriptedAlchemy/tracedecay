@@ -4,14 +4,14 @@ use tracedecay_contracts::retained_surfaces::{
     RetainedOutcomeStatusV1, RetainedSurfaceRequestV1, RetainedSurfaceResultV1,
     SessionRefreshActionRequestV1, SessionRefreshActionV1, SessionRefreshFrontierV1,
     SessionRefreshGrainV1, SessionRefreshRequestV1, SessionRefreshScopeV1, SessionRefreshSessionV1,
-    SessionRefreshSourceV1, SessionRefreshTargetV1, SessionRefreshTemporalModeV1,
+    SessionRefreshSourceV1, SessionRefreshTargetV1,
 };
 use tracedecay_contracts::{
     ApplicationOutcome, ApplicationProblemKind, ApplicationResult, CancellationSignal, Deadline,
     RequestId, now_micros,
 };
 use tracedecay_daemon_identity::profile_identity;
-use tracedecay_domain::UtcMicros;
+use tracedecay_domain::{TemporalModeV1, UtcMicros};
 use tracedecay_session_memory::context::ResolvedSessionIdentity;
 use tracedecay_session_runtime::retained::{
     ProfileRetainedAuthoritiesV1, ProfileRetainedConnectionAuthorityV1,
@@ -53,7 +53,7 @@ fn refresh_request(
                 scope: "codex".to_owned(),
             },
             target: SessionRefreshTargetV1 {
-                temporal_mode: SessionRefreshTemporalModeV1::Current,
+                temporal_mode: TemporalModeV1::Current,
                 grain: SessionRefreshGrainV1::LogicalMessage,
                 frontier: SessionRefreshFrontierV1 {
                     observed_through: 0,
@@ -61,7 +61,6 @@ fn refresh_request(
                 },
             },
             handle,
-            format: None,
         },
     ))
 }

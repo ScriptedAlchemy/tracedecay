@@ -3,20 +3,6 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tracedecay::mcp::McpServer;
 use tracedecay_mcp::get_tool_definitions;
-#[test]
-fn outline_schema_requires_file_without_provider_property() {
-    let tools = get_tool_definitions().expect("tool definitions");
-    let schema = tool_schema(&tools, "tracedecay_outline");
-
-    assert_eq!(required_args_at(schema, &[]), vec!["file"]);
-    assert!(
-        schema["properties"]
-            .as_object()
-            .is_some_and(|properties| !properties.contains_key("provider")),
-        "tracedecay_outline should not advertise a provider property: {schema}"
-    );
-}
-
 #[tokio::test]
 async fn schema_required_arguments_match_representative_handler_parsers() {
     let tools = get_tool_definitions().expect("tool definitions");
@@ -39,25 +25,16 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
 
     // Routed graph tools need the production query authority mounted before
     // dispatch reaches their operation parser.
-    // Shared helper parser style, including canonical node_id despite id alias support.
+    // Canonical application request parser style.
     assert_schema_requires(&tools, "tracedecay_callers", &["node_id"]);
     expect_real_server_missing_argument_error(
         &server,
         "tracedecay_callers",
         json!({}),
-        "missing required parameter: node_id",
+        "missing field `node_id`",
     )
     .await;
 
-    // Non-empty array parser style.
-    assert_schema_requires(&tools, "tracedecay_callers_for", &["node_ids"]);
-    expect_real_server_missing_argument_error(
-        &server,
-        "tracedecay_callers_for",
-        json!({}),
-        "node_ids",
-    )
-    .await;
     // Multi-field edit parser style.
     assert_schema_requires(
         &tools,
@@ -205,24 +182,8 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
 }
 
 #[test]
-fn lcm_tool_schemas_are_registered_with_stable_names() {
+fn lcm_tool_schemas_are_read_only_and_closed() {
     let tools = get_tool_definitions().expect("tool definitions");
-    let names = tools
-        .iter()
-        .map(|tool| tool.name.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-
-    for expected in [
-        "tracedecay_lcm_status",
-        "tracedecay_lcm_load_session",
-        "tracedecay_lcm_grep",
-        "tracedecay_lcm_describe",
-        "tracedecay_lcm_expand",
-        "tracedecay_lcm_expand_query",
-        "tracedecay_lcm_doctor",
-    ] {
-        assert!(names.contains(expected), "missing {expected}");
-    }
 
     for read_only in [
         "tracedecay_lcm_status",
@@ -250,17 +211,6 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         {
             assert_eq!(branch["additionalProperties"], false);
         }
-    }
-
-    for retired in [
-        "tracedecay_lcm_preflight",
-        "tracedecay_lcm_compress",
-        "tracedecay_lcm_session_boundary",
-    ] {
-        assert!(
-            !names.contains(retired),
-            "{retired} must remain daemon-internal"
-        );
     }
 
     for scoped in [
@@ -292,12 +242,6 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         .expect("tracedecay_lcm_load_session definition");
     assert_eq!(load.input_schema["required"], json!(["session_id"]));
     assert!(
-        load.input_schema["properties"]["provider"]["description"]
-            .as_str()
-            .unwrap()
-            .contains("across all providers")
-    );
-    assert!(
         load.input_schema["properties"]
             .get("content_limit")
             .is_some()
@@ -322,12 +266,6 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
             .and_then(Value::as_array)
             .is_some_and(|required| required.iter().any(|field| field == "provider")),
         "tracedecay_lcm_grep provider must stay optional"
-    );
-    assert!(
-        grep.input_schema["properties"]["provider"]["description"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("all providers")
     );
     assert_eq!(
         grep.input_schema["properties"]["limit"]["type"],
@@ -432,21 +370,6 @@ fn retrieve_tool_schema_requires_handle_and_canonical_project_selector() {
             .collect::<Vec<_>>(),
         vec!["project_id"]
     );
-
-    assert!(retrieve.description.contains("tracedecay_retrieve"));
-    assert!(retrieve.description.contains("required argument `handle`"));
-    assert!(retrieve.description.contains("pass the same selector"));
-    assert!(
-        retrieve
-            .description
-            .contains("Only call it when the missing details are needed")
-    );
-    assert!(
-        properties["handle"]["description"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("required `handle` argument")
-    );
 }
 
 #[test]
@@ -455,7 +378,11 @@ fn always_loaded_graph_tool_schemas_match_project_selector_authority() {
 
     // Registered-project readers dispatch to other mounted projects, so the
     // selector has to be discoverable from the schema.
-    for name in ["tracedecay_context", "tracedecay_grep", "tracedecay_read"] {
+    for name in [
+        "tracedecay_context",
+        "tracedecay_grep",
+        "tracedecay_callers",
+    ] {
         let properties = tool_properties(&tools, name);
         assert!(properties.contains_key("project_selector"));
         for alias in ["project_id", "project_path", "project_root", "root"] {
@@ -533,8 +460,6 @@ fn exact_fact_store_definitions_project_canonical_request_schemas() {
 #[test]
 fn exact_memory_tool_definitions_exclude_legacy_payload_aliases() {
     let tools = get_tool_definitions().expect("tool definitions");
-    let tool_names: std::collections::HashSet<_> =
-        tools.iter().map(|tool| tool.name.as_str()).collect();
     let fact_add = tools
         .iter()
         .find(|tool| tool.name == "tracedecay_fact_store_add")
@@ -587,20 +512,6 @@ fn exact_memory_tool_definitions_exclude_legacy_payload_aliases() {
     assert!(
         trust_type == "number" || *trust_type == serde_json::json!(["number", "null"]),
         "trust must be a number (nullable Option<f64> is also accepted): {trust_type}"
-    );
-    // FactStoreAddRequestV1::trust is Option<f64> with no schemars range.
-
-    assert!(
-        !tool_names.contains("tracedecay_record_decision"),
-        "unshipped legacy decision tool should not be exposed"
-    );
-    assert!(
-        !tool_names.contains("tracedecay_record_code_area"),
-        "unshipped legacy code-area tool should not be exposed"
-    );
-    assert!(
-        !tool_names.contains("tracedecay_session_recall"),
-        "unshipped legacy recall tool should not be exposed"
     );
 }
 

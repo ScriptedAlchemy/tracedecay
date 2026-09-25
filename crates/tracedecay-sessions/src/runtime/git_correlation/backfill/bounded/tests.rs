@@ -244,12 +244,12 @@ async fn prepare_store(path: &Path, project_path: &Path) -> TestStore {
                 ended_at INTEGER,
                 PRIMARY KEY(provider, session_id)
             );
-            CREATE TABLE session_messages (
+            CREATE TABLE lcm_raw_messages (
                 provider TEXT NOT NULL,
                 message_id TEXT NOT NULL,
                 session_id TEXT NOT NULL,
                 timestamp INTEGER,
-                PRIMARY KEY(provider, message_id)
+                UNIQUE(provider, message_id)
             );",
         )
         .await

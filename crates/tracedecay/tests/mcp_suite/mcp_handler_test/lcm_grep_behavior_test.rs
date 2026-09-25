@@ -207,7 +207,7 @@ fn unsupported_sort_refusal() -> Value {
 }
 
 async fn seed(
-    cg: &tracedecay::project::TraceDecay,
+    cg: &tracedecay_project::project::TraceDecay,
     provider: &str,
     session_id: &str,
     message_id: &str,

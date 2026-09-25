@@ -514,15 +514,18 @@ impl fmt::Display for CodeIndexParallelismErrorV1 {
 
 impl std::error::Error for CodeIndexParallelismErrorV1 {}
 
+#[cfg(any(test, feature = "test-helpers"))]
 thread_local! {
-    /// Test-only worker width. Thread-scoped so one equivalence or batching
+    /// Forced worker width. Thread-scoped so one equivalence or batching
     /// test cannot change a sibling test's scheduling policy.
     static FORCED_WORKERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
-    /// Test-only: force [`install`] on this thread to return
+#[cfg(test)]
+thread_local! {
+    /// Forces [`install`] on this thread to return
     /// [`CodeIndexParallelismErrorV1::PoolBuild`]. Thread-scoped so a fault
     /// test cannot leak into sibling tests running in the same process.
-    /// Visible to integration tests; production callers leave it false.
     static FORCE_INSTALL_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -530,13 +533,14 @@ thread_local! {
 /// inline".
 #[must_use]
 pub fn indexing_workers() -> usize {
-    match FORCED_WORKERS.with(std::cell::Cell::get) {
-        0 => WORKER_RUNTIME.get().map_or_else(
-            || indexing_worker_target(detected_cores()),
-            |runtime| runtime.plan.effective_workers,
-        ),
-        forced => forced,
+    #[cfg(any(test, feature = "test-helpers"))]
+    if let forced @ 1.. = FORCED_WORKERS.with(std::cell::Cell::get) {
+        return forced;
     }
+    WORKER_RUNTIME.get().map_or_else(
+        || indexing_worker_target(detected_cores()),
+        |runtime| runtime.plan.effective_workers,
+    )
 }
 
 /// Force the indexing width for an equivalence test.
@@ -544,23 +548,22 @@ pub fn indexing_workers() -> usize {
 /// Width is sizing policy, never semantics: the same inputs must produce the
 /// same generation bytes at any width. This exists so one test process can
 /// build a fixture at width 1 and at full width and compare the sealed
-/// digests directly. It is not a supported runtime control, production sizing
-/// comes from [`indexing_workers`].
-#[doc(hidden)]
+/// digests directly. Production sizing comes from [`indexing_workers`].
+#[cfg(any(test, feature = "test-helpers"))]
 pub fn force_indexing_workers_for_test(workers: usize) {
     FORCED_WORKERS.with(|forced| forced.set(workers.max(1)));
 }
 
 /// Restore production sizing after [`force_indexing_workers_for_test`].
-#[doc(hidden)]
+#[cfg(any(test, feature = "test-helpers"))]
 pub fn clear_forced_indexing_workers_for_test() {
     FORCED_WORKERS.with(|forced| forced.set(0));
 }
 
 /// Force [`install`] to fail so callers can assert operational pool errors stay
 /// typed as parallelism failures instead of identity corruption.
-#[doc(hidden)]
-pub fn force_install_failure_for_test(force: bool) {
+#[cfg(test)]
+pub(crate) fn force_install_failure_for_test(force: bool) {
     FORCE_INSTALL_FAILURE.with(|flag| flag.set(force));
 }
 
@@ -599,6 +602,7 @@ where
     R: Send,
 {
     hotpath::gauge!("code_index_worker_count").set(indexing_workers());
+    #[cfg(test)]
     if FORCE_INSTALL_FAILURE.with(std::cell::Cell::get) {
         return Err(CodeIndexParallelismErrorV1::PoolBuild {
             message: "forced code-index worker pool failure for test".to_owned(),

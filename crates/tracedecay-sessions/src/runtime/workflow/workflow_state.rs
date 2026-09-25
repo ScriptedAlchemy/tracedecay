@@ -46,7 +46,7 @@ pub async fn list_unfinished(
              ORDER BY COALESCE(raw.timestamp, 0) DESC, raw.store_id DESC
              LIMIT ?2",
             params![
-                r#""session limit" OR blocked OR interrupted OR "runs 0""#,
+                r#"index_text : ("session limit" OR blocked OR interrupted OR "runs 0")"#,
                 limit
             ],
         )

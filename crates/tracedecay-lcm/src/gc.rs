@@ -1067,20 +1067,19 @@ async fn tombstone_dangling_refs_in_transaction(
             continue;
         }
         let store_id = row.store_id;
-        let (content, snippet_text, index_text, metadata_json, changed) =
+        let (content, placeholder_text, metadata_json, changed) =
             tombstone_row_for_refs(row, dangling);
         if changed == 0 {
             continue;
         }
         conn.execute(
             "UPDATE lcm_raw_messages
-             SET content = ?2, snippet_text = ?3, index_text = ?4, metadata_json = ?5
+             SET content = ?2, placeholder_text = ?3, metadata_json = ?4
              WHERE store_id = ?1",
             params![
                 store_id,
                 content.as_deref(),
-                snippet_text,
-                index_text,
+                placeholder_text.as_deref(),
                 metadata_json.as_deref()
             ],
         )
@@ -1093,23 +1092,28 @@ async fn tombstone_dangling_refs_in_transaction(
 fn tombstone_row_for_refs(
     row: PlaceholderTextRow,
     payload_refs: &BTreeSet<String>,
-) -> (Option<String>, String, String, Option<String>, usize) {
+) -> (Option<String>, Option<String>, Option<String>, usize) {
     let mut changed = 0usize;
     let content = row.content.map(|text| {
         let (tombstoned, field_changes) = tombstone_text_for_refs(&text, payload_refs);
         changed += field_changes;
         tombstoned
     });
-    let (snippet_text, snippet_changes) = tombstone_text_for_refs(&row.snippet_text, payload_refs);
+    // The snippet and index columns derive from the tombstoned body; they are
+    // counted because they are retrieval text a reader sees change.
+    let (_, snippet_changes) = tombstone_text_for_refs(&row.snippet_text, payload_refs);
     changed += snippet_changes;
-    let (index_text, index_changes) = tombstone_text_for_refs(&row.index_text, payload_refs);
+    let (_, index_changes) = tombstone_text_for_refs(&row.index_text, payload_refs);
     changed += index_changes;
+    let placeholder_text = row
+        .placeholder_text
+        .map(|text| tombstone_text_for_refs(&text, payload_refs).0);
     let metadata_json = row.metadata_json.map(|text| {
         let (tombstoned, field_changes) = tombstone_text_for_refs(&text, payload_refs);
         changed += field_changes;
         tombstoned
     });
-    (content, snippet_text, index_text, metadata_json, changed)
+    (content, placeholder_text, metadata_json, changed)
 }
 
 fn tombstone_text_for_refs(text: &str, payload_refs: &BTreeSet<String>) -> (String, usize) {

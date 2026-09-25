@@ -70,7 +70,7 @@ use cli::*;
 use tracedecay_daemon_service::logging::StderrTracingDefault;
 
 pub(crate) fn current_unix_timestamp() -> i64 {
-    tracedecay::project::current_timestamp()
+    tracedecay_runtime_core::tracedecay::current_timestamp()
 }
 
 /// A self-animating spinner that ticks on a background thread.
@@ -544,7 +544,7 @@ impl ProcessHotpathGuard {
     fn install(guard: hotpath::HotpathGuard) -> Result<Self, String> {
         let guard = Arc::new(Mutex::new(Some(guard)));
         let watchdog_guard = Arc::clone(&guard);
-        if !tracedecay::daemon::install_hotpath_shutdown_finalizer(move || {
+        if !tracedecay_daemon_service::shutdown::install_hotpath_shutdown_finalizer(move || {
             let guard = watchdog_guard
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -626,7 +626,9 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
     // This binary is the sole generator of source provenance and the embedded
     // dashboard bundle; the composition library reads both through this
     // set-once registration.
-    tracedecay::register_product_runtime(crate::product_runtime::provider())?;
+    tracedecay_project::product_runtime::register_product_runtime(
+        crate::product_runtime::provider(),
+    )?;
     crate::cloud::admit_sync_probes();
     // Every process-global runtime port the extracted crates invert back into
     // the composition root. Must precede argument parsing: hook, install, and
@@ -685,7 +687,7 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
         // Pin its profile before Tokio starts worker threads so every canonical
         // configuration authority observes the Task Scheduler argument.
         unsafe {
-            std::env::set_var(tracedecay::config::USER_DATA_DIR_ENV, profile_root);
+            std::env::set_var(tracedecay_project::config::USER_DATA_DIR_ENV, profile_root);
         }
     }
     // Route tracing events (degradation causes, ingest warnings) to stderr.
@@ -872,7 +874,7 @@ async fn run_startup_preamble(command: &Commands) {
         && user_config.pending_upload > 0
         && let Ok(cwd) = std::env::current_dir()
         && let Some(project_root) =
-            tracedecay::config::discover_project_root_with_identity(&cwd).await
+            tracedecay_project::config::discover_project_root_with_identity(&cwd).await
     {
         match commands::canonical_upload_enabled(&project_root).await {
             Ok(upload_enabled) => {
@@ -996,8 +998,7 @@ impl CommandFamily {
             | Commands::Reinstall { .. }
             | Commands::UpdatePlugin { .. }
             | Commands::Uninstall { .. }
-            | Commands::FeedbackRollback { .. }
-            | Commands::HostBundle { .. } => Self::Agent,
+            | Commands::FeedbackRollback { .. } => Self::Agent,
             Commands::HookPreToolUse
             | Commands::HookPromptSubmit
             | Commands::HookStop
@@ -1089,14 +1090,13 @@ fn validate_host_bundle_options(
         }
         return Ok(());
     }
-    // The scoped storage resets destroy refused store state, so they REQUIRE
-    // the same `--yes` confirmation (their handlers refuse to run without it).
-    // Like `wipe`, they own no host component and have no preview.
+    // The scoped storage reset destroys refused store state, so it REQUIRES
+    // the same `--yes` confirmation (its handler refuses to run without it).
+    // Like `wipe`, it owns no host component and has no preview.
     if matches!(
         command,
         Commands::Storage {
-            action: ProfileStorageAction::ResetAuthority { .. }
-                | ProfileStorageAction::ResetProjectStore { .. },
+            action: ProfileStorageAction::ResetProjectStore { .. },
         }
     ) {
         if host_bundle.component.is_some() || host_bundle.dry_run || host_bundle.adopt {
@@ -1144,18 +1144,6 @@ fn validate_host_bundle_options(
         });
     }
     Ok(())
-}
-
-fn is_full_component_set_adoption(command: &Commands, host_bundle: &HostBundleCliOptions) -> bool {
-    host_bundle.component.is_none()
-        && host_bundle.yes
-        && host_bundle.adopt
-        && matches!(
-            command,
-            Commands::Install { local: false, .. }
-                | Commands::Reinstall { local: false, .. }
-                | Commands::UpdatePlugin { local: false, .. }
-        )
 }
 
 async fn dispatch_command(
@@ -1224,14 +1212,12 @@ async fn dispatch_project_command(
         }
         Commands::Sync {
             path,
-            force,
             skip_folders,
             include_folders,
             doctor,
             verbose,
         } => {
-            commands::handle_sync(path, force, skip_folders, include_folders, doctor, verbose)
-                .await?;
+            commands::handle_sync(path, skip_folders, include_folders, doctor, verbose).await?;
         }
         Commands::Status {
             path,
@@ -1564,140 +1550,9 @@ async fn dispatch_agent_command(
     command: Commands,
     host_bundle: HostBundleCliOptions,
 ) -> tracedecay_domain::errors::Result<()> {
-    let full_reinstall_preflight = matches!(
-        &command,
-        Commands::Reinstall {
-            local: false,
-            agent: None,
-        }
-    ) && host_bundle.component.is_none()
-        && host_bundle.dry_run
-        && !host_bundle.yes;
-    let full_component_set_adoption = is_full_component_set_adoption(&command, &host_bundle);
-    // `--dry-run` / `--yes` preview or confirm a first-party component
-    // mutation, so they normally require `--component` to name the target.
-    // Full `reinstall --dry-run` is the read-only exception: it validates the
-    // same tracked integration set that post-update will refresh.
-    if !matches!(
-        command,
-        Commands::FeedbackRollback { .. } | Commands::HostBundle { .. }
-    ) && host_bundle.component.is_none()
-        && (host_bundle.dry_run || host_bundle.yes)
-        && !full_reinstall_preflight
-        && !full_component_set_adoption
-    {
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: "--dry-run and --yes require --component to select the target host component"
-                .to_string(),
-        });
-    }
-    match command {
-        Commands::Install {
-            agent,
-            local,
-            no_dashboard,
-            automation,
-            git_hook,
-        } => {
-            if host_bundle.component.is_some() {
-                if local || automation || no_dashboard {
-                    return Err(tracedecay_domain::errors::TraceDecayError::Config {
-                        message: "--component cannot be combined with --local, --automation, or --no-dashboard"
-                            .to_string(),
-                    });
-                }
-                agent_cmd::handle_host_bundle_component_command(
-                    agent,
-                    agent_cmd::HostBundleCliOperation::Install,
-                    host_bundle,
-                )
-                .await?;
-                if git_hook {
-                    agent_cmd::install_requested_git_hook()?;
-                }
-            } else {
-                agent_cmd::handle_install_command(
-                    agent,
-                    local,
-                    no_dashboard,
-                    automation.then_some(agent_cmd::CodexAutomationInstall),
-                    host_bundle.adopt,
-                    git_hook,
-                )
-                .await?;
-            }
-        }
-        Commands::Reinstall { local, agent } => {
-            if host_bundle.component.is_some() {
-                if local {
-                    return Err(tracedecay_domain::errors::TraceDecayError::Config {
-                        message: "--component cannot be combined with --local".to_string(),
-                    });
-                }
-                agent_cmd::handle_host_bundle_component_command(
-                    None,
-                    agent_cmd::HostBundleCliOperation::Repair,
-                    host_bundle,
-                )
-                .await?;
-            } else if host_bundle.dry_run {
-                agent_cmd::handle_reinstall_preflight_command()?;
-            } else if local {
-                agent_cmd::handle_project_local_lifecycle_command(
-                    agent.expect("--local requires --agent"),
-                    agent_cmd::HostBundleCliOperation::Repair,
-                )
-                .await?;
-            } else {
-                agent_cmd::handle_reinstall_command(host_bundle.adopt).await?;
-            }
-        }
-        Commands::UpdatePlugin { local, agent } => {
-            if host_bundle.component.is_some() {
-                if local {
-                    return Err(tracedecay_domain::errors::TraceDecayError::Config {
-                        message: "--component cannot be combined with --local".to_string(),
-                    });
-                }
-                agent_cmd::handle_host_bundle_component_command(
-                    None,
-                    agent_cmd::HostBundleCliOperation::Update,
-                    host_bundle,
-                )
-                .await?;
-            } else if local {
-                agent_cmd::handle_project_local_lifecycle_command(
-                    agent.expect("--local requires --agent"),
-                    agent_cmd::HostBundleCliOperation::Update,
-                )
-                .await?;
-            } else {
-                agent_cmd::handle_update_plugin_command(host_bundle.adopt).await?;
-            }
-        }
-        Commands::Uninstall { agent, local } => {
-            if host_bundle.component.is_some() {
-                if local {
-                    return Err(tracedecay_domain::errors::TraceDecayError::Config {
-                        message: "--component cannot be combined with --local".to_string(),
-                    });
-                }
-                agent_cmd::handle_host_bundle_component_command(
-                    agent,
-                    agent_cmd::HostBundleCliOperation::Uninstall,
-                    host_bundle,
-                )
-                .await?;
-            } else if local {
-                agent_cmd::handle_project_local_lifecycle_command(
-                    agent.expect("--local requires --agent"),
-                    agent_cmd::HostBundleCliOperation::Uninstall,
-                )
-                .await?;
-            } else {
-                agent_cmd::handle_uninstall_command(agent).await?;
-            }
-        }
+    use agent_cmd::HostBundleCliOperation as Operation;
+
+    let (operation, agent, local, no_dashboard, automation, git_hook) = match command {
         Commands::FeedbackRollback { mut action } => {
             if host_bundle.component.is_some() || host_bundle.dry_run {
                 return Err(tracedecay_domain::errors::TraceDecayError::Config {
@@ -1712,31 +1567,57 @@ async fn dispatch_agent_command(
                 }
                 crate::cli::FeedbackRollbackAction::DryRun { .. } => {}
             }
-            agent_cmd::handle_feedback_rollback_command(action).await?;
+            return agent_cmd::handle_feedback_rollback_command(action).await;
         }
-        Commands::HostBundle { action } => {
-            if matches!(
-                &action,
-                crate::cli::HostBundleAction::ArtifactBackup { .. }
-                    | crate::cli::HostBundleAction::ArtifactRestore { .. }
-            ) {
-                agent_cmd::handle_host_bundle_artifact_command(action, host_bundle).await?;
-            } else {
-                if host_bundle.component.is_some() {
-                    return Err(tracedecay_domain::errors::TraceDecayError::Config {
-                        message: "host-bundle recovery operates on the whole component set"
-                            .to_string(),
-                    });
-                }
-                agent_cmd::handle_host_bundle_recovery_command(
-                    action,
-                    host_bundle.dry_run,
-                    host_bundle.yes,
-                )
-                .await?;
-            }
+        Commands::Install {
+            agent,
+            local,
+            no_dashboard,
+            automation,
+            git_hook,
+        } => (
+            Operation::Install,
+            agent,
+            local,
+            no_dashboard,
+            automation,
+            git_hook,
+        ),
+        Commands::Reinstall { local, agent } => {
+            (Operation::Repair, agent, local, false, false, false)
+        }
+        Commands::UpdatePlugin { local, agent } => {
+            (Operation::Update, agent, local, false, false, false)
+        }
+        Commands::Uninstall { agent, local } => {
+            (Operation::Uninstall, agent, local, false, false, false)
         }
         _ => unreachable!("non-agent command passed to agent dispatcher"),
+    };
+    if local {
+        if host_bundle.component.is_some() || host_bundle.dry_run {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "--component and --dry-run cannot be combined with --local".to_string(),
+            });
+        }
+        let agent_id = agent.ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+            message: "--local requires a project-capable --agent".to_string(),
+        })?;
+        agent_cmd::handle_project_local_lifecycle_command(agent_id, operation).await?;
+    } else {
+        agent_cmd::handle_host_lifecycle_command(
+            agent,
+            operation,
+            host_bundle,
+            no_dashboard,
+            automation.then_some(agent_cmd::CodexAutomationInstall),
+        )
+        .await?;
+    }
+    if git_hook {
+        agent_cmd::install_requested_git_hook()?;
+    } else if operation == Operation::Install {
+        tracedecay_agent_hosts::agents::report_git_post_commit_hook_status();
     }
     Ok(())
 }
@@ -1952,7 +1833,7 @@ async fn dispatch_knowledge_command(command: Commands) -> tracedecay_domain::err
             sessions_cmd::handle_sessions_action(action).await?;
         }
         Commands::Analytics { action } => match action {
-            AnalyticsAction::Diagnostics { all, no_sync, .. } => {
+            AnalyticsAction::Diagnostics { all, no_sync } => {
                 hotpath::future!(
                     analytics_cmd::run_analytics_diagnostics(all, no_sync),
                     label = "cli.analytics.diagnostics"
@@ -2004,7 +1885,6 @@ impl CommandStartupPolicy {
             | Commands::Reinstall { .. }
             | Commands::UpdatePlugin { .. }
             | Commands::FeedbackRollback { .. }
-            | Commands::HostBundle { .. }
             | Commands::Upgrade { .. }
             | Commands::Update { .. }
             | Commands::PostUpdate { .. }

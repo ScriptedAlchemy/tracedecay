@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use tempfile::TempDir;
+use tracedecay_code_index_retention::code_index_generations::code_generation_segments_root;
 
 use super::{
     CodeIndexSchedulerRegistryV1, GitFixture, SharedCodeIndexBytePoolV1, published,
@@ -44,7 +45,7 @@ async fn partitioned_restart_rebuilds_incompatible_retained_generation() {
         generation
     };
     rewrite_active_rust_extractor_revision(&scoped_store, "extractor.rust.v3");
-    let segment_path = std::fs::read_dir(scoped_store.join("code-generation-segments-v1"))
+    let segment_path = std::fs::read_dir(code_generation_segments_root(&scoped_store))
         .expect("read retained segment directory")
         .find_map(|entry| {
             let path = entry.expect("read retained segment entry").path();

@@ -119,8 +119,6 @@ pub struct ConfigurationRollbackPreviewRequestV1 {
     pub mode: RollbackModeV1,
 }
 
-pub type ConfigurationRollbackApplyRequestV1 = ConfigurationProtectedApplyRequestV1;
-
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationAuditRequestV1 {
@@ -199,7 +197,7 @@ pub enum ConfigurationWireRequestV1 {
     ProtectedPreview(ConfigurationProtectedPreviewRequestV1),
     ProtectedApply(ConfigurationProtectedApplyRequestV1),
     RollbackPreview(ConfigurationRollbackPreviewRequestV1),
-    RollbackApply(ConfigurationRollbackApplyRequestV1),
+    RollbackApply(ConfigurationProtectedApplyRequestV1),
     Audit(ConfigurationAuditRequestV1),
 }
 
@@ -515,7 +513,7 @@ fn configuration_executable_schemas(
     );
     add!(
         "configuration_rollback_apply",
-        ConfigurationRollbackApplyRequestV1,
+        ConfigurationProtectedApplyRequestV1,
         ConfigurationMutationReceipt
     );
     add!(

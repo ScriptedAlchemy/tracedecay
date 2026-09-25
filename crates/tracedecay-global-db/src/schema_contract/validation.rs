@@ -7,8 +7,7 @@ use super::super::{global_db_operation_error, global_db_operation_message};
 use super::definitions::{
     Column, INDEX_DESCENDING_COLUMNS, INDEX_EXPRESSION_COLUMN, INDEXES, Index,
     REGISTRY_TABLE_NAMES, SESSION_RELATION_RECEIPTS_RECOVERY_DUE_INDEX,
-    SESSION_RELATION_RECEIPTS_WITHOUT_RECOVERY, SESSION_TEMPORAL_PROJECTION_RECEIPTS_V3, TABLES,
-    Table,
+    SESSION_RELATION_RECEIPTS_WITHOUT_RECOVERY, TABLES, Table,
 };
 use super::pragma::{
     ActualColumn, ActualForeignKey, ActualIndex, ActualTableMetadata, read_table_metadata,
@@ -180,7 +179,7 @@ fn validate_table(
 }
 
 fn column_metadata_matches(actual: &ActualColumn, expected: &Column) -> bool {
-    actual.hidden == 0
+    actual.hidden == expected.hidden
         && actual
             .declared_type
             .eq_ignore_ascii_case(expected.declared_type)
@@ -491,12 +490,6 @@ pub async fn validate_session_temporal_schema_contract(
     table_names: &[&str],
 ) -> tracedecay_domain::errors::Result<()> {
     validate_named_tables_and_indexes(conn, table_names).await
-}
-
-pub async fn validate_released_v3_temporal_projection_receipt_contract(
-    conn: &impl QueryExecutor,
-) -> tracedecay_domain::errors::Result<()> {
-    validate_contracts(conn, &[&SESSION_TEMPORAL_PROJECTION_RECEIPTS_V3]).await
 }
 
 /// Validates the exact v4 `session_relation_receipts` shape persisted before

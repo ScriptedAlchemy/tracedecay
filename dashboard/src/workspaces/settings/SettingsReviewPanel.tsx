@@ -129,10 +129,10 @@ function PanelBody({
               <OriginText row={row} />
             </Readout>
             <Readout label="write">
-              <span className="td-value text-2xs text-text-muted">no write path</span>
+              <span className="td-value text-sm text-text-muted">no write path</span>
             </Readout>
           </Readouts>
-          <p className="text-2xs leading-relaxed text-text-muted" data-settings-gate="no_write_path">
+          <p className="text-body leading-relaxed text-text-muted" data-settings-gate="no_write_path">
             <span className="text-text-secondary">Read-only.</span> GET /api/settings reports this
             key as effective configuration, and no settings PATCH route addresses it. Nothing on
             this surface can propose a change to it.
@@ -147,19 +147,19 @@ function PanelBody({
               <ValueCell row={row.row} query={query} />
             </Readout>
             <Readout label="target layer">
-              <span className="td-value text-2xs text-text-secondary">
+              <span className="td-value text-sm text-text-secondary">
                 {scopeNoun(capability.binding.scope)}
               </span>
             </Readout>
             <Readout label="write">
-              <span className="inline-flex items-center gap-1 text-2xs text-state-locked">
+              <span className="inline-flex items-center gap-1 text-body text-state-locked">
                 <Lock aria-hidden size={11} />
                 locked · {capability.gate.replace('_', ' ')}
               </span>
             </Readout>
           </Readouts>
           <p
-            className="text-2xs leading-relaxed text-text-muted"
+            className="text-body leading-relaxed text-text-muted"
             data-settings-gate={capability.gate}
           >
             <span className="text-text-secondary">Read-only · </span>
@@ -203,7 +203,7 @@ function HeldReviewUnderLock({
   if (review === null || review.scope !== scope) return null;
   return (
     <div className="flex flex-wrap items-center justify-between gap-2" data-settings-stage={editor.state.status}>
-      <span className="text-2xs text-text-muted">
+      <span className="text-body text-text-muted">
         A {scopeNoun(scope)} review is {reviewStatusWord(editor.state.status)} against revision{' '}
         <span className="td-value">{review.expectedRevisionId}</span>; this scope can no longer
         apply it.
@@ -276,7 +276,7 @@ function WritableBody({
       <Readouts>
         <Readout label="effective value">
           <ValueCell row={row.row} query={query} />
-          <span className="mt-0.5 block text-3xs text-text-muted">authoritative</span>
+          <span className="mt-0.5 block text-sm text-text-muted">authoritative</span>
         </Readout>
         <Readout label="proposed value">
           <SettingsRowEditor
@@ -293,8 +293,8 @@ function WritableBody({
           <Validation plan={plan} errors={scopeErrors} edited={edited} rejection={rejection?.scope === scope ? rejection : null} />
         </Readout>
         <Readout label="current revision (cas)">
-          <span className="td-value break-all text-2xs text-text-primary">{revision}</span>
-          <span className="mt-0.5 block text-3xs text-text-muted">
+          <span className="td-value break-all text-sm text-text-primary">{revision}</span>
+          <span className="mt-0.5 block text-sm text-text-muted">
             {scopeReview
               ? scopeReview.expectedRevisionId === revision
                 ? 'held by this review'
@@ -303,8 +303,8 @@ function WritableBody({
           </span>
         </Readout>
         <Readout label="target layer">
-          <span className="td-value text-2xs text-text-primary">{scopeNoun(scope)}</span>
-          <span className="mt-0.5 block text-3xs text-text-muted" data-settings-gate="writable">
+          <span className="td-value text-sm text-text-primary">{scopeNoun(scope)}</span>
+          <span className="mt-0.5 block text-sm text-text-muted" data-settings-gate="writable">
             applies to {target}
           </span>
         </Readout>
@@ -314,7 +314,7 @@ function WritableBody({
       </Readouts>
 
       {otherReview ? (
-        <p className="text-2xs text-text-muted" data-settings-other-review={state.status}>
+        <p className="text-body text-text-muted" data-settings-other-review={state.status}>
           A {scopeNoun(otherReview)} review is {reviewStatusWord(state.status)}. Editing this
           value withdraws it.
         </p>
@@ -331,7 +331,7 @@ function WritableBody({
         >
           <StateChip kind="ready" detail="applied" />
           <strong className="font-semibold text-text-primary">{applied.message}</strong>
-          <span className="td-value text-2xs text-text-muted">
+          <span className="td-value text-sm text-text-muted">
             revision now {applied.revisionId}
           </span>
           {applied.resyncRecommended ? <span>Resync recommended</span> : null}
@@ -403,10 +403,10 @@ function FrozenReview({
     <div className="grid gap-2" data-settings-stage={state.status}>
       <div className="grid gap-1">
         <span className="td-legend">validated patch</span>
-        <pre className="max-h-40 overflow-auto border border-edge-subtle bg-surface-0 p-2 text-2xs text-text-secondary">
+        <pre className="max-h-40 overflow-auto border border-edge-subtle bg-surface-0 p-2 text-body text-text-secondary">
           {JSON.stringify(patch, null, 2)}
         </pre>
-        <span className="td-value text-3xs text-text-muted">
+        <span className="td-value text-xs text-text-muted">
           only the validated changed fields above are sent · expected revision {expectedRevisionId}
         </span>
       </div>
@@ -527,18 +527,18 @@ function Validation({
     return (
       <ul className="grid gap-0.5" data-settings-validation="rejected">
         {errors.map((error, index) => (
-          <li key={`${index}:${error.field}`} className="text-2xs text-state-error">
+          <li key={`${index}:${error.field}`} className="text-body text-state-error">
             <span className="td-value">{error.field}</span> · {error.message}
           </li>
         ))}
       </ul>
     );
   }
-  if (!plan) return <span className="text-2xs text-text-muted">unavailable</span>;
+  if (!plan) return <span className="text-body text-text-muted">unavailable</span>;
   switch (plan.outcome) {
     case 'unchanged':
       return (
-        <span className="text-2xs text-text-muted" data-settings-validation="unchanged">
+        <span className="text-body text-text-muted" data-settings-validation="unchanged">
           {edited ? 'no change' : 'no proposal · effective value stands'}
         </span>
       );
@@ -546,7 +546,7 @@ function Validation({
       return (
         <ul className="grid gap-0.5" data-settings-validation="invalid">
           {plan.errors.map((error, index) => (
-            <li key={`${index}:${error.field}`} className="text-2xs text-state-error">
+            <li key={`${index}:${error.field}`} className="text-body text-state-error">
               <span className="td-value">{error.field}</span> · {error.message}
             </li>
           ))}
@@ -555,7 +555,7 @@ function Validation({
     case 'ready': {
       const changed = Object.keys(plan.patch).length;
       return (
-        <span className="text-2xs text-state-ready" data-settings-validation="ready">
+        <span className="text-body text-state-ready" data-settings-validation="ready">
           valid · {changed} {changed === 1 ? 'field' : 'fields'} changed
         </span>
       );
@@ -570,7 +570,7 @@ function Validation({
 function OriginText({ row }: { row: EffectiveRow }) {
   const { section } = row;
   return (
-    <span className="td-value break-all text-2xs text-text-secondary">
+    <span className="td-value break-all text-sm text-text-secondary">
       {ORIGIN_WORD[section.origin]}
       {section.location ? ` · ${section.location}` : ''}
     </span>

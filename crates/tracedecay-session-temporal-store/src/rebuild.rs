@@ -7,7 +7,8 @@ use tracedecay_store::{
     SessionGenerationRebuildReceiptV1, SessionGenerationRebuildRequestV1, SessionStoreError,
     SessionStoreResult,
 };
-use tracedecay_temporal_query::ports::{ExecutionControl, TemporalPortError};
+use tracedecay_temporal_query::execution::ExecutionControl;
+use tracedecay_temporal_query::ports::TemporalPortError;
 
 use super::projection::{canonical_parent_message_resolver, validate_final_projection_receipt};
 use super::query::{

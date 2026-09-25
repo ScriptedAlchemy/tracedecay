@@ -21,7 +21,6 @@ import type {
   DoctorFindingsPayloadV1,
   ExecutionTopologyMetricsV1,
   ObservatoryReadModelV1,
-  StorageFindingsPayloadV1,
   StorageTelemetryPayloadV1,
 } from '../../contracts/generated.ts';
 import { assertNever } from '../../contracts/generated.ts';
@@ -234,7 +233,7 @@ export const SOURCE_IDENTITY: Record<EvidenceSourceId, SourceIdentity> = {
   findings: {
     id: 'findings',
     title: 'Storage findings',
-    route: '/api/storage/findings',
+    route: '/api/doctor/findings?family=storage',
     authority: 'storage-family projection of the admitted canonical Doctor report',
   },
 };
@@ -575,8 +574,7 @@ export function pipelineSummary(read: EvidenceRead<CodeIndexFreshnessPayloadV1>)
     const building = worktrees.filter(
       (worktree) =>
         (worktree.progress != null && worktree.progress.phase !== 'ready') ||
-        worktree.rebuild_in_flight ||
-        worktree.clone_index?.state === 'backfilling',
+        worktree.rebuild_in_flight,
     ).length;
     const stale = worktrees.filter((worktree) => worktree.staleness_state === 'stale').length;
     const blocked = worktrees.filter((worktree) => worktree.progress?.blocked_reason != null).length;
@@ -648,25 +646,25 @@ export function telemetrySummary(read: EvidenceRead<StorageTelemetryPayloadV1>):
   });
 }
 
-export function findingsSummary(read: EvidenceRead<StorageFindingsPayloadV1>): EvidenceSummary {
+export function findingsSummary(read: EvidenceRead<DoctorFindingsPayloadV1>): EvidenceSummary {
   return envelopeSummary(SOURCE_IDENTITY.findings, read, (payload, envelope) => {
     const problems = payload.entries.filter(
       (entry) => entry.finding.state === 'degraded' || entry.finding.state === 'stale',
     ).length;
-    const real = payload.kind_statuses.filter((status) => status.state === 'real').length;
+    const real = payload.storage_kind_statuses.filter((status) => status.state === 'real').length;
     const grade = evidenceStateOf(envelope.domain_state);
     return {
       state: grade === 'measured' && payload.entries.length === 0 ? 'empty' : grade,
       coverage: {
         completeness:
-          payload.kind_statuses.length > 0 && real === payload.kind_statuses.length
+          payload.storage_kind_statuses.length > 0 && real === payload.storage_kind_statuses.length
             ? 'complete'
             : envelope.coverage.completeness,
         examined: real,
-        denominator: payload.kind_statuses.length,
+        denominator: payload.storage_kind_statuses.length,
         unit: 'producers real',
       },
-      affected: `${payload.entries.length.toLocaleString()} findings · ${problems} problem · ${real} of ${payload.kind_statuses.length} producers real`,
+      affected: `${payload.entries.length.toLocaleString()} findings · ${problems} problem · ${real} of ${payload.storage_kind_statuses.length} producers real`,
       note: payload.note,
     };
   });

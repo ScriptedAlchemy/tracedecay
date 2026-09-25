@@ -19,11 +19,11 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use tempfile::TempDir;
-use tracedecay::git_query::{
-    GenerationBoundGitQueryV1, GenerationStalenessV1, GitQueryBounds, GitQueryEngine, GitQueryError,
-};
 use tracedecay_application::git_intelligence::{
     GitBlameRequest, GitHistoryRequest, GitIntelligenceError, NativeGitIntelligence,
+};
+use tracedecay_application::git_query::{
+    GenerationBoundGitQueryV1, GenerationStalenessV1, GitQueryBounds, GitQueryEngine, GitQueryError,
 };
 use tracedecay_domain::CodeGenerationId;
 use tracedecay_domain::git::{
@@ -390,7 +390,7 @@ fn binary_content_is_classified_instead_of_text_diffed() {
         .expect("text record");
     assert!(!text.binary);
     assert_eq!(text.insertions, Some(1));
-    assert!(!text.hunks.is_empty());
+    assert_eq!(text.hunks.len(), 1);
 
     // Diff-level totals ignore the binary record rather than inventing zeros
     // for it: one text insertion, no deletions.

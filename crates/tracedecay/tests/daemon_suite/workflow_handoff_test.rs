@@ -8,7 +8,6 @@
 //! durability here.
 
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_contracts::{
     TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome, TaskHandoffGrant, TaskHandoffScope,
     WorkHandoffFrontierV1, WorkHandoffLineageV1, WorkflowDefinitionAuthorityPort,
@@ -18,6 +17,7 @@ use tracedecay_domain::{
     WorkVersion, WorkflowDefinition, WorkflowDefinitionId, WorkflowOperationRef,
     WorkflowOutputName, WorkflowStep, WorkflowStepId, WorktreeId, canonical_sha256,
 };
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 
 use tracedecay_domain::test_fixtures::id;
 

@@ -40,7 +40,7 @@ pub enum PrivacyDetectorV1 {
     SensitiveField,
     HighEntropyToken,
     /// Reserved for public V1 compatibility; malformed input is reported by
-    /// `ClaudeRecordParseErrorV1` before detector findings are constructed.
+    /// `ObservationRecordParseErrorV1` before detector findings are constructed.
     MalformedRecord,
     RecordSizeLimit,
     StructureLimit,

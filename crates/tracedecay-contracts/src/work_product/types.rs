@@ -57,7 +57,7 @@ pub enum WorkProductApplicationErrorV1 {
     ProposalAuthorityUnavailable,
 }
 
-pub use tracedecay_domain::WorkProductAuthorizedRelationScopeV1 as WorkRelationScopeV1;
+pub use tracedecay_domain::WorkProductAuthorizedRelationScopeV1;
 pub use tracedecay_domain::WorkProductSelectionScopeV1;
 
 /// Owner identity resolved by the registered profile authority. It is never

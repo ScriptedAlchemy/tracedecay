@@ -3,12 +3,13 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use tracedecay_contracts::retained_surfaces::{
     FactCategoryV1, FactSearchGraphCoverageV1, FactSearchGraphDegradationV1, FactSearchHitV1,
 };
 use tracedecay_contracts::{
-    CancellationSignal, Deadline, now_micros, retained_surface_execution_problem,
+    CancellationSignal, ContextMemoryAnalyticsV1, Deadline, now_micros,
+    retained_surface_execution_problem,
 };
 use tracedecay_domain::Confidence;
 use tracedecay_domain::collapse_whitespace;
@@ -219,23 +220,21 @@ pub(super) fn context_memory_read_control(
     }))))
 }
 
-pub(super) fn context_memory_analytics_value(
+pub(super) fn context_memory_analytics(
     options: &ContextMemoryOptions,
     memory_matches: &[FactSearchHitV1],
     memory_matches_error: Option<&str>,
-) -> Value {
-    let fact_ids: Vec<Value> = memory_matches
-        .iter()
-        .map(|hit| Value::String(hit.fact.fact_id.as_str().to_owned()))
-        .collect();
-    json!({
-        "include_memory": options.include_memory,
-        "limit": options.limit,
-        "min_trust": options.min_trust,
-        "match_count": fact_ids.len(),
-        "fact_ids": fact_ids,
-        "error": memory_matches_error,
-    })
+) -> ContextMemoryAnalyticsV1 {
+    ContextMemoryAnalyticsV1 {
+        include_memory: options.include_memory,
+        limit: u32::try_from(options.limit).unwrap_or(u32::MAX),
+        min_trust_millionths: (options.min_trust * 1_000_000.0).round() as u32,
+        fact_ids: memory_matches
+            .iter()
+            .map(|hit| hit.fact.fact_id.as_str().to_owned())
+            .collect(),
+        error: memory_matches_error.map(str::to_owned),
+    }
 }
 
 pub(super) struct ContextMemoryMatches {

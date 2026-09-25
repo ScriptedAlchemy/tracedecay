@@ -2,11 +2,13 @@ use tracedecay_code_extraction::CSharpExtractor;
 use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_domain::*;
 
+include!("support/edges.rs");
+
 #[test]
 fn test_cs_file_node_is_root() {
     let source = "public class Main {}";
     let extractor = CSharpExtractor;
-    let result = extractor.extract("src/Main.cs", source);
+    let result = extractor.extract_artifact("src/Main.cs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let files: Vec<_> = result
         .nodes
@@ -26,7 +28,7 @@ namespace MyApp.Models
 }
 "#;
     let extractor = CSharpExtractor;
-    let result = extractor.extract("test.cs", source);
+    let result = extractor.extract_artifact("test.cs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let namespaces: Vec<_> = result
         .nodes
@@ -47,7 +49,7 @@ using System.Linq;
 public class Foo {}
 "#;
     let extractor = CSharpExtractor;
-    let result = extractor.extract("test.cs", source);
+    let result = extractor.extract_artifact("test.cs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let uses: Vec<_> = result
         .nodes
@@ -74,7 +76,7 @@ namespace TestApp
 }
 "#;
     let extractor = CSharpExtractor;
-    let result = extractor.extract("Calculator.cs", source);
+    let result = extractor.extract_artifact("Calculator.cs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let classes: Vec<_> = result
         .nodes
@@ -105,7 +107,7 @@ public struct Point
 }
 "#;
     let extractor = CSharpExtractor;
-    let result = extractor.extract("test.cs", source);
+    let result = extractor.extract_artifact("test.cs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let structs: Vec<_> = result
         .nodes
@@ -127,7 +129,7 @@ public interface IDrawable
 }
 "#;
     let extractor = CSharpExtractor;
-    let result = extractor.extract("test.cs", source);
+    let result = extractor.extract_artifact("test.cs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let ifaces: Vec<_> = result
         .nodes
@@ -149,7 +151,7 @@ public enum Color
 }
 "#;
     let extractor = CSharpExtractor;
-    let result = extractor.extract("test.cs", source);
+    let result = extractor.extract_artifact("test.cs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let enums: Vec<_> = result
         .nodes
@@ -182,7 +184,7 @@ public class Person
 }
 "#;
     let extractor = CSharpExtractor;
-    let result = extractor.extract("test.cs", source);
+    let result = extractor.extract_artifact("test.cs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let constructors: Vec<_> = result
         .nodes
@@ -203,7 +205,7 @@ public class Config
 }
 "#;
     let extractor = CSharpExtractor;
-    let result = extractor.extract("test.cs", source);
+    let result = extractor.extract_artifact("test.cs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let props: Vec<_> = result
         .nodes
@@ -228,7 +230,7 @@ public class Config
 }
 "#;
     let extractor = CSharpExtractor;
-    let result = extractor.extract("test.cs", source);
+    let result = extractor.extract_artifact("test.cs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fields: Vec<_> = result
         .nodes
@@ -255,7 +257,7 @@ fn test_cs_record() {
 public record Person(string Name, int Age);
 "#;
     let extractor = CSharpExtractor;
-    let result = extractor.extract("test.cs", source);
+    let result = extractor.extract_artifact("test.cs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let records: Vec<_> = result
         .nodes
@@ -273,7 +275,7 @@ fn test_cs_delegate() {
 public delegate void EventHandler(object sender, EventArgs e);
 "#;
     let extractor = CSharpExtractor;
-    let result = extractor.extract("test.cs", source);
+    let result = extractor.extract_artifact("test.cs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let delegates: Vec<_> = result
         .nodes
@@ -294,7 +296,7 @@ public class Button
 }
 "#;
     let extractor = CSharpExtractor;
-    let result = extractor.extract("test.cs", source);
+    let result = extractor.extract_artifact("test.cs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let events: Vec<_> = result
         .nodes
@@ -328,24 +330,19 @@ public class Foo
 }
 "#;
     let extractor = CSharpExtractor;
-    let result = extractor.extract("test.cs", source);
+    let result = extractor.extract_artifact("test.cs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let annots: Vec<_> = result
+    let annots: Vec<&str> = result
         .nodes
         .iter()
         .filter(|n| n.kind == NodeKind::AnnotationUsage)
+        .map(|n| n.name.as_str())
         .collect();
-    assert!(
-        annots.len() >= 2,
-        "should extract attribute usages, got: {:?}",
-        annots.iter().map(|a| &a.name).collect::<Vec<_>>()
+    assert_eq!(annots, ["Obsolete", "Serializable"]);
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Annotates),
+        [("Obsolete", "OldMethod"), ("Serializable", "NewMethod")]
     );
-    let has_annotates = result.edges.iter().any(|e| e.kind == EdgeKind::Annotates)
-        || result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Annotates);
-    assert!(has_annotates, "should have Annotates edges");
 }
 
 #[test]
@@ -367,7 +364,7 @@ public class Dog : Animal, IAnimal
 }
 "#;
     let extractor = CSharpExtractor;
-    let result = extractor.extract("test.cs", source);
+    let result = extractor.extract_artifact("test.cs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let has_extends = result.edges.iter().any(|e| e.kind == EdgeKind::Extends)
         || result
@@ -395,7 +392,7 @@ public class Foo
 }
 "#;
     let extractor = CSharpExtractor;
-    let result = extractor.extract("test.cs", source);
+    let result = extractor.extract_artifact("test.cs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let methods: Vec<_> = result
         .nodes
@@ -430,7 +427,7 @@ public class Foo
 }
 "#;
     let extractor = CSharpExtractor;
-    let result = extractor.extract("test.cs", source);
+    let result = extractor.extract_artifact("test.cs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let methods: Vec<_> = result
         .nodes
@@ -465,7 +462,7 @@ public class Service
 }
 "#;
     let extractor = CSharpExtractor;
-    let result = extractor.extract("test.cs", source);
+    let result = extractor.extract_artifact("test.cs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let methods: Vec<_> = result
         .nodes
@@ -489,18 +486,16 @@ public class Foo
 }
 "#;
     let extractor = CSharpExtractor;
-    let result = extractor.extract("test.cs", source);
+    let result = extractor.extract_artifact("test.cs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    // File contains: Class; Class contains: Field, Property, Method
-    assert!(
-        contains.len() >= 4,
-        "should have Contains edges: {}",
-        contains.len()
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Contains),
+        [
+            ("test.cs", "Foo"),
+            ("Foo", "_x"),
+            ("Foo", "Name"),
+            ("Foo", "Bar")
+        ]
     );
 }
 
@@ -516,7 +511,7 @@ namespace MyApp
 }
 "#;
     let extractor = CSharpExtractor;
-    let result = extractor.extract("src/Service.cs", source);
+    let result = extractor.extract_artifact("src/Service.cs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let methods: Vec<_> = result
         .nodes

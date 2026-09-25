@@ -400,8 +400,14 @@ mod tests {
             payload,
         )
         .unwrap();
-        let cursor =
-            ObservationSourceCursorV1::new(source, scope, generation, range.end()).unwrap();
+        let cursor = ObservationSourceCursorV1::for_ordering(
+            source,
+            scope,
+            generation,
+            ObservationOrderingDomainV1::FileBytes,
+            range.end(),
+        )
+        .unwrap();
         (observation, cursor)
     }
 

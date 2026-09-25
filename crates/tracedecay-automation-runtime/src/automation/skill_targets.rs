@@ -15,11 +15,6 @@ use tracedecay_runtime_core::config::{TRACEDECAY_DIR, USER_DATA_DIR_ENV};
 
 const NATIVE_NAMESPACE_DIR: &str = "agent-managed";
 const NATIVE_MANIFEST_FILE: &str = ".tracedecay-managed-skills.json";
-/// The unslugged legacy managed-skill start marker. Reuses the same literal the
-/// prompt-rules block-splicer stops at, keeping the two in sync.
-const PROMPT_INDEX_START: &str = super::host_io::SKILL_INDEX_START;
-const PROMPT_INDEX_END: &str = "<!-- TRACEDECAY MANAGED SKILLS END -->";
-
 const ALL_SKILL_INSTALL_TARGETS: [SkillInstallTarget; 8] = [
     SkillInstallTarget::Cursor,
     SkillInstallTarget::Codex,
@@ -235,7 +230,7 @@ pub fn export_prompt_skill_index(
         if let Some(parent) = prompt_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        host_io.safe_write_text_file(prompt_path, &updated, None)?;
+        host_io.safe_write_text_file(prompt_path, &updated)?;
     }
 
     let exported = skills
@@ -288,7 +283,7 @@ fn remove_prompt_skill_indexes(
     if updated.trim().is_empty() {
         fs::remove_file(prompt_path)?;
     } else {
-        host_io.safe_write_text_file(prompt_path, &updated, None)?;
+        host_io.safe_write_text_file(prompt_path, &updated)?;
     }
     Ok(())
 }
@@ -324,16 +319,8 @@ pub fn stale_prompt_index_ids(
         Err(err) => return Err(err.into()),
     };
     let (start_marker, end_marker) = prompt_index_markers(target);
-    let range = match managed_block_range(&existing, target, &start_marker, &end_marker)? {
-        Some(range) => Some(range),
-        // Mirror the removal path's legacy fallback: an unslugged block is this
-        // target's only when no other target has claimed the file with a slug.
-        None if !has_other_slugged_block(&existing, target) => {
-            managed_block_range(&existing, target, PROMPT_INDEX_START, PROMPT_INDEX_END)?
-        }
-        None => None,
-    };
-    let Some((start, end)) = range else {
+    let Some((start, end)) = managed_block_range(&existing, target, &start_marker, &end_marker)?
+    else {
         return Ok(Vec::new());
     };
     let active = load_active_managed_skills_for_target(profile_root, target)?
@@ -382,12 +369,7 @@ fn replace_or_append_marked_block(
     block: &str,
 ) -> Result<String> {
     let (start_marker, end_marker) = prompt_index_markers(target);
-    // Prefer this target's slugged block; fall back to the legacy unslugged one.
-    let existing_range = match managed_block_range(existing, target, &start_marker, &end_marker)? {
-        Some(range) => Some(range),
-        None => managed_block_range(existing, target, PROMPT_INDEX_START, PROMPT_INDEX_END)?,
-    };
-    if let Some((start, end)) = existing_range {
+    if let Some((start, end)) = managed_block_range(existing, target, &start_marker, &end_marker)? {
         Ok(splice_range(existing, start, end, block))
     } else {
         let mut updated = String::new();
@@ -420,28 +402,7 @@ fn remove_marked_block_for_target(existing: &str, target: SkillInstallTarget) ->
     if let Some((start, end)) = managed_block_range(existing, target, &start_marker, &end_marker)? {
         return Ok(remove_range(existing, start, end));
     }
-    // Legacy fallback: older installs wrote an unslugged block. Only claim it as
-    // this target's when NO other target's slugged block is present. On a shared
-    // file mid-migration (one host slugged, another still legacy-unslugged),
-    // removing the legacy block here would delete the other host's block, so
-    // leave it untouched and let the remove-all path handle it instead.
-    if !has_other_slugged_block(existing, target)
-        && let Some((start, end)) =
-            managed_block_range(existing, target, PROMPT_INDEX_START, PROMPT_INDEX_END)?
-    {
-        return Ok(remove_range(existing, start, end));
-    }
     Ok(existing.to_string())
-}
-
-/// True when the file contains a slugged managed-skill block belonging to a
-/// target other than `target`.
-fn has_other_slugged_block(existing: &str, target: SkillInstallTarget) -> bool {
-    ALL_SKILL_INSTALL_TARGETS
-        .iter()
-        .copied()
-        .filter(|candidate| *candidate != target)
-        .any(|candidate| existing.contains(&prompt_index_markers(candidate).0))
 }
 
 fn remove_all_marked_blocks(existing: &str) -> Result<String> {
@@ -457,33 +418,7 @@ fn remove_all_marked_blocks(existing: &str) -> Result<String> {
             updated = remove_range(&updated, start, end);
         }
     }
-    if let Some((start, end)) = legacy_managed_block_range(&updated)? {
-        updated = remove_range(&updated, start, end);
-    }
     Ok(updated)
-}
-
-fn marked_block_range(
-    existing: &str,
-    start_marker: &str,
-    end_marker: &str,
-) -> Result<Option<(usize, usize)>> {
-    match (existing.find(start_marker), existing.find(end_marker)) {
-        (Some(start), Some(end)) if start <= end => {
-            if existing.match_indices(start_marker).count() != 1
-                || existing.match_indices(end_marker).count() != 1
-            {
-                return Err(config_error(
-                    "managed skill prompt index markers are ambiguous".to_string(),
-                ));
-            }
-            Ok(Some((start, end + end_marker.len())))
-        }
-        (None, None) => Ok(None),
-        _ => Err(config_error(
-            "managed skill prompt index markers are unbalanced".to_string(),
-        )),
-    }
 }
 
 /// Finds a normal marker-delimited block, or a generated block whose start
@@ -508,49 +443,6 @@ fn managed_block_range(
         }
         (None, None) => Ok(None),
         (None, Some(end)) => orphaned_generated_block_range(existing, target, end, end_marker),
-        _ => Err(config_error(
-            "managed skill prompt index markers are unbalanced".to_string(),
-        )),
-    }
-}
-
-fn legacy_managed_block_range(existing: &str) -> Result<Option<(usize, usize)>> {
-    match (
-        existing.find(PROMPT_INDEX_START),
-        existing.find(PROMPT_INDEX_END),
-    ) {
-        (Some(_), Some(_)) => marked_block_range(existing, PROMPT_INDEX_START, PROMPT_INDEX_END),
-        (None, None) => Ok(None),
-        (None, Some(end)) => {
-            if existing.match_indices(PROMPT_INDEX_END).count() != 1 {
-                return Err(config_error(
-                    "managed skill prompt index markers are ambiguous".to_string(),
-                ));
-            }
-            let mut starts = Vec::new();
-            for target in ALL_SKILL_INSTALL_TARGETS
-                .into_iter()
-                .filter(|target| target.writes_prompt_index())
-            {
-                let preamble = prompt_index_preamble(target);
-                starts.extend(
-                    existing[..end]
-                        .match_indices(&preamble)
-                        .map(|(start, _)| start),
-                );
-            }
-            let Some(start) = starts.first().copied() else {
-                return Err(config_error(
-                    "managed skill prompt index markers are unbalanced".to_string(),
-                ));
-            };
-            if starts.len() != 1 {
-                return Err(config_error(
-                    "managed skill prompt index markers are ambiguous".to_string(),
-                ));
-            }
-            Ok(Some((start, end + PROMPT_INDEX_END.len())))
-        }
         _ => Err(config_error(
             "managed skill prompt index markers are unbalanced".to_string(),
         )),

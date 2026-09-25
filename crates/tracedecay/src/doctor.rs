@@ -25,6 +25,8 @@ use tracedecay_daemon_protocol::RequestedOutputFormat;
 use tracedecay_daemon_service::application_surface::{
     execute_application_surface, resolve_application_surface_dispatch,
 };
+#[cfg(unix)]
+use tracedecay_daemon_service::logging::recent_watcher_events;
 use tracedecay_runtime_core::text::format_token_count;
 
 /// Opens an isolated daemon-registered profile database so Doctor tests can
@@ -103,7 +105,7 @@ pub async fn run_doctor(
                 return Err(error);
             }
         };
-    let build_version = crate::version::build_version()?;
+    let build_version = tracedecay_project::version::build_version()?;
     let mut dc = DoctorCounters::new();
 
     eprintln!("\n\x1b[1mtracedecay doctor v{build_version}\x1b[0m\n");
@@ -559,8 +561,8 @@ fn fallback_database_path(project_path: &Path) -> Option<PathBuf> {
     {
         return Some(layout.graph_db_path);
     }
-    let data_root = crate::config::get_tracedecay_dir(project_path);
-    let db_path = data_root.join(crate::config::db_filename(&data_root));
+    let data_root = tracedecay_project::config::get_tracedecay_dir(project_path);
+    let db_path = data_root.join(tracedecay_project::config::db_filename(&data_root));
     db_path.is_file().then_some(db_path)
 }
 
@@ -571,7 +573,6 @@ fn database_recovery_guidance(db_path: &Path) -> String {
     let mut graph_dirty = db_path.as_os_str().to_os_string();
     graph_dirty.push(".dirty");
     let graph_dirty = PathBuf::from(graph_dirty);
-    let legacy_dirty = data_root.join("dirty");
     let sessions_path = data_root.join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
 
     format!(
@@ -581,16 +582,14 @@ fn database_recovery_guidance(db_path: &Path) -> String {
          WAL: {}\n\
          SHM: {}\n\
          graph dirty sentinel: {}\n\
-         legacy dirty sentinel (if present): {}\n\
          `sessions.db` is separate and must not be removed: {}\n\
          Facts are stored in the graph database; automatic default-store rebuild is intentionally blocked because it cannot preserve them generically.\n\
-         Do not run `tracedecay init`, `tracedecay sync --force`, or `tracedecay wipe` until that recovery set is safely copied.\n\
+         Do not run `tracedecay init`, `tracedecay sync`, or `tracedecay wipe` until that recovery set is safely copied.\n\
          Report the preserved set at https://github.com/ScriptedAlchemy/tracedecay/issues for offline recovery.",
         db_path.display(),
         wal_path.display(),
         shm_path.display(),
         graph_dirty.display(),
-        legacy_dirty.display(),
         sessions_path.display(),
     )
 }
@@ -709,7 +708,7 @@ fn check_watcher(dc: &mut DoctorCounters) {
 
     #[cfg(unix)]
     {
-        let events = crate::daemon::recent_watcher_events(2000);
+        let events = recent_watcher_events(2000);
         if events.is_empty() {
             dc.info("Daemon running; no recent watcher telemetry in the log yet");
             return;
@@ -760,7 +759,8 @@ const DOMAIN_SYMBOL_RULES_FILENAME: &str = "domain-symbols.toml";
 /// nodes, so Doctor is where the author finds out. `None` (the normal case)
 /// keeps Doctor silent about a file that is not there.
 fn domain_symbol_rules_warning(project_path: &Path) -> Option<String> {
-    let rules = crate::config::get_tracedecay_dir(project_path).join(DOMAIN_SYMBOL_RULES_FILENAME);
+    let rules = tracedecay_project::config::get_tracedecay_dir(project_path)
+        .join(DOMAIN_SYMBOL_RULES_FILENAME);
     rules.is_file().then(|| {
         format!(
             "Domain symbol extraction is unavailable: no extractor reads {}, \
@@ -878,7 +878,6 @@ fn check_external_tools(dc: &mut DoctorCounters) {
     let diagnostics = tracedecay_mcp::ast_grep_diagnostics_json();
     let installed = json_bool(&diagnostics, "installed");
     let rewrite_available = json_bool(&diagnostics, "rewrite_available");
-    let outline_available = json_bool(&diagnostics, "outline_available");
     let version = diagnostics
         .get("version")
         .and_then(serde_json::Value::as_str)
@@ -888,18 +887,12 @@ fn check_external_tools(dc: &mut DoctorCounters) {
         .and_then(serde_json::Value::as_str)
         .unwrap_or("ast-grep status unavailable");
 
-    if outline_available {
-        dc.pass(&format!(
-            "ast-grep {version}: rewrite and outline support available"
-        ));
+    if rewrite_available {
+        dc.pass(&format!("ast-grep {version}: rewrite support available"));
         return;
     }
 
-    if rewrite_available {
-        dc.warn(&format!(
-            "ast-grep {version}: rewrite support available, but outline support is missing"
-        ));
-    } else if installed {
+    if installed {
         dc.warn(&format!(
             "ast-grep {version}: optional ast-grep-backed tools are unavailable"
         ));
@@ -907,7 +900,7 @@ fn check_external_tools(dc: &mut DoctorCounters) {
         dc.warn("ast-grep not found on PATH; optional ast-grep-backed tools are hidden");
     }
     dc.info(message);
-    dc.info("Install or update ast-grep to >= 0.44, then rerun `tracedecay install` or `tracedecay update-plugin` if your agent integration caches tool metadata.");
+    dc.info("Install or update ast-grep, then rerun `tracedecay install` or `tracedecay update-plugin` if your agent integration caches tool metadata.");
 }
 
 fn json_bool(value: &serde_json::Value, key: &str) -> bool {

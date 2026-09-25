@@ -137,13 +137,6 @@ const CREATE_PROVENANCE_UPDATE_TRIGGER: &str = "CREATE TRIGGER IF NOT EXISTS \
      observation_repository_provenance BEGIN SELECT RAISE(ABORT, \
      'observation repository provenance is immutable'); END";
 
-const DROP_CURSOR_ADVANCE_DELETE_TRIGGER: &str =
-    "DROP TRIGGER IF EXISTS source_cursor_advances_immutable_delete_v1";
-const CREATE_CURSOR_ADVANCE_DELETE_TRIGGER: &str = "CREATE TRIGGER \
-     source_cursor_advances_immutable_delete_v1 BEFORE DELETE ON \
-     source_cursor_advances BEGIN SELECT RAISE(ABORT, \
-     'source cursor advances are immutable'); END";
-
 mod restore;
 pub use restore::replay_current_release_state_for_restore;
 
@@ -995,7 +988,6 @@ async fn run_cursor_advance_pass(
         transaction,
         "apply mode requires an open cursor advance retention transaction",
     )?;
-    execute_required(&txn, DROP_CURSOR_ADVANCE_DELETE_TRIGGER).await?;
     for chunk in targets.chunks(RETENTION_DML_CHUNK) {
         let placeholders = vec!["?"; chunk.len()].join(",");
         let sql = format!("DELETE FROM source_cursor_advances WHERE rowid IN ({placeholders})");
@@ -1024,7 +1016,6 @@ async fn run_cursor_advance_pass(
             )),
         }
     }
-    execute_required(&txn, CREATE_CURSOR_ADVANCE_DELETE_TRIGGER).await?;
     commit_transaction(txn).await?;
     Ok(report)
 }

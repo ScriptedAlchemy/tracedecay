@@ -9,13 +9,16 @@ use tracedecay_domain::{
 };
 use tracedecay_runtime_core::db::engine::{Executor, TestConnection};
 use tracedecay_temporal_query::candidates::CandidateChannel;
+use tracedecay_temporal_query::execution::{BindingDigest, ExecutionControl};
 use tracedecay_temporal_query::ports::{
-    BindingDigest, ExecutionControl, KernelVersions, TemporalCandidateFilterV1,
-    TemporalExecutionSnapshot, TemporalPortError, TemporalSessionScopeFilterV1,
-    TemporalSnapshotRequest, TemporalWatermarks,
+    TemporalCandidateFilterV1, TemporalPortError, TemporalSessionScopeFilterV1,
+    TemporalSnapshotRequest,
 };
 use tracedecay_temporal_query::ranking::RankingCandidate;
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+use tracedecay_temporal_query::snapshot::{
+    KernelVersions, TemporalExecutionSnapshot, TemporalWatermarks,
+};
 
 use super::SessionTemporalReadPort;
 use crate::relations::{

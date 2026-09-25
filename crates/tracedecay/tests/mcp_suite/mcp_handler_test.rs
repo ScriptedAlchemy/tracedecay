@@ -15,8 +15,6 @@ mod ast_grep_rewrite_behavior_test;
 mod ast_grep_search_test;
 mod automation_run_list_behavior_test;
 mod automation_runs_test;
-#[cfg(feature = "test-transport")]
-mod body_behavior_test;
 mod bounded_analysis_test;
 mod branch_diff_behavior_test;
 #[cfg(feature = "test-transport")]
@@ -25,7 +23,6 @@ mod branch_search_test;
 mod branch_sensitivity_test;
 mod callees_behavior_test;
 mod callers_behavior_test;
-mod callers_for_test;
 mod circular_behavior_test;
 #[cfg(feature = "test-transport")]
 mod complexity_test;
@@ -80,7 +77,6 @@ mod health_behavior_test;
 mod hermes_skill_bridge_test;
 mod impact_behavior_test;
 mod implementations_test;
-mod impls_behavior_test;
 mod inheritance_depth_test;
 #[cfg(feature = "test-transport")]
 mod insert_at_test;
@@ -113,8 +109,6 @@ mod move_symbol_test;
 mod multi_str_replace_behavior_test;
 mod mutate_graph_test;
 mod node_behavior_test;
-#[cfg(feature = "test-transport")]
-mod outline_behavior_test;
 #[cfg(feature = "test-transport")]
 mod port_order_test;
 mod port_status_test;

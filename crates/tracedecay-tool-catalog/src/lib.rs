@@ -19,8 +19,8 @@ mod snapshot;
 mod validation;
 
 pub use binding::{
-    BindingDeprecation, BindingStatus, BindingSurface, ProtocolRevisionRange,
-    SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName,
+    BindingSurface, ProtocolRevisionRange, SurfaceBindingInputV1, SurfaceBindingV1,
+    SurfaceOperationName,
 };
 pub use executable::{
     BindingAvailabilityV1, BindingRegistryV1, ExecutableBindingAvailabilityV1,

@@ -463,7 +463,7 @@ async fn mount_one_production_composition_project(
         allow_initialize_root_routing: false,
         tool_list_changed_capable: false,
         catalog_version: String::new(),
-        moved_store_adoption: crate::project::MovedStoreAdoption::Never,
+        moved_store_adoption: tracedecay_project::project::MovedStoreAdoption::Never,
     };
     let (canonical_project_path, _) = project_route_for_handshake(&handshake)?;
     let composition = stores
@@ -534,7 +534,8 @@ impl ProductionProjectCompositionHarnessV1 {
         isolation_root: impl AsRef<Path>,
         project_roots: impl IntoIterator<Item = PathBuf>,
     ) -> ProductionHarnessOpenFuture {
-        let live_profile_root = crate::config::user_data_dir().filter(|path| path.exists());
+        let live_profile_root =
+            tracedecay_project::config::user_data_dir().filter(|path| path.exists());
         Self::open_with_live_profile_root(
             isolation_root.as_ref().to_path_buf(),
             project_roots.into_iter().collect(),
@@ -552,7 +553,8 @@ impl ProductionProjectCompositionHarnessV1 {
         isolation_root: impl AsRef<Path>,
         project_roots: impl IntoIterator<Item = PathBuf>,
     ) -> ProductionHarnessOpenFuture {
-        let live_profile_root = crate::config::user_data_dir().filter(|path| path.exists());
+        let live_profile_root =
+            tracedecay_project::config::user_data_dir().filter(|path| path.exists());
         Self::open_with_live_profile_root(
             isolation_root.as_ref().to_path_buf(),
             project_roots.into_iter().collect(),
@@ -568,7 +570,8 @@ impl ProductionProjectCompositionHarnessV1 {
         project_roots: impl IntoIterator<Item = PathBuf>,
         scope_prefix: impl Into<String>,
     ) -> ProductionHarnessOpenFuture {
-        let live_profile_root = crate::config::user_data_dir().filter(|path| path.exists());
+        let live_profile_root =
+            tracedecay_project::config::user_data_dir().filter(|path| path.exists());
         Self::open_with_live_profile_root(
             isolation_root.as_ref().to_path_buf(),
             project_roots.into_iter().collect(),
@@ -598,7 +601,7 @@ impl ProductionProjectCompositionHarnessV1 {
             // product-runtime registration, so the canonical fixture is this
             // composition's provider; without it daemon bootstrap and version
             // reporting answer the typed missing-provider state.
-            crate::product_runtime::register_fixture_product_runtime();
+            tracedecay_project::product_runtime::register_fixture_product_runtime();
             let isolated = isolate_production_composition_roots(
                 isolation_root,
                 project_roots,

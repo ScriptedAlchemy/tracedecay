@@ -23,8 +23,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use futures_util::FutureExt as _;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::ProjectId;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::storage::write_repository_identity_marker;
 use tracedecay_sessions::runtime::SessionProvider;
 use tracedecay_sessions::runtime::source::{
@@ -131,8 +131,7 @@ fn sandbox(label: &str) -> Sandbox {
         .expect("bench main installed a sandbox HOME");
     let project = tmp.path().join("project");
     let profile = tmp.path().join("profile");
-    std::fs::create_dir_all(project.join(".tracedecay")).unwrap();
-    std::fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
+    std::fs::create_dir_all(&project).unwrap();
     let git = std::process::Command::new("git")
         .args(["init", "--quiet"])
         .current_dir(&project)

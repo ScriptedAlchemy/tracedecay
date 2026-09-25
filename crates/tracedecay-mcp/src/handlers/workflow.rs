@@ -28,9 +28,10 @@ use tracedecay_application::diagnostics_store::DiagnosticsStore;
 use tracedecay_application::operation_stream::{
     OperationEmitter, OperationEventError, operation_event_authority,
 };
+use tracedecay_code_index::is_test_file;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_project::project::{TraceDecay, is_test_file};
+use tracedecay_project::project::TraceDecay;
 
 use crate::ToolResult;
 use crate::handlers::{generic_tool_result, rendered_tool_result, unique_file_paths};
@@ -488,7 +489,7 @@ where
 {
     let run_args = match RunAffectedArgs::parse(&args) {
         Ok(run_args) => run_args,
-        Err(result) => return Ok(result),
+        Err(result) => return Ok(*result),
     };
     let project_root = cg.project_root().to_path_buf();
 
@@ -498,7 +499,7 @@ where
     // of whether the graph projection is mounted.
     let changed_paths = match resolve_changed_paths(&args, run_args.explicit_paths) {
         Ok(paths) => paths,
-        Err(result) => return Ok(result),
+        Err(result) => return Ok(*result),
     };
     if changed_paths.is_empty() {
         return Ok(empty_result(&args, "no changed files detected"));
@@ -848,15 +849,15 @@ fn test_run_contract_error(error: impl std::fmt::Display) -> TraceDecayError {
 fn resolve_changed_paths(
     args: &Value,
     explicit_paths: Option<Vec<String>>,
-) -> std::result::Result<Vec<String>, ToolResult> {
+) -> std::result::Result<Vec<String>, Box<ToolResult>> {
     match explicit_paths {
         Some(paths) => Ok(paths),
-        None => Err(error_result(
+        None => Err(Box::new(error_result(
             args,
             "invalid_request",
             "changed_paths",
             "`changed_paths` is required and must explicitly scope the affected-test run",
-        )),
+        ))),
     }
 }
 

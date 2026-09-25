@@ -103,36 +103,6 @@ impl ProtocolRevisionRange {
     }
 }
 
-/// A bounded deprecation period for a formerly current surface spelling.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct BindingDeprecation {
-    sunset_revision: u32,
-}
-
-impl BindingDeprecation {
-    pub fn new(sunset_revision: u32) -> Result<Self, CatalogValidationError> {
-        if sunset_revision == 0 {
-            return Err(CatalogValidationError::InvalidValue {
-                field: "binding deprecation sunset revision",
-                reason: "must be greater than zero",
-            });
-        }
-        Ok(Self { sunset_revision })
-    }
-
-    pub const fn sunset_revision(&self) -> u32 {
-        self.sunset_revision
-    }
-}
-
-/// Lifecycle state of a surface spelling.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case", tag = "status")]
-pub enum BindingStatus {
-    Current,
-    Deprecated { deprecation: BindingDeprecation },
-}
-
 /// Input used to construct an immutable surface binding.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SurfaceBindingInputV1 {
@@ -142,8 +112,6 @@ pub struct SurfaceBindingInputV1 {
     pub operation: SurfaceOperationName,
     pub protocol_revisions: ProtocolRevisionRange,
     pub required_features: Vec<FeatureId>,
-    pub status: BindingStatus,
-    pub alias_of: Option<BindingId>,
 }
 
 /// A surface spelling pointing at exactly one capability.
@@ -159,8 +127,6 @@ pub struct SurfaceBindingV1 {
     operation: SurfaceOperationName,
     protocol_revisions: ProtocolRevisionRange,
     required_features: Vec<FeatureId>,
-    status: BindingStatus,
-    alias_of: Option<BindingId>,
 }
 
 impl SurfaceBindingV1 {
@@ -174,8 +140,6 @@ impl SurfaceBindingV1 {
             operation: input.operation,
             protocol_revisions: input.protocol_revisions,
             required_features,
-            status: input.status,
-            alias_of: input.alias_of,
         })
     }
 
@@ -201,17 +165,5 @@ impl SurfaceBindingV1 {
 
     pub fn required_features(&self) -> &[FeatureId] {
         &self.required_features
-    }
-
-    pub fn status(&self) -> &BindingStatus {
-        &self.status
-    }
-
-    pub fn alias_of(&self) -> Option<&BindingId> {
-        self.alias_of.as_ref()
-    }
-
-    pub const fn is_alias(&self) -> bool {
-        self.alias_of.is_some()
     }
 }

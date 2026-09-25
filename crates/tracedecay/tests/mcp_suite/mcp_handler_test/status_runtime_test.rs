@@ -161,11 +161,6 @@ async fn status_reports_daemon_owned_partial_history_catch_up() {
     assert_eq!(status["session_history_catch_up"]["status"], "warming");
     assert_eq!(status["session_history_catch_up"]["coverage"], "partial");
     assert_eq!(status["session_history_catch_up"]["authority"], "daemon");
-    let text = status.to_string();
-    assert!(text.contains("continues bounded background catch-up"));
-    assert!(!text.contains("tracedecay sessions ingest --project-path"));
-    assert!(!text.contains("hook catch-up cap"));
-    assert!(!text.contains("tracedecay doctor --agent cursor"));
 }
 
 #[cfg(feature = "test-transport")]

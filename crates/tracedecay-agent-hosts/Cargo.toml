@@ -31,6 +31,7 @@ same-file = "1.0.6"
 getrandom = "0.2"
 hex = "0.4"
 hotpath.workspace = true
+jsonc-parser = { version = "0.33.2", features = ["serde_json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"

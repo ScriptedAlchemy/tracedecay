@@ -593,9 +593,7 @@ fn accepted_skill_proposal_record(
     if let Some(object) = record.as_object_mut() {
         let reason = proposal.get("reason").cloned().unwrap_or(Value::Null);
         object.insert("action".to_string(), json!(action.as_str()));
-        object.insert("proposal_action".to_string(), json!(action.as_str()));
-        object.insert("reason".to_string(), reason.clone());
-        object.insert("proposal_reason".to_string(), reason);
+        object.insert("reason".to_string(), reason);
         object.insert("target_skill_id".to_string(), json!(skill.metadata.id));
         object.insert(
             "target_checksum".to_string(),
@@ -695,11 +693,7 @@ fn skill_draft_from_proposal(
     let routing_description = required_routing_description(object.get("routing_description"))?;
     let category = required_proposal_string(object.get("category"), "category")?;
     let targets = proposal_targets_or_default(object.get("targets"))?;
-    let body_markdown = object
-        .get("body_markdown")
-        .or_else(|| object.get("body"))
-        .ok_or_else(|| "body_markdown is required".to_string())
-        .and_then(|value| required_proposal_string(Some(value), "body_markdown"))?;
+    let body_markdown = required_proposal_string(object.get("body_markdown"), "body_markdown")?;
     let support_files = support_files_from_proposal(object.get("support_files"))?;
     let draft = ManagedSkillDraft {
         id,
@@ -744,13 +738,13 @@ fn skill_proposal_action(proposal: &Value) -> std::result::Result<SkillProposalA
     let object = proposal
         .as_object()
         .ok_or_else(|| "proposal must be a JSON object".to_string())?;
-    let Some(action) = object.get("action").or_else(|| object.get("operation")) else {
+    let Some(action) = object.get("action") else {
         return Ok(SkillProposalAction::Create);
     };
     match required_proposal_string(Some(action), "action")?.as_str() {
         "create" => Ok(SkillProposalAction::Create),
-        "update" | "patch" => Ok(SkillProposalAction::Update),
-        "merge" | "consolidate" => Ok(SkillProposalAction::Merge),
+        "update" => Ok(SkillProposalAction::Update),
+        "merge" => Ok(SkillProposalAction::Merge),
         "archive" => Ok(SkillProposalAction::Archive),
         other => Err(format!("unsupported skill proposal action '{other}'")),
     }
@@ -793,9 +787,7 @@ fn skill_update_from_proposal(
             .transpose()?,
         category: optional_proposal_string(object.get("category"))?,
         targets: optional_proposal_targets(object.get("targets"))?,
-        body_markdown: optional_proposal_string(
-            object.get("body_markdown").or_else(|| object.get("body")),
-        )?,
+        body_markdown: optional_proposal_string(object.get("body_markdown"))?,
         support_files: if object
             .get("support_files")
             .is_some_and(|value| !value.is_null())
@@ -974,6 +966,39 @@ mod tests {
             Ok(_) => panic!("expected error: {expected}"),
             Err(err) => assert_eq!(err, expected),
         }
+    }
+
+    #[test]
+    fn proposal_action_accepts_only_the_prompt_schema_verbs() {
+        assert_eq!(
+            skill_proposal_action(&json!({"action": "update"})),
+            Ok(SkillProposalAction::Update)
+        );
+        assert_eq!(
+            skill_proposal_action(&json!({"action": "merge"})),
+            Ok(SkillProposalAction::Merge)
+        );
+        for verb in ["patch", "consolidate"] {
+            assert_err_eq(
+                skill_proposal_action(&json!({"action": verb})),
+                &format!("unsupported skill proposal action '{verb}'"),
+            );
+        }
+        assert_eq!(
+            skill_proposal_action(&json!({"operation": "archive"})),
+            Ok(SkillProposalAction::Create)
+        );
+        assert_err_eq(
+            skill_draft_from_proposal(
+                &json!({
+                    "id": "x", "title": "t", "summary": "s", "routing_description": "r",
+                    "category": "c", "body": "b"
+                }),
+                "run-1",
+                &BTreeSet::new(),
+            ),
+            "body_markdown is required",
+        );
     }
 
     #[test]

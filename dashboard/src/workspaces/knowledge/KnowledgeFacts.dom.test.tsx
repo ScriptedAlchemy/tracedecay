@@ -308,26 +308,25 @@ describe('Facts camera: inspect, select, and the address', () => {
     expect(within(inspector()).getByText(/21 facts/)).toBeTruthy();
   });
 
-  it('inspects and selects from a constellation body, and marks it on the field', async () => {
+  it('inspects and selects from a camera row, and marks it on the field', async () => {
     stub();
     const { container } = renderPage();
     await ledgerRow(/alpha fact content/);
-    const body = container.querySelector('[data-node="fact:fact-beta"]');
-    expect(body).not.toBeNull();
+    const row = container.querySelector('[data-node="fact:fact-beta"]');
+    expect(row).not.toBeNull();
 
-    fireEvent.pointerMove(body!);
+    fireEvent.pointerMove(row!);
     expect(inspector().getAttribute('data-fact-id')).toBe('fact-beta');
-    expect(body!.getAttribute('data-inspected')).toBe('true');
-    // Hover dims the material the body is not wired to: gamma is not drawn
-    // (redacted) and alpha is wired to beta, so the entity Rspeedy, wired
-    // only to alpha, is the dimmed one.
-    const entity = container.querySelector('[data-node="entity:Rspeedy"]');
-    expect(Number(entity!.getAttribute('opacity'))).toBeLessThan(0.3);
+    expect(row!.getAttribute('data-inspected')).toBe('true');
+    // Hover lights the relation beta is wired by: alpha supports beta.
+    expect(container.querySelector('[data-relation="supports"]')!.getAttribute('data-lit')).toBe('true');
 
-    fireEvent.click(body!);
+    fireEvent.click(row!);
     await waitFor(() => expect(lastSearch).toContain('fact=fact-beta'));
-    expect(body!.getAttribute('data-selected')).toBe('true');
+    expect(row!.getAttribute('data-selected')).toBe('true');
     expect(await within(inspector()).findByText('selected fact')).toBeTruthy();
+    // Selected, its relation lifts with the halo.
+    expect(container.querySelector('[data-relation="supports"]')!.getAttribute('data-lifted')).toBe('true');
   });
 
   it('returns from inspection to the selection on Escape, then clears the selection', async () => {
@@ -447,7 +446,7 @@ describe('Facts camera: typed absences', () => {
     expect(rungState(panel, 'canonical_detail')).toBe('unavailable');
   });
 
-  it('does not draw a constellation over a graph sub-read that served no topology', async () => {
+  it('does not draw the cameras over a graph sub-read that served no topology', async () => {
     stub({
       holographic: {
         reads: {
@@ -462,23 +461,23 @@ describe('Facts camera: typed absences', () => {
     expect(screen.queryByTestId('fact-constellation-svg')).toBeNull();
     const aperture = screen.getByTestId('knowledge-aperture');
     expect(aperture.querySelector('[data-state="error"]')).not.toBeNull();
-    expect(aperture.textContent).toMatch(/no constellation is drawn/);
+    expect(aperture.textContent).toMatch(/did not serve a topology, so no field is drawn/);
     await waitFor(() => expect(publishedRegisters()['graph']?.state).toBe('error'));
     expect(publishedRegisters()['graph']?.detail).toBe('the graph schema changed');
     expect(publishedRegisters()['memory']?.state).toBe('ready');
   });
 
-  it('prints the daemon coverage under the constellation and the sub-read states on the register', async () => {
+  it('prints the daemon coverage under the cameras and the sub-read states on the register', async () => {
     stub();
     renderPage();
     await ledgerRow(/alpha fact content/);
     const coverage = screen.getByTestId('fact-constellation-coverage');
     expect(coverage.textContent).toMatch(/graph coverage unknown: fact_universe_bounded/);
     expect(coverage.textContent).toMatch(/2 of 4,128 facts in the store drawn/);
-    expect(coverage.textContent).toMatch(/2 of 2 relations drawn, limit 100/);
+    expect(coverage.textContent).toMatch(/2 of 2 relations resolved, limit 100/);
     const svg = screen.getByTestId('fact-constellation-svg');
-    expect(svg.getAttribute('aria-label')).toMatch(/2 fact roots/);
-    expect(svg.getAttribute('aria-label')).toMatch(/fact ledger beside this field is the exact accessible equivalent/);
+    expect(svg.getAttribute('aria-label')).toMatch(/2 fact roots in 2 category frames \(rows\)/);
+    expect(svg.getAttribute('aria-label')).toMatch(/fact ledger below this field is the exact accessible equivalent/);
     await waitFor(() => expect(publishedRegisters()['memory']?.state).toBe('ready'));
     const registers = publishedRegisters();
     expect(registers['memory']).toMatchObject({ state: 'ready', detail: '4,128 facts' });

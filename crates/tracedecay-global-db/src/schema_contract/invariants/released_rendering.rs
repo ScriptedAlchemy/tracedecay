@@ -14,6 +14,11 @@
 //! | -------------------------------- | --------------------------- | ------------ | ---------------- |
 //! | v0.1.0-beta.25 .. v0.1.0-beta.37 | `claude-session-message-v5` | unchanged    | unchanged        |
 //!
+//! Since LCM schema 12 the digested message is the stored message row (its
+//! sanitized body and protected metadata), so a stored row is digestible into
+//! the provenance that pairs with it; stores from those tags are reset rather
+//! than converged.
+//!
 //! What did change, after the newest tag, is one *rendering*:
 //! `provider_message_semantics` gives a Codex user message carrying an
 //! `<codex_internal_context source="goal">` block a typed rendering, role
@@ -52,12 +57,15 @@ use std::sync::Mutex;
 
 use tracedecay_runtime_core::db::engine::Executor;
 use tracedecay_store::{
-    SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageProjection, message_output_digest,
+    ProjectionStoreError, SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageProjection,
+    message_output_digest,
 };
 
 use super::audit::ProjectionProvenanceRow;
 use super::rows::authority_violation;
-use crate::observation_projection::{ConvergedRendering, ProjectionRowsBatch};
+use crate::observation_projection::{
+    ConvergedRendering, ProjectionRowsBatch, stored_output_digest,
+};
 
 /// What this binary must do with one stored provenance row.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -226,11 +234,18 @@ pub(super) fn classify_provenance_rendering(
     if let Some(field) = provenance_identity_disagreement(actual, projection) {
         return Err(disagreement(field, actual, projection));
     }
-    let derived_digest = projection.output_digest().map_err(|_| {
-        authority_violation("projection output digest is not canonically derivable")
-    })?;
-    if actual.output_digest == derived_digest.as_str() {
-        return Ok(StoredProvenanceRendering::Current);
+    // A rendering the sanitizer now withholds has no current row, so only a
+    // released stored row can still pair with its provenance.
+    match stored_output_digest(projection) {
+        Ok(derived_digest) if actual.output_digest == derived_digest.as_str() => {
+            return Ok(StoredProvenanceRendering::Current);
+        }
+        Ok(_) | Err(ProjectionStoreError::SanitizationRefused { .. }) => {}
+        Err(_) => {
+            return Err(authority_violation(
+                "projection output digest is not canonically derivable",
+            ));
+        }
     }
     let message = projection.message();
     let stored_digest = stored
@@ -401,7 +416,7 @@ mod tests {
             "codex-goal-context",
         )
         .unwrap();
-        let anchor = tracedecay_store::build_observation_retrieval_anchor_v2(
+        let anchor = tracedecay_store::build_observation_retrieval_anchor(
             write.observation(),
             generation.clone(),
             UtcMicros(1),
@@ -423,8 +438,8 @@ mod tests {
             .map(|_| ())
     }
 
-    /// Every persisted byte of one projected output: the message row, its LCM
-    /// raw twin's indexed text, and the provenance digest that pairs them.
+    /// Every persisted byte of one projected output: the message row, its
+    /// indexed text, and the provenance digest that pairs them.
     #[derive(Debug, Eq, PartialEq)]
     struct StoredOutput {
         session_id: String,
@@ -445,12 +460,11 @@ mod tests {
     async fn stored_output(conn: &impl QueryExecutor, message_id: &str) -> StoredOutput {
         let mut rows = conn
             .query(
-                "SELECT m.session_id, m.role, m.timestamp, m.ordinal, m.text, m.kind, m.model,
+                "SELECT m.session_id, m.role, m.timestamp, m.ordinal,
+                        COALESCE(m.content, m.placeholder_text, ''), m.kind, m.model,
                         m.tool_names, m.source_path, m.source_offset, m.metadata_json,
-                        raw.index_text, p.output_digest
-                 FROM session_messages AS m
-                 JOIN lcm_raw_messages AS raw
-                   ON raw.provider = m.provider AND raw.message_id = m.message_id
+                        m.index_text, p.output_digest
+                 FROM lcm_raw_messages AS m
                  JOIN observation_projection_provenance AS p
                    ON p.output_provider = m.provider AND p.output_message_id = m.message_id
                  WHERE m.provider = 'codex' AND m.message_id = ?1",
@@ -480,6 +494,25 @@ mod tests {
         }
     }
 
+    /// Provenance digest a release's stored output pairs with: the output
+    /// digest over the row the projector stores for the released message.
+    fn stored_release_digest(session: &SessionRecord, message: &SessionMessageRecord) -> String {
+        let stored = tracedecay_lcm::raw::projection_stored_message(message)
+            .expect("the released rendering must be storable by this binary's sanitizer");
+        message_output_digest(session, &stored, 0)
+            .expect("digest the released output")
+            .as_str()
+            .to_owned()
+    }
+
+    fn released_digest() -> String {
+        let fixture = released();
+        stored_release_digest(
+            &serde_json::from_value(fixture["released_session"].clone()).unwrap(),
+            &serde_json::from_value(fixture["released_message"].clone()).unwrap(),
+        )
+    }
+
     /// Rewrites the drained output to the bytes a release persisted, and arms
     /// an exhaustive audit. This is the shipped store the report describes: the
     /// released rendering, paired with the digest that release computed for it.
@@ -493,33 +526,9 @@ mod tests {
             message.session_id, session.session_id,
             "the fixture's released output must belong to its released session"
         );
-        conn.execute(
-            "UPDATE session_messages
-             SET session_id = ?3, role = ?4, timestamp = ?5, ordinal = ?6,
-                 text = ?7, kind = ?8, model = ?9, tool_names = ?10,
-                 source_path = ?11, source_offset = ?12, metadata_json = ?13
-             WHERE provider = ?1 AND message_id = ?2",
-            tracedecay_runtime_core::params![
-                message.provider.as_str(),
-                message.message_id.as_str(),
-                message.session_id.as_str(),
-                message.role.as_str(),
-                message.timestamp,
-                message.ordinal,
-                message.text.as_str(),
-                message.kind.as_deref(),
-                message.model.as_deref(),
-                message.tool_names.as_deref(),
-                message.source_path.as_deref(),
-                message.source_offset,
-                message.metadata_json.as_deref(),
-            ],
-        )
-        .await
-        .expect("restore the released message row");
         tracedecay_lcm::raw::upsert_projection_raw_message(conn, &message)
             .await
-            .expect("restore the released LCM raw twin");
+            .expect("restore the released message row");
         conn.execute(
             "UPDATE observation_projection_provenance SET output_digest = ?2
              WHERE projector_version = ?1 AND observation_id = ?3",
@@ -556,8 +565,8 @@ mod tests {
         let snapshot = database.read_snapshot().await.unwrap();
         let current = stored_output(&snapshot, RECORD_ID).await;
         drop(snapshot);
-        let fixture = released();
-        let released_digest = fixture["released_output_digest"].as_str().unwrap();
+        let released_digest = released_digest();
+        let released_digest = released_digest.as_str();
         assert_eq!(
             current.role, "system",
             "this binary renders a Codex goal-context record as typed goal context"
@@ -629,11 +638,7 @@ mod tests {
             .begin_write_transaction("seed current provenance over a stale output")
             .await
             .unwrap();
-        downgrade_to_released(
-            &transaction,
-            released()["released_output_digest"].as_str().unwrap(),
-        )
-        .await;
+        downgrade_to_released(&transaction, &released_digest()).await;
         transaction
             .execute(
                 "UPDATE observation_projection_provenance SET output_digest = ?2
@@ -665,61 +670,11 @@ mod tests {
         assert_eq!(stored_output(&snapshot, RECORD_ID).await, current);
     }
 
-    /// The digest covers the message, not its LCM raw twin. A twin can be
-    /// rewritten under a still-current message and provenance; reopen has to
-    /// restore the twin a fresh projection write stores.
-    #[tokio::test]
-    async fn current_provenance_repairs_a_stale_raw_twin() {
-        let directory = TempDir::new().unwrap();
-        let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
-            .await
-            .unwrap();
-        seed(&runtime, &observation()).await.unwrap();
-        let database = runtime
-            .registered_database(HostAdmissionScope::Profile)
-            .expect("registered profile database");
-        let snapshot = database.read_snapshot().await.unwrap();
-        let current = stored_output(&snapshot, RECORD_ID).await;
-        drop(snapshot);
-
-        let transaction = database
-            .runtime_database()
-            .begin_write_transaction("stale the raw twin under current provenance")
-            .await
-            .unwrap();
-        let updated = transaction
-            .execute(
-                "UPDATE lcm_raw_messages
-                 SET content = 'stale raw body', content_hash = 'stale',
-                     snippet_text = 'stale raw body', index_text = 'stale raw body'
-                 WHERE provider = 'codex' AND message_id = ?1",
-                tracedecay_runtime_core::params![RECORD_ID],
-            )
-            .await
-            .expect("stale the raw twin");
-        assert_eq!(updated, 1);
-        transaction.commit().await.unwrap();
-
-        let snapshot = database.read_snapshot().await.unwrap();
-        let stale = stored_output(&snapshot, RECORD_ID).await;
-        drop(snapshot);
-        assert_eq!(stale.digest, current.digest);
-        assert_eq!(stale.text, current.text);
-        assert_eq!(stale.raw_index_text, "stale raw body");
-
-        super::super::ensure_authority_invariants(database.runtime_database(), false, false)
-            .await
-            .expect("current provenance must repair its stale raw twin");
-
-        let snapshot = database.read_snapshot().await.unwrap();
-        assert_eq!(stored_output(&snapshot, RECORD_ID).await, current);
-    }
-
-    /// A twin whose content survived but whose derived columns did not still
+    /// A row whose content survived but whose content hash did not still
     /// fails hydration with `PayloadIntegrityMismatch`. Content equality alone
-    /// is not the twin a fresh projection write stores.
+    /// is not the row a fresh projection write stores.
     #[tokio::test]
-    async fn current_provenance_repairs_a_raw_twin_with_a_stale_hash() {
+    async fn current_provenance_repairs_a_row_with_a_stale_hash() {
         let directory = TempDir::new().unwrap();
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
             .await
@@ -734,13 +689,13 @@ mod tests {
 
         let transaction = database
             .runtime_database()
-            .begin_write_transaction("stale the raw twin derivations")
+            .begin_write_transaction("stale the stored content hash")
             .await
             .unwrap();
         let updated = transaction
             .execute(
                 "UPDATE lcm_raw_messages
-                 SET content_hash = 'stale', index_text = 'stale index'
+                 SET content_hash = 'stale'
                  WHERE provider = 'codex' AND message_id = ?1",
                 tracedecay_runtime_core::params![RECORD_ID],
             )
@@ -751,7 +706,7 @@ mod tests {
 
         super::super::ensure_authority_invariants(database.runtime_database(), false, false)
             .await
-            .expect("current provenance must repair a twin with stale derivations");
+            .expect("current provenance must repair a row with a stale content hash");
 
         let snapshot = database.read_snapshot().await.unwrap();
         assert_eq!(stored_output(&snapshot, RECORD_ID).await, current);
@@ -762,18 +717,18 @@ mod tests {
                 tracedecay_runtime_core::params![RECORD_ID],
             )
             .await
-            .expect("read the repaired twin");
+            .expect("read the repaired row");
         let row = rows
             .next()
             .await
-            .expect("read the repaired twin")
-            .expect("raw twin row");
+            .expect("read the repaired row")
+            .expect("message row");
         assert_eq!(
             row.get::<String>(0).unwrap(),
             tracedecay_lcm::retrieval_content::projected_content_hash(
                 &row.get::<String>(1).unwrap()
             ),
-            "the repaired twin must carry the hash its content hydrates against"
+            "the repaired row must carry the hash its content hydrates against"
         );
     }
 
@@ -798,7 +753,7 @@ mod tests {
             .unwrap();
         let updated = transaction
             .execute(
-                "UPDATE session_messages SET text = 'tampered projection body'
+                "UPDATE lcm_raw_messages SET content = 'tampered projection body'
                  WHERE provider = 'codex' AND message_id = ?1",
                 tracedecay_runtime_core::params![RECORD_ID],
             )
@@ -867,7 +822,7 @@ mod tests {
             .expect("create stale session identity");
         transaction
             .execute(
-                "UPDATE session_messages SET session_id = ?2
+                "UPDATE lcm_raw_messages SET session_id = ?2
                  WHERE provider = 'codex' AND session_id = ?1",
                 tracedecay_runtime_core::params![SESSION, "stale-session-identity"],
             )
@@ -916,7 +871,6 @@ mod tests {
     #[derive(Debug, Eq, PartialEq)]
     struct ProjectionOutcome {
         message_rows: i64,
-        raw_rows: i64,
         provenance_rows: i64,
         disposition: Option<(String, String)>,
     }
@@ -929,8 +883,6 @@ mod tests {
         let mut rows = conn
             .query(
                 "SELECT
-                    (SELECT COUNT(*) FROM session_messages
-                     WHERE provider = 'codex' AND message_id = ?2),
                     (SELECT COUNT(*) FROM lcm_raw_messages
                      WHERE provider = 'codex' AND message_id = ?2),
                     (SELECT COUNT(*) FROM observation_projection_provenance
@@ -952,12 +904,11 @@ mod tests {
             .await
             .expect("read the projection authority row")
             .expect("the aggregate row is always present");
-        let receipt_id: Option<String> = row.get(3).unwrap();
-        let reason: Option<String> = row.get(4).unwrap();
+        let receipt_id: Option<String> = row.get(2).unwrap();
+        let reason: Option<String> = row.get(3).unwrap();
         ProjectionOutcome {
             message_rows: row.get(0).unwrap(),
-            raw_rows: row.get(1).unwrap(),
-            provenance_rows: row.get(2).unwrap(),
+            provenance_rows: row.get(1).unwrap(),
             disposition: receipt_id.zip(reason),
         }
     }
@@ -1008,36 +959,10 @@ mod tests {
         )
         .await
         .expect("install the released session row");
-        conn.execute(
-            "INSERT INTO session_messages
-                (provider, message_id, session_id, role, timestamp, ordinal, text, kind, model,
-                 tool_names, source_path, source_offset, metadata_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            tracedecay_runtime_core::params![
-                message.provider.as_str(),
-                message.message_id.as_str(),
-                message.session_id.as_str(),
-                message.role.as_str(),
-                message.timestamp,
-                message.ordinal,
-                message.text.as_str(),
-                message.kind.as_deref(),
-                message.model.as_deref(),
-                message.tool_names.as_deref(),
-                message.source_path.as_deref(),
-                message.source_offset,
-                message.metadata_json.as_deref(),
-            ],
-        )
-        .await
-        .expect("install the released message row");
         tracedecay_lcm::raw::upsert_projection_raw_message(conn, &message)
             .await
             .expect("the released rendering must still be servable by this binary's sanitizer");
-        let digest = message_output_digest(&session, &message, 0)
-            .expect("digest the released output")
-            .as_str()
-            .to_owned();
+        let digest = stored_release_digest(&session, &message);
         let anchor =
             derive_exact_observation_anchor_id(observation.scope(), observation.observation_id())
                 .unwrap();
@@ -1130,7 +1055,6 @@ mod tests {
             fresh_capture,
             ProjectionOutcome {
                 message_rows: 0,
-                raw_rows: 0,
                 provenance_rows: 0,
                 disposition: Some((
                     observation

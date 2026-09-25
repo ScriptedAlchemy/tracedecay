@@ -1,4 +1,4 @@
-//! Cross-session response cache for `tracedecay_read`.
+//! Cross-session response cache for mode-aware source reads.
 //!
 //! Cached entries are keyed by `(project_id, file_path, mode, args_hash)` and
 //! survive across MCP sessions. The `mtime_ns` column on each row is the

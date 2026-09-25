@@ -142,7 +142,7 @@ function ReviewHeader({ context, row }: { context: DeliveryContext; row: Deliver
   const { inbox, navigate } = context;
   const project = projectFor(inbox, row.project_id);
   const button =
-    'inline-flex min-h-9 items-center border border-edge-strong px-3 text-xs text-text-primary hover:bg-surface-2';
+    'inline-flex min-h-[var(--touch-target-min)] items-center border border-edge-strong px-3 text-xs text-text-primary hover:bg-surface-2';
   return (
     <header className="flex flex-wrap items-center gap-3 border-b border-edge-subtle bg-surface-1 px-3 py-2">
       <div className="flex min-w-0 flex-wrap items-center gap-x-2 text-xs">

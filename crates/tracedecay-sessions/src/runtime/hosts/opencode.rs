@@ -16,12 +16,12 @@ use tracedecay_store::ParseOffset;
 use crate::admission::HostAdmission;
 use crate::observation::{CaptureObservationRequest, ObservationCancellation};
 use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget, HostScanEvidence};
-use crate::runtime::opencode_frontier::{
+use crate::runtime::hosts::opencode_frontier::{
     GENERATION_KEY as OPENCODE_GENERATION_FRONTIER_KEY,
     REWRITE_KEY as OPENCODE_REWRITE_FRONTIER_KEY, prepare_generation_rewrite,
     read as read_frontier, write as write_frontier,
 };
-use crate::runtime::opencode_snapshot::MAX_SNAPSHOT_DATABASE_IO_BYTES;
+use crate::runtime::hosts::opencode_snapshot::MAX_SNAPSHOT_DATABASE_IO_BYTES;
 use crate::runtime::shared::TranscriptScopeMatcher;
 use crate::runtime::snapshot_observation::{
     MAX_SNAPSHOT_CAPTURE_UNIT_BYTES, SnapshotAdmissionBatch, SnapshotAdmissionRecord,
@@ -202,7 +202,8 @@ impl SnapshotAdmissionRecord for OpenCodeRecord {
 impl OpenCodeSource {
     pub fn new_for_project(project_root: &Path) -> Option<Self> {
         let home = crate::runtime::home_dir()?;
-        let snapshot_scratch_root = crate::runtime::opencode_snapshot::snapshot_scratch_root()?;
+        let snapshot_scratch_root =
+            crate::runtime::hosts::opencode_snapshot::snapshot_scratch_root()?;
         Some(Self::with_database_for_project_and_scratch(
             opencode_data_dir(&home).join("opencode.db"),
             snapshot_scratch_root,
@@ -212,7 +213,8 @@ impl OpenCodeSource {
 
     pub fn new_for_user(roots: Vec<PathBuf>) -> Option<Self> {
         let home = crate::runtime::home_dir()?;
-        let snapshot_scratch_root = crate::runtime::opencode_snapshot::snapshot_scratch_root()?;
+        let snapshot_scratch_root =
+            crate::runtime::hosts::opencode_snapshot::snapshot_scratch_root()?;
         Some(Self::with_database_for_user_and_scratch(
             opencode_data_dir(&home).join("opencode.db"),
             snapshot_scratch_root,
@@ -293,7 +295,7 @@ pub(crate) async fn capture_opencode_observations(
         Instant::now() + HOST_SCAN_WINDOW,
         cancellation.clone(),
     );
-    let snapshot_attempt = crate::runtime::opencode_snapshot::snapshot_database(
+    let snapshot_attempt = crate::runtime::hosts::opencode_snapshot::snapshot_database(
         source.database_path.clone(),
         source.snapshot_scratch_root.clone(),
         snapshot_budget,
@@ -543,7 +545,9 @@ fn scan_reference_page(
     match scan_kind {
         OpenCodeScanKind::Messages => scan_message_reference_page(source, cursor, budget),
         OpenCodeScanKind::Parts => {
-            crate::runtime::opencode_part_scan::scan_part_reference_page(source, cursor, budget)
+            crate::runtime::hosts::opencode_part_scan::scan_part_reference_page(
+                source, cursor, budget,
+            )
         }
         OpenCodeScanKind::Rewrite => scan_message_reference_page(source, cursor, budget),
     }

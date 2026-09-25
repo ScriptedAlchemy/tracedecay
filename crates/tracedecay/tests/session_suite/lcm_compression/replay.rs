@@ -168,13 +168,9 @@ async fn replay_assembly_terminates_when_existing_summary_sources_contain_cycle(
 
 #[tokio::test]
 async fn threshold_pressure_summarizes_short_huge_active_context() {
-    // Pin the cursor-agent adapter to a nonexistent binary so the daemon's
-    // registered summarizer refuses deterministically instead of invoking a
-    // live cursor-agent from the operator's PATH.
-    let _cursor_agent = common::EnvVarGuard::set(
-        "TRACEDECAY_CURSOR_AGENT_BIN",
-        "/nonexistent/tracedecay-test-cursor-agent",
-    );
+    // No `lcm.summarizer_executables.v1` binding is published for this
+    // profile shard, so the registered cursor-agent summarizer refuses with
+    // its typed unconfigured state instead of resolving a binary from PATH.
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     insert_session(&db, "cursor", "short-huge").await;
@@ -229,10 +225,11 @@ async fn threshold_pressure_summarizes_short_huge_active_context() {
         "response reason: {}",
         response.reason
     );
-    // The daemon authority resolves auxiliary summaries itself; when the
-    // registered cursor-agent summarizer cannot run, the pending summary
-    // stays typed unavailable instead of asking the host to fill it.
-    assert_eq!(response.reason, "cursor_agent_unavailable");
+    // The daemon authority resolves auxiliary summaries itself; while the
+    // registered cursor-agent summarizer has no configured executable, the
+    // pending summary stays typed unconfigured instead of asking the host to
+    // fill it.
+    assert_eq!(response.reason, "cursor_agent_unconfigured");
     let summary_request = response
         .summary_request
         .expect("threshold pressure should select source messages to summarize");

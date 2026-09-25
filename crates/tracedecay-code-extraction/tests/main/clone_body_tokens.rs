@@ -258,7 +258,7 @@ fn bodies_above_the_token_maximum_are_excluded_without_streams() {
     let body = &under.clone_bodies[0];
     assert!(body.non_trivia_token_count <= MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1);
     assert_eq!(body.eligibility, CloneBodyEligibilityV1::Eligible);
-    assert!(!body.conservative_tokens.is_empty());
+    assert_eq!(body.conservative_tokens.len(), 10164);
 }
 
 #[test]
@@ -292,7 +292,8 @@ fn body_bytes_are_bounded_before_a_large_literal_is_tokenized() {
 
 #[test]
 fn clone_bodies_bind_to_method_and_stable_arrow_occurrences() {
-    for (artifact, expected_kind, expected_language) in [
+    // Both bodies are the `{ load(); }` block.
+    for (artifact, expected_kind, expected_language, expected_span) in [
         (
             RustExtractor.extract_artifact(
                 "src/store.rs",
@@ -300,11 +301,13 @@ fn clone_bodies_bind_to_method_and_stable_arrow_occurrences() {
             ),
             NodeKind::Method,
             "rust",
+            (42, 53),
         ),
         (
             TypeScriptExtractor.extract_artifact("src/store.ts", "const read = () => { load(); };"),
             NodeKind::ArrowFunction,
             "typescript",
+            (19, 30),
         ),
     ] {
         let body = artifact.clone_bodies.first().expect("clone body");
@@ -317,7 +320,10 @@ fn clone_bodies_bind_to_method_and_stable_arrow_occurrences() {
         assert_eq!(body.symbol_occurrence_id, callable.id);
         assert_eq!(body.symbol_kind, expected_kind);
         assert_eq!(body.language, expected_language);
-        assert!(!body.body_span.is_empty());
+        assert_eq!(
+            (body.body_span.start_byte, body.body_span.end_byte),
+            expected_span
+        );
     }
 }
 
@@ -325,7 +331,20 @@ fn clone_bodies_bind_to_method_and_stable_arrow_occurrences() {
 fn extracted_token_kinds_borrow_the_grammar_table_without_changing_the_wire_shape() {
     let source = "pub fn publish(input: &str) -> bool {\n    let trimmed = input.trim();\n    let ready = !trimmed.is_empty();\n    let flagged = trimmed.starts_with('!');\n    let long = trimmed.len() > 4;\n    ready && long && !flagged\n}\n";
     let emitted = tokens(&RustExtractor, "borrowed.rs", source);
-    assert!(!emitted.is_empty());
+    assert_eq!(emitted.len(), 92);
+    let texts: Vec<&str> = emitted
+        .iter()
+        .filter_map(|token| match token {
+            ConservativeCloneTokenV1::Syntax { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts.join(" "),
+        "{ let trimmed = input . trim ( ) ; let ready = ! trimmed . is_empty ( ) ; \
+         let flagged = trimmed . starts_with ( '!' ) ; let long = trimmed . len ( ) > 4 ; \
+         ready && long && ! flagged }"
+    );
     for token in &emitted {
         let kind = match token {
             ConservativeCloneTokenV1::StructureStart { syntax_kind }
@@ -339,9 +358,9 @@ fn extracted_token_kinds_borrow_the_grammar_table_without_changing_the_wire_shap
     }
 
     let encoded = serde_json::to_string(&emitted[0]).expect("token encodes");
-    assert!(
-        encoded.contains("\"syntax_kind\":\""),
-        "the persisted clone-token shape changed: {encoded}"
+    assert_eq!(
+        encoded, r#"{"kind":"structure_start","syntax_kind":"block"}"#,
+        "the persisted clone-token shape changed"
     );
     let decoded: ConservativeCloneTokenV1 = serde_json::from_str(&encoded).expect("token decodes");
     assert_eq!(decoded, emitted[0]);

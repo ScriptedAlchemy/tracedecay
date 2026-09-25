@@ -4,12 +4,11 @@
 //!
 //! - **Global accounting DB** (the registered profile store behind
 //!   `tracedecay gain` / `tracedecay cost` / `tracedecay monitor`): the
-//!   `savings_ledger` and legacy lifetime savings counters.
-//!   Ledger aggregation reuses [`RegisteredGlobalDb::sum_savings`] /
+//!   `savings_ledger`. Ledger aggregation reuses [`RegisteredGlobalDb::sum_savings`] /
 //!   [`RegisteredGlobalDb::savings_history`], the same queries `tracedecay gain` runs.
 //! - **Session store** (the resolved LCM store the dashboard already serves):
 //!   canonical provider-usage observations plus `sessions` +
-//!   `session_messages`, whose content and model fields provide a separate
+//!   `lcm_raw_messages`, whose content and model fields provide a separate
 //!   non-billing token-count overlay.
 //!
 //! Content token counts carry an explicit provenance label:
@@ -25,8 +24,7 @@
 //! Provider billing counters are exposed separately as provider-usage events;
 //! they are never treated as message counts.
 //!
-//! Dollar costs and `/pricing` use one bundled, deterministic all-provider
-//! authority. Unknown models keep their token counts but get no invented
+//! Dollar costs use one bundled, deterministic all-provider authority. Unknown models keep their token counts but get no invented
 //! price.
 
 use std::collections::{BTreeMap, HashMap};
@@ -50,12 +48,10 @@ use super::read_model::{DashboardCoverageV1, DashboardEnvelopeV1, scope_from_sta
 use super::token_count::{
     MESSAGE_TOKENS_CTE, MessageTokens, counting_available, encoder_for_model,
 };
-use super::util::{
-    JsonQuery, coerce_limit, i64_field, query_i64, query_i64_result, query_rows, str_field,
-};
+use super::util::{JsonQuery, i64_field, query_i64_result, query_rows, str_field};
 use super::{DashboardState, savings_pricing, token_count};
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_runtime_core::db::engine::{Value as DbValue, params, params_from_iter};
+use tracedecay_runtime_core::db::engine::params;
 
 /// Content-size aggregate shared by the per-session and per-model rollups.
 /// Provider billing usage is joined from the canonical observation projection,
@@ -68,13 +64,6 @@ const TOKEN_AGG_COLUMNS: &str = "
 #[derive(Deserialize)]
 pub struct RangeParams {
     range: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub struct SessionsParams {
-    range: Option<String>,
-    limit: Option<i64>,
-    offset: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -92,21 +81,6 @@ struct SavingsLedgerSummaryV1 {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-struct SavingsLifetimeProjectV1 {
-    path: Option<String>,
-    tokens_saved: Option<i64>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-struct SavingsLifetimeCountersV1 {
-    total_tokens_saved: i64,
-    project_total: i64,
-    projects_limit: i64,
-    projects_truncated: bool,
-    projects: Vec<SavingsLifetimeProjectV1>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 struct SavingsAccountingSummaryV1 {
     available: bool,
     db: String,
@@ -115,8 +89,6 @@ struct SavingsAccountingSummaryV1 {
     error: Option<String>,
     #[serde(default)]
     ledger: Option<SavingsLedgerSummaryV1>,
-    #[serde(default)]
-    lifetime_counters: Option<SavingsLifetimeCountersV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -211,49 +183,6 @@ fn provider_usage_scope(state: &DashboardState) -> Option<ObservationScopeV1> {
         .map(|scope| ObservationScopeV1::Project {
             project_id: scope.project_id.clone(),
         })
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-struct SavingsSessionModelV1 {
-    model: Option<String>,
-    tokenizer: Option<Value>,
-    messages: i64,
-    provider_usage_events: i64,
-    tokenized_messages: i64,
-    estimated_messages: i64,
-    cost_basis: String,
-    provider_actual: Option<TokenActualV1>,
-    tokenized: TokenPairV1,
-    estimated: TokenPairV1,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-struct SavingsSessionRowV1 {
-    provider: String,
-    session_id: String,
-    title: Option<String>,
-    started_at: Option<i64>,
-    last_message_at: Option<i64>,
-    is_subagent: bool,
-    messages: i64,
-    provider_usage_events: i64,
-    tokenized_messages: i64,
-    estimated_messages: i64,
-    cost_basis: String,
-    models: Vec<SavingsSessionModelV1>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-pub(super) struct SavingsSessionsPayloadV1 {
-    available: bool,
-    db: String,
-    #[serde(default)]
-    scope: Option<String>,
-    range: String,
-    #[serde(default)]
-    since: Option<i64>,
-    total: i64,
-    sessions: Vec<SavingsSessionRowV1>,
 }
 
 /// One model-keyed content aggregate from the session store, joined to the
@@ -1029,14 +958,6 @@ pub async fn costs(
     .await
 }
 
-// `costs_http` / `costs_export` are deleted with their last caller, for the
-// same reason as their Observatory twins above `observatory_model`. They
-// mounted `/api/plugins/savings/costs{,/export}` over the identical
-// `costs_model` that `/api/costs`, the route `CanonicalCosts.tsx` reads,
-// already serves. The savings family's OTHER routes (`overview`, `ledger`,
-// `sessions`, `models`, `pricing`) are not aliases: each is the sole mount of
-// its handler and has live consumers, so they stay.
-
 async fn costs_model(state: &DashboardState) -> CostsReadModelV1 {
     let provider_scope = provider_usage_scope(state);
     match (
@@ -1060,7 +981,6 @@ async fn costs_model(state: &DashboardState) -> CostsReadModelV1 {
 }
 
 async fn savings_overview(gdb: &RegisteredGlobalDb, db_path: &str) -> Value {
-    const PROJECT_LIMIT: i64 = 25;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -1086,62 +1006,6 @@ async fn savings_overview(gdb: &RegisteredGlobalDb, db_path: &str) -> Value {
         }
     };
 
-    // Legacy lifetime counters (`projects.tokens_saved`) predate the ledger
-    // and often carry history the event log does not, surface both.
-    let conn = gdb.read_connection();
-    let lifetime_projects = match query_rows(
-        &conn,
-        "SELECT path, tokens_saved FROM projects
-         WHERE tokens_saved > 0 ORDER BY tokens_saved DESC LIMIT ?1",
-        params![PROJECT_LIMIT],
-    )
-    .await
-    {
-        Ok(projects) => projects,
-        Err(error) => {
-            return json!({
-                "available": false,
-                "db": db_path,
-                "recording": recording_block(),
-                "error": format!("failed to read lifetime project savings: {error}"),
-            });
-        }
-    };
-    let lifetime_total = match query_i64_result(
-        &conn,
-        "SELECT COALESCE(SUM(tokens_saved), 0) FROM projects",
-        (),
-    )
-    .await
-    {
-        Ok(total) => total,
-        Err(error) => {
-            return json!({
-                "available": false,
-                "db": db_path,
-                "recording": recording_block(),
-                "error": format!("failed to read lifetime savings total: {error}"),
-            });
-        }
-    };
-    let project_total = match query_i64_result(
-        &conn,
-        "SELECT COUNT(*) FROM projects WHERE tokens_saved > 0",
-        (),
-    )
-    .await
-    {
-        Ok(total) => total,
-        Err(error) => {
-            return json!({
-                "available": false,
-                "db": db_path,
-                "recording": recording_block(),
-                "error": format!("failed to read lifetime project count: {error}"),
-            });
-        }
-    };
-
     let sum_json = |total: &tracedecay_global_db::SavingsTotal| json!({ "saved_tokens": total.saved_tokens, "calls": total.calls });
     json!({
         "available": true,
@@ -1152,16 +1016,6 @@ async fn savings_overview(gdb: &RegisteredGlobalDb, db_path: &str) -> Value {
             "last_7d": sum_json(&week),
             "last_30d": sum_json(&month),
             "all_time": sum_json(&all_time),
-        },
-        "lifetime_counters": {
-            "total_tokens_saved": lifetime_total,
-            "project_total": project_total,
-            "projects_limit": PROJECT_LIMIT,
-            "projects_truncated": project_total > lifetime_projects.len() as i64,
-            "projects": lifetime_projects.iter().map(|row| json!({
-                "path": str_field(row, "path"),
-                "tokens_saved": i64_field(row, "tokens_saved"),
-            })).collect::<Vec<_>>(),
         },
     })
 }
@@ -1260,319 +1114,6 @@ fn provider_usage_overview(aggregate: &ProviderUsageAggregateV1) -> Value {
             "provider_reported_unpriced"
         },
     })
-}
-
-/// GET `/api/plugins/savings/ledger?range=today|7d|30d|all`
-pub async fn ledger(
-    State(state): State<DashboardState>,
-    JsonQuery(params): JsonQuery<RangeParams>,
-) -> Json<Value> {
-    hotpath::future!(
-        async move {
-        let (range, since) = match range_since(params.range.as_deref()) {
-            Ok(range) => range,
-            Err(error) => return Json(read_failed_block(error)),
-        };
-        let Some(gdb) = state.savings_db.as_deref() else {
-            return Json(json!({
-                "available": false,
-                "db": state.savings_db_path,
-                "range": range,
-            }));
-        };
-
-        // The ledger route fails closed to its typed read_failed block: an
-        // unreadable ledger is not an empty ledger with zero totals.
-        let (total, history) = match async {
-            Ok::<_, String>((
-                gdb.sum_savings(None, since).await?,
-                gdb.savings_history(None, since).await?,
-            ))
-        }
-        .await
-        {
-            Ok(read) => read,
-            Err(error) => {
-                return Json(merge(
-                    json!({ "db": state.savings_db_path, "range": range, "since": since }),
-                    read_failed_block(error),
-                ));
-            }
-        };
-        let conn = gdb.read_connection();
-        const SAVED_TOKENS_EXPR: &str = "COALESCE(SUM(CASE WHEN before_tokens > after_tokens THEN before_tokens - after_tokens ELSE 0 END), 0)";
-        let by_tool = query_rows(
-            &conn,
-            &format!(
-                "SELECT tool_name,
-                {SAVED_TOKENS_EXPR} AS saved_tokens,
-                COUNT(*) AS calls
-         FROM savings_ledger WHERE ts >= ?1
-         GROUP BY tool_name ORDER BY saved_tokens DESC LIMIT 50"
-            ),
-            params![since],
-        )
-        .await
-        .unwrap_or_default();
-        let by_project = query_rows(
-            &conn,
-            &format!(
-                "SELECT project_path,
-                {SAVED_TOKENS_EXPR} AS saved_tokens,
-                COUNT(*) AS calls
-         FROM savings_ledger WHERE ts >= ?1
-         GROUP BY project_path ORDER BY saved_tokens DESC LIMIT 50"
-            ),
-            params![since],
-        )
-        .await
-        .unwrap_or_default();
-
-        Json(json!({
-            "available": true,
-            "db": state.savings_db_path,
-            "range": range,
-            "since": since,
-            "total": { "saved_tokens": total.saved_tokens, "calls": total.calls },
-            "by_day": history.iter().map(|day| json!({
-                "day": day.day,
-                "saved_tokens": day.saved_tokens,
-                "calls": day.calls,
-            })).collect::<Vec<_>>(),
-            "by_tool": by_tool.iter().map(|row| json!({
-                "tool": str_field(row, "tool_name"),
-                "saved_tokens": i64_field(row, "saved_tokens"),
-                "calls": i64_field(row, "calls"),
-            })).collect::<Vec<_>>(),
-            "by_project": by_project.iter().map(|row| json!({
-                "project": str_field(row, "project_path"),
-                "saved_tokens": i64_field(row, "saved_tokens"),
-                "calls": i64_field(row, "calls"),
-            })).collect::<Vec<_>>(),
-        }))
-
-        },
-        label = "dashboard_api.savings.ledger"
-    )
-    .await
-}
-
-/// GET `/api/plugins/savings/sessions?range=&limit=&offset=`
-///
-/// Sessions without any timestamp (neither `started_at` nor message
-/// timestamps, true for Cursor hook ingests today) are only included in the
-/// default `all` range, since they cannot be placed on a timeline.
-pub async fn sessions(
-    State(state): State<DashboardState>,
-    JsonQuery(params): JsonQuery<SessionsParams>,
-) -> Response {
-    hotpath::future!(
-        async move {
-        let (range, since) = match range_since(params.range.as_deref()) {
-            Ok(range) => range,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(read_failed_block(error)),
-                )
-                    .into_response();
-            }
-        };
-        let limit = coerce_limit(params.limit, 25, 100);
-        let offset = params.offset.unwrap_or(0).max(0);
-        let Some(db) = state.lcm_db.as_deref() else {
-            return match decode_contract::<SavingsSessionsPayloadV1>(
-                json!({
-                "available": false,
-                "db": state.lcm_db_path,
-                "range": range,
-                "sessions": [],
-                "total": 0,
-                }),
-                "savings sessions",
-            ) {
-                Ok(payload) => Json(payload).into_response(),
-                Err(error) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"status": "contract_invalid", "error": error})),
-                )
-                    .into_response(),
-            };
-        };
-        let conn = db.read_connection();
-
-        let page_sql = "
-            SELECT s.provider, s.session_id, s.title, s.started_at, s.ended_at,
-                   s.is_subagent,
-                   (SELECT MAX(m.timestamp) FROM session_messages m
-                     WHERE m.provider = s.provider AND m.session_id = s.session_id) AS last_message_at
-            FROM sessions s
-            WHERE ?1 = 0 OR COALESCE(s.started_at,
-                  (SELECT MAX(m.timestamp) FROM session_messages m
-                    WHERE m.provider = s.provider AND m.session_id = s.session_id), 0) >= ?1
-            ORDER BY (s.started_at IS NULL), s.started_at DESC, s.rowid DESC
-            LIMIT ?2 OFFSET ?3";
-        let page = query_rows(&conn, page_sql, params![since, limit, offset])
-            .await
-            .unwrap_or_default();
-        let total = query_i64(
-            &conn,
-            "SELECT COUNT(*) FROM sessions s
-             WHERE ?1 = 0 OR COALESCE(s.started_at,
-                   (SELECT MAX(m.timestamp) FROM session_messages m
-                     WHERE m.provider = s.provider AND m.session_id = s.session_id), 0) >= ?1",
-            params![since],
-        )
-        .await;
-
-        let overlay = token_count::non_usage_message_tokens(&state).await;
-        let provider_scope = provider_usage_scope(&state);
-        let provider_usage = match (state.lcm_db.as_deref(), provider_scope.as_ref()) {
-            (Some(usage_db), Some(scope)) => {
-                Some(provider_usage_aggregate(usage_db, scope, None, None).await)
-            }
-            _ => None,
-        };
-        let usage_deltas = provider_usage
-            .as_ref()
-            .filter(|usage| usage.coverage == ProviderUsageCoverageV1::Complete)
-            .map(|usage| usage.deltas.as_slice());
-        let session_model_tiers = overlay.as_deref().map(|messages| {
-            fold_overlay(messages, |msg| {
-                Some((
-                    msg.provider.clone(),
-                    msg.session_id.clone(),
-                    msg.model.clone(),
-                ))
-            })
-        });
-
-        // One grouped aggregate over the page's (provider, session_id) pairs,
-        // previously each page row ran its own aggregate query (N+1, up to 100
-        // round-trips re-running the json_extract CTE per page render). The
-        // VALUES list joins as the outer loop so each pair stays an indexed
-        // probe of session_messages (a row-value `IN (VALUES …)` predicate does
-        // not get pushed into the index and full-scans instead). The global
-        // `messages DESC` order keeps each session's model rows descending after
-        // bucketing, matching the old per-session ORDER BY.
-        let mut model_rows_by_session: HashMap<(String, String), Vec<Value>> = HashMap::new();
-        if !page.is_empty() {
-            let tuples = vec!["(?, ?)"; page.len()].join(", ");
-            let agg_sql = format!(
-                "SELECT provider, session_id, model, {TOKEN_AGG_COLUMNS}
-                 FROM (VALUES {tuples}) pairs
-                 JOIN ({MESSAGE_TOKENS_CTE}) ON provider = pairs.column1
-                                            AND session_id = pairs.column2
-                 GROUP BY provider, session_id, model
-                 ORDER BY messages DESC"
-            );
-            let mut agg_params: Vec<DbValue> = Vec::with_capacity(page.len() * 2);
-            for row in &page {
-                agg_params.push(DbValue::Text(str_field(row, "provider").to_string()));
-                agg_params.push(DbValue::Text(str_field(row, "session_id").to_string()));
-            }
-            let rows = query_rows(&conn, &agg_sql, params_from_iter(agg_params))
-                .await
-                .unwrap_or_default();
-            for row in rows {
-                let key = (
-                    str_field(&row, "provider").to_string(),
-                    str_field(&row, "session_id").to_string(),
-                );
-                model_rows_by_session.entry(key).or_default().push(row);
-            }
-        }
-
-        let mut sessions_json = Vec::with_capacity(page.len());
-        for row in &page {
-            let provider = str_field(row, "provider");
-            let session_id = str_field(row, "session_id");
-            let model_rows = model_rows_by_session
-                .remove(&(provider.to_string(), session_id.to_string()))
-                .unwrap_or_default();
-
-            let mut messages = 0;
-            let mut provider_usage_events = 0;
-            let mut tokenized_messages = 0;
-            let mut estimated_messages = 0;
-            let models: Vec<Value> = model_rows
-                .iter()
-                .map(|model_row| {
-                    let model = str_field(model_row, "model");
-                    let tiers = session_model_tiers.as_ref().and_then(|map| {
-                        map.get(&(
-                            provider.to_string(),
-                            session_id.to_string(),
-                            model.to_string(),
-                        ))
-                    });
-                    let mut block = token_block(model_row, tiers);
-                    let (event_count, actual) = usage_deltas.map_or((0, None), |deltas| {
-                        actual_for_deltas(deltas.iter().filter(|delta| {
-                            delta.provider == provider
-                                && delta.session_id == session_id
-                                && delta.model.as_deref().unwrap_or_default() == model
-                                && (since == 0
-                                    || delta
-                                        .native_timestamp
-                                        .is_some_and(|timestamp| timestamp >= since))
-                        }))
-                    });
-                    apply_provider_actual(&mut block, event_count, actual);
-                    messages += i64_field(&block, "messages");
-                    provider_usage_events += i64_field(&block, "provider_usage_events");
-                    tokenized_messages += i64_field(&block, "tokenized_messages");
-                    estimated_messages += i64_field(&block, "estimated_messages");
-                    merge(
-                        block,
-                        json!({
-                            "model": model_value(model),
-                            "tokenizer": tokenizer_block(model),
-                        }),
-                    )
-                })
-                .collect();
-
-            sessions_json.push(json!({
-                "provider": provider,
-                "session_id": session_id,
-                "title": row.get("title").cloned().unwrap_or(Value::Null),
-                "started_at": row.get("started_at").cloned().unwrap_or(Value::Null),
-                "last_message_at": row.get("last_message_at").cloned().unwrap_or(Value::Null),
-                "is_subagent": i64_field(row, "is_subagent") != 0,
-                "messages": messages,
-                "provider_usage_events": provider_usage_events,
-                "tokenized_messages": tokenized_messages,
-                "estimated_messages": estimated_messages,
-                "cost_basis": basis_label(tokenized_messages, messages),
-                "models": models,
-            }));
-        }
-
-        match decode_contract::<SavingsSessionsPayloadV1>(
-            json!({
-                "available": true,
-                "db": state.lcm_db_path,
-                "scope": state.lcm_scope,
-                "range": range,
-                "since": since,
-                "total": total,
-                "sessions": sessions_json,
-            }),
-            "savings sessions",
-        ) {
-            Ok(payload) => Json(payload).into_response(),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"status": "contract_invalid", "error": error})),
-            )
-                .into_response(),
-        }
-
-        },
-        label = "dashboard_api.savings.sessions"
-    )
-    .await
 }
 
 /// The typed `/models` failure body: the request could not be served and no
@@ -1770,13 +1311,6 @@ pub async fn models(
             .into_response(),
     }
 }
-
-/// GET `/api/plugins/savings/pricing`, deterministic bundled all-provider
-/// prices with content-addressed provenance.
-pub async fn pricing() -> Json<Value> {
-    Json(savings_pricing::pricing_payload())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1975,8 +1509,6 @@ mod tests {
     fn tier_sums_attribute_roles_like_sql() {
         let mut sums = TierSums::default();
         let msg = |role: &str, tokens: i64, tokenized: bool| MessageTokens {
-            provider: "cursor".into(),
-            session_id: "s".into(),
             model: "gpt-5".into(),
             role: role.into(),
             timestamp: None,

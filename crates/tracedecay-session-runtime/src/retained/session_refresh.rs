@@ -10,18 +10,16 @@ use sha2::{Digest, Sha256};
 use tracedecay_contracts::retained_surfaces::{
     RetainedSurfaceExecutionErrorV1, SessionRefreshActionRequestV1, SessionRefreshActionV1,
     SessionRefreshGrainV1, SessionRefreshRequestV1, SessionRefreshScopeV1,
-    SessionRefreshTemporalModeV1,
 };
 use tracedecay_contracts::{
     CancellationContext, CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, RequestContext, retained_surface_application_operation,
 };
-use tracedecay_domain::{
-    ManifestDigest, RetrievalGrainV1, SessionId, TemporalModeV1, UserProfileId, UtcMicros,
-};
+use tracedecay_domain::{ManifestDigest, RetrievalGrainV1, SessionId, UserProfileId};
+use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_session_memory::context::{
-    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
-    RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    BranchId, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId, RequestBudgets,
+    ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
     session_application_grant_digest,
 };
 use tracedecay_session_memory::session::{SessionRefreshTarget, SessionRequestBinding};
@@ -230,17 +228,6 @@ fn admitted_identity(
 fn admitted_target(
     request: &SessionRefreshActionRequestV1,
 ) -> Result<SessionRefreshTarget, RetainedSurfaceExecutionErrorV1> {
-    let temporal_mode = match request.target.temporal_mode {
-        SessionRefreshTemporalModeV1::Current => TemporalModeV1::Current,
-        SessionRefreshTemporalModeV1::AsOf { cutoff } => TemporalModeV1::AsOf {
-            cutoff: UtcMicros(
-                i64::try_from(cutoff)
-                    .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?,
-            ),
-        },
-        SessionRefreshTemporalModeV1::Evolution => TemporalModeV1::Evolution,
-        SessionRefreshTemporalModeV1::Forensic => TemporalModeV1::Forensic,
-    };
     let grain = match request.target.grain {
         SessionRefreshGrainV1::Occurrence => RetrievalGrainV1::Occurrence,
         SessionRefreshGrainV1::LogicalMessage => RetrievalGrainV1::LogicalMessage,
@@ -259,7 +246,7 @@ fn admitted_target(
         SessionId::new(request.session.id.clone())
             .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?,
         Some(request.source.scope.clone()),
-        temporal_mode,
+        request.target.temporal_mode,
         grain,
         frontier,
     )

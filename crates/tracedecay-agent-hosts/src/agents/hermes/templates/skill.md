@@ -40,9 +40,9 @@ compresses a session.
 
 1. Start with `tracedecay_message_search`. Its defaults are `provider=all`,
    `include_subagents=true`, `scope=all`, `message_type=all`, `limit=10`, and
-   `catch_up=false`. It finds stored message evidence and session ids; an
-   explicit freshness request can return `refresh_required`, but never catches
-   data up itself.
+   `require_fresh=false`. It finds stored message evidence and session ids;
+   `require_fresh=true` can return `refresh_required`, but never refreshes
+   data itself.
 2. Hermes exposes native aliases `lcm_grep`, `lcm_load_session`,
    `lcm_describe`, `lcm_expand`, `lcm_expand_query`, `lcm_status`, and
    `lcm_doctor`. They dispatch to their matching `tracedecay_lcm_*` commands;
@@ -50,10 +50,10 @@ compresses a session.
    canonical command and its schema elsewhere. Do not invent fields by mixing
    the two surfaces.
 3. Narrow temporal evidence with `lcm_grep` / `tracedecay_lcm_grep` (default
-   `temporal_mode=current`; Hermes starts its native alias at the current
-   session), replay one session with `lcm_load_session` /
-   `tracedecay_lcm_load_session` (default `temporal_mode=forensic`), then use
-   `lcm_describe` / `tracedecay_lcm_describe` and `lcm_expand` /
+   `temporal_mode={"kind":"current"}`; Hermes starts its native alias at the
+   current session), replay one session with `lcm_load_session` /
+   `tracedecay_lcm_load_session` (default `temporal_mode={"kind":"forensic"}`),
+   then use `lcm_describe` / `tracedecay_lcm_describe` and `lcm_expand` /
    `tracedecay_lcm_expand` to open only the needed DAG node or payload.
    Summary node IDs are opaque strings, not integers. `source_limit` and the
    opaque continuation cursor apply only to summary source pages; raw and

@@ -1,5 +1,5 @@
-//! Atomic, capability-rooted single-component writer with a recoverable
-//! journal, component backup/restore, and the no-follow filesystem primitives.
+//! Atomic, capability-rooted single-component writer with in-memory rollback,
+//! and the no-follow filesystem primitives.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -11,33 +11,24 @@ use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use sha2::{Digest, Sha256};
-use tracedecay_domain::canonical_json_bytes;
-use tracedecay_host_integration::host_bundle_recovery_required;
 use tracedecay_host_integration::host_bundle_storage_failure;
 
 use super::control::{
-    HOST_BUNDLE_CONTROL_DIR, HOST_BUNDLE_JOURNAL_FILE, HOST_BUNDLE_LOCK_FILE,
-    HOST_BUNDLE_QUARANTINE_DIR, HOST_COMPONENT_SET_JOURNAL_FILE, HOST_COMPONENT_SET_STAGE_DIR,
-    MAX_CONTROL_FILE_BYTES, backup_name, component_set_journal_file, component_set_receipt_file,
-    host_bundle_backup_receipt_file, host_bundle_restore_receipt_file, host_bundle_snapshot_name,
-    is_safe_component, journal_file, latest_host_component_set_receipt_at, receipt_file,
-    validate_backup_receipt, validate_component_set_journal, validate_component_set_receipt,
-    validate_journal, validate_receipt, validate_restore_receipt, writer_lock_file,
+    HOST_BUNDLE_CONTROL_DIR, HOST_BUNDLE_LOCK_FILE, MAX_CONTROL_FILE_BYTES,
+    component_set_receipt_file, is_safe_component, latest_host_component_set_receipt_at,
+    parse_receipt, receipt_file, receipt_identity_from_file_name, receipt_schema_probe,
+    validate_component_set_receipt, validate_receipt, writer_lock_file,
 };
 use super::model::{HostBundleExecutionRequestV1, HostBundleLifecycleStorageV1};
 use super::planner::{
-    HostArtifactActionV1, HostBundleLifecycleRequestV1, ObservedArtifactKindV1,
-    ObservedHostArtifactV1, plan_verified_complete_lifecycle_mutation,
-    validate_artifact_contents_for_operation,
+    HostArtifactActionV1, HostArtifactMutationV1, ObservedArtifactKindV1, ObservedHostArtifactV1,
+    plan_verified_complete_lifecycle_mutation, validate_artifact_contents_for_operation,
 };
 use super::{
-    HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, HostBundleArtifactContentV1, HostBundleBackupArtifactV1,
-    HostBundleBackupReceiptV1, HostBundleError, HostBundleInstallReceiptV1,
-    HostBundleJournalEntryV1, HostBundleJournalStateV1, HostBundleJournalV1,
-    HostBundleLifecycleOpV1, HostBundleManifestV1, HostBundleReceiptArtifactV1,
-    HostBundleRestoreReceiptV1, HostBundleRollbackBoundaryV1, HostBundleVerificationAdapterV1,
-    HostComponentSetJournalV1, HostComponentSetReceiptV1, HostComponentV1, HostKindV1,
-    MAX_ARTIFACT_CONTENT_BYTES, stock_host_kinds, validate_relative_install_path,
+    HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, HostBundleArtifactContentV1, HostBundleError,
+    HostBundleInstallReceiptV1, HostBundleLifecycleOpV1, HostBundleManifestV1,
+    HostBundleReceiptArtifactV1, HostBundleVerificationAdapterV1, HostComponentSetReceiptV1,
+    HostComponentV1, HostKindV1, MAX_ARTIFACT_CONTENT_BYTES, validate_relative_install_path,
 };
 
 static HOST_BUNDLE_TEMP_NONCE: AtomicU64 = AtomicU64::new(1);
@@ -45,8 +36,8 @@ static HOST_BUNDLE_TEMP_NONCE: AtomicU64 = AtomicU64::new(1);
 /// Exclusive owner of one host's mutable bundle state.
 ///
 /// The lock is released when the writer switches hosts or is dropped. A
-/// second host does not share this file: their artifact trees, journals, and
-/// receipts are already disjoint.
+/// second host does not share this file: their artifact trees and receipts are
+/// already disjoint.
 struct HostWriterLock {
     host: HostKindV1,
     file: fs::File,
@@ -64,13 +55,23 @@ impl Drop for HostWriterLock {
     }
 }
 
+/// Pre-mutation state of one artifact path, held only for the running
+/// operation so a failure can put the path back.
+pub(super) struct ArtifactUndo {
+    relative_path: String,
+    previous: Option<Vec<u8>>,
+    written_digest: Option<[u8; 32]>,
+}
+
 /// Atomic, capability-rooted host-bundle writer. Every descendant directory
 /// is opened without following symlinks; files are staged, fsynced, renamed,
 /// and followed by a directory sync before receipt publication.
 ///
-/// Opening does not take a lifecycle-root lock and does not recover another
-/// host's journal. Mutation acquires `writer.{slug}.v1.lock` for the host
-/// being written and holds it until the writer switches hosts or drops.
+/// Rollback bytes live only in memory for the running operation. A process
+/// killed mid-operation leaves whatever it wrote; the next install or repair
+/// converges from the observed state. Mutation acquires
+/// `writer.{slug}.v1.lock` for the host being written and holds it until the
+/// writer switches hosts or drops.
 pub struct HostBundleWriterV1 {
     pub(super) root_path: PathBuf,
     pub(super) lifecycle_root_path: PathBuf,
@@ -128,99 +129,8 @@ impl HostBundleWriterV1 {
         Ok(())
     }
 
-    /// Recover by rolling an incomplete transaction back from its immutable
-    /// backups. A receipt matching the journal operation is a durable commit
-    /// marker and is never rolled back after a crash between receipt/journal
-    /// cleanup.
-    pub fn recover_interrupted_operation(
-        &mut self,
-        host: HostKindV1,
-    ) -> Result<(), HostBundleError> {
-        self.ensure_host_lock(host)?;
-        self.recover_host_journal_locked(host)
-    }
-
-    fn recover_host_journal_locked(&mut self, host: HostKindV1) -> Result<(), HostBundleError> {
-        let Some(journal) = self.load_journal_for(host)? else {
-            return Ok(());
-        };
-        if journal.host != host {
-            return Err(HostBundleError::ReceiptCorrupted);
-        }
-        validate_journal(&journal)?;
-        if let Some(receipt) =
-            self.load_receipt(journal.host, journal.component)?
-                .filter(|receipt| {
-                    receipt.operation_id == journal.operation_id
-                        && receipt.operation == journal.operation
-                        && receipt.manifest_digest == journal.manifest_digest
-                })
-        {
-            self.remove_journal(host)?;
-            if receipt.rollback_boundary == HostBundleRollbackBoundaryV1::Passed {
-                self.cleanup_unreferenced_backup_dir(journal.operation_id)?;
-            }
-            return Ok(());
-        }
-
-        let backup_dir = self.open_existing_backup_dir(journal.operation_id)?;
-        for entry in journal.entries.iter().rev() {
-            let (parent, name) = self.open_parent_nofollow(Path::new(&entry.relative_path))?;
-            if let Some(backup_name) = &entry.backup_name {
-                let backup_exists = match &backup_dir {
-                    Some(backups) => regular_file_exists(backups, backup_name)?,
-                    None => false,
-                };
-                if !entry.backup_created {
-                    if !backup_exists {
-                        continue;
-                    }
-                    if regular_file_exists(&parent, &name)? {
-                        return Err(host_bundle_recovery_required!());
-                    }
-                }
-                let backups = backup_dir
-                    .as_ref()
-                    .filter(|_| backup_exists)
-                    .ok_or(host_bundle_recovery_required!())?;
-                if entry.wrote_new {
-                    remove_if_digest_matches(
-                        &parent,
-                        &name,
-                        entry
-                            .installed_digest
-                            .ok_or(HostBundleError::ReceiptCorrupted)?,
-                    )?;
-                } else if regular_file_exists(&parent, &name)? {
-                    return Err(host_bundle_recovery_required!());
-                }
-                backups
-                    .rename(backup_name, &parent, &name)
-                    .map_err(|_| host_bundle_storage_failure!())?;
-                sync_cap_dir(backups)?;
-                sync_cap_dir(&parent)?;
-            } else if entry.wrote_new {
-                remove_if_digest_matches(
-                    &parent,
-                    &name,
-                    entry
-                        .installed_digest
-                        .ok_or(HostBundleError::ReceiptCorrupted)?,
-                )?;
-                sync_cap_dir(&parent)?;
-            }
-        }
-        drop(backup_dir);
-        match journal.previous_receipt {
-            Some(receipt) => self.write_receipt(&receipt)?,
-            None => self.remove_receipt(journal.host, journal.component)?,
-        }
-        self.remove_journal(host)?;
-        self.cleanup_unreferenced_backup_dir(journal.operation_id)
-    }
-
     /// Verify first-party catalog identity, validate artifact bytes, plan ownership-aware
-    /// mutations, then execute them atomically with a recoverable journal.
+    /// mutations, then execute them, putting every touched path back on failure.
     #[hotpath::measure(label = "hosts.agent.host_bundle.execute")]
     pub fn execute(
         &mut self,
@@ -235,15 +145,6 @@ impl HostBundleWriterV1 {
         self.ensure_host_lock(manifest.host)?;
         verifier.verify_manifest(manifest)?;
         let content_by_path = validate_artifact_contents(manifest, request, contents)?;
-        // Scoped to this manifest's own host: another host's pending
-        // component-set journal governs a disjoint artifact subtree.
-        if self
-            .load_component_set_journal_for(manifest.host)?
-            .is_some()
-        {
-            return Err(host_bundle_recovery_required!());
-        }
-        self.recover_host_journal_locked(manifest.host)?;
         let previous_receipt = self.load_receipt(manifest.host, manifest.component)?;
         let manifest_digest = manifest.canonical_digest()?;
         if let Some(receipt) = previous_receipt.as_ref()
@@ -295,89 +196,16 @@ impl HostBundleWriterV1 {
             &orphan_observed,
             verifier,
         )?;
-        let mut journal = HostBundleJournalV1 {
-            schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
-            operation_id: request.operation_id,
-            host: manifest.host,
-            component: manifest.component,
-            operation: request.lifecycle.operation,
-            manifest_digest,
-            state: HostBundleJournalStateV1::Prepared,
-            previous_receipt: previous_receipt.clone(),
-            entries: plan
-                .mutations
-                .iter()
-                .map(|mutation| HostBundleJournalEntryV1 {
-                    relative_path: mutation.relative_path.clone(),
-                    backup_name: matches!(
-                        mutation.action,
-                        HostArtifactActionV1::BackupThenReplace
-                            | HostArtifactActionV1::BackupThenRemove
-                    )
-                    .then(|| backup_name(request.operation_id, &mutation.relative_path)),
-                    backup_created: false,
-                    wrote_new: false,
-                    installed_digest: manifest
-                        .artifacts
-                        .iter()
-                        .find(|artifact| artifact.relative_path == mutation.relative_path)
-                        .map(|artifact| artifact.artifact_digest)
-                        .filter(|_| {
-                            !matches!(mutation.action, HostArtifactActionV1::BackupThenRemove)
-                        }),
-                })
-                .collect(),
-        };
-        self.write_journal(&journal)?;
-        let backup_dir = self.open_or_create_backup_dir(request.operation_id)?;
-
-        for (index, mutation) in plan.mutations.iter().enumerate() {
-            let (parent, name) = self.open_parent_nofollow(Path::new(&mutation.relative_path))?;
-            match mutation.action {
-                HostArtifactActionV1::Noop => {}
-                HostArtifactActionV1::WriteNew => {
-                    journal.entries[index].wrote_new = true;
-                    self.write_journal(&journal)?;
-                    atomic_write_nofollow(
-                        &parent,
-                        &name,
-                        content_by_path
-                            .get(&mutation.relative_path)
-                            .ok_or(HostBundleError::ArtifactContentMismatch)?,
-                        false,
-                    )?;
-                }
-                HostArtifactActionV1::BackupThenReplace => {
-                    let backup_name = journal.entries[index]
-                        .backup_name
-                        .as_deref()
-                        .ok_or(HostBundleError::ReceiptCorrupted)?;
-                    move_regular_to_backup(&parent, &name, &backup_dir, backup_name)?;
-                    journal.entries[index].backup_created = true;
-                    self.write_journal(&journal)?;
-                    journal.entries[index].wrote_new = true;
-                    self.write_journal(&journal)?;
-                    atomic_write_nofollow(
-                        &parent,
-                        &name,
-                        content_by_path
-                            .get(&mutation.relative_path)
-                            .ok_or(HostBundleError::ArtifactContentMismatch)?,
-                        false,
-                    )?;
-                }
-                HostArtifactActionV1::BackupThenRemove => {
-                    let backup_name = journal.entries[index]
-                        .backup_name
-                        .as_deref()
-                        .ok_or(HostBundleError::ReceiptCorrupted)?;
-                    move_regular_to_backup(&parent, &name, &backup_dir, backup_name)?;
-                    journal.entries[index].backup_created = true;
-                    self.write_journal(&journal)?;
-                }
+        let mut undo = Vec::new();
+        let applied = plan.mutations.iter().try_for_each(|mutation| {
+            if let Some(record) = self.apply_artifact_mutation(mutation, &content_by_path)? {
+                undo.push(record);
             }
+            Ok(())
+        });
+        if let Err(error) = applied {
+            return Err(self.undo_after_failure(error, &undo));
         }
-        drop(backup_dir);
 
         let receipt = HostBundleInstallReceiptV1 {
             schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
@@ -399,20 +227,143 @@ impl HostBundleWriterV1 {
                     })
                     .collect()
             },
-            rollback_boundary: HostBundleRollbackBoundaryV1::Passed,
-            rollback_history: previous_receipt
-                .as_ref()
-                .map(|receipt| receipt.rollback_history.clone())
-                .unwrap_or_default(),
         };
-        self.write_receipt(&receipt)?;
-        journal.state = HostBundleJournalStateV1::Committed;
-        self.write_journal(&journal)?;
-        self.remove_journal(manifest.host)?;
-        if receipt.rollback_boundary == HostBundleRollbackBoundaryV1::Passed {
-            self.cleanup_unreferenced_backup_dir(request.operation_id)?;
+        if let Err(error) = self.write_receipt(&receipt) {
+            return Err(self.undo_after_failure(error, &undo));
         }
         Ok(receipt)
+    }
+
+    /// Apply one planned mutation, returning what the path held before when
+    /// the mutation changed it.
+    pub(super) fn apply_artifact_mutation(
+        &self,
+        mutation: &HostArtifactMutationV1,
+        content_by_path: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<Option<ArtifactUndo>, HostBundleError> {
+        let (parent, name) = self.open_parent_nofollow(Path::new(&mutation.relative_path))?;
+        let content = || {
+            content_by_path
+                .get(&mutation.relative_path)
+                .ok_or(HostBundleError::ArtifactContentMismatch)
+        };
+        let (previous, written_digest) = match mutation.action {
+            HostArtifactActionV1::Noop => return Ok(None),
+            HostArtifactActionV1::WriteNew => {
+                let bytes = content()?;
+                atomic_write_nofollow(&parent, &name, bytes, false)?;
+                (None, Some(Sha256::digest(bytes).into()))
+            }
+            HostArtifactActionV1::Replace => {
+                let previous = read_regular_nofollow(&parent, &name)?
+                    .ok_or(HostBundleError::InvalidObservedState)?;
+                let bytes = content()?;
+                atomic_write_nofollow(&parent, &name, bytes, true)?;
+                (Some(previous), Some(Sha256::digest(bytes).into()))
+            }
+            HostArtifactActionV1::Remove => {
+                let previous = read_regular_nofollow(&parent, &name)?
+                    .ok_or(HostBundleError::InvalidObservedState)?;
+                parent
+                    .remove_file(&name)
+                    .map_err(|_| host_bundle_storage_failure!())?;
+                sync_cap_dir(&parent)?;
+                (Some(previous), None)
+            }
+        };
+        Ok(Some(ArtifactUndo {
+            relative_path: mutation.relative_path.clone(),
+            previous,
+            written_digest,
+        }))
+    }
+
+    /// Put every recorded path back in reverse order. A path that holds
+    /// neither its prior bytes nor this operation's output was changed by
+    /// another writer: it is left alone and reported once every other path has
+    /// been put back.
+    pub(super) fn undo_artifact_mutations(
+        &self,
+        undo: &[ArtifactUndo],
+    ) -> Result<(), HostBundleError> {
+        let mut conflict = None;
+        for record in undo.iter().rev() {
+            let (parent, name) = self.open_parent_nofollow(Path::new(&record.relative_path))?;
+            let live = read_regular_nofollow(&parent, &name)?;
+            if live == record.previous {
+                continue;
+            }
+            let live_digest = live
+                .as_ref()
+                .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes)));
+            if live.is_some() && live_digest != record.written_digest {
+                conflict.get_or_insert_with(|| {
+                    HostBundleError::OwnershipConflict(format!(
+                        "{}: changed by another writer while this operation rolled back",
+                        record.relative_path
+                    ))
+                });
+                continue;
+            }
+            match &record.previous {
+                Some(bytes) => atomic_write_nofollow(&parent, &name, bytes, live.is_some())?,
+                None => {
+                    parent
+                        .remove_file(&name)
+                        .map_err(|_| host_bundle_storage_failure!())?;
+                    sync_cap_dir(&parent)?;
+                }
+            }
+        }
+        conflict.map_or(Ok(()), Err)
+    }
+
+    fn undo_after_failure(&self, error: HostBundleError, undo: &[ArtifactUndo]) -> HostBundleError {
+        match self.undo_artifact_mutations(undo) {
+            Ok(()) => error,
+            Err(undo_error) => undo_error,
+        }
+    }
+
+    /// Delete this host's receipts written under an older receipt schema.
+    /// Only an explicitly adopting lifecycle calls this; every other lifecycle
+    /// reports [`HostBundleError::ReinstallRequired`] for them.
+    pub(super) fn discard_stale_receipts(
+        &mut self,
+        host: HostKindV1,
+    ) -> Result<(), HostBundleError> {
+        self.ensure_host_lock(host)?;
+        let control_path = self.lifecycle_root_path.join(HOST_BUNDLE_CONTROL_DIR);
+        let entries = match fs::read_dir(&control_path) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(host_bundle_storage_failure!()),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|_| host_bundle_storage_failure!())?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let owned_by_host = if name.starts_with("component-set-receipt.") {
+                None
+            } else if let Some((receipt_host, _)) = receipt_identity_from_file_name(name) {
+                Some(receipt_host == host)
+            } else {
+                continue;
+            };
+            let Some(bytes) = read_control_json(&self.control, name)? else {
+                continue;
+            };
+            let Some(probe) = receipt_schema_probe(&bytes) else {
+                continue;
+            };
+            if probe.is_current() || !owned_by_host.unwrap_or(probe.host == Some(host)) {
+                continue;
+            }
+            self.remove_control_file(name)?;
+        }
+        Ok(())
     }
 
     fn observe_artifacts(
@@ -504,48 +455,13 @@ impl HostBundleWriterV1 {
         ))
     }
 
-    pub(super) fn open_or_create_backup_dir(
-        &self,
-        operation_id: [u8; 16],
-    ) -> Result<Dir, HostBundleError> {
-        let backups = open_or_create_nofollow_dir(&self.control, "backups")?;
-        open_or_create_nofollow_dir(&backups, &hex::encode(operation_id))
-    }
-
-    pub(super) fn open_or_create_component_set_stage_dir(
-        &self,
-        operation_id: [u8; 16],
-    ) -> Result<Dir, HostBundleError> {
-        let stages = open_or_create_nofollow_dir(&self.control, HOST_COMPONENT_SET_STAGE_DIR)?;
-        open_or_create_nofollow_dir(&stages, &hex::encode(operation_id))
-    }
-
-    pub(super) fn open_existing_backup_dir(
-        &self,
-        operation_id: [u8; 16],
-    ) -> Result<Option<Dir>, HostBundleError> {
-        let backups = match self.control.open_dir_nofollow("backups") {
-            Ok(backups) => backups,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(HostBundleError::UnsafeInstallPath),
-        };
-        match backups.open_dir_nofollow(hex::encode(operation_id)) {
-            Ok(directory) => Ok(Some(directory)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(_) => Err(HostBundleError::UnsafeInstallPath),
-        }
-    }
-
     pub(super) fn load_receipt(
         &self,
         host: HostKindV1,
         component: HostComponentV1,
     ) -> Result<Option<HostBundleInstallReceiptV1>, HostBundleError> {
-        let receipt = read_control_json(&self.control, &receipt_file(host, component))?;
-        let receipt = receipt
-            .map(|bytes| {
-                serde_json::from_slice(&bytes).map_err(|_| HostBundleError::ReceiptCorrupted)
-            })
+        let receipt = read_control_json(&self.control, &receipt_file(host, component))?
+            .map(|bytes| parse_receipt::<HostBundleInstallReceiptV1>(&bytes))
             .transpose()?;
         if let Some(receipt) = &receipt {
             validate_receipt(receipt)?;
@@ -584,9 +500,7 @@ impl HostBundleWriterV1 {
         operation_id: [u8; 16],
     ) -> Result<Option<HostComponentSetReceiptV1>, HostBundleError> {
         let receipt = read_control_json(&self.control, &component_set_receipt_file(operation_id))?
-            .map(|bytes| {
-                serde_json::from_slice(&bytes).map_err(|_| HostBundleError::ReceiptCorrupted)
-            })
+            .map(|bytes| parse_receipt::<HostComponentSetReceiptV1>(&bytes))
             .transpose()?;
         if let Some(receipt) = &receipt {
             validate_component_set_receipt(receipt)?;
@@ -616,459 +530,9 @@ impl HostBundleWriterV1 {
         self.remove_control_file(&component_set_receipt_file(operation_id))
     }
 
-    fn read_journal_file(
-        &self,
-        file_name: &str,
-    ) -> Result<Option<HostBundleJournalV1>, HostBundleError> {
-        read_control_json(&self.control, file_name)?
-            .map(|bytes| {
-                serde_json::from_slice(&bytes).map_err(|_| HostBundleError::ReceiptCorrupted)
-            })
-            .transpose()
-    }
-
-    /// Load the pending single-component journal for one host.
-    ///
-    /// A journal written by an older binary lives under the shared legacy name
-    /// and carries its own `host` field, so it is attributed to exactly one
-    /// host. Recovering a different host must not see it.
-    pub(super) fn load_journal_for(
-        &self,
-        host: HostKindV1,
-    ) -> Result<Option<HostBundleJournalV1>, HostBundleError> {
-        if let Some(journal) = self.read_journal_file(&journal_file(host))? {
-            if journal.host != host {
-                return Err(HostBundleError::ReceiptCorrupted);
-            }
-            return Ok(Some(journal));
-        }
-        Ok(self
-            .read_journal_file(HOST_BUNDLE_JOURNAL_FILE)?
-            .filter(|journal| journal.host == host))
-    }
-
-    fn read_component_set_journal_file(
-        &self,
-        file_name: &str,
-    ) -> Result<Option<HostComponentSetJournalV1>, HostBundleError> {
-        read_control_json(&self.control, file_name)?
-            .map(|bytes| {
-                serde_json::from_slice(&bytes).map_err(|_| HostBundleError::ReceiptCorrupted)
-            })
-            .transpose()
-    }
-
-    /// Load the pending component-set journal for one host.
-    ///
-    /// Journals are host-scoped so an interrupted transaction for host X never
-    /// blocks an unrelated host Y. Journals written by an older binary live
-    /// under the shared legacy name; they carry their own `host` field, so they
-    /// are readable here and are attributed to exactly one host.
-    pub(super) fn load_component_set_journal_for(
-        &self,
-        host: HostKindV1,
-    ) -> Result<Option<HostComponentSetJournalV1>, HostBundleError> {
-        if let Some(journal) =
-            self.read_component_set_journal_file(&component_set_journal_file(host))?
-        {
-            return Ok(Some(journal));
-        }
-        Ok(self
-            .read_component_set_journal_file(HOST_COMPONENT_SET_JOURNAL_FILE)?
-            .filter(|journal| journal.host == host))
-    }
-
-    /// Load any pending component-set journal, host-scoped or legacy. Used by
-    /// the host-blind recovery entry point, which must still be able to find a
-    /// single outstanding transaction.
-    pub(super) fn load_component_set_journal(
-        &self,
-    ) -> Result<Option<HostComponentSetJournalV1>, HostBundleError> {
-        for host in stock_host_kinds() {
-            if let Some(journal) =
-                self.read_component_set_journal_file(&component_set_journal_file(host))?
-            {
-                return Ok(Some(journal));
-            }
-        }
-        self.read_component_set_journal_file(HOST_COMPONENT_SET_JOURNAL_FILE)
-    }
-
-    /// Every host with a pending component-set journal. The recovery verb
-    /// reports these; `--agent` narrows the set.
-    pub fn pending_component_set_journal_hosts(&self) -> Result<Vec<HostKindV1>, HostBundleError> {
-        let mut hosts = Vec::new();
-        for host in stock_host_kinds() {
-            if self.load_component_set_journal_for(host)?.is_some() {
-                hosts.push(host);
-            }
-        }
-        Ok(hosts)
-    }
-
-    pub fn pending_component_set_journal_operation(
-        &self,
-        host: HostKindV1,
-    ) -> Result<Option<HostBundleLifecycleOpV1>, HostBundleError> {
-        let Some(journal) = self.load_component_set_journal_for(host)? else {
-            return Ok(None);
-        };
-        validate_component_set_journal(&journal)?;
-        Ok(Some(journal.operation))
-    }
-
-    #[hotpath::measure(label = "hosts.agent.host_bundle.journal_persist")]
-    fn write_journal(&self, journal: &HostBundleJournalV1) -> Result<(), HostBundleError> {
-        validate_journal(journal)?;
-        let bytes = serde_json::to_vec(journal).map_err(|_| HostBundleError::ReceiptCorrupted)?;
-        atomic_write_nofollow(&self.control, &journal_file(journal.host), &bytes, true)?;
-        // A journal written by an older binary lives under the shared legacy
-        // name. Once its host-scoped successor is durable, retire it so the
-        // legacy file can never shadow or double-recover this transaction.
-        // Never unlink a legacy journal that belongs to a different host.
-        if self
-            .read_journal_file(HOST_BUNDLE_JOURNAL_FILE)?
-            .is_some_and(|legacy| legacy.host == journal.host)
-        {
-            self.remove_control_file(HOST_BUNDLE_JOURNAL_FILE)?;
-        }
-        Ok(())
-    }
-
-    fn remove_journal(&self, host: HostKindV1) -> Result<(), HostBundleError> {
-        self.remove_control_file(&journal_file(host))?;
-        if self
-            .read_journal_file(HOST_BUNDLE_JOURNAL_FILE)?
-            .is_some_and(|legacy| legacy.host == host)
-        {
-            self.remove_control_file(HOST_BUNDLE_JOURNAL_FILE)?;
-        }
-        Ok(())
-    }
-
-    #[hotpath::measure(label = "hosts.agent.host_bundle.component_set_journal_persist")]
-    pub(super) fn write_component_set_journal(
-        &self,
-        journal: &HostComponentSetJournalV1,
-    ) -> Result<(), HostBundleError> {
-        validate_component_set_journal(journal)?;
-        let bytes = serde_json::to_vec(journal).map_err(|_| HostBundleError::ReceiptCorrupted)?;
-        atomic_write_nofollow(
-            &self.control,
-            &component_set_journal_file(journal.host),
-            &bytes,
-            true,
-        )?;
-        // A journal written by an older binary lives under the shared legacy
-        // name. Once its host-scoped successor is durable, retire it so the
-        // legacy file can never shadow or double-recover this transaction.
-        if self
-            .read_component_set_journal_file(HOST_COMPONENT_SET_JOURNAL_FILE)?
-            .is_some_and(|legacy| legacy.host == journal.host)
-        {
-            self.remove_control_file(HOST_COMPONENT_SET_JOURNAL_FILE)?;
-        }
-        Ok(())
-    }
-
     fn remove_control_file(&self, name: &str) -> Result<(), HostBundleError> {
         remove_regular_if_exists(&self.control, name)?;
         sync_cap_dir(&self.control)
-    }
-
-    /// Last-resort operator escape when convergent recovery still cannot
-    /// resolve a host's component-set journal (genuinely foreign bytes at a
-    /// path the transaction created, for example).
-    ///
-    /// The journal is *moved* into a quarantine directory rather than deleted:
-    /// the transaction's immutable backups stay on disk beside it, so the
-    /// pre-transaction bytes remain recoverable by hand and nothing about the
-    /// failure is destroyed. Only the authority file that blocks further
-    /// mutation of this host is set aside. This replaces the previous recovery
-    /// path, which was hand-deleting the journal.
-    ///
-    /// Returns the quarantined path, or `None` when no journal was pending.
-    pub fn quarantine_component_set_journal(
-        &mut self,
-        host: HostKindV1,
-        now_unix: u64,
-    ) -> Result<Option<PathBuf>, HostBundleError> {
-        self.ensure_host_lock(host)?;
-        let mut moved = None;
-        for file in [
-            component_set_journal_file(host),
-            HOST_COMPONENT_SET_JOURNAL_FILE.to_string(),
-        ] {
-            // The legacy shared file belongs to whichever host wrote it; never
-            // quarantine another host's journal from under it.
-            if file == HOST_COMPONENT_SET_JOURNAL_FILE
-                && self
-                    .read_component_set_journal_file(&file)?
-                    .is_none_or(|journal| journal.host != host)
-            {
-                continue;
-            }
-            if !regular_file_exists(&self.control, &file)? {
-                continue;
-            }
-            let quarantine =
-                open_or_create_nofollow_dir(&self.control, HOST_BUNDLE_QUARANTINE_DIR)?;
-            let target = format!("{now_unix}.{file}");
-            if !is_safe_component(&target) {
-                return Err(HostBundleError::UnsafeInstallPath);
-            }
-            self.control
-                .rename(&file, &quarantine, &target)
-                .map_err(|_| host_bundle_storage_failure!())?;
-            sync_cap_dir(&quarantine)?;
-            sync_cap_dir(&self.control)?;
-            moved = Some(
-                self.lifecycle_root_path
-                    .join(HOST_BUNDLE_CONTROL_DIR)
-                    .join(HOST_BUNDLE_QUARANTINE_DIR)
-                    .join(target),
-            );
-        }
-        Ok(moved)
-    }
-
-    pub(super) fn remove_component_set_journal(
-        &self,
-        host: HostKindV1,
-    ) -> Result<(), HostBundleError> {
-        self.remove_control_file(&component_set_journal_file(host))?;
-        if self
-            .read_component_set_journal_file(HOST_COMPONENT_SET_JOURNAL_FILE)?
-            .is_some_and(|legacy| legacy.host == host)
-        {
-            self.remove_control_file(HOST_COMPONENT_SET_JOURNAL_FILE)?;
-        }
-        Ok(())
-    }
-
-    /// Retires an operation's rollback backups once no receipt still names it.
-    ///
-    /// Every caller must drop its `Dir` capability on the operation's backup
-    /// directory first: `cap_std` opens directories without `FILE_SHARE_DELETE`,
-    /// so on Windows a live handle makes the removal below fail with a sharing
-    /// violation and turns a completed transaction into a storage failure.
-    pub(super) fn cleanup_unreferenced_backup_dir(
-        &self,
-        operation_id: [u8; 16],
-    ) -> Result<(), HostBundleError> {
-        let control_path = self.lifecycle_root_path.join(HOST_BUNDLE_CONTROL_DIR);
-        let mut referenced = false;
-        for entry in fs::read_dir(&control_path).map_err(|_| host_bundle_storage_failure!())? {
-            let Ok(entry) = entry else {
-                return Ok(());
-            };
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else {
-                continue;
-            };
-            if !name.starts_with("receipt.") || !name.ends_with(".v1.json") {
-                continue;
-            }
-            let Ok(bytes) = fs::read(entry.path()) else {
-                return Ok(());
-            };
-            let Ok(receipt) = serde_json::from_slice::<HostBundleInstallReceiptV1>(&bytes) else {
-                return Ok(());
-            };
-            if validate_receipt(&receipt).is_err() {
-                return Ok(());
-            }
-            referenced |= receipt.rollback_history.contains(&operation_id);
-        }
-        if referenced {
-            return Ok(());
-        }
-        let backup_path = control_path.join("backups").join(hex::encode(operation_id));
-        match fs::symlink_metadata(&backup_path) {
-            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-                fs::remove_dir_all(&backup_path).map_err(|_| host_bundle_storage_failure!())?;
-            }
-            Ok(_) => return Err(HostBundleError::UnsafeInstallPath),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(_) => return Err(host_bundle_storage_failure!()),
-        }
-        if let Some(backups) = backup_path.parent() {
-            let _ = fs::remove_dir(backups);
-        }
-        Ok(())
-    }
-
-    pub(super) fn cleanup_component_set_boundary(
-        &self,
-        operation_id: [u8; 16],
-    ) -> Result<(), HostBundleError> {
-        self.cleanup_unreferenced_backup_dir(operation_id)?;
-        self.remove_component_set_stage_dir(operation_id)
-    }
-
-    fn remove_component_set_stage_dir(
-        &self,
-        operation_id: [u8; 16],
-    ) -> Result<(), HostBundleError> {
-        let stage_path = self
-            .lifecycle_root_path
-            .join(HOST_BUNDLE_CONTROL_DIR)
-            .join(HOST_COMPONENT_SET_STAGE_DIR)
-            .join(hex::encode(operation_id));
-        match fs::symlink_metadata(&stage_path) {
-            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-                fs::remove_dir_all(&stage_path).map_err(|_| host_bundle_storage_failure!())?;
-            }
-            Ok(_) => return Err(HostBundleError::UnsafeInstallPath),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(_) => return Err(host_bundle_storage_failure!()),
-        }
-        if let Some(stages) = stage_path.parent() {
-            let _ = fs::remove_dir(stages);
-        }
-        Ok(())
-    }
-
-    /// Snapshot one installed component without mutating host state. Replaying
-    /// the same operation id returns the existing receipt after revalidation.
-    /// A missing, edited, or foreign artifact fails before receipt publication.
-    pub fn backup_component<V: HostBundleVerificationAdapterV1>(
-        &mut self,
-        manifest: &HostBundleManifestV1,
-        operation_id: [u8; 16],
-        explicit_confirmation: bool,
-        verifier: &V,
-    ) -> Result<HostBundleBackupReceiptV1, HostBundleError> {
-        if operation_id == [0; 16] {
-            return Err(HostBundleError::InvalidManifest);
-        }
-        if !explicit_confirmation {
-            return Err(HostBundleError::ConfirmationRequired);
-        }
-        self.ensure_host_lock(manifest.host)?;
-        manifest.validate_structure()?;
-        verifier.verify_manifest(manifest)?;
-        if let Some(receipt) = self.load_backup_receipt(operation_id)? {
-            validate_backup_receipt(&receipt)?;
-            self.read_backup_contents(&receipt)?;
-            return (receipt.manifest == *manifest)
-                .then_some(receipt)
-                .ok_or(HostBundleError::ReceiptCorrupted);
-        }
-
-        let source_receipt = self
-            .load_receipt(manifest.host, manifest.component)?
-            .filter(|receipt| receipt.operation != HostBundleLifecycleOpV1::Uninstall)
-            .ok_or(HostBundleError::InvalidObservedState)?;
-        if source_receipt.manifest_digest != manifest.canonical_digest()?
-            || source_receipt.artifacts.len() != manifest.artifacts.len()
-        {
-            return Err(HostBundleError::InvalidObservedState);
-        }
-        let source_receipt_digest: [u8; 32] = Sha256::digest(
-            canonical_json_bytes(&source_receipt)
-                .map_err(|_| HostBundleError::CanonicalizationFailed)?,
-        )
-        .into();
-        let snapshot_dir = self.open_or_create_snapshot_dir(operation_id)?;
-        let mut artifacts = Vec::with_capacity(source_receipt.artifacts.len());
-        for (index, owned) in source_receipt.artifacts.iter().enumerate() {
-            let expected = manifest
-                .artifacts
-                .iter()
-                .find(|artifact| artifact.relative_path == owned.relative_path)
-                .filter(|artifact| {
-                    artifact.artifact_digest == owned.artifact_digest
-                        && artifact.ownership_marker == owned.ownership_marker
-                })
-                .ok_or(HostBundleError::InvalidObservedState)?;
-            let (parent, name) = self.open_parent_nofollow(Path::new(&expected.relative_path))?;
-            let bytes = read_regular_nofollow(&parent, &name)?
-                .ok_or(HostBundleError::InvalidObservedState)?;
-            if <[u8; 32]>::from(Sha256::digest(&bytes)) != expected.artifact_digest {
-                return Err(HostBundleError::OwnershipConflict(format!(
-                    "{}: deployed bytes no longer match the receipt-owned content (marker {:?})",
-                    expected.relative_path, expected.ownership_marker
-                )));
-            }
-            let snapshot_name = host_bundle_snapshot_name(index, &expected.relative_path);
-            match read_regular_nofollow(&snapshot_dir, &snapshot_name)? {
-                Some(existing) if existing == bytes => {}
-                Some(_) => return Err(HostBundleError::ReceiptCorrupted),
-                None => atomic_write_nofollow(&snapshot_dir, &snapshot_name, &bytes, false)?,
-            }
-            artifacts.push(HostBundleBackupArtifactV1 {
-                relative_path: expected.relative_path.clone(),
-                artifact_digest: expected.artifact_digest,
-                ownership_marker: expected.ownership_marker.clone(),
-                snapshot_name,
-            });
-        }
-        sync_cap_dir(&snapshot_dir)?;
-        let receipt = HostBundleBackupReceiptV1 {
-            schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
-            operation_id,
-            host: manifest.host,
-            component: manifest.component,
-            manifest: manifest.clone(),
-            source_receipt_digest,
-            artifacts,
-        };
-        self.write_backup_receipt(&receipt)?;
-        Ok(receipt)
-    }
-
-    /// Restore a named component backup through the ordinary Repair
-    /// transaction. Any failure rolls the host files back to their pre-restore
-    /// bytes; replaying `operation_id` returns the durable terminal receipt.
-    pub fn restore_component_backup<V: HostBundleVerificationAdapterV1>(
-        &mut self,
-        backup_operation_id: [u8; 16],
-        operation_id: [u8; 16],
-        explicit_confirmation: bool,
-        verifier: &V,
-    ) -> Result<HostBundleRestoreReceiptV1, HostBundleError> {
-        if backup_operation_id == [0; 16] || operation_id == [0; 16] {
-            return Err(HostBundleError::InvalidManifest);
-        }
-        if !explicit_confirmation {
-            return Err(HostBundleError::ConfirmationRequired);
-        }
-        if let Some(receipt) = self.load_restore_receipt(operation_id)? {
-            validate_restore_receipt(&receipt)?;
-            return (receipt.backup_operation_id == backup_operation_id)
-                .then_some(receipt)
-                .ok_or(HostBundleError::ReceiptCorrupted);
-        }
-        let backup = self
-            .load_backup_receipt(backup_operation_id)?
-            .ok_or(HostBundleError::InvalidObservedState)?;
-        validate_backup_receipt(&backup)?;
-        verifier.verify_manifest(&backup.manifest)?;
-        let contents = self.read_backup_contents(&backup)?;
-        let request = HostBundleExecutionRequestV1 {
-            lifecycle: HostBundleLifecycleRequestV1 {
-                operation: HostBundleLifecycleOpV1::Repair,
-                expected_host: backup.host,
-                expected_component: backup.component,
-                explicit_confirmation: true,
-                hermes_profile_bindings: u8::from(backup.host == HostKindV1::Hermes),
-                // The operator explicitly confirmed restoring this exact
-                // named backup, which is adoption authority over the backup's
-                // recorded deploy paths whatever bytes sit there now.
-                adopt_receiptless: true,
-            },
-            operation_id,
-        };
-        let restored_receipt = self.execute(&backup.manifest, &request, &contents, verifier)?;
-        let receipt = HostBundleRestoreReceiptV1 {
-            schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
-            operation_id,
-            backup_operation_id,
-            restored_receipt,
-        };
-        self.write_restore_receipt(&receipt)?;
-        Ok(receipt)
     }
 
     pub fn publish_feedback_component_set_receipt(
@@ -1123,118 +587,9 @@ impl HostBundleWriterV1 {
     pub fn lifecycle_root_path(&self) -> &Path {
         &self.lifecycle_root_path
     }
-
-    fn open_or_create_snapshot_dir(&self, operation_id: [u8; 16]) -> Result<Dir, HostBundleError> {
-        let snapshots = open_or_create_nofollow_dir(&self.control, "snapshots")?;
-        open_or_create_nofollow_dir(&snapshots, &hex::encode(operation_id))
-    }
-
-    fn open_existing_snapshot_dir(
-        &self,
-        operation_id: [u8; 16],
-    ) -> Result<Option<Dir>, HostBundleError> {
-        let snapshots = match self.control.open_dir_nofollow("snapshots") {
-            Ok(directory) => directory,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(HostBundleError::UnsafeInstallPath),
-        };
-        match snapshots.open_dir_nofollow(hex::encode(operation_id)) {
-            Ok(directory) => Ok(Some(directory)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(_) => Err(HostBundleError::UnsafeInstallPath),
-        }
-    }
-
-    fn read_backup_contents(
-        &self,
-        receipt: &HostBundleBackupReceiptV1,
-    ) -> Result<Vec<HostBundleArtifactContentV1>, HostBundleError> {
-        validate_backup_receipt(receipt)?;
-        let snapshot_dir = self
-            .open_existing_snapshot_dir(receipt.operation_id)?
-            .ok_or(HostBundleError::ReceiptCorrupted)?;
-        receipt
-            .artifacts
-            .iter()
-            .map(|artifact| {
-                let bytes = read_regular_nofollow(&snapshot_dir, &artifact.snapshot_name)?
-                    .ok_or(HostBundleError::ReceiptCorrupted)?;
-                if <[u8; 32]>::from(Sha256::digest(&bytes)) != artifact.artifact_digest {
-                    return Err(HostBundleError::ReceiptCorrupted);
-                }
-                Ok(HostBundleArtifactContentV1 {
-                    relative_path: artifact.relative_path.clone(),
-                    bytes,
-                })
-            })
-            .collect()
-    }
-
-    fn load_backup_receipt(
-        &self,
-        operation_id: [u8; 16],
-    ) -> Result<Option<HostBundleBackupReceiptV1>, HostBundleError> {
-        read_control_json(
-            &self.control,
-            &host_bundle_backup_receipt_file(operation_id),
-        )?
-        .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| HostBundleError::ReceiptCorrupted))
-        .transpose()
-    }
-
-    fn write_backup_receipt(
-        &self,
-        receipt: &HostBundleBackupReceiptV1,
-    ) -> Result<(), HostBundleError> {
-        validate_backup_receipt(receipt)?;
-        let bytes = serde_json::to_vec(receipt).map_err(|_| HostBundleError::ReceiptCorrupted)?;
-        atomic_write_nofollow(
-            &self.control,
-            &host_bundle_backup_receipt_file(receipt.operation_id),
-            &bytes,
-            false,
-        )
-    }
-
-    fn load_restore_receipt(
-        &self,
-        operation_id: [u8; 16],
-    ) -> Result<Option<HostBundleRestoreReceiptV1>, HostBundleError> {
-        read_control_json(
-            &self.control,
-            &host_bundle_restore_receipt_file(operation_id),
-        )?
-        .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| HostBundleError::ReceiptCorrupted))
-        .transpose()
-    }
-
-    fn write_restore_receipt(
-        &self,
-        receipt: &HostBundleRestoreReceiptV1,
-    ) -> Result<(), HostBundleError> {
-        validate_restore_receipt(receipt)?;
-        let bytes = serde_json::to_vec(receipt).map_err(|_| HostBundleError::ReceiptCorrupted)?;
-        atomic_write_nofollow(
-            &self.control,
-            &host_bundle_restore_receipt_file(receipt.operation_id),
-            &bytes,
-            false,
-        )
-    }
 }
 
 impl HostBundleLifecycleStorageV1 for HostBundleWriterV1 {
-    fn recover_lifecycle(&mut self) -> Result<(), HostBundleError> {
-        // Explicit recover-all. Each host owns its journal, so each recovery
-        // takes only that host's lock and releases it before the next host.
-        for host in stock_host_kinds() {
-            if self.load_journal_for(host)?.is_some() {
-                self.recover_interrupted_operation(host)?;
-            }
-        }
-        Ok(())
-    }
-
     fn execute_lifecycle<V: HostBundleVerificationAdapterV1>(
         &mut self,
         manifest: &HostBundleManifestV1,
@@ -1279,7 +634,7 @@ fn open_or_create_nofollow_dir(parent: &Dir, name: &str) -> Result<Dir, HostBund
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             match parent.create_dir(name) {
                 Ok(()) => {}
-                // Two hosts may create a shared parent (`backups/`, `.config/`)
+                // Two hosts may create a shared parent (`.config/`)
                 // at once. The directory is a namespace, not a shared state
                 // object; the loser retries the open instead of failing.
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
@@ -1312,8 +667,7 @@ fn open_host_writer_lock(
         .map_err(|_| HostBundleError::UnsafeInstallPath)?
         .into_std();
     file.try_lock()
-        .map_err(std::io::Error::from)
-        .map_err(|_| host_bundle_recovery_required!())?;
+        .map_err(|_| HostBundleError::HostWriterBusy)?;
     Ok(HostWriterLock { host, file })
 }
 
@@ -1363,42 +717,6 @@ fn remove_regular_if_exists(parent: &Dir, name: &str) -> Result<(), HostBundleEr
             .map_err(|_| host_bundle_storage_failure!())?;
     }
     Ok(())
-}
-
-pub(super) fn remove_if_digest_matches(
-    parent: &Dir,
-    name: &str,
-    expected_digest: [u8; 32],
-) -> Result<(), HostBundleError> {
-    let Some(bytes) = read_regular_nofollow(parent, name)? else {
-        return Ok(());
-    };
-    let actual: [u8; 32] = Sha256::digest(&bytes).into();
-    if actual != expected_digest {
-        return Err(host_bundle_recovery_required!());
-    }
-    parent
-        .remove_file(name)
-        .map_err(|_| host_bundle_storage_failure!())
-}
-
-pub(super) fn move_regular_to_backup(
-    parent: &Dir,
-    name: &str,
-    backup_dir: &Dir,
-    backup_name: &str,
-) -> Result<(), HostBundleError> {
-    if !regular_file_exists(parent, name)? || !is_safe_component(backup_name) {
-        return Err(HostBundleError::UnsafeInstallPath);
-    }
-    if regular_file_exists(backup_dir, backup_name)? {
-        return Err(host_bundle_recovery_required!());
-    }
-    parent
-        .rename(name, backup_dir, backup_name)
-        .map_err(|_| host_bundle_storage_failure!())?;
-    sync_cap_dir(parent)?;
-    sync_cap_dir(backup_dir)
 }
 
 pub(super) fn atomic_write_nofollow(

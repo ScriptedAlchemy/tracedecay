@@ -344,7 +344,7 @@ fn request_context() -> RequestContext {
         id::<ActorId>("actor.issuer"),
         UtcMicros(1),
         // Admission validates the grant window and the context deadline
-        // against real `current_micros()` timestamps (the cancellation path
+        // against real `now_micros()` timestamps (the cancellation path
         // observes wall-clock time), so both must sit in the real future.
         deadline_in(3_600),
         scope.clone(),
@@ -393,7 +393,7 @@ fn pinned_protocol(backend: WorkProviderBackendV1) -> WorkProviderProtocol {
 /// Deadline far enough ahead that the wall-clock arm of the execution select
 /// never fires; every fixture below is expected to finish on its own terms.
 fn deadline_in(seconds: i64) -> UtcMicros {
-    UtcMicros(current_micros().0.saturating_add(seconds * 1_000_000))
+    UtcMicros(now_micros().0.saturating_add(seconds * 1_000_000))
 }
 
 impl WorkAttemptEffectStoragePortV1 for AttemptStore {
@@ -1232,7 +1232,7 @@ async fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record(
                     run_id: identity.run_id().clone(),
                     attempt_id: identity.attempt_id().clone(),
                     request_id: id("cancellation.work-attempt-exec.1"),
-                    occurred_at: current_micros(),
+                    occurred_at: now_micros(),
                 },
             )
             .unwrap();
@@ -1378,7 +1378,7 @@ async fn a_wall_exhausted_provider_seals_timed_out_and_emits_the_no_progress_ter
             event_kinds: vec!["operation.no_progress.terminal.v1".to_owned()],
             horizon: ObservabilityHorizonV1 {
                 since_micros: 0,
-                until_micros: current_micros().0.saturating_add(1_000_000),
+                until_micros: now_micros().0.saturating_add(1_000_000),
             },
             after_watermark: None,
             limit: 8,

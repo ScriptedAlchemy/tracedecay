@@ -221,10 +221,6 @@ pub struct CodeCloneIndexCoverageV1 {
     pub rename_partial_bodies: Option<u64>,
     /// Eligible bodies whose language has no rename normalization.
     pub rename_unsupported_bodies: Option<u64>,
-    /// Sealed source pages committed to clone indexing.
-    pub completed_source_pages: u64,
-    /// Sealed source pages in the generation.
-    pub total_source_pages: u64,
 }
 
 /// Fixed per-request clone candidate and verification budgets.
@@ -242,7 +238,7 @@ pub struct CodeCloneIndexBudgetsV1 {
 /// Measured resources and update accounting for one clone-index generation.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CodeCloneIndexResourcesV1 {
-    /// Current durable artifact or staging-file bytes.
+    /// Durable artifact bytes.
     pub bytes_on_disk: Option<u64>,
     /// Largest measured clone-row serialization scratch during the build.
     pub peak_scratch_memory_bytes: Option<u64>,
@@ -271,10 +267,6 @@ pub struct CodeCloneIndexObservationV1 {
 pub enum CodeCloneIndexStatusV1 {
     /// The sealed lexical artifact or its clone rows cannot be read.
     Unavailable { reason: String },
-    /// A restartable clone successor is consuming sealed source pages.
-    Backfilling {
-        observation: CodeCloneIndexObservationV1,
-    },
     /// Some clone evidence is readable, but required postings are missing.
     Partial {
         observation: CodeCloneIndexObservationV1,

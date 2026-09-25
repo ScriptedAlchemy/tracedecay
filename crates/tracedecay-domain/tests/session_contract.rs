@@ -18,19 +18,13 @@ use tracedecay_domain::{
     TemporalValidityV1, UtcMicros,
 };
 
-fn assert_json_round_trip<T>(value: T)
+/// Pins the literal wire form and proves that literal decodes to the value.
+fn assert_wire<T>(value: &T, wire: Value)
 where
     T: Serialize + DeserializeOwned + PartialEq + Debug,
 {
-    let encoded = serde_json::to_value(&value).unwrap();
-    let decoded = serde_json::from_value::<T>(encoded).unwrap();
-    assert_eq!(decoded, value);
-}
-
-macro_rules! assert_json_round_trip {
-    ($value:expr) => {
-        assert_json_round_trip($value);
-    };
+    assert_eq!(serde_json::to_value(value).unwrap(), wire);
+    assert_eq!(&serde_json::from_value::<T>(wire).unwrap(), value);
 }
 
 fn observation_id() -> CanonicalObservationIdV1 {
@@ -69,16 +63,19 @@ fn evidence() -> SessionEvidenceMetadataV1 {
     serde_json::from_value(evidence_wire("provider_declared")).unwrap()
 }
 
-fn summary_publication() -> SummaryPublicationMetadataV1 {
-    serde_json::from_value(json!({
+fn summary_publication_wire() -> Value {
+    json!({
         "model_route": "summary.model.fixture",
         "configuration_digest": format!("sha256:{}", "3".repeat(64)),
         "sanitization_receipt": {
             "receipt_id": "receipt.fixture",
             "sanitizer_version": "sanitizer.fixture"
         }
-    }))
-    .unwrap()
+    })
+}
+
+fn summary_publication() -> SummaryPublicationMetadataV1 {
+    serde_json::from_value(summary_publication_wire()).unwrap()
 }
 
 fn occurrence_record_wire() -> Value {
@@ -160,7 +157,7 @@ fn temporal_modes_round_trip_and_unknown_valid_time_is_not_representative_as_of(
 fn exact_byte_ranges_are_canonical_half_open_domain_values() {
     let range = ByteRangeV1::new(3, 11).expect("ordered non-empty byte range");
     assert_eq!((range.start(), range.end()), (3, 11));
-    assert_json_round_trip!(range);
+    assert_wire(&range, json!({"start": 3, "end": 11}));
     assert_eq!(
         ByteRangeV1::new(3, 3),
         Err(SessionContractError::InvalidByteRange)
@@ -194,25 +191,41 @@ fn exact_byte_range_deserialization_rejects_invalid_domain_values() {
 }
 
 #[test]
-fn temporal_values_round_trip_every_variant_and_reject_unknown_variants() {
-    for mode in [
-        TemporalModeV1::Current,
-        TemporalModeV1::AsOf {
-            cutoff: UtcMicros(50),
-        },
-        TemporalModeV1::Evolution,
-        TemporalModeV1::Forensic,
+fn temporal_values_have_literal_wire_forms_and_reject_unknown_variants() {
+    for (mode, kind, wire) in [
+        (
+            TemporalModeV1::Current,
+            "current",
+            json!({"kind": "current"}),
+        ),
+        (
+            TemporalModeV1::AsOf {
+                cutoff: UtcMicros(50),
+            },
+            "as_of",
+            json!({"kind": "as_of", "cutoff": 50}),
+        ),
+        (
+            TemporalModeV1::Evolution,
+            "evolution",
+            json!({"kind": "evolution"}),
+        ),
+        (
+            TemporalModeV1::Forensic,
+            "forensic",
+            json!({"kind": "forensic"}),
+        ),
     ] {
-        assert_json_round_trip!(mode);
+        assert_wire(&mode, wire);
+        assert_eq!(mode.as_str(), kind);
     }
-    for validity in [
-        TemporalValidityV1::Known {
+    assert_wire(
+        &TemporalValidityV1::Known {
             valid_at: UtcMicros(40),
         },
-        TemporalValidityV1::Unknown,
-    ] {
-        assert_json_round_trip!(validity);
-    }
+        json!({"kind": "known", "valid_at": 40}),
+    );
+    assert_wire(&TemporalValidityV1::Unknown, json!({"kind": "unknown"}));
     assert!(serde_json::from_value::<TemporalModeV1>(json!({"kind": "future"})).is_err());
     assert!(serde_json::from_value::<TemporalValidityV1>(json!({"kind": "future"})).is_err());
 }
@@ -222,22 +235,43 @@ fn copy_proofs_and_copy_records_round_trip_and_reject_invalid_links() {
     let source = occurrence(0);
     let target = occurrence(1);
     let proofs = [
-        CopyProofV1::ProviderLinkage {
-            source_occurrence_id: source.clone(),
-            provider_record_id: ObservationId::new("provider.message.1").unwrap(),
-        },
-        CopyProofV1::ParentMessageLinkage {
-            source_occurrence_id: source.clone(),
-            parent_message_id: MessageId::new("message.parent.1").unwrap(),
-        },
-        CopyProofV1::ExplicitAnchorAssertion {
-            source_occurrence_id: source.clone(),
-            assertion_anchor_id: anchor("anchor.copy.proof"),
-        },
+        (
+            CopyProofV1::ProviderLinkage {
+                source_occurrence_id: source.clone(),
+                provider_record_id: ObservationId::new("provider.message.1").unwrap(),
+            },
+            json!({
+                "kind": "provider_linkage",
+                "source_occurrence_id": source,
+                "provider_record_id": "provider.message.1"
+            }),
+        ),
+        (
+            CopyProofV1::ParentMessageLinkage {
+                source_occurrence_id: source.clone(),
+                parent_message_id: MessageId::new("message.parent.1").unwrap(),
+            },
+            json!({
+                "kind": "parent_message_linkage",
+                "source_occurrence_id": source,
+                "parent_message_id": "message.parent.1"
+            }),
+        ),
+        (
+            CopyProofV1::ExplicitAnchorAssertion {
+                source_occurrence_id: source.clone(),
+                assertion_anchor_id: anchor("anchor.copy.proof"),
+            },
+            json!({
+                "kind": "explicit_anchor_assertion",
+                "source_occurrence_id": source,
+                "assertion_anchor_id": "anchor.copy.proof"
+            }),
+        ),
     ];
-    for proof in proofs {
+    for (proof, proof_wire) in proofs {
         assert_eq!(proof.source_occurrence_id(), &source);
-        assert_json_round_trip!(proof.clone());
+        assert_wire(&proof, proof_wire.clone());
         let copy = LogicalCopyRecordV1 {
             occurrence_id: target.clone(),
             copied_from_occurrence_id: source.clone(),
@@ -246,7 +280,16 @@ fn copy_proofs_and_copy_records_round_trip_and_reject_invalid_links() {
             valid_time: TemporalValidityV1::Unknown,
         };
         copy.validate().unwrap();
-        assert_json_round_trip!(copy);
+        assert_wire(
+            &copy,
+            json!({
+                "occurrence_id": target,
+                "copied_from_occurrence_id": source,
+                "proof": proof_wire,
+                "knowledge_at": 50,
+                "valid_time": {"kind": "unknown"}
+            }),
+        );
     }
     assert!(
         serde_json::from_value::<CopyProofV1>(json!({
@@ -268,7 +311,6 @@ fn copy_proofs_and_copy_records_round_trip_and_reject_invalid_links() {
         valid_time: TemporalValidityV1::Unknown,
     };
     copy.validate().unwrap();
-    assert_json_round_trip!(copy.clone());
 
     let self_copy = LogicalCopyRecordV1 {
         occurrence_id: target.clone(),
@@ -351,15 +393,24 @@ fn summaries_canonicalize_sources_and_reject_self_predecessors() {
         serde_json::to_value(&canonical).unwrap(),
         serde_json::to_value(&reordered).unwrap()
     );
-    assert_json_round_trip!(canonical.clone());
-    assert_json_round_trip!(SummarySourceHorizonV1 {
-        knowledge_through: UtcMicros(50),
-        valid_through: None,
+    let canonical_wire = json!({
+        "summary_id": "summary.fixture",
+        "session_id": "session.fixture",
+        "summary_anchor_id": "anchor.summary",
+        "source_anchors": ["anchor.source.a", "anchor.source.b"],
+        "source_horizon": {"knowledge_through": 50, "valid_through": 40},
+        "created_at": 60,
+        "predecessor_summary_id": null,
+        "publication": null
     });
-    assert_json_round_trip!(SummarySourceHorizonV1 {
-        knowledge_through: UtcMicros(50),
-        valid_through: Some(UtcMicros(50)),
-    });
+    assert_wire(&canonical, canonical_wire.clone());
+    assert_wire(
+        &SummarySourceHorizonV1 {
+            knowledge_through: UtcMicros(50),
+            valid_through: None,
+        },
+        json!({"knowledge_through": 50, "valid_through": null}),
+    );
 
     let empty = SessionSummaryRecordV1::new(
         SessionSummaryIdV1::new("summary.empty").unwrap(),
@@ -414,7 +465,19 @@ fn summaries_canonicalize_sources_and_reject_self_predecessors() {
         UtcMicros(70),
     )
     .expect("valid time may extend beyond knowledge time");
-    assert_json_round_trip!(future_effective_horizon);
+    assert_wire(
+        &future_effective_horizon,
+        json!({
+            "summary_id": "summary.future-effective-horizon",
+            "session_id": "session.fixture",
+            "summary_anchor_id": "anchor.summary.future-effective-horizon",
+            "source_anchors": ["anchor.source.future-effective-horizon"],
+            "source_horizon": {"knowledge_through": 50, "valid_through": 60},
+            "created_at": 70,
+            "predecessor_summary_id": null,
+            "publication": null
+        }),
+    );
     assert!(
         serde_json::from_value::<SummarySourceHorizonV1>(json!({
             "knowledge_through": 50
@@ -432,12 +495,17 @@ fn summaries_canonicalize_sources_and_reject_self_predecessors() {
         .clone()
         .with_predecessor(SessionSummaryIdV1::new("summary.predecessor").unwrap())
         .unwrap();
-    assert_json_round_trip!(predecessor);
-    assert_json_round_trip!(
-        canonical
+    let mut predecessor_wire = canonical_wire.clone();
+    predecessor_wire["predecessor_summary_id"] = json!("summary.predecessor");
+    assert_wire(&predecessor, predecessor_wire);
+    let mut published_wire = canonical_wire;
+    published_wire["publication"] = summary_publication_wire();
+    assert_wire(
+        &canonical
             .clone()
             .with_publication(summary_publication())
-            .unwrap()
+            .unwrap(),
+        published_wire,
     );
 
     let mut self_predecessor = serde_json::to_value(canonical).unwrap();
@@ -447,17 +515,32 @@ fn summaries_canonicalize_sources_and_reject_self_predecessors() {
 
 #[test]
 fn typed_ids_and_signed_cursors_round_trip_and_reject_invalid_values() {
-    assert_json_round_trip!(SessionSummaryIdV1::new("summary.fixture").unwrap());
-    assert_json_round_trip!(TemporalAssertionIdV1::new("assertion.fixture").unwrap());
-    assert_json_round_trip!(SessionRefreshOperationIdV1::new("refresh.fixture").unwrap());
-    assert_json_round_trip!(SessionProjectionGenerationV1::new(1).unwrap());
-    assert_json_round_trip!(SessionCursorKeyIdV1::new("cursor.key.fixture").unwrap());
+    assert_wire(
+        &SessionSummaryIdV1::new("summary.fixture").unwrap(),
+        json!("summary.fixture"),
+    );
+    assert_wire(
+        &TemporalAssertionIdV1::new("assertion.fixture").unwrap(),
+        json!("assertion.fixture"),
+    );
+    assert_wire(
+        &SessionRefreshOperationIdV1::new("refresh.fixture").unwrap(),
+        json!("refresh.fixture"),
+    );
+    assert_wire(&SessionProjectionGenerationV1::new(1).unwrap(), json!(1));
+    assert_wire(
+        &SessionCursorKeyIdV1::new("cursor.key.fixture").unwrap(),
+        json!("cursor.key.fixture"),
+    );
 
     let signed_cursor = SignedCursorKeyRefV1 {
         key_id: SessionCursorKeyIdV1::new("cursor.key.fixture").unwrap(),
         version: SessionCursorVersionV1::new(1).unwrap(),
     };
-    assert_json_round_trip!(signed_cursor);
+    assert_wire(
+        &signed_cursor,
+        json!({"key_id": "cursor.key.fixture", "version": 1}),
+    );
     assert!(serde_json::from_value::<SessionProjectionGenerationV1>(json!(0)).is_err());
     assert!(serde_json::from_value::<SessionCursorVersionV1>(json!(0)).is_err());
     assert_eq!(
@@ -510,39 +593,59 @@ fn typed_ids_and_signed_cursors_round_trip_and_reject_invalid_values() {
     }
 }
 
-/// `as_str` is what callers log, key, and route on, so it must be the same
-/// string the wire carries. Sweeping `ALL` keeps a new variant covered without
-/// a test edit.
-macro_rules! assert_as_str_is_the_wire_value_for_all_variants {
-    ($type:ty) => {
-        for variant in <$type>::ALL {
-            assert_json_round_trip!(variant);
-            assert_eq!(serde_json::to_value(variant).unwrap(), variant.as_str());
-        }
-    };
-}
-
 #[test]
-fn enum_as_str_matches_serde_for_every_variant() {
-    assert_as_str_is_the_wire_value_for_all_variants!(RetrievalGrainV1);
-    assert_as_str_is_the_wire_value_for_all_variants!(SessionAuthorityClassV1);
-    assert_as_str_is_the_wire_value_for_all_variants!(TemporalAssertionKindV1);
-
-    // These two carry data, so they serialize as tagged objects and `as_str`
-    // names the tag rather than the whole value.
-    for mode in [
-        TemporalModeV1::Current,
-        TemporalModeV1::AsOf {
-            cutoff: UtcMicros(50),
-        },
-        TemporalModeV1::Evolution,
-        TemporalModeV1::Forensic,
+fn session_enums_have_literal_wire_spellings_and_reject_unknown_values() {
+    for (grain, wire) in [
+        (RetrievalGrainV1::Occurrence, "occurrence"),
+        (RetrievalGrainV1::LogicalMessage, "logical_message"),
+        (RetrievalGrainV1::Turn, "turn"),
+        (RetrievalGrainV1::Session, "session"),
+        (RetrievalGrainV1::Thread, "thread"),
+        (RetrievalGrainV1::Agent, "agent"),
+        (RetrievalGrainV1::Summary, "summary"),
     ] {
-        assert_eq!(serde_json::to_value(mode).unwrap()["kind"], mode.as_str());
+        assert_wire(&grain, json!(wire));
+        assert_eq!(grain.as_str(), wire);
     }
-    for grouping in [GroupingProvenanceV1::ProviderNative, derived_grouping()] {
-        assert_json_round_trip!(grouping);
+    for (authority, wire) in [
+        (SessionAuthorityClassV1::ProviderNative, "provider_native"),
+        (
+            SessionAuthorityClassV1::CanonicalObservation,
+            "canonical_observation",
+        ),
+        (
+            SessionAuthorityClassV1::ExplicitAnchorAssertion,
+            "explicit_anchor_assertion",
+        ),
+        (
+            SessionAuthorityClassV1::DerivedProjection,
+            "derived_projection",
+        ),
+        (
+            SessionAuthorityClassV1::ImmutableSummary,
+            "immutable_summary",
+        ),
+    ] {
+        assert_wire(&authority, json!(wire));
+        assert_eq!(authority.as_str(), wire);
     }
+    for (kind, wire) in [
+        (TemporalAssertionKindV1::Corrects, "corrects"),
+        (TemporalAssertionKindV1::Supersedes, "supersedes"),
+        (TemporalAssertionKindV1::Contradicts, "contradicts"),
+        (TemporalAssertionKindV1::Supports, "supports"),
+    ] {
+        assert_wire(&kind, json!(wire));
+        assert_eq!(kind.as_str(), wire);
+    }
+    assert_wire(
+        &GroupingProvenanceV1::ProviderNative,
+        json!({"kind": "provider_native"}),
+    );
+    assert_wire(
+        &derived_grouping(),
+        json!({"kind": "derived_role_boundary", "projector_version": "projector.fixture"}),
+    );
 
     assert!(serde_json::from_value::<RetrievalGrainV1>(json!("paragraph")).is_err());
     assert!(serde_json::from_value::<SessionAuthorityClassV1>(json!("untrusted")).is_err());
@@ -563,22 +666,23 @@ fn evidence_and_assertion_records_round_trip_and_reject_invalid_anchors() {
         let metadata: SessionEvidenceMetadataV1 =
             serde_json::from_value(evidence_wire(evidence_class)).unwrap();
         metadata.validate().unwrap();
-        assert_json_round_trip!(metadata);
+        assert_eq!(
+            serde_json::to_value(&metadata).unwrap(),
+            evidence_wire(evidence_class)
+        );
     }
 
     let metadata = evidence();
-    metadata.validate().unwrap();
-    assert_json_round_trip!(metadata.clone());
 
     let mut invalid_metadata = serde_json::to_value(&metadata).unwrap();
     invalid_metadata["source_anchor_id"] = json!(" ");
     assert!(serde_json::from_value::<SessionEvidenceMetadataV1>(invalid_metadata).is_err());
 
-    for kind in [
-        TemporalAssertionKindV1::Corrects,
-        TemporalAssertionKindV1::Supersedes,
-        TemporalAssertionKindV1::Contradicts,
-        TemporalAssertionKindV1::Supports,
+    for (kind, kind_wire) in [
+        (TemporalAssertionKindV1::Corrects, "corrects"),
+        (TemporalAssertionKindV1::Supersedes, "supersedes"),
+        (TemporalAssertionKindV1::Contradicts, "contradicts"),
+        (TemporalAssertionKindV1::Supports, "supports"),
     ] {
         let assertion = TemporalAssertionRecordV1 {
             assertion_id: TemporalAssertionIdV1::new("assertion.fixture").unwrap(),
@@ -592,7 +696,18 @@ fn evidence_and_assertion_records_round_trip_and_reject_invalid_anchors() {
             evidence: metadata.clone(),
         };
         assertion.validate().unwrap();
-        assert_json_round_trip!(assertion.clone());
+        assert_wire(
+            &assertion,
+            json!({
+                "assertion_id": "assertion.fixture",
+                "kind": kind_wire,
+                "subject_anchor_id": "anchor.assertion.subject",
+                "object_anchor_id": "anchor.assertion.object",
+                "knowledge_at": 50,
+                "valid_time": {"kind": "known", "valid_at": 40},
+                "evidence": evidence_wire("provider_declared")
+            }),
+        );
 
         let self_assertion = TemporalAssertionRecordV1 {
             object_anchor_id: assertion.subject_anchor_id.clone(),
@@ -614,7 +729,6 @@ fn occurrence_records_round_trip_with_independent_grouping_and_reject_orphans() 
     let record: MessageOccurrenceRecordV1 = serde_json::from_value(wire.clone()).unwrap();
     record.validate().unwrap();
     assert_eq!(serde_json::to_value(&record).unwrap(), wire);
-    assert_json_round_trip!(record.clone());
 
     let mut invalid_occurrence_record = record.clone();
     invalid_occurrence_record.occurrence_id = occurrence(1);
@@ -664,43 +778,64 @@ fn occurrence_records_round_trip_with_independent_grouping_and_reject_orphans() 
 }
 
 #[test]
-fn hydration_and_omission_values_round_trip_every_variant_and_reject_unknown_values() {
-    for state in [
-        HydrationStateV1::Available,
-        HydrationStateV1::RetainedButUnavailable,
-        HydrationStateV1::Redacted,
-        HydrationStateV1::Deleted,
-        HydrationStateV1::RetentionExpired,
-        HydrationStateV1::Unauthorized,
-        HydrationStateV1::Locked,
-        HydrationStateV1::UnverifiableLegacy,
+fn hydration_and_omission_values_have_literal_wire_spellings_and_reject_unknown_values() {
+    for (state, wire) in [
+        (HydrationStateV1::Available, "available"),
+        (
+            HydrationStateV1::RetainedButUnavailable,
+            "retained_but_unavailable",
+        ),
+        (HydrationStateV1::Redacted, "redacted"),
+        (HydrationStateV1::Deleted, "deleted"),
+        (HydrationStateV1::RetentionExpired, "retention_expired"),
+        (HydrationStateV1::Unauthorized, "unauthorized"),
+        (HydrationStateV1::Locked, "locked"),
+        (HydrationStateV1::Unverifiable, "unverifiable"),
     ] {
-        assert_json_round_trip!(state);
-        assert_eq!(serde_json::to_value(state).unwrap(), state.as_str());
+        assert_wire(&state, json!(wire));
+        assert_eq!(state.as_str(), wire);
     }
-    for reason in [
-        ContextOmissionReasonV1::ByteBudget,
-        ContextOmissionReasonV1::TokenBudget,
-        ContextOmissionReasonV1::Unauthorized,
-        ContextOmissionReasonV1::Redacted,
-        ContextOmissionReasonV1::Deleted,
-        ContextOmissionReasonV1::RetentionExpired,
-        ContextOmissionReasonV1::Locked,
-        ContextOmissionReasonV1::Unavailable,
-        ContextOmissionReasonV1::SummaryHorizonMismatch,
-        ContextOmissionReasonV1::DuplicateRepresentative,
-        ContextOmissionReasonV1::RootContinuationUnavailable,
+    for (reason, wire) in [
+        (ContextOmissionReasonV1::ByteBudget, "byte_budget"),
+        (ContextOmissionReasonV1::TokenBudget, "token_budget"),
+        (ContextOmissionReasonV1::Unauthorized, "unauthorized"),
+        (ContextOmissionReasonV1::Redacted, "redacted"),
+        (ContextOmissionReasonV1::Deleted, "deleted"),
+        (
+            ContextOmissionReasonV1::RetentionExpired,
+            "retention_expired",
+        ),
+        (ContextOmissionReasonV1::Locked, "locked"),
+        (ContextOmissionReasonV1::Unavailable, "unavailable"),
+        (
+            ContextOmissionReasonV1::SummaryHorizonMismatch,
+            "summary_horizon_mismatch",
+        ),
+        (
+            ContextOmissionReasonV1::DuplicateRepresentative,
+            "duplicate_representative",
+        ),
+        (
+            ContextOmissionReasonV1::RootContinuationUnavailable,
+            "root_continuation_unavailable",
+        ),
     ] {
-        assert_json_round_trip!(CompactContextOmissionV1 {
-            anchor_id: Some(anchor("anchor.omission")),
-            reason,
-        });
-        assert_eq!(serde_json::to_value(reason).unwrap(), reason.as_str());
+        assert_wire(
+            &CompactContextOmissionV1 {
+                anchor_id: Some(anchor("anchor.omission")),
+                reason,
+            },
+            json!({"anchor_id": "anchor.omission", "reason": wire}),
+        );
+        assert_eq!(reason.as_str(), wire);
     }
-    assert_json_round_trip!(CompactContextOmissionV1 {
-        anchor_id: None,
-        reason: ContextOmissionReasonV1::ByteBudget,
-    });
+    assert_wire(
+        &CompactContextOmissionV1 {
+            anchor_id: None,
+            reason: ContextOmissionReasonV1::ByteBudget,
+        },
+        json!({"anchor_id": null, "reason": "byte_budget"}),
+    );
 
     assert!(serde_json::from_value::<HydrationStateV1>(json!("incomplete")).is_err());
     assert!(serde_json::from_value::<ContextOmissionReasonV1>(json!("stale")).is_err());
@@ -727,8 +862,20 @@ fn compact_context_recomputes_bytes_and_validates_omission_anchors() {
         hydration: HydrationStateV1::RetainedButUnavailable,
         encoded_bytes: 5,
     };
-    assert_json_round_trip!(first.clone());
-    assert_json_round_trip!(second.clone());
+    let first_wire = json!({
+        "anchor_id": "anchor.context.first",
+        "grain": "occurrence",
+        "hydration": "available",
+        "encoded_bytes": 3
+    });
+    let second_wire = json!({
+        "anchor_id": "anchor.context.second",
+        "grain": "summary",
+        "hydration": "retained_but_unavailable",
+        "encoded_bytes": 5
+    });
+    assert_wire(&first, first_wire.clone());
+    assert_wire(&second, second_wire.clone());
 
     let bundle = CompactContextBundleV1 {
         records: vec![first.clone(), second],
@@ -759,7 +906,29 @@ fn compact_context_recomputes_bytes_and_validates_omission_anchors() {
         encoded_bytes: 8,
     };
     bundle.validate().unwrap();
-    assert_json_round_trip!(bundle.clone());
+    assert_wire(
+        &bundle,
+        json!({
+            "records": [first_wire, second_wire],
+            "omissions": [{"anchor_id": "anchor.context.omitted", "reason": "token_budget"}],
+            "continuation_anchors": ["anchor.context.continuation"],
+            "coverage": {"visible": 1, "hidden": 2, "unknown": 3, "redacted": 4},
+            "conflicts": [{
+                "anchor_id": "anchor.context.first",
+                "supporting_anchor_ids": ["anchor.context.support"]
+            }],
+            "lineage": [{
+                "kind": "corrects",
+                "subject_anchor_id": "anchor.context.first",
+                "object_anchor_id": "anchor.context.predecessor",
+                "knowledge_at": 42,
+                "authority": "canonical_observation",
+                "authorized": true,
+                "supporting_anchor_ids": ["anchor.context.support"]
+            }],
+            "encoded_bytes": 8
+        }),
+    );
 
     let mut incorrect_total = bundle.clone();
     incorrect_total.encoded_bytes = 9;
@@ -1040,7 +1209,10 @@ fn coverage_and_anchor_entity_kinds_have_stable_wire_values() {
     };
     assert_eq!(coverage.total(), Some(10));
     assert!(coverage.has_withheld_or_unknown());
-    assert_json_round_trip!(coverage);
+    assert_wire(
+        &coverage,
+        json!({"visible": 3, "hidden": 2, "unknown": 1, "redacted": 4}),
+    );
 
     let kinds = [
         (EntityKind::Thread, "thread"),

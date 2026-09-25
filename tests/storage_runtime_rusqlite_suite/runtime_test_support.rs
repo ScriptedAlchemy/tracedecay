@@ -27,8 +27,6 @@ use tracedecay_store::{
 pub(crate) struct ReaderRuntimeFixture {
     pub(crate) binding: StoreRuntimeBindingV1,
     pub(crate) reader_budget: ReaderBudgetFixture,
-    pub(crate) initial_commit_sequence: u64,
-    pub(crate) published_commit_sequence: u64,
 }
 
 pub(crate) struct ReaderBudgetFixture {
@@ -58,15 +56,6 @@ pub(crate) fn seed_acceptance_rows(connection: &Connection, suspend_autocheckpoi
              INSERT INTO acceptance_rows(value) VALUES (1);"
         ))
         .expect("seed acceptance authority");
-}
-
-pub(crate) fn shard_watermark(binding: &StoreRuntimeBindingV1, sequence: u64) -> ShardWatermarkV1 {
-    ShardWatermarkV1 {
-        shard_id: binding.shard_id.clone(),
-        incarnation: binding.incarnation,
-        authority_epoch: binding.authority_epoch,
-        commit_sequence: CommitSequenceV1(sequence),
-    }
 }
 
 pub(crate) fn acceptance_reader_budget(fixture: &ReaderRuntimeFixture) -> ReaderBudgetV1 {
@@ -112,8 +101,6 @@ pub(crate) fn reader_runtime_fixture() -> ReaderRuntimeFixture {
             max_per_hot_shard: 2,
             idle_burst_retire_ms: 30_000,
         },
-        initial_commit_sequence: 4,
-        published_commit_sequence: 5,
     }
 }
 

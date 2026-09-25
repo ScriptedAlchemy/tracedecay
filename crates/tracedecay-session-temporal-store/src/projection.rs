@@ -7,7 +7,7 @@ use tracedecay_store::{
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshFrontierV1, SessionRefreshProgressV1,
     SessionStoreResult, SessionTemporalProjectionBatchReceiptV1, SessionTemporalProjectionBatchV1,
 };
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 use super::query::{PERSIST_OPERATION, storage};
 use super::refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};

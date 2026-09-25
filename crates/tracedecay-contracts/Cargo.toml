@@ -16,7 +16,7 @@ hotpath = ["hotpath/hotpath"]
 
 [dependencies]
 hotpath.workspace = true
-schemars = "1.2.1"
+schemars.workspace = true
 getrandom = "0.2"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }

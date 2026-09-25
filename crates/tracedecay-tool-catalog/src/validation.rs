@@ -83,15 +83,6 @@ pub enum CatalogValidationError {
         binding_id: BindingId,
         capability_id: CapabilityId,
     },
-    #[error("binding {binding_id} aliases missing binding {alias_of}")]
-    MissingAliasTarget {
-        binding_id: BindingId,
-        alias_of: BindingId,
-    },
-    #[error("binding alias {binding_id} must target the same capability")]
-    AliasCapabilityMismatch { binding_id: BindingId },
-    #[error("binding alias {binding_id} cannot target another alias")]
-    AliasTargetsAlias { binding_id: BindingId },
     #[error("duplicate retrieval primitive capability ID {0}")]
     DuplicateRetrievalCapabilityId(CapabilityId),
     #[error("duplicate retriever ID {0}")]
@@ -372,28 +363,6 @@ fn index_bindings<'a>(
                     capability_id: capability.capability_id().clone(),
                 });
             }
-        }
-    }
-
-    for binding in bindings.values() {
-        let Some(alias_of) = binding.alias_of() else {
-            continue;
-        };
-        let Some(canonical) = bindings.get(alias_of) else {
-            return Err(CatalogValidationError::MissingAliasTarget {
-                binding_id: binding.binding_id().clone(),
-                alias_of: alias_of.clone(),
-            });
-        };
-        if canonical.is_alias() {
-            return Err(CatalogValidationError::AliasTargetsAlias {
-                binding_id: binding.binding_id().clone(),
-            });
-        }
-        if canonical.capability_id() != binding.capability_id() {
-            return Err(CatalogValidationError::AliasCapabilityMismatch {
-                binding_id: binding.binding_id().clone(),
-            });
         }
     }
 

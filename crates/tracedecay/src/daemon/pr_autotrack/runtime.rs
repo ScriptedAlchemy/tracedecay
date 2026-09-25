@@ -104,7 +104,7 @@ async fn tick(
 ) {
     let window = 14 * 86_400;
     let cap = 64;
-    let cutoff = crate::project::current_timestamp().saturating_sub(window);
+    let cutoff = tracedecay_runtime_core::tracedecay::current_timestamp().saturating_sub(window);
     let Ok(records) = database.list_code_projects(cap).await else {
         return;
     };
@@ -116,16 +116,17 @@ async fn tick(
             return;
         }
         let root = PathBuf::from(&record.canonical_root);
-        if !root.is_dir() || crate::config::is_ambient_project_root(&root) {
+        if !root.is_dir() || tracedecay_project::config::is_ambient_project_root(&root) {
             continue;
         }
         // A poll loop has no right to turn an arbitrary project path into
         // configuration authority. Missing/pending daemon snapshot means no
         // poll and, critically, no destructive disabled-state teardown.
-        let Ok(cfg) =
-            crate::config::cached_runtime_configuration_for_project_id(&root, &record.project_id)
-                .map(|configuration| configuration.into_config().sync)
-        else {
+        let Ok(cfg) = tracedecay_project::config::cached_runtime_configuration_for_project_id(
+            &root,
+            &record.project_id,
+        )
+        .map(|configuration| configuration.config().sync.clone()) else {
             continue;
         };
         let interval = Duration::from_secs(cfg.effective_auto_track_pr_poll_secs());
@@ -156,7 +157,7 @@ async fn tick(
 async fn retained_project_graph(
     administration: &StoreAdministration,
     project_root: &Path,
-) -> Option<Arc<crate::project::TraceDecay>> {
+) -> Option<Arc<tracedecay_project::project::TraceDecay>> {
     let canonical = project_root
         .canonicalize()
         .unwrap_or_else(|_| project_root.to_path_buf());

@@ -27,8 +27,8 @@ use std::path::{Path, PathBuf};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, config_backup_path,
-    load_json_file, load_jsonc_file,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, load_json_file,
+    load_jsonc_file,
 };
 
 /// Name of GitHub Copilot's own CLI, which owns `~/.copilot/mcp-config.json`.
@@ -121,8 +121,8 @@ impl AgentIntegration for CopilotIntegration {
     ///
     /// `ContextMcp` is the CLI-driven half of this integration: the only file
     /// it mutates is Copilot's own `~/.copilot/mcp-config.json`, and the writer
-    /// is `copilot mcp`, not TraceDecay. Naming that file (and its staged
-    /// backup) here is what gives the component-set transaction rollback
+    /// is `copilot mcp`, not TraceDecay. Naming that file here is what gives
+    /// the component-set transaction rollback
     /// authority over the host command's effect; without it the observation
     /// recorded in `run_mcp_registry_step` would have nothing to restore.
     /// Any other component set keeps the default inventory, which is the
@@ -133,8 +133,7 @@ impl AgentIntegration for CopilotIntegration {
         home: &Path,
     ) -> Vec<PathBuf> {
         if components == [super::host_bundle::HostComponentV1::ContextMcp] {
-            let path = copilot_cli_mcp_config_path(home);
-            vec![path.clone(), config_backup_path(&path)]
+            vec![copilot_cli_mcp_config_path(home)]
         } else {
             self.host_registration_paths(home)
         }

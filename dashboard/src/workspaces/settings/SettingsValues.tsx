@@ -63,7 +63,7 @@ export function OriginMark({ origin }: { origin: OriginKind }) {
     <span
       aria-hidden
       className={cn(
-        'td-value flex size-4 shrink-0 items-center justify-center border text-3xs',
+        'td-value flex size-4 shrink-0 items-center justify-center border text-xs',
         origin === 'resolved'
           ? 'border-edge-subtle text-text-muted'
           : 'border-edge-strong text-text-secondary',
@@ -82,7 +82,7 @@ export function ValueCell({ row, query }: { row: ConfigRow; query: string }) {
       return (
         <span
           className={cn(
-            'td-value inline-flex items-center gap-1.5 border px-1.5 py-px text-2xs',
+            'td-value inline-flex items-center gap-1.5 border px-1.5 py-px text-sm',
             on ? 'border-edge-strong text-text-primary' : 'border-edge-subtle text-text-muted',
           )}
         >
@@ -93,29 +93,29 @@ export function ValueCell({ row, query }: { row: ConfigRow; query: string }) {
     }
     case 'number':
       return (
-        <span className="td-value text-2xs text-text-primary" data-cell="numeric">
+        <span className="td-value text-sm text-text-primary" data-cell="numeric">
           {typeof row.value === 'number' ? row.value.toLocaleString() : row.text}
         </span>
       );
     case 'null':
-      return <span className="td-value text-2xs text-text-muted">null</span>;
+      return <span className="td-value text-sm text-text-muted">null</span>;
     case 'path':
       return (
-        <span className="td-value block min-w-0 break-all text-2xs">
+        <span className="td-value block min-w-0 break-all text-sm">
           <PathText value={String(row.value)} query={query} />
         </span>
       );
     case 'list': {
       const items = Array.isArray(row.value) ? row.value : [];
       if (items.length === 0) {
-        return <span className="text-2xs text-text-muted">{row.text}</span>;
+        return <span className="text-body text-text-muted">{row.text}</span>;
       }
       return (
         <span className="flex flex-wrap gap-1">
           {items.map((item, index) => (
             <span
               key={`${String(item)}-${index}`}
-              className="td-value border border-edge-subtle bg-surface-2 px-1.5 py-px text-2xs text-text-secondary"
+              className="td-value border border-edge-subtle bg-surface-2 px-1.5 py-px text-sm text-text-secondary"
             >
               <Highlight text={String(item)} query={query} />
             </span>
@@ -133,7 +133,7 @@ export function ValueCell({ row, query }: { row: ConfigRow; query: string }) {
       return (
         <span
           className={cn(
-            'td-value block min-w-0 break-words text-2xs',
+            'td-value block min-w-0 break-words text-sm',
             row.value === null ? 'text-text-muted' : 'text-text-primary',
           )}
         >
@@ -206,7 +206,7 @@ export function ProvenanceChip({ kind }: { kind: RowProvenance }) {
     case 'unserved':
       return (
         <span
-          className="td-value inline-flex items-center gap-1.5 border border-dashed border-edge-strong px-1.5 py-px text-3xs text-text-muted"
+          className="td-value inline-flex items-center gap-1.5 border border-dashed border-edge-strong px-1.5 py-px text-xs text-text-muted"
           title={provenanceSentence(kind)}
         >
           unserved
@@ -215,7 +215,7 @@ export function ProvenanceChip({ kind }: { kind: RowProvenance }) {
     case 'explicit':
       return (
         <span
-          className="td-value inline-flex items-center gap-1.5 border border-edge-strong px-1.5 py-px text-3xs text-text-primary"
+          className="td-value inline-flex items-center gap-1.5 border border-edge-strong px-1.5 py-px text-xs text-text-primary"
           title={provenanceSentence(kind)}
         >
           <Lamp tone="bg-state-ready" />
@@ -225,7 +225,7 @@ export function ProvenanceChip({ kind }: { kind: RowProvenance }) {
     case 'default':
       return (
         <span
-          className="td-value inline-flex items-center gap-1.5 border border-edge-subtle px-1.5 py-px text-3xs text-text-muted"
+          className="td-value inline-flex items-center gap-1.5 border border-edge-subtle px-1.5 py-px text-xs text-text-muted"
           title={provenanceSentence(kind)}
         >
           <Lamp tone="bg-surface-3" />
@@ -235,7 +235,7 @@ export function ProvenanceChip({ kind }: { kind: RowProvenance }) {
     case 'edited':
       return (
         <span
-          className="td-value inline-flex items-center gap-1.5 border border-accent px-1.5 py-px text-3xs text-accent"
+          className="td-value inline-flex items-center gap-1.5 border border-accent px-1.5 py-px text-xs text-accent"
           title={provenanceSentence(kind)}
         >
           edited
@@ -258,8 +258,8 @@ export function ApplyRequirementText({ requirement }: { requirement: ApplyRequir
     case 'restart':
       return (
         <>
-          <span className="td-value text-2xs text-state-stale">daemon restart</span>
-          <span className="mt-0.5 block text-3xs leading-relaxed text-text-muted">
+          <span className="td-value text-sm text-state-stale">daemon restart</span>
+          <span className="mt-0.5 block text-sm leading-relaxed text-text-muted">
             {requirement.detail}
           </span>
         </>
@@ -267,8 +267,8 @@ export function ApplyRequirementText({ requirement }: { requirement: ApplyRequir
     case 'reported_on_apply':
       return (
         <>
-          <span className="td-value text-2xs text-text-secondary">reported on apply</span>
-          <span className="mt-0.5 block text-3xs leading-relaxed text-text-muted">
+          <span className="td-value text-sm text-text-secondary">reported on apply</span>
+          <span className="mt-0.5 block text-sm leading-relaxed text-text-muted">
             the write authority states resync or restart requirements in its response
           </span>
         </>
@@ -311,7 +311,7 @@ export function WriteCell({ capability }: { capability: WriteCapability }) {
   switch (capability.kind) {
     case 'writable':
       return (
-        <span className="inline-flex items-center gap-1 text-2xs text-text-secondary">
+        <span className="inline-flex items-center gap-1 text-body text-text-secondary">
           <PenLine aria-hidden size={11} />
           editable
         </span>
@@ -319,7 +319,7 @@ export function WriteCell({ capability }: { capability: WriteCapability }) {
     case 'locked':
       return (
         <span
-          className="inline-flex items-center gap-1 text-2xs text-state-locked"
+          className="inline-flex items-center gap-1 text-body text-state-locked"
           title={capability.reason}
         >
           <Lock aria-hidden size={11} />
@@ -328,7 +328,7 @@ export function WriteCell({ capability }: { capability: WriteCapability }) {
       );
     case 'no_write_path':
       return (
-        <span className="td-value text-2xs text-text-muted" title="no write path">
+        <span className="td-value text-sm text-text-muted" title="no write path">
           —<span className="sr-only">no write path</span>
         </span>
       );

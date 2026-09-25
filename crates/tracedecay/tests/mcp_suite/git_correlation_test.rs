@@ -10,8 +10,8 @@ use std::process::Command;
 use serde_json::{Value, json};
 
 use tracedecay::mcp::McpServer;
-use tracedecay::project::{TraceDecay, TraceDecayOpenOptions};
-use tracedecay::test_support::host_admission::{
+use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_project::test_support::host_admission::{
     HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1,
 };
 use tracedecay_runtime_core::storage::PrivateStoreIo;

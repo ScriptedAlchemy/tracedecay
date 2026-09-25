@@ -6,10 +6,9 @@ use std::path::{Path, PathBuf};
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
 use crate::admission::HostAdmission;
-use crate::host_ports::hermes_profile_pin::resolve as read_config_pinned_project_root;
 use crate::observation::ObservationCancellation;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
-use crate::runtime::shared::{TranscriptIngestStats, path_belongs_to_project};
+use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::source::run_blocking_transcript_section;
 
 use super::DEFAULT_HERMES_SWEEP_BYTES;
@@ -198,9 +197,7 @@ pub async fn ingest_homes_for_projects(
             run_blocking_transcript_section(|| {
                 destinations
                     .iter()
-                    .filter(|destination| {
-                        source_is_candidate_for_project(&source, destination.project_root)
-                    })
+                    .filter(|destination| project_is_real(destination.project_root))
                     .cloned()
                     .collect::<Vec<_>>()
             })
@@ -472,77 +469,10 @@ async fn ingest_user_homes_capped_with_admission(
     outcome
 }
 
-/// Strict one-time import for a legacy profile whose project pin was already
-/// resolved by the migration layer. Unlike the normal catch-up sweep, any
-/// open/query/write failure is returned so callers retain the pin and source.
-#[hotpath::measure(label = "sessions.hosts.hermes.ingest_legacy", future = true)]
-pub async fn ingest_legacy_pinned_profile(
-    admission: &dyn HostAdmission,
-    profile_dir: &Path,
-    project_root: &Path,
-    project_id: ProjectId,
-) -> Result<TranscriptIngestStats, String> {
-    let source = hotpath::measure_block!(
-        "sessions.hosts.hermes.prepare_legacy_profile_blocking",
-        run_blocking_transcript_section(|| {
-            let state_db = profile_dir.join("state.db");
-            if !state_db.is_file() {
-                return Ok::<Option<HermesProfileSource>, String>(None);
-            }
-            let legacy_project_pin =
-                read_config_pinned_project_root(&profile_dir.join("config.yaml"))
-                    .map(PathBuf::from)
-                    .ok_or_else(|| {
-                        format!(
-                            "legacy Hermes state store '{}' has no project pin",
-                            state_db.display()
-                        )
-                    })?;
-            Ok(Some(HermesProfileSource {
-                state_db,
-                legacy_project_pin: Some(legacy_project_pin),
-                profile: profile_dir
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .map(str::to_string),
-            }))
-        })
-    )?;
-    let Some(source) = source else {
-        return Ok(TranscriptIngestStats::default());
-    };
-    let scope = ObservationScopeV1::Project {
-        project_id: project_id.clone(),
-    };
-    let mut budget = new_sweep_budget(None);
-    let stats = try_ingest_state_db_bounded_with_admission(
-        &source,
-        project_root,
-        project_id,
-        admission,
-        &mut budget,
-        &ObservationCancellation::default(),
-    )
-    .await?;
-    if budget.deferred() {
-        return Err(format!(
-            "legacy Hermes state store '{}' exceeded the bounded import sweep",
-            source.state_db.display()
-        ));
-    }
-    drain_hermes_projections_with_admission(admission, &scope).await?;
-    Ok(stats)
-}
-
-/// Locates the `state.db` of every profile that maps to `project_root`.
-///
-/// A legacy project pin may associate an entire profile. Otherwise the
-/// profile is only a bounded candidate source and each session must carry a
-/// matching code-project cwd.
-///
+/// A profile `state.db` is only a bounded candidate source: each session must
+/// carry a matching code-project cwd.
 pub(super) struct HermesProfileSource {
     pub state_db: PathBuf,
-    pub legacy_project_pin: Option<PathBuf>,
     pub profile: Option<String>,
 }
 
@@ -563,14 +493,7 @@ fn all_profile_sources(hermes_homes: &[PathBuf]) -> Vec<HermesProfileSource> {
         for (profile_dir, profile) in profiles {
             let state_db = profile_dir.join("state.db");
             if state_db.is_file() && seen.insert(state_db.clone()) {
-                out.push(HermesProfileSource {
-                    state_db,
-                    legacy_project_pin: read_config_pinned_project_root(
-                        &profile_dir.join("config.yaml"),
-                    )
-                    .map(PathBuf::from),
-                    profile,
-                });
+                out.push(HermesProfileSource { state_db, profile });
             }
         }
     }
@@ -580,9 +503,9 @@ fn all_profile_sources(hermes_homes: &[PathBuf]) -> Vec<HermesProfileSource> {
 fn candidate_state_dbs(hermes_homes: &[PathBuf], project_root: &Path) -> Vec<HermesProfileSource> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
-    let project_is_real = tracedecay_runtime_core::worktree::git_worktree_root(project_root)
-        .is_some()
-        || tracedecay_runtime_core::config::has_project_database(project_root);
+    if !project_is_real(project_root) {
+        return out;
+    }
     for home in hermes_homes {
         let mut candidates: Vec<(PathBuf, Option<String>)> = vec![(home.clone(), None)];
         if let Ok(entries) = std::fs::read_dir(home.join("profiles")) {
@@ -602,40 +525,17 @@ fn candidate_state_dbs(hermes_homes: &[PathBuf], project_root: &Path) -> Vec<Her
             }
         }
         for (profile_dir, profile) in candidates {
-            let legacy_project_pin =
-                read_config_pinned_project_root(&profile_dir.join("config.yaml"))
-                    .map(PathBuf::from);
-            if legacy_project_pin
-                .as_deref()
-                .is_some_and(|pin| !path_belongs_to_project(pin, project_root))
-                || (legacy_project_pin.is_none() && !project_is_real)
-            {
-                continue;
-            }
             let state_db = profile_dir.join("state.db");
             if state_db.is_file() && seen.insert(state_db.clone()) {
-                out.push(HermesProfileSource {
-                    state_db,
-                    legacy_project_pin,
-                    profile,
-                });
+                out.push(HermesProfileSource { state_db, profile });
             }
         }
     }
     out
 }
 
-fn source_is_candidate_for_project(source: &HermesProfileSource, project_root: &Path) -> bool {
-    if source
-        .legacy_project_pin
-        .as_deref()
-        .is_some_and(|pin| !path_belongs_to_project(pin, project_root))
-    {
-        return false;
-    }
-    source.legacy_project_pin.is_some()
-        || tracedecay_runtime_core::worktree::git_worktree_root(project_root).is_some()
-        || tracedecay_runtime_core::config::has_project_database(project_root)
+fn project_is_real(project_root: &Path) -> bool {
+    tracedecay_runtime_core::worktree::git_worktree_root(project_root).is_some()
 }
 
 #[cfg(test)]

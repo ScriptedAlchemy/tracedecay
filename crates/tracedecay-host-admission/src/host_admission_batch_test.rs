@@ -16,12 +16,12 @@ use tracedecay_domain::{
     SensitivityV1, SessionId, UtcMicros,
 };
 use tracedecay_global_db::tests::harness::HostAdmissionTestRuntimeV1;
-use tracedecay_privacy::{ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1};
+use tracedecay_privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_sessions::admission::{HostAdmission, HostAdmissionScope};
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationWrite,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
 
 use super::*;
@@ -116,7 +116,7 @@ fn sequential_capture_requests(
                     }],
                     CanonicalObservationEvidenceV1::new(ordering_domain, range),
                 )
-                .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+                .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
             },
         )
         .unwrap();
@@ -314,7 +314,7 @@ async fn canonical_message_projection_succeeds_while_git_graph_is_unavailable() 
                     )
                     .with_native_timestamp(1_785_000_000),
                 )
-                .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+                .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
             }
         },
     )
@@ -487,7 +487,7 @@ fn anchored_write(
     let authorization =
         build_observation_resolution_authorization_v1(write.observation(), "host-admission-batch")
             .unwrap();
-    let anchor = build_observation_retrieval_anchor_v2(
+    let anchor = build_observation_retrieval_anchor(
         write.observation(),
         projection_generation.clone(),
         UtcMicros(1),

@@ -5,7 +5,7 @@ use tracedecay_domain::{
     SessionId, SessionSummaryRecordV1, TemporalAssertionRecordV1, TemporalCoverageCountsV1,
     TemporalModeV1,
 };
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 use super::common::{
     SessionSnapshotFreezePermit, SessionStoreError, SessionStoreResult,

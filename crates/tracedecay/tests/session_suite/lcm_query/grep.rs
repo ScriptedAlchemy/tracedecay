@@ -437,3 +437,154 @@ async fn grep_filters_raw_hits_by_role_source_and_time_and_sorts() {
     assert_eq!(hits[0].message_id.as_deref(), Some("old-cli-assistant"));
     assert_eq!(hits[0].kind, "raw_message");
 }
+
+/// A message body is stored in exactly one row. That one row serves session
+/// search, LCM grep, and LCM expand, and the credential redacted at ingest
+/// reaches none of them.
+#[tokio::test]
+async fn one_stored_body_serves_search_grep_and_expand_redacted() {
+    let tmp = TempDir::new().unwrap();
+    let db = registered_lcm_runtime(&tmp).await;
+    let secret = ["sk-proj-single-copy-", "1234567890abcdef"].concat();
+    let body = format!("orchard ledger rotation uses {secret} for the nightly job");
+    let store_ids = insert_raw_messages(&db, "cursor", "session-1", &[body.clone()]).await;
+
+    let snapshot_path = tmp.path().join("single-copy-snapshot.db");
+    db.snapshot_session_database_for_test(HostAdmissionScope::Profile, &snapshot_path)
+        .await
+        .unwrap();
+    let connection = rusqlite::Connection::open(&snapshot_path).unwrap();
+    let tables: Vec<(String, Vec<String>)> = connection
+        .prepare(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'table' AND sql NOT LIKE 'CREATE VIRTUAL TABLE%'
+               AND name NOT LIKE '%\\_fts\\_%' ESCAPE '\\'",
+        )
+        .unwrap()
+        .query_map((), |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .map(|table| {
+            let columns = connection
+                .prepare(&format!("SELECT name FROM pragma_table_xinfo('{table}')"))
+                .unwrap()
+                .query_map((), |row| row.get::<_, String>(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            (table, columns)
+        })
+        .collect();
+    let mut stored_copies = Vec::new();
+    for (table, columns) in &tables {
+        for column in columns {
+            // Generated retrieval columns derive from `content`; they are not
+            // stored copies.
+            if table == "lcm_raw_messages"
+                && matches!(column.as_str(), "snippet_text" | "index_text")
+            {
+                continue;
+            }
+            let holding: i64 = connection
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM \"{table}\"
+                         WHERE instr(CAST(\"{column}\" AS TEXT), 'orchard ledger rotation') > 0"
+                    ),
+                    (),
+                    |row| row.get(0),
+                )
+                .unwrap();
+            if holding > 0 {
+                stored_copies.push(format!("{table}.{column}"));
+            }
+        }
+    }
+    assert_eq!(stored_copies, vec!["lcm_raw_messages.content".to_owned()]);
+    let secret_holders = tables
+        .iter()
+        .flat_map(|(table, columns)| columns.iter().map(move |column| (table, column)))
+        .filter(|(table, column)| {
+            connection
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM \"{table}\"
+                         WHERE instr(CAST(\"{column}\" AS TEXT), ?1) > 0"
+                    ),
+                    [&secret],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+                > 0
+        })
+        .count();
+    assert_eq!(secret_holders, 0, "the credential must be redacted at rest");
+    drop(connection);
+
+    let searched = db
+        .search_session_messages_for_test(
+            HostAdmissionScope::Profile,
+            "cursor",
+            None,
+            "orchard ledger",
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(searched.len(), 1);
+    assert!(searched[0].message.text.contains("orchard ledger rotation"));
+    assert!(!searched[0].message.text.contains(&secret));
+
+    let grep = |query: &str| LcmGrepRequest {
+        provider: "cursor".into(),
+        query: query.into(),
+        scope: LcmScope::Session,
+        session_id: Some("session-1".into()),
+        include_summaries: false,
+        limit: 10,
+        sort: LcmGrepSort::Recency,
+        source: None,
+        role: None,
+        start_time: None,
+        end_time: None,
+        git_filter: Default::default(),
+    };
+    let hits = db
+        .lcm_grep_for_test(grep("orchard ledger"))
+        .await
+        .unwrap()
+        .hits;
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].store_id, Some(store_ids[0]));
+    assert!(!hits[0].snippet.contains(&secret));
+    // LCM grep matches message bodies only, never the role column the shared
+    // index also carries for session search.
+    assert!(
+        db.lcm_grep_for_test(grep("assistant"))
+            .await
+            .unwrap()
+            .hits
+            .is_empty()
+    );
+
+    let expanded = db
+        .lcm_expand_for_test(LcmExpandRequest {
+            provider: "cursor".into(),
+            session_id: "session-1".into(),
+            target: LcmExpandTarget::RawMessage {
+                store_id: store_ids[0],
+            },
+            content_slice: None,
+            source_offset: 0,
+            source_limit: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        expanded
+            .content
+            .starts_with("orchard ledger rotation uses ")
+    );
+    assert!(expanded.content.ends_with(" for the nightly job"));
+    assert!(!expanded.content.contains(&secret));
+}

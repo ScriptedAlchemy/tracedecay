@@ -321,6 +321,9 @@ pub(crate) struct AgentTaskRunContext<'a> {
     /// the scheduler activity signal.
     sessions_db: RegisteredGlobalDbLeaseV1,
     config: &'a AutomationConfig,
+    /// The executable the run's backend spawns (`AgentTaskBackend::executable`),
+    /// stamped into every terminal record's backend identity.
+    executable: Option<PathBuf>,
     task: AgentTaskKind,
     started_at: String,
     ledger_publication: AutomationRunLedgerPublication,
@@ -339,6 +342,7 @@ impl<'a> AgentTaskRunContext<'a> {
         run_id_prefix: &'static str,
         trigger: AutomationTrigger,
         config: &'a AutomationConfig,
+        executable: Option<&Path>,
         task: AgentTaskKind,
     ) -> Self {
         Self {
@@ -347,6 +351,7 @@ impl<'a> AgentTaskRunContext<'a> {
             dashboard_root,
             sessions_db,
             config,
+            executable: executable.map(Path::to_path_buf),
             task,
             started_at: current_timestamp().to_string(),
             ledger_publication: AutomationRunLedgerPublication::Immediate,
@@ -377,9 +382,14 @@ impl<'a> AgentTaskRunContext<'a> {
         &self.started_at
     }
 
+    pub(crate) fn executable(&self) -> Option<&Path> {
+        self.executable.as_deref()
+    }
+
     pub(crate) async fn gate(&mut self) -> Result<SchedulerGate> {
         let (gate, summary) = task_run_gate_with_lock_retention(
             self.config,
+            self.executable(),
             &self.dashboard_root,
             self.sessions_db.as_ref(),
             self.task,
@@ -458,6 +468,7 @@ impl<'a> AgentTaskRunContext<'a> {
             &self.run_id,
             self.trigger,
             self.config,
+            self.executable(),
             self.task,
             self.started_at(),
             input_hash,
@@ -486,6 +497,7 @@ pub(crate) fn task_skip_reason(
 #[hotpath::measure(label = "automation.scheduler.gate", future = true)]
 async fn scheduler_gate_with_lock_retention(
     config: &AutomationConfig,
+    executable: Option<&Path>,
     dashboard_root: &Path,
     sessions_db: &RegisteredGlobalDb,
     task: AgentTaskKind,
@@ -528,13 +540,21 @@ async fn scheduler_gate_with_lock_retention(
     let decision = if trigger == AutomationTrigger::HostReceipt {
         super::scheduler::host_receipt_decision(
             config,
+            executable,
             task,
             summary.records(),
             activity,
             decision_now_secs,
         )
     } else {
-        schedule_decision(config, task, summary.records(), activity, decision_now_secs)
+        schedule_decision(
+            config,
+            executable,
+            task,
+            summary.records(),
+            activity,
+            decision_now_secs,
+        )
     };
     if let Some(reason) = decision.skip_reason() {
         super::scheduler_metrics::observe_skip_reason(reason);
@@ -547,17 +567,27 @@ async fn scheduler_gate_with_lock_retention(
 
 pub(crate) async fn task_run_gate(
     config: &AutomationConfig,
+    executable: Option<&Path>,
     dashboard_root: &Path,
     sessions_db: &RegisteredGlobalDb,
     task: AgentTaskKind,
     trigger: AutomationTrigger,
 ) -> Result<(SchedulerGate, Option<AutomationRunLedgerTaskSummary>)> {
-    task_run_gate_with_lock_retention(config, dashboard_root, sessions_db, task, trigger, None)
-        .await
+    task_run_gate_with_lock_retention(
+        config,
+        executable,
+        dashboard_root,
+        sessions_db,
+        task,
+        trigger,
+        None,
+    )
+    .await
 }
 
 pub(crate) async fn task_run_gate_for_retained_settlement(
     config: &AutomationConfig,
+    executable: Option<&Path>,
     dashboard_root: &Path,
     sessions_db: &RegisteredGlobalDb,
     task: AgentTaskKind,
@@ -567,6 +597,7 @@ pub(crate) async fn task_run_gate_for_retained_settlement(
     let retention = settlement_guard.retention();
     task_run_gate_with_lock_retention(
         config,
+        executable,
         dashboard_root,
         sessions_db,
         task,
@@ -578,6 +609,7 @@ pub(crate) async fn task_run_gate_for_retained_settlement(
 
 async fn task_run_gate_with_lock_retention(
     config: &AutomationConfig,
+    executable: Option<&Path>,
     dashboard_root: &Path,
     sessions_db: &RegisteredGlobalDb,
     task: AgentTaskKind,
@@ -586,6 +618,7 @@ async fn task_run_gate_with_lock_retention(
 ) -> Result<(SchedulerGate, Option<AutomationRunLedgerTaskSummary>)> {
     let (gate, records) = scheduler_gate_with_lock_retention(
         config,
+        executable,
         dashboard_root,
         sessions_db,
         task,
@@ -789,6 +822,7 @@ pub(crate) struct AgentRunFinalizer<'a> {
     run_id: &'a str,
     trigger: AutomationTrigger,
     config: &'a AutomationConfig,
+    executable: Option<&'a Path>,
     task: AgentTaskKind,
     started_at: &'a str,
     input_hash: Option<String>,
@@ -807,6 +841,7 @@ impl<'a> AgentRunFinalizer<'a> {
         run_id: &'a str,
         trigger: AutomationTrigger,
         config: &'a AutomationConfig,
+        executable: Option<&'a Path>,
         task: AgentTaskKind,
         started_at: &'a str,
         input_hash: Option<String>,
@@ -816,6 +851,7 @@ impl<'a> AgentRunFinalizer<'a> {
             run_id,
             trigger,
             config,
+            executable,
             task,
             started_at,
             input_hash,
@@ -829,6 +865,7 @@ impl<'a> AgentRunFinalizer<'a> {
         run_id: &'a str,
         trigger: AutomationTrigger,
         config: &'a AutomationConfig,
+        executable: Option<&'a Path>,
         task: AgentTaskKind,
         started_at: &'a str,
         input_hash: Option<String>,
@@ -840,6 +877,7 @@ impl<'a> AgentRunFinalizer<'a> {
             run_id,
             trigger,
             config,
+            executable,
             task,
             started_at,
             input_hash,
@@ -1175,7 +1213,11 @@ impl<'a> AgentRunFinalizer<'a> {
             // configuration it failed under changes. A digest that cannot be
             // computed is left absent rather than guessed: an unidentified
             // failure must not suppress anything.
-            backend_identity: super::backend_identity::backend_identity(self.config).ok(),
+            backend_identity: super::backend_identity::backend_identity(
+                self.config,
+                self.executable,
+            )
+            .ok(),
             host_mode: Some(self.config.host_mode.as_str().to_string()),
             prompt_version: Some(prompt_version(self.task).to_string()),
             response_schema: Some(contract.response_schema),
@@ -1193,10 +1235,9 @@ impl<'a> AgentRunFinalizer<'a> {
             accepted_count: outcome.accepted_count,
             rejected_count: outcome.rejected_count,
             skipped_count: usize::from(outcome.status == AutomationRunStatus::Skipped),
-            fallback_status: (outcome.status == AutomationRunStatus::Skipped)
-                .then(|| outcome.error.clone())
-                .flatten(),
+            fallback_status: None,
             error: outcome.error,
+            session_evidence_budget_stage: None,
             error_classification,
             error_retryable: error_classification
                 .map(super::backend::AgentTaskFailureClass::is_retryable),
@@ -1295,6 +1336,7 @@ mod recorded_failure_tests {
             "prior_scheduler_skip",
             AutomationTrigger::Scheduler,
             &config,
+            None,
             AgentTaskKind::SessionReflector,
             "0",
             None,

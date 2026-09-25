@@ -20,9 +20,8 @@ use tracedecay_store::FactReadControl;
 
 use super::{
     CommitRelationFilter, CommitSessionRecord, CorrelationIndexHealth, CorrelationIndexPresence,
-    GIT_EVIDENCE_LEGACY_PROJECTOR_REVISION_V1, GIT_EVIDENCE_PROJECTOR_REVISION,
-    GitCorrelationError, GitEvidenceProjectionV1, GitRefFilter, GitScopeFilter,
-    SessionGitCorrelationHit, SessionGitSpan, SessionsForQuery, SpanObservation,
+    GIT_EVIDENCE_PROJECTOR_REVISION, GitCorrelationError, GitEvidenceProjectionV1, GitRefFilter,
+    GitScopeFilter, SessionGitCorrelationHit, SessionGitSpan, SessionsForQuery, SpanObservation,
     canonical_provider_map, commit_hits, commit_identities_with_producer_fallback,
     commit_record_matches_query, commit_record_order, digest_bytes, scope_session_ids,
     sessions_for_limit, span_hits, span_matches_query,
@@ -200,62 +199,6 @@ pub fn build_git_evidence_manifest_checked(
     .map_err(Into::into)
 }
 
-/// The exact pre-index (`v1`) generation shape for `projection`: no projector
-/// revision marker, no counts, no hubs or index relations, and the legacy
-/// generation identity. Lets dependent crates exercise their legacy-head
-/// handling against the shape a live store published before this projector.
-#[cfg(any(test, feature = "test-helpers"))]
-pub fn legacy_git_evidence_manifest_for_test(
-    identity: GraphProjectionIdentity,
-    projection: &GitEvidenceProjectionV1,
-) -> Result<GraphGenerationManifest, GitCorrelationError> {
-    let legacy_revision =
-        GraphProjectorRevision::try_from(GIT_EVIDENCE_LEGACY_PROJECTOR_REVISION_V1.to_owned())?;
-    let generation = git_evidence_generation_id(projection, &legacy_revision)?;
-    let providers = canonical_provider_map(projection.spans(), projection.commit_sessions())?;
-    let mut entities = vec![GraphEntity::new(
-        projection_entity_id()?,
-        BTreeSet::new(),
-        BTreeMap::from([(
-            GraphPropertyName::new(PROJECTION_RECORD_PROPERTY)?,
-            GraphProperty::String(projection.source_watermark().to_owned()),
-        )]),
-    )?];
-    let mut relations = Vec::new();
-    for (session_id, provider) in &providers {
-        entities.push(GraphEntity::new(
-            session_entity_id(session_id)?,
-            BTreeSet::from([GraphLabel::new(SESSION_LABEL)?]),
-            BTreeMap::from([(
-                GraphPropertyName::new(PROVIDER_PROPERTY)?,
-                GraphProperty::String(provider.to_owned()),
-            )]),
-        )?);
-    }
-    for span in projection.spans() {
-        entities.push(span_entity(span)?);
-        relations.push(session_span_relation(&identity, span)?);
-    }
-    let mut commits = BTreeSet::new();
-    for record in projection.commit_sessions() {
-        if commits.insert(record.commit_sha.clone()) {
-            entities.push(commit_entity(&record.commit_sha)?);
-        }
-        relations.push(session_commit_relation(&identity, record)?);
-    }
-    GraphGenerationManifest::new_checked(
-        identity,
-        generation,
-        SourceGeneration::new(projection.source_watermark())?,
-        GraphWatermark::new(projection.source_watermark())?,
-        Vec::new(),
-        entities,
-        relations,
-        &|| Ok(()),
-    )
-    .map_err(Into::into)
-}
-
 pub trait GitCorrelationWriteTxn: QueryExecutor + Executor + Sized + Send {
     fn commit(self) -> impl Future<Output = Result<(), GitCorrelationError>> + Send;
 }
@@ -341,37 +284,23 @@ pub trait GitCorrelationSessionStore: Sync {
     fn graph_runtime(&self) -> Result<&dyn VerifiedGraphRuntimePortV1, GitCorrelationError>;
 }
 
-/// Which projector revision published a verified Git-evidence head.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GitEvidenceProjectorRevision {
-    /// [`GIT_EVIDENCE_PROJECTOR_REVISION`]: carries the bounded query index.
-    Current,
-    /// [`GIT_EVIDENCE_LEGACY_PROJECTOR_REVISION_V1`]: rows only, no index.
-    LegacyV1,
+/// Admits only heads published by the current indexed projector. A head
+/// without a recorded revision, or with any other revision, is a projector
+/// this build cannot serve.
+fn require_current_projector_revision(recorded: Option<&str>) -> Result<(), GitCorrelationError> {
+    match recorded {
+        Some(GIT_EVIDENCE_PROJECTOR_REVISION) => Ok(()),
+        Some(other) => Err(GitCorrelationError::Corrupt(format!(
+            "verified Git evidence records unknown projector revision `{other}`"
+        ))),
+        None => Err(GitCorrelationError::Corrupt(
+            "verified Git evidence records no projector revision".to_owned(),
+        )),
+    }
 }
 
-impl GitEvidenceProjectorRevision {
-    /// Resolves the revision a head declares. Heads published before the
-    /// projector recorded its revision are the legacy shape; any recorded
-    /// revision other than the current one is a projector this build cannot
-    /// serve.
-    fn from_recorded(recorded: Option<&str>) -> Result<Self, GitCorrelationError> {
-        match recorded {
-            None => Ok(Self::LegacyV1),
-            Some(GIT_EVIDENCE_PROJECTOR_REVISION) => Ok(Self::Current),
-            Some(other) => Err(GitCorrelationError::Corrupt(format!(
-                "verified Git evidence records unknown projector revision `{other}`"
-            ))),
-        }
-    }
-
-    fn graph_revision(self) -> Result<GraphProjectorRevision, GitCorrelationError> {
-        let revision = match self {
-            Self::Current => GIT_EVIDENCE_PROJECTOR_REVISION,
-            Self::LegacyV1 => GIT_EVIDENCE_LEGACY_PROJECTOR_REVISION_V1,
-        };
-        GraphProjectorRevision::try_from(revision.to_owned()).map_err(Into::into)
-    }
+fn current_projector_revision() -> Result<GraphProjectorRevision, GitCorrelationError> {
+    GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION.to_owned()).map_err(Into::into)
 }
 
 /// Complete typed projection recovered from one verified graph generation.
@@ -382,7 +311,6 @@ impl GitEvidenceProjectorRevision {
 pub struct GitEvidenceProjectionStore {
     snapshot: VerifiedGraphSnapshot,
     projection: GitEvidenceProjectionV1,
-    projector_revision: GitEvidenceProjectorRevision,
 }
 
 impl std::fmt::Debug for GitEvidenceProjectionStore {
@@ -391,7 +319,6 @@ impl std::fmt::Debug for GitEvidenceProjectionStore {
             .debug_struct("GitEvidenceProjectionStore")
             .field("projection", self.snapshot.projection())
             .field("generation", self.snapshot.generation())
-            .field("projector_revision", &self.projector_revision)
             .field("span_count", &self.projection.spans().len())
             .field("commit_count", &self.projection.commit_sessions().len())
             .finish_non_exhaustive()
@@ -414,7 +341,6 @@ impl GitEvidenceProjectionStore {
         let mut entities_done = false;
         let mut relations_done = false;
         let mut source_watermark = None;
-        let mut projector_revision = None;
         let mut spans = Vec::new();
         let mut commit_sessions = Vec::new();
 
@@ -446,14 +372,12 @@ impl GitEvidenceProjectionStore {
                                 .to_owned(),
                         ));
                     }
-                    projector_revision = GitEvidenceProjectorRevision::from_recorded(match entity
-                        .properties
-                        .get(&revision_property)
-                    {
-                        Some(GraphProperty::String(recorded)) => Some(recorded.as_str()),
-                        _ => None,
-                    })
-                    .map(Some)?;
+                    require_current_projector_revision(
+                        match entity.properties.get(&revision_property) {
+                            Some(GraphProperty::String(recorded)) => Some(recorded.as_str()),
+                            _ => None,
+                        },
+                    )?;
                 }
                 if let Some(GraphProperty::Bytes(bytes)) = entity.properties.get(&span_property) {
                     spans.push(serde_json::from_slice(bytes)?);
@@ -470,23 +394,16 @@ impl GitEvidenceProjectionStore {
             entities_done = after_entity.is_none();
             relations_done = after_relation.is_none();
         }
-        let (Some(source_watermark), Some(projector_revision)) =
-            (source_watermark, projector_revision)
-        else {
+        let Some(source_watermark) = source_watermark else {
             return Err(GitCorrelationError::Corrupt(
                 "verified Git evidence is missing projection metadata".to_owned(),
             ));
         };
         let projection = GitEvidenceProjectionV1::new(source_watermark, spans, commit_sessions)?;
-        require_git_evidence_generation(
-            &snapshot,
-            &projection,
-            &projector_revision.graph_revision()?,
-        )?;
+        require_git_evidence_generation(&snapshot, &projection, &current_projector_revision()?)?;
         Ok(Self {
             snapshot,
             projection,
-            projector_revision,
         })
     }
 
@@ -496,10 +413,6 @@ impl GitEvidenceProjectionStore {
 
     pub fn projection(&self) -> &GitEvidenceProjectionV1 {
         &self.projection
-    }
-
-    pub fn projector_revision(&self) -> GitEvidenceProjectorRevision {
-        self.projector_revision
     }
 
     pub fn sessions_for(&self, query: &SessionsForQuery) -> Vec<SessionGitCorrelationHit> {
@@ -569,7 +482,6 @@ pub fn publish_git_evidence_projection(
     Ok(GitEvidenceProjectionStore {
         snapshot,
         projection: projection.clone(),
-        projector_revision: GitEvidenceProjectorRevision::Current,
     })
 }
 
@@ -601,12 +513,6 @@ pub fn recover_git_evidence_projection(
 pub enum GitEvidenceGraphHead {
     /// No verified head has ever been published: the typed empty start.
     Unpublished,
-    /// The head was published before the projector carried a query index. Its
-    /// rows are recoverable in full, but no bounded read can be served until
-    /// the next publication re-projects it.
-    Legacy {
-        generation: GraphGenerationId,
-    },
     Indexed(GitEvidenceGraphView),
 }
 
@@ -668,15 +574,10 @@ pub fn open_git_evidence_graph_view(
                 "verified Git evidence is missing projection metadata".to_owned(),
             )
         })?;
-    let revision = GitEvidenceProjectorRevision::from_recorded(string_property(
+    require_current_projector_revision(string_property(
         &metadata.properties,
         PROJECTOR_REVISION_PROPERTY,
     )?)?;
-    if revision == GitEvidenceProjectorRevision::LegacyV1 {
-        return Ok(GitEvidenceGraphHead::Legacy {
-            generation: snapshot.generation().clone(),
-        });
-    }
     let source_watermark = required_string_property(
         &metadata.properties,
         PROJECTION_RECORD_PROPERTY,

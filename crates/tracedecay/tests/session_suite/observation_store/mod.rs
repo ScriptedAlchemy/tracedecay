@@ -5,23 +5,23 @@ use std::path::Path;
 
 use serde_json::json;
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
-    AnchorDurabilityClass, AnchorSourceGenerationV2, CanonicalMessageRoleV1,
+    AnchorDurabilityClass, AnchorSourceGeneration, CanonicalMessageRoleV1,
     CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1, CanonicalObservationFactV1,
     CanonicalObservationRelationsV1, CommitId, ComponentVersion, CoverageReportV1,
-    DurableClaudeObservationV1, EvidenceAvailabilityV1, EvidenceClass,
-    GenerationBoundRepositoryProvenanceV1, NativeAliasV2, ObservationId,
+    DurableObservationV1, EvidenceAvailabilityV1, EvidenceClass,
+    GenerationBoundRepositoryProvenanceV1, NativeAlias, ObservationId,
     ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
     ObservationSourceRangeV1, PayloadAccessState, PayloadReferenceV1,
     PrivacyDomainBoundLocatorDigest, ProjectionGenerationId, ProviderId, RefId,
     RepositoryDirtyStateV1, RepositoryEvidenceV1, RepositoryId, RepositoryProvenanceV1,
-    RepositoryRemoteIdentityV1, RetentionClass, RetrievalAnchorRecordV2,
-    RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, SanitizationReceiptId,
-    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionId, TreeId, UtcMicros, VectorWatermark, WorktreeId,
+    RepositoryRemoteIdentityV1, RetentionClass, RetrievalAnchorRecord, RetrievalAnchorRecordParts,
+    RetrievalAnchorTarget, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+    SanitizerDispositionV1, SensitivityV1, SessionId, TreeId, UtcMicros, VectorWatermark,
+    WorktreeId,
 };
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, NonDurableFrameReason, ObservationCoverageV1, ObservationCursorAdvance,
@@ -30,8 +30,10 @@ use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStatus,
     ObservationReplayRequest, ObservationStore, ObservationStoreError, ObservationWrite,
     SESSION_MESSAGE_PROJECTOR_VERSION, build_observation_resolution_authorization_v1,
-    build_observation_retrieval_anchor_v2,
+    build_observation_retrieval_anchor,
 };
+
+use crate::claude_records;
 
 const GENERATION: u64 = 7;
 
@@ -54,16 +56,17 @@ fn cursor(byte_offset: u64) -> ObservationSourceCursorV1 {
 }
 
 fn cursor_in_generation(generation: u64, byte_offset: u64) -> ObservationSourceCursorV1 {
-    ObservationSourceCursorV1::new(
+    ObservationSourceCursorV1::for_ordering(
         source(),
         scope(),
         ObservationSourceGenerationV1::new(generation).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
         byte_offset,
     )
     .unwrap()
 }
 
-fn observation(start: u64, end: u64, receipt_id: &str, body: &str) -> DurableClaudeObservationV1 {
+fn observation(start: u64, end: u64, receipt_id: &str, body: &str) -> DurableObservationV1 {
     observation_in_generation(GENERATION, start, end, receipt_id, body)
 }
 
@@ -73,7 +76,7 @@ fn observation_in_generation(
     end: u64,
     receipt_id: &str,
     body: &str,
-) -> DurableClaudeObservationV1 {
+) -> DurableObservationV1 {
     observation_in_scope(generation, start, end, receipt_id, body, scope())
 }
 
@@ -84,11 +87,13 @@ fn observation_in_scope(
     receipt_id: &str,
     body: &str,
     scope: ObservationScopeV1,
-) -> DurableClaudeObservationV1 {
-    let payload = json!({
-        "kind": "assistant_message",
-        "body": body,
-    });
+) -> DurableObservationV1 {
+    let payload = claude_records::canonical_envelope(
+        &claude_records::assistant_record(body),
+        source().session_id().as_str(),
+        start,
+        end,
+    );
     let payload_reference = PayloadReferenceV1::for_payload(&payload).unwrap();
     let receipt = SanitizationReceiptV1::new(
         SanitizationReceiptRefV1::new(
@@ -109,7 +114,7 @@ fn observation_in_scope(
     )
     .unwrap();
 
-    DurableClaudeObservationV1::new(
+    DurableObservationV1::new(
         identity,
         receipt,
         RetentionClass::new("retention.test").unwrap(),
@@ -119,13 +124,14 @@ fn observation_in_scope(
 }
 
 fn write(
-    observation: DurableClaudeObservationV1,
+    observation: DurableObservationV1,
     expected_cursor: Option<ObservationSourceCursorV1>,
 ) -> AnchoredObservationWrite {
-    let next_cursor = ObservationSourceCursorV1::new(
+    let next_cursor = ObservationSourceCursorV1::for_ordering(
         observation.source().clone(),
         observation.scope().clone(),
         observation.identity().generation(),
+        ObservationOrderingDomainV1::FileBytes,
         observation.identity().position().end(),
     )
     .unwrap();
@@ -154,7 +160,7 @@ fn anchored_write_at_with_projection_generation(
         "observation-store-test.v1",
     )
     .unwrap();
-    let retrieval_anchor = build_observation_retrieval_anchor_v2(
+    let retrieval_anchor = build_observation_retrieval_anchor(
         write.observation(),
         projection_generation.clone(),
         ingested_at,
@@ -176,7 +182,7 @@ fn known_repository_provenance_write(write: ObservationWrite) -> AnchoredObserva
         "observation-store-provenance-test.v1",
     )
     .unwrap();
-    let observation_anchor = build_observation_retrieval_anchor_v2(
+    let observation_anchor = build_observation_retrieval_anchor(
         &observation,
         projection_generation.clone(),
         UtcMicros(7),
@@ -215,8 +221,8 @@ fn known_repository_provenance_write(write: ObservationWrite) -> AnchoredObserva
         Some(observation.observation_id().clone()),
     )
     .unwrap();
-    let repository_anchor = RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
-        target: RetrievalAnchorTargetV2::RepositoryCapture {
+    let repository_anchor = RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
+        target: RetrievalAnchorTarget::RepositoryCapture {
             repository_id,
             capture_id: provenance.capture_id().clone(),
             receipt: observation.receipt().receipt().clone(),
@@ -226,7 +232,7 @@ fn known_repository_provenance_write(write: ObservationWrite) -> AnchoredObserva
         occurred_at: None,
         ingested_at: UtcMicros(7),
         evidence_class: EvidenceClass::Observed,
-        source_generation: AnchorSourceGenerationV2::RepositoryCapture(
+        source_generation: AnchorSourceGeneration::RepositoryCapture(
             provenance.capture_id().clone(),
         ),
         projection_generation: projection_generation.clone(),
@@ -250,10 +256,10 @@ fn known_repository_provenance_write(write: ObservationWrite) -> AnchoredObserva
 }
 
 fn anchor_with_aliases(
-    anchor: &RetrievalAnchorRecordV2,
-    aliases: Vec<NativeAliasV2>,
-) -> RetrievalAnchorRecordV2 {
-    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+    anchor: &RetrievalAnchorRecord,
+    aliases: Vec<NativeAlias>,
+) -> RetrievalAnchorRecord {
+    RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
         target: anchor.target().clone(),
         owner: anchor.owner().clone(),
         aliases,
@@ -322,7 +328,7 @@ fn native_observation(
     receipt_id: &str,
     native_record_id: &str,
     body: &str,
-) -> DurableClaudeObservationV1 {
+) -> DurableObservationV1 {
     provider_observation(ProviderObservationFixture {
         provider: "hermes",
         session_id: "session.observation-store-native",
@@ -346,7 +352,7 @@ struct ProviderObservationFixture<'a> {
     body: &'a str,
 }
 
-fn provider_observation(fixture: ProviderObservationFixture<'_>) -> DurableClaudeObservationV1 {
+fn provider_observation(fixture: ProviderObservationFixture<'_>) -> DurableObservationV1 {
     let ProviderObservationFixture {
         provider,
         session_id,
@@ -383,7 +389,7 @@ fn provider_observation(fixture: ProviderObservationFixture<'_>) -> DurableClaud
     )
     .unwrap();
 
-    DurableClaudeObservationV1::new(
+    DurableObservationV1::new(
         identity,
         receipt,
         RetentionClass::new("retention.test").unwrap(),
@@ -400,7 +406,7 @@ fn canonical_revision_observation(
     receipt_id: &str,
     legacy: bool,
     content: &str,
-) -> DurableClaudeObservationV1 {
+) -> DurableObservationV1 {
     let session_id = format!("session.{provider}.canonical-revision");
     let stable_record_id = ObservationId::new("record.stable").unwrap();
     let mut relations =
@@ -494,7 +500,7 @@ fn canonical_revision_observation(
     )
     .unwrap();
 
-    DurableClaudeObservationV1::new(
+    DurableObservationV1::new(
         identity,
         receipt,
         RetentionClass::new("retention.test").unwrap(),
@@ -504,10 +510,10 @@ fn canonical_revision_observation(
 }
 
 fn mutate_observation_payload(
-    observation: &DurableClaudeObservationV1,
+    observation: &DurableObservationV1,
     receipt_id: &str,
     mutate: impl FnOnce(&mut serde_json::Value),
-) -> DurableClaudeObservationV1 {
+) -> DurableObservationV1 {
     let mut payload = observation.payload().clone();
     mutate(&mut payload);
     let payload_reference = PayloadReferenceV1::for_payload(&payload).unwrap();
@@ -522,7 +528,7 @@ fn mutate_observation_payload(
         Some(payload_reference),
     )
     .unwrap();
-    DurableClaudeObservationV1::new(
+    DurableObservationV1::new(
         observation.identity().clone(),
         receipt,
         observation.retention_class().clone(),
@@ -532,14 +538,14 @@ fn mutate_observation_payload(
 }
 
 fn native_write(
-    observation: DurableClaudeObservationV1,
+    observation: DurableObservationV1,
     expected_cursor: Option<ObservationSourceCursorV1>,
 ) -> AnchoredObservationWrite {
     provider_write(observation, expected_cursor)
 }
 
 fn provider_write(
-    observation: DurableClaudeObservationV1,
+    observation: DurableObservationV1,
     expected_cursor: Option<ObservationSourceCursorV1>,
 ) -> AnchoredObservationWrite {
     let generation = observation.identity().generation().generation_id();
@@ -853,11 +859,12 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
     assert_eq!(deltas.get("observation_repository_provenance"), Some(&1));
 }
 
-/// The `idempotency_key` observation shape never shipped in a published
-/// release, so admission must refuse it with the typed `ResetRequired` state
-/// naming the observation authority, never migrate it in place.
+/// An `observations` table that drifted from the authority schema contract
+/// (here the pre-release `idempotency_key` shape) refuses admission with the
+/// typed `ResetRequired` state naming the drifted table, never migrates in
+/// place, and leaves the refused rows for recovery.
 #[tokio::test]
-async fn pre_release_idempotency_observation_shape_refuses_admission_with_reset_required() {
+async fn drifted_observation_shape_refuses_admission_with_reset_required() {
     let tmp = TempDir::new().unwrap();
     let bootstrap = profile_runtime(&tmp).await;
     let db_path = bootstrap
@@ -897,10 +904,10 @@ async fn pre_release_idempotency_observation_shape_refuses_admission_with_reset_
     let (authority, reason) = error
         .reset_required_context()
         .unwrap_or_else(|| panic!("expected the typed ResetRequired state, got: {error}"));
-    assert_eq!(authority, "observations");
+    assert_eq!(authority, "authority schema");
     assert!(
-        reason.contains("no sanctioned migration"),
-        "the refusal must explain that the shape never shipped: {reason}"
+        reason.contains("table 'observations' has an incompatible number of columns"),
+        "the refusal must name the drifted table: {reason}"
     );
 
     let verify_conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -1758,8 +1765,14 @@ async fn cursor_only_progress_allows_file_replacement_from_zero_with_exact_cas()
         NonDurableFrameReason::OutOfScope,
     )
     .unwrap();
-    let replacement_cursor =
-        ObservationSourceCursorV1::new(source(), scope(), replacement_generation, 10).unwrap();
+    let replacement_cursor = ObservationSourceCursorV1::for_ordering(
+        source(),
+        scope(),
+        replacement_generation,
+        ObservationOrderingDomainV1::FileBytes,
+        10,
+    )
+    .unwrap();
 
     assert_eq!(
         store.advance_source_cursor(advance.clone()).await.unwrap(),

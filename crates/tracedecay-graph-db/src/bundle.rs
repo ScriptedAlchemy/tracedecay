@@ -16,6 +16,12 @@
 //! absent without error, so bundles written before a new artifact existed
 //! stay serveable.
 //!
+//! Artifact bytes carry no generation of their own, so they are stored once
+//! under their content digest in an artifact root shared by every worktree
+//! scope of a project, while each generation's manifest stays in its own
+//! generations root. Retiring a bundle removes only its manifest; the
+//! project's segment sweep collects artifacts no manifest names.
+//!
 //! A missing or mismatched artifact is a TYPED state
 //! ([`SealedReadBundleArtifactStateV1::Absent`] /
 //! [`SealedReadBundleArtifactStateV1::Stale`]), never a silent fallback:
@@ -108,6 +114,7 @@ pub enum SealedReadBundleArtifactStateV1 {
 /// artifact was recorded in `staged`.
 pub struct SealedReadBundleWriterV1 {
     root: PathBuf,
+    artifact_root: PathBuf,
     sealed: SealedGraphStateDigest,
     staged: Vec<(SealedReadBundleArtifactV1, PathBuf)>,
     pending: Option<PathBuf>,
@@ -115,15 +122,22 @@ pub struct SealedReadBundleWriterV1 {
 }
 
 impl SealedReadBundleWriterV1 {
-    pub fn create(root: &Path, sealed: &SealedGraphStateDigest) -> Result<Self, GraphDbError> {
-        if !root.is_dir() {
+    /// `root` holds this generation's manifest; `artifact_root` holds the
+    /// content-addressed artifacts every scope of the project shares.
+    pub fn create(
+        root: &Path,
+        artifact_root: &Path,
+        sealed: &SealedGraphStateDigest,
+    ) -> Result<Self, GraphDbError> {
+        if !root.is_dir() || !artifact_root.is_dir() {
             return Err(GraphDbError::unavailable(
                 "sealed read bundle root is not a directory",
             ));
         }
-        sweep_aborted_sealed_read_bundle_temporaries(root, sealed)?;
+        sweep_aborted_sealed_read_bundle_temporaries(root, artifact_root, sealed)?;
         Ok(Self {
             root: root.to_path_buf(),
+            artifact_root: artifact_root.to_path_buf(),
             sealed: sealed.clone(),
             staged: Vec::new(),
             pending: None,
@@ -133,7 +147,7 @@ impl SealedReadBundleWriterV1 {
 
     fn temporary_path(&self, name: &str) -> Result<PathBuf, GraphDbError> {
         Ok(bundle_tmp_path(
-            &self.root,
+            &self.artifact_root,
             &sealed_hex(&self.sealed)?,
             name,
         ))
@@ -232,9 +246,13 @@ impl SealedReadBundleWriterV1 {
         Ok(())
     }
 
-    /// Renames every staged artifact into place, then writes the manifest
-    /// bound to `identity` and syncs the directory. The manifest write is the
-    /// commit point: without a manifest the artifacts are invisible.
+    /// Places every staged artifact under its content address, then writes
+    /// the manifest bound to `identity` and syncs both roots. The manifest
+    /// write is the commit point: without a manifest the artifacts are
+    /// invisible. An artifact another scope already placed is verified and
+    /// reused. The caller must keep the project's segment sweep out from the
+    /// first placement until this returns, since a placed artifact is
+    /// unreferenced until the manifest lands.
     pub fn commit(
         mut self,
         identity: &GraphGenerationManifestIdentity,
@@ -245,15 +263,15 @@ impl SealedReadBundleWriterV1 {
         let identity_digest = generation_identity_frames_digest(identity, check)?;
         let mut artifacts = Vec::with_capacity(self.staged.len());
         for (artifact, temporary) in std::mem::take(&mut self.staged) {
-            let target = self.root.join(artifact_file_name(&hex, &artifact.name));
-            remove_stale_regular_file(&target)?;
-            std::fs::rename(&temporary, &target).map_err(|error| {
-                GraphDbError::unavailable(format!(
-                    "failed to place sealed read bundle artifact: {error}"
-                ))
-            })?;
+            let placed =
+                place_content_addressed_artifact(&temporary, &self.artifact_root, &artifact, check);
+            if placed.is_err() {
+                let _ = std::fs::remove_file(&temporary);
+            }
+            placed?;
             artifacts.push(artifact);
         }
+        sync_bundle_directory(&self.artifact_root)?;
         artifacts.sort_by(|left, right| left.name.cmp(&right.name));
         let manifest = SealedReadBundleManifestV1 {
             format: SEALED_READ_BUNDLE_FORMAT_V1.to_owned(),
@@ -286,14 +304,14 @@ impl SealedReadBundleWriterV1 {
                     ))
                 })
         };
+        // A placed artifact may already back another scope's manifest, so a
+        // failed commit leaves it to the sweep rather than unlinking it.
         if let Err(error) = write_manifest() {
             self.abort_pending();
-            self.remove_committed_artifacts(&hex, &manifest);
             return Err(error);
         }
         if let Err(error) = std::fs::rename(&temporary, self.root.join(manifest_file_name(&hex))) {
             self.abort_pending();
-            self.remove_committed_artifacts(&hex, &manifest);
             return Err(GraphDbError::unavailable(format!(
                 "failed to place sealed read bundle manifest: {error}"
             )));
@@ -303,12 +321,79 @@ impl SealedReadBundleWriterV1 {
         self.committed = true;
         Ok(manifest)
     }
+}
 
-    fn remove_committed_artifacts(&self, hex: &str, manifest: &SealedReadBundleManifestV1) {
-        for artifact in &manifest.artifacts {
-            let _ = std::fs::remove_file(self.root.join(artifact_file_name(hex, &artifact.name)));
+/// Moves `temporary` to the artifact's content address, or verifies the
+/// artifact already there. A same-name file with other bytes fails closed.
+fn place_content_addressed_artifact(
+    temporary: &Path,
+    artifact_root: &Path,
+    artifact: &SealedReadBundleArtifactV1,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<(), GraphDbError> {
+    let target =
+        artifact_root.join(artifact_content_file_name(&artifact.digest).ok_or_else(|| {
+            GraphDbError::invalid("sealed read bundle artifact digest is not sha256")
+        })?);
+    match target.symlink_metadata() {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            let (digest, bytes) = digest_file(&target, check)?;
+            if bytes != artifact.bytes || digest != artifact.digest {
+                return Err(GraphDbError::unavailable(
+                    "existing sealed read bundle artifact does not match its content address",
+                ));
+            }
+            std::fs::remove_file(temporary).map_err(|error| {
+                GraphDbError::unavailable(format!(
+                    "failed to withdraw a duplicate sealed read bundle artifact: {error}"
+                ))
+            })
         }
+        Ok(_) => Err(GraphDbError::unavailable(
+            "sealed read bundle artifact path is not a regular file",
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            std::fs::rename(temporary, &target).map_err(|error| {
+                GraphDbError::unavailable(format!(
+                    "failed to place sealed read bundle artifact: {error}"
+                ))
+            })
+        }
+        Err(error) => Err(GraphDbError::unavailable(format!(
+            "failed to inspect sealed read bundle artifact: {error}"
+        ))),
     }
+}
+
+fn digest_file(
+    path: &Path,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<(String, u64), GraphDbError> {
+    let mut file = std::fs::File::open(path).map_err(|error| {
+        GraphDbError::unavailable(format!(
+            "failed to open sealed read bundle artifact: {error}"
+        ))
+    })?;
+    let mut digest = Sha256::new();
+    let mut bytes = 0_u64;
+    let mut chunk = vec![0_u8; IO_CHUNK_BYTES];
+    loop {
+        check()?;
+        let read = file.read(&mut chunk).map_err(|error| {
+            GraphDbError::unavailable(format!(
+                "failed to read sealed read bundle artifact: {error}"
+            ))
+        })?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&chunk[..read]);
+        bytes = bytes.saturating_add(read as u64);
+    }
+    Ok((
+        format!("sha256:{}", encode_lowercase_hex(&digest.finalize())),
+        bytes,
+    ))
 }
 
 impl Drop for SealedReadBundleWriterV1 {
@@ -328,6 +413,7 @@ impl Drop for SealedReadBundleWriterV1 {
 /// any byte is trusted.
 pub fn load_sealed_read_bundle_artifact(
     root: &Path,
+    artifact_root: &Path,
     sealed: &SealedGraphStateDigest,
     identity: &GraphGenerationManifestIdentity,
     name: &str,
@@ -394,7 +480,12 @@ pub fn load_sealed_read_bundle_artifact(
                 detail: "sealed read bundle artifact exceeds its byte bound".to_owned(),
             });
         }
-        let path = root.join(artifact_file_name(&hex, &artifact.name));
+        let Some(file_name) = artifact_content_file_name(&artifact.digest) else {
+            return Ok(SealedReadBundleArtifactStateV1::Stale {
+                detail: format!("sealed read bundle artifact `{name}` digest is not sha256"),
+            });
+        };
+        let path = artifact_root.join(file_name);
         let file = match std::fs::File::open(&path) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -461,9 +552,11 @@ pub fn load_sealed_read_bundle_artifact(
     })
 }
 
-/// Removes the generation's bundle manifest and every bundle file filed under
-/// its sealed digest. Idempotent: an absent bundle retires successfully.
-/// Called from the same retirement pass that collects the generation itself.
+/// Removes the generation's bundle manifest and every file filed under its
+/// sealed digest in `root`. Shared artifacts stay for the project's sweep,
+/// which keeps them while any other manifest names them. Idempotent: an
+/// absent bundle retires successfully. Called from the same retirement pass
+/// that collects the generation itself.
 pub fn retire_sealed_read_bundle(
     root: &Path,
     sealed: &SealedGraphStateDigest,
@@ -509,6 +602,18 @@ pub fn retire_sealed_read_bundle(
 /// a committed bundle. Activation retries call this (via [`SealedReadBundleWriterV1::create`])
 /// so a prior OOM or cancelled catalog write cannot stack `.tmp` files.
 pub fn sweep_aborted_sealed_read_bundle_temporaries(
+    root: &Path,
+    artifact_root: &Path,
+    sealed: &SealedGraphStateDigest,
+) -> Result<(), GraphDbError> {
+    sweep_aborted_temporaries_in(root, sealed)?;
+    if artifact_root != root {
+        sweep_aborted_temporaries_in(artifact_root, sealed)?;
+    }
+    Ok(())
+}
+
+fn sweep_aborted_temporaries_in(
     root: &Path,
     sealed: &SealedGraphStateDigest,
 ) -> Result<(), GraphDbError> {
@@ -664,12 +769,15 @@ fn windows_process_is_dead(pid: u32) -> bool {
     use std::ffi::c_void;
 
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const STILL_ACTIVE: u32 = 259;
     const ERROR_INVALID_PARAMETER: i32 = 87;
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
         #[link_name = "OpenProcess"]
         fn open_process(access: u32, inherit_handle: i32, process_id: u32) -> *mut c_void;
+        #[link_name = "GetExitCodeProcess"]
+        fn get_exit_code_process(process: *mut c_void, exit_code: *mut u32) -> i32;
         #[link_name = "CloseHandle"]
         fn close_handle(handle: *mut c_void) -> i32;
     }
@@ -678,8 +786,14 @@ fn windows_process_is_dead(pid: u32) -> bool {
     if process.is_null() {
         return std::io::Error::last_os_error().raw_os_error() == Some(ERROR_INVALID_PARAMETER);
     }
+    // An exited process stays openable for as long as anyone (its parent,
+    // typically) holds a handle to it, so a successful open is not liveness.
+    let mut exit_code = 0_u32;
+    // SAFETY: `process` is a live owned handle, `exit_code` is writable for
+    // the duration of the call, and the handle is closed exactly once.
+    let read = unsafe { get_exit_code_process(process, &mut exit_code) };
     let _ = unsafe { close_handle(process) };
-    false
+    read != 0 && exit_code != STILL_ACTIVE
 }
 
 fn bundle_tmp_path(root: &Path, hex: &str, name: &str) -> PathBuf {
@@ -700,8 +814,78 @@ fn manifest_file_name(hex: &str) -> String {
     format!("read-bundle-{hex}.json")
 }
 
-fn artifact_file_name(hex: &str, name: &str) -> String {
-    format!("read-bundle-{hex}.{name}.bin")
+fn artifact_content_file_name(digest: &str) -> Option<String> {
+    let hex = sha256_hex_suffix(digest)?;
+    is_sha256_hex(hex).then(|| format!("{ARTIFACT_FILE_PREFIX}{hex}{ARTIFACT_FILE_SUFFIX}"))
+}
+
+fn is_sha256_hex(hex: &str) -> bool {
+    hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+const ARTIFACT_FILE_PREFIX: &str = "read-bundle-artifact-";
+const ARTIFACT_FILE_SUFFIX: &str = ".bin";
+
+/// The `sha256:` digest a shared artifact file name addresses, or `None` for
+/// any other name.
+#[must_use]
+pub fn sealed_read_bundle_artifact_file_digest(file_name: &str) -> Option<String> {
+    let hex = file_name
+        .strip_prefix(ARTIFACT_FILE_PREFIX)?
+        .strip_suffix(ARTIFACT_FILE_SUFFIX)?;
+    is_sha256_hex(hex).then(|| format!("sha256:{hex}"))
+}
+
+/// The artifact digests a bundle manifest at `path` names, or `None` when
+/// `path` is not a bundle manifest. A manifest that cannot be parsed names
+/// nothing: loading treats it as stale and never reads an artifact through it.
+pub fn sealed_read_bundle_manifest_artifact_digests(
+    path: &Path,
+) -> Result<Option<Vec<String>>, GraphDbError> {
+    let is_manifest = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("read-bundle-"))
+        .and_then(|name| name.strip_suffix(".json"))
+        .is_some_and(is_sha256_hex);
+    if !is_manifest {
+        return Ok(None);
+    }
+    let metadata = match path.symlink_metadata() {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Some(Vec::new())),
+        Err(error) => {
+            return Err(GraphDbError::unavailable(format!(
+                "failed to stat sealed read bundle manifest: {error}"
+            )));
+        }
+    };
+    if !metadata.is_file() || metadata.len() > MAX_SEALED_READ_BUNDLE_MANIFEST_BYTES_V1 {
+        return Ok(Some(Vec::new()));
+    }
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Some(Vec::new())),
+        Err(error) => {
+            return Err(GraphDbError::unavailable(format!(
+                "failed to read sealed read bundle manifest: {error}"
+            )));
+        }
+    };
+    Ok(Some(
+        serde_json::from_slice::<SealedReadBundleManifestV1>(&bytes)
+            .map(|manifest| {
+                manifest
+                    .artifacts
+                    .into_iter()
+                    .map(|artifact| artifact.digest)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    ))
 }
 
 fn validate_artifact_name(name: &str) -> Result<(), GraphDbError> {
@@ -716,25 +900,6 @@ fn validate_artifact_name(name: &str) -> Result<(), GraphDbError> {
         ));
     }
     Ok(())
-}
-
-fn remove_stale_regular_file(path: &Path) -> Result<(), GraphDbError> {
-    match path.symlink_metadata() {
-        Ok(metadata) if metadata.file_type().is_file() => {
-            std::fs::remove_file(path).map_err(|error| {
-                GraphDbError::unavailable(format!(
-                    "failed to replace stale sealed read bundle file: {error}"
-                ))
-            })
-        }
-        Ok(_) => Err(GraphDbError::unavailable(
-            "sealed read bundle path is not a regular file",
-        )),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(GraphDbError::unavailable(format!(
-            "failed to inspect sealed read bundle path: {error}"
-        ))),
-    }
 }
 
 fn remove_bundle_file(path: &Path) -> Result<bool, GraphDbError> {
@@ -791,11 +956,40 @@ mod tests {
     }
 
     fn sealed() -> SealedGraphStateDigest {
-        SealedGraphStateDigest::try_from(format!("sha256:{}", "ab".repeat(32))).unwrap()
+        sealed_of("ab")
+    }
+
+    fn sealed_of(byte: &str) -> SealedGraphStateDigest {
+        SealedGraphStateDigest::try_from(format!("sha256:{}", byte.repeat(32))).unwrap()
+    }
+
+    /// The shared artifact root beside `root`, created on first use.
+    fn artifacts(root: &Path) -> PathBuf {
+        let artifacts = root.join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        artifacts
+    }
+
+    fn entries(root: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
     }
 
     fn write_bundle(root: &Path, generation: &str, payload: &[u8]) -> SealedReadBundleManifestV1 {
-        let mut writer = SealedReadBundleWriterV1::create(root, &sealed()).unwrap();
+        write_bundle_for(root, &sealed(), generation, payload)
+    }
+
+    fn write_bundle_for(
+        root: &Path,
+        sealed: &SealedGraphStateDigest,
+        generation: &str,
+        payload: &[u8],
+    ) -> SealedReadBundleManifestV1 {
+        let mut writer = SealedReadBundleWriterV1::create(root, &artifacts(root), sealed).unwrap();
         writer
             .stage_artifact("interactive-catalog", &mut |out| {
                 out.write_all(payload)
@@ -815,6 +1009,7 @@ mod tests {
 
         let state = load_sealed_read_bundle_artifact(
             temp.path(),
+            &artifacts(temp.path()),
             &sealed(),
             &identity("generation-a"),
             "interactive-catalog",
@@ -835,6 +1030,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let state = load_sealed_read_bundle_artifact(
             temp.path(),
+            &artifacts(temp.path()),
             &sealed(),
             &identity("generation-a"),
             "interactive-catalog",
@@ -849,6 +1045,7 @@ mod tests {
         write_bundle(temp.path(), "generation-a", b"catalog-bytes");
         let state = load_sealed_read_bundle_artifact(
             temp.path(),
+            &artifacts(temp.path()),
             &sealed(),
             &identity("generation-a"),
             "identity-index",
@@ -869,6 +1066,7 @@ mod tests {
         write_bundle(temp.path(), "generation-a", b"catalog-bytes");
         let state = load_sealed_read_bundle_artifact(
             temp.path(),
+            &artifacts(temp.path()),
             &sealed(),
             &identity("generation-b"),
             "interactive-catalog",
@@ -886,14 +1084,13 @@ mod tests {
     #[test]
     fn tampered_artifact_bytes_are_typed_stale() {
         let temp = TempDir::new().unwrap();
-        write_bundle(temp.path(), "generation-a", b"catalog-bytes");
-        let artifact = temp.path().join(format!(
-            "read-bundle-{}.interactive-catalog.bin",
-            "ab".repeat(32)
-        ));
+        let manifest = write_bundle(temp.path(), "generation-a", b"catalog-bytes");
+        let artifact = artifacts(temp.path())
+            .join(artifact_content_file_name(&manifest.artifacts[0].digest).unwrap());
         std::fs::write(&artifact, b"tampered-byte").unwrap();
         let state = load_sealed_read_bundle_artifact(
             temp.path(),
+            &artifacts(temp.path()),
             &sealed(),
             &identity("generation-a"),
             "interactive-catalog",
@@ -909,9 +1106,9 @@ mod tests {
     }
 
     #[test]
-    fn retirement_removes_manifest_artifacts_and_stage_leftovers() {
+    fn retirement_removes_manifest_and_stage_leftovers_but_keeps_shared_artifacts() {
         let temp = TempDir::new().unwrap();
-        write_bundle(temp.path(), "generation-a", b"catalog-bytes");
+        let manifest = write_bundle(temp.path(), "generation-a", b"catalog-bytes");
         let hex = "ab".repeat(32);
         std::fs::write(
             temp.path().join(format!(".read-bundle-{hex}.orphan.1.tmp")),
@@ -922,11 +1119,18 @@ mod tests {
 
         retire_sealed_read_bundle(temp.path(), &sealed()).unwrap();
 
-        let remaining: Vec<String> = std::fs::read_dir(temp.path())
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(remaining, vec!["generation-unrelated.json".to_owned()]);
+        assert_eq!(
+            entries(temp.path()),
+            vec![
+                "artifacts".to_owned(),
+                "generation-unrelated.json".to_owned()
+            ]
+        );
+        assert_eq!(
+            entries(&artifacts(temp.path())),
+            vec![artifact_content_file_name(&manifest.artifacts[0].digest).unwrap()],
+            "another scope's manifest may still name the artifact; only the sweep collects it"
+        );
 
         // Idempotent on an absent bundle.
         retire_sealed_read_bundle(temp.path(), &sealed()).unwrap();
@@ -936,7 +1140,9 @@ mod tests {
     fn dropped_writer_removes_staged_temporaries() {
         let temp = TempDir::new().unwrap();
         {
-            let mut writer = SealedReadBundleWriterV1::create(temp.path(), &sealed()).unwrap();
+            let mut writer =
+                SealedReadBundleWriterV1::create(temp.path(), &artifacts(temp.path()), &sealed())
+                    .unwrap();
             writer
                 .stage_artifact("interactive-catalog", &mut |out| {
                     out.write_all(b"asdf")
@@ -944,13 +1150,16 @@ mod tests {
                 })
                 .unwrap();
         }
-        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+        assert_eq!(entries(temp.path()), vec!["artifacts".to_owned()]);
+        assert!(entries(&artifacts(temp.path())).is_empty());
     }
 
     #[test]
     fn aborted_write_removes_in_progress_temporary() {
         let temp = TempDir::new().unwrap();
-        let mut writer = SealedReadBundleWriterV1::create(temp.path(), &sealed()).unwrap();
+        let mut writer =
+            SealedReadBundleWriterV1::create(temp.path(), &artifacts(temp.path()), &sealed())
+                .unwrap();
         let error = writer
             .stage_artifact("interactive-catalog", &mut |out| {
                 out.write_all(&[0u8; 4096])
@@ -960,14 +1169,17 @@ mod tests {
             .expect_err("aborted staging must fail");
         assert!(error.to_string().contains("catalog write aborted"));
         drop(writer);
-        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+        assert_eq!(entries(temp.path()), vec!["artifacts".to_owned()]);
+        assert!(entries(&artifacts(temp.path())).is_empty());
     }
 
     #[test]
     fn panic_during_write_removes_in_progress_temporary() {
         let temp = TempDir::new().unwrap();
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut writer = SealedReadBundleWriterV1::create(temp.path(), &sealed()).unwrap();
+            let mut writer =
+                SealedReadBundleWriterV1::create(temp.path(), &artifacts(temp.path()), &sealed())
+                    .unwrap();
             writer
                 .stage_artifact("interactive-catalog", &mut |out| {
                     out.write_all(&[0u8; 4096])
@@ -977,7 +1189,8 @@ mod tests {
                 .expect("panic is the abort path");
         }));
         assert!(panicked.is_err());
-        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+        assert_eq!(entries(temp.path()), vec!["artifacts".to_owned()]);
+        assert!(entries(&artifacts(temp.path())).is_empty());
     }
 
     #[test]
@@ -1021,21 +1234,173 @@ mod tests {
         )
         .unwrap();
 
-        drop(SealedReadBundleWriterV1::create(temp.path(), &sealed()).unwrap());
+        drop(
+            SealedReadBundleWriterV1::create(temp.path(), &artifacts(temp.path()), &sealed())
+                .unwrap(),
+        );
 
-        let mut remaining: Vec<String> = std::fs::read_dir(temp.path())
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        remaining.sort();
         assert_eq!(
-            remaining,
+            entries(temp.path()),
             vec![
                 live_name,
                 format!(".read-bundle-{foreign}.interactive-catalog.1.tmp"),
-                format!("read-bundle-{hex}.interactive-catalog.bin"),
+                "artifacts".to_owned(),
                 format!("read-bundle-{hex}.json"),
             ]
+        );
+    }
+
+    fn load_catalog(root: &Path, sealed: &SealedGraphStateDigest, generation: &str) -> Vec<u8> {
+        match load_sealed_read_bundle_artifact(
+            root,
+            &artifacts(root),
+            sealed,
+            &identity(generation),
+            "interactive-catalog",
+            &|| Ok(()),
+        )
+        .unwrap()
+        {
+            SealedReadBundleArtifactStateV1::Loaded { bytes, .. } => bytes,
+            other => panic!("expected loaded artifact, got {other:?}"),
+        }
+    }
+
+    /// Two worktree scopes filing bundles under their own generations in one
+    /// shared artifact root: identical bytes are stored once, and each scope
+    /// still loads exactly the bytes its own manifest names.
+    #[test]
+    fn identical_artifacts_of_two_generations_share_one_file_and_divergent_ones_do_not() {
+        let temp = TempDir::new().unwrap();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        let third = temp.path().join("third");
+        for root in [&first, &second, &third] {
+            std::fs::create_dir_all(root).unwrap();
+        }
+        let shared = temp.path().join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        let write =
+            |root: &Path, sealed: &SealedGraphStateDigest, generation: &str, bytes: &[u8]| {
+                let mut writer = SealedReadBundleWriterV1::create(root, &shared, sealed).unwrap();
+                writer
+                    .stage_artifact("interactive-catalog", &mut |out| {
+                        out.write_all(bytes)
+                            .map_err(|error| GraphDbError::unavailable(error.to_string()))
+                    })
+                    .unwrap();
+                writer.commit(&identity(generation), &|| Ok(())).unwrap()
+            };
+        let a = write(&first, &sealed_of("aa"), "generation-a", b"same-catalog");
+        let b = write(&second, &sealed_of("bb"), "generation-b", b"same-catalog");
+        let c = write(
+            &third,
+            &sealed_of("cc"),
+            "generation-c",
+            b"divergent-catalog",
+        );
+        assert_eq!(a.artifacts, b.artifacts);
+        assert_ne!(a.artifacts, c.artifacts);
+        assert_eq!(
+            entries(&shared).len(),
+            2,
+            "one file per distinct artifact: {:?}",
+            entries(&shared)
+        );
+
+        let load = |root: &Path, sealed: &SealedGraphStateDigest, generation: &str| {
+            match load_sealed_read_bundle_artifact(
+                root,
+                &shared,
+                sealed,
+                &identity(generation),
+                "interactive-catalog",
+                &|| Ok(()),
+            )
+            .unwrap()
+            {
+                SealedReadBundleArtifactStateV1::Loaded { bytes, .. } => bytes,
+                other => panic!("expected loaded artifact, got {other:?}"),
+            }
+        };
+        assert_eq!(
+            load(&first, &sealed_of("aa"), "generation-a"),
+            b"same-catalog"
+        );
+        assert_eq!(
+            load(&third, &sealed_of("cc"), "generation-c"),
+            b"divergent-catalog"
+        );
+
+        retire_sealed_read_bundle(&second, &sealed_of("bb")).unwrap();
+        assert_eq!(
+            load(&first, &sealed_of("aa"), "generation-a"),
+            b"same-catalog",
+            "retiring one scope's bundle keeps the artifact its sibling names"
+        );
+    }
+
+    #[test]
+    fn a_same_name_artifact_with_other_bytes_fails_closed() {
+        let temp = TempDir::new().unwrap();
+        let manifest = write_bundle(temp.path(), "generation-a", b"catalog-bytes");
+        let target = artifacts(temp.path())
+            .join(artifact_content_file_name(&manifest.artifacts[0].digest).unwrap());
+        std::fs::write(&target, b"other-bytes!!").unwrap();
+        let mut writer = SealedReadBundleWriterV1::create(
+            temp.path(),
+            &artifacts(temp.path()),
+            &sealed_of("cd"),
+        )
+        .unwrap();
+        writer
+            .stage_artifact("interactive-catalog", &mut |out| {
+                out.write_all(b"catalog-bytes")
+                    .map_err(|error| GraphDbError::unavailable(error.to_string()))
+            })
+            .unwrap();
+        let error = writer
+            .commit(&identity("generation-b"), &|| Ok(()))
+            .expect_err("a mismatched content address must not be reused");
+        assert!(
+            error
+                .to_string()
+                .contains("does not match its content address"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"other-bytes!!");
+        assert_eq!(
+            entries(&artifacts(temp.path())).len(),
+            1,
+            "the refused stage must not linger"
+        );
+    }
+
+    #[test]
+    fn manifest_artifact_digests_name_exactly_the_shared_files() {
+        let temp = TempDir::new().unwrap();
+        let manifest = write_bundle(temp.path(), "generation-a", b"catalog-bytes");
+        let manifest_path = temp.path().join(manifest_file_name(&"ab".repeat(32)));
+        let digests = sealed_read_bundle_manifest_artifact_digests(&manifest_path)
+            .unwrap()
+            .expect("a bundle manifest");
+        assert_eq!(digests, vec![manifest.artifacts[0].digest.clone()]);
+        let files = entries(&artifacts(temp.path()));
+        assert_eq!(
+            files
+                .iter()
+                .map(|name| sealed_read_bundle_artifact_file_digest(name))
+                .collect::<Vec<_>>(),
+            vec![Some(digests[0].clone())]
+        );
+        assert_eq!(
+            sealed_read_bundle_manifest_artifact_digests(&temp.path().join("generation-x.json"))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            load_catalog(temp.path(), &sealed(), "generation-a"),
+            b"catalog-bytes"
         );
     }
 }

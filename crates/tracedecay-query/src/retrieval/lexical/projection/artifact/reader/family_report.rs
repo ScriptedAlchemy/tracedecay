@@ -8,6 +8,8 @@ use tracedecay_domain::{
     CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, SymbolOccurrenceId, canonical_sha256,
 };
 
+use super::super::clone_codec::{digest_from_key, digest_key};
+use super::super::row_codec::symbol_id_from_key;
 use super::{CodeLexicalArtifactReaderV1, MAX_CLONE_EXACT_PAGE_MEMBERS_V1};
 use crate::retrieval::lexical::projection::artifact::{
     CodeLexicalArtifactErrorV1, checkpoint, sqlite_error,
@@ -85,11 +87,6 @@ impl CodeLexicalArtifactReaderV1 {
                 "clone family repository authority is unavailable".to_owned(),
             ));
         }
-        if !self.layout.has_clone_index() {
-            return Err(CodeLexicalArtifactErrorV1::Incompatible(
-                "clone family lookup requires lexical artifact revision 15".to_owned(),
-            ));
-        }
         if limit == 0 || limit > MAX_CLONE_EXACT_PAGE_MEMBERS_V1 {
             return Err(CodeLexicalArtifactErrorV1::Contract(format!(
                 "clone family page limit must be within 1..={MAX_CLONE_EXACT_PAGE_MEMBERS_V1}"
@@ -141,7 +138,10 @@ impl CodeLexicalArtifactReaderV1 {
         let after_revision = after
             .map(|position| position.normalization_revision)
             .unwrap_or_default();
-        let after_digest = after.map(|position| position.digest.as_str()).unwrap_or("");
+        let after_digest = after
+            .map(|position| digest_key(&position.digest))
+            .transpose()?
+            .unwrap_or_default();
         let connection = self.lock_connection()?;
         install_generated_path_function(&connection)?;
         install_pull_request_path_function(&connection, pull_request_paths)?;
@@ -149,14 +149,14 @@ impl CodeLexicalArtifactReaderV1 {
             .prepare_cached(
                 "WITH families AS ( \
                     SELECT posting.class, posting.normalization_revision, posting.digest, \
-                           MIN(posting.symbol_occurrence_id) AS representative, \
+                           MIN(occurrence.symbol_key) AS representative, \
                            COUNT(*) AS member_count, \
                            SUM(occurrence.body_end - occurrence.body_start) \
                                - MIN(occurrence.body_end - occurrence.body_start) \
                                AS reviewable_source_bytes \
                     FROM clone_exact_postings AS posting \
                     JOIN clone_occurrences AS occurrence \
-                      ON occurrence.symbol_occurrence_id = posting.symbol_occurrence_id \
+                      ON occurrence.ordinal = posting.occurrence_ordinal \
                     WHERE ((:conservative AND posting.class = 1) OR (:rename AND posting.class = 2)) \
                       AND (:path IS NULL OR occurrence.path = :path \
                            OR (substr(occurrence.path, 1, length(:path)) = :path \
@@ -193,7 +193,7 @@ impl CodeLexicalArtifactReaderV1 {
                     .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
                 ":after_class": i64::from(after_class),
                 ":after_revision": i64::from(after_revision),
-                ":after_digest": after_digest,
+                ":after_digest": after_digest.as_slice(),
                 ":fetch": i64::try_from(fetch)
                     .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
             })
@@ -217,10 +217,9 @@ impl CodeLexicalArtifactReaderV1 {
             };
             let normalization_revision = u16::try_from(row.get::<_, i64>(1).map_err(sqlite_error)?)
                 .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-            let digest = ManifestDigest::new(row.get::<_, String>(2).map_err(sqlite_error)?)
-                .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+            let digest = digest_from_key(&row.get::<_, Vec<u8>>(2).map_err(sqlite_error)?)?;
             let representative =
-                SymbolOccurrenceId::new(row.get::<_, String>(3).map_err(sqlite_error)?)
+                SymbolOccurrenceId::new(symbol_id_from_key(row.get_ref(3).map_err(sqlite_error)?)?)
                     .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
             let member_count = usize::try_from(row.get::<_, i64>(4).map_err(sqlite_error)?)
                 .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;

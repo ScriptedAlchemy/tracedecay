@@ -102,7 +102,6 @@ pub struct PrDiscovery {
 pub struct ManagedPr {
     pub pr: u64,
     pub head_branch: String,
-    #[serde(default)]
     pub head_sha: String,
     pub worktree: PathBuf,
     pub tracking_ref: String,
@@ -584,20 +583,5 @@ mod tests {
         ]"#;
         assert!(parse_gh_pr_list(json, 2).expect("partial list").partial);
         assert!(!parse_gh_pr_list(json, 3).expect("complete list").partial);
-    }
-
-    #[test]
-    fn legacy_state_without_head_sha_remains_refreshable() {
-        let store = tempfile::tempdir().expect("store root");
-        std::fs::write(
-            state_path(store.path()),
-            r#"{"managed":{"pr/8":{"pr":8,"head_branch":"legacy","worktree":"pr-worktrees/pr-8","tracking_ref":"refs/tracedecay/pr/8"}}}"#,
-        )
-        .expect("legacy state");
-
-        assert_eq!(
-            load_state(store.path()).expect("load legacy state").managed["pr/8"].head_sha,
-            ""
-        );
     }
 }

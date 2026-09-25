@@ -3,7 +3,7 @@ use tracedecay_code_extraction::LeanExtractor;
 use tracedecay_domain::*;
 
 fn extract(source: &str) -> ExtractionResult {
-    LeanExtractor.extract("Demo.lean", source)
+    LeanExtractor.extract_artifact("Demo.lean", source).result
 }
 
 fn names_of(result: &ExtractionResult, kind: NodeKind) -> Vec<String> {

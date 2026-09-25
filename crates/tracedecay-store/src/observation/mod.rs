@@ -1,20 +1,18 @@
-use std::collections::HashMap;
 use std::error::Error;
 use std::future::Future;
-use std::sync::{LazyLock, RwLock};
 
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CanonicalObservationIdV1,
-    CapabilityId, CoverageReportV1, DomainError, DurableObservationV1, EvidenceClass,
-    NativeAliasKindV2, NativeAliasV2, ObservationCollisionOutcomeV1, ObservationContractError,
+    AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGeneration, CanonicalObservationIdV1,
+    CoverageReportV1, DomainError, DurableObservationV1, EvidenceClass, NativeAlias,
+    NativeAliasKind, ObservationCollisionOutcomeV1, ObservationContractError,
     ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
     PayloadAccessState, PayloadDigestV1, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest,
-    PrivacyDomainId, ProjectionGenerationId, ResolutionAuthorizationV1, RetrievalAnchorId,
-    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2,
-    SanitizationReceiptId, SanitizationReceiptV1, SanitizerDispositionV1, ScopeResolutionId,
-    UtcMicros, VectorWatermark,
+    ProjectionGenerationId, ResolutionAuthorizationV1, RetrievalAnchorId, RetrievalAnchorRecord,
+    RetrievalAnchorRecordParts, RetrievalAnchorTarget, SanitizationReceiptId,
+    SanitizationReceiptV1, SanitizerDispositionV1, UtcMicros, VectorWatermark,
+    authority_access_policy_digest,
 };
 
 mod anchored_write;
@@ -156,60 +154,11 @@ pub fn build_scope_resolution_authorization_v1(
     })
 }
 
-/// Upper bound on memoized access-policy digests.
-///
-/// Authority namespaces are compile-time constants in production, so this only
-/// exists so a caller passing unbounded namespaces cannot grow the memo without
-/// limit; past the bound the digest is derived without being retained.
-const MAX_MEMOIZED_ACCESS_POLICY_DIGESTS: usize = 64;
-
-/// Access-policy digests keyed by authority namespace.
-///
-/// The digested value binds nothing but the authorization domain constant and
-/// the namespace, so it is the same bytes for every resolution in that
-/// namespace. Deriving it per resolution put a canonical-JSON encode plus a
-/// SHA-256 compression on the anchor-resolution serving path for a value that
-/// was born the first time the namespace was used.
-///
-/// The lock type follows `hotpath::rw_lock!`: instrumented wrapper when the
-/// `hotpath` feature is on, `std::sync::RwLock` when it is off.
-static ACCESS_POLICY_DIGESTS: LazyLock<hotpath::rw_locks::RwLock<HashMap<String, String>>> =
-    LazyLock::new(|| {
-        hotpath::rw_lock!(
-            RwLock::new(HashMap::new()),
-            label = "store.observation.access_policy_digests"
-        )
-    });
-
-fn access_policy_digest_for(authority_namespace: &str) -> ObservationStoreResult<String> {
-    hotpath::measure_block!("store.observation.access_policy_digest", {
-        if let Ok(memo) = ACCESS_POLICY_DIGESTS.read()
-            && let Some(digest) = memo.get(authority_namespace)
-        {
-            return Ok(digest.clone());
-        }
-        let digest = PayloadReferenceV1::for_payload(&serde_json::json!({
-            "domain": "tracedecay.observation-anchor.authorization.v1",
-            "authority": authority_namespace,
-        }))
-        .map_err(ObservationStoreError::Contract)?
-        .digest()
-        .as_str()
-        .to_owned();
-        if let Ok(mut memo) = ACCESS_POLICY_DIGESTS.write()
-            && memo.len() < MAX_MEMOIZED_ACCESS_POLICY_DIGESTS
-        {
-            memo.insert(authority_namespace.to_owned(), digest.clone());
-        }
-        Ok(digest)
-    })
-}
-
 /// Returns the exact access-policy digest retained by production observation
 /// anchors so retrieval admission can bind to the same authority without
 /// duplicating its canonical digest construction.
 pub fn observation_capture_access_policy_digest_v1() -> ObservationStoreResult<AccessPolicyDigest> {
-    AccessPolicyDigest::new(access_policy_digest_for(OBSERVATION_CAPTURE_AUTHORITY_V1)?)
+    authority_access_policy_digest(OBSERVATION_CAPTURE_AUTHORITY_V1)
         .map_err(ObservationStoreError::RetrievalAnchorContract)
 }
 
@@ -217,28 +166,22 @@ fn build_resolution_authorization_v1(
     authority_namespace: &str,
     canonical_request_digest: String,
 ) -> ObservationStoreResult<ResolutionAuthorizationV1> {
-    let access_policy_digest = access_policy_digest_for(authority_namespace)?;
-    Ok(ResolutionAuthorizationV1 {
-        resolved_scope_id: ScopeResolutionId::new(format!("scope.{authority_namespace}"))
-            .map_err(ObservationStoreError::RetrievalAnchorContract)?,
-        privacy_domain_id: PrivacyDomainId::new(format!("privacy.{authority_namespace}"))
-            .map_err(ObservationStoreError::RetrievalAnchorContract)?,
-        access_policy_digest: AccessPolicyDigest::new(access_policy_digest)
-            .map_err(ObservationStoreError::RetrievalAnchorContract)?,
-        capability_id: CapabilityId::new(format!("capability.{authority_namespace}"))
-            .map_err(ObservationStoreError::RetrievalAnchorContract)?,
-        canonical_request_digest: PrivacyDomainBoundLocatorDigest::new(canonical_request_digest)
-            .map_err(ObservationStoreError::RetrievalAnchorContract)?,
+    hotpath::measure_block!("store.observation.access_policy_digest", {
+        PrivacyDomainBoundLocatorDigest::new(canonical_request_digest)
+            .and_then(|digest| {
+                ResolutionAuthorizationV1::for_authority(authority_namespace, digest)
+            })
+            .map_err(ObservationStoreError::RetrievalAnchorContract)
     })
 }
 
 /// Builds the canonical stable anchor for one retained sanitized observation.
-pub fn build_observation_retrieval_anchor_v2(
+pub fn build_observation_retrieval_anchor(
     observation: &DurableObservationV1,
     projection_generation: ProjectionGenerationId,
     ingested_at: UtcMicros,
     authorization: ResolutionAuthorizationV1,
-) -> ObservationStoreResult<RetrievalAnchorRecordV2> {
+) -> ObservationStoreResult<RetrievalAnchorRecord> {
     hotpath::measure_block!("store.observation.build_retrieval_anchor", {
         let aliases = observation
             .identity()
@@ -257,20 +200,20 @@ pub fn build_observation_retrieval_anchor_v2(
                     .to_owned();
                 let locator_digest = PrivacyDomainBoundLocatorDigest::new(digest)
                     .map_err(ObservationStoreError::RetrievalAnchorContract)?;
-                NativeAliasV2::new(NativeAliasKindV2::ProviderRecord, locator_digest)
+                NativeAlias::new(NativeAliasKind::ProviderRecord, locator_digest)
                     .map_err(ObservationStoreError::RetrievalAnchorContract)
             })
             .transpose()?
             .into_iter()
             .collect();
-        RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
-            target: RetrievalAnchorTargetV2::ExactObservation(observation.observation_id().clone()),
+        RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
+            target: RetrievalAnchorTarget::ExactObservation(observation.observation_id().clone()),
             owner: observation.scope().clone(),
             aliases,
             occurred_at: None,
             ingested_at,
             evidence_class: EvidenceClass::Observed,
-            source_generation: AnchorSourceGenerationV2::Observation(
+            source_generation: AnchorSourceGeneration::Observation(
                 observation.identity().generation(),
             ),
             projection_generation,
@@ -298,7 +241,7 @@ pub enum ObservedEvidenceAnchorResolution {
     /// watermark is the store's current projection-stream position reported
     /// under exactly the shard keys the record's frozen watermark claims.
     Resolved {
-        record: Box<RetrievalAnchorRecordV2>,
+        record: Box<RetrievalAnchorRecord>,
         observed_watermark: VectorWatermark,
     },
     /// No binding for the anchor exists in this authority.
@@ -883,7 +826,7 @@ pub struct ObservationCommitReceipt {
     sequence: u64,
     observation: Box<DurableObservationV1>,
     committed_cursor: ObservationSourceCursorV1,
-    retrieval_anchor: Box<RetrievalAnchorRecordV2>,
+    retrieval_anchor: Box<RetrievalAnchorRecord>,
     projection_generation: ProjectionGenerationId,
     repository_provenance: RepositoryProvenanceAttachmentV1,
 }
@@ -893,7 +836,7 @@ impl ObservationCommitReceipt {
         sequence: u64,
         observation: DurableObservationV1,
         committed_cursor: ObservationSourceCursorV1,
-        retrieval_anchor: RetrievalAnchorRecordV2,
+        retrieval_anchor: RetrievalAnchorRecord,
         projection_generation: ProjectionGenerationId,
     ) -> ObservationStoreResult<Self> {
         validate_retrieval_anchor_binding(&observation, &retrieval_anchor, &projection_generation)?;
@@ -933,7 +876,7 @@ impl ObservationCommitReceipt {
         &self.committed_cursor
     }
 
-    pub fn retrieval_anchor(&self) -> &RetrievalAnchorRecordV2 {
+    pub fn retrieval_anchor(&self) -> &RetrievalAnchorRecord {
         self.retrieval_anchor.as_ref()
     }
 
@@ -979,7 +922,7 @@ impl StoredObservation {
         sequence: u64,
         observation: DurableObservationV1,
         committed_cursor: ObservationSourceCursorV1,
-        retrieval_anchor: RetrievalAnchorRecordV2,
+        retrieval_anchor: RetrievalAnchorRecord,
         projection_generation: ProjectionGenerationId,
         projection_status: ObservationProjectionStatus,
     ) -> ObservationStoreResult<Self> {
@@ -1029,7 +972,7 @@ impl StoredObservation {
         self.commit_receipt.repository_provenance_attachment()
     }
 
-    pub fn retrieval_anchor(&self) -> &RetrievalAnchorRecordV2 {
+    pub fn retrieval_anchor(&self) -> &RetrievalAnchorRecord {
         self.commit_receipt.retrieval_anchor()
     }
 
@@ -1088,22 +1031,6 @@ pub enum ObservationProjectionStatus {
     NotQueued,
 }
 
-/// Why one bounded observation batch must be retried as scalar operations.
-///
-/// These causes describe only collisions between not-yet-durable members of
-/// the current batch. Collisions against durable evidence remain terminal
-/// store errors and must never be retried as scalar writes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ObservationBatchFallbackCause {
-    IntraBatchIdentityCollision,
-    IntraBatchSanitizationReceiptCollision,
-    IntraBatchRetrievalAnchorAliasCollision,
-    /// A collision path that must compare-and-set against the durable source
-    /// frontier, while an earlier member of this batch has not made that
-    /// frontier durable yet.
-    IntraBatchDurableFrontier,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ObservationReplayRequest {
     after_sequence: u64,
@@ -1136,10 +1063,6 @@ impl ObservationReplayRequest {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ObservationStoreError {
-    #[error("observation batch requires scalar fallback: {cause:?}")]
-    BatchRequiresScalarFallback {
-        cause: ObservationBatchFallbackCause,
-    },
     #[error("observation cursor does not match its source evidence")]
     CursorObservationMismatch,
     #[error("covered source evidence is not contiguous with the expected cursor")]
@@ -1192,7 +1115,7 @@ pub enum ObservationStoreError {
         "retrieval anchor alias {alias:?} collided between existing anchor {existing_anchor_id:?} and candidate anchor {candidate_anchor_id:?}"
     )]
     RetrievalAnchorAliasCollision {
-        alias: Box<NativeAliasV2>,
+        alias: Box<NativeAlias>,
         existing_anchor_id: Box<RetrievalAnchorId>,
         candidate_anchor_id: Box<RetrievalAnchorId>,
     },

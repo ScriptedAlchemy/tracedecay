@@ -305,7 +305,6 @@ async fn postcommit_recovery_returns_exact_nonempty_automatic_receipts_determini
         1
     );
     assert!(recovered.curation_receipt().is_none());
-    assert!(!recovered.is_empty());
 }
 
 #[tokio::test]

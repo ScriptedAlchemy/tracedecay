@@ -13,9 +13,9 @@
     "required_first": [
       "tracedecay_context",
       "tracedecay_search",
-      "tracedecay_body",
-      "tracedecay_outline",
-      "tracedecay_read",
+      "tracedecay_find_exact_symbol",
+      "tracedecay_source_body",
+      "tracedecay_source_outline",
       "tracedecay_grep"
     ],
     "acceptable": [
@@ -41,5 +41,5 @@
     "capped"
   ],
   "max_tool_calls": 3,
-  "notes": "read-one-function; tracedecay_body should be preferred over opening the whole file."
+  "notes": "read-one-function; tracedecay_find_exact_symbol plus tracedecay_source_body should be preferred over opening the whole file."
 }

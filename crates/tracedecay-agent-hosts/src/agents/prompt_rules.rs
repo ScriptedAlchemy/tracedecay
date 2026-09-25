@@ -41,8 +41,7 @@ impl OwnedBlockSentinels {
 }
 
 /// Every tracedecay-owned range in `contents` in document order. `locate_first`
-/// returns the earliest owned block (current or historical shape) starting at
-/// or after an offset; ranges never overlap because each search resumes at the
+/// returns the earliest owned block starting at or after an offset; ranges never overlap because each search resumes at the
 /// previous block's end.
 pub(crate) fn owned_block_ranges(
     contents: &str,
@@ -108,7 +107,7 @@ pub(crate) fn owned_block_is_current(contents: &str, ranges: &[Range<usize>], bl
 }
 
 /// Install `block` as the single owned block: unchanged when already current,
-/// otherwise converge every current or historical owned range onto one copy
+/// otherwise converge every owned range onto one copy
 /// (the first range's position, or appended when none exists).
 pub(crate) fn converge_owned_block(
     existing: &str,
@@ -136,20 +135,6 @@ pub(crate) fn remove_owned_blocks(contents: &str, ranges: &[Range<usize>]) -> Pr
         Some(rebuilt) => PromptRulesRemoval::Rewrite(rebuilt),
         None => PromptRulesRemoval::Remove,
     }
-}
-
-/// Earliest of the shipped boundaries that closes a heading-marked historical
-/// block searched from `search_from`: the next `\n## ` heading, the managed
-/// skill index, a current start sentinel, or EOF.
-pub(crate) fn historical_heading_block_end(
-    contents: &str,
-    search_from: usize,
-    sentinels: OwnedBlockSentinels,
-) -> usize {
-    let heading_end = heading_block_end(contents, search_from);
-    contents[search_from..]
-        .find(sentinels.start)
-        .map_or(heading_end, |offset| heading_end.min(search_from + offset))
 }
 
 /// Managed-skill index marker prefix (the full marker carries a per-host

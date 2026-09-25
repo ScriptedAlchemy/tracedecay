@@ -12,7 +12,6 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use crate::ports::mcp_tools::{AdvertisedToolV1, advertised_tools};
-pub use profile_config::read_config_pinned_project_root;
 use profile_config::{disable_plugin, enable_plugin};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
@@ -76,9 +75,7 @@ impl AgentIntegration for HermesIntegration {
             let Some(profile_dir) = plugin_dir.parent().and_then(Path::parent) else {
                 continue;
             };
-            let config = profile_dir.join("config.yaml");
-            paths.push(config.clone());
-            paths.push(profile_config::original_config_path(&config));
+            paths.push(profile_dir.join("config.yaml"));
             paths.extend(dashboard_wrapper::managed_paths(&plugin_dir));
             if plugin_dir != default_plugin {
                 paths.extend(managed_plugin_paths(&plugin_dir));
@@ -252,7 +249,7 @@ pub(super) fn activate_deployed_plugin_profile(
             .into_iter()
             .zip(deployed_files)
         {
-            super::safe_write_bytes_file(&path, &contents, None)?;
+            super::safe_write_bytes_file(&path, &contents)?;
         }
     }
     dashboard_wrapper::apply_install_policy(plugin_dir, tracedecay_bin, deploy_dashboard)?;
@@ -568,7 +565,7 @@ fn reconcile_managed_skill_overlay(profile_root: &Path, plugin_dir: &Path) -> Re
         .into_iter()
         .collect::<BTreeSet<_>>();
     for (path, bytes) in &desired {
-        super::safe_write_bytes_file(path, bytes, None)?;
+        super::safe_write_bytes_file(path, bytes)?;
     }
     for path in existing {
         if !desired.contains_key(&path) {
@@ -632,7 +629,7 @@ pub(super) fn write_text_file(path: &Path, contents: &str) -> Result<()> {
     if current == contents {
         return Ok(());
     }
-    super::safe_write_text_file(path, contents, None)
+    super::safe_write_text_file(path, contents)
 }
 
 pub(super) fn remove_generated_file(path: &Path) -> Result<()> {

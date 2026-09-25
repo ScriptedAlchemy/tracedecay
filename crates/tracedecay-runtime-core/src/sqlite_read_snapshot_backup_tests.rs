@@ -813,12 +813,16 @@ async fn windows_live_wal_writer_survives_copy_mode_backup() {
             [],
         )
         .unwrap();
-    let illegal = temp.path().join("illegal-copy.db");
-    let error = fs::copy(&source, &illegal).expect_err("copying a live Windows store must fail");
-    assert!(
-        matches!(error.raw_os_error(), Some(32 | 33)),
-        "expected sharing/lock violation, got {error}"
-    );
+    // SQLite shares its Windows handles for reading and locks only the byte
+    // range past its pending byte, so a raw copy of a small live store
+    // succeeds. It is still not a backup: it misses every WAL-resident row.
+    let raw = temp.path().join("raw-copy.db");
+    fs::copy(&source, &raw).unwrap();
+    let raw_ids: String = Connection::open(&raw)
+        .unwrap()
+        .query_row("SELECT group_concat(id) FROM durable", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(raw_ids, "0");
     assert_eq!(snapshot_ids(&destination), [0, 1]);
     drop(writer);
 }

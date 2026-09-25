@@ -138,17 +138,12 @@ const fn state_matches_coverage(
     )
 }
 
-pub type GitHubCiWorkflowRunV1 = GitHubActionsWorkflowRunV1;
-pub type GitHubCiCheckRunV1 = GitHubActionsCheckRunV1;
-pub type GitHubCiCheckAnnotationV1 = GitHubCheckAnnotationV1;
-pub type GitHubCiAnnotationLevelV1 = GitHubCheckAnnotationLevelV1;
-
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GitHubCiProviderRecordV1 {
-    pub workflow_run: GitHubCiWorkflowRunV1,
+    pub workflow_run: GitHubActionsWorkflowRunV1,
     pub workflow_job: GitHubActionsWorkflowJobV1,
-    pub check_run: GitHubCiCheckRunV1,
-    pub annotations: Vec<GitHubCiCheckAnnotationV1>,
+    pub check_run: GitHubActionsCheckRunV1,
+    pub annotations: Vec<GitHubCheckAnnotationV1>,
 }
 
 impl GitHubCiProviderRecordV1 {
@@ -163,7 +158,7 @@ impl GitHubCiProviderRecordV1 {
             .min_by_key(|step| step.number)
     }
 
-    pub fn failed_annotation(&self) -> Option<&GitHubCiCheckAnnotationV1> {
+    pub fn failed_annotation(&self) -> Option<&GitHubCheckAnnotationV1> {
         self.annotations
             .iter()
             .filter(|annotation| {
@@ -202,20 +197,20 @@ impl GitHubCiOfficialResponseDecoderV1 {
         annotations: &str,
     ) -> Result<GitHubCiProviderRecordV1, serde_json::Error> {
         Ok(GitHubCiProviderRecordV1 {
-            workflow_run: serde_json::from_str::<GitHubRetainedResponseV1<GitHubCiWorkflowRunV1>>(
-                workflow_run,
-            )?
+            workflow_run: serde_json::from_str::<
+                GitHubRetainedResponseV1<GitHubActionsWorkflowRunV1>,
+            >(workflow_run)?
             .response,
             workflow_job: serde_json::from_str::<
                 GitHubRetainedResponseV1<GitHubActionsWorkflowJobV1>,
             >(workflow_job)?
             .response,
-            check_run: serde_json::from_str::<GitHubRetainedResponseV1<GitHubCiCheckRunV1>>(
+            check_run: serde_json::from_str::<GitHubRetainedResponseV1<GitHubActionsCheckRunV1>>(
                 check_run,
             )?
             .response,
             annotations: serde_json::from_str::<
-                GitHubRetainedResponseV1<Vec<GitHubCiCheckAnnotationV1>>,
+                GitHubRetainedResponseV1<Vec<GitHubCheckAnnotationV1>>,
             >(annotations)?
             .response,
         })

@@ -2,6 +2,8 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use tracedecay_private_fs::FileLease;
+
 use super::{
     CodeGenerationRetentionErrorV1, GRAPH_REPLAY_POOL_ACQUIRE_BUDGET,
     GRAPH_REPLAY_POOL_ACQUIRE_POLL, SCOPE_RETENTION_LOCK_FILE, STORE_LOCK_FILE, storage,
@@ -9,8 +11,10 @@ use super::{
 #[cfg(windows)]
 use super::{SCOPE_RETENTION_TRANSACTION_FILE, is_code_index_scope_hash, journal, scope_roots};
 
+const CODE_GENERATION_LEASE_LABEL: &str = "code_index_retention.store";
+
 pub struct CodeGenerationStoreLockV1 {
-    file: File,
+    _file: FileLease,
     store_root: PathBuf,
     generation_store: bool,
     shared: bool,
@@ -38,12 +42,6 @@ impl CodeGenerationStoreLockV1 {
                 "text-artifact attachment requires the generation-store lock".to_owned(),
             ))
         }
-    }
-}
-
-impl Drop for CodeGenerationStoreLockV1 {
-    fn drop(&mut self) {
-        let _ = self.file.unlock();
     }
 }
 
@@ -87,7 +85,7 @@ pub fn try_acquire_code_generation_store_read_lock(
     let lock = open_lock_file(&store_root.join(STORE_LOCK_FILE))?;
     match lock.try_lock_shared().map_err(std::io::Error::from) {
         Ok(()) => Ok(Some(CodeGenerationStoreLockV1 {
-            file: lock,
+            _file: FileLease::held(lock, CODE_GENERATION_LEASE_LABEL),
             store_root,
             generation_store: true,
             shared: true,
@@ -135,7 +133,7 @@ fn try_acquire_code_generation_store_lock_unfenced(
     let lock = open_lock_file(&store_root.join(STORE_LOCK_FILE))?;
     match lock.try_lock().map_err(std::io::Error::from) {
         Ok(()) => Ok(Some(CodeGenerationStoreLockV1 {
-            file: lock,
+            _file: FileLease::held(lock, CODE_GENERATION_LEASE_LABEL),
             store_root,
             generation_store: true,
             shared: false,
@@ -157,6 +155,57 @@ pub(super) fn acquire_scope_retention_lock(
         Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET,
         &|| false,
     )
+}
+
+/// Exclusive hold on the project's shared generation segments.
+///
+/// It is the project's scope-retention lock: every change that can make a
+/// manifest stop or start naming segments, retiring generations, sweeping
+/// segments, and collecting or restoring whole scopes, runs under it, so a
+/// sweep's mark phase observes every manifest that can still be read.
+pub(super) fn acquire_generation_segments_lock_checked(
+    store_root: &Path,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CodeGenerationStoreLockV1, CodeGenerationRetentionErrorV1> {
+    lock_file(
+        super::generation_segment_project_root(store_root),
+        SCOPE_RETENTION_LOCK_FILE,
+        false,
+        Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET,
+        is_cancelled,
+    )
+}
+
+/// Shared hold a publication keeps from its first segment write until its
+/// manifest is durable, so no sweep can collect a segment a manifest is about
+/// to name. Publications of different worktrees share it; the exclusive
+/// holders are bounded passes, so this waits for them instead of failing the
+/// publication, observing `is_cancelled` between probes.
+pub fn acquire_generation_segments_publication_lock(
+    store_root: &Path,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CodeGenerationStoreLockV1, CodeGenerationRetentionErrorV1> {
+    let project_root = canonical_store_root(super::generation_segment_project_root(store_root))?;
+    loop {
+        if is_cancelled() {
+            return Err(CodeGenerationRetentionErrorV1::Cancelled);
+        }
+        let lock = open_lock_file(&project_root.join(SCOPE_RETENTION_LOCK_FILE))?;
+        match lock.try_lock_shared().map_err(std::io::Error::from) {
+            Ok(()) => {
+                return Ok(CodeGenerationStoreLockV1 {
+                    _file: FileLease::held(lock, CODE_GENERATION_LEASE_LABEL),
+                    store_root: project_root,
+                    generation_store: false,
+                    shared: true,
+                });
+            }
+            Err(error) if tracedecay_private_fs::is_lock_contended(&error) => {
+                std::thread::park_timeout(GRAPH_REPLAY_POOL_ACQUIRE_POLL);
+            }
+            Err(error) => return Err(storage(error)),
+        }
+    }
 }
 
 #[hotpath::measure(label = "code_index_retention.lock")]
@@ -192,7 +241,7 @@ fn lock_file(
         match lock.try_lock().map_err(std::io::Error::from) {
             Ok(()) => {
                 return Ok(CodeGenerationStoreLockV1 {
-                    file: lock,
+                    _file: FileLease::held(lock, CODE_GENERATION_LEASE_LABEL),
                     store_root,
                     generation_store,
                     shared: false,

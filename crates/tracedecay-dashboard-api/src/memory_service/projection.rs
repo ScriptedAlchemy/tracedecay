@@ -3,11 +3,15 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use serde_json::{Map, Value, json};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use tracedecay_domain::{FactId, PayloadAccessState};
 
 use super::super::DashboardState;
 use super::super::memory_analysis::pca_scores;
 use super::facts::fact_summary_json;
+use crate::read_model::DashboardDomainStateV1;
 use crate::snapshot_cache::DerivedSnapshotCacheState;
 use crate::tracedecay::facts::memory_application_for_db;
 use tracedecay_store::{
@@ -16,6 +20,128 @@ use tracedecay_store::{
 };
 
 pub(super) const PROJECTION_POINT_CAP: i64 = 2000;
+
+/// Cache provenance of one derived (projection or similarity) read.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct MemoryDerivedScanV1 {
+    pub cache_scope: String,
+    pub cache_state: String,
+    /// Vector rows loaded for this response; zero on a cache hit.
+    pub vector_rows_read: usize,
+}
+
+impl MemoryDerivedScanV1 {
+    pub(super) fn store_revision(
+        cache_state: DerivedSnapshotCacheState,
+        vector_rows_read: usize,
+    ) -> Self {
+        Self {
+            cache_scope: "store_revision".to_owned(),
+            cache_state: cache_state.as_str().to_owned(),
+            vector_rows_read,
+        }
+    }
+}
+
+/// One eligible fact as the canonical dashboard fact summary projects it.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryProjectedFactV1 {
+    pub fact_id: FactId,
+    pub payload_access: PayloadAccessState,
+    pub trust_score: f64,
+    pub retrieval_count: u64,
+    pub access_count: u64,
+    pub helpful_count: u64,
+    pub unhelpful_count: u64,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub projected_as_of: i64,
+    pub last_recalled_at: Option<i64>,
+    pub content: String,
+    pub category: String,
+    pub tags: Vec<String>,
+    pub entities: Vec<String>,
+    pub metadata: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_label: Option<String>,
+    pub entity_count: u64,
+}
+
+/// One projected fact placed in the 2D phase projection.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct MemoryProjectionPointV1 {
+    #[serde(flatten)]
+    pub fact: MemoryProjectedFactV1,
+    pub x: f64,
+    pub y: f64,
+}
+
+/// `pca` only when the decomposition succeeded over at least two equal-length
+/// vectors; every other outcome is `none` and is not a semantic map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryProjectionMethodV1 {
+    Pca,
+    None,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryProjectionCompletenessV1 {
+    Complete,
+    Bounded,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct MemoryProjectionCoverageV1 {
+    pub completeness: MemoryProjectionCompletenessV1,
+    pub examined: usize,
+    pub limit: i64,
+    pub omission_reasons: Vec<String>,
+}
+
+/// `GET /api/plugins/holographic/projection`.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct MemoryProjectionPayloadV1 {
+    pub exists: bool,
+    pub dim: usize,
+    pub limit: i64,
+    pub method: MemoryProjectionMethodV1,
+    pub points: Vec<MemoryProjectionPointV1>,
+    pub coverage: MemoryProjectionCoverageV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scan: Option<MemoryDerivedScanV1>,
+    /// Request lifecycle state when the read ended before a result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<DashboardDomainStateV1>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    pub error: String,
+}
+
+impl MemoryProjectionPayloadV1 {
+    pub fn empty(limit: i64, error: impl Into<String>) -> Self {
+        Self {
+            exists: true,
+            dim: 0,
+            limit,
+            method: MemoryProjectionMethodV1::None,
+            points: Vec::new(),
+            coverage: MemoryProjectionCoverageV1 {
+                completeness: MemoryProjectionCompletenessV1::Unknown,
+                examined: 0,
+                limit,
+                omission_reasons: vec!["read_not_completed".to_owned()],
+            },
+            scan: None,
+            state: None,
+            code: None,
+            error: error.into(),
+        }
+    }
+}
 
 pub fn projection_point_cap() -> i64 {
     PROJECTION_POINT_CAP
@@ -73,68 +199,24 @@ pub(super) fn vector_rows(
 /// One cached PCA projection of a store revision for a query/limit pair.
 pub(crate) struct ProjectionComputation {
     dim: usize,
-    method: &'static str,
+    method: MemoryProjectionMethodV1,
     error: &'static str,
-    points: Vec<Value>,
+    points: Vec<MemoryProjectionPointV1>,
     examined: usize,
-    point_limit: usize,
     coverage_complete: bool,
 }
 
 pub(crate) type ProjectionCacheRevision = (ProjectMemoryStoreRevisionV1, String, i64);
 
-fn projection_point(meta: &Value, x: f64, y: f64) -> Result<Value, String> {
-    let mut point = meta.clone();
-    let object = point
-        .as_object_mut()
-        .ok_or_else(|| "projection metadata was not an object".to_owned())?;
-    object
-        .get("fact_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "projection metadata omitted its canonical fact ID".to_owned())?;
-    object
-        .get("payload_access")
-        .ok_or_else(|| "projection metadata omitted its payload-access state".to_owned())?;
-    object
-        .get("category")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "projection metadata omitted its authoritative category".to_owned())?;
-    object
-        .get("trust_score")
-        .and_then(Value::as_f64)
-        .ok_or_else(|| "projection metadata omitted its authoritative trust score".to_owned())?;
-    object
-        .get("retrieval_count")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| {
-            "projection metadata omitted its authoritative retrieval count".to_owned()
-        })?;
-    object
-        .get("created_at")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| "projection metadata omitted its authoritative creation time".to_owned())?;
-    object
-        .get("updated_at")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| "projection metadata omitted its authoritative update time".to_owned())?;
-    object
-        .get("metadata")
-        .ok_or_else(|| "projection metadata omitted authoritative fact metadata".to_owned())?;
-    object
-        .get("entity_count")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| "projection metadata omitted its authoritative entity count".to_owned())?;
-    let content = object
-        .get("content")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "projection metadata omitted authoritative fact content".to_owned())?
-        .chars()
-        .take(200)
-        .collect::<String>();
-    object.insert("content".into(), json!(content));
-    object.insert("x".into(), json!((x * 1e6).round() / 1e6));
-    object.insert("y".into(), json!((y * 1e6).round() / 1e6));
-    Ok(point)
+fn projection_point(meta: &Value, x: f64, y: f64) -> Result<MemoryProjectionPointV1, String> {
+    let mut fact = MemoryProjectedFactV1::deserialize(meta)
+        .map_err(|error| format!("projection metadata did not match its contract: {error}"))?;
+    fact.content = fact.content.chars().take(200).collect();
+    Ok(MemoryProjectionPointV1 {
+        fact,
+        x: (x * 1e6).round() / 1e6,
+        y: (y * 1e6).round() / 1e6,
+    })
 }
 
 fn compute_projection(
@@ -159,11 +241,10 @@ fn compute_projection(
             .collect();
         return Ok(ProjectionComputation {
             dim,
-            method: "none",
+            method: MemoryProjectionMethodV1::None,
             error: "",
             points,
             examined: rows.len(),
-            point_limit,
             coverage_complete: rows.len() < point_limit,
         });
     }
@@ -184,7 +265,7 @@ fn compute_projection(
     match pca_scores(&features, &read_control).map_err(|error| error.to_string())? {
         Some(scores) => Ok(ProjectionComputation {
             dim,
-            method: "pca",
+            method: MemoryProjectionMethodV1::Pca,
             error: "",
             points: rows
                 .iter()
@@ -192,16 +273,14 @@ fn compute_projection(
                 .map(|((meta, _), s)| projection_point(meta, s[0], s[1]))
                 .collect::<Result<Vec<_>, _>>()?,
             examined: rows.len(),
-            point_limit,
             coverage_complete: rows.len() < point_limit,
         }),
         None => Ok(ProjectionComputation {
             dim,
-            method: "none",
+            method: MemoryProjectionMethodV1::None,
             error: "projection failed",
             points: Vec::new(),
             examined: rows.len(),
-            point_limit,
             coverage_complete: rows.len() < point_limit,
         }),
     }
@@ -212,48 +291,21 @@ pub async fn projection_payload(
     query: &str,
     limit: i64,
     read_control: &FactReadControl,
-) -> Value {
-    let mut obj = Map::new();
-    obj.insert("exists".into(), json!(true));
-    obj.insert("dim".into(), json!(0));
-    obj.insert("limit".into(), json!(limit));
-    obj.insert("method".into(), json!("none"));
-    obj.insert("points".into(), json!([]));
-    obj.insert(
-        "coverage".into(),
-        json!({
-            "completeness": "unknown",
-            "examined": 0,
-            "limit": limit,
-            "omission_reasons": ["read_not_completed"],
-        }),
-    );
-    obj.insert("error".into(), json!(""));
-
+) -> MemoryProjectionPayloadV1 {
     if read_control.interrupted() {
-        obj.insert("error".into(), json!("memory projection interrupted"));
-        return Value::Object(obj);
+        return MemoryProjectionPayloadV1::empty(limit, "memory projection interrupted");
     }
     let application = match memory_application_for_db(state.memory_owner.clone(), &state.mem_db) {
         Ok(application) => application,
-        Err(error) => {
-            obj.insert("error".into(), json!(error.to_string()));
-            return Value::Object(obj);
-        }
+        Err(error) => return MemoryProjectionPayloadV1::empty(limit, error.to_string()),
     };
     let point_limit = match usize::try_from(limit.clamp(1, PROJECTION_POINT_CAP)) {
         Ok(limit) => limit,
-        Err(error) => {
-            obj.insert("error".into(), json!(error.to_string()));
-            return Value::Object(obj);
-        }
+        Err(error) => return MemoryProjectionPayloadV1::empty(limit, error.to_string()),
     };
     let store_revision = match application.dashboard_store_revision(read_control).await {
         Ok(revision) => revision,
-        Err(error) => {
-            obj.insert("error".into(), json!(error.to_string()));
-            return Value::Object(obj);
-        }
+        Err(error) => return MemoryProjectionPayloadV1::empty(limit, error.to_string()),
     };
     let normalized_query = query.trim().to_owned();
     let revision = (store_revision, normalized_query.clone(), limit);
@@ -288,53 +340,33 @@ pub async fn projection_payload(
         .await
     {
         Ok(cached) => cached,
-        Err(error) => {
-            obj.insert("error".into(), json!(error));
-            return Value::Object(obj);
-        }
+        Err(error) => return MemoryProjectionPayloadV1::empty(limit, error),
     };
     if read_control.interrupted() {
-        obj.insert("error".into(), json!("memory projection interrupted"));
-        return Value::Object(obj);
+        return MemoryProjectionPayloadV1::empty(limit, "memory projection interrupted");
     }
-    projection_response(
-        &computed,
-        cache_state,
-        vector_rows_read.load(Ordering::Relaxed),
-        obj,
-    )
-}
-
-fn projection_response(
-    computation: &ProjectionComputation,
-    cache_state: DerivedSnapshotCacheState,
-    vector_rows_read: usize,
-    mut obj: Map<String, Value>,
-) -> Value {
-    obj.insert(
-        "coverage".into(),
-        json!({
-            "completeness": if computation.coverage_complete { "complete" } else { "bounded" },
-            "examined": computation.examined,
-            "limit": computation.point_limit,
-            "omission_reasons": if computation.coverage_complete {
-                Vec::<&str>::new()
-            } else {
-                vec!["request_limit_reached"]
-            },
-        }),
-    );
-    obj.insert(
-        "scan".into(),
-        json!({
-            "cache_scope": "store_revision",
-            "cache_state": cache_state.as_str(),
-            "vector_rows_read": vector_rows_read,
-        }),
-    );
-    obj.insert("dim".into(), json!(computation.dim));
-    obj.insert("method".into(), json!(computation.method));
-    obj.insert("points".into(), json!(computation.points));
-    obj.insert("error".into(), json!(computation.error));
-    Value::Object(obj)
+    let (completeness, omission_reasons) = if computed.coverage_complete {
+        (MemoryProjectionCompletenessV1::Complete, Vec::new())
+    } else {
+        (
+            MemoryProjectionCompletenessV1::Bounded,
+            vec!["request_limit_reached".to_owned()],
+        )
+    };
+    MemoryProjectionPayloadV1 {
+        dim: computed.dim,
+        method: computed.method,
+        points: computed.points.clone(),
+        coverage: MemoryProjectionCoverageV1 {
+            completeness,
+            examined: computed.examined,
+            limit: limit.clamp(1, PROJECTION_POINT_CAP),
+            omission_reasons,
+        },
+        scan: Some(MemoryDerivedScanV1::store_revision(
+            cache_state,
+            vector_rows_read.load(Ordering::Relaxed),
+        )),
+        ..MemoryProjectionPayloadV1::empty(limit, computed.error)
+    }
 }

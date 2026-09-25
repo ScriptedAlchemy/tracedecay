@@ -3,8 +3,8 @@
 use std::io::Write;
 use std::path::Path;
 
-use tracedecay::project::TraceDecay;
 use tracedecay_domain::errors::Result;
+use tracedecay_project::project::TraceDecay;
 
 /// Returns the first plausible unexpanded `${...}` template variable in a
 /// `--path` argument (e.g. `${workspaceFolder}`), or `None` when the value
@@ -99,7 +99,7 @@ fn proxy_serve_handshake(
     };
 
     let ambient_discovery =
-        !explicit_path && tracedecay::config::is_ambient_project_root(&resolved_path);
+        !explicit_path && tracedecay_project::config::is_ambient_project_root(&resolved_path);
     let initialized = !ambient_discovery && TraceDecay::is_initialized(&resolved_path);
     // `serve` is a database-free proxy. It may consult only an already-pinned
     // in-memory snapshot; missing authority disables implicit auto-init rather
@@ -112,13 +112,13 @@ fn proxy_serve_handshake(
     // mirrors the same default fallback in `resolve_daemon_initialize_route`.
     let auto_init_root = (!ambient_discovery
         && !initialized
-        && tracedecay::config::cached_sync_config(&resolved_path).map_or_else(
+        && tracedecay_project::config::cached_sync_config(&resolved_path).map_or_else(
             |_| tracedecay_configuration::SyncConfig::default().auto_init,
             |config| config.auto_init,
         ))
     .then(|| tracedecay_runtime_core::worktree::git_worktree_root(&resolved_path))
     .flatten()
-    .filter(|root| !tracedecay::config::is_ambient_project_root(root));
+    .filter(|root| !tracedecay_project::config::is_ambient_project_root(root));
     if let Some(root) = auto_init_root.as_ref() {
         resolved_path.clone_from(root);
     }
@@ -129,7 +129,7 @@ fn proxy_serve_handshake(
         .and_then(|project_path| serve_scope_prefix(original_cwd, project_path));
     let telemetry_timings = timings
         || project_path.as_deref().is_some_and(|path| {
-            tracedecay::config::cached_telemetry_config(path)
+            tracedecay_project::config::cached_telemetry_config(path)
                 .is_ok_and(|telemetry| telemetry.timings)
         });
     let mut handshake = tracedecay::daemon::handshake_for_current_client(

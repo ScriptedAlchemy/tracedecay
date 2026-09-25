@@ -63,7 +63,7 @@ export function MetricPlate({
         </span>
       </div>
 
-      {annotation ? <div className="text-3xs text-text-muted">{annotation}</div> : null}
+      {annotation ? <div className="text-sm text-text-muted">{annotation}</div> : null}
 
       {/* The reason is the reading when there is no figure, so it sits where a
         * value would and carries the state chip rather than hiding in a
@@ -71,43 +71,43 @@ export function MetricPlate({
       {!presentation.available ? (
         <div className="flex flex-wrap items-center gap-2">
           <StateChip kind="unknown" />
-          <span className="min-w-0 text-2xs text-text-secondary">
+          <span className="min-w-0 text-body text-text-secondary">
             {presentation.unavailableReason ?? 'the daemon reported no reason'}
           </span>
         </div>
       ) : null}
 
-      <dl className="flex flex-col gap-1 text-3xs leading-snug text-text-muted">
+      <dl className="flex flex-col gap-1 text-sm leading-snug text-text-muted">
         <div className="flex min-w-0 gap-1.5">
-          <dt className="shrink-0 uppercase tracking-[0.08em]">denominator</dt>
+          <dt className="shrink-0 uppercase tracking-[0.08em] text-3xs">denominator</dt>
           <dd className="min-w-0 break-words text-text-secondary">{presentation.denominator}</dd>
         </div>
         <div className="flex min-w-0 gap-1.5">
-          <dt className="shrink-0 uppercase tracking-[0.08em]">coverage</dt>
+          <dt className="shrink-0 uppercase tracking-[0.08em] text-3xs">coverage</dt>
           <dd className="min-w-0 break-words text-text-secondary">{presentation.coverage}</dd>
         </div>
         {presentation.interval ? (
           <div className="flex min-w-0 gap-1.5">
-            <dt className="shrink-0 uppercase tracking-[0.08em]">interval</dt>
+            <dt className="shrink-0 uppercase tracking-[0.08em] text-3xs">interval</dt>
             <dd className="min-w-0 break-words text-text-secondary">{presentation.interval}</dd>
           </div>
         ) : null}
         {presentation.delta ? (
           <div className="flex min-w-0 gap-1.5">
-            <dt className="shrink-0 uppercase tracking-[0.08em]">delta</dt>
+            <dt className="shrink-0 uppercase tracking-[0.08em] text-3xs">delta</dt>
             <dd className="min-w-0 break-words text-text-secondary">{presentation.delta}</dd>
           </div>
         ) : null}
         {presentation.calibration ? (
           <div className="flex min-w-0 gap-1.5">
-            <dt className="shrink-0 uppercase tracking-[0.08em]">calibration</dt>
+            <dt className="shrink-0 uppercase tracking-[0.08em] text-3xs">calibration</dt>
             <dd className="min-w-0 break-words text-text-secondary">
               {presentation.calibration}
             </dd>
           </div>
         ) : null}
         <div className="flex min-w-0 gap-1.5">
-          <dt className="shrink-0 uppercase tracking-[0.08em]">source</dt>
+          <dt className="shrink-0 uppercase tracking-[0.08em] text-3xs">source</dt>
           <dd className="min-w-0 break-words">{presentation.provenance}</dd>
         </div>
       </dl>
@@ -135,7 +135,7 @@ export function MetricGroups({
   const groups = groupBySource(metrics);
   if (groups.length === 0) {
     return (
-      <p className="px-3 py-4 text-2xs text-text-secondary" data-metric-groups="empty">
+      <p className="px-3 py-4 text-body text-text-secondary" data-metric-groups="empty">
         {emptyLabel}
       </p>
     );
@@ -160,7 +160,7 @@ function MetricSourceGroup({ group }: { group: MetricGroup }) {
       <div className="flex min-w-0 items-center gap-2">
         <h3 className="td-legend truncate">{group.label}</h3>
         <span aria-hidden className="td-rule" />
-        <span className="shrink-0 text-3xs text-text-muted tabular">
+        <span className="shrink-0 text-xs text-text-muted tabular">
           {available} of {group.metrics.length} measured
         </span>
       </div>

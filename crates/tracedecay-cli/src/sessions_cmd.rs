@@ -251,10 +251,7 @@ mod search_report_tests {
 
     fn base_result() -> serde_json::Value {
         json!({
-            "catch_up": false,
-            "catch_up_failures": [],
-            "catch_up_performed": false,
-            "catch_up_provider": "all",
+            "require_fresh": false,
             "goals": false,
             "include_subagents": false,
             "message_type": "any",

@@ -52,7 +52,9 @@ fn hook_notice_registration_is_released_with_the_published_owner() {
     ));
 }
 
-fn hook_binding(host: tracedecay_hooks::HookHostV1) -> tracedecay_hooks::HookScopeBindingV1 {
+fn hook_binding(
+    host: tracedecay_domain::NativeHostIdentityV1,
+) -> tracedecay_hooks::HookScopeBindingV1 {
     let capabilities = [
         tracedecay_hooks::HookEventFamily::SessionBoundary,
         tracedecay_hooks::HookEventFamily::PromptBoundary,
@@ -86,7 +88,7 @@ fn hook_notice_dispatch_requires_a_live_daemon_binding() {
         "an unpublished binding set must stay typed unbound"
     );
 
-    let host = tracedecay_hooks::HookHostV1::ClaudeCode;
+    let host = tracedecay_domain::NativeHostIdentityV1::ClaudeCode;
     let expires_at = UtcMicros(published_at.0 + 60_000_000);
     tracedecay_hooks::HookConfigurationPublisherV1::new(
         tracedecay_hooks::HookConfigurationFileWriterV1::new(hook_configuration_path(

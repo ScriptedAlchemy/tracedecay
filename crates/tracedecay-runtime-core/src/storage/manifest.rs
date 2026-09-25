@@ -5,8 +5,8 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
     PrivateStoreIo, ProfileShardValidationError, SESSIONS_DB_FILENAME, STORE_MANIFEST_FILENAME,
-    STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreLayout, StoreManifest,
-    ValidatedProfileShard, has_sqlite_database_header, profile_sharded_data_root,
+    STORE_MANIFEST_SCHEMA_VERSION, StoreKind, StoreLayout, StoreManifest, ValidatedProfileShard,
+    has_sqlite_database_header, profile_sharded_data_root,
 };
 
 pub fn write_store_manifest(layout: &StoreLayout) -> Result<StoreManifest> {
@@ -178,9 +178,6 @@ fn validate_profile_shard_manifest(
     }
     if manifest.store_kind != StoreKind::CodeProject {
         return Err(invalid(Reason::ManifestStoreKindMismatch));
-    }
-    if manifest.storage_mode != StorageMode::ProfileSharded {
-        return Err(invalid(Reason::ManifestStorageModeMismatch));
     }
     if manifest.sessions_db_relpath != Path::new(SESSIONS_DB_FILENAME) {
         return Err(invalid(Reason::ManifestSessionsDbPathMismatch));

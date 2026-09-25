@@ -17,7 +17,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
-use tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1;
+use tracedecay_code_index_retention::code_index_generations::{
+    DurablePublicationPointerV1, code_generation_segments_root,
+};
 use tracedecay_domain::{
     CodeGenerationId, ProjectId, RefId, RepositoryId, WorktreeId, canonical_sha256,
     sha256_hex_suffix,
@@ -58,6 +60,21 @@ fn git(root: &Path, args: &[&str]) {
         "git fixture command failed: {args:?}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// The shared artifact files a scope's bundle manifest names.
+fn read_bundle_artifact_paths(scope: &Path, manifest: &Path) -> Vec<PathBuf> {
+    tracedecay_graph_db::sealed_read_bundle_manifest_artifact_digests(manifest)
+        .expect("read bundle manifest")
+        .expect("a bundle manifest path")
+        .iter()
+        .map(|digest| {
+            code_generation_segments_root(scope).join(format!(
+                "read-bundle-artifact-{}.bin",
+                sha256_hex_suffix(digest).expect("sha256 artifact digest")
+            ))
+        })
+        .collect()
 }
 
 fn with_publication_context<T>(
@@ -351,7 +368,7 @@ async fn unreadable_pending_replay_is_discarded_before_fresh_publication() {
         .join("../tracedecay-code-index/tests/fixtures/partitioned_pre_paging");
     let historical_digest = "6fece830a4b12904018853a467e404edc60ea76e2cab48d4645fbbb4132bd6af";
     let generations_root = scoped_store.join("code-generations-v1");
-    let segments_root = scoped_store.join("code-generation-segments-v1");
+    let segments_root = code_generation_segments_root(&scoped_store);
     std::fs::create_dir_all(&segments_root).expect("historical segment root");
     std::fs::copy(
         historical_fixture.join("manifest.json"),
@@ -940,8 +957,6 @@ async fn sealed_read_bundle_serves_catalog_without_warm_and_degrades_typed() {
         .expect("sha256 state digest")
         .to_owned();
     let bundle_manifest_path = generations_root.join(format!("read-bundle-{digest_hex}.json"));
-    let bundle_catalog_path =
-        generations_root.join(format!("read-bundle-{digest_hex}.interactive-catalog.bin"));
 
     let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
     let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
@@ -987,6 +1002,9 @@ async fn sealed_read_bundle_serves_catalog_without_warm_and_degrades_typed() {
         bundle_manifest_path.is_file(),
         "sealing must write the read bundle manifest"
     );
+    let bundle_catalog_path = read_bundle_artifact_paths(&scoped_store, &bundle_manifest_path)
+        .pop()
+        .expect("the bundle names its catalog artifact");
     assert!(
         bundle_catalog_path.is_file(),
         "sealing must write the interactive-catalog artifact"
@@ -1035,7 +1053,10 @@ async fn sealed_read_bundle_serves_catalog_without_warm_and_degrades_typed() {
     tracedecay_graph_db::retire_sealed_read_bundle(&generations_root, &sealed_state_digest)
         .expect("retire the read bundle");
     assert!(!bundle_manifest_path.exists());
-    assert!(!bundle_catalog_path.exists());
+    assert!(
+        bundle_catalog_path.exists(),
+        "a shared artifact outlives its bundle until the project's sweep collects it"
+    );
     let absent = runtime
         .load_sealed_read_bundle_catalog(&Arc::new(AtomicBool::new(false)))
         .expect("absent load is a typed state, not an error");
@@ -2130,7 +2151,7 @@ async fn concurrent_worktree_scopes_publish_with_one_corpus_build_and_bounded_rs
             sealed_source: scoped_store
                 .join("code-generations-v1")
                 .join(format!("generation-{digest}.json")),
-            segments_source_root: scoped_store.join("code-generation-segments-v1"),
+            segments_source_root: code_generation_segments_root(&scoped_store),
             sealed_state_digest: tracedecay_graph_db::SealedGraphStateDigest::try_from(
                 pointer.state_digest,
             )

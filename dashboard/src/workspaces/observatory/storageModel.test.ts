@@ -98,6 +98,7 @@ describe('Observatory storage read models', () => {
       },
       known_families: ['storage'],
       schema_convergences: [],
+      storage_kind_statuses: [],
       note: 'storage retention and size authorities were consulted',
     });
 

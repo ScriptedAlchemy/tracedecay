@@ -34,7 +34,7 @@ mod goal_event_tests {
     use crate::admission::HostAdmission;
     use crate::admission::test_support::MemoryHostAdmission;
     use crate::observation::{CaptureObservationRequest, ObservationCancellation};
-    use crate::runtime::codex::{
+    use crate::runtime::hosts::codex::{
         try_admit_codex_jsonl_observations_for_project_window,
         try_admit_codex_jsonl_observations_for_project_with_admission,
     };
@@ -1494,7 +1494,7 @@ mod recent_first_discovery_tests {
 
     use super::CodexSource;
     use crate::admission::test_support::MemoryHostAdmission;
-    use crate::runtime::codex::{
+    use crate::runtime::hosts::codex::{
         CodexCorpusEpoch, CodexDiscoveryDelivery, CodexDiscoveryFrontier, CodexDiscoveryHub,
         CodexDiscoverySourceKey, CodexDiscoveryState, CodexExactSessionPathAuthority,
         CodexIndexedPath, CodexReplayIndex, EXACT_HOOK_DISCOVERY_UNITS_PER_CALL,
@@ -1881,7 +1881,6 @@ mod recent_first_discovery_tests {
             .expect("one source replay index");
         assert_eq!(index.completed_enumerations, 1);
         assert_eq!(index.files_considered, 73);
-        assert!(!index._memory.is_empty());
     }
 
     #[tokio::test]

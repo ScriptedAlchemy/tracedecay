@@ -52,9 +52,8 @@ pub use memory::{
 };
 pub use session::{
     ClosedUtcIntervalV1, CorrelationIndexCountModeV1, CorrelationIndexV1, GitScopeV1,
-    HydrationStateResultV1, MessageSearchFreshnessV1, MessageSearchHitV1, MessageSearchResultV1,
-    MessageSearchRootV1, MessageSearchSkipV1, RetainedNextActionV1, RetrievalWorkerStatusV1,
-    SessionCorrelationHitV1, SessionCoverageIntervalV1, SessionCoverageModeV1,
+    HydrationStateResultV1, MessageSearchHitV1, MessageSearchResultV1, RetainedNextActionV1,
+    RetrievalWorkerStatusV1, SessionCorrelationHitV1, SessionCoverageIntervalV1,
     SessionCoverageReasonV1, SessionCoverageRequestV1, SessionCoverageStateV1, SessionMessageV1,
     SessionRecordV1, SessionRefreshBeginResultV1, SessionRefreshCancelResultV1,
     SessionRefreshFrontierResultV1, SessionRefreshProgressV1, SessionRefreshReceiptV1,
@@ -142,7 +141,7 @@ pub enum RetainedSurfaceResultV1 {
     LcmDoctor(LcmDoctorResultV1),
     LcmLoadSession(LcmLoadSessionResultV1),
     LcmGrep(LcmGrepResultV1),
-    LcmDescribe(LcmDescribeResultV1),
+    LcmDescribe(Box<LcmDescribeResultV1>),
     LcmExpand(Box<LcmExpandResultV1>),
     LcmExpandQuery(LcmExpandQueryResultV1),
 }

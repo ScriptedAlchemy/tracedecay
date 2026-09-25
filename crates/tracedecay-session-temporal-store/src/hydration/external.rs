@@ -256,5 +256,5 @@ pub(crate) async fn resolve_external_target(
 }
 
 fn unverifiable() -> HydrationResolution {
-    HydrationResolution::Unavailable(HydrationStateV1::UnverifiableLegacy)
+    HydrationResolution::Unavailable(HydrationStateV1::Unverifiable)
 }

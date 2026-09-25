@@ -40,6 +40,10 @@ impl AgentTaskBackend for ReviewFactRecordingBackend {
             output_tokens: None,
         })
     }
+
+    fn executable(&self) -> Option<&std::path::Path> {
+        None
+    }
 }
 
 #[tokio::test]

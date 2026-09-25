@@ -16,12 +16,14 @@
  *
  * Determinism: fixtures never call `Math.random`; array shapes derive from the
  * row index, so the parse-gate test and screenshots are stable across runs.
- * Wall-clock (`nowSecs` / `nowMicros`) is the only time source, matching the
- * pre-existing fixtures.
+ * `nowSecs` / `nowMicros` are the only time source: the wall clock, unless
+ * `TD_FIXTURE_NOW_MS` pins one. The visual audit pins it, together with the
+ * page clock, so its captures are pixel-stable between runs.
  */
 
-const nowSecs = Math.floor(Date.now() / 1000);
-const nowMicros = Date.now() * 1000;
+const nowMs = Number(globalThis.process?.env?.['TD_FIXTURE_NOW_MS']) || Date.now();
+const nowSecs = Math.floor(nowMs / 1000);
+const nowMicros = nowMs * 1000;
 const DAY = 86_400;
 
 const PLAN26_OBSERVATORY_METRICS = [
@@ -498,7 +500,7 @@ function memoryEntities(): Record<string, unknown>[] {
  * the drawing must count rather than draw.
  */
 function memoryGraph(facts: ReturnType<typeof memoryFacts>): Record<string, unknown> {
-  const factNodes = facts.map((fact) => ({
+  const factNodes: Record<string, unknown>[] = facts.map((fact) => ({
     id: `fact:${fact.fact_id}`,
     kind: 'fact',
     label: fact.content,
@@ -511,6 +513,23 @@ function memoryGraph(facts: ReturnType<typeof memoryFacts>): Record<string, unkn
     retrieval_count: fact.retrieval_count,
     helpful_count: fact.helpful_count,
   }));
+  // One root whose payload is withheld, in the daemon's `Unavailable` shape
+  // (memory_service/graph.rs `fact_node`): its identity is the label and it
+  // carries no content, category or trust, so the drawing must show the gap.
+  const withheldId = `fact.${'a'.repeat(64)}.${'e'.repeat(64)}`;
+  factNodes.push({
+    id: `fact:${withheldId}`,
+    kind: 'fact',
+    label: withheldId,
+    fact_id: withheldId,
+    payload_access: 'redacted',
+    projected_as_of: nowMicros,
+    content: null,
+    category: null,
+    trust_score: null,
+    retrieval_count: null,
+    helpful_count: null,
+  });
   const entityNodes = ENTITY_NAMES.map(([name]) => ({
     id: `entity:${name}`,
     kind: 'entity',
@@ -529,6 +548,7 @@ function memoryGraph(facts: ReturnType<typeof memoryFacts>): Record<string, unkn
       });
     }
   });
+  edges.push({ kind: 'mentions', source: `fact:fact.${'a'.repeat(64)}.${'e'.repeat(64)}`, target: `entity:${ENTITY_NAMES[2]![0]}` });
   edges.push({ kind: 'contradicts', source: `fact:${facts[6]!.fact_id}`, target: `fact:${facts[7]!.fact_id}` });
   edges.push({ kind: 'supersedes', source: `fact:${facts[1]!.fact_id}`, target: `fact:${facts[12]!.fact_id}` });
   edges.push({ kind: 'derived_from', source: `fact:${facts[4]!.fact_id}`, target: `fact:${facts[9]!.fact_id}` });
@@ -550,12 +570,12 @@ function memoryGraph(facts: ReturnType<typeof memoryFacts>): Record<string, unkn
       unknown: null,
       denominator: null,
       unit: null,
-      omission_reasons: ['fact_universe_bounded'],
+      omission_reasons: ['fact_universe_bounded', 'unavailable_fact_roots'],
     },
     fact_universe_count: 4128,
-    fact_candidates_examined: facts.length,
-    unavailable_fact_candidates: 0,
-    root_count: facts.length,
+    fact_candidates_examined: facts.length + 1,
+    unavailable_fact_candidates: 1,
+    root_count: facts.length + 1,
     relation_limit: 100,
     relation_count: edges.length,
   };
@@ -706,6 +726,163 @@ function memoryTrustHistoryPayload(factId: string): Record<string, unknown> {
     completeness: 'complete',
     next_after: null,
     error: '',
+  };
+}
+
+/** Width of the synthetic phase encodings the geometry reads report. */
+const GEOMETRY_DIM = 256;
+
+/** A small deterministic generator, so the scatter is stable across a
+ * screenshot pair without pretending to be a decomposition. */
+function geometryRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state / 0x1_0000_0000;
+  };
+}
+
+function geometryFactId(index: number): string {
+  return `fact.${'e'.repeat(64)}.${index.toString(16).padStart(64, '0')}`;
+}
+
+function geometryContent(index: number): string {
+  const category = FACT_CATEGORIES[index % FACT_CATEGORIES.length]!;
+  return `Synthetic geometry fixture fact #${String(index).padStart(4, '0')} (${category})`;
+}
+
+/**
+ * `GET /api/plugins/holographic/projection` (memory_service/projection.rs):
+ * the request limit's worth of synthetic facts, one cluster per category on a
+ * ring with seeded jitter. The coordinates are arithmetic, not a PCA; they only
+ * need the shape of one. The store holds more facts than the limit, so the
+ * coverage is `bounded` by `request_limit_reached`, as the handler reports.
+ * The `q` filter keeps facts whose content contains it.
+ */
+function memoryProjectionPayload(search: string): Record<string, unknown> {
+  const params = new URLSearchParams(search);
+  const raw = Number(params.get('limit'));
+  const limit = Number.isFinite(raw) && raw > 0 ? Math.min(2000, Math.trunc(raw)) : 400;
+  const query = (params.get('q') ?? '').toLowerCase();
+  const random = geometryRandom(0x5eed);
+  const points = Array.from({ length: limit }, (_, index) => {
+    const lobe = index % FACT_CATEGORIES.length;
+    const angle = (lobe / FACT_CATEGORIES.length) * Math.PI * 2;
+    const spread = 0.12 + 0.22 * random();
+    const theta = random() * Math.PI * 2;
+    const createdAt = nowMicros - (index + 1) * 3_600_000_000;
+    return {
+      fact_id: geometryFactId(index),
+      payload_access: 'eligible',
+      category: FACT_CATEGORIES[lobe]!,
+      content: geometryContent(index),
+      tags: ['synthetic'],
+      entities: [],
+      entity_count: 0,
+      metadata: {},
+      source_label: 'story-fixture',
+      trust_score: 0.2 + 0.75 * random(),
+      access_count: index % 17,
+      retrieval_count: index % 11,
+      helpful_count: index % 5,
+      unhelpful_count: index % 3,
+      created_at: createdAt,
+      updated_at: createdAt,
+      last_recalled_at: index % 4 === 0 ? null : createdAt,
+      projected_as_of: nowMicros,
+      x: Math.cos(angle) * 0.62 + Math.cos(theta) * spread,
+      y: Math.sin(angle) * 0.48 + Math.sin(theta) * spread,
+    };
+  }).filter((point) => query === '' || point.content.toLowerCase().includes(query));
+  return {
+    exists: true,
+    error: '',
+    method: 'pca',
+    dim: GEOMETRY_DIM,
+    limit,
+    points,
+    coverage: {
+      completeness: 'bounded',
+      examined: limit,
+      limit,
+      omission_reasons: ['request_limit_reached'],
+    },
+    scan: { cache_scope: 'store_revision', cache_state: 'hit', vector_rows_read: limit },
+  };
+}
+
+/** `similarity_classification` in session-memory/similarity.rs, by score alone. */
+function geometryClassification(similarity: number): string {
+  if (similarity >= 0.95) return 'likely_duplicate';
+  if (similarity >= 0.9) return 'high_similarity';
+  return 'related';
+}
+
+/**
+ * `GET /api/plugins/holographic/similarity` (memory_analysis.rs): 400 encoded
+ * synthetic facts, every pair scored into the handler's 20 fixed-width bins
+ * between the observed minimum and maximum, and the highest-scoring pairs at
+ * or above the floor, capped at the request limit.
+ */
+function memorySimilarityPayload(search: string): Record<string, unknown> {
+  const params = new URLSearchParams(search);
+  const floor = Number(params.get('min_similarity') ?? '0.85');
+  const rawLimit = Number(params.get('limit'));
+  const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(2000, Math.trunc(rawLimit)) : 25;
+  const encoded = 400;
+  const totalPairs = (encoded * (encoded - 1)) / 2;
+  const minScore = -0.25;
+  const maxScore = 0.99;
+  const average = 0.14;
+  const width = (maxScore - minScore) / 20;
+  const weights = Array.from({ length: 20 }, (_, bin) => {
+    const centre = minScore + (bin + 0.5) * width;
+    return Math.exp(-(((centre - average) / 0.2) ** 2));
+  });
+  const weightSum = weights.reduce((sum, weight) => sum + weight, 0);
+  const counts = weights.map((weight) => Math.max(1, Math.floor((weight / weightSum) * totalPairs)));
+  const peak = weights.indexOf(Math.max(...weights));
+  counts[peak] = counts[peak]! + totalPairs - counts.reduce((sum, count) => sum + count, 0);
+  const bins = counts.map((count, bin) => ({
+    start: Math.round((minScore + bin * width) * 1e9) / 1e9,
+    end: Math.round((minScore + (bin + 1) * width) * 1e9) / 1e9,
+    count,
+  }));
+  const pairs = Array.from({ length: 60 }, (_, rank) => {
+    const similarity = Math.round((maxScore - rank * 0.009) * 1e4) / 1e4;
+    const a = rank * 2;
+    const b = rank * 2 + FACT_CATEGORIES.length;
+    return {
+      a_id: geometryFactId(a),
+      a_category: FACT_CATEGORIES[a % FACT_CATEGORIES.length]!,
+      a_content: geometryContent(a),
+      b_id: geometryFactId(b),
+      b_category: FACT_CATEGORIES[b % FACT_CATEGORIES.length]!,
+      b_content: geometryContent(b),
+      similarity,
+      classification: geometryClassification(similarity),
+    };
+  })
+    .filter((pair) => pair.similarity >= floor)
+    .slice(0, limit);
+  return {
+    exists: true,
+    error: '',
+    count: encoded,
+    dim: GEOMETRY_DIM,
+    limit,
+    min_similarity: floor,
+    total_pairs: totalPairs,
+    pairs,
+    score_distribution: {
+      bin_count: bins.length,
+      total_pairs: totalPairs,
+      min_score: minScore,
+      max_score: maxScore,
+      average_score: average,
+      bins,
+    },
+    scan: { cache_scope: 'store_revision', cache_state: 'hit', vector_rows_read: encoded },
   };
 }
 
@@ -947,6 +1124,101 @@ function buildBaseGraph(): BaseGraph {
 
 const BASE_GRAPH = buildBaseGraph();
 
+/** Directories the wide slice's extra symbols live in, with their files. */
+const WIDE_DIRECTORIES = [
+  ['src/storage/sqlite', ['pool.rs', 'migrate.rs', 'pragma.rs']],
+  ['src/query/plan', ['planner.rs', 'ranker.rs']],
+  ['src/capture/hooks', ['ingest.rs', 'outcome.rs', 'refusal.rs']],
+  ['src/application/services', ['retrieval.rs', 'memory.rs']],
+  ['src/domain/identity', ['project.rs', 'worktree.rs']],
+  ['src/runtime/shard', ['registry.rs', 'close.rs']],
+  ['dashboard/src/viz/graph', ['layout.ts', 'activation.ts']],
+  ['dashboard/src/data/query', ['envelope.ts', 'structure.ts']],
+] as const;
+
+/**
+ * The slice an explicit `limit_nodes` asks for: the 40 base symbols, exactly
+ * as the default slice serves them, plus 210 more in their own directories.
+ * The extras never touch a base symbol, so every base degree (an index total,
+ * not a slice count) and every neighbours read stays what it always was.
+ */
+function buildWideGraph(): BaseGraph {
+  const EXTRA = 210;
+  let seed = 11;
+  const rand = () => (seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 2 ** 32;
+  const ids = Array.from({ length: EXTRA }, (_, i) => `sym-${40 + i}`);
+  // Contiguous blocks, so each directory holds a mix of kinds.
+  const cluster = (i: number) => Math.floor((i * WIDE_DIRECTORIES.length) / EXTRA);
+  const edges: Record<string, unknown>[] = [];
+  const seen = new Set<string>();
+  const addEdge = (a: number, b: number, kind: string) => {
+    const key = `${a}→${b}→${kind}`;
+    if (a === b || seen.has(key)) return;
+    seen.add(key);
+    edges.push({
+      source: ids[a],
+      target: ids[b],
+      kind,
+      line: 12 + ((a * 13 + b) % 400),
+      source_name: null,
+      target_name: null,
+    });
+  };
+  const members = WIDE_DIRECTORIES.map((_, c) => ids.flatMap((_, i) => (cluster(i) === c ? [i] : [])));
+  for (const group of members) {
+    // Two hubs per directory, a chain of tails, and a sprinkling of pairs.
+    for (const hub of group.slice(0, 2)) {
+      for (const leaf of group.slice(2)) if (rand() < 0.45) addEdge(hub, leaf, 'calls');
+    }
+    for (let i = 2; i + 1 < group.length; i += 2) addEdge(group[i]!, group[i + 1]!, 'references');
+    for (let i = 0; i < group.length; i += 1) {
+      if (rand() < 0.3) addEdge(group[i]!, group[Math.floor(rand() * group.length)]!, 'calls');
+    }
+    addEdge(group[0]!, group[1]!, 'contains');
+  }
+  // Cross-directory traffic, heavier between neighbouring layers.
+  while (edges.length < 400) {
+    const from = Math.floor(rand() * WIDE_DIRECTORIES.length);
+    const to = (from + 1 + Math.floor(rand() * rand() * (WIDE_DIRECTORIES.length - 1))) % WIDE_DIRECTORIES.length;
+    const a = members[from]![Math.floor(rand() * members[from]!.length)]!;
+    const b = members[to]![Math.floor(rand() * Math.min(6, members[to]!.length))]!;
+    addEdge(a, b, rand() < 0.7 ? 'calls' : 'references');
+  }
+
+  const degreeById = new Map<string, number>(BASE_GRAPH.degreeById);
+  const adjacency = new Map<string, Set<string>>(BASE_GRAPH.adjacency);
+  for (const id of ids) {
+    degreeById.set(id, 0);
+    adjacency.set(id, new Set());
+  }
+  for (const edge of edges) {
+    const s = edge['source'] as string;
+    const t = edge['target'] as string;
+    degreeById.set(s, degreeById.get(s)! + 1);
+    degreeById.set(t, degreeById.get(t)! + 1);
+    adjacency.get(s)!.add(t);
+    adjacency.get(t)!.add(s);
+  }
+  const extras = ids.map((id, i) => {
+    const [directory, files] = WIDE_DIRECTORIES[cluster(i)]!;
+    const file = `${directory}/${files[i % files.length]}`;
+    const node = graphNode(40 + i, 'sym', degreeById.get(id)!);
+    return {
+      ...node,
+      file_path: file,
+      qualified_name: `${file.replace(/[/.]/g, '::')}::${node['name'] as string}`,
+    };
+  });
+  return {
+    nodes: [...BASE_GRAPH.nodes, ...extras],
+    edges: [...BASE_GRAPH.edges, ...edges],
+    degreeById,
+    adjacency,
+  };
+}
+
+const WIDE_GRAPH = buildWideGraph();
+
 /* ---- GET /api/plugins/graph/node/{id}/neighbors -------------------------
  *
  * Wire-true against `graph_service.rs::neighbors_payload`, which composes
@@ -1090,7 +1362,27 @@ function neighborsPayload(nodeId: string, limit: number): Record<string, unknown
 // 500)` in graph_api.rs: the defaults are 80 and 120, not 40. The Code
 // workspace now prints these limits in the canvas caption, so a wrong number
 // here would be a wrong number on screen.
-function subgraphPayload(nodeId: string | null): Record<string, unknown> {
+function subgraphPayload(
+  nodeId: string | null,
+  limits: { nodes: number; edges: number } | null = null,
+): Record<string, unknown> {
+  if (!nodeId && limits) {
+    // `coerce_limit(limit, default, max)`: the wide slice is 250 symbols, so
+    // a request at the ceiling is served whole and a smaller one is cut.
+    const nodes = WIDE_GRAPH.nodes.slice(0, limits.nodes);
+    const keep = new Set(nodes.map((n) => n['id'] as string));
+    const among = WIDE_GRAPH.edges.filter(
+      (e) => keep.has(e['source'] as string) && keep.has(e['target'] as string),
+    );
+    return {
+      seed_id: null,
+      mode: 'default',
+      nodes,
+      edges: among.slice(0, limits.edges),
+      capped: { nodes: WIDE_GRAPH.nodes.length > limits.nodes, edges: among.length > limits.edges },
+      limits,
+    };
+  }
   if (!nodeId) {
     return {
       seed_id: null,
@@ -1101,7 +1393,9 @@ function subgraphPayload(nodeId: string | null): Record<string, unknown> {
       limits: { nodes: 80, edges: 120 },
     };
   }
-  const neighbors = BASE_GRAPH.adjacency.get(nodeId);
+  // The wide graph's adjacency is the base one plus the extras, which never
+  // touch a base symbol, so a base seed resolves exactly as it always did.
+  const neighbors = WIDE_GRAPH.adjacency.get(nodeId);
   if (!neighbors) {
     return {
       seed_id: null,
@@ -1113,8 +1407,8 @@ function subgraphPayload(nodeId: string | null): Record<string, unknown> {
     };
   }
   const keep = new Set<string>([nodeId, ...neighbors]);
-  const nodes = BASE_GRAPH.nodes.filter((n) => keep.has(n['id'] as string));
-  const edges = BASE_GRAPH.edges.filter(
+  const nodes = WIDE_GRAPH.nodes.filter((n) => keep.has(n['id'] as string));
+  const edges = WIDE_GRAPH.edges.filter(
     (e) => keep.has(e['source'] as string) && keep.has(e['target'] as string),
   );
   return {
@@ -1388,46 +1682,6 @@ function graphPathPayload(): Record<string, unknown> {
  * ========================================================================== */
 
 /**
- * Per-project lifetime savings at the SHAPE the real ledger has, not a smooth
- * ramp.
- *
- * On a machine where every worktree of one repository shares a cache, every
- * worktree records almost exactly the same lifetime saving: twenty of the
- * owner's twenty-five rows sit within a few percent of 1.80B. The fixture used
- * to ramp evenly from 8.4M down to 1.1M, which made twenty-five equal-length
- * rails look like a legitimate ranking in every audit shot. Two rows genuinely
- * deviate. The primary checkout above and a small unrelated repository well
- * below, and those are the only rows worth drawing.
- */
-const SAVINGS_PROJECTS: ReadonlyArray<readonly [string, number]> = [
-  ['/fast/projects/tracedecay', 2_939_894_592],
-  ['/fast/projects/tracedecay/.worktrees/sqlite-storage-runtime', 2_140_723_247],
-  ['/fast/projects/tracedecay/.worktrees/live-repair', 2_078_590_272],
-  ['/fast/projects/tracedecay/.worktrees/runtime-hardening', 1_946_100_344],
-  ['/fast/projects/tracedecay/.worktrees/pr8-migration', 1_831_192_520],
-  ['/fast/projects/tracedecay/.worktrees/pr8-acceptance-runner', 1_824_171_535],
-  ['/fast/projects/tracedecay/.worktrees/pr8-live-tools', 1_824_065_209],
-  ['/fast/projects/tracedecay/.worktrees/pr8-move-symbol', 1_802_722_260],
-  ['/fast/projects/tracedecay/.worktrees/pr8-kernel', 1_801_796_023],
-  ['/fast/projects/tracedecay/.worktrees/plan-topology-integration', 1_799_923_909],
-  ['/fast/projects/tracedecay/.worktrees/pr8-refresh', 1_799_813_188],
-  ['/fast/projects/tracedecay/.worktrees/pr8-runtime', 1_799_356_160],
-  ['/fast/projects/tracedecay/.worktrees/pr8-compat', 1_796_821_496],
-  ['/fast/projects/tracedecay/.worktrees/plan-dashboard', 1_799_400_112],
-  ['/fast/projects/tracedecay/.worktrees/plan-task-runtime', 1_799_402_004],
-  ['/fast/projects/tracedecay/.worktrees/plan-lsp-hooks', 1_799_398_771],
-  ['/fast/projects/tracedecay/.worktrees/plan-git-stack', 1_799_401_330],
-  ['/fast/projects/tracedecay/.worktrees/plan-policy-anchors', 1_799_399_006],
-  ['/fast/projects/tracedecay/.worktrees/pr8-automation', 1_799_400_845],
-  ['/fast/projects/tracedecay/.worktrees/pr8-benchmark', 1_799_397_612],
-  ['/fast/projects/tracedecay/.worktrees/pr8-transport', 1_799_400_501],
-  ['/fast/projects/tracedecay/.worktrees/pr8-context', 1_799_400_009],
-  ['/fast/projects/lynx', 1_802_004_118],
-  ['/fast/projects/hermes', 1_796_100_530],
-  ['/fast/projects/tracedecay-astgrep', 380_112_004],
-];
-
-/**
  * `unavailable_provider_latency` from the canonical Costs projector. The
  * mounted Savings/Costs callers do not pass a project scope to the latency
  * projector; that absence must remain a typed latency result, never an
@@ -1499,16 +1753,6 @@ function savingsPayload(): Record<string, unknown> {
         last_7d: sum(1_850_569_717, 52_371),
         last_30d: sum(4_410_909_252, 134_767),
         all_time: sum(4_902_796_408, 147_230),
-      },
-      lifetime_counters: {
-        total_tokens_saved: SAVINGS_PROJECTS.reduce((sum, [, saved]) => sum + saved, 0),
-        projects: SAVINGS_PROJECTS.map(([path, tokens_saved]) => ({ path, tokens_saved })),
-        // `savings_api` lists at most `PROJECT_LIMIT` (25) project rows and
-        // reports the true distinct-project count beside them, so the surface
-        // can say how many it is not showing.
-        project_total: SAVINGS_PROJECTS.length,
-        projects_limit: 25,
-        projects_truncated: false,
       },
     },
     // Session content sizing and provider billing evidence remain separate.
@@ -1988,6 +2232,18 @@ function analyticsSubagentTreePayload(): Record<string, unknown> {
         depth: 0,
         descendants: 2,
         link: 'root',
+        usage: {
+          usage_events: 64,
+          complete: true,
+          counters: {
+            input_tokens: 182_400,
+            output_tokens: 24_310,
+            cache_read_tokens: 1_204_800,
+            cache_write_tokens: 96_000,
+            reasoning_tokens: 8_120,
+            total_tokens: 1_515_630,
+          },
+        },
       },
       {
         provider: 'codex',
@@ -2002,6 +2258,19 @@ function analyticsSubagentTreePayload(): Record<string, unknown> {
         depth: 1,
         descendants: 1,
         link: 'linked',
+        // The provider stopped reporting mid-session: a floor, not a total.
+        usage: {
+          usage_events: 11,
+          complete: false,
+          counters: {
+            input_tokens: 41_200,
+            output_tokens: 6_050,
+            cache_read_tokens: 310_000,
+            cache_write_tokens: null,
+            reasoning_tokens: null,
+            total_tokens: 357_250,
+          },
+        },
       },
       {
         provider: 'codex',
@@ -2030,6 +2299,18 @@ function analyticsSubagentTreePayload(): Record<string, unknown> {
         depth: 0,
         descendants: 0,
         link: 'missing_parent',
+        usage: {
+          usage_events: 9,
+          complete: true,
+          counters: {
+            input_tokens: 12_900,
+            output_tokens: 3_400,
+            cache_read_tokens: 88_000,
+            cache_write_tokens: 4_100,
+            reasoning_tokens: null,
+            total_tokens: 108_400,
+          },
+        },
       },
       {
         provider: 'cursor',
@@ -2053,7 +2334,182 @@ function analyticsSubagentTreePayload(): Record<string, unknown> {
     missing_parent_count: 1,
     cycle_count: 0,
     truncated: false,
+    // The grandchild and the Cursor session carry no usage row; the child's
+    // aggregate is incomplete, so the read as a whole is partial.
+    usage_coverage: 'partial',
   };
+}
+
+/**
+ * Named scenarios for the subagent-tree route. `default` is the five-node tree
+ * above, which the Agents surface is audited against. `dense-fanout` is a
+ * synthetic 100+ agent delegation for dense-state rendering: one orchestrator
+ * over eight workstream leads, twelve subagents each, a grandchild under the
+ * first two of every lead, a few sessions still open, and three cut edges.
+ * Select it with `?fixture=dense-fanout` on the route, or through
+ * `subagentTreeFixture('dense-fanout')`; the default tree never changes.
+ */
+export type SubagentTreeScenario = 'default' | 'dense-fanout';
+
+const DENSE_WORKSTREAMS = [
+  'ingest',
+  'graph',
+  'rank',
+  'memory',
+  'export',
+  'review',
+  'release',
+  'docs',
+] as const;
+
+function analyticsSubagentTreeDenseFanoutPayload(): Record<string, unknown> {
+  const t0 = 1_760_000_000;
+  const nodes: Record<string, unknown>[] = [];
+  const session = (spec: {
+    id: string;
+    parent: string | null;
+    agent: string;
+    depth: number;
+    start: number;
+    end: number | null;
+    descendants: number;
+    link: 'root' | 'linked' | 'missing_parent';
+    provider?: string;
+    total?: number;
+    complete?: boolean;
+  }) =>
+    nodes.push({
+      provider: spec.provider ?? 'codex',
+      session_id: spec.id,
+      parent_session_id: spec.parent,
+      agent: spec.agent,
+      title: null,
+      started_at: t0 + spec.start,
+      ended_at: spec.end === null ? null : t0 + spec.end,
+      is_subagent: spec.depth > 0 || spec.link === 'missing_parent',
+      parent_tool_use_id: spec.depth > 0 ? `toolu_${spec.id.replace(/\W/g, '_')}` : null,
+      depth: spec.depth,
+      descendants: spec.descendants,
+      link: spec.link,
+      ...(spec.total === undefined ? {} : { usage: denseUsage(spec.total, spec.complete ?? true) }),
+    });
+  const perLead = 12;
+  const grandchildrenPerLead = 2;
+  session({
+    id: 'session.dense.orchestrator',
+    parent: null,
+    agent: 'Codex',
+    depth: 0,
+    start: 0,
+    end: 14_400,
+    descendants: DENSE_WORKSTREAMS.length * (1 + perLead + grandchildrenPerLead),
+    link: 'root',
+    total: 2_480_000,
+  });
+  DENSE_WORKSTREAMS.forEach((stream, lead) => {
+    const leadId = `session.dense.${stream}-lead`;
+    const leadStart = 120 + lead * 900;
+    session({
+      id: leadId,
+      parent: 'session.dense.orchestrator',
+      agent: `${stream}-lead`,
+      depth: 1,
+      start: leadStart,
+      end: leadStart + 5_400,
+      descendants: perLead + grandchildrenPerLead,
+      link: 'linked',
+      total: 400_000 + lead * 25_000,
+    });
+    for (let k = 0; k < perLead; k += 1) {
+      const id = `session.dense.${stream}-${String(k + 1).padStart(2, '0')}`;
+      const start = leadStart + 60 + k * 240;
+      const open = (lead * perLead + k) % 7 === 6;
+      session({
+        id,
+        parent: leadId,
+        agent: `${stream}-worker`,
+        depth: 2,
+        start,
+        end: open ? null : start + 600 + (k % 4) * 300,
+        descendants: k < grandchildrenPerLead ? 1 : 0,
+        link: 'linked',
+        // Every third worker reports usage; `ingest-02` stopped mid-session.
+        ...(k % 3 === 0 || (lead === 0 && k === 1)
+          ? { total: 20_000 + lead * 1_000 + k * 250, complete: !(lead === 0 && k === 1) }
+          : {}),
+      });
+      if (k < grandchildrenPerLead) {
+        session({
+          id: `${id}.probe`,
+          parent: id,
+          agent: `${stream}-probe`,
+          depth: 3,
+          start: start + 120,
+          end: start + 420,
+          descendants: 0,
+          link: 'linked',
+        });
+      }
+    }
+  });
+  for (let cut = 0; cut < 3; cut += 1) {
+    session({
+      id: `session.dense.orphan-${cut + 1}`,
+      parent: `session.dense.never-ingested-${cut + 1}`,
+      agent: 'Claude',
+      provider: 'claude',
+      depth: 0,
+      start: 2_000 + cut * 1_500,
+      end: 2_600 + cut * 1_500,
+      descendants: 0,
+      link: 'missing_parent',
+    });
+  }
+  return {
+    available: true,
+    source: 'sessions',
+    error: null,
+    nodes,
+    sessions_read: nodes.length,
+    root_count: 1,
+    edge_count: nodes.filter((node) => (node['depth'] as number) > 0).length,
+    max_depth: 3,
+    missing_parent_count: 3,
+    cycle_count: 0,
+    truncated: false,
+    usage_coverage: 'complete',
+  };
+}
+
+/** One synthetic usage aggregate: a fixed input/output/cache split of `total`. */
+function denseUsage(total: number, complete: boolean): Record<string, unknown> {
+  const input = Math.round(total * 0.3);
+  const output = Math.round(total * 0.1);
+  return {
+    usage_events: Math.max(1, Math.round(total / 8_000)),
+    complete,
+    counters: {
+      input_tokens: input,
+      output_tokens: output,
+      cache_read_tokens: total - input - output,
+      cache_write_tokens: 0,
+      reasoning_tokens: null,
+      total_tokens: total,
+    },
+  };
+}
+
+export function subagentTreeFixture(scenario: SubagentTreeScenario): Record<string, unknown> {
+  switch (scenario) {
+    case 'default':
+      return envelope(analyticsSubagentTreePayload());
+    case 'dense-fanout':
+      return envelope(analyticsSubagentTreeDenseFanoutPayload());
+    default: {
+      const unhandled: never = scenario;
+      return unhandled;
+    }
+  }
 }
 
 function analyticsHintsPayload(): Record<string, unknown> {
@@ -2103,8 +2559,11 @@ function schedulerStatusPayload(): Record<string, unknown> {
           task_key: 'memory_curator',
           backend: 'claude',
           status: 'succeeded',
+          reviewed_count: 6,
           accepted_count: 4,
           rejected_count: 2,
+          skipped_count: 0,
+          backend_attempt_count: 1,
           started_at: String(nowSecs - 2 * DAY),
           completed_at: String(nowSecs - 2 * DAY + 240),
         },
@@ -2235,7 +2694,6 @@ function automationRunsPayload(): Record<string, unknown> {
     has_more: false,
     malformed_row_count: 0,
     completeness: 'known',
-    error: '',
   };
 }
 
@@ -2305,15 +2763,14 @@ const SKILL_ROWS: ReadonlyArray<readonly [string, string, string, string]> = [
   ['multi-agent-model-orchestration', 'Multi-Agent Model Orchestration', 'disabled', 'orchestration'],
 ];
 
-/** Wire-true ManagedSkill rows (managed_skill_model.rs): id/title/state nest
- * under `metadata`. AutomationsPage reads those top-level, so titles render as
- * index fallbacks. Flagged in the report as a component/wire mismatch. */
+/** `AutomationSkillsPayloadV1` (automation_skills_api.rs list). */
 function skillsPayload(): Record<string, unknown> {
   const skills = SKILL_ROWS.slice(0, 4).map(([id, title, state, category]) => ({
     metadata: {
       id,
       title,
       summary: `${title}: managed automation skill.`,
+      routing_description: `Use when ${title.toLowerCase()} applies.`,
       category,
       targets: ['claude', 'codex'],
       state,
@@ -2321,21 +2778,12 @@ function skillsPayload(): Record<string, unknown> {
       checksum: `sha256:${id}`,
       created_at: nowSecs - 40 * DAY,
       updated_at: nowSecs - 3 * DAY,
-      provenance: { source: 'skill_writer', actor: 'automation', run_id: null },
+      provenance: { source: 'automation_run', actor: 'skill_writer', run_id: null },
     },
     body_markdown: `# ${title}\n\nManaged skill body.`,
     support_files: [],
   }));
-  return {
-    profile_root: '/home/zack/.tracedecay',
-    skills_root: '/home/zack/.tracedecay/managed-skills',
-    count: skills.length,
-    skills,
-    skill_metadata: skills.map((s) => s.metadata),
-    usage_summaries: [],
-    stale_recommendations: [],
-    improvement_recommendations: [],
-  };
+  return { count: skills.length, skills };
 }
 
 /** Wire-true automatic fact receipt rows. */
@@ -2350,12 +2798,17 @@ function automaticFactReceiptsPayload(): Record<string, unknown> {
     add_fact_request: {
       content: FACT_CONTENTS[i % FACT_CONTENTS.length],
       category: FACT_CATEGORIES[i % FACT_CATEGORIES.length],
+      source_label: null,
+      tags: [],
+      entities: [],
+      trust: null,
+      metadata: {},
     },
     quarantine_reason: i === 2 ? 'validation failed' : undefined,
     applied_fact_id: i === 2 ? undefined : `fact.project.story.${i}`,
     recorded_at_micros: (nowSecs - i * DAY) * 1_000_000,
   }));
-  return { receipts, count: receipts.length, limit: 50, error: '' };
+  return { receipts, count: receipts.length, limit: 50 };
 }
 
 /* ==========================================================================
@@ -2499,6 +2952,30 @@ function doctorFindingsEnvelope(): Record<string, unknown> {
     },
     known_families: [...DOCTOR_FAMILIES],
     schema_convergences: [],
+    storage_kind_statuses: [
+      {
+        kind: 'over_budget_store',
+        state: 'partial',
+        observed_entries: 1,
+        reason:
+          'canonical Doctor producer returned 1 entries, but coverage or evidence state was incomplete',
+      },
+      ...(
+        [
+          'orphan_store',
+          'incident_debris_present',
+          'retention_backlog',
+          'table_growth',
+          'pending_schema_migration',
+        ] as const
+      ).map((kind) => ({
+        kind,
+        state: 'partial',
+        observed_entries: 0,
+        reason:
+          'the storage family was consulted, but the canonical report returned no typed entry for this producer; absence does not prove clean per-producer coverage',
+      })),
+    ],
     note: 'five of seven finding families were consulted; two reported no evidence source',
   };
   return envelope(payload, 'partial', [
@@ -2800,9 +3277,10 @@ const storageTelemetryEnvelope = {
   ],
 };
 
-/** GET /api/storage/findings. Observatory canonical Doctor projection plus
- * per-producer source coverage. This fixture follows the production parser
- * path; source state is not inferred from an empty finding list. */
+/** GET /api/doctor/findings?family=storage. Observatory canonical Doctor
+ * projection plus per-producer source coverage. This fixture follows the
+ * production parser path; source state is not inferred from an empty finding
+ * list. */
 const storageFindings = envelope({
   family_filter: 'storage',
   entries: [],
@@ -2818,7 +3296,7 @@ const storageFindings = envelope({
   ],
   schema_convergences: [],
   note: 'storage producers reported independent source coverage',
-  kind_statuses: [
+  storage_kind_statuses: [
     {
       kind: 'over_budget_store',
       state: 'partial',
@@ -2862,9 +3340,6 @@ const storageFindings = envelope({
 
 const settingsPayload: Record<string, unknown> = {
   project: {
-    config_path: '/fast/projects/tracedecay/.tracedecay/config.toml',
-    legacy_config_path: '/fast/projects/tracedecay/.tracedecay/config.toml',
-    legacy_config_read_only: true,
     configuration_snapshot_id: 'snap-42',
     configuration_revision_id: 'rev-42',
     config: {
@@ -2882,9 +3357,6 @@ const settingsPayload: Record<string, unknown> = {
     pr_autotrack: { tracked: [] },
   },
   user: {
-    config_path: '/home/zack/.tracedecay/config.toml',
-    legacy_config_path: '/home/zack/.tracedecay/config.toml',
-    legacy_config_read_only: true,
     configuration_snapshot_id: 'user-snap-7',
     configuration_revision_id: 'user-rev-7',
     code_index_worker_configuration_snapshot_id: 'profile-worker-snap-7',
@@ -3004,10 +3476,9 @@ const capabilities: Record<string, unknown> = {
 };
 
 /* ==========================================================================
- * /api/plugins/savings/sessions (savings_api.rs::sessions) and
  * /api/plugins/hermes-lcm/session/{id} (lcm_api.rs::session).
  *
- * The Loom weave's two sources, mirrored from a real daemon response captured
+ * The Loom weave's session rows, mirrored from a real daemon response captured
  * on 2026-07-25 (`tracedecay dashboard --port 7341`, profile-sharded store,
  * 6,053 sessions). Shapes are exact; the population is shaped to the same
  * DISTRIBUTION the real store has.
@@ -3094,18 +3565,6 @@ function loomSessionRows(count = 34): Record<string, unknown>[] {
       ],
     };
   });
-}
-
-function loomSessionsPayload(): Record<string, unknown> {
-  return {
-    available: true,
-    db: '/home/zack/.tracedecay/projects/proj_a5b3d7e3ebe14ca7/sessions.db',
-    scope: 'profile_sharded',
-    range: 'all',
-    since: 0,
-    total: 6053,
-    sessions: loomSessionRows(),
-  };
 }
 
 /* ==========================================================================
@@ -3251,8 +3710,66 @@ function lcmOverviewPayload(): Record<string, unknown> {
  * distribution as the savings fixture so the weave has real structure.
  * ========================================================================== */
 
-function loomTemporalPayload(): Record<string, unknown> {
-  const rows = loomSessionRows();
+/**
+ * The delegation tree's own sessions, placed on the Loom page three hours
+ * before now with the tree's recorded offsets kept, so the page holds the
+ * parents and children the subagent tree names and the field draws their
+ * spawns, the missing parent and the lone root from the same fixture.
+ */
+function loomDelegationRows(): Record<string, unknown>[] {
+  const nodes = analyticsSubagentTreePayload()['nodes'] as Record<string, unknown>[];
+  const origin = Math.min(...nodes.map((node) => node['started_at'] as number));
+  const base = nowSecs - 3 * 3600;
+  return nodes.map((node, i) => {
+    const start = base + ((node['started_at'] as number) - origin);
+    const ended = node['ended_at'] as number | null;
+    return {
+      session_id: node['session_id'],
+      provider: node['provider'],
+      title: node['title'],
+      started_at: start,
+      last_message_at: ended === null ? null : base + (ended - origin),
+      messages: 12 + i * 9,
+      is_subagent: node['is_subagent'],
+      // The sessions table's own parent columns, which the tree also reads.
+      parent_session_id: node['link'] === 'linked' ? node['parent_session_id'] : null,
+      parent_tool_use_id: node['link'] === 'linked' ? node['parent_tool_use_id'] : null,
+    };
+  });
+}
+
+/** Two cursor subagents whose parent is recorded only on the session row,
+ * never in the subagent tree, so the field draws a row-sourced fork. */
+const LOOM_ROW_PARENTS: Readonly<Record<number, number>> = { 5: 8, 17: 20 };
+
+/**
+ * The `dense-fanout` subagent tree's sessions as a Loom page (select with
+ * `?fixture=dense-fanout` on `/api/loom/temporal`): the tree's offsets kept,
+ * ending five minutes ago, each row carrying the tree's own parent columns.
+ */
+function loomDenseFanoutRows(): Record<string, unknown>[] {
+  const nodes = analyticsSubagentTreeDenseFanoutPayload()['nodes'] as Record<string, unknown>[];
+  const origin = Math.min(...nodes.map((node) => node['started_at'] as number));
+  const base = nowSecs - 14_400 - 300;
+  return nodes.map((node, i) => {
+    const ended = node['ended_at'] as number | null;
+    return {
+      session_id: node['session_id'],
+      provider: node['provider'],
+      title: `${String(node['agent'])} · ${String(node['session_id']).replace('session.dense.', '')}`,
+      started_at: base + ((node['started_at'] as number) - origin),
+      last_message_at: ended === null ? null : base + (ended - origin),
+      messages: i === 0 ? 998 : (node['depth'] as number) === 1 ? 120 + i : 4 + ((i * 37) % 60),
+      is_subagent: node['is_subagent'],
+      parent_session_id: node['link'] === 'linked' ? node['parent_session_id'] : null,
+      parent_tool_use_id: node['link'] === 'linked' ? node['parent_tool_use_id'] : null,
+    };
+  });
+}
+
+function loomTemporalPayload(scenario: 'default' | 'dense-fanout' = 'default'): Record<string, unknown> {
+  // Past the dense-page threshold, so the page opens with its branches bundled.
+  const rows = scenario === 'dense-fanout' ? loomDenseFanoutRows() : [...loomSessionRows(45), ...loomDelegationRows()];
   const sessions = rows.map((row, i) => ({
     session_id: row['session_id'],
     provider: row['provider'],
@@ -3266,6 +3783,12 @@ function loomTemporalPayload(): Record<string, unknown> {
     models: [{ model: null }, { model: pick(LOOM_MODELS, i) }],
     is_subagent: row['is_subagent'],
     edited_files_recorded: i % 3 !== 2,
+    parent_session_id:
+      (row['parent_session_id'] as string | null | undefined) ??
+      (scenario === 'default' && LOOM_ROW_PARENTS[i] !== undefined ? loomSessionId(LOOM_ROW_PARENTS[i]!) : null),
+    parent_tool_use_id:
+      (row['parent_tool_use_id'] as string | null | undefined) ??
+      (scenario === 'default' && LOOM_ROW_PARENTS[i] !== undefined ? `toolu_loom_${i}` : null),
   }));
   // Vocabulary is the daemon's own (`git_correlation::{CommitRelation,
   // CommitEvidence, SpanOverlapKind}`, snake_case on the wire): a produced
@@ -3299,6 +3822,8 @@ function loomTemporalPayload(): Record<string, unknown> {
       path: pick(GRAPH_FILES, i),
       change_type: i % 2 === 0 ? 'modified' : 'added',
       hunks: 1 + (i % 4),
+      // Most provider rollups record no edit time; these two did.
+      edited_at_micros: i % 2 === 0 && i < 4 ? ((session.started_at as number) + 1_200 + i * 600) * 1_000_000 : null,
     },
   ]);
   const branchSpans = sessions.slice(0, 4).map((session, i) => ({
@@ -3390,8 +3915,12 @@ function loomTemporalPayload(): Record<string, unknown> {
  * the page's `(provider, session_id)` keys exactly as `read_temporal` does.
  * The route clamps `limit` to 1..=500 and floors `offset` at 0.
  */
-function loomTemporalPageEnvelope(rawLimit: string | null, rawOffset: string | null): Record<string, unknown> {
-  const full = loomTemporalPayload();
+function loomTemporalPageEnvelope(
+  rawLimit: string | null,
+  rawOffset: string | null,
+  scenario: 'default' | 'dense-fanout' = 'default',
+): Record<string, unknown> {
+  const full = loomTemporalPayload(scenario);
   const parsedLimit = Number(rawLimit);
   const limit = Number.isFinite(parsedLimit) && rawLimit !== null ? Math.min(500, Math.max(1, Math.trunc(parsedLimit))) : 200;
   const parsedOffset = Number(rawOffset);
@@ -3509,6 +4038,11 @@ const INBOX_HEADS = {
   'module-federation': 'c4e9a022'.padEnd(40, '1'),
 } as const;
 
+/** Delivery observation time: daemon read and attention stamps, hours ago. */
+function deliveryHoursAgo(hours: number): number {
+  return nowMicros - Math.round(hours * 3_600_000_000);
+}
+
 function inboxProject(
   projectId: keyof typeof INBOX_HEADS,
   branch: string,
@@ -3539,12 +4073,15 @@ function inboxPullRequest(
     prState?: string;
     attention?: ReadonlyArray<Record<string, unknown>>;
     sizes?: readonly [number, number, number];
-    fetchedAgoHours?: number;
+    /** Hours ago each provider read last completed, in operation order
+     * (pull_request, reviews, review_comments, review_threads). The daemon
+     * reads operations independently, so a PR's observation window spans them. */
+    readsAgoHours?: readonly [number, number, number, number];
   } = {},
 ): Record<string, unknown> {
   const head = INBOX_HEADS[projectId];
   const [additions, deletions, files] = options.sizes ?? [512, 87, 12];
-  const fetched = nowMicros - (options.fetchedAgoHours ?? 2) * 3_600_000_000;
+  const reads = options.readsAgoHours ?? [2, 2, 2, 2];
   return {
     id: `${projectId}:github:${number}`,
     project_id: projectId,
@@ -3567,12 +4104,12 @@ function inboxPullRequest(
         deletions,
         changed_files: files,
       },
-      operations: ['pull_request', 'reviews', 'review_comments', 'review_threads'].map(
-        (operation) => ({
+      operations: (['pull_request', 'reviews', 'review_comments', 'review_threads'] as const).map(
+        (operation, index) => ({
           operation,
           last_complete: {
             coverage: 'complete',
-            fetched_at_micros: fetched,
+            fetched_at_micros: deliveryHoursAgo(reads[index]!),
             merge_base_commit_id: '3e6167b2'.padEnd(40, '0'),
             outcome: options.state === 'stale' ? 'stale' : 'complete',
             provider_base_commit_id: 'dfc669d9'.padEnd(40, '0'),
@@ -3588,7 +4125,7 @@ function inboxPullRequest(
       pull_request_id: number,
       state: 'active',
       coverage: 'complete',
-      observed_at_micros: fetched,
+      observed_at_micros: deliveryHoursAgo(reads[3]!),
       ...item,
     })),
     shared_code: [
@@ -3639,31 +4176,42 @@ function deliveryInboxPayload(): Record<string, unknown> {
       inboxPullRequest('rspack', 'perf/persistent-cache-v2', '10337', 'perf: persistent caching v2', {
         state: 'stale',
         sizes: [4_812, 1_206, 58],
-        fetchedAgoHours: 9,
+        readsAgoHours: [30, 26, 21, 14],
         attention: [
-          { source: 'stale_provider_state', evidence: [{ kind: 'provider_operation', operation: 'pull_request', fetched_at_micros: nowMicros - 9 * 3_600_000_000 }] },
+          { source: 'stale_provider_state', observed_at_micros: deliveryHoursAgo(14), evidence: [{ kind: 'provider_operation', operation: 'pull_request', fetched_at_micros: deliveryHoursAgo(30) }] },
+          { source: 'test_risk', observed_at_micros: deliveryHoursAgo(20), evidence: [{ kind: 'indexed_generation', generation: 'generation.rspack.2026-09-16.001' }] },
         ],
       }),
       inboxPullRequest('rspack', 'perf/persistent-cache-v2', '10315', 'feat: emit perf graph leak diagnostics', {
         state: 'stale',
         sizes: [143, 32, 6],
-        fetchedAgoHours: 9,
+        readsAgoHours: [28, 27, 18, 16],
+        attention: [
+          { source: 'weak_evidence', observed_at_micros: deliveryHoursAgo(17), evidence: [{ kind: 'indexed_generation', generation: 'generation.rspack.2026-09-16.001' }] },
+        ],
       }),
       inboxPullRequest('tracedecay', 'codex/tracedecay-total-redesign-plan', '707', 'feat: restore TraceDecay V2 review head', {
         sizes: [78_341, 21_904, 1_840],
+        readsAgoHours: [11, 6, 3, 1.5],
         attention: [
-          { source: 'unresolved_review', evidence: [{ kind: 'review_comment', comment_id: 'r1234567890', path: 'dashboard/src/workspaces/delivery/DeliveryPage.tsx' }] },
-          { source: 'ci_failure', evidence: [{ kind: 'ci_failure', failure_anchor: 'ci:integration-tests:cargo-test' }] },
+          { source: 'unresolved_review', observed_at_micros: deliveryHoursAgo(3), evidence: [{ kind: 'review_comment', comment_id: 'r1234567890', path: 'dashboard/src/workspaces/delivery/DeliveryPage.tsx' }] },
+          { source: 'ci_failure', observed_at_micros: deliveryHoursAgo(2), evidence: [{ kind: 'ci_failure', failure_anchor: 'ci:integration-tests:cargo-test' }] },
+          { source: 'new_review_comment', observed_at_micros: deliveryHoursAgo(1.5), evidence: [{ kind: 'review_comment', comment_id: 'r1234567931', path: 'dashboard/src/workspaces/delivery/lanes.ts' }] },
+          { source: 'unsafe_pattern', state: 'unavailable', coverage: 'unsupported', observed_at_micros: null, evidence: [] },
         ],
       }),
       inboxPullRequest('tracedecay', 'codex/tracedecay-total-redesign-plan', '694', 'fix: tag jitter on retries', {
         draft: true,
         sizes: [76, 12, 3],
+        readsAgoHours: [8, 5, 4, 0.5],
+        attention: [
+          { source: 'overlapping_edit', observed_at_micros: deliveryHoursAgo(0.75), evidence: [{ kind: 'proximity_encounter', encounter_id: 'sha256:9f2c41d0', relation: 'overlapping_edit' }] },
+        ],
       }),
       inboxPullRequest('tracedecay', 'codex/tracedecay-total-redesign-plan', '681', 'docs: delivery lookbook authority', {
         prState: 'merged',
         sizes: [1_204, 0, 14],
-        fetchedAgoHours: 30,
+        readsAgoHours: [52, 47, 46, 40],
       }),
     ],
     membership_edges: [
@@ -3762,13 +4310,27 @@ const LOOM_CHAIN_TOOLS = [
   null,
 ] as const;
 
-/** One session's transcript. `timestamp` is null on every message, exactly as
- * the daemon serves it. The chain rail reads that and prints "ordinal order",
- * so a fixture with timestamps would hide the behaviour under audit. */
-function loomChainPayload(): Record<string, unknown> {
-  const sessionId = loomSessionId(0);
+/** The spawning `Task` call each Loom parent transcript records, as
+ * `[message index, tool_use_id]`: the id its child's `parent_tool_use_id`
+ * names, so the field forks on that glyph, graded EXACT. The row-parented
+ * child of session 20 and the Claude orphan name calls no loaded transcript
+ * carries, so they stay INFERRED at the child's start. */
+const LOOM_SPAWN_CALLS: Readonly<Record<string, readonly (readonly [number, string])[]>> = {
+  'session.codex.root': [[7, 'toolu_codex_01']],
+  'session.codex.child': [[13, 'toolu_codex_02']],
+  [loomSessionId(8)]: [[19, 'toolu_loom_5']],
+};
+
+/** One session's transcript, served for whichever session is asked for.
+ * `timestamp` is null on every message, exactly as the daemon serves it. The
+ * chain rail reads that and prints "ordinal order", so a fixture with
+ * timestamps would hide the behaviour under audit. Every tool call carries its
+ * host tool-use id. */
+function loomChainPayload(sessionId: string): Record<string, unknown> {
+  const spawns = new Map(LOOM_SPAWN_CALLS[sessionId] ?? []);
   const messages = Array.from({ length: 46 }, (_, i) => {
-    const tool = i === 0 ? null : LOOM_CHAIN_TOOLS[i % LOOM_CHAIN_TOOLS.length];
+    const spawn = spawns.get(i);
+    const tool = spawn ? 'Task' : i === 0 ? null : LOOM_CHAIN_TOOLS[i % LOOM_CHAIN_TOOLS.length];
     return {
       message_id: `${sessionId}:${String(i).padStart(4, '0')}`,
       session_id: sessionId,
@@ -3780,9 +4342,12 @@ function loomChainPayload(): Record<string, unknown> {
             ? `Invoking ${tool} against the workspace to confirm the reconciliation path.`
             : 'Summarising the reconciliation result and the remaining gap.',
       ordinal: i,
+      snippet: null,
       timestamp: null,
       tool_name: tool,
-      token_estimate: 18 + (i % 9) * 7,
+      tool_use_id: spawn ?? (tool ? `toolu_chain_${String(i).padStart(4, '0')}` : null),
+      token_count: 18 + (i % 9) * 7,
+      token_count_provenance: 'o200k_approximate',
       // `lcm_queries` selects a literal `0 AS pinned`: pinning is not tracked
       // yet, and the column is an integer, not a boolean.
       pinned: 0,
@@ -3804,15 +4369,15 @@ function loomChainPayload(): Record<string, unknown> {
     has_more: false,
     has_more_messages: false,
     has_more_summary_nodes: false,
+    next_cursor: null,
     counts: {
       message_count: 998,
       source_token_count: 18_400,
       summary_node_count: LOOM_CHAIN_SUMMARY_NODES.length,
       summary_token_count: 1_020,
-      token_estimate_total: 21_460,
     },
     messages,
-    summary_nodes: LOOM_CHAIN_SUMMARY_NODES.map((node) => ({ ...node, session_id: sessionId })),
+    summary_nodes: LOOM_CHAIN_SUMMARY_NODES.map((node) => ({ recency: null, snippet: null, ...node, session_id: sessionId })),
   };
 }
 
@@ -3927,15 +4492,11 @@ export const CODE_INDEX_FRESHNESS_FIXTURES = {
 export const FIXTURES: Readonly<Record<string, unknown>> = {
   '/api/projects': envelope(projectsPayload),
   '/api/storage/telemetry': storageTelemetryEnvelope,
-  '/api/storage/findings': storageFindings,
   '/api/doctor/findings': doctorFindingsEnvelope(),
   '/api/settings': settings,
   '/api/capabilities': capabilities,
-  // Memory (holographic). Consumed with a trailing slash by KnowledgePage and
-  // ExplorerPage (`/api/plugins/holographic/?...`).
-  '/api/plugins/holographic/': envelope(memoryPayload()),
+  // Memory (holographic), consumed by KnowledgePage and ExplorerPage.
   '/api/plugins/holographic': envelope(memoryPayload()),
-  '/api/plugins/holographic/overview': envelope(memoryPayload()),
   // LCM standing reads model a MOUNTED temporal-retrieval store, so the
   // Sessions ledger renders populated; search stays explicitly unavailable so
   // the refusal state remains a modeled, reachable surface.
@@ -3961,7 +4522,6 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   '/api/delivery/inbox': envelope(deliveryInboxPayload(), 'partial'),
   // Savings. `sessions` is the Loom weave's thread source, not a costs route.
   '/api/plugins/savings/overview': envelope(savingsPayload()),
-  '/api/plugins/savings/sessions': loomSessionsPayload(),
   // The bare-path entry is the parse gate's; `resolveFixture` answers the
   // route itself range-by-range above.
   '/api/plugins/savings/models': savingsModelsPayload('all'),
@@ -4260,11 +4820,6 @@ export const FIXTURE_PREFIXES: ReadonlyArray<readonly [string, unknown]> = [
   // the panel as `unsupported_schema` and be audited as a broken surface.
   ['/api/plugins/graph/path', FIXTURES['/api/plugins/graph/path']],
   ['/api/plugins/hermes-lcm/search', FIXTURES['/api/plugins/hermes-lcm/search']],
-  // Dynamic: `/session/{session_id}`. The Loom thread chain. One transcript
-  // answers for every id, which is what a fixture can honestly be.
-  ['/api/plugins/hermes-lcm/session/', unavailableEnvelope(
-    'lcm_temporal_retrieval_not_mounted',
-  )],
   ['/api/plugins/holographic', envelope(memoryPayload())],
   ['/api/plugins/graph', envelope(graphOverviewPayload())],
   ['/api/plugins/savings', envelope(savingsPayload())],
@@ -5289,14 +5844,30 @@ export function resolveFixture(pathname: string, search = ''): unknown {
   const contextMatch = /^\/api\/projects\/([^/]+)$/.exec(pathname);
   if (contextMatch) return projectContextPayload(contextMatch[1]!);
 
+  // `/session/{session_id}`, the Loom thread chain: one transcript answers
+  // for every id, which is what a fixture can honestly be.
+  const lcmSession = /^\/api\/plugins\/hermes-lcm\/session\/([^/]+)$/.exec(pathname);
+  if (lcmSession) return envelope(loomChainPayload(decodeURIComponent(lcmSession[1]!)));
   if (pathname === '/api/plugins/graph/subgraph') {
-    const nodeId = new URLSearchParams(search).get('node_id');
-    return envelope(subgraphPayload(nodeId));
+    const params = new URLSearchParams(search);
+    const nodeId = params.get('node_id');
+    const limitNodes = params.get('limit_nodes');
+    const limits =
+      limitNodes === null
+        ? null
+        : {
+            nodes: Math.min(250, Math.max(1, Number(limitNodes) || 80)),
+            edges: Math.min(500, Math.max(1, Number(params.get('limit_edges')) || 120)),
+          };
+    return envelope(subgraphPayload(nodeId, limits));
   }
   // Range-keyed: the daemon attributes the requested window, so the fixture
   // does too, or the range control would appear to do nothing.
   if (pathname === '/api/plugins/savings/models') {
     return savingsModelsPayload(new URLSearchParams(search).get('range') ?? 'all');
+  }
+  if (pathname === '/api/doctor/findings' && new URLSearchParams(search).get('family') === 'storage') {
+    return storageFindings;
   }
   // Must also precede the prefix sweep: the family read is keyed by match class
   // and cursor, and each class is a separate digest group on the wire.
@@ -5330,6 +5901,8 @@ export function resolveFixture(pathname: string, search = ''): unknown {
   if (trustHistory) return memoryTrustHistoryPayload(decodeURIComponent(trustHistory[1]!));
   const factDetail = /^\/api\/plugins\/holographic\/fact\/([^/]+)$/.exec(pathname);
   if (factDetail) return memoryFactDetailEnvelope(decodeURIComponent(factDetail[1]!));
+  if (pathname === '/api/plugins/holographic/projection') return memoryProjectionPayload(search);
+  if (pathname === '/api/plugins/holographic/similarity') return memorySimilarityPayload(search);
   // The Loom temporal read is a real `limit`/`offset` page over the session
   // store (loom_api.rs `PAGE_CTE`), and the Sessions index pages it. Serving
   // the whole fixture population for every page would audit a 25-row page
@@ -5337,7 +5910,17 @@ export function resolveFixture(pathname: string, search = ''): unknown {
   // same coverage the route does.
   if (pathname === '/api/loom/temporal') {
     const params = new URLSearchParams(search);
-    return loomTemporalPageEnvelope(params.get('limit'), params.get('offset'));
+    return loomTemporalPageEnvelope(
+      params.get('limit'),
+      params.get('offset'),
+      params.get('fixture') === 'dense-fanout' ? 'dense-fanout' : 'default',
+    );
+  }
+  if (
+    pathname === '/api/plugins/analytics/subagent-tree' &&
+    new URLSearchParams(search).get('fixture') === 'dense-fanout'
+  ) {
+    return subagentTreeFixture('dense-fanout');
   }
   if (pathname in FIXTURES) return FIXTURES[pathname];
   for (const [prefix, payload] of FIXTURE_PREFIXES) {
@@ -5414,11 +5997,11 @@ function analyticsUnderusedPayload(): Record<string, unknown> {
 function analyticsDiagnosticsPayload(): Record<string, unknown> {
   const AGENT_TOOL_CALLS: ReadonlyArray<readonly [string, number]> = [
     ['tracedecay_grep', 1945],
-    ['tracedecay_read', 1180],
-    ['tracedecay_body', 1152],
+    ['tracedecay_source_lines', 1180],
+    ['tracedecay_source_body', 1152],
     ['tracedecay_fact_store', 644],
     ['tracedecay_hook_runtime', 587],
-    ['tracedecay_outline', 460],
+    ['tracedecay_source_outline', 460],
     ['tracedecay_search', 306],
     ['tracedecay_context', 200],
     ['tracedecay_status', 183],
@@ -5439,20 +6022,20 @@ function analyticsDiagnosticsPayload(): Record<string, unknown> {
     [0, 'tracedecay_fact_store', 'success'],
     [4, 'tracedecay_hook_runtime', 'success'],
     [11, 'tracedecay_grep', 'success'],
-    [17, 'tracedecay_body', 'success'],
+    [17, 'tracedecay_source_body', 'success'],
     [23, 'tracedecay_grep', 'error'],
-    [29, 'tracedecay_read', 'success'],
-    [38, 'tracedecay_outline', 'success'],
+    [29, 'tracedecay_source_lines', 'success'],
+    [38, 'tracedecay_source_outline', 'success'],
     [44, 'tracedecay_context', 'success'],
     [51, 'tracedecay_grep', 'success'],
-    [63, 'tracedecay_body', 'success'],
+    [63, 'tracedecay_source_body', 'success'],
     [70, 'tracedecay_search', 'success'],
-    [82, 'tracedecay_read', 'success'],
+    [82, 'tracedecay_source_lines', 'success'],
     [96, 'tracedecay_hook_runtime', 'success'],
     [109, 'tracedecay_grep', 'success'],
-    [124, 'tracedecay_body', 'success'],
+    [124, 'tracedecay_source_body', 'success'],
     [141, 'tracedecay_status', 'success'],
-    [163, 'tracedecay_read', 'error'],
+    [163, 'tracedecay_source_lines', 'error'],
     [188, 'tracedecay_hook_runtime', 'success'],
     [222, 'tracedecay_status', 'success'],
   ];

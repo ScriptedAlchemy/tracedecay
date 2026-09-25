@@ -6,6 +6,8 @@ use tracedecay_domain::*;
 // into this module's own namespace, so the tests below call them unqualified
 // without each extractor module re-declaring the support module.
 include!("support/docstrings.rs");
+include!("support/edges.rs");
+
 #[test]
 fn test_c_file_node_is_root() {
     let source = r#"
@@ -14,7 +16,7 @@ int main() {
 }
 "#;
     let extractor = CExtractor;
-    let result = extractor.extract("test.c", source);
+    let result = extractor.extract_artifact("test.c", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let files: Vec<_> = result
         .nodes
@@ -33,7 +35,7 @@ int add(int a, int b) {
 }
 "#;
     let extractor = CExtractor;
-    let result = extractor.extract("math.c", source);
+    let result = extractor.extract_artifact("math.c", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fns: Vec<_> = result
         .nodes
@@ -54,7 +56,7 @@ int add(int a, int b);
 void process(const char *data);
 "#;
     let extractor = CExtractor;
-    let result = extractor.extract("math.h", source);
+    let result = extractor.extract_artifact("math.h", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fns: Vec<_> = result
         .nodes
@@ -76,7 +78,7 @@ struct Point {
 };
 "#;
     let extractor = CExtractor;
-    let result = extractor.extract("point.h", source);
+    let result = extractor.extract_artifact("point.h", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let structs: Vec<_> = result
         .nodes
@@ -106,7 +108,7 @@ union Data {
 };
 "#;
     let extractor = CExtractor;
-    let result = extractor.extract("data.h", source);
+    let result = extractor.extract_artifact("data.h", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let union_node = result
@@ -146,7 +148,7 @@ enum Color {
 };
 "#;
     let extractor = CExtractor;
-    let result = extractor.extract("color.h", source);
+    let result = extractor.extract_artifact("color.h", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let enums: Vec<_> = result
         .nodes
@@ -173,7 +175,7 @@ fn test_c_typedef() {
 typedef unsigned long ulong;
 "#;
     let extractor = CExtractor;
-    let result = extractor.extract("types.h", source);
+    let result = extractor.extract_artifact("types.h", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let typedefs: Vec<_> = result
         .nodes
@@ -191,7 +193,7 @@ fn test_c_preprocessor_define() {
 #define PI 3.14159
 "#;
     let extractor = CExtractor;
-    let result = extractor.extract("defs.h", source);
+    let result = extractor.extract_artifact("defs.h", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let macros: Vec<_> = result
         .nodes
@@ -210,7 +212,7 @@ fn test_c_include() {
 #include "myheader.h"
 "#;
     let extractor = CExtractor;
-    let result = extractor.extract("main.c", source);
+    let result = extractor.extract_artifact("main.c", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let includes: Vec<_> = result
         .nodes
@@ -228,7 +230,7 @@ static int helper(int x) {
 }
 "#;
     let extractor = CExtractor;
-    let result = extractor.extract("utils.c", source);
+    let result = extractor.extract_artifact("utils.c", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fns: Vec<_> = result
         .nodes
@@ -248,7 +250,7 @@ int public_func(void) {
 }
 "#;
     let extractor = CExtractor;
-    let result = extractor.extract("api.c", source);
+    let result = extractor.extract_artifact("api.c", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fns: Vec<_> = result
         .nodes
@@ -289,7 +291,7 @@ int mul(int a, int b) {
 
     for (style, source, expected) in cases {
         let extractor = CExtractor;
-        let result = extractor.extract("math.c", source);
+        let result = extractor.extract_artifact("math.c", source).result;
         assert_node_docstring(style, &result, NodeKind::Function, None, expected);
     }
 }
@@ -308,17 +310,19 @@ int main() {
 }
 "#;
     let extractor = CExtractor;
-    let result = extractor.extract("main.c", source);
+    let result = extractor.extract_artifact("main.c", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let call_refs: Vec<_> = result
         .unresolved_refs
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
-    assert!(
-        call_refs.len() >= 2,
-        "should have call refs for helper and printf, got: {:?}",
+    assert_eq!(
         call_refs
+            .iter()
+            .map(|x| x.reference_name.as_str())
+            .collect::<Vec<_>>(),
+        ["helper", "printf"]
     );
     assert!(call_refs.iter().any(|r| r.reference_name == "helper"));
     assert!(call_refs.iter().any(|r| r.reference_name == "printf"));
@@ -331,18 +335,11 @@ void foo() {}
 void bar() {}
 "#;
     let extractor = CExtractor;
-    let result = extractor.extract("test.c", source);
+    let result = extractor.extract_artifact("test.c", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    // File -> foo, File -> bar = at least 2
-    assert!(
-        contains.len() >= 2,
-        "should have Contains edges from File to Functions, got: {}",
-        contains.len()
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Contains),
+        [("test.c", "foo"), ("test.c", "bar")]
     );
 }
 
@@ -355,7 +352,7 @@ struct Rect {
 };
 "#;
     let extractor = CExtractor;
-    let result = extractor.extract("rect.h", source);
+    let result = extractor.extract_artifact("rect.h", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let struct_node = result
@@ -382,7 +379,7 @@ fn test_c_function_pointer_typedef() {
 typedef int (*compare_fn)(const void *, const void *);
 "#;
     let extractor = CExtractor;
-    let result = extractor.extract("types.h", source);
+    let result = extractor.extract_artifact("types.h", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let typedefs: Vec<_> = result
         .nodes
@@ -402,7 +399,7 @@ typedef struct {
 } Point;
 "#;
     let extractor = CExtractor;
-    let result = extractor.extract("point.h", source);
+    let result = extractor.extract_artifact("point.h", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     // Should have a Typedef node for Point
@@ -442,7 +439,7 @@ enum LogLevel {
 };
 "#;
     let extractor = CExtractor;
-    let result = extractor.extract("log.h", source);
+    let result = extractor.extract_artifact("log.h", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let variants: Vec<_> = result
         .nodes
@@ -459,7 +456,7 @@ fn test_c_global_variable_docstring() {
 int global_counter = 0;
 "#;
     let extractor = CExtractor;
-    let result = extractor.extract("globals.c", source);
+    let result = extractor.extract_artifact("globals.c", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let statics: Vec<_> = result
         .nodes
@@ -480,7 +477,7 @@ fn test_c_static_global_variable() {
 static int counter = 0;
 "#;
     let extractor = CExtractor;
-    let result = extractor.extract("state.c", source);
+    let result = extractor.extract_artifact("state.c", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let statics: Vec<_> = result
         .nodes

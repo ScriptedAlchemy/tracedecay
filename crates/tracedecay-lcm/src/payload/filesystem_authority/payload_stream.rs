@@ -218,7 +218,7 @@ fn io_error(error: std::io::Error) -> LcmError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::util::sha256_hex;
+    use tracedecay_domain::canonical_text::sha256_hex;
 
     const WINDOW: usize = 4 * 1024;
 
@@ -427,13 +427,34 @@ mod tests {
 
         let mut rewritten = content.clone();
         rewritten[WINDOW + 1] ^= 0x20;
-        fs::write(&path, &rewritten).unwrap();
+        if rewrite_while_held(&path, &rewritten) {
+            let error = collect(stream, &mut window).unwrap_err();
+            assert_eq!(
+                error,
+                PayloadStreamError::Payload(LcmError::PayloadIntegrityMismatch)
+            );
+        } else {
+            assert_eq!(collect(stream, &mut window).unwrap().0, content);
+        }
+    }
 
-        let error = collect(stream, &mut window).unwrap_err();
-        assert_eq!(
-            error,
-            PayloadStreamError::Payload(LcmError::PayloadIntegrityMismatch)
-        );
+    /// Rewrites the payload in place while a proven stream holds it, reporting
+    /// whether the write landed. The stream's Windows handle shares only read
+    /// and delete access, so there the writer is refused with a sharing
+    /// violation and the proven bytes cannot change under the stream.
+    fn rewrite_while_held(path: &Path, bytes: &[u8]) -> bool {
+        const ERROR_SHARING_VIOLATION: i32 = 32;
+        match fs::write(path, bytes) {
+            Ok(()) if !cfg!(windows) => true,
+            Ok(()) => panic!("a held payload must exclude writers"),
+            Err(error) => {
+                assert!(
+                    cfg!(windows) && error.raw_os_error() == Some(ERROR_SHARING_VIOLATION),
+                    "unexpected rewrite failure: {error}"
+                );
+                false
+            }
+        }
     }
 
     #[test]
@@ -445,32 +466,37 @@ mod tests {
         let mut window = vec![0_u8; WINDOW];
 
         let stream = open(&path, &content, &mut window).unwrap().unwrap();
-        fs::write(&path, &content[..WINDOW]).unwrap();
+        let truncated = rewrite_while_held(&path, &content[..WINDOW]);
         let mut emitted = 0;
-        let error = stream
-            .emit(&mut window, &mut ok, &mut |chunk| {
-                emitted += chunk.len();
-                Ok(())
-            })
-            .unwrap_err();
-        assert_eq!(
-            error,
-            PayloadStreamError::Payload(LcmError::PayloadIntegrityMismatch)
-        );
-        assert_eq!(
-            emitted, 0,
-            "a size change is refused before the first window"
-        );
+        let result = stream.emit(&mut window, &mut ok, &mut |chunk| {
+            emitted += chunk.len();
+            Ok(())
+        });
+        if truncated {
+            assert_eq!(
+                result.unwrap_err(),
+                PayloadStreamError::Payload(LcmError::PayloadIntegrityMismatch)
+            );
+            assert_eq!(
+                emitted, 0,
+                "a size change is refused before the first window"
+            );
+        } else {
+            assert_eq!(result.unwrap(), content.len() as u64);
+        }
 
         fs::write(&path, &content).unwrap();
         let stream = open(&path, &content, &mut window).unwrap().unwrap();
         let mut grown = content.clone();
         grown.extend_from_slice(b"!");
-        fs::write(&path, &grown).unwrap();
-        assert_eq!(
-            collect(stream, &mut window).unwrap_err(),
-            PayloadStreamError::Payload(LcmError::PayloadIntegrityMismatch)
-        );
+        if rewrite_while_held(&path, &grown) {
+            assert_eq!(
+                collect(stream, &mut window).unwrap_err(),
+                PayloadStreamError::Payload(LcmError::PayloadIntegrityMismatch)
+            );
+        } else {
+            assert_eq!(collect(stream, &mut window).unwrap().0, content);
+        }
     }
 
     #[test]

@@ -71,7 +71,7 @@ impl From<StoredConfigurationProtectedOperationV1> for ConfigurationProtectedOpe
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct StoredConfigurationPlanPayloadV2 {
+pub(super) struct StoredConfigurationPlanPayload {
     pub(super) schema_version: u16,
     pub(super) plan: ProtectedChangePlan,
     pub(super) operation: StoredConfigurationProtectedOperationV1,
@@ -493,7 +493,7 @@ pub(super) fn decode_plan_row(
             "configuration plan operation payload is missing",
         ));
     };
-    let payload = serde_json::from_slice::<StoredConfigurationPlanPayloadV2>(&sealed_payload)
+    let payload = serde_json::from_slice::<StoredConfigurationPlanPayload>(&sealed_payload)
         .map_err(|error| {
             invalid_store_data(format!("decode configuration plan payload: {error}"))
         })?;

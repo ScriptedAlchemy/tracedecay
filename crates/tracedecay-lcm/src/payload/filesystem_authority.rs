@@ -1372,11 +1372,13 @@ mod windows_tests {
 
 #[cfg(test)]
 mod authority_tests {
+    use tracedecay_domain::canonical_text::sha256_hex;
+
     use super::*;
 
     fn expectation(content: &str) -> (String, u64, u64) {
         (
-            super::super::util::sha256_hex(content.as_bytes()),
+            sha256_hex(content.as_bytes()),
             content.len() as u64,
             content.chars().count() as u64,
         )

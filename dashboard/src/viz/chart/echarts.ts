@@ -4,8 +4,8 @@
  * `import('echarts')` pulls the whole distribution, every series type, both
  * renderers, the map/geo stack, which measured 1,080 KiB raw and 288 KiB
  * Brotli in one async chunk, against the 200 KiB per-chunk ceiling. The
- * product draws line series on a cartesian grid with a tooltip, so that is what
- * gets registered.
+ * product draws line and scatter series on a cartesian grid with a tooltip, so
+ * that is what gets registered.
  *
  * REGISTERING A NEW SERIES TYPE IS A TWO-LINE CHANGE HERE, AND IT IS REQUIRED.
  * ECharts does not throw on an unregistered series; it draws nothing. On a
@@ -14,14 +14,14 @@
  * `REGISTERED_SERIES` rather than presenting emptiness as a reading.
  */
 import { init, use } from 'echarts/core';
-import { LineChart } from 'echarts/charts';
+import { LineChart, ScatterChart } from 'echarts/charts';
 import { GridComponent, TooltipComponent } from 'echarts/components';
 import { CanvasRenderer } from 'echarts/renderers';
 
-use([LineChart, GridComponent, TooltipComponent, CanvasRenderer]);
+use([LineChart, ScatterChart, GridComponent, TooltipComponent, CanvasRenderer]);
 
 /** Series types this build can actually draw. Keep in step with `use` above. */
-export const REGISTERED_SERIES = ['line'] as const;
+export const REGISTERED_SERIES = ['line', 'scatter'] as const;
 
 export type RegisteredSeries = (typeof REGISTERED_SERIES)[number];
 

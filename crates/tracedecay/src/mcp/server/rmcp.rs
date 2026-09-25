@@ -143,7 +143,7 @@ mod tests {
 
     impl RmcpWireFixture {
         async fn start() -> Self {
-            crate::product_runtime::register_fixture_product_runtime();
+            tracedecay_project::product_runtime::register_fixture_product_runtime();
             let (cg, repo, authority) =
                 crate::mcp::server::writer_test_support::init_indexed_repo().await;
             let context =
@@ -201,7 +201,7 @@ mod tests {
                 .rev()
                 .find(|message| message.get("id") == Some(&response_id))
                 .expect("recorded client request for response");
-            serde_json::from_value(request.clone()).expect("legacy request shape")
+            serde_json::from_value(request.clone()).expect("raw request shape")
         }
 
         fn last_response(&self) -> Value {
@@ -213,22 +213,22 @@ mod tests {
                 .clone()
         }
 
-        async fn assert_last_response_matches_legacy(&self, decorate_initialize: bool) {
+        async fn assert_last_response_matches_raw_dispatch(&self, decorate_initialize: bool) {
             let request = self.last_request();
             let mut expected = self
                 .server
                 .handle_request(&request)
                 .await
-                .expect("legacy response");
+                .expect("raw response");
             if decorate_initialize {
-                expected.result.as_mut().expect("legacy initialize result")["_meta"]["tracedecayInitializeRoute"] = json!({
+                expected.result.as_mut().expect("raw initialize result")["_meta"]["tracedecayInitializeRoute"] = json!({
                     "projectPath": "/wire/oracle",
                     "allowInit": false,
                 });
             }
             assert_eq!(
                 self.last_response(),
-                serde_json::to_value(expected).expect("serialize legacy response"),
+                serde_json::to_value(expected).expect("serialize raw response"),
             );
         }
 
@@ -243,7 +243,7 @@ mod tests {
     async fn malformed_initialize_is_refused_typed_and_a_corrected_handshake_still_serves() {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
-        crate::product_runtime::register_fixture_product_runtime();
+        tracedecay_project::product_runtime::register_fixture_product_runtime();
         let (cg, repo, authority) =
             crate::mcp::server::writer_test_support::init_indexed_repo().await;
         let context = crate::mcp::server::writer_test_support::registered_context(cg, &authority);
@@ -282,6 +282,10 @@ mod tests {
 
         line.clear();
         client_write
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
+            .await
+            .expect("send the pipelined initialized notification");
+        client_write
             .write_all(
                 br#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"handshake-retry","version":"0"}}}
 "#,
@@ -307,8 +311,93 @@ mod tests {
         drop(repo);
     }
 
+    /// MCP lets either party ping at any time; a stateless SEP-2575 connection
+    /// must still answer one after it has served another request.
     #[tokio::test]
-    async fn rmcp_wire_matrix_matches_legacy_initialize_tools_and_resources() {
+    async fn stateless_connection_answers_ping_after_an_earlier_request() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        tracedecay_project::product_runtime::register_fixture_product_runtime();
+        let (cg, repo, authority) =
+            crate::mcp::server::writer_test_support::init_indexed_repo().await;
+        let context = crate::mcp::server::writer_test_support::registered_context(cg, &authority);
+        let server = McpServer::new_with_registered_test_context(context, Vec::new())
+            .await
+            .expect("registered RMCP stateless server");
+        let adapter = production_adapter(&server, None);
+        let (server_io, client_io) = tokio::io::duplex(2 * 1024 * 1024);
+        let serving = tokio::spawn(async move {
+            let running = adapter
+                .serve(IntoTransport::<RoleServer, _, _>::into_transport(server_io))
+                .await
+                .expect("a stateless first request opens the RMCP session");
+            let _ = running.waiting().await;
+        });
+        let (client_read, mut client_write) = tokio::io::split(client_io);
+        let mut client_read = tokio::io::BufReader::new(client_read);
+        let stateless_line = |request: Value| {
+            let mut request: JsonRpcRequest =
+                serde_json::from_value(request).expect("JSON-RPC request fixture");
+            assert!(tracedecay_mcp::server::attach_stateless_request_context(
+                &mut request
+            ));
+            format!(
+                "{}\n",
+                serde_json::to_string(&request).expect("stateless request")
+            )
+        };
+
+        client_write
+            .write_all(
+                stateless_line(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
+                    .as_bytes(),
+            )
+            .await
+            .expect("send stateless tools/list");
+        let mut line = String::new();
+        client_read
+            .read_line(&mut line)
+            .await
+            .expect("read tools/list response");
+        let listed: Value = serde_json::from_str(&line).expect("tools/list frame");
+        assert_eq!(listed["id"], json!(1), "{line}");
+        assert!(listed["result"]["tools"].is_array(), "{line}");
+
+        for (request, id) in [
+            (
+                stateless_line(json!({"jsonrpc": "2.0", "id": 2, "method": "ping"})),
+                2,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":3,"method":"ping"}"#.to_owned() + "\n",
+                3,
+            ),
+        ] {
+            client_write
+                .write_all(request.as_bytes())
+                .await
+                .expect("send ping");
+            line.clear();
+            client_read
+                .read_line(&mut line)
+                .await
+                .expect("read ping response");
+            assert_eq!(
+                line.trim_end(),
+                format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{}}}}"#),
+                "a later ping on a stateless connection must get an empty result: {request}",
+            );
+        }
+
+        drop(client_write);
+        drop(client_read);
+        serving.await.expect("join RMCP server");
+        server.shutdown().await;
+        drop(repo);
+    }
+
+    #[tokio::test]
+    async fn rmcp_wire_matrix_matches_raw_dispatch_initialize_tools_and_resources() {
         let fixture = RmcpWireFixture::start().await;
         let initialize_id = fixture.last_response()["id"].clone();
         let mut initialize_result =
@@ -323,7 +412,7 @@ mod tests {
             fixture.last_response(),
             serde_json::to_value(JsonRpcResponse::success(initialize_id, initialize_result))
                 .expect("serialize initialize oracle"),
-            "rmcp negotiates the client protocol version while preserving the legacy payload",
+            "rmcp negotiates the client protocol version while preserving the raw payload",
         );
         assert_eq!(
             fixture.last_response()["result"]["_meta"]["tracedecayInitializeRoute"],
@@ -336,7 +425,9 @@ mod tests {
             .list_tools(None)
             .await
             .expect("RMCP tools/list");
-        fixture.assert_last_response_matches_legacy(false).await;
+        fixture
+            .assert_last_response_matches_raw_dispatch(false)
+            .await;
 
         fixture
             .client
@@ -369,7 +460,9 @@ mod tests {
             )
             .await
             .expect_err("unknown tool must be a JSON-RPC error");
-        fixture.assert_last_response_matches_legacy(false).await;
+        fixture
+            .assert_last_response_matches_raw_dispatch(false)
+            .await;
         assert_eq!(
             fixture.last_response()["error"]["code"],
             json!(-32603),
@@ -403,14 +496,18 @@ mod tests {
             .list_resources(None)
             .await
             .expect("RMCP resources/list");
-        fixture.assert_last_response_matches_legacy(false).await;
+        fixture
+            .assert_last_response_matches_raw_dispatch(false)
+            .await;
 
         fixture
             .client
             .read_resource(ReadResourceRequestParams::new("tracedecay://schema"))
             .await
             .expect("RMCP resources/read");
-        fixture.assert_last_response_matches_legacy(false).await;
+        fixture
+            .assert_last_response_matches_raw_dispatch(false)
+            .await;
 
         let unknown_resource = fixture
             .client
@@ -419,11 +516,13 @@ mod tests {
             ))
             .await
             .expect_err("an unknown resource URI must be a JSON-RPC error");
-        fixture.assert_last_response_matches_legacy(false).await;
+        fixture
+            .assert_last_response_matches_raw_dispatch(false)
+            .await;
         assert_eq!(
             fixture.last_response()["error"]["code"],
             json!(-32602),
-            "the typed resources/read refusal keeps the legacy invalid-params code",
+            "the typed resources/read refusal keeps the raw invalid-params code",
         );
         assert!(
             unknown_resource
@@ -509,20 +608,54 @@ mod tests {
         fixture.shutdown().await;
     }
 
-    /// The legacy raw JSON-RPC transport must stay byte-for-byte what it was
+    /// `rmcp` moves wire `params._meta` into the request context; the caller
+    /// deadline it carries must still reach dispatch as on the raw path.
+    #[tokio::test]
+    async fn rmcp_tool_call_honours_the_request_meta_caller_deadline() {
+        let fixture = RmcpWireFixture::start().await;
+        let mut params = CallToolRequestParams::new("tracedecay_status").with_arguments(
+            json!({"admission_only": true, "format": "json"})
+                .as_object()
+                .cloned()
+                .expect("object arguments"),
+        );
+        params.meta = Some(rmcp::model::RequestMetaObject::from(
+            rmcp::model::MetaObject(
+                tracedecay_mcp::tool_call_deadline_meta(tracedecay_domain::UtcMicros(1))
+                    .as_object()
+                    .cloned()
+                    .expect("deadline meta object"),
+            ),
+        ));
+        let elapsed = fixture.client.call_tool(params).await;
+        fixture
+            .assert_last_response_matches_raw_dispatch(false)
+            .await;
+        assert!(
+            elapsed.is_err()
+                || elapsed
+                    .as_ref()
+                    .is_ok_and(|result| result.is_error == Some(true)),
+            "an elapsed caller deadline must not complete as a success: {:?}",
+            fixture.last_response()
+        );
+        fixture.shutdown().await;
+    }
+
+    /// Raw JSON-RPC dispatch frames must stay byte-for-byte what they were
     /// before the typed envelope: the envelope is an internal representation,
     /// never a wire change. These are the shapes a host actually parses,
     /// method refusals, param refusals, the trivial ack, and a resource body,
     /// pinned as exact serialized frames rather than as structural matches.
     #[tokio::test]
-    async fn legacy_json_rpc_wire_frames_are_unchanged_by_the_typed_envelope() {
-        crate::product_runtime::register_fixture_product_runtime();
+    async fn raw_json_rpc_wire_frames_are_unchanged_by_the_typed_envelope() {
+        tracedecay_project::product_runtime::register_fixture_product_runtime();
         let (cg, _repo, authority) =
             crate::mcp::server::writer_test_support::init_indexed_repo().await;
         let context = crate::mcp::server::writer_test_support::registered_context(cg, &authority);
         let server = McpServer::new_with_registered_test_context(context, Vec::new())
             .await
-            .expect("registered legacy wire server");
+            .expect("registered raw wire server");
 
         for (request_line, expected) in [
             (
@@ -551,15 +684,12 @@ mod tests {
             ),
         ] {
             let request: JsonRpcRequest =
-                serde_json::from_str(request_line).expect("legacy request line");
-            let response = server
-                .handle_request(&request)
-                .await
-                .expect("legacy response");
+                serde_json::from_str(request_line).expect("raw request line");
+            let response = server.handle_request(&request).await.expect("raw response");
             assert_eq!(
-                serde_json::to_string(&response).expect("serialize legacy response"),
+                serde_json::to_string(&response).expect("serialize raw response"),
                 expected,
-                "legacy wire frame changed for {request_line}",
+                "raw wire frame changed for {request_line}",
             );
         }
 
@@ -568,19 +698,19 @@ mod tests {
         let schema_request: JsonRpcRequest = serde_json::from_str(
             r#"{"jsonrpc":"2.0","id":6,"method":"resources/read","params":{"uri":"tracedecay://schema"}}"#,
         )
-        .expect("legacy request line");
+        .expect("raw request line");
         let schema = serde_json::to_string(
             &server
                 .handle_request(&schema_request)
                 .await
-                .expect("legacy response"),
+                .expect("raw response"),
         )
-        .expect("serialize legacy response");
+        .expect("serialize raw response");
         assert!(
             schema.starts_with(
                 r#"{"jsonrpc":"2.0","id":6,"result":{"contents":[{"mimeType":"text/markdown","text":"#
             ) && schema.ends_with(r#","uri":"tracedecay://schema"}]}}"#),
-            "legacy resources/read frame shape changed: {schema}",
+            "raw resources/read frame shape changed: {schema}",
         );
         let parsed: Value = serde_json::from_str(&schema).expect("schema frame");
         let text = parsed["result"]["contents"][0]["text"]
@@ -594,16 +724,16 @@ mod tests {
             "schema resource must be the migration inventory, not a second document"
         );
 
-        // Notifications stay responseless on the legacy transport.
+        // Notifications stay responseless on raw dispatch.
         for notification in [
             r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
             r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#,
         ] {
             let request: JsonRpcRequest =
-                serde_json::from_str(notification).expect("legacy notification line");
+                serde_json::from_str(notification).expect("raw notification line");
             assert!(
                 server.handle_request(&request).await.is_none(),
-                "legacy notification produced a response: {notification}",
+                "raw notification produced a response: {notification}",
             );
         }
         server.shutdown().await;
@@ -657,14 +787,14 @@ mod tests {
     }
 
     #[test]
-    fn adapter_accepts_the_legacy_initialize_response_shape() {
-        crate::product_runtime::register_fixture_product_runtime();
+    fn adapter_accepts_the_dispatch_initialize_response_shape() {
+        tracedecay_project::product_runtime::register_fixture_product_runtime();
         let initialized: InitializeResult = rmcp_response_result(JsonRpcResponse::success(
             json!(1),
             crate::mcp::server::initialize_result("TraceDecay instructions")
                 .expect("fixture product runtime registered"),
         ))
-        .expect("rmcp must preserve legacy MCP initialization compatibility");
+        .expect("rmcp must accept the server's own initialize result shape");
 
         assert_eq!(
             serde_json::to_value(&initialized).expect("serialize initialized response")["protocolVersion"],

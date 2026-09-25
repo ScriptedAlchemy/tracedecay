@@ -27,7 +27,7 @@ pub(super) async fn execute_configuration(
             ApplicationProblem::cancelled_before_admission(),
         );
     }
-    if deadline.is_elapsed_at(observed_at) || deadline.is_elapsed_at(current_micros()) {
+    if deadline.is_elapsed_at(observed_at) || deadline.is_elapsed_at(now_micros()) {
         return application_problem(
             wire_request_id,
             ApplicationProblem::timed_out_before_admission(),
@@ -660,7 +660,7 @@ pub(super) fn configuration_evidence(
 ) -> Result<ApplicationOutcome<serde_json::Value>, ConfigurationError> {
     let execution = OperationReceipt::completed(
         observed_at,
-        current_micros(),
+        now_micros(),
         deadline,
         OperationBudgetUsage::default(),
     )
@@ -704,7 +704,7 @@ fn configuration_preview(
     .map_err(ConfigurationError::validation)?;
     let execution = OperationReceipt::completed(
         observed_at,
-        current_micros(),
+        now_micros(),
         deadline,
         OperationBudgetUsage::default(),
     )

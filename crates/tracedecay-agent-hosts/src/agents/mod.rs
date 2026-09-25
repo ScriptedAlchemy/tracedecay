@@ -14,9 +14,6 @@ pub mod copilot;
 pub mod cursor;
 pub(crate) mod cursor_diagnostics;
 pub mod devin;
-/// Legacy Cursor `serve` log marker; the root crate's `src/serve.rs`
-/// re-exports this instead of declaring its own copy.
-pub use cursor_diagnostics::DEGRADED_SERVE_STDERR_MARKER;
 pub mod gemini;
 mod git_post_commit_hook;
 pub mod hermes;
@@ -34,10 +31,8 @@ pub mod plugin_bundle;
 pub mod prompt_rules;
 mod text_file_transaction;
 pub(crate) use text_file_transaction::{
-    TextFileMutation, update_config_file_transactionally, update_text_file_transactionally,
-    update_two_config_files_transactionally,
+    TextFileMutation, update_text_file_transactionally, update_two_config_files_transactionally,
 };
-pub(crate) mod retired_memory_digest;
 pub mod roo_code;
 pub mod vibe;
 pub mod zed;
@@ -51,8 +46,8 @@ use tracedecay_domain::errors::TraceDecayError;
 
 pub use antigravity::AntigravityIntegration;
 pub(crate) use bundle_identity::{
-    is_auto_discovered_entrypoint, observed_bundle_content_digest,
-    observed_bundle_discovery_matches, rendered_bundle_content_digest,
+    observed_bundle_content_digest, observed_bundle_discovery_matches,
+    rendered_bundle_content_digest,
 };
 pub use claude::ClaudeIntegration;
 pub use cline::ClineIntegration;
@@ -72,10 +67,10 @@ pub use zed::ZedIntegration;
 
 pub use git_post_commit_hook::{install_git_post_commit_hook, report_git_post_commit_hook_status};
 pub use host_config_io::{
-    HostFileMetadataIdentityV1, JsonConfigDialect, backup_config_file, capture_host_file_metadata,
-    config_backup_path, copilot_cli_dir, home_dir, host_config_write_intent_path, kiro_data_dir,
-    load_json_file, load_json_file_strict, load_jsonc_file, load_jsonc_file_strict, load_toml_file,
-    parse_jsonc, restore_host_file_metadata, safe_remove_host_file, safe_write_bytes_file,
+    HostFileMetadataIdentityV1, JsonConfigDialect, capture_host_file_metadata, copilot_cli_dir,
+    home_dir, host_config_write_intent_path, kiro_data_dir, load_json_file, load_json_file_strict,
+    load_jsonc_file, load_jsonc_file_strict, load_toml_file, parse_jsonc,
+    restore_host_file_metadata, safe_remove_host_file, safe_write_bytes_file,
     safe_write_bytes_file_with_metadata, safe_write_json_file, safe_write_text_file,
     vscode_data_dir, vscode_insiders_data_dir, which_tracedecay, which_tracedecay_path,
     with_host_config_write_intents,
@@ -83,22 +78,19 @@ pub use host_config_io::{
 pub(crate) use host_config_io::{
     JsonConfigMutation, collect_regular_files, ensure_project_local_safe_path,
     ensure_project_local_safe_paths, hook_command, host_home_override,
-    record_host_config_observation_bytes, sweep_superseded_plugin_siblings,
-    update_json_config_transactionally, update_toml_config_transactionally,
+    record_host_config_observation_bytes, update_json_config_transactionally,
+    update_toml_config_transactionally,
 };
-// Host adapters under this module reach these through `super::` / `crate::agents::`.
 #[cfg(test)]
 use host_config_io::{
     TestHostConfigWritePauseController, pause_next_host_config_write_after_validation,
     pause_next_host_config_write_at_publication,
 };
-use host_config_io::{render_json_config, strip_jsonc_comments};
 pub(crate) use mcp_registration::doctor_check_prompt_contains_tracedecay;
 pub use mcp_registration::{
-    McpDoctorLabels, McpUninstallPolicy, doctor_check_mcp_registration, expected_tool_perms,
-    install_mcp_server_entry, mcp_config_has_tracedecay, mcp_registration_entry,
-    mcp_servers_registration_state, read_only_tool_names, report_mcp_registration, tool_names,
-    uninstall_mcp_server_entry,
+    McpDoctorLabels, McpUninstallPolicy, doctor_check_mcp_registration, install_mcp_server_entry,
+    mcp_config_has_tracedecay, mcp_registration_entry, mcp_servers_registration_state,
+    read_only_tool_names, report_mcp_registration, tool_names, uninstall_mcp_server_entry,
 };
 
 #[hotpath::measure(label = "agent_hosts.agents.managed_skill.install_index")]
@@ -111,8 +103,6 @@ pub(crate) fn install_managed_skill_prompt_index(
         tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(
             profile_home,
         );
-    retired_memory_digest::remove_state(&profile_root)?;
-    retired_memory_digest::remove_prompt_block(prompt_path)?;
     tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
         &crate::host_io(),
         &profile_root,
@@ -124,21 +114,14 @@ pub(crate) fn install_managed_skill_prompt_index(
 
 #[hotpath::measure(label = "agent_hosts.agents.managed_skill.remove_index")]
 pub(crate) fn remove_managed_skill_prompt_index(
-    profile_home: &Path,
     prompt_path: &Path,
     target: tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget,
 ) -> Result<()> {
-    let profile_root =
-        tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(
-            profile_home,
-        );
-    retired_memory_digest::remove_state(&profile_root)?;
     tracedecay_automation_runtime::automation::skill_targets::remove_prompt_skill_index_for_target(
         &crate::host_io(),
         prompt_path,
         target,
-    )?;
-    retired_memory_digest::remove_prompt_block(prompt_path)
+    )
 }
 
 /// Warns for each of a host's managed-skill prompt indexes that still
@@ -282,25 +265,15 @@ pub trait AgentIntegration {
         false
     }
 
-    /// Validate non-interactive install readiness without changing host state.
+    /// Whether the host has already activated what this version deploys,
+    /// read without changing host state.
     ///
-    /// This is the read-only counterpart to
-    /// [`AgentIntegration::prepare_non_interactive_install`]. Hosts that need
-    /// manual activation report the same typed deferral without staging files.
+    /// Most integrations activate through their own host CLI inside the
+    /// component transaction and are always `Ready` here. A host whose only
+    /// activation route is interactive reports a typed deferral naming the
+    /// host action; the transaction then commits the staged source it owns
+    /// and surfaces that remediation instead of claiming activation.
     fn preflight_non_interactive_install(
-        &self,
-        _ctx: &InstallContext,
-    ) -> Result<NonInteractiveInstallOutcome> {
-        Ok(NonInteractiveInstallOutcome::Ready)
-    }
-
-    /// Prepare an install requested from a non-interactive orchestration path.
-    ///
-    /// Most integrations are immediately ready. Hosts whose official lifecycle
-    /// requires user interaction may stage verified artifacts and return a
-    /// typed deferral instead. Explicit install commands still surface that
-    /// deferral as an error, while maintenance can warn and continue.
-    fn prepare_non_interactive_install(
         &self,
         _ctx: &InstallContext,
     ) -> Result<NonInteractiveInstallOutcome> {
@@ -311,10 +284,9 @@ pub trait AgentIntegration {
     /// through an interactive UI, or `None` for a host TraceDecay can activate
     /// non-interactively.
     ///
-    /// This is the read-only capability twin of the typed deferral
-    /// [`AgentIntegration::prepare_non_interactive_install`] returns: doctor
-    /// needs the same fact without an `InstallContext` and without staging
-    /// anything. Every integration returning `Some` here must also return
+    /// This is the capability twin of the typed deferral
+    /// [`AgentIntegration::preflight_non_interactive_install`] returns: doctor
+    /// needs the same fact without an `InstallContext`. Every integration returning `Some` here must also return
     /// [`NonInteractiveInstallOutcome::DeferredUserAction`] from preflight,
     /// otherwise doctor would downgrade a state that an unattended reinstall
     /// could actually have repaired.
@@ -340,20 +312,6 @@ pub trait AgentIntegration {
     /// from opposite ends of the lifecycle.
     fn interactive_removal_guidance(&self) -> Option<String> {
         None
-    }
-
-    /// Refresh tracedecay-generated artifacts (plugin code, baked binary
-    /// paths, embedded assets) for every *detected* existing installation,
-    /// without writing to any agent config file. Pins, MCP registrations,
-    /// settings, and prompt rules are left byte-for-byte intact.
-    ///
-    /// The default reports [`UpdatePluginOutcome::ConfigOnly`]: most agents
-    /// keep their entire tracedecay integration inside shared config files
-    /// (MCP entries, hook blocks, prompt rules), so there is nothing to
-    /// refresh that would not be a config write. `tracedecay reinstall`
-    /// remains the path that reconciles those.
-    fn update_plugin(&self, _ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
-        Ok(UpdatePluginOutcome::ConfigOnly)
     }
 
     /// Re-export the profile's active managed skills into every export
@@ -466,8 +424,9 @@ pub trait AgentIntegration {
     }
 
     /// Every mutable host registration/configuration path participating in an
-    /// aggregate component-set lifecycle. The transaction stages backups for
-    /// all returned paths before invoking the host registration authority.
+    /// aggregate component-set lifecycle. The transaction snapshots all
+    /// returned paths in memory before invoking the host registration
+    /// authority.
     fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
         self.primary_config_path(home).into_iter().collect()
     }
@@ -483,7 +442,7 @@ pub trait AgentIntegration {
         self.host_registration_paths(home)
     }
 
-    /// Fallible exact registration inventory used by the transaction backup.
+    /// Fallible exact registration inventory used by the transaction snapshot.
     ///
     /// Hosts whose paths depend on validated profile data override this rather
     /// than silently dropping files from rollback ownership.
@@ -556,9 +515,10 @@ pub trait AgentIntegration {
 
     /// Apply only this host's project-scoped registration projection.
     ///
-    /// The component-set transaction calls this boundary after it has staged
-    /// exact registration backups. Implementations must mutate only bounded
-    /// project registration paths; they must not install global assets.
+    /// The component-set transaction calls this boundary after it has
+    /// snapshotted the exact registration paths. Implementations must mutate
+    /// only bounded project registration paths; they must not install global
+    /// assets.
     fn activate_project_host_component_registration(
         &self,
         _components: &[host_bundle::HostComponentV1],
@@ -608,27 +568,10 @@ pub enum NonInteractiveInstallOutcome {
     DeferredUserAction(DeferredUserAction),
 }
 
-/// Outcome of [`AgentIntegration::update_plugin`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum UpdatePluginOutcome {
-    /// Generated artifacts were refreshed at these locations.
-    Refreshed(Vec<PathBuf>),
-    /// The integration ships generated artifacts, but none were detected on
-    /// this machine, nothing was written.
-    NotInstalled,
-    /// The integration only writes shared config files; there are no
-    /// tracedecay-generated artifacts to refresh without touching config.
-    ConfigOnly,
-    /// Verified artifacts were staged, but the host requires explicit user
-    /// action before it can activate them.
-    DeferredUserAction(DeferredUserAction),
-}
-
 /// Context passed to catalog-backed host registration and refresh operations.
 pub struct InstallContext {
     pub home: PathBuf,
     pub tracedecay_bin: String,
-    pub tool_permissions: Vec<String>,
     /// Codex update/uninstall can use this as an explicit repo-local plugin
     /// target. Other integrations ignore it.
     pub project_root: Option<PathBuf>,
@@ -859,19 +802,6 @@ Pass the schema's arguments as the exact JSON object; do not invent per-key flag
 Do not query private databases as a fallback. If the daemon is unavailable or intentionally held, \
 report that state rather than starting or replacing it."
 );
-
-/// True when a `SKILL.md` carries a TraceDecay authorship marker. Retired
-/// plugin artifacts use this narrow check so same-name user workflows remain
-/// outside TraceDecay's cleanup authority.
-pub(crate) fn skill_contents_have_tracedecay_marker(contents: &str) -> bool {
-    contents.lines().map(str::trim).any(|line| {
-        line.starts_with("name: tracedecay:")
-            || line.starts_with("description: TraceDecay ")
-            || line.contains("TraceDecay MCP")
-            || line.contains("tracedecay_")
-            || line.contains("`tracedecay:")
-    })
-}
 
 /// Choose which detected agents `tracedecay install` should configure, or
 /// `None` when this machine has no supported agent yet.

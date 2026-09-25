@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -8,11 +9,12 @@ use tracedecay_code_index::graph_projection::{
 };
 use tracedecay_code_index::lineage::LineageSymbolRecordV1;
 use tracedecay_contracts::retrieval::{
-    ExactSymbolRequest, GraphImpactPrimitiveRequest, GraphRelationRequest, ImplementationSelector,
-    ImplementationsRequest, PrimitiveFailure, PrimitiveFailureKind, PrimitiveSupportGap,
-    SignatureSearchRequest, SymbolGraphPage, SymbolGraphPortContext, SymbolGraphPortFuture,
-    SymbolGraphPortOutcome, SymbolGraphPrimitivePort, SymbolGraphScope, SymbolPrimitiveRecord,
-    SymbolRelationRecord, SymbolSearchPrimitiveRequest, TypeHierarchyRecord, TypeHierarchyRequest,
+    ExactSymbolRequest, GraphImpactPrimitiveRequest, GraphRelationRequest, ImplementationRecord,
+    ImplementationSelector, ImplementationsRequest, PrimitiveFailure, PrimitiveFailureKind,
+    PrimitiveSupportGap, SignatureSearchRequest, SymbolGraphPage, SymbolGraphPortContext,
+    SymbolGraphPortFuture, SymbolGraphPortOutcome, SymbolGraphPrimitivePort, SymbolGraphScope,
+    SymbolPrimitiveRecord, SymbolRelationRecord, SymbolSearchPrimitiveRequest, TypeHierarchyRecord,
+    TypeHierarchyRequest,
 };
 use tracedecay_contracts::{OpaqueCursor, OperationBudgetUsage, PageRequest, RequestContext};
 use tracedecay_domain::code_intelligence::NodeKind;
@@ -118,6 +120,8 @@ where
 /// to the admitted, generation-pinned graph projection.
 pub struct CanonicalSymbolGraphAdapter<C> {
     code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
+    /// Admitted project root implementation bodies are read from.
+    source_root: PathBuf,
     cursors: C,
     ignored_dependency_admission: Option<Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1>>,
 }
@@ -365,7 +369,7 @@ where
         &'a self,
         context: SymbolGraphPortContext<'a>,
         request: &'a ImplementationsRequest,
-    ) -> SymbolGraphPortFuture<'a, SymbolRelationRecord> {
+    ) -> SymbolGraphPortFuture<'a, ImplementationRecord> {
         Box::pin(hotpath::future!(
             async move {
                 let claim = match claim_generation(
@@ -433,7 +437,7 @@ where
                         records
                     }
                 };
-                complete_or_failed(
+                let outcome = complete_or_failed(
                     &self.cursors,
                     context,
                     &request.meta.page,
@@ -444,7 +448,8 @@ where
                     Vec::new(),
                     None,
                 )
-                .await
+                .await;
+                with_implementation_bodies(&self.source_root, context, outcome).await
             },
             label = "usecases.primitives.implementations"
         ))
@@ -475,7 +480,17 @@ where
                     .symbol_summary(&root_id, Arc::clone(&graph.cancellation))
                 {
                     Ok(Some(node)) if in_scope(&node, &request.scope) => node,
-                    Ok(_) => {
+                    Ok(None) => {
+                        return failed_with(
+                            context,
+                            primitive_failure(
+                                PrimitiveFailureKind::NotFoundOrNotAuthorized,
+                                "application.symbol-graph.node-not-found",
+                                "type hierarchy root is not in the admitted graph",
+                            ),
+                        );
+                    }
+                    Ok(Some(_)) => {
                         return complete_or_failed(
                             &self.cursors,
                             context,
@@ -929,17 +944,33 @@ fn signature_metadata_matches(
         .all(|param| parameters.contains(param))
 }
 
+/// Byte offsets of the parameter list's balanced parentheses, so tuple
+/// parameters and parenthesized return types stay in their own regions.
+fn parameter_parens(signature: &str) -> Option<(usize, usize)> {
+    let open = signature.find('(')?;
+    let mut depth = 0_usize;
+    for (index, byte) in signature.bytes().enumerate().skip(open) {
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((open, index));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn parameter_region(signature: &str) -> &str {
-    let Some(start) = signature.find('(') else {
-        return "";
-    };
-    let end = signature.rfind(')').unwrap_or(signature.len());
-    signature.get(start + 1..end).unwrap_or("")
+    parameter_parens(signature).map_or("", |(open, close)| &signature[open + 1..close])
 }
 
 fn return_region(signature: &str) -> &str {
-    signature
-        .split_once("->")
+    let tail = parameter_parens(signature).map_or(signature, |(_, close)| &signature[close + 1..]);
+    tail.split_once("->")
         .map_or("", |(_, returns)| returns.trim())
 }
 
@@ -1104,6 +1135,109 @@ pub(crate) fn symbol_record(
         signature: metadata.signature,
         score,
     })
+}
+
+/// Exact zero-based, inclusive `start_line..=end_line` source of one indexed
+/// symbol, the slice every symbol-body read serves.
+pub(crate) async fn read_symbol_source_body(
+    project_root: &Path,
+    file: &str,
+    start_line: u32,
+    end_line: u32,
+) -> std::io::Result<String> {
+    let content = tokio::fs::read_to_string(project_root.join(file)).await?;
+    let start = start_line as usize;
+    let end = end_line as usize;
+    Ok(content
+        .lines()
+        .skip(start)
+        .take(end.saturating_sub(start).saturating_add(1))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// Hydrates only the served page, so a large implementation set reads the
+/// source of at most one page of matches.
+async fn with_implementation_bodies(
+    source_root: &Path,
+    context: SymbolGraphPortContext<'_>,
+    outcome: SymbolGraphPortOutcome<SymbolRelationRecord>,
+) -> SymbolGraphPortOutcome<ImplementationRecord> {
+    let (page, partial, finished_at, budget) = match outcome {
+        SymbolGraphPortOutcome::Completed {
+            page,
+            finished_at,
+            budget,
+        } => (page, false, finished_at, budget),
+        SymbolGraphPortOutcome::Partial {
+            page,
+            finished_at,
+            budget,
+        } => (page, true, finished_at, budget),
+        SymbolGraphPortOutcome::Failed {
+            failure,
+            finished_at,
+            budget,
+        } => {
+            return SymbolGraphPortOutcome::Failed {
+                failure,
+                finished_at,
+                budget,
+            };
+        }
+    };
+    let SymbolGraphPage {
+        generation,
+        freshness,
+        items,
+        total,
+        next_cursor,
+        truncated,
+        related_edge_count,
+        support_gaps,
+    } = page;
+    let mut hydrated = Vec::with_capacity(items.len());
+    for record in items {
+        let Ok(body) = read_symbol_source_body(
+            source_root,
+            &record.symbol.file,
+            record.symbol.line.saturating_sub(1),
+            record.symbol.end_line.saturating_sub(1),
+        )
+        .await
+        else {
+            return failed(context, "implementation source body was unavailable");
+        };
+        hydrated.push(ImplementationRecord {
+            symbol: record.symbol,
+            edge_kind: record.edge_kind,
+            dispatch_from: record.dispatch_from,
+            body,
+        });
+    }
+    let page = SymbolGraphPage {
+        generation,
+        freshness,
+        items: hydrated,
+        total,
+        next_cursor,
+        truncated,
+        related_edge_count,
+        support_gaps,
+    };
+    if partial {
+        SymbolGraphPortOutcome::Partial {
+            page,
+            finished_at,
+            budget,
+        }
+    } else {
+        SymbolGraphPortOutcome::Completed {
+            page,
+            finished_at,
+            budget,
+        }
+    }
 }
 
 fn in_scope(node: &CodeGraphSymbolSummaryV1, scope: &SymbolGraphScope) -> bool {

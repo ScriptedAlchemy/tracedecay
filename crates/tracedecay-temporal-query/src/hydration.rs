@@ -7,7 +7,9 @@ use thiserror::Error;
 use tracedecay_domain::{HydrationStateV1, RetrievalAnchorId};
 use zeroize::Zeroizing;
 
-use super::ports::{TemporalExecutionSnapshot, TemporalPortError, await_controlled};
+use super::execution::await_controlled;
+use super::ports::TemporalPortError;
+use super::snapshot::TemporalExecutionSnapshot;
 
 /// Fallible pre-allocation ceiling for a single authorized payload buffer.
 const MAX_HYDRATION_PREALLOC_BYTES: usize = 1024 * 1024;
@@ -316,11 +318,10 @@ mod tests {
     use tracedecay_domain::{RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalModeV1};
 
     use super::*;
-    use crate::ports::{
-        BindingDigest, ExecutionControl, ExecutionLimits, KernelVersions,
-        TemporalExecutionSnapshot, TemporalPortError, TemporalSnapshotRequest, TemporalWatermarks,
-    };
+    use crate::execution::{BindingDigest, ExecutionControl, ExecutionLimits};
+    use crate::ports::{TemporalPortError, TemporalSnapshotRequest};
     use crate::resolution::types::ValidatedAuthorization;
+    use crate::snapshot::{KernelVersions, TemporalExecutionSnapshot, TemporalWatermarks};
     use crate::test_support::block_on;
 
     fn anchor(value: &str) -> RetrievalAnchorId {

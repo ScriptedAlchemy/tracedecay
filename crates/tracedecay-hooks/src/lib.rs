@@ -32,7 +32,7 @@ pub use config::{
     HookConfigurationSnapshotV1, HookConfigurationSubscriberV1, hook_configuration_path,
 };
 pub use core_events::{
-    DaemonHookEvent, HOOK_EVENT_METHOD, HookAgent, HookEventNotifyOutcomeV1, HookRouteMetadata,
+    DaemonHookEvent, HOOK_EVENT_METHOD, HookEventNotifyOutcomeV1, HookRouteMetadata,
     HookTerminalReceipt,
 };
 pub use delivery_spool::{
@@ -80,11 +80,6 @@ pub const MAX_REPLAY_BATCH_RECORDS: u16 = 64;
 pub const MAX_REPLAY_BATCH_BYTES: u32 = 256 * 1024;
 pub const MAX_SUGGESTION_BYTES: usize = 4 * 1024;
 
-/// Canonical native host identity used by hook decoding, configuration, and
-/// persisted spool state. The alias preserves the Hook V2 API name while
-/// preventing a second host vocabulary from drifting from the domain catalog.
-pub type HookHostV1 = NativeHostIdentityV1;
-
 /// Event families that a host hook itself may emit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -110,40 +105,46 @@ pub enum HookEventSupportV1 {
 
 /// Checked-in native host matrix. `Unavailable` is truthful absence and never
 /// permission to infer an event from command text or another host surface.
-pub const fn stock_event_support(host: HookHostV1, family: HookEventFamily) -> HookEventSupportV1 {
+pub const fn stock_event_support(
+    host: NativeHostIdentityV1,
+    family: HookEventFamily,
+) -> HookEventSupportV1 {
     use HookEventFamily::{
         PromptBoundary, SavedEdit, SessionBoundary, TestLifecycle, ToolLifecycle,
     };
     use HookEventSupportV1::{Native, ReceiptDerived, Unavailable};
 
     match (host, family) {
-        (HookHostV1::ClaudeCode, SessionBoundary | ToolLifecycle) => Native,
-        (HookHostV1::ClaudeCode, SavedEdit | TestLifecycle) => ReceiptDerived,
-        (HookHostV1::ClaudeCode, PromptBoundary) => Unavailable,
-        (HookHostV1::Codex, SessionBoundary | ToolLifecycle) => Native,
-        (HookHostV1::Codex, SavedEdit | TestLifecycle) => ReceiptDerived,
-        (HookHostV1::Codex, PromptBoundary) => Unavailable,
-        (HookHostV1::CursorDesktop, SessionBoundary | SavedEdit) => Native,
-        (HookHostV1::CursorDesktop, TestLifecycle) => ReceiptDerived,
-        (HookHostV1::CursorDesktop, PromptBoundary | ToolLifecycle) => Unavailable,
+        (NativeHostIdentityV1::ClaudeCode, SessionBoundary | ToolLifecycle) => Native,
+        (NativeHostIdentityV1::ClaudeCode, SavedEdit | TestLifecycle) => ReceiptDerived,
+        (NativeHostIdentityV1::ClaudeCode, PromptBoundary) => Unavailable,
+        (NativeHostIdentityV1::Codex, SessionBoundary | ToolLifecycle) => Native,
+        (NativeHostIdentityV1::Codex, SavedEdit | TestLifecycle) => ReceiptDerived,
+        (NativeHostIdentityV1::Codex, PromptBoundary) => Unavailable,
+        (NativeHostIdentityV1::CursorDesktop, SessionBoundary | SavedEdit) => Native,
+        (NativeHostIdentityV1::CursorDesktop, TestLifecycle) => ReceiptDerived,
+        (NativeHostIdentityV1::CursorDesktop, PromptBoundary | ToolLifecycle) => Unavailable,
         (
-            HookHostV1::CursorCloud,
+            NativeHostIdentityV1::CursorCloud,
             SessionBoundary | PromptBoundary | ToolLifecycle | SavedEdit | TestLifecycle,
         ) => Unavailable,
-        (HookHostV1::Hermes, SessionBoundary | ToolLifecycle) => Native,
-        (HookHostV1::Hermes, SavedEdit | TestLifecycle) => ReceiptDerived,
-        (HookHostV1::Hermes, PromptBoundary) => Unavailable,
-        (HookHostV1::Kiro, PromptBoundary) => Native,
-        (HookHostV1::Kiro, SessionBoundary | ToolLifecycle | SavedEdit | TestLifecycle) => {
-            Unavailable
-        }
-        (HookHostV1::KimiCode, ToolLifecycle | SavedEdit) => Native,
-        (HookHostV1::KimiCode, SessionBoundary) => Native,
-        (HookHostV1::KimiCode, PromptBoundary | TestLifecycle) => Unavailable,
-        (HookHostV1::OpenCode, SessionBoundary | ToolLifecycle | SavedEdit) => Native,
-        (HookHostV1::OpenCode, PromptBoundary | TestLifecycle) => Unavailable,
+        (NativeHostIdentityV1::Hermes, SessionBoundary | ToolLifecycle) => Native,
+        (NativeHostIdentityV1::Hermes, SavedEdit | TestLifecycle) => ReceiptDerived,
+        (NativeHostIdentityV1::Hermes, PromptBoundary) => Unavailable,
+        (NativeHostIdentityV1::Kiro, PromptBoundary) => Native,
         (
-            HookHostV1::Cline | HookHostV1::RooCode | HookHostV1::Kilo,
+            NativeHostIdentityV1::Kiro,
+            SessionBoundary | ToolLifecycle | SavedEdit | TestLifecycle,
+        ) => Unavailable,
+        (NativeHostIdentityV1::KimiCode, ToolLifecycle | SavedEdit) => Native,
+        (NativeHostIdentityV1::KimiCode, SessionBoundary) => Native,
+        (NativeHostIdentityV1::KimiCode, PromptBoundary | TestLifecycle) => Unavailable,
+        (NativeHostIdentityV1::OpenCode, SessionBoundary | ToolLifecycle | SavedEdit) => Native,
+        (NativeHostIdentityV1::OpenCode, PromptBoundary | TestLifecycle) => Unavailable,
+        (
+            NativeHostIdentityV1::Cline
+            | NativeHostIdentityV1::RooCode
+            | NativeHostIdentityV1::Kilo,
             SessionBoundary | PromptBoundary | ToolLifecycle | SavedEdit | TestLifecycle,
         ) => Unavailable,
     }
@@ -231,7 +232,7 @@ impl HookEventV2 {
 pub struct HookEventEnvelopeV2 {
     pub schema_version: u16,
     pub event_id: [u8; 16],
-    pub producer: HookHostV1,
+    pub producer: NativeHostIdentityV1,
     pub protected_session_id: [u8; 32],
     pub project_id: [u8; 16],
     pub repository_id: [u8; 16],
@@ -306,7 +307,7 @@ pub struct HookCapabilityV1 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookScopeBindingV1 {
-    pub host: HookHostV1,
+    pub host: NativeHostIdentityV1,
     pub project_id: [u8; 16],
     pub repository_id: [u8; 16],
     pub worktree_id: [u8; 16],
@@ -434,7 +435,7 @@ mod tests {
 
     fn binding() -> HookScopeBindingV1 {
         HookScopeBindingV1 {
-            host: HookHostV1::CursorDesktop,
+            host: NativeHostIdentityV1::CursorDesktop,
             project_id: [1; 16],
             repository_id: [2; 16],
             worktree_id: [3; 16],
@@ -451,7 +452,7 @@ mod tests {
         HookEventEnvelopeV2 {
             schema_version: HOOK_EVENT_SCHEMA_VERSION,
             event_id: [8; 16],
-            producer: HookHostV1::CursorDesktop,
+            producer: NativeHostIdentityV1::CursorDesktop,
             protected_session_id: [9; 32],
             project_id: [1; 16],
             repository_id: [2; 16],
@@ -500,49 +501,61 @@ mod tests {
     #[test]
     fn host_matrix_matches_checked_in_native_capture_authority() {
         assert_eq!(
-            stock_event_support(HookHostV1::Kiro, HookEventFamily::ToolLifecycle),
+            stock_event_support(NativeHostIdentityV1::Kiro, HookEventFamily::ToolLifecycle),
             HookEventSupportV1::Unavailable
         );
         assert_eq!(
-            stock_event_support(HookHostV1::Kiro, HookEventFamily::SavedEdit),
+            stock_event_support(NativeHostIdentityV1::Kiro, HookEventFamily::SavedEdit),
             HookEventSupportV1::Unavailable
         );
         assert_eq!(
-            stock_event_support(HookHostV1::Kiro, HookEventFamily::PromptBoundary),
+            stock_event_support(NativeHostIdentityV1::Kiro, HookEventFamily::PromptBoundary),
             HookEventSupportV1::Native,
             "the checked-in Kiro userPromptSubmit capture proves this native family"
         );
         assert_eq!(
-            stock_event_support(HookHostV1::KimiCode, HookEventFamily::SessionBoundary),
+            stock_event_support(
+                NativeHostIdentityV1::KimiCode,
+                HookEventFamily::SessionBoundary
+            ),
             HookEventSupportV1::Native,
             "the checked-in Kimi Stop capture proves this native family"
         );
         assert_eq!(
-            stock_event_support(HookHostV1::CursorCloud, HookEventFamily::SessionBoundary),
+            stock_event_support(
+                NativeHostIdentityV1::CursorCloud,
+                HookEventFamily::SessionBoundary
+            ),
             HookEventSupportV1::Unavailable,
             "Cursor Desktop captures cannot prove a Cursor Cloud callback"
         );
         assert_eq!(
-            stock_event_support(HookHostV1::Hermes, HookEventFamily::TestLifecycle),
+            stock_event_support(NativeHostIdentityV1::Hermes, HookEventFamily::TestLifecycle),
             HookEventSupportV1::ReceiptDerived
         );
         assert_eq!(
-            stock_event_support(HookHostV1::ClaudeCode, HookEventFamily::ToolLifecycle),
+            stock_event_support(
+                NativeHostIdentityV1::ClaudeCode,
+                HookEventFamily::ToolLifecycle
+            ),
             HookEventSupportV1::Native,
             "the checked-in Claude PostToolUse capture proves this native family"
         );
         assert_eq!(
-            stock_event_support(HookHostV1::Hermes, HookEventFamily::ToolLifecycle),
+            stock_event_support(NativeHostIdentityV1::Hermes, HookEventFamily::ToolLifecycle),
             HookEventSupportV1::Native,
             "the checked-in Hermes post_tool_call capture proves this native family"
         );
         assert_eq!(
-            stock_event_support(HookHostV1::Codex, HookEventFamily::ToolLifecycle),
+            stock_event_support(NativeHostIdentityV1::Codex, HookEventFamily::ToolLifecycle),
             HookEventSupportV1::Native,
             "the checked-in Codex PostToolUse capture proves this native family"
         );
         assert_eq!(
-            stock_event_support(HookHostV1::CursorDesktop, HookEventFamily::SavedEdit),
+            stock_event_support(
+                NativeHostIdentityV1::CursorDesktop,
+                HookEventFamily::SavedEdit
+            ),
             HookEventSupportV1::Native,
             "the checked-in Cursor afterFileEdit capture proves this native family"
         );

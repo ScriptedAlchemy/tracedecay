@@ -50,12 +50,6 @@
 #![allow(clippy::single_match_else)]
 #![allow(clippy::large_futures)]
 
-/// Abort bound for in-flight invocation tasks during shutdown.
-///
-/// Re-exported here as the daemon-service authority while the lower runtime
-/// crate remains the cycle-free owner shared with code-index runtime.
-pub use tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE as TASK_ABORT_DEADLINE;
-
 pub mod adoption_observation;
 pub mod application_surface;
 pub mod automation_effect;
@@ -87,7 +81,7 @@ pub use callable_code_authorization::{
 pub use invocation::{
     AuthorizedDaemonLspWorkspace, DaemonConfigurationRuntimeRegistrationPauseV1,
     DaemonFeedbackPublicationTestGate, InvocationProjectRuntimeIdentityV1, LspLeaseTaskRegistry,
-    RuntimeLspSession, WorkAttemptProcessRegistryV1, canonicalize_lsp_roots, current_micros,
+    RuntimeLspSession, WorkAttemptProcessRegistryV1, canonicalize_lsp_roots,
     execute_work_application, lsp_delivery_attempt, mounted_configuration_layers, now_millis,
     retain_lsp_delivery_attempt,
 };
@@ -100,15 +94,17 @@ pub use invocation::{
     DaemonContextScoutRuntimeRegistrar, DaemonContextScoutRuntimeRegistrationError,
     DaemonFeedbackInvocationOwner, DaemonFeedbackProximityInvocationFuture,
     DaemonFeedbackProximityInvocationRequest, DaemonFeedbackRuntimeRegistrar,
-    DaemonFeedbackRuntimeRegistrationError, DaemonInvocationService, DaemonLspInvocationOwner,
-    DaemonLspOwnerRegistrar, DaemonPrimitiveRuntimeRegistrar,
-    DaemonPrimitiveRuntimeRegistrationError, DaemonRetainedRuntimeRegistrar,
-    DaemonSourceEditOwnerRegistrationError, DaemonWorkProposalRoutingAuthorityV1,
-    DaemonWorkRuntimeRegistrar, FeedbackCycleRuntimeBuilderV1, HookOrchestrationAdmissionV1,
-    HookOrchestrationRequestV1, HookOrchestrationTriggerV1, HookOrchestrationWorkOutcomeV1,
-    LSP_WORKSPACE_CAPABILITY_ID_V1, LSP_WORKSPACE_USE_CASE_ID_V1, LspDeliverySettlementAdmissionV1,
-    MAX_COALESCED_HOOK_COMPLETIONS, RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime,
-    RegisteredFeedbackRuntime, RegisteredRetainedRequestContextError, RegisteredRetainedRuntime,
+    DaemonFeedbackRuntimeRegistrationError, DaemonGraphToolOwnerRegistrationError,
+    DaemonInvocationService, DaemonLspInvocationOwner, DaemonLspOwnerRegistrar,
+    DaemonPrimitiveRuntimeRegistrar, DaemonPrimitiveRuntimeRegistrationError,
+    DaemonRetainedRuntimeRegistrar, DaemonSourceEditOwnerRegistrationError,
+    DaemonWorkProposalRoutingAuthorityV1, DaemonWorkRuntimeRegistrar,
+    FeedbackCycleRuntimeBuilderV1, GraphToolFuture, GraphToolInvocationV1,
+    HookOrchestrationAdmissionV1, HookOrchestrationRequestV1, HookOrchestrationTriggerV1,
+    HookOrchestrationWorkOutcomeV1, LSP_WORKSPACE_CAPABILITY_ID_V1, LSP_WORKSPACE_USE_CASE_ID_V1,
+    LspDeliverySettlementAdmissionV1, MAX_COALESCED_HOOK_COMPLETIONS, ProjectGraphToolPortV1,
+    RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime, RegisteredFeedbackRuntime,
+    RegisteredGraphToolOwnerV1, RegisteredRetainedRequestContextError, RegisteredRetainedRuntime,
     RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
     admit_registered_hook_orchestration, advisory_cycle_invocation_result,
     callable_code_request_context, daemon_operation_event_authority,

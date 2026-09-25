@@ -128,7 +128,6 @@ fn assert_surface_contract_parity(
             assert_eq!(binding.operation(), operation);
             assert!(capability.binding_ids().contains(binding.binding_id()));
             assert!(binding.required_features().is_empty());
-            assert!(!binding.is_alias());
         }
     }
 }

@@ -17,18 +17,23 @@ use super::writer_test_support::{
 };
 use super::{CodeIndexReconcileSink, McpServer};
 use crate::mcp::project_route::HookProjectRouteCache;
-use tracedecay_hooks::core_events::{DaemonHookEvent, HookAgent};
+use tracedecay_domain::HostIntegrationIdV1;
+use tracedecay_hooks::core_events::DaemonHookEvent;
 use tracedecay_host_admission::{
     HostAdmissionBroker, HostAdmissionRuntime, SharedHostAdmissionBroker, SpoolBounds,
 };
 use tracedecay_sessions::admission::HostAdmissionStatus;
 
 fn session_start(root: PathBuf) -> Value {
-    serde_json::to_value(DaemonHookEvent::session_start(HookAgent::Codex, root)).unwrap()
+    serde_json::to_value(DaemonHookEvent::session_start(
+        HostIntegrationIdV1::Codex,
+        root,
+    ))
+    .unwrap()
 }
 
 async fn server_with_broker(
-    cg: crate::project::TraceDecay,
+    cg: tracedecay_project::project::TraceDecay,
     authority: &WriterTestFixtureAuthority,
     broker: SharedHostAdmissionBroker,
     reconcile_sink: CodeIndexReconcileSink,
@@ -42,7 +47,7 @@ async fn server_with_broker(
 }
 
 async fn server_without_broker(
-    cg: crate::project::TraceDecay,
+    cg: tracedecay_project::project::TraceDecay,
     authority: &WriterTestFixtureAuthority,
     reconcile_sink: CodeIndexReconcileSink,
 ) -> Arc<McpServer> {
@@ -357,7 +362,7 @@ async fn after_edit_hook_delivers_touched_paths_to_code_index_sink() {
         .expect("registered test server");
     let mut routes = HookProjectRouteCache::default();
     let event = serde_json::to_value(DaemonHookEvent::post_tool_use_edit(
-        HookAgent::Codex,
+        HostIntegrationIdV1::Codex,
         vec!["src/lib.rs".to_owned()],
         project.path().to_path_buf(),
     ))

@@ -1,7 +1,14 @@
-//! Connection lifecycle: the JSON-RPC read/write loop, shutdown
-//! policy, and daemon-owned host-admission replay driving.
+//! Connection context for the `rmcp` adapter, server shutdown, and
+//! daemon-owned host-admission replay driving.
 
 use super::*;
+#[cfg(any(test, feature = "test-transport"))]
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+#[cfg(any(test, feature = "test-transport"))]
+use tracedecay_daemon_protocol::BrokerStream;
+#[cfg(any(test, feature = "test-transport"))]
+use tracedecay_daemon_service::shutdown::DaemonLifecycle;
+use tracedecay_daemon_service::shutdown::ShutdownStatus;
 
 pub(super) const MAX_CONCURRENT_CONNECTION_READS: usize =
     crate::daemon::MAX_CONCURRENT_REQUESTS_PER_DAEMON_CLIENT;
@@ -36,7 +43,7 @@ impl tracedecay_mcp::server::McpConnectionContext for ProductionMcpConnectionCon
     }
 
     fn build_version(&self) -> Result<&'static str> {
-        crate::version::build_version().map_err(|error| TraceDecayError::Config {
+        tracedecay_project::version::build_version().map_err(|error| TraceDecayError::Config {
             message: error.to_string(),
         })
     }
@@ -50,16 +57,12 @@ impl tracedecay_mcp::server::McpConnectionContext for ProductionMcpConnectionCon
             .is_ok_and(tracedecay_tool_catalog::McpDispatchContractV1::read_only)
     }
 
-    fn tool_supports_live_cancellation(&self, tool_name: &str) -> bool {
-        super::requests::tool_supports_live_cancellation(tool_name)
-    }
-
     fn dispatch<'a>(
         &'a self,
         request: tracedecay_mcp::server::McpDispatchRequest<'a>,
         timings_enabled: bool,
         connection: &'a mut Self::Connection,
-        cancellation: tracedecay_session_memory::context::CancellationToken,
+        cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<JsonRpcResponse>> + Send + 'a>>
     {
         Box::pin(
@@ -77,12 +80,6 @@ impl tracedecay_mcp::server::McpConnectionContext for ProductionMcpConnectionCon
         self.server.dispatch_authority.cancellation_registered()
     }
 
-    fn take_pending_notifications(&self) -> Vec<Value> {
-        super::requests::recover_lock(&self.server.pending_notifications)
-            .drain(..)
-            .collect()
-    }
-
     fn run_in_connection_admission<'a, T, F>(
         &'a self,
         future: F,
@@ -96,36 +93,70 @@ impl tracedecay_mcp::server::McpConnectionContext for ProductionMcpConnectionCon
             future,
         ))
     }
+}
 
-    fn shutdown(
-        self: Arc<Self>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        Box::pin(async move { McpServer::shutdown(&self.server).await })
+/// A request line carrying the SEP-2575 per-request context the stdio proxy
+/// stamps; `initialize`, notifications, and undecodable lines pass unchanged.
+#[cfg(any(test, feature = "test-transport"))]
+fn with_stateless_request_context(line: String) -> String {
+    let Ok(mut request) = tracedecay_mcp::JsonRpcRequest::decode(line.trim()) else {
+        return line;
+    };
+    if !tracedecay_mcp::server::attach_stateless_request_context(&mut request) {
+        return line;
+    }
+    match serde_json::to_string(&request) {
+        Ok(stamped) => stamped,
+        Err(_) => line,
     }
 }
 
+#[cfg(all(unix, any(test, feature = "test-transport")))]
+fn connected_broker_pair() -> Result<(BrokerStream, tokio::net::UnixStream)> {
+    let (daemon, client) = tokio::net::UnixStream::pair()?;
+    Ok((BrokerStream::Unix(daemon), client))
+}
+
+#[cfg(all(not(unix), any(test, feature = "test-transport")))]
+async fn connected_broker_pair() -> Result<(BrokerStream, tokio::net::TcpStream)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let client = tokio::net::TcpStream::connect(listener.local_addr()?).await?;
+    let (daemon, _) = listener.accept().await?;
+    Ok((BrokerStream::Tcp(daemon), client))
+}
+
+#[cfg(any(test, feature = "test-transport"))]
 impl McpServer {
-    fn connection_server(
-        self: &Arc<Self>,
-    ) -> Arc<tracedecay_mcp::server::McpConnectionServer<ProductionMcpConnectionContext>> {
-        tracedecay_mcp::server::McpConnectionServer::new(ProductionMcpConnectionContext::new(
-            Arc::clone(self),
-        ))
+    /// Serves one line-framed client through the daemon's production `rmcp`
+    /// route over a real socket. Requests carry the per-request context the
+    /// stdio proxy stamps, so a client that skips `initialize` is served the
+    /// way a proxied request is.
+    #[hotpath::skip]
+    pub async fn run_connection(
+        &self,
+        transport: &mut impl tracedecay_mcp::transport::McpTransport,
+    ) -> Result<()> {
+        self.run_connection_until(transport, &DaemonLifecycle::default())
+            .await
     }
 
+    /// As [`Self::run_connection`], then shuts the server down.
     #[hotpath::skip]
     pub async fn run(
         self: &Arc<Self>,
         transport: &mut impl tracedecay_mcp::transport::McpTransport,
     ) -> Result<()> {
-        self.connection_server().run(transport).await
+        let served = self.run_connection(transport).await;
+        self.shutdown().await;
+        served
     }
 
-    #[cfg(any(test, feature = "test-transport"))]
+    /// As [`Self::run_connection`], draining when `lifecycle` drains.
     #[hotpath::skip]
-    pub async fn run_connection(
+    pub(crate) async fn run_connection_until(
         &self,
         transport: &mut impl tracedecay_mcp::transport::McpTransport,
+        lifecycle: &DaemonLifecycle,
     ) -> Result<()> {
         let server = self.dispatch_authority.server().upgrade().ok_or_else(|| {
             TraceDecayError::project_route(
@@ -134,42 +165,70 @@ impl McpServer {
                 "MCP server was released before connection dispatch",
             )
         })?;
-        server.connection_server().run_connection(transport).await
+        let first_request = loop {
+            match transport.read_line().await? {
+                Some(line) if line.trim().is_empty() => {}
+                Some(line) => break with_stateless_request_context(line),
+                None => return Ok(()),
+            }
+        };
+        #[cfg(unix)]
+        let (daemon_side, client_side) = connected_broker_pair()?;
+        #[cfg(not(unix))]
+        let (daemon_side, client_side) = connected_broker_pair().await?;
+        let serving = crate::daemon::serve_routed_rmcp_connection(
+            server,
+            tracedecay_mcp::BrokerStreamTransport::new(daemon_side),
+            first_request,
+            std::collections::VecDeque::new(),
+            None,
+            self.timings_enabled(),
+            lifecycle,
+        );
+        let (reader, mut writer) = tokio::io::split(client_side);
+        let pump = async move {
+            let mut responses = tokio::io::BufReader::new(reader).lines();
+            let mut input_open = true;
+            // Until the client's EOF this never resolves; after it, the
+            // client's full close drops both socket halves so the daemon side
+            // observes the same full close.
+            let mut peer_full_close: std::pin::Pin<
+                Box<dyn std::future::Future<Output = ()> + Send>,
+            > = Box::pin(std::future::pending());
+            loop {
+                tokio::select! {
+                    biased;
+                    incoming = transport.read_line(), if input_open => match incoming? {
+                        Some(line) => {
+                            writer
+                                .write_all(with_stateless_request_context(line).as_bytes())
+                                .await?;
+                            writer.write_all(b"\n").await?;
+                            writer.flush().await?;
+                        }
+                        None => {
+                            writer.shutdown().await?;
+                            input_open = false;
+                            peer_full_close = Box::pin(transport.peer_fully_closed_after_eof());
+                        }
+                    },
+                    () = &mut peer_full_close => return Ok::<(), TraceDecayError>(()),
+                    response = responses.next_line() => match response? {
+                        Some(line) => {
+                            transport.write_line(&format!("{line}\n")).await?;
+                            transport.flush().await?;
+                        }
+                        None => return Ok::<(), TraceDecayError>(()),
+                    },
+                }
+            }
+        };
+        let (served, pumped) = tokio::join!(serving, pump);
+        served.and(pumped)
     }
+}
 
-    #[hotpath::skip]
-    pub(crate) async fn run_daemon_connection_with_timings(
-        self: &Arc<Self>,
-        transport: &mut impl tracedecay_mcp::transport::McpTransport,
-        timings_enabled: bool,
-        lifecycle: &dyn tracedecay_mcp::McpConnectionLifecyclePort,
-    ) -> Result<()> {
-        self.connection_server()
-            .run_daemon_connection_with_timings(transport, timings_enabled, lifecycle)
-            .await
-    }
-
-    #[cfg(test)]
-    #[hotpath::skip]
-    pub(crate) async fn run_with_shutdown_policy(
-        self: &Arc<Self>,
-        transport: &mut impl tracedecay_mcp::transport::McpTransport,
-        shutdown_on_exit: bool,
-        listen_for_process_signals: bool,
-        timings_override: Option<bool>,
-        request_lifecycle: Option<&dyn tracedecay_mcp::McpConnectionLifecyclePort>,
-    ) -> Result<()> {
-        self.connection_server()
-            .run_with_shutdown_policy(
-                transport,
-                shutdown_on_exit,
-                listen_for_process_signals,
-                timings_override,
-                request_lifecycle,
-            )
-            .await
-    }
-
+impl McpServer {
     /// Persists the tokens-saved counter, flushes pending tokens to the
     /// worldwide counter, checkpoints the WAL, and logs a session summary.
     ///
@@ -190,17 +249,14 @@ impl McpServer {
     pub(crate) async fn shutdown_until(
         self: &Arc<Self>,
         deadline: tokio::time::Instant,
-    ) -> crate::daemon::ShutdownStatus {
+    ) -> ShutdownStatus {
         self.shutdown
             .coordinate_until(deadline, Arc::clone(self).run_shutdown(deadline))
             .await
     }
 
     #[hotpath::skip]
-    async fn run_shutdown(
-        self: Arc<Self>,
-        deadline: tokio::time::Instant,
-    ) -> crate::daemon::ShutdownStatus {
+    async fn run_shutdown(self: Arc<Self>, deadline: tokio::time::Instant) -> ShutdownStatus {
         let mut failures = self.shutdown_background_tasks_until(deadline).await;
 
         let uptime = self.stats.started_at.elapsed();
@@ -248,7 +304,7 @@ impl McpServer {
                                 )
                             {
                                 config.pending_upload = 0;
-                                let now = crate::project::current_timestamp();
+                                let now = tracedecay_runtime_core::tracedecay::current_timestamp();
                                 config.last_upload_at = now;
                             }
                             if let Err(err) = config.save() {
@@ -276,9 +332,9 @@ impl McpServer {
                 uptime_secs = uptime.as_secs(),
                 "MCP server shutdown complete"
             );
-            crate::daemon::ShutdownStatus::Clean
+            ShutdownStatus::Clean
         } else {
-            crate::daemon::ShutdownStatus::Failed(failures.join("; "))
+            ShutdownStatus::Failed(failures.join("; "))
         }
     }
 
@@ -524,7 +580,7 @@ mod cancellable_queue_tests {
     impl DelayedRouteFixture {
         async fn new() -> Self {
             let fixture_guard = DELAYED_ROUTE_FIXTURE_LOCK.lock().await;
-            crate::product_runtime::register_fixture_product_runtime();
+            tracedecay_project::product_runtime::register_fixture_product_runtime();
             let isolation = tempfile::TempDir::new().expect("route concurrency isolation");
             let active_root = isolation.path().join("active");
             let target_root = isolation.path().join("target");
@@ -618,63 +674,6 @@ mod cancellable_queue_tests {
     struct ObservedTransport {
         inner: tracedecay_mcp::transport::ChannelTransport,
         reads: Arc<std::sync::atomic::AtomicUsize>,
-    }
-
-    #[derive(Clone, Default)]
-    struct TestConnectionLifecycle {
-        accepting: Arc<AtomicBool>,
-        active: Arc<std::sync::atomic::AtomicUsize>,
-        draining: Arc<tokio::sync::Notify>,
-    }
-
-    struct TestRequestActivity(Arc<std::sync::atomic::AtomicUsize>);
-
-    impl Drop for TestRequestActivity {
-        fn drop(&mut self) {
-            self.0.fetch_sub(1, Ordering::AcqRel);
-        }
-    }
-
-    impl TestConnectionLifecycle {
-        fn accepting() -> Self {
-            Self {
-                accepting: Arc::new(AtomicBool::new(true)),
-                ..Self::default()
-            }
-        }
-
-        fn begin_draining(&self) {
-            self.accepting.store(false, Ordering::Release);
-            self.draining.notify_waiters();
-        }
-    }
-
-    impl tracedecay_mcp::McpConnectionLifecyclePort for TestConnectionLifecycle {
-        fn accepting(&self) -> bool {
-            self.accepting.load(Ordering::Acquire)
-        }
-
-        fn try_enter(&self) -> Option<tracedecay_mcp::McpRequestActivity> {
-            if !self.accepting() {
-                return None;
-            }
-            self.active.fetch_add(1, Ordering::AcqRel);
-            if self.accepting() {
-                return Some(tracedecay_mcp::McpRequestActivity::retain(
-                    TestRequestActivity(Arc::clone(&self.active)),
-                ));
-            }
-            self.active.fetch_sub(1, Ordering::AcqRel);
-            None
-        }
-
-        fn wait_for_draining(&self) -> tracedecay_mcp::McpLifecycleDrainFuture<'_> {
-            Box::pin(async move {
-                while self.accepting() {
-                    self.draining.notified().await;
-                }
-            })
-        }
     }
 
     impl tracedecay_mcp::transport::McpTransport for ObservedTransport {
@@ -799,11 +798,10 @@ mod cancellable_queue_tests {
     }
 
     #[tokio::test]
-    async fn ordinary_connection_read_has_one_connection_task_owner() {
+    async fn ordinary_connection_read_has_one_retained_task_owner() {
         let fixture = DelayedRouteFixture::new().await;
         let registry = fixture.caller.dispatch_authority.registry();
         let retained_before = registry.retained_spawn_count_for_test();
-        let connection_owned_before = registry.connection_owned_count_for_test();
         let (mut transport, sender, mut responses) =
             tracedecay_mcp::transport::ChannelTransport::new();
         let serving = tokio::spawn({
@@ -829,13 +827,8 @@ mod cancellable_queue_tests {
 
         assert_eq!(
             registry.retained_spawn_count_for_test(),
-            retained_before,
-            "the connection's active-read task must be the sole task owner"
-        );
-        assert_eq!(
-            registry.connection_owned_count_for_test(),
-            connection_owned_before + 1,
-            "one inline registry lease must cover the ordinary read"
+            retained_before + 1,
+            "the retained dispatch registry must own exactly the one ordinary read"
         );
 
         drop(sender);
@@ -1024,83 +1017,9 @@ mod cancellable_queue_tests {
     }
 
     #[tokio::test]
-    async fn notification_is_an_ordering_barrier_for_later_reads() {
-        let fixture = DelayedRouteFixture::new().await;
-        let (mut transport, sender, mut responses) =
-            tracedecay_mcp::transport::ChannelTransport::new();
-        let serving = tokio::spawn({
-            let caller = Arc::clone(&fixture.caller);
-            async move { caller.run_connection(&mut transport).await }
-        });
-
-        sender
-            .send(
-                serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": 20,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "tracedecay_grep",
-                        "arguments": {
-                            "pattern": "route_fixture",
-                            "fixed_strings": true,
-                            "project_selector": {
-                                "project_id": fixture.target_project_id.clone()
-                            },
-                            "format": "json"
-                        }
-                    }
-                })
-                .to_string(),
-            )
-            .expect("send read before notification");
-        fixture.wait_for_routes(1).await;
-        sender
-            .send(
-                serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "method": "notifications/initialized"
-                })
-                .to_string(),
-            )
-            .expect("send ordering notification");
-        sender
-            .send(
-                serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": 21,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "tracedecay_status",
-                        "arguments": {"admission_only": true}
-                    }
-                })
-                .to_string(),
-            )
-            .expect("send read after notification");
-
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), responses.recv())
-                .await
-                .is_err(),
-            "the later read must not overtake an ordered notification"
-        );
-        fixture.route_release.add_permits(1);
-        assert_eq!(receive_response(&mut responses).await["id"], json!(20));
-        assert_eq!(receive_response(&mut responses).await["id"], json!(21));
-
-        drop(sender);
-        serving
-            .await
-            .expect("join notification barrier connection")
-            .expect("serve notification barrier connection");
-        fixture.harness.shutdown().await;
-    }
-
-    #[tokio::test]
     async fn daemon_drain_cancels_and_joins_concurrent_reads() {
         let fixture = DelayedRouteFixture::new().await;
-        let lifecycle = TestConnectionLifecycle::accepting();
+        let lifecycle = DaemonLifecycle::default();
         let (mut transport, sender, _responses) =
             tracedecay_mcp::transport::ChannelTransport::new();
         let serving = tokio::spawn({
@@ -1108,7 +1027,7 @@ mod cancellable_queue_tests {
             let lifecycle = lifecycle.clone();
             async move {
                 caller
-                    .run_with_shutdown_policy(&mut transport, false, false, None, Some(&lifecycle))
+                    .run_connection_until(&mut transport, &lifecycle)
                     .await
             }
         });
@@ -1135,21 +1054,16 @@ mod cancellable_queue_tests {
             )
             .expect("send read held across drain");
         fixture.wait_for_routes(1).await;
-        assert_eq!(lifecycle.active.load(Ordering::Acquire), 1);
 
         lifecycle.begin_draining();
-        tokio::time::timeout(Duration::from_secs(5), serving)
+        tokio::time::timeout(Duration::from_secs(10), serving)
             .await
-            .expect("draining connection did not join active reads")
+            .expect("draining connection did not join its in-flight read")
             .expect("join draining connection")
             .expect("serve draining connection");
-        assert_eq!(
-            lifecycle.active.load(Ordering::Acquire),
-            0,
-            "shutdown drain must release every admitted request activity"
-        );
 
         drop(sender);
+        fixture.route_release.add_permits(1);
         fixture.harness.shutdown().await;
     }
 

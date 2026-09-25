@@ -6,20 +6,22 @@ use tracedecay_code_index::clones::{
     CloneExactKeyV1, CloneFingerprintPositionV1, CloneNormalizationClassV1, CodeIndexCloneBodyV1,
 };
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, VerifiedSealedLexicalPageV1};
-use tracedecay_domain::{ExactFieldV1, ManifestDigest};
+use tracedecay_domain::{ExactFieldV1, ManifestDigest, NodeKind};
 
 use super::super::{
     CodeLexicalProjectionMetadataV1, ProjectedChunkV1, canonical_projected_exact_term,
     exact_field_for_kind, normalized_search_text,
 };
+use super::clone_codec::{encode_clone_eligibility, encode_clone_payload};
 use super::format::{
     ArtifactRowV1, BASE_SECTION_NAMES, PageBaseSectionReceiptBuilderV1, contract_number,
     encode_exact_field, encode_field, encode_ngram_bitmap, encode_page_base_sections_receipt,
     hash_bytes, ngram_page_digest,
 };
-use super::postings::{NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, document_ngrams};
-use super::row_codec::{RowDictionaryTableV1, encode_artifact_row};
-use super::schema::LexicalArtifactLayoutV1;
+use super::postings::{
+    NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, document_ngrams, ngram_is_case_sensitive,
+};
+use super::row_codec::{BlockRowV1, RowDictionaryTableV1, encode_artifact_row, encode_row_blocks};
 use super::{
     CodeLexicalArtifactErrorV1, NGRAM_AGGREGATION_BYTES_PER_LOGICAL_POSTING_V1, checkpoint,
 };
@@ -43,11 +45,12 @@ pub struct PreparedCodeLexicalArtifactPageV1 {
     pub(super) imports: Vec<PreparedImportV1>,
     pub(super) clone_bodies: Vec<PreparedCloneBodyV1>,
     pub(super) documents: Vec<PreparedDocumentV1>,
+    /// The page's rows as stored blocks keyed by their first document.
+    pub(super) row_blocks: Vec<(i64, Vec<u8>)>,
     pub(super) ngram_shards: Vec<PreparedNgramShardV1>,
     pub(super) ngram_digest: ManifestDigest,
     pub(super) base_sections_receipt: Vec<u8>,
-    /// Every dictionary entry this page's rows reference (revision 14);
-    /// empty for layouts whose rows carry their strings inline.
+    /// Every dictionary entry this page's rows reference.
     pub(super) row_dictionary: RowDictionaryTableV1,
     source_retained_bytes: usize,
     prepared_retained_bytes: usize,
@@ -89,6 +92,16 @@ impl PreparedCodeLexicalArtifactPageV1 {
         self.estimated_write_bytes
     }
 
+    /// Serialized bytes of this page's largest clone body (payload plus
+    /// occurrence), the scratch one clone row holds while it is written.
+    pub fn clone_body_peak_bytes(&self) -> usize {
+        self.clone_bodies
+            .iter()
+            .map(|body| body.serialized_bytes)
+            .max()
+            .unwrap_or(0)
+    }
+
     pub fn ledger_charge_bytes(&self) -> Result<usize, CodeLexicalArtifactErrorV1> {
         self.source_retained_bytes
             .checked_add(self.prepared_retained_bytes)
@@ -110,8 +123,11 @@ pub(super) struct PreparedImportV1 {
 #[derive(Debug)]
 pub(super) struct PreparedCloneBodyV1 {
     pub(super) payload_digest: String,
+    /// Stored (deflated binary) payload and the occurrence's eligibility.
     pub(super) payload: Vec<u8>,
-    pub(super) occurrence: Vec<u8>,
+    pub(super) eligibility: Vec<u8>,
+    /// Encoded payload bytes before deflate plus the eligibility bytes.
+    pub(super) serialized_bytes: usize,
     pub(super) symbol_occurrence_id: String,
     pub(super) path: String,
     pub(super) body_start: u64,
@@ -125,7 +141,6 @@ pub(super) struct PreparedCloneFingerprintStreamV1 {
     pub(super) language: String,
     pub(super) class: CloneNormalizationClassV1,
     pub(super) normalization_revision: u16,
-    pub(super) body_digest: String,
     pub(super) positions: Vec<CloneFingerprintPositionV1>,
 }
 
@@ -133,12 +148,13 @@ pub(super) struct PreparedCloneFingerprintStreamV1 {
 pub(super) struct PreparedDocumentV1 {
     pub(super) document_id: i64,
     pub(super) chunk_id: String,
+    /// Row metadata; its text is stored in the page's row blocks.
     pub(super) row: Vec<u8>,
     pub(super) term_postings: Vec<PreparedTermPostingV1>,
     pub(super) exact_postings: Vec<(String, Vec<u8>)>,
-    /// Tagged hex form persisted by layouts up to 13.
+    /// Tagged hex form, which the page receipt and memory accounting read.
     pub(super) integrity_digest: ManifestDigest,
-    /// The same digest as the 32 raw bytes revision 14 persists.
+    /// The same digest as the 32 raw bytes `document_integrity` persists.
     pub(super) integrity_digest_bytes: [u8; 32],
 }
 
@@ -158,7 +174,6 @@ pub(super) struct PreparedTermPostingV1 {
 }
 
 pub(super) fn prepare_page(
-    layout: LexicalArtifactLayoutV1,
     metadata: &CodeLexicalProjectionMetadataV1,
     page: &VerifiedSealedLexicalPageV1,
     previous_cursor: Option<Vec<u8>>,
@@ -176,6 +191,7 @@ pub(super) fn prepare_page(
             )
         })?;
     let mut documents = Vec::with_capacity(page.chunks().len());
+    let mut texts = Vec::with_capacity(page.chunks().len());
     let mut row_dictionary = RowDictionaryTableV1::new();
     let mut ngram_documents = BTreeMap::<(i64, i64), RoaringBitmap>::new();
     let mut logical_ngram_postings = 0usize;
@@ -188,6 +204,15 @@ pub(super) fn prepare_page(
         page.chunks().iter().zip(page.symbol_displays()).enumerate()
     {
         checkpoint(control)?;
+        // Attribute and annotation uses stay graph symbols, but the item they
+        // annotate already carries their text; they mint no lexical document
+        // and their source ordinal is left unused.
+        if display
+            .as_ref()
+            .is_some_and(|display| display.kind() == NodeKind::AnnotationUsage.as_str())
+        {
+            continue;
+        }
         let document = first_document
             .checked_add(u64::try_from(offset).map_err(contract_number)?)
             .ok_or_else(|| {
@@ -195,8 +220,7 @@ pub(super) fn prepare_page(
                     "lexical artifact prepared document id overflowed".to_owned(),
                 )
             })?;
-        let (prepared, ngrams) = prepare_document(
-            layout,
+        let (prepared, ngrams, text) = prepare_document(
             metadata,
             i64::try_from(document).map_err(contract_number)?,
             admitted.chunk(),
@@ -228,6 +252,7 @@ pub(super) fn prepare_page(
                 })?;
         }
         documents.push(prepared);
+        texts.push(text);
     }
     let mut imports = Vec::with_capacity(page.imports().len());
     for evidence in page.imports() {
@@ -243,7 +268,7 @@ pub(super) fn prepare_page(
     let mut clone_bodies = Vec::with_capacity(page.clone_bodies().len());
     for body in page.clone_bodies() {
         checkpoint(control)?;
-        clone_bodies.push(prepare_clone_body(layout, metadata, body)?);
+        clone_bodies.push(prepare_clone_body(metadata, body)?);
     }
     let next_cursor = page
         .next_cursor()
@@ -252,7 +277,7 @@ pub(super) fn prepare_page(
     let mut ngram_shards = Vec::with_capacity(ngram_documents.len());
     for ((kind, ngram), documents) in ngram_documents {
         checkpoint(control)?;
-        let encoded = encode_ngram_bitmap(layout, &documents)?;
+        let encoded = encode_ngram_bitmap(&documents)?;
         ngram_shards.push(PreparedNgramShardV1 {
             kind,
             ngram,
@@ -272,13 +297,28 @@ pub(super) fn prepare_page(
         }),
     )?;
     let base_sections_receipt = prepare_base_sections_receipt(
-        layout,
         page.page_ordinal(),
         &imports,
         &documents,
+        &texts,
         &ngram_shards,
         control,
     )?;
+    checkpoint(control)?;
+    let row_blocks = encode_row_blocks(
+        &documents
+            .iter()
+            .zip(&texts)
+            .map(|(document, text)| BlockRowV1 {
+                document_id: document.document_id,
+                chunk_id: &document.chunk_id,
+                parent_chunk_id: text.parent_chunk_id.as_deref(),
+                row: &document.row,
+                text: &text.text,
+            })
+            .collect::<Vec<_>>(),
+    )?;
+    drop(texts);
     let aggregation_scratch_bytes = logical_ngram_postings
         .checked_mul(NGRAM_AGGREGATION_BYTES_PER_LOGICAL_POSTING_V1)
         .ok_or_else(|| {
@@ -307,6 +347,7 @@ pub(super) fn prepare_page(
         imports,
         clone_bodies,
         documents,
+        row_blocks,
         ngram_shards,
         ngram_digest,
         base_sections_receipt,
@@ -326,39 +367,45 @@ pub(super) fn prepare_page(
 }
 
 fn prepare_clone_body(
-    layout: LexicalArtifactLayoutV1,
     metadata: &CodeLexicalProjectionMetadataV1,
     body: &CodeIndexCloneBodyV1,
 ) -> Result<PreparedCloneBodyV1, CodeLexicalArtifactErrorV1> {
-    let fingerprint_stream = if layout.has_clone_fingerprints() {
-        body.payload
-            .fingerprint_stream(body.occurrence.eligibility)
-            .map(|stream| {
-                Ok(PreparedCloneFingerprintStreamV1 {
-                    language: body.payload.language.clone(),
-                    class: stream.class,
-                    normalization_revision: stream.normalization_revision,
-                    body_digest: body.payload.body_digest.as_str().to_owned(),
-                    positions: body
-                        .payload
-                        .fingerprint_positions(body.occurrence.eligibility)
-                        .map_err(CodeLexicalArtifactErrorV1::Contract)?,
-                })
+    let fingerprint_stream = body
+        .payload
+        .fingerprint_stream(body.occurrence.eligibility)
+        .map(|stream| {
+            Ok(PreparedCloneFingerprintStreamV1 {
+                language: body.payload.language.clone(),
+                class: stream.class,
+                normalization_revision: stream.normalization_revision,
+                positions: body
+                    .payload
+                    .fingerprint_positions(body.occurrence.eligibility)
+                    .map_err(CodeLexicalArtifactErrorV1::Contract)?,
             })
-            .transpose()?
-    } else {
-        None
-    };
-    // Stamp the serving generation onto carried Arc-shared clone bodies so the
-    // artifact authority matches metadata.generation at lookup time.
-    let mut occurrence = body.occurrence.clone();
-    occurrence.source_generation = metadata.generation.clone();
+        })
+        .transpose()?;
+    // Only content is stored; the opener's route supplies project,
+    // repository, worktree, generation, and snapshot. A body from another
+    // route would be silently re-labelled, so it is refused.
+    let occurrence = &body.occurrence;
+    let owned = metadata.clone_route.as_ref().is_some_and(|route| {
+        route.project_id == occurrence.project_id
+            && route.worktree_id == occurrence.worktree_id
+            && metadata.repository_id.as_ref() == Some(&occurrence.repository_id)
+    });
+    if !owned {
+        return Err(CodeLexicalArtifactErrorV1::Contract(
+            "clone body belongs to another route than the projection".to_owned(),
+        ));
+    }
+    let (payload, payload_bytes) = encode_clone_payload(&body.payload)?;
+    let eligibility = encode_clone_eligibility(occurrence.eligibility);
     Ok(PreparedCloneBodyV1 {
         payload_digest: body.payload.payload_digest.as_str().to_owned(),
-        payload: serde_json::to_vec(&body.payload)
-            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
-        occurrence: serde_json::to_vec(&occurrence)
-            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
+        payload,
+        serialized_bytes: payload_bytes.saturating_add(eligibility.len()),
+        eligibility,
         symbol_occurrence_id: occurrence.symbol_occurrence_id.as_str().to_owned(),
         path: occurrence.path.clone(),
         body_start: occurrence.body_span.start_byte,
@@ -369,10 +416,10 @@ fn prepare_clone_body(
 }
 
 fn prepare_base_sections_receipt(
-    layout: LexicalArtifactLayoutV1,
     page_ordinal: u64,
     imports: &[PreparedImportV1],
     documents: &[PreparedDocumentV1],
+    texts: &[PreparedTextV1],
     ngram_shards: &[PreparedNgramShardV1],
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
@@ -399,21 +446,17 @@ fn prepare_base_sections_receipt(
         import_evidence.blob(&import.canonical)?;
         import_evidence.blob(&import.canonical)?;
     }
-    for document in documents {
+    for (document, text) in documents.iter().zip(texts) {
         checkpoint(control)?;
         document_integrity.begin_row()?;
         document_integrity.integer(document.document_id);
-        if layout.stores_document_integrity_bytes() {
-            document_integrity.blob(&document.integrity_digest_bytes)?;
-        } else {
-            document_integrity.text(&document.chunk_id)?;
-            document_integrity.text(document.integrity_digest.as_str())?;
-        }
+        document_integrity.blob(&document.integrity_digest_bytes)?;
 
         rows.begin_row()?;
         rows.integer(document.document_id);
         rows.text(&document.chunk_id)?;
         rows.blob(&document.row)?;
+        rows.text(&text.text)?;
 
         for posting in &document.term_postings {
             checkpoint(control)?;
@@ -455,15 +498,24 @@ fn prepare_base_sections_receipt(
     )
 }
 
+/// A prepared row's text and parent chunk, held only until the page's row
+/// blocks and receipt are built.
+struct PreparedTextV1 {
+    text: String,
+    parent_chunk_id: Option<String>,
+}
+
+/// One prepared document, its `(kind, n-gram)` keys, and its text.
+type PreparedDocumentPartsV1 = (PreparedDocumentV1, Vec<(i64, i64)>, PreparedTextV1);
+
 fn prepare_document(
-    layout: LexicalArtifactLayoutV1,
     metadata: &CodeLexicalProjectionMetadataV1,
     document_id: i64,
     chunk: &tracedecay_domain::CodeSearchChunkV1,
     display: Option<&tracedecay_code_index::production::VerifiedSealedLexicalSymbolDisplayV1>,
     row_dictionary: &mut RowDictionaryTableV1,
     control: &dyn CodeIndexExecutionControlV1,
-) -> Result<(PreparedDocumentV1, Vec<(i64, i64)>), CodeLexicalArtifactErrorV1> {
+) -> Result<PreparedDocumentPartsV1, CodeLexicalArtifactErrorV1> {
     u32::try_from(document_id).map_err(|_| {
         CodeLexicalArtifactErrorV1::Contract(
             "lexical artifact exceeds the posting document-id range".to_owned(),
@@ -527,26 +579,29 @@ fn prepare_document(
         ));
     }
 
-    let search_text = normalized_search_text(&row);
-    let mut ngram_postings = document_ngrams(search_text.as_bytes(), control)?
-        .into_iter()
-        .map(|ngram| (NGRAM_NORMALIZED, i64::from(ngram)))
-        .collect::<Vec<_>>();
-    if row.sanitized_text.as_str().as_bytes() != row.normalized_text.as_bytes() {
-        ngram_postings.extend(
-            document_ngrams(row.sanitized_text.as_str().as_bytes(), control)?
-                .into_iter()
-                .map(|ngram| (NGRAM_RAW_OVERRIDE, i64::from(ngram))),
-        );
-    }
+    let ngram_postings = document_ngram_keys(
+        &normalized_search_text(&row),
+        row.sanitized_text.as_str(),
+        &row.normalized_text,
+        control,
+    )?;
     let artifact_row = ArtifactRowV1::from(row);
     let chunk_id = artifact_row.id.as_str().to_owned();
-    let row = encode_artifact_row(layout, &artifact_row, row_dictionary)?;
+    let row = encode_artifact_row(&artifact_row, row_dictionary)?;
+    let text = PreparedTextV1 {
+        parent_chunk_id: artifact_row
+            .anchor
+            .parent_chunk_id
+            .as_ref()
+            .map(|parent| parent.as_str().to_owned()),
+        text: artifact_row.sanitized_text.as_str().to_owned(),
+    };
     let exact_postings = exact_postings.into_iter().collect::<Vec<_>>();
     let (integrity_digest, integrity_digest_bytes) = document_integrity_digest(
         document_id,
         chunk_id.as_bytes(),
         &row,
+        text.text.as_bytes(),
         &term_postings,
         &exact_postings,
     )?;
@@ -561,22 +616,50 @@ fn prepare_document(
             integrity_digest_bytes,
         },
         ngram_postings,
+        text,
     ))
+}
+
+/// The `(kind, n-gram)` keys one admitted document contributes: its
+/// normalized search text always, and its raw text where that differs from
+/// the normalized form. Preparation and the sealed n-gram lists derive from
+/// this one definition.
+pub(super) fn document_ngram_keys(
+    search_text: &str,
+    sanitized_text: &str,
+    normalized_text: &str,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<Vec<(i64, i64)>, CodeLexicalArtifactErrorV1> {
+    let mut keys = document_ngrams(search_text.as_bytes(), control)?
+        .into_iter()
+        .map(|ngram| (NGRAM_NORMALIZED, i64::from(ngram)))
+        .collect::<Vec<_>>();
+    if sanitized_text.as_bytes() != normalized_text.as_bytes() {
+        keys.extend(
+            document_ngrams(sanitized_text.as_bytes(), control)?
+                .into_iter()
+                .filter(|ngram| ngram_is_case_sensitive(*ngram))
+                .map(|ngram| (NGRAM_RAW_OVERRIDE, i64::from(ngram))),
+        );
+    }
+    Ok(keys)
 }
 
 fn document_integrity_digest(
     document: i64,
     chunk_id: &[u8],
     row: &[u8],
+    text: &[u8],
     term_postings: &[PreparedTermPostingV1],
     exact_postings: &[(String, Vec<u8>)],
 ) -> Result<(ManifestDigest, [u8; 32]), CodeLexicalArtifactErrorV1> {
     let mut hasher = Sha256::new();
-    hasher.update(b"tracedecay.code-lexical-artifact-derived-document.v3\0");
+    hasher.update(b"tracedecay.code-lexical-artifact-derived-document.v4\0");
     hasher.update(document.to_le_bytes());
     hash_table(&mut hasher, "row", 1, |hasher, _| {
         hash_text(hasher, chunk_id)?;
-        hash_blob(hasher, row)
+        hash_blob(hasher, row)?;
+        hash_text(hasher, text)
     })?;
     hash_table(
         &mut hasher,
@@ -698,6 +781,13 @@ fn prepared_retained_bytes(
         })
         .and_then(|bytes| bytes.checked_add(page.ngram_digest.as_str().len()))
         .and_then(|bytes| bytes.checked_add(page.base_sections_receipt.capacity()))
+        .and_then(|bytes| {
+            page.row_blocks.iter().try_fold(bytes, |bytes, (_, block)| {
+                bytes
+                    .checked_add(block.capacity())
+                    .and_then(|bytes| bytes.checked_add(std::mem::size_of::<(i64, Vec<u8>)>()))
+            })
+        })
         .ok_or_else(prepared_charge_overflow)?;
     for import in &page.imports {
         bytes = bytes
@@ -768,7 +858,7 @@ fn prepared_clone_body_retained_bytes(
             bytes
                 .checked_add(body.payload_digest.capacity())
                 .and_then(|bytes| bytes.checked_add(body.payload.capacity()))
-                .and_then(|bytes| bytes.checked_add(body.occurrence.capacity()))
+                .and_then(|bytes| bytes.checked_add(body.eligibility.capacity()))
                 .and_then(|bytes| bytes.checked_add(body.symbol_occurrence_id.capacity()))
                 .and_then(|bytes| bytes.checked_add(body.path.capacity()))
                 .and_then(|bytes| {
@@ -790,7 +880,6 @@ fn prepared_clone_body_retained_bytes(
                     Some(stream) => {
                         bytes
                             .checked_add(stream.language.capacity())
-                            .and_then(|bytes| bytes.checked_add(stream.body_digest.capacity()))
                             .and_then(|bytes| {
                                 bytes.checked_add(stream.positions.capacity().saturating_mul(
                                     std::mem::size_of::<CloneFingerprintPositionV1>(),
@@ -829,12 +918,18 @@ fn estimated_sqlite_writes(
     bytes = bytes
         .checked_add(clone_bytes)
         .ok_or_else(prepared_write_overflow)?;
+    for (_, block) in &page.row_blocks {
+        rows = rows.checked_add(1).ok_or_else(prepared_write_overflow)?;
+        bytes = bytes
+            .checked_add(block.len())
+            .and_then(|bytes| bytes.checked_add(8))
+            .ok_or_else(prepared_write_overflow)?;
+    }
     for document in &page.documents {
-        rows = rows.checked_add(2).ok_or_else(prepared_write_overflow)?;
+        rows = rows.checked_add(1).ok_or_else(prepared_write_overflow)?;
         bytes = bytes
             .checked_add(document.chunk_id.len())
-            .and_then(|bytes| bytes.checked_add(document.row.len()))
-            .and_then(|bytes| bytes.checked_add(document.integrity_digest.as_str().len()))
+            .and_then(|bytes| bytes.checked_add(8))
             .ok_or_else(prepared_write_overflow)?;
         for posting in &document.term_postings {
             rows = rows.checked_add(1).ok_or_else(prepared_write_overflow)?;
@@ -851,15 +946,6 @@ fn estimated_sqlite_writes(
                 .and_then(|bytes| bytes.checked_add(8))
                 .ok_or_else(prepared_write_overflow)?;
         }
-    }
-    rows = rows
-        .checked_add(page.ngram_shards.len())
-        .ok_or_else(prepared_write_overflow)?;
-    for shard in &page.ngram_shards {
-        bytes = bytes
-            .checked_add(shard.documents.len())
-            .and_then(|bytes| bytes.checked_add(32))
-            .ok_or_else(prepared_write_overflow)?;
     }
     rows = rows
         .checked_add(page.row_dictionary.len())
@@ -891,7 +977,7 @@ fn estimated_clone_body_writes(
             let bytes = bytes
                 .checked_add(body.payload_digest.len().saturating_mul(2))
                 .and_then(|bytes| bytes.checked_add(body.payload.len()))
-                .and_then(|bytes| bytes.checked_add(body.occurrence.len()))
+                .and_then(|bytes| bytes.checked_add(body.eligibility.len()))
                 .and_then(|bytes| bytes.checked_add(body.symbol_occurrence_id.len()))
                 .and_then(|bytes| bytes.checked_add(body.path.len()))
                 .and_then(|bytes| {
@@ -907,9 +993,7 @@ fn estimated_clone_body_writes(
                             stream
                                 .language
                                 .len()
-                                .saturating_add(stream.body_digest.len())
                                 .saturating_add(body.symbol_occurrence_id.len())
-                                .saturating_add(body.payload_digest.len())
                                 .saturating_add(32),
                         ),
                     ),

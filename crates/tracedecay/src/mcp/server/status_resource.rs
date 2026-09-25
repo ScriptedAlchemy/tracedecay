@@ -1,6 +1,7 @@
 //! Typed status resource rendering.
 
 use serde_json::{Value, json};
+use tracedecay_mcp::handlers::info::graph_statistics_value;
 
 use super::{ErrorCode, JsonRpcResponse, McpServer};
 
@@ -9,11 +10,11 @@ impl McpServer {
     #[hotpath::skip]
     pub(crate) async fn read_resource_status(&self, id: Value) -> JsonRpcResponse {
         let cg = self.reopen_if_branch_drifted().await;
-        let graph_statistics = match crate::mcp::tools::handlers::info::graph_statistics_value(
-            self.generation_census_reader().as_ref(),
-        )
-        .await
-        {
+        let census = match self.generation_census_reader() {
+            Some(reader) => Some(reader().await),
+            None => None,
+        };
+        let graph_statistics = match graph_statistics_value(census.as_ref()) {
             Ok(value) => value,
             Err(error) => {
                 return JsonRpcResponse::error(

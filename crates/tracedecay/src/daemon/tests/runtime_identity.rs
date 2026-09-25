@@ -238,22 +238,6 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
             .exists(),
         "a stale worktree-local marker must never create or open a second project store"
     );
-    let branch_store_exists =
-        std::fs::read_dir(primary_graph.store_layout().data_root.join("branches"))
-            .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(std::result::Result::ok)
-            .any(|entry| {
-                entry
-                    .path()
-                    .extension()
-                    .is_some_and(|extension| extension == "db")
-            });
-    assert!(
-        !branch_store_exists,
-        "opening a linked worktree must not create a branch database"
-    );
 
     // `f347a0a46` ("fix(index): require opt-in for linked worktree scopes")
     // gates project-open code-index activation for a linked worktree behind
@@ -485,9 +469,9 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
             | tracedecay_dashboard_api::AutomationSchedulerReconcileOutcome::Exiting
     ));
     assert!(
-        tracedecay_runtime_core::storage::read_legacy_enrollment_marker(&linked)
+        std::fs::read_to_string(linked.join(".tracedecay/enrollment.json"))
             .expect("read linked legacy marker")
-            .is_some_and(|marker| marker.project_id == stale_project_id),
+            .contains(stale_project_id),
         "routing must ignore, not rewrite or delete, a stale legacy worktree-local marker"
     );
     // Every whole-worktree demand the daemon raised for the linked route on

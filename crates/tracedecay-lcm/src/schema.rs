@@ -9,15 +9,48 @@ use super::{LcmError, LcmRawMessage, raw};
 #[cfg(test)]
 use super::util;
 
-pub const LCM_SCHEMA_VERSION: i64 = 8;
+/// Message and raw rows carry no copy of their observation envelope; readers
+/// join it from the `observations` row. Raw rows store their body once.
+/// `snippet_text` and `index_text` are virtual columns computing
+/// [`crate::retrieval_content::derived_text_for_snippet`] and
+/// [`crate::retrieval_content::derived_text_for_index`] from `content`, or
+/// from `placeholder_text` when the body lives outside the row. Each cursor
+/// commit deletes the cursor advances the durable cursor strictly supersedes.
+/// `lcm_raw_messages` also holds the session message projection, so each
+/// message body is stored once beside the session-only columns (`kind`,
+/// `model`, `tool_names`, `source_path`, `source_offset`), and one FTS index
+/// serves both LCM grep and session message search. There are no LCM summary
+/// tables. Every summary read joins the canonical `session_summary_nodes` /
+/// `session_summary_sources` authority (session temporal schema) through
+/// [`SUMMARY_VISIBLE_SQL`]. Stores at an older version require a profile
+/// reset.
+pub const LCM_SCHEMA_VERSION: i64 = 13;
+
+/// Visibility rule for every LCM summary read, over a `session_summary_nodes`
+/// row aliased `n`: a summary surfaces iff its availability in the session's
+/// active generation is `available`. Retirement writes `unavailable` (and
+/// supersession or a raw revision writes `stale`), so the immutable row stays
+/// for audit while grep, describe, expand, replay, status, and the DAG stop
+/// returning it. There is no other deletion signal.
+pub const SUMMARY_VISIBLE_SQL: &str = "EXISTS (
+    SELECT 1
+    FROM session_temporal_generations visible_generation
+    JOIN session_summary_availability visible_availability
+      ON visible_availability.session_id = visible_generation.session_id
+     AND visible_availability.generation = visible_generation.generation
+    WHERE visible_generation.session_id = n.session_id
+      AND visible_generation.state = 'active'
+      AND visible_availability.summary_id = n.summary_id
+      AND visible_availability.availability = 'available'
+)";
 
 const MIGRATION_NAME: &str = "lcm";
 
 /// Indexes that keep expensive LCM reads off the message-body table pages.
 ///
 /// `lcm_status` aggregates whole-store counts on every probe. Without these
-/// indexes four of its components scan the full `lcm_raw_messages` /
-/// `lcm_summary_nodes` / `lcm_external_payloads` records, multi-gigabyte
+/// indexes its components scan the full `lcm_raw_messages` /
+/// `lcm_external_payloads` records, multi-gigabyte
 /// body reads on a long-lived profile store for a one-row answer (issue #767
 /// measured 10.65 s daemon-side). Each entry is one independently committed
 /// idempotent batch. Fresh stores install the final index shape with the
@@ -32,9 +65,6 @@ const MIGRATION_NAME: &str = "lcm";
 /// live in [`super::query`]; the raw direct-user candidate predicate lives in
 /// [`super::query::grep`].
 pub const LCM_STATUS_PERFORMANCE_INDEX_SQL: &[&str] = &[
-    "CREATE INDEX IF NOT EXISTS idx_lcm_raw_legacy_truncated
-         ON lcm_raw_messages(provider, session_id)
-         WHERE legacy_truncated != 0;",
     "CREATE INDEX IF NOT EXISTS idx_lcm_raw_lossy_ingest
          ON lcm_raw_messages(provider, session_id)
          WHERE metadata_json IS NOT NULL
@@ -48,10 +78,6 @@ pub const LCM_STATUS_PERFORMANCE_INDEX_SQL: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_lcm_raw_direct_user_candidate
          ON lcm_raw_messages(provider, store_id)
          WHERE role = 'user';",
-    "CREATE INDEX IF NOT EXISTS idx_lcm_summary_nodes_depth_tokens
-         ON lcm_summary_nodes(
-             provider, session_id, depth, summary_token_count, source_token_count
-         );",
     // The byte-count variant covers the status COUNT+SUM without touching
     // payload metadata rows and fully supersedes the plain owner index
     // (same leading columns), so the replacement and the drop commit as one
@@ -61,37 +87,50 @@ pub const LCM_STATUS_PERFORMANCE_INDEX_SQL: &[&str] = &[
      DROP INDEX IF EXISTS idx_lcm_external_payloads_owner;",
 ];
 
-/// Raw-message FTS structure (schema v3): index only `index_text`, matching
-/// hermes-lcm `build_message_fts_spec` (store.py:173-204), which indexes
-/// nothing but the message content column. Earlier schemas also indexed
-/// `role` and `metadata_json`, so an unqualified MATCH over-matched rows via
-/// role names or metadata text. Role and source filtering happen as plain
-/// SQL predicates on `lcm_raw_messages`, never through the FTS index.
+/// The single message FTS index. Session message search ranks over every
+/// column (`bm25` weights 10/2/1/1/1), while LCM grep keeps hermes-lcm
+/// `build_message_fts_spec` (store.py:173-204) semantics by qualifying its
+/// MATCH with [`RAW_FTS_CONTENT_COLUMN_FILTER`]: an unqualified LCM MATCH would
+/// over-match rows through role, kind, model, or tool names.
 const RAW_FTS_DDL: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS lcm_raw_messages_fts USING fts5(
-        index_text,
+        index_text, role, kind, model, tool_names,
         content='lcm_raw_messages',
         content_rowid='store_id'
     );
     CREATE TRIGGER IF NOT EXISTS lcm_raw_messages_fts_insert
         AFTER INSERT ON lcm_raw_messages BEGIN
-            INSERT INTO lcm_raw_messages_fts(rowid, index_text)
-            VALUES (NEW.store_id, NEW.index_text);
+            INSERT INTO lcm_raw_messages_fts(rowid, index_text, role, kind, model, tool_names)
+            VALUES (NEW.store_id, NEW.index_text, NEW.role, NEW.kind, NEW.model, NEW.tool_names);
         END;
     CREATE TRIGGER IF NOT EXISTS lcm_raw_messages_fts_delete
         AFTER DELETE ON lcm_raw_messages BEGIN
-            INSERT INTO lcm_raw_messages_fts(lcm_raw_messages_fts, rowid, index_text)
-            VALUES ('delete', OLD.store_id, OLD.index_text);
+            INSERT INTO lcm_raw_messages_fts(
+                lcm_raw_messages_fts, rowid, index_text, role, kind, model, tool_names
+            )
+            VALUES (
+                'delete', OLD.store_id, OLD.index_text, OLD.role, OLD.kind, OLD.model,
+                OLD.tool_names
+            );
         END;
     CREATE TRIGGER IF NOT EXISTS lcm_raw_messages_fts_update
         AFTER UPDATE ON lcm_raw_messages BEGIN
-            INSERT INTO lcm_raw_messages_fts(lcm_raw_messages_fts, rowid, index_text)
-            VALUES ('delete', OLD.store_id, OLD.index_text);
-            INSERT INTO lcm_raw_messages_fts(rowid, index_text)
-            VALUES (NEW.store_id, NEW.index_text);
+            INSERT INTO lcm_raw_messages_fts(
+                lcm_raw_messages_fts, rowid, index_text, role, kind, model, tool_names
+            )
+            VALUES (
+                'delete', OLD.store_id, OLD.index_text, OLD.role, OLD.kind, OLD.model,
+                OLD.tool_names
+            );
+            INSERT INTO lcm_raw_messages_fts(rowid, index_text, role, kind, model, tool_names)
+            VALUES (NEW.store_id, NEW.index_text, NEW.role, NEW.kind, NEW.model, NEW.tool_names);
         END;";
 
+/// FTS5 column filter that restricts a MATCH to the message body, e.g.
+/// `format!("{RAW_FTS_CONTENT_COLUMN_FILTER}({query})")`.
+pub const RAW_FTS_CONTENT_COLUMN_FILTER: &str = "index_text : ";
+
 /// Returns whether the raw-message FTS table and all three synchronization
-/// triggers use the v3 content-only contracts.
+/// triggers use the current five-column contracts.
 pub async fn raw_fts_structure_is_current(conn: &(impl QueryExecutor + ?Sized)) -> Option<bool> {
     let mut rows = conn
         .query(
@@ -119,47 +158,41 @@ pub async fn raw_fts_structure_is_current(conn: &(impl QueryExecutor + ?Sized)) 
             "lcm_raw_messages_fts" => {
                 table_current = object_type == "table"
                     && sql.contains(
-                        "usingfts5(index_text,content='lcm_raw_messages',content_rowid='store_id')",
+                        "usingfts5(index_text,role,kind,model,tool_names,\
+                         content='lcm_raw_messages',content_rowid='store_id')",
                     );
             }
             "lcm_raw_messages_fts_insert" => {
                 insert_current = object_type == "trigger"
                     && table_name == "lcm_raw_messages"
                     && sql.contains("afterinsertonlcm_raw_messagesbegin")
-                    && sql.contains(
-                        "insertintolcm_raw_messages_fts(rowid,index_text)\
-                         values(new.store_id,new.index_text)",
-                    );
+                    && sql.contains(RAW_FTS_INSERT_NEW);
             }
             "lcm_raw_messages_fts_delete" => {
                 delete_current = object_type == "trigger"
                     && table_name == "lcm_raw_messages"
                     && sql.contains("afterdeleteonlcm_raw_messagesbegin")
-                    && sql.contains(
-                        "insertintolcm_raw_messages_fts\
-                         (lcm_raw_messages_fts,rowid,index_text)\
-                         values('delete',old.store_id,old.index_text)",
-                    );
+                    && sql.contains(RAW_FTS_DELETE_OLD);
             }
             "lcm_raw_messages_fts_update" => {
                 update_current = object_type == "trigger"
                     && table_name == "lcm_raw_messages"
                     && sql.contains("afterupdateonlcm_raw_messagesbegin")
-                    && sql.contains(
-                        "insertintolcm_raw_messages_fts\
-                         (lcm_raw_messages_fts,rowid,index_text)\
-                         values('delete',old.store_id,old.index_text)",
-                    )
-                    && sql.contains(
-                        "insertintolcm_raw_messages_fts(rowid,index_text)\
-                         values(new.store_id,new.index_text)",
-                    );
+                    && sql.contains(RAW_FTS_DELETE_OLD)
+                    && sql.contains(RAW_FTS_INSERT_NEW);
             }
             _ => {}
         }
     }
     Some(table_current && insert_current && delete_current && update_current)
 }
+
+const RAW_FTS_INSERT_NEW: &str = "insertintolcm_raw_messages_fts\
+     (rowid,index_text,role,kind,model,tool_names)\
+     values(new.store_id,new.index_text,new.role,new.kind,new.model,new.tool_names)";
+const RAW_FTS_DELETE_OLD: &str = "insertintolcm_raw_messages_fts\
+     (lcm_raw_messages_fts,rowid,index_text,role,kind,model,tool_names)\
+     values('delete',old.store_id,old.index_text,old.role,old.kind,old.model,old.tool_names)";
 
 fn compact_sql(sql: &str) -> String {
     sql.chars()
@@ -194,9 +227,13 @@ pub async fn rebuild_raw_fts(conn: &(impl Executor + ?Sized)) -> Option<()> {
 }
 
 /// Test-only convenience wrapper: production schema creation runs through
-/// [`ensure_lcm_schema_in_transaction`] inside the callers' own transactions.
+/// [`ensure_lcm_schema_in_transaction`] inside the callers' own transactions,
+/// after the session temporal schema this crate's summary reads join against;
+/// unit fixtures install that fixture shape here.
 #[cfg(test)]
 pub async fn ensure_lcm_schema(conn: &Connection) -> Result<(), LcmError> {
+    conn.execute_batch(crate::test_support::SESSION_GENERATION_SCHEMA)
+        .await?;
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await?;
@@ -279,11 +316,29 @@ pub async fn ensure_lcm_schema_in_transaction(
             content_hash TEXT NOT NULL,
             storage_kind TEXT NOT NULL CHECK(storage_kind IN ('inline', 'external')),
             payload_ref TEXT,
-            snippet_text TEXT NOT NULL,
-            index_text TEXT NOT NULL,
-            legacy_source INTEGER NOT NULL DEFAULT 0,
-            legacy_truncated INTEGER NOT NULL DEFAULT 0,
+            placeholder_text TEXT,
+            snippet_text TEXT NOT NULL GENERATED ALWAYS AS (
+                CASE
+                    WHEN content IS NULL THEN COALESCE(placeholder_text, '')
+                    WHEN length(content) <= 4096 THEN content
+                    ELSE substr(content, 1, 4054)
+                        || char(10) || '[derived snippet truncated by tracedecay]'
+                END
+            ) VIRTUAL,
+            index_text TEXT NOT NULL GENERATED ALWAYS AS (
+                CASE
+                    WHEN content IS NULL THEN COALESCE(placeholder_text, '')
+                    WHEN length(content) <= 65536 THEN content
+                    ELSE substr(content, 1, 65494)
+                        || char(10) || '[derived snippet truncated by tracedecay]'
+                END
+            ) VIRTUAL,
             metadata_json TEXT,
+            kind TEXT,
+            model TEXT,
+            tool_names TEXT,
+            source_path TEXT,
+            source_offset INTEGER,
             UNIQUE(provider, message_id),
             FOREIGN KEY(provider, session_id)
                 REFERENCES sessions(provider, session_id) ON DELETE CASCADE
@@ -292,6 +347,14 @@ pub async fn ensure_lcm_schema_in_transaction(
             ON lcm_raw_messages(provider, session_id, store_id);
         CREATE INDEX IF NOT EXISTS idx_lcm_raw_session_id
             ON lcm_raw_messages(session_id);
+        CREATE INDEX IF NOT EXISTS idx_lcm_raw_session_ordinal
+            ON lcm_raw_messages(provider, session_id, ordinal);
+        CREATE INDEX IF NOT EXISTS idx_lcm_raw_session_activity
+            ON lcm_raw_messages(
+                provider, session_id, timestamp, ordinal, message_id, kind, tool_names
+            );
+        CREATE INDEX IF NOT EXISTS idx_lcm_raw_timestamp
+            ON lcm_raw_messages(timestamp);
         CREATE TABLE IF NOT EXISTS lcm_external_payloads (
             payload_ref TEXT PRIMARY KEY,
             provider TEXT NOT NULL,
@@ -317,72 +380,6 @@ pub async fn ensure_lcm_schema_in_transaction(
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS lcm_summary_nodes (
-            node_id TEXT PRIMARY KEY,
-            provider TEXT NOT NULL,
-            conversation_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            depth INTEGER NOT NULL,
-            summary_text TEXT NOT NULL,
-            summary_hash TEXT NOT NULL,
-            summary_token_count INTEGER NOT NULL,
-            source_token_count INTEGER NOT NULL,
-            source_time_start INTEGER,
-            source_time_end INTEGER,
-            expand_hint TEXT,
-            metadata_json TEXT,
-            created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-            FOREIGN KEY(provider, session_id)
-                REFERENCES sessions(provider, session_id) ON DELETE CASCADE
-        );
-        CREATE TABLE IF NOT EXISTS lcm_summary_sources (
-            node_id TEXT NOT NULL,
-            source_kind TEXT NOT NULL CHECK(source_kind IN ('raw_message', 'summary_node')),
-            source_id TEXT NOT NULL,
-            ordinal INTEGER NOT NULL,
-            PRIMARY KEY(node_id, ordinal),
-            FOREIGN KEY(node_id) REFERENCES lcm_summary_nodes(node_id) ON DELETE CASCADE
-        );
-        CREATE INDEX IF NOT EXISTS idx_lcm_summary_nodes_session_depth_time
-            ON lcm_summary_nodes(
-                provider, session_id, depth, source_time_start, source_time_end, created_at
-            );
-        CREATE INDEX idx_lcm_summary_nodes_codex_pending_session_order
-            ON lcm_summary_nodes(
-                session_id,
-                (CASE
-                    WHEN json_valid(metadata_json) THEN
-                        json_extract(metadata_json, '$.source') = 'codex_context_compacted'
-                        AND COALESCE(
-                              json_extract(metadata_json, '$.tracedecay_summary_source'),
-                              ''
-                            ) <> 'codex_app_server'
-                    ELSE 0
-                 END),
-                depth DESC,
-                created_at DESC,
-                node_id
-            )
-            WHERE provider = 'codex';
-        CREATE INDEX idx_lcm_summary_nodes_codex_pending_root_order
-            ON lcm_summary_nodes(
-                (CASE
-                    WHEN json_valid(metadata_json) THEN
-                        json_extract(metadata_json, '$.source') = 'codex_context_compacted'
-                        AND COALESCE(
-                              json_extract(metadata_json, '$.tracedecay_summary_source'),
-                              ''
-                            ) <> 'codex_app_server'
-                    ELSE 0
-                 END),
-                created_at DESC,
-                depth DESC,
-                node_id,
-                session_id
-            )
-            WHERE provider = 'codex';
-        CREATE INDEX IF NOT EXISTS idx_lcm_summary_sources_source
-            ON lcm_summary_sources(source_kind, source_id);
         CREATE TABLE IF NOT EXISTS lcm_lifecycle_state (
             provider TEXT NOT NULL,
             conversation_id TEXT NOT NULL,
@@ -411,33 +408,7 @@ pub async fn ensure_lcm_schema_in_transaction(
                 REFERENCES lcm_lifecycle_state(provider, conversation_id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_lcm_maintenance_debt_kind
-            ON lcm_maintenance_debt(provider, debt_kind, created_at);
-        CREATE VIRTUAL TABLE IF NOT EXISTS lcm_summary_nodes_fts USING fts5(
-            summary_text, expand_hint, metadata_json,
-            content='lcm_summary_nodes',
-            content_rowid='rowid'
-        );
-        CREATE TRIGGER IF NOT EXISTS lcm_summary_nodes_fts_insert
-            AFTER INSERT ON lcm_summary_nodes BEGIN
-                INSERT INTO lcm_summary_nodes_fts(rowid, summary_text, expand_hint, metadata_json)
-                VALUES (NEW.rowid, NEW.summary_text, NEW.expand_hint, NEW.metadata_json);
-            END;
-        CREATE TRIGGER IF NOT EXISTS lcm_summary_nodes_fts_delete
-            AFTER DELETE ON lcm_summary_nodes BEGIN
-                INSERT INTO lcm_summary_nodes_fts(
-                    lcm_summary_nodes_fts, rowid, summary_text, expand_hint, metadata_json
-                )
-                VALUES ('delete', OLD.rowid, OLD.summary_text, OLD.expand_hint, OLD.metadata_json);
-            END;
-        CREATE TRIGGER IF NOT EXISTS lcm_summary_nodes_fts_update
-            AFTER UPDATE ON lcm_summary_nodes BEGIN
-                INSERT INTO lcm_summary_nodes_fts(
-                    lcm_summary_nodes_fts, rowid, summary_text, expand_hint, metadata_json
-                )
-                VALUES ('delete', OLD.rowid, OLD.summary_text, OLD.expand_hint, OLD.metadata_json);
-                INSERT INTO lcm_summary_nodes_fts(rowid, summary_text, expand_hint, metadata_json)
-                VALUES (NEW.rowid, NEW.summary_text, NEW.expand_hint, NEW.metadata_json);
-            END;",
+            ON lcm_maintenance_debt(provider, debt_kind, created_at);",
     )
     .await?;
     ensure_raw_identity_schema(conn).await?;
@@ -633,8 +604,6 @@ mod tests {
                 payload_ref TEXT,
                 snippet_text TEXT NOT NULL,
                 index_text TEXT NOT NULL,
-                legacy_source INTEGER NOT NULL DEFAULT 0,
-                legacy_truncated INTEGER NOT NULL DEFAULT 0,
                 metadata_json TEXT,
                 UNIQUE(provider, message_id)
             );",
@@ -673,7 +642,11 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE lcm_raw_messages (
                 store_id INTEGER PRIMARY KEY,
-                index_text TEXT NOT NULL
+                index_text TEXT NOT NULL,
+                role TEXT NOT NULL,
+                kind TEXT,
+                model TEXT,
+                tool_names TEXT
             );",
         )
         .await
@@ -922,9 +895,8 @@ mod tests {
             .map_err(|error| error.to_string())?;
 
         for index in [
-            "idx_lcm_raw_legacy_truncated",
             "idx_lcm_raw_lossy_ingest",
-            "idx_lcm_summary_nodes_depth_tokens",
+            "idx_lcm_raw_direct_user_candidate",
             "idx_lcm_external_payloads_owner_bytes",
         ] {
             assert!(
@@ -1019,6 +991,89 @@ mod tests {
             .expect_err("database failure must not collapse to absence");
 
         assert!(matches!(error, LcmError::Db(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn raw_retrieval_columns_derive_exactly_what_the_application_derives()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let conn = TestConnection::open(&temp.path().join("sessions.db"));
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                PRIMARY KEY(provider, session_id)
+            );
+            INSERT INTO sessions VALUES ('cursor', 'session-1');",
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        ensure_lcm_schema(&conn)
+            .await
+            .map_err(|error| error.to_string())?;
+        let cap = crate::MAX_DERIVED_TEXT_CHARS;
+        let snippet_cap = crate::retrieval_content::MAX_DERIVED_SNIPPET_CHARS;
+        let bodies = [
+            String::new(),
+            "short body".to_owned(),
+            "a".repeat(snippet_cap),
+            "a".repeat(snippet_cap + 1),
+            "雪🦀é".repeat(snippet_cap),
+            "x".repeat(cap),
+            "雪".repeat(cap + 1),
+        ];
+        for (ordinal, body) in bodies.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO lcm_raw_messages (
+                    provider, message_id, session_id, role, ordinal, content,
+                    content_hash, storage_kind
+                 ) VALUES ('cursor', ?1, 'session-1', 'user', ?2, ?3, 'hash', 'inline')",
+                params![format!("inline-{ordinal}"), ordinal as i64, body.as_str()],
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        }
+        conn.execute(
+            "INSERT INTO lcm_raw_messages (
+                provider, message_id, session_id, role, ordinal, content,
+                content_hash, storage_kind, payload_ref, placeholder_text
+             ) VALUES ('cursor', 'external', 'session-1', 'user', 99, NULL,
+                       'hash', 'external', 'ref', '[payload ref=ref]')",
+            (),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+
+        let mut rows = conn
+            .query(
+                "SELECT message_id, content, placeholder_text, snippet_text, index_text
+                 FROM lcm_raw_messages ORDER BY ordinal",
+                (),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut checked = 0;
+        while let Some(row) = rows.next().await.map_err(|error| error.to_string())? {
+            let message_id: String = row.get(0).map_err(|error| error.to_string())?;
+            let content: Option<String> = row.get(1).map_err(|error| error.to_string())?;
+            let placeholder: Option<String> = row.get(2).map_err(|error| error.to_string())?;
+            let snippet: String = row.get(3).map_err(|error| error.to_string())?;
+            let index: String = row.get(4).map_err(|error| error.to_string())?;
+            let source = content.or(placeholder).unwrap_or_default();
+            assert_eq!(
+                snippet,
+                crate::retrieval_content::derived_text_for_snippet(&source),
+                "{message_id} snippet"
+            );
+            assert_eq!(
+                index,
+                crate::retrieval_content::derived_text_for_index(&source),
+                "{message_id} index"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, bodies.len() + 1);
         Ok(())
     }
 

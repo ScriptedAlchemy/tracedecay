@@ -112,16 +112,8 @@ fn diagnostic(
 }
 
 #[test]
-fn superseded_and_cleared_records_remain_typed_historical_evidence() {
+fn cleared_records_remain_typed_historical_evidence() {
     let (snapshot, manifest) = generation();
-    let superseded = diagnostic(
-        "generation.prior.1",
-        "anchor.diagnostic.superseded",
-        'a',
-        DiagnosticRecordStateV1::Superseded {
-            successor_generation: manifest.generation_id.clone(),
-        },
-    );
     let cleared = diagnostic(
         "generation.prior.2",
         "anchor.diagnostic.cleared",
@@ -134,7 +126,7 @@ fn superseded_and_cleared_records_remain_typed_historical_evidence() {
     let joined = GenerationDiagnosticJoinV1::join(
         &manifest,
         &snapshot,
-        &[superseded, cleared],
+        &[cleared],
         &watermark(
             &snapshot,
             &manifest,
@@ -143,20 +135,11 @@ fn superseded_and_cleared_records_remain_typed_historical_evidence() {
     )
     .expect("historical evidence remains inspectable");
 
+    assert_eq!(joined.records.len(), 1);
     assert!(matches!(
         joined.records[0].disposition,
         GenerationDiagnosticDispositionV1::Cleared { .. }
-            | GenerationDiagnosticDispositionV1::Superseded { .. }
     ));
-    assert!(matches!(
-        joined.records[1].disposition,
-        GenerationDiagnosticDispositionV1::Cleared { .. }
-            | GenerationDiagnosticDispositionV1::Superseded { .. }
-    ));
-    assert!(joined.records.iter().all(|record| !matches!(
-        record.disposition,
-        GenerationDiagnosticDispositionV1::Current { .. }
-    )));
 }
 
 #[test]
@@ -166,8 +149,8 @@ fn out_of_scope_historical_record_is_not_classified_as_lifecycle_history() {
         "generation.prior",
         "anchor.diagnostic.out-of-scope",
         'a',
-        DiagnosticRecordStateV1::Superseded {
-            successor_generation: manifest.generation_id.clone(),
+        DiagnosticRecordStateV1::Cleared {
+            cleared_in_generation: manifest.generation_id.clone(),
         },
     );
     record.reference = Some(id("ref.other"));

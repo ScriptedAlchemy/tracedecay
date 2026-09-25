@@ -1290,15 +1290,21 @@ def prime_fixture_values(
         )
 
     with prime_group("retrieval"):
-        read = _producer_call(
+        large = _producer_call(
             client,
-            "tracedecay_read",
-            {"file": "docs/large.md"},
-            deadline("tracedecay_read"),
+            "tracedecay_grep",
+            {
+                "pattern": "catalog sweep handle source",
+                "fixed_strings": True,
+                "path_glob": "docs/large.md",
+                "max_results": 200,
+                "context_lines": 3,
+            },
+            deadline("tracedecay_grep"),
         )
-        handle = response_handle(read)
+        handle = response_handle(large)
         if handle is None:
-            raise SweepError("read producer did not mint a retrieval handle")
+            raise SweepError("grep producer did not mint a retrieval handle")
         retrieved = _producer_call(
             client,
             "tracedecay_retrieve",
@@ -1762,7 +1768,7 @@ def prime_code_navigation(
         selected: dict[str, str] = {}
         for tool, expected_name in CODE_NAVIGATION_NODE_NAMES.items():
             matches = [value for value in records if value["name"] == expected_name]
-            if tool == "tracedecay_code_type_hierarchy":
+            if tool == "tracedecay_type_hierarchy":
                 matches = [value for value in matches if value.get("kind") == "struct"]
             if len(matches) == 1:
                 selected[tool] = matches[0]["node_id"]
@@ -1813,7 +1819,7 @@ def mint_code_navigation_input(
             if isinstance(value.get("node_id"), str)
             and value.get("name") == expected_name
         ]
-        if producer_key == "tracedecay_code_type_hierarchy":
+        if producer_key == "tracedecay_type_hierarchy":
             matches = [value for value in matches if value.get("kind") == "struct"]
         if row["verdict"] == "PASS" and len(matches) == 1:
             if duration_us(searched) is None:
@@ -1868,12 +1874,12 @@ OPAQUE_FIELDS = frozenset(
 CODE_INDEX_READY_TIMEOUT_S = 120
 
 CODE_NAVIGATION_NODE_NAMES = {
-    "tracedecay_code_callees": "sweep_peer",
-    "tracedecay_code_callers": "sweep_anchor",
+    "tracedecay_callees": "sweep_peer",
+    "tracedecay_callers": "sweep_anchor",
     "tracedecay_code_declaration": "sweep_anchor",
     "tracedecay_code_references": "sweep_anchor",
     "tracedecay_code_type_definition": "sweep_typed",
-    "tracedecay_code_type_hierarchy": "SweepType",
+    "tracedecay_type_hierarchy": "SweepType",
 }
 
 # Navigation consumers whose `node_id` is a code-query identity minted by the
@@ -1887,7 +1893,6 @@ CODE_NAVIGATION_INPUT_PRODUCERS = {
     **{name: name for name in CODE_QUERY_NODE_CONSUMERS},
     "tracedecay_node": "tracedecay_code_declaration",
     "tracedecay_rename_preview": "tracedecay_code_declaration",
-    "tracedecay_type_hierarchy": "tracedecay_code_type_hierarchy",
 }
 
 # Expected hermetic typed-denial verdicts. Each entry asserts the EXACT
@@ -2009,16 +2014,6 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, An
         return dict(fixture["workflow_read_arguments"][name])
     if name == "tracedecay_git_preview":
         return git_preview_arguments(fixture)
-    if name == "tracedecay_type_hierarchy":
-        identities = fixture.get("code_navigation_node_ids")
-        node_id = (
-            identities.get("tracedecay_code_type_hierarchy")
-            if isinstance(identities, dict)
-            else None
-        )
-        if not isinstance(node_id, str) or not node_id:
-            raise SweepError("type hierarchy producer minted no type identity")
-        return {"node_id": node_id, "format": "json"}
     if name == "tracedecay_branch_diff":
         # The runtime requires `base` even though the negotiated schema marks
         # it optional (schema gap logged to the binding owner). Diff the real

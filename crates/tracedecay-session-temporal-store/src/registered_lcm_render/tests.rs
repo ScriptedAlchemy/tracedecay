@@ -398,7 +398,10 @@ async fn registered_metadata_rows_do_not_fabricate_full_raw_messages() {
 async fn session_describe_reports_the_message_not_an_empty_stub() {
     let directory = tempdir().expect("temporary session store");
     let runtime = seeded_render_fixture(directory.path()).await;
-    let content = "canonical raw message plus hidden tail";
+    let content = format!(
+        "canonical raw {} hidden tail",
+        "x".repeat(tracedecay_lcm::MAX_DERIVED_SNIPPET_CHARS)
+    );
     runtime
         .registered_database(HostAdmissionScope::Profile)
         .expect("registered session database")
@@ -406,11 +409,11 @@ async fn session_describe_reports_the_message_not_an_empty_stub() {
         .expect("registered writer")
         .execute_batch(&format!(
             "UPDATE lcm_raw_messages
-                SET content = '{content}', snippet_text = 'canonical raw'
+                SET content = '{content}'
               WHERE message_id = 'message-a';"
         ))
         .await
-        .expect("shorten the stored preview without shortening the message");
+        .expect("store a message longer than its derived preview");
     let snapshot = runtime
         .registered_database(HostAdmissionScope::Profile)
         .expect("registered session database")
@@ -435,7 +438,10 @@ async fn session_describe_reports_the_message_not_an_empty_stub() {
         .iter()
         .find(|message| message.message_id == "message-a")
         .expect("describe must list the captured message");
-    assert_eq!(overview.content_preview, "canonical raw");
+    assert_eq!(
+        overview.content_preview,
+        tracedecay_lcm::retrieval_content::derived_text_for_snippet(&content)
+    );
     assert!(!overview.content_preview.contains("hidden tail"));
     assert_eq!(
         overview.content_range.total_chars,

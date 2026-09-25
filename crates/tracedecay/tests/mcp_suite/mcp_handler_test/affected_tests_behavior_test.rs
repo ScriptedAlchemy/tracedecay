@@ -4,15 +4,21 @@
 //! `cargo test` runner. Assertions are the JSON the caller reads, not which
 //! helper the handler invoked.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
 use serde_json::{Value, json};
+use tracedecay_application::operation_stream::operation_event_authority;
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_contracts::{Deadline, OperationBudgetUsage, OperationReceipt};
+use tracedecay_domain::UtcMicros;
 use tracedecay_mcp::ToolResult;
+use url::Url;
 
 use crate::support::{
-    ProductionCompositionFixture, extract_text, production_composition_fixture_with_sources,
-    wait_for_current_graph,
+    ProductionCompositionFixture, extract_text, production_composition_fixture,
+    production_composition_fixture_with_sources, wait_for_current_graph,
 };
 
 const GREETING_TEST: &str = "tests::greeting_is_hello_world";
@@ -380,4 +386,60 @@ async fn run_affected_tests_reports_the_cargo_result_for_the_changed_manifest() 
     );
 
     fixture.harness.shutdown().await;
+}
+
+/// The operation-event authority is process-global, so every daemon
+/// composition in this test process shares it. A peer composition shutting
+/// down (the production `DaemonInvocationState::shutdown` path) between a
+/// managed run's admission and its first result must leave the accepted
+/// record in place: the first result lands at sequence 1 behind it instead
+/// of failing with an expired history frontier.
+#[tokio::test]
+async fn operation_history_keeps_an_admitted_test_run_across_a_peer_composition_shutdown() {
+    let (_isolated_env, _) = crate::common::IsolatedEnv::acquire().await;
+    let owner = production_composition_fixture_with_sources(write_affected_fixture).await;
+    let peer = production_composition_fixture().await;
+
+    let root_uri = Url::from_directory_path(
+        fs::canonicalize(&owner.project_root).expect("canonical affected fixture root"),
+    )
+    .expect("affected fixture root URI")
+    .to_string();
+    let deadline = Deadline::new(UtcMicros(i64::MAX)).expect("deadline");
+    let emitter = operation_event_authority()
+        .begin_managed_test_run(
+            root_uri,
+            mint_global_request_id(GlobalRequestSurface::ManagedTestRun).expect("request id"),
+            None,
+            None,
+            BTreeMap::new(),
+            deadline.clone(),
+        )
+        .await
+        .expect("managed test run admitted before the peer shuts down");
+
+    peer.harness.shutdown().await;
+
+    let first_result = emitter
+        .test_result(GREETING_TEST.to_owned(), true)
+        .await
+        .expect("first result must land after a peer composition shutdown");
+    assert_eq!(
+        first_result.sequence, 1,
+        "the accepted record at sequence 0 precedes the first result"
+    );
+    emitter
+        .terminal(
+            OperationReceipt::completed(
+                UtcMicros(1),
+                UtcMicros(2),
+                deadline,
+                OperationBudgetUsage::default(),
+            )
+            .expect("receipt"),
+        )
+        .await
+        .expect("terminal receipt after the first result");
+
+    owner.harness.shutdown().await;
 }

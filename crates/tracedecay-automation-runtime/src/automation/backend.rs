@@ -1,5 +1,6 @@
 //! Runtime adapters for leaf-owned automation backend contracts and policies.
 
+use schemars::JsonSchema;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -12,6 +13,7 @@ pub use tracedecay_automation::backend::{
     AgentTaskResponse, agent_task_contract, agent_task_failure_disposition,
     classify_agent_task_error_message, prompt_version, task_key,
 };
+use tracedecay_domain::configuration::LcmSummarizerExecutableV1;
 use tracedecay_domain::errors::Result;
 
 use super::config::{AutomationBackend, AutomationConfig};
@@ -59,7 +61,7 @@ impl BackendRetryPolicy {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
 pub struct AgentTaskRetryAttempt {
     pub attempt: u32,
     pub succeeded: bool,
@@ -87,7 +89,17 @@ impl AgentTaskRetryReport {
     }
 }
 
-pub fn backend_availability(config: &AutomationConfig) -> AgentBackendAvailability {
+/// Reason reported while `lcm.summarizer_executables.v1` binds no `codex`
+/// executable for the project.
+pub const CODEX_EXECUTABLE_UNCONFIGURED: &str =
+    "codex app-server backend executable is not configured (lcm.summarizer_executables.v1)";
+
+/// Whether the configured backend can run, given the `codex` executable the
+/// project's configuration snapshot binds. Nothing is resolved from `PATH`.
+pub fn backend_availability(
+    config: &AutomationConfig,
+    codex: &LcmSummarizerExecutableV1,
+) -> AgentBackendAvailability {
     match config.backend {
         AutomationBackend::Disabled => AgentBackendAvailability {
             backend: AutomationBackend::Disabled,
@@ -95,44 +107,35 @@ pub fn backend_availability(config: &AutomationConfig) -> AgentBackendAvailabili
             executable: None,
             reason: Some("automation backend is disabled".to_string()),
         },
-        AutomationBackend::CodexAppServer => {
-            let summary_config = CodexAppServerSummaryConfig::from_env();
-            let executable = summary_config.codex_bin.clone();
-            match executable_resolution(&executable) {
-                Ok(true) => AgentBackendAvailability {
-                    backend: AutomationBackend::CodexAppServer,
-                    available: true,
-                    executable: Some(executable),
-                    reason: None,
-                },
-                Ok(false) => AgentBackendAvailability {
-                    backend: AutomationBackend::CodexAppServer,
-                    available: false,
-                    executable: Some(executable.clone()),
-                    reason: Some(format!(
-                        "codex app-server backend executable '{executable}' was not found"
-                    )),
-                },
-                Err(error) => AgentBackendAvailability {
-                    backend: AutomationBackend::CodexAppServer,
-                    available: false,
-                    executable: Some(executable),
-                    reason: Some(error.to_string()),
-                },
+        AutomationBackend::CodexAppServer => match codex.canonical_path() {
+            None => AgentBackendAvailability {
+                backend: AutomationBackend::CodexAppServer,
+                available: false,
+                executable: None,
+                reason: Some(CODEX_EXECUTABLE_UNCONFIGURED.to_string()),
+            },
+            Some(path) => {
+                let executable = path.to_string_lossy().into_owned();
+                if path.is_file() {
+                    AgentBackendAvailability {
+                        backend: AutomationBackend::CodexAppServer,
+                        available: true,
+                        executable: Some(executable),
+                        reason: None,
+                    }
+                } else {
+                    AgentBackendAvailability {
+                        backend: AutomationBackend::CodexAppServer,
+                        available: false,
+                        reason: Some(format!(
+                            "codex app-server backend executable '{executable}' was not found"
+                        )),
+                        executable: Some(executable),
+                    }
+                }
             }
-        }
+        },
     }
-}
-
-fn executable_resolution(bin: &str) -> Result<bool> {
-    let path = Path::new(bin);
-    if path.components().count() > 1 {
-        return Ok(path.is_file());
-    }
-    Ok(
-        super::executable_lookup::resolve_on_path(bin, std::env::var_os("PATH").as_deref())?
-            .is_some(),
-    )
 }
 
 pub async fn run_agent_task_with_retry(
@@ -203,27 +206,43 @@ pub fn extract_json_object_prefix(text: &str) -> Result<Value> {
     leaf_backend::extract_json_object_prefix(text).map_err(Into::into)
 }
 
+/// The Codex app-server backend bound to the project's configured executable.
+///
+/// `config` is `None` while `lcm.summarizer_executables.v1` binds no `codex`
+/// executable: every task then settles as `Unavailable` and nothing is spawned.
 #[derive(Debug, Clone)]
 pub struct CodexAppServerBackend {
-    config: CodexAppServerSummaryConfig,
+    config: Option<CodexAppServerSummaryConfig>,
 }
 
 impl CodexAppServerBackend {
-    pub fn from_automation_config(config: &AutomationConfig) -> Self {
-        Self::new(config.model_id.clone(), config.timeout_secs)
+    pub fn from_automation_config(
+        config: &AutomationConfig,
+        codex: &LcmSummarizerExecutableV1,
+    ) -> Self {
+        Self::new(config.model_id.clone(), config.timeout_secs, codex)
     }
 
-    pub fn new(model: Option<String>, timeout_secs: u64) -> Self {
-        let mut config = CodexAppServerSummaryConfig::from_env();
-        if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
-            config.model = Some(model);
-        }
-        config.timeout = Duration::from_secs(timeout_secs.clamp(5, 300));
+    pub fn new(
+        model: Option<String>,
+        timeout_secs: u64,
+        codex: &LcmSummarizerExecutableV1,
+    ) -> Self {
+        let config = codex.canonical_path().map(|codex_bin| {
+            let mut config = CodexAppServerSummaryConfig::for_executable(codex_bin);
+            if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
+                config.model = Some(model);
+            }
+            config.timeout = Duration::from_secs(timeout_secs.clamp(5, 300));
+            config
+        });
         Self { config }
     }
 
     pub fn from_config(config: CodexAppServerSummaryConfig) -> Self {
-        Self { config }
+        Self {
+            config: Some(config),
+        }
     }
 }
 
@@ -238,6 +257,11 @@ impl AgentTaskBackend for CodexAppServerBackend {
         &self,
         request: &AgentTaskRequest,
     ) -> std::result::Result<AgentTaskResponse, AgentTaskError> {
+        let Some(config) = self.config.as_ref() else {
+            return Err(AgentTaskError::Unavailable {
+                reason: CODEX_EXECUTABLE_UNCONFIGURED.to_string(),
+            });
+        };
         let backend_message =
             request
                 .backend_message()
@@ -248,7 +272,7 @@ impl AgentTaskBackend for CodexAppServerBackend {
         // taxonomy admits that string exactly once, at this boundary.
         let summary = run_prompt_with_codex_app_server(
             &backend_message,
-            &self.config,
+            config,
             "tracedecay_automation",
             matches!(
                 request.task,
@@ -270,11 +294,17 @@ impl AgentTaskBackend for CodexAppServerBackend {
             task: request.task,
             output_json,
             output_text: summary.text,
-            model: summary.model.or_else(|| self.config.model.clone()),
+            model: summary.model.or_else(|| config.model.clone()),
             provider: Some("codex".to_owned()),
             input_tokens: None,
             output_tokens: None,
         })
+    }
+
+    fn executable(&self) -> Option<&Path> {
+        self.config
+            .as_ref()
+            .map(|config| config.codex_bin.as_path())
     }
 }
 
@@ -322,6 +352,10 @@ mod tests {
                 input_tokens: None,
                 output_tokens: None,
             })
+        }
+
+        fn executable(&self) -> Option<&Path> {
+            None
         }
     }
 

@@ -313,7 +313,7 @@ mod tests {
         let report = temp.path().join("watchdog-hotpath.json");
         let output = Command::new(std::env::current_exe().expect("current test binary"))
             .arg("--exact")
-            .arg("daemon::shutdown_watchdog::tests::watchdog_exit_child")
+            .arg("shutdown::watchdog::tests::watchdog_exit_child")
             .arg("--nocapture")
             .env("TRACEDECAY_WATCHDOG_EXIT_CHILD", "1")
             .env("HOTPATH_METRICS_SERVER_OFF", "true")

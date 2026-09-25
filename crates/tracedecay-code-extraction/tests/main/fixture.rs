@@ -3,9 +3,52 @@
 use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_domain::*;
 
+include!("support/edges.rs");
+
 fn read_fixture(name: &str) -> String {
     let path = format!("../../tests/fixtures/{}", name);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("Failed to read {}: {}", path, e))
+}
+
+fn names<'a>(nodes: &[&'a Node]) -> Vec<&'a str> {
+    nodes.iter().map(|n| n.name.as_str()).collect()
+}
+
+fn kind_names(result: &ExtractionResult, kind: NodeKind) -> Vec<&str> {
+    result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == kind)
+        .map(|n| n.name.as_str())
+        .collect()
+}
+
+fn docstring_of<'a>(result: &'a ExtractionResult, kind: NodeKind, name: &str) -> Option<&'a str> {
+    result
+        .nodes
+        .iter()
+        .find(|n| n.kind == kind && n.name == name)
+        .unwrap_or_else(|| panic!("{kind:?} {name} not extracted"))
+        .docstring
+        .as_deref()
+}
+
+fn ref_names(result: &ExtractionResult, kind: EdgeKind) -> Vec<&str> {
+    result
+        .unresolved_refs
+        .iter()
+        .filter(|r| r.reference_kind == kind)
+        .map(|r| r.reference_name.as_str())
+        .collect()
+}
+
+/// Names of the nodes `parent` directly contains, in emission order.
+fn contained_children<'a>(result: &'a ExtractionResult, parent: &str) -> Vec<&'a str> {
+    edge_pairs(result, EdgeKind::Contains)
+        .into_iter()
+        .filter(|(source, _)| *source == parent)
+        .map(|(_, child)| child)
+        .collect()
 }
 
 // ── TypeScript ──────────────────────────────────────────────────────────────
@@ -14,7 +57,7 @@ fn read_fixture(name: &str) -> String {
 fn test_fixture_typescript() {
     let source = read_fixture("sample.ts");
     let extractor = tracedecay_code_extraction::TypeScriptExtractor;
-    let result = extractor.extract("sample.ts", &source);
+    let result = extractor.extract_artifact("sample.ts", &source).result;
     assert!(result.errors.is_empty(), "TS errors: {:?}", result.errors);
 
     // File root
@@ -26,11 +69,7 @@ fn test_fixture_typescript() {
         .iter()
         .filter(|n| n.kind == NodeKind::Use)
         .collect();
-    assert!(
-        imports.len() >= 2,
-        "expected >= 2 imports, got {}",
-        imports.len()
-    );
+    assert_eq!(names(&imports), ["events", "path"]);
 
     // Const
     let consts: Vec<_> = result
@@ -76,9 +115,22 @@ fn test_fixture_typescript() {
     let class = result
         .nodes
         .iter()
-        .find(|n| n.kind == NodeKind::Class && n.name == "UserService");
-    assert!(class.is_some(), "UserService class not found");
-    assert_eq!(class.unwrap().visibility, Visibility::Pub);
+        .find(|n| n.kind == NodeKind::Class && n.name == "UserService")
+        .expect("UserService class not found");
+    assert_eq!(class.visibility, Visibility::Pub);
+    assert_eq!(
+        contained_children(&result, "UserService"),
+        [
+            "id",
+            "name",
+            "_cache",
+            "settings",
+            "constructor",
+            "getDisplayName",
+            "fetchProfile",
+            "resetCache",
+        ]
+    );
 
     // Methods including async
     let methods: Vec<_> = result
@@ -86,10 +138,20 @@ fn test_fixture_typescript() {
         .iter()
         .filter(|n| n.kind == NodeKind::Method)
         .collect();
-    assert!(methods.len() >= 2, "expected >= 2 methods");
-    let fetch = methods.iter().find(|m| m.name == "fetchProfile");
-    assert!(fetch.is_some(), "fetchProfile method not found");
-    assert!(fetch.unwrap().is_async, "fetchProfile should be async");
+    assert_eq!(
+        names(&methods),
+        [
+            "getDisplayName",
+            "getDisplayName",
+            "fetchProfile",
+            "resetCache"
+        ]
+    );
+    let fetch = methods
+        .iter()
+        .find(|m| m.name == "fetchProfile")
+        .expect("fetchProfile method not found");
+    assert!(fetch.is_async, "fetchProfile should be async");
 
     // Arrow function (export const createUser = ...)
     assert!(
@@ -99,29 +161,20 @@ fn test_fixture_typescript() {
             .any(|n| n.kind == NodeKind::ArrowFunction && n.name == "createUser")
     );
 
-    // Call sites
-    assert!(
-        !result.unresolved_refs.is_empty(),
-        "expected call site refs"
+    assert_eq!(
+        ref_names(&result, EdgeKind::Calls),
+        [
+            "console.log",
+            "super",
+            "fetch",
+            "response.json",
+            "this._cache.set",
+            "log",
+            "this._cache.clear",
+        ]
     );
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Calls)
-    );
-
-    // Contains edges
-    assert!(result.edges.iter().any(|e| e.kind == EdgeKind::Contains));
-
-    // Extends edge (UserService extends EventEmitter)
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Extends),
-        "expected Extends ref for UserService"
-    );
+    assert_eq!(ref_names(&result, EdgeKind::Extends), ["EventEmitter"]);
+    assert_eq!(ref_names(&result, EdgeKind::Implements), ["IUser"]);
 }
 
 // ── JavaScript ──────────────────────────────────────────────────────────────
@@ -130,7 +183,7 @@ fn test_fixture_typescript() {
 fn test_fixture_javascript() {
     let source = read_fixture("sample.js");
     let extractor = tracedecay_code_extraction::TypeScriptExtractor;
-    let result = extractor.extract("sample.js", &source);
+    let result = extractor.extract_artifact("sample.js", &source).result;
     assert!(result.errors.is_empty(), "JS errors: {:?}", result.errors);
 
     assert!(
@@ -148,9 +201,9 @@ fn test_fixture_javascript() {
     let fetch_fn = result
         .nodes
         .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "fetchData");
-    assert!(fetch_fn.is_some());
-    assert!(fetch_fn.unwrap().is_async);
+        .find(|n| n.kind == NodeKind::Function && n.name == "fetchData")
+        .expect("fetchData function");
+    assert!(fetch_fn.is_async);
     assert!(
         result
             .nodes
@@ -165,7 +218,7 @@ fn test_fixture_javascript() {
 fn test_fixture_python() {
     let source = read_fixture("sample.py");
     let extractor = tracedecay_code_extraction::PythonExtractor;
-    let result = extractor.extract("sample.py", &source);
+    let result = extractor.extract_artifact("sample.py", &source).result;
     assert!(
         result.errors.is_empty(),
         "Python errors: {:?}",
@@ -181,10 +234,9 @@ fn test_fixture_python() {
         .iter()
         .filter(|n| n.kind == NodeKind::Use)
         .collect();
-    assert!(
-        imports.len() >= 3,
-        "expected >= 3 imports, got {}",
-        imports.len()
+    assert_eq!(
+        names(&imports),
+        ["os", "pathlib.Path", "typing.List", "typing.Optional"]
     );
 
     // Module-level constants
@@ -213,10 +265,18 @@ fn test_fixture_python() {
         .iter()
         .find(|n| n.kind == NodeKind::Function && n.name == "log")
         .unwrap();
-    assert!(log_fn.docstring.is_some(), "log() should have docstring");
+    assert_eq!(
+        log_fn.docstring.as_deref(),
+        Some("Log a message to stdout.")
+    );
 
     // Decorator
-    assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Decorator));
+    let decorators: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Decorator)
+        .collect();
+    assert_eq!(names(&decorators), ["retry", "property"]);
 
     // Classes
     assert!(
@@ -244,61 +304,77 @@ fn test_fixture_python() {
         .iter()
         .find(|n| n.kind == NodeKind::Class && n.name == "Connection")
         .unwrap();
-    assert!(conn.docstring.is_some(), "Connection should have docstring");
+    assert_eq!(
+        conn.docstring.as_deref(),
+        Some("Manages a network connection.")
+    );
 
-    // Methods
+    // Methods, with the nested Config class owned by Connection
+    assert_eq!(
+        contained_children(&result, "Base"),
+        ["__init__", "__repr__", "_internal_method"]
+    );
+    assert_eq!(
+        contained_children(&result, "Connection"),
+        [
+            "__init__",
+            "connect",
+            "disconnect",
+            "is_connected",
+            "Config"
+        ]
+    );
+    assert_eq!(
+        contained_children(&result, "Pool"),
+        ["__init__", "acquire", "release"]
+    );
     let methods: Vec<_> = result
         .nodes
         .iter()
         .filter(|n| n.kind == NodeKind::Method)
         .collect();
-    assert!(
-        methods.len() >= 5,
-        "expected >= 5 methods, got {}",
-        methods.len()
-    );
 
     // Async method
-    let connect = methods.iter().find(|m| m.name == "connect");
-    assert!(connect.is_some(), "connect method not found");
-    assert!(connect.unwrap().is_async, "connect should be async");
+    let connect = methods
+        .iter()
+        .find(|m| m.name == "connect")
+        .expect("connect method not found");
+    assert!(connect.is_async, "connect should be async");
 
     // Visibility: _internal_method is private
-    let internal = methods.iter().find(|m| m.name == "_internal_method");
-    assert!(internal.is_some());
-    assert_eq!(internal.unwrap().visibility, Visibility::Private);
-
-    // Nested class
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.kind == NodeKind::Class && n.name == "Config")
-    );
+    let internal = methods
+        .iter()
+        .find(|m| m.name == "_internal_method")
+        .expect("_internal_method");
+    assert_eq!(internal.visibility, Visibility::Private);
 
     // Inheritance
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Extends),
-        "expected Extends refs for class inheritance"
+    assert_eq!(
+        ref_names(&result, EdgeKind::Extends),
+        ["Base", "Connection"]
     );
 
     // Call sites
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Calls)
+    assert_eq!(
+        ref_names(&result, EdgeKind::Calls),
+        [
+            "print",
+            "super",
+            "super().__init__",
+            "log",
+            "super",
+            "super().__init__",
+            "self._connections.pop",
+            "Connection",
+            "conn.connect",
+            "self._connections.append",
+        ]
     );
 
     // Signature with type annotations should not be truncated
-    let log_sig = log_fn.signature.as_ref().unwrap();
-    assert!(
-        log_sig.contains("message"),
-        "log signature should contain 'message', got: {}",
-        log_sig
+    assert_eq!(
+        log_fn.signature.as_deref(),
+        Some("def log(message: str) -> None")
     );
 }
 
@@ -308,100 +384,85 @@ fn test_fixture_python() {
 fn test_fixture_c() {
     let source = read_fixture("sample.c");
     let extractor = tracedecay_code_extraction::CExtractor;
-    let result = extractor.extract("sample.c", &source);
+    let result = extractor.extract_artifact("sample.c", &source).result;
     assert!(result.errors.is_empty(), "C errors: {:?}", result.errors);
 
-    // Includes
-    let includes: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Include)
-        .collect();
-    assert!(includes.len() >= 3, "expected >= 3 includes");
-
-    // Preprocessor defines
-    let defs: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::PreprocessorDef)
-        .collect();
-    assert!(defs.iter().any(|n| n.name == "MAX_BUFFER_SIZE"));
-
-    // Typedef struct
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.kind == NodeKind::Typedef && n.name == "Point")
+    assert_eq!(
+        kind_names(&result, NodeKind::Include),
+        ["stdio.h", "stdlib.h", "string.h"]
     );
-
-    // Struct with fields
-    let fields: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Field)
-        .collect();
-    assert!(fields.len() >= 2, "expected struct fields");
-
-    // Union
-    assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Union));
-
-    // Enum
-    assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Enum));
-    let variants: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::EnumVariant)
-        .collect();
-    assert!(variants.len() >= 4, "expected >= 4 enum variants");
-
-    // Function pointer typedef
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.kind == NodeKind::Typedef && n.name == "Callback")
+    assert_eq!(
+        kind_names(&result, NodeKind::PreprocessorDef),
+        ["MAX_BUFFER_SIZE"]
     );
-
-    // Functions
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.kind == NodeKind::Function && n.name == "point_distance")
+    assert_eq!(
+        kind_names(&result, NodeKind::Typedef),
+        ["Point", "Variant", "Status", "Callback"]
     );
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.kind == NodeKind::Function && n.name == "main")
+    assert_eq!(kind_names(&result, NodeKind::Struct), ["Point", "Color"]);
+    assert_eq!(
+        kind_names(&result, NodeKind::Field),
+        [
+            "x",
+            "y",
+            "r",
+            "g",
+            "b",
+            "a",
+            "int_val",
+            "float_val",
+            "str_val",
+        ]
+    );
+    assert_eq!(kind_names(&result, NodeKind::Union), ["Variant"]);
+    assert_eq!(kind_names(&result, NodeKind::Enum), ["Status"]);
+    assert_eq!(
+        kind_names(&result, NodeKind::EnumVariant),
+        [
+            "STATUS_OK",
+            "STATUS_ERROR",
+            "STATUS_PENDING",
+            "STATUS_TIMEOUT",
+        ]
+    );
+    assert_eq!(
+        kind_names(&result, NodeKind::Function),
+        [
+            "point_distance",
+            "point_new",
+            "set_error",
+            "process_variant",
+            "main",
+        ]
     );
 
     // Static function is private
     let set_err = result
         .nodes
         .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "set_error");
-    assert!(set_err.is_some());
-    assert_eq!(set_err.unwrap().visibility, Visibility::Private);
+        .find(|n| n.kind == NodeKind::Function && n.name == "set_error")
+        .expect("set_error function");
+    assert_eq!(set_err.visibility, Visibility::Private);
 
-    // Docstrings
-    let dist_fn = result
-        .nodes
-        .iter()
-        .find(|n| n.name == "point_distance")
-        .unwrap();
-    assert!(
-        dist_fn.docstring.is_some(),
-        "point_distance should have docstring"
+    assert_eq!(
+        docstring_of(&result, NodeKind::Function, "point_distance"),
+        Some("Compute the distance between two points.")
     );
 
-    // Call sites
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Calls)
+    assert_eq!(
+        ref_names(&result, EdgeKind::Calls),
+        [
+            "sqrt",
+            "strncpy",
+            "cb",
+            "printf",
+            "set_error",
+            "point_new",
+            "point_new",
+            "point_distance",
+            "printf",
+            "process_variant",
+        ]
     );
 }
 
@@ -411,7 +472,7 @@ fn test_fixture_c() {
 fn test_fixture_c_header() {
     let source = read_fixture("sample.h");
     let extractor = tracedecay_code_extraction::CExtractor;
-    let result = extractor.extract("sample.h", &source);
+    let result = extractor.extract_artifact("sample.h", &source).result;
     assert!(
         result.errors.is_empty(),
         "C header errors: {:?}",
@@ -437,8 +498,11 @@ fn test_fixture_c_header() {
             .any(|n| n.kind == NodeKind::Typedef && n.name == "Rect")
     );
 
-    // Enum
-    assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Enum));
+    assert_eq!(kind_names(&result, NodeKind::Enum), ["LogLevel"]);
+    assert_eq!(
+        kind_names(&result, NodeKind::Function),
+        ["rect_new", "rect_area", "rect_contains", "log_init"]
+    );
 }
 
 // ── C++ ─────────────────────────────────────────────────────────────────────
@@ -447,7 +511,7 @@ fn test_fixture_c_header() {
 fn test_fixture_cpp() {
     let source = read_fixture("sample.cpp");
     let extractor = tracedecay_code_extraction::CppExtractor;
-    let result = extractor.extract("sample.cpp", &source);
+    let result = extractor.extract_artifact("sample.cpp", &source).result;
     assert!(result.errors.is_empty(), "C++ errors: {:?}", result.errors);
 
     // Namespace
@@ -488,41 +552,35 @@ fn test_fixture_cpp() {
             .any(|n| n.kind == NodeKind::Class && n.name == "Rectangle")
     );
 
-    // Template class
-    assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Template));
-
-    // Methods
-    let methods: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Method)
-        .collect();
-    assert!(methods.len() >= 4, "expected >= 4 methods");
-
-    // Enum class
-    assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Enum));
-
-    // Union
-    assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Union));
-
-    // Typedef
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.kind == NodeKind::Typedef && n.name == "EntityId")
+    assert_eq!(kind_names(&result, NodeKind::Template), ["FixedBuffer"]);
+    assert_eq!(
+        kind_names(&result, NodeKind::Method),
+        [
+            "length",
+            "~Shape",
+            "name",
+            "area",
+            "perimeter",
+            "center",
+            "radius",
+            "~Rectangle",
+            "area",
+            "perimeter",
+        ]
     );
-
-    // Typedef
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.kind == NodeKind::Typedef && n.name == "EntityId")
+    assert_eq!(
+        kind_names(&result, NodeKind::AbstractMethod),
+        ["area", "perimeter"]
     );
-
-    // Includes
-    assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Include));
+    assert_eq!(kind_names(&result, NodeKind::Enum), ["Color"]);
+    // `} // namespace geom` trails code two lines above, so it documents nothing.
+    assert_eq!(docstring_of(&result, NodeKind::Enum, "Color"), None);
+    assert_eq!(kind_names(&result, NodeKind::Union), ["Number"]);
+    assert_eq!(kind_names(&result, NodeKind::Typedef), ["EntityId"]);
+    assert_eq!(
+        kind_names(&result, NodeKind::Include),
+        ["iostream", "string", "vector", "memory"]
+    );
 
     // Preprocessor def
     assert!(
@@ -536,25 +594,26 @@ fn test_fixture_cpp() {
     let helper = result
         .nodes
         .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "internal_helper");
-    assert!(helper.is_some());
-    assert_eq!(helper.unwrap().visibility, Visibility::Private);
+        .find(|n| n.kind == NodeKind::Function && n.name == "internal_helper")
+        .expect("internal_helper function");
+    assert_eq!(helper.visibility, Visibility::Private);
 
-    // Inheritance edges
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Extends),
-        "expected Extends refs for class inheritance"
-    );
+    // Circle and Rectangle both extend Shape
+    assert_eq!(ref_names(&result, EdgeKind::Extends), ["Shape", "Shape"]);
 
-    // Call sites
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Calls)
+    assert_eq!(
+        ref_names(&result, EdgeKind::Calls),
+        [
+            "std::sqrt",
+            "shape.name",
+            "shape.area",
+            "shape.perimeter",
+            "print_shape",
+            "print_shape",
+            "buffer.push",
+            "buffer.push",
+            "internal_helper",
+        ]
     );
 }
 
@@ -564,119 +623,84 @@ fn test_fixture_cpp() {
 fn test_fixture_kotlin() {
     let source = read_fixture("sample.kt");
     let extractor = tracedecay_code_extraction::KotlinExtractor;
-    let result = extractor.extract("sample.kt", &source);
+    let result = extractor.extract_artifact("sample.kt", &source).result;
     assert!(
         result.errors.is_empty(),
         "Kotlin errors: {:?}",
         result.errors
     );
 
-    // Package
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.kind == NodeKind::KotlinPackage)
+    assert_eq!(
+        kind_names(&result, NodeKind::KotlinPackage),
+        ["com.example.app"]
     );
-
-    // Imports
-    let imports: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Use)
-        .collect();
-    assert!(imports.len() >= 2, "expected >= 2 imports");
-
-    // Data class
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.kind == NodeKind::DataClass && n.name == "Point")
+    assert_eq!(
+        kind_names(&result, NodeKind::Use),
+        ["kotlin.math.sqrt", "java.time.Instant"]
     );
-
-    // Sealed class
-    assert!(result.nodes.iter().any(|n| n.kind == NodeKind::SealedClass));
-
-    // Interface
-    let iface = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Interface || n.kind == NodeKind::Trait);
-    assert!(iface.is_some(), "Repository interface not found");
-
-    // Annotation (may be Decorator or AnnotationUsage depending on extractor)
-    let has_annotation = result
-        .nodes
-        .iter()
-        .any(|n| n.kind == NodeKind::Decorator || n.kind == NodeKind::AnnotationUsage);
-    assert!(has_annotation, "expected annotation nodes");
-
-    // Abstract class
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.kind == NodeKind::Class && n.name == "Entity")
+    assert_eq!(
+        kind_names(&result, NodeKind::DataClass),
+        ["Point", "Success", "Failure"]
     );
-
-    // Regular class with properties
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.kind == NodeKind::Class && n.name == "User")
+    assert_eq!(kind_names(&result, NodeKind::SealedClass), ["Result"]);
+    assert_eq!(kind_names(&result, NodeKind::Trait), ["Repository"]);
+    assert_eq!(
+        kind_names(&result, NodeKind::AnnotationUsage),
+        ["Target", "Retention", "Cacheable"]
     );
-    let properties: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Property)
-        .collect();
-    assert!(properties.len() >= 2, "expected >= 2 properties");
-
-    // Companion object
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.kind == NodeKind::CompanionObject)
+    assert_eq!(
+        kind_names(&result, NodeKind::Class),
+        ["Cacheable", "Entity", "User"]
     );
-
-    // Enum class
-    assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Enum));
-
-    // Object declaration (singleton)
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.kind == NodeKind::KotlinObject && n.name == "Logger")
+    assert_eq!(
+        kind_names(&result, NodeKind::Property),
+        ["MAX_RETRIES", "APP_NAME", "createdAt", "lastLogin"]
     );
-
-    // Extension function
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.kind == NodeKind::Function && n.name.contains("toSlug"))
+    assert_eq!(
+        kind_names(&result, NodeKind::CompanionObject),
+        ["Companion"]
+    );
+    assert_eq!(kind_names(&result, NodeKind::Enum), ["Role"]);
+    assert_eq!(
+        kind_names(&result, NodeKind::KotlinObject),
+        ["Loading", "Logger"]
+    );
+    assert_eq!(
+        kind_names(&result, NodeKind::Function),
+        ["toSlug", "processUser", "helperFunction"]
     );
 
     // Visibility: protected helper
-    let helper = result.nodes.iter().find(|n| n.name == "helperFunction");
-    if let Some(h) = helper {
-        assert_eq!(
-            h.visibility,
-            Visibility::PubSuper,
-            "protected should be PubSuper"
-        );
-    }
+    let helper = result
+        .nodes
+        .iter()
+        .find(|n| n.name == "helperFunction")
+        .expect("helperFunction");
+    assert_eq!(
+        helper.visibility,
+        Visibility::PubSuper,
+        "protected should be PubSuper"
+    );
 
-    // Call sites
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Calls)
+    assert_eq!(
+        ref_names(&result, EdgeKind::Calls),
+        [
+            "sqrt",
+            "name.isNotBlank",
+            "email.contains",
+            "println",
+            "mapOf",
+            "User",
+            "println",
+            "println",
+            "this.lowercase",
+            "this.lowercase().replace",
+            "repo.count",
+            "Logger.info",
+            "Result.Success",
+            "User.guest",
+            "Logger.info",
+        ]
     );
 }
 
@@ -687,26 +711,17 @@ fn test_fixture_kotlin() {
 fn test_fixture_dart() {
     let source = read_fixture("sample.dart");
     let extractor = tracedecay_code_extraction::DartExtractor;
-    let result = extractor.extract("sample.dart", &source);
+    let result = extractor.extract_artifact("sample.dart", &source).result;
     assert!(result.errors.is_empty(), "Dart errors: {:?}", result.errors);
 
-    // Library
-    assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Library));
-
-    // Imports
-    let imports: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Use)
-        .collect();
-    assert!(imports.len() >= 2, "expected >= 2 imports");
-
-    // Enum
-    assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Enum));
-
-    // Abstract class (may map to Interface or Class)
-    let serializable = result.nodes.iter().find(|n| n.name == "Serializable");
-    assert!(serializable.is_some(), "Serializable not found");
+    assert_eq!(kind_names(&result, NodeKind::Library), ["sample"]);
+    assert_eq!(
+        kind_names(&result, NodeKind::Use),
+        ["dart:async", "dart:convert"]
+    );
+    assert_eq!(kind_names(&result, NodeKind::Enum), ["LogLevel"]);
+    // The abstract class is modelled as an interface
+    assert_eq!(kind_names(&result, NodeKind::Interface), ["Serializable"]);
 
     // Mixin
     assert!(
@@ -732,36 +747,51 @@ fn test_fixture_dart() {
             .any(|n| n.kind == NodeKind::Extension && n.name == "StringUtils")
     );
 
-    // Methods
-    let methods: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Method)
-        .collect();
-    assert!(methods.len() >= 2, "expected >= 2 methods");
+    assert_eq!(
+        kind_names(&result, NodeKind::Method),
+        [
+            "toJson",
+            "toJsonString",
+            "createdAt",
+            "updatedAt",
+            "age",
+            "toJson",
+            "fetchProfile",
+            "_isValid",
+            "_logAction",
+            "toSlug",
+            "isBlank",
+        ]
+    );
+    assert_eq!(
+        kind_names(&result, NodeKind::Constructor),
+        ["User", "User.guest"]
+    );
 
-    // Constructor
-    assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Constructor));
-
-    // Private visibility (_email, _isValid, _logAction)
+    // Underscore-prefixed members are library-private
     let privates: Vec<_> = result
         .nodes
         .iter()
-        .filter(|n| n.visibility == Visibility::Private)
+        .filter(|n| n.visibility == Visibility::Private && n.name.starts_with('_'))
         .collect();
-    assert!(!privates.is_empty(), "expected private members");
+    assert_eq!(names(&privates), ["_email", "_isValid", "_logAction"]);
 
     // Async function
-    let process = result.nodes.iter().find(|n| n.name == "processUsers");
-    if let Some(p) = process {
-        assert!(p.is_async, "processUsers should be async");
-    }
+    let process = result
+        .nodes
+        .iter()
+        .find(|n| n.name == "processUsers")
+        .expect("processUsers function");
+    assert!(process.is_async, "processUsers should be async");
 
-    // Typedef
-    assert!(result.nodes.iter().any(|n| n.kind == NodeKind::TypeAlias));
-
-    // Contains edges
-    assert!(result.edges.iter().any(|e| e.kind == EdgeKind::Contains));
+    assert_eq!(
+        kind_names(&result, NodeKind::TypeAlias),
+        ["JsonMap", "Callback"]
+    );
+    assert_eq!(
+        contained_children(&result, "StringUtils"),
+        ["toSlug", "isBlank"]
+    );
 }
 
 // ── C# ──────────────────────────────────────────────────────────────────────
@@ -770,133 +800,120 @@ fn test_fixture_dart() {
 fn test_fixture_csharp() {
     let source = read_fixture("sample.cs");
     let extractor = tracedecay_code_extraction::CSharpExtractor;
-    let result = extractor.extract("sample.cs", &source);
+    let result = extractor.extract_artifact("sample.cs", &source).result;
     assert!(result.errors.is_empty(), "C# errors: {:?}", result.errors);
 
-    // Namespace
-    assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Namespace));
+    assert_eq!(
+        kind_names(&result, NodeKind::Namespace),
+        ["SampleApp.Models"]
+    );
+    assert_eq!(
+        kind_names(&result, NodeKind::Use),
+        [
+            "System",
+            "System.Collections.Generic",
+            "System.Threading.Tasks",
+        ]
+    );
+    assert_eq!(kind_names(&result, NodeKind::Enum), ["LogLevel"]);
+    assert_eq!(kind_names(&result, NodeKind::Record), ["AppConfig"]);
+    assert_eq!(
+        kind_names(&result, NodeKind::Delegate),
+        ["StatusChangedHandler"]
+    );
+    assert_eq!(
+        kind_names(&result, NodeKind::Interface),
+        ["IEntity", "IRepository"]
+    );
+    assert_eq!(
+        kind_names(&result, NodeKind::AnnotationUsage),
+        ["AttributeUsage", "Cacheable"]
+    );
+    assert_eq!(
+        kind_names(&result, NodeKind::Class),
+        ["CacheableAttribute", "Entity", "User"]
+    );
+    assert_eq!(
+        kind_names(&result, NodeKind::Method),
+        [
+            "Validate",
+            "FindByIdAsync",
+            "GetAllAsync",
+            "Validate",
+            "Validate",
+            "FetchProfileAsync",
+            "LogAction",
+            "DistanceTo",
+        ]
+    );
+    assert_eq!(
+        kind_names(&result, NodeKind::Constructor),
+        ["CacheableAttribute", "Entity", "User", "Point"]
+    );
+    assert_eq!(
+        kind_names(&result, NodeKind::CSharpProperty),
+        [
+            "Id",
+            "Count",
+            "TtlSeconds",
+            "Id",
+            "CreatedAt",
+            "Name",
+            "Level",
+            "IsActive",
+            "InstanceCount",
+            "X",
+            "Y",
+        ]
+    );
+    assert_eq!(kind_names(&result, NodeKind::Event), ["StatusChanged"]);
+    assert_eq!(
+        kind_names(&result, NodeKind::Field),
+        ["_email", "_instanceCount"]
+    );
+    assert_eq!(kind_names(&result, NodeKind::Struct), ["Point"]);
 
-    // Using directives
-    let usings: Vec<_> = result
+    // Visibility: private fields, internal property
+    for field in ["_email", "_instanceCount"] {
+        let node = result
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Field && n.name == field)
+            .expect("field");
+        assert_eq!(node.visibility, Visibility::Private, "{field}");
+    }
+    let internal: Vec<_> = result
         .nodes
         .iter()
-        .filter(|n| n.kind == NodeKind::Use)
+        .filter(|n| n.visibility == Visibility::PubCrate)
         .collect();
-    assert!(usings.len() >= 3, "expected >= 3 using directives");
-
-    // Enum
-    assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Enum));
-
-    // Record
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.kind == NodeKind::Record && n.name == "AppConfig")
-    );
-
-    // Delegate
-    assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Delegate));
-
-    // Interfaces
-    let ifaces: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Interface)
-        .collect();
-    assert!(ifaces.len() >= 2, "expected >= 2 interfaces");
-
-    // Attribute (decorator)
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.kind == NodeKind::AnnotationUsage || n.kind == NodeKind::Decorator)
-    );
-
-    // Abstract class
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.kind == NodeKind::Class && n.name == "Entity")
-    );
-
-    // Class with methods
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.kind == NodeKind::Class && n.name == "User")
-    );
-    let methods: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Method)
-        .collect();
-    assert!(methods.len() >= 3, "expected >= 3 methods");
-
-    // Constructor
-    assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Constructor));
-
-    // Properties
-    let props: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::CSharpProperty)
-        .collect();
-    assert!(props.len() >= 2, "expected >= 2 properties");
-
-    // Event
-    assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Event));
-
-    // Fields
-    assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Field));
-
-    // Struct
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.kind == NodeKind::Struct && n.name == "Point")
-    );
-
-    // Visibility: private, internal, protected
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.visibility == Visibility::Private)
-    );
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.visibility == Visibility::PubCrate)
-    ); // internal
+    assert_eq!(names(&internal), ["Level"]);
 
     // Async method
-    let fetch = methods.iter().find(|m| m.name == "FetchProfileAsync");
-    if let Some(f) = fetch {
-        assert!(f.is_async, "FetchProfileAsync should be async");
-    }
+    let fetch = result
+        .nodes
+        .iter()
+        .find(|m| m.kind == NodeKind::Method && m.name == "FetchProfileAsync")
+        .expect("FetchProfileAsync method");
+    assert!(fetch.is_async, "FetchProfileAsync should be async");
 
-    // Inheritance
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Extends
-                || r.reference_kind == EdgeKind::Implements),
-        "expected inheritance refs"
+    assert_eq!(
+        ref_names(&result, EdgeKind::Extends),
+        ["Attribute", "IEntity", "Entity"]
     );
-
-    // Call sites
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Calls)
+    assert_eq!(
+        ref_names(&result, EdgeKind::Calls),
+        [
+            "string.IsNullOrWhiteSpace",
+            "_email.Contains",
+            "Task.Delay",
+            "Console.WriteLine",
+            "StatusChanged?.Invoke",
+            "new Dictionary<string, object>",
+            "Level.ToString",
+            "Console.WriteLine",
+            "Math.Sqrt",
+        ]
     );
 }
 
@@ -907,129 +924,63 @@ fn test_fixture_csharp() {
 fn test_fixture_php() {
     let source = read_fixture("sample.php");
     let extractor = tracedecay_code_extraction::PhpExtractor;
-    let result = extractor.extract("sample.php", &source);
+    let result = extractor.extract_artifact("sample.php", &source).result;
     assert!(result.errors.is_empty(), "PHP errors: {:?}", result.errors);
 
     // File root node
     assert!(result.nodes.iter().any(|n| n.kind == NodeKind::File));
 
     // Namespace (mapped to NodeKind::Module in PHP extractor)
-    assert!(
-        result.nodes.iter().any(|n| n.kind == NodeKind::Module),
-        "expected a namespace/module node"
-    );
+    assert_eq!(kind_names(&result, NodeKind::Module), [r"App\Http"]);
 
-    // Use nodes: the PHP extractor extracts trait `use` declarations inside class bodies as
-    // NodeKind::Use. Namespace-level `use` imports use a different grammar node
-    // (namespace_use_declaration) that is not yet mapped. We expect >= 2 Use nodes
-    // because both Connection (use Timestamps) and Pool (use Loggable) have trait uses.
-    let imports: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Use)
-        .collect();
-    assert!(
-        imports.len() >= 2,
-        "expected >= 2 Use nodes (trait uses), got {}",
-        imports.len()
+    // Use nodes are the trait `use` declarations inside class bodies:
+    // Connection uses Timestamps and Pool uses Loggable.
+    assert_eq!(
+        kind_names(&result, NodeKind::Use),
+        ["Timestamps", "Loggable"]
     );
 
     // Interface and Trait (both mapped to NodeKind::Trait)
-    let traits: Vec<_> = result
+    assert_eq!(
+        kind_names(&result, NodeKind::Trait),
+        ["ConnectionInterface", "Timestamps", "Loggable"]
+    );
+    assert_eq!(kind_names(&result, NodeKind::Class), ["Connection", "Pool"]);
+    assert_eq!(
+        contained_children(&result, "Connection"),
+        [
+            "Timestamps",
+            "host",
+            "port",
+            "connected",
+            "__construct",
+            "connect",
+            "disconnect",
+            "validatePort",
+        ]
+    );
+    assert_eq!(kind_names(&result, NodeKind::Enum), ["ConnectionState"]);
+    assert_eq!(
+        kind_names(&result, NodeKind::Field),
+        ["connectedAt", "host", "port", "connected", "size"]
+    );
+
+    // Visibility: private members
+    let privates: Vec<_> = result
         .nodes
         .iter()
-        .filter(|n| n.kind == NodeKind::Trait)
+        .filter(|n| n.visibility == Visibility::Private && n.kind != NodeKind::Use)
         .collect();
-    assert!(
-        traits.len() >= 2,
-        "expected >= 2 Trait nodes (interface + trait), got {}",
-        traits.len()
-    );
-    assert!(
-        traits.iter().any(|n| n.name == "ConnectionInterface"),
-        "ConnectionInterface not found"
-    );
-    assert!(
-        traits.iter().any(|n| n.name == "Timestamps"),
-        "Timestamps trait not found"
+    assert_eq!(
+        names(&privates),
+        ["connectedAt", "port", "connected", "validatePort", "size"]
     );
 
-    // Classes
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.kind == NodeKind::Class && n.name == "Connection"),
-        "Connection class not found"
-    );
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.kind == NodeKind::Class && n.name == "Pool"),
-        "Pool class not found"
-    );
-
-    // Methods (>= 3)
-    let methods: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Method)
-        .collect();
-    assert!(
-        methods.len() >= 3,
-        "expected >= 3 methods, got {}",
-        methods.len()
-    );
-
-    // Enum
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.kind == NodeKind::Enum && n.name == "ConnectionState"),
-        "ConnectionState enum not found"
-    );
-
-    // Fields (properties)
-    let fields: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Field)
-        .collect();
-    assert!(!fields.is_empty(), "expected property/field nodes");
-
-    // Visibility: has private members
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.visibility == Visibility::Private),
-        "expected at least one private member"
-    );
-
-    // Inheritance: Extends refs (Pool extends Connection)
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Extends),
-        "expected Extends ref for Pool extends Connection"
-    );
-
-    // Call sites
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Calls),
-        "expected Calls refs"
-    );
-
-    // Contains edges
-    assert!(
-        result.edges.iter().any(|e| e.kind == EdgeKind::Contains),
-        "expected Contains edges"
+    // Pool extends Connection
+    assert_eq!(ref_names(&result, EdgeKind::Extends), ["Connection"]);
+    assert_eq!(
+        ref_names(&result, EdgeKind::Calls),
+        ["error_log", "log_message", "log_message"]
     );
 }
 
@@ -1040,23 +991,15 @@ fn test_fixture_php() {
 fn test_fixture_pascal() {
     let source = read_fixture("sample.pas");
     let extractor = tracedecay_code_extraction::PascalExtractor;
-    let result = extractor.extract("sample.pas", &source);
+    let result = extractor.extract_artifact("sample.pas", &source).result;
     assert!(
         result.errors.is_empty(),
         "Pascal errors: {:?}",
         result.errors
     );
 
-    // Unit declaration
-    assert!(result.nodes.iter().any(|n| n.kind == NodeKind::PascalUnit));
-
-    // Uses clause
-    let uses: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Use)
-        .collect();
-    assert!(uses.len() >= 2, "expected >= 2 uses");
+    assert_eq!(kind_names(&result, NodeKind::PascalUnit), ["SampleUnit"]);
+    assert_eq!(kind_names(&result, NodeKind::Use), ["SysUtils", "Classes"]);
 
     // Constants
     assert!(
@@ -1074,25 +1017,21 @@ fn test_fixture_pascal() {
             .any(|n| n.kind == NodeKind::PascalRecord && n.name == "TPoint")
     );
 
-    // Interface type
-    assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Interface));
-
-    // Classes
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.kind == NodeKind::Class && n.name == "TEntity")
+    assert_eq!(kind_names(&result, NodeKind::Interface), ["ISerializable"]);
+    assert_eq!(kind_names(&result, NodeKind::Class), ["TEntity", "TUser"]);
+    assert_eq!(
+        contained_children(&result, "TEntity"),
+        [
+            "FId",
+            "FCreatedAt",
+            "GetId",
+            "Create",
+            "Destroy",
+            "Validate",
+            "Id",
+            "CreatedAt",
+        ]
     );
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.kind == NodeKind::Class && n.name == "TUser")
-    );
-
-    // Constructor
-    assert!(result.nodes.iter().any(|n| n.kind == NodeKind::Constructor));
 
     // Functions and procedures
     assert!(
@@ -1108,32 +1047,22 @@ fn test_fixture_pascal() {
             .any(|n| n.kind == NodeKind::Procedure && n.name == "LogMessage")
     );
 
-    // Methods
-    let methods: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Method)
-        .collect();
-    assert!(methods.len() >= 2, "expected >= 2 methods");
-
-    // Properties
-    let properties: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Property)
-        .collect();
-    assert!(!properties.is_empty(), "expected >= 1 property");
-
-    // Visibility: private members
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.visibility == Visibility::Private)
+    assert_eq!(
+        kind_names(&result, NodeKind::Property),
+        ["Id", "CreatedAt", "Name", "Level"]
     );
+    assert_eq!(contained_children(&result, "TPoint"), ["X", "Y"]);
 
-    // Contains edges
-    assert!(result.edges.iter().any(|e| e.kind == EdgeKind::Contains));
+    // Visibility: fields declared in `private` sections
+    let private_fields: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Field && n.visibility == Visibility::Private)
+        .collect();
+    assert_eq!(
+        names(&private_fields),
+        ["FId", "FCreatedAt", "FName", "FEmail", "FLevel"]
+    );
 }
 
 // ── Ruby ────────────────────────────────────────────────────────────────────
@@ -1143,7 +1072,7 @@ fn test_fixture_pascal() {
 fn test_fixture_ruby() {
     let source = read_fixture("sample.rb");
     let extractor = tracedecay_code_extraction::RubyExtractor;
-    let result = extractor.extract("sample.rb", &source);
+    let result = extractor.extract_artifact("sample.rb", &source).result;
     assert!(result.errors.is_empty(), "Ruby errors: {:?}", result.errors);
 
     // File root node
@@ -1206,48 +1135,45 @@ fn test_fixture_ruby() {
         "nested Config class not found"
     );
 
-    // Methods (>= 3)
-    let methods: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Method)
-        .collect();
-    assert!(
-        methods.len() >= 3,
-        "expected >= 3 methods, got {}",
-        methods.len()
+    // `log` is defined inside a module, so it is a Method of Networking.
+    assert_eq!(
+        contained_children(&result, "Networking"),
+        [
+            "MAX_CONNECTIONS",
+            "DEFAULT_TIMEOUT",
+            "log",
+            "Base",
+            "Connection",
+            "Pool",
+        ]
     );
-
-    // Top-level function (log is defined inside a module, class_depth > 0, so it's a Method;
-    // but `log` is at module level, class_depth is incremented for modules too).
-    // Accept either Function or Method for `log`.
-    assert!(
-        result.nodes.iter().any(
-            |n| (n.kind == NodeKind::Function || n.kind == NodeKind::Method) && n.name == "log"
-        ),
-        "log function/method not found"
+    assert_eq!(
+        contained_children(&result, "Connection"),
+        [
+            "initialize",
+            "connect",
+            "disconnect",
+            "connected?",
+            "Config"
+        ]
+    );
+    assert_eq!(
+        contained_children(&result, "Config"),
+        ["initialize", "valid?"]
     );
 
     // Inheritance: Connection < Base, Pool < Connection
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Extends),
-        "expected Extends refs for class inheritance"
+    assert_eq!(
+        ref_names(&result, EdgeKind::Extends),
+        ["Base", "Connection"]
     );
-
-    // Call sites
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Calls),
-        "expected Calls refs"
+    assert_eq!(
+        ref_names(&result, EdgeKind::Calls),
+        [
+            "puts", "class", "name", "raise", "super", "log", "super", "empty?", "new", "connect",
+            "pop", "push",
+        ]
     );
-
-    // Contains edges
-    assert!(result.edges.iter().any(|e| e.kind == EdgeKind::Contains));
 }
 
 // -- Swift ────────────────────────────────────────────────────────────────────
@@ -1256,7 +1182,7 @@ fn test_fixture_ruby() {
 fn test_fixture_swift() {
     let source = read_fixture("sample.swift");
     let extractor = tracedecay_code_extraction::SwiftExtractor;
-    let result = extractor.extract("sample.swift", &source);
+    let result = extractor.extract_artifact("sample.swift", &source).result;
     assert!(
         result.errors.is_empty(),
         "Swift errors: {:?}",
@@ -1272,13 +1198,7 @@ fn test_fixture_swift() {
         .iter()
         .filter(|n| n.kind == NodeKind::Use)
         .collect();
-    assert!(
-        imports.len() >= 2,
-        "expected >= 2 imports, got {}",
-        imports.len()
-    );
-    assert!(imports.iter().any(|n| n.name == "Foundation"));
-    assert!(imports.iter().any(|n| n.name == "UIKit"));
+    assert_eq!(names(&imports), ["Foundation", "UIKit"]);
 
     // Top-level constant
     assert!(
@@ -1313,11 +1233,7 @@ fn test_fixture_swift() {
         .iter()
         .filter(|n| n.kind == NodeKind::EnumVariant)
         .collect();
-    assert!(
-        variants.len() >= 4,
-        "expected >= 4 enum variants, got {}",
-        variants.len()
-    );
+    assert_eq!(names(&variants), ["debug", "info", "warning", "error"]);
 
     // Protocol as Interface
     assert!(
@@ -1362,22 +1278,19 @@ fn test_fixture_swift() {
         "String extension not found"
     );
 
-    // Constructor
-    assert!(
-        result.nodes.iter().any(|n| n.kind == NodeKind::Constructor),
-        "expected at least one Constructor node"
-    );
-
-    // Methods (>= 3: description, validate, connect, disconnect, distance, toSlug, toJson, toJsonString)
-    let methods: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Method)
-        .collect();
-    assert!(
-        methods.len() >= 3,
-        "expected >= 3 methods, got {}",
-        methods.len()
+    assert_eq!(kind_names(&result, NodeKind::Constructor), ["init", "init"]);
+    assert_eq!(
+        kind_names(&result, NodeKind::Method),
+        [
+            "toJson",
+            "toJsonString",
+            "description",
+            "validate",
+            "connect",
+            "disconnect",
+            "distance",
+            "toSlug",
+        ]
     );
 
     // Top-level function
@@ -1395,62 +1308,58 @@ fn test_fixture_swift() {
         .iter()
         .filter(|n| n.kind == NodeKind::Property)
         .collect();
-    assert!(
-        props.len() >= 2,
-        "expected >= 2 properties, got {}",
-        props.len()
+    assert_eq!(
+        names(&props),
+        ["name", "port", "connected", "isConnected", "x", "y"]
     );
 
-    // Docstrings
-    let base = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Class && n.name == "Base")
-        .unwrap();
-    assert!(base.docstring.is_some(), "Base class should have docstring");
+    assert_eq!(
+        docstring_of(&result, NodeKind::Class, "Base"),
+        Some("Base class with shared functionality.")
+    );
 
     // Inheritance: Connection extends Base
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Extends),
-        "expected Extends refs for class inheritance"
+    assert_eq!(ref_names(&result, EdgeKind::Extends), ["Base"]);
+    assert_eq!(
+        ref_names(&result, EdgeKind::Calls),
+        [
+            "type",
+            "assert",
+            "init",
+            "print",
+            "squareRoot",
+            "lowercased",
+            "replacingOccurrences",
+            "map",
+            "description",
+        ]
     );
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Extends && r.reference_name == "Base"),
-        "expected Extends ref to Base"
+    assert_eq!(
+        contained_children(&result, "Connection"),
+        [
+            "port",
+            "connected",
+            "init",
+            "connect",
+            "disconnect",
+            "isConnected",
+        ]
     );
-
-    // Call sites
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Calls),
-        "expected Calls refs"
-    );
-
-    // Contains edges
-    assert!(result.edges.iter().any(|e| e.kind == EdgeKind::Contains));
 
     // Async method
-    let connect = result.nodes.iter().find(|n| n.name == "connect");
-    if let Some(c) = connect {
-        assert!(c.is_async, "connect should be async");
-    }
+    let connect = result
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::Method && n.name == "connect")
+        .expect("connect method");
+    assert!(connect.is_async, "connect should be async");
 
-    // Private visibility
-    assert!(
-        result
-            .nodes
-            .iter()
-            .any(|n| n.visibility == Visibility::Private),
-        "expected at least one private member"
-    );
+    let privates: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.visibility == Visibility::Private && n.kind != NodeKind::Use)
+        .collect();
+    assert_eq!(names(&privates), ["validate", "connected"]);
 }
 
 // ── Bash ────────────────────────────────────────────────────────────────────
@@ -1460,7 +1369,7 @@ fn test_fixture_swift() {
 fn test_fixture_bash() {
     let source = read_fixture("sample.sh");
     let extractor = tracedecay_code_extraction::BashExtractor;
-    let result = extractor.extract("sample.sh", &source);
+    let result = extractor.extract_artifact("sample.sh", &source).result;
     assert!(result.errors.is_empty(), "Bash errors: {:?}", result.errors);
 
     // File root node
@@ -1504,19 +1413,52 @@ fn test_fixture_bash() {
         .iter()
         .find(|n| n.kind == NodeKind::Function && n.name == "log")
         .unwrap();
-    assert!(log_fn.docstring.is_some(), "log should have docstring");
-
-    // Call sites
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Calls),
-        "expected Calls refs"
+    assert_eq!(
+        log_fn.docstring.as_deref(),
+        Some("Logs a message with timestamp.")
     );
 
-    // Contains edges
-    assert!(result.edges.iter().any(|e| e.kind == EdgeKind::Contains));
+    assert_eq!(
+        ref_names(&result, EdgeKind::Calls),
+        [
+            "source",
+            "echo",
+            "date",
+            "log",
+            "return",
+            "log",
+            "return",
+            "return",
+            "log",
+            "seq",
+            "curl",
+            "log",
+            "return",
+            "log",
+            "sleep",
+            "return",
+            "log",
+            "validate_config",
+            "connect",
+            "log",
+            "exit",
+            "disconnect",
+            "main",
+        ]
+    );
+    assert_eq!(
+        contained_children(&result, "sample"),
+        [
+            "MAX_RETRIES",
+            "DEFAULT_PORT",
+            "./utils.sh",
+            "log",
+            "validate_config",
+            "connect",
+            "disconnect",
+            "main",
+        ]
+    );
 }
 
 // ── Lua ─────────────────────────────────────────────────────────────────────
@@ -1526,7 +1468,7 @@ fn test_fixture_bash() {
 fn test_fixture_lua() {
     let source = read_fixture("sample.lua");
     let extractor = tracedecay_code_extraction::LuaExtractor;
-    let result = extractor.extract("sample.lua", &source);
+    let result = extractor.extract_artifact("sample.lua", &source).result;
     assert!(result.errors.is_empty(), "Lua errors: {:?}", result.errors);
 
     // File root node
@@ -1585,19 +1527,46 @@ fn test_fixture_lua() {
         .iter()
         .find(|n| n.kind == NodeKind::Function && n.name == "log")
         .unwrap();
-    assert!(lua_log_fn.docstring.is_some(), "log should have docstring");
-
-    // Call sites
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Calls),
-        "expected Calls refs"
+    assert_eq!(
+        lua_log_fn.docstring.as_deref(),
+        Some(
+            "Logs a message with the given level.\n\
+             @param level string The log level\n\
+             @param message string The message to log"
+        )
     );
 
-    // Contains edges
-    assert!(result.edges.iter().any(|e| e.kind == EdgeKind::Contains));
+    assert_eq!(
+        ref_names(&result, EdgeKind::Calls),
+        [
+            "print",
+            "string.format",
+            "setmetatable",
+            "log",
+            "setmetatable",
+            "table.remove",
+            "Connection.new",
+            "conn:connect",
+            "table.insert",
+        ]
+    );
+    assert_eq!(
+        contained_children(&result, "sample.lua"),
+        [
+            "json",
+            "socket",
+            "MAX_RETRIES",
+            "DEFAULT_PORT",
+            "log",
+            "new",
+            "connect",
+            "disconnect",
+            "isConnected",
+            "new",
+            "acquire",
+            "release",
+        ]
+    );
 }
 
 // ── Zig ─────────────────────────────────────────────────────────────────────
@@ -1607,7 +1576,7 @@ fn test_fixture_lua() {
 fn test_fixture_zig() {
     let source = read_fixture("sample.zig");
     let extractor = tracedecay_code_extraction::ZigExtractor;
-    let result = extractor.extract("sample.zig", &source);
+    let result = extractor.extract_artifact("sample.zig", &source).result;
     assert!(result.errors.is_empty(), "Zig errors: {:?}", result.errors);
 
     // File root node
@@ -1681,36 +1650,23 @@ fn test_fixture_zig() {
     );
 
     // Fields
-    let fields: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Field)
-        .collect();
-    assert!(
-        fields.len() >= 5,
-        "expected >= 5 fields, got {}",
-        fields.len()
+    // Fields and methods nest under their structs
+    assert_eq!(
+        contained_children(&result, "Point"),
+        ["x", "y", "distance", "origin"]
     );
-    assert!(fields.iter().any(|f| f.name == "x"));
-    assert!(fields.iter().any(|f| f.name == "host"));
-
-    // Methods inside structs (distance, origin, init, connect, disconnect, isConnected)
-    let methods: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Method)
-        .collect();
-    assert!(
-        methods.len() >= 6,
-        "expected >= 6 methods, got {}",
-        methods.len()
+    assert_eq!(
+        contained_children(&result, "Connection"),
+        [
+            "host",
+            "port",
+            "connected",
+            "init",
+            "connect",
+            "disconnect",
+            "isConnected",
+        ]
     );
-    assert!(methods.iter().any(|m| m.name == "distance"));
-    assert!(methods.iter().any(|m| m.name == "origin"));
-    assert!(methods.iter().any(|m| m.name == "init"));
-    assert!(methods.iter().any(|m| m.name == "connect"));
-    assert!(methods.iter().any(|m| m.name == "disconnect"));
-    assert!(methods.iter().any(|m| m.name == "isConnected"));
 
     // Top-level functions (log, processConnections)
     let fns: Vec<_> = result
@@ -1757,20 +1713,18 @@ fn test_fixture_zig() {
         .iter()
         .find(|n| n.kind == NodeKind::Struct && n.name == "Point")
         .unwrap();
-    assert!(point.docstring.is_some(), "Point should have docstring");
-    assert!(point.docstring.as_ref().unwrap().contains("2D point"));
+    assert_eq!(point.docstring.as_deref(), Some("A 2D point."));
 
-    // Call sites
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Calls),
-        "expected Calls refs"
+    assert_eq!(
+        ref_names(&result, EdgeKind::Calls),
+        [
+            "std.debug.print",
+            "std.debug.print",
+            "conn.connect",
+            "p1.distance",
+            "std.testing.expectEqual",
+        ]
     );
-
-    // Contains edges
-    assert!(result.edges.iter().any(|e| e.kind == EdgeKind::Contains));
 }
 
 // ── Protobuf ────────────────────────────────────────────────────────────────
@@ -1780,7 +1734,7 @@ fn test_fixture_zig() {
 fn test_fixture_proto() {
     let source = read_fixture("sample.proto");
     let extractor = tracedecay_code_extraction::ProtoExtractor;
-    let result = extractor.extract("sample.proto", &source);
+    let result = extractor.extract_artifact("sample.proto", &source).result;
     assert!(
         result.errors.is_empty(),
         "Proto errors: {:?}",
@@ -1818,14 +1772,18 @@ fn test_fixture_proto() {
         .iter()
         .filter(|n| n.kind == NodeKind::ProtoMessage)
         .collect();
-    assert!(
-        msgs.len() >= 7,
-        "expected >= 7 messages, got {}",
-        msgs.len()
+    assert_eq!(
+        names(&msgs),
+        [
+            "Endpoint",
+            "ConnectionConfig",
+            "AuthConfig",
+            "ConnectionStatus",
+            "DisconnectRequest",
+            "HealthCheckRequest",
+            "HealthCheckResponse",
+        ]
     );
-    assert!(msgs.iter().any(|m| m.name == "Endpoint"));
-    assert!(msgs.iter().any(|m| m.name == "ConnectionConfig"));
-    assert!(msgs.iter().any(|m| m.name == "AuthConfig")); // nested
 
     // Enum + variants
     assert!(
@@ -1866,49 +1824,40 @@ fn test_fixture_proto() {
     assert!(rpcs.iter().any(|r| r.name == "Disconnect"));
     assert!(rpcs.iter().any(|r| r.name == "HealthCheck"));
 
-    // Fields
-    let fields: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Field)
-        .collect();
-    assert!(
-        fields.len() >= 15,
-        "expected >= 15 fields, got {}",
-        fields.len()
+    // Fields, with the nested AuthConfig message owned by ConnectionConfig
+    assert_eq!(
+        contained_children(&result, "Endpoint"),
+        ["host", "port", "tls"]
+    );
+    assert_eq!(
+        contained_children(&result, "ConnectionConfig"),
+        [
+            "endpoint",
+            "max_retries",
+            "timeout_ms",
+            "log_level",
+            "AuthConfig",
+            "auth",
+            "round_robin",
+            "least_connections",
+        ]
+    );
+    assert_eq!(
+        contained_children(&result, "AuthConfig"),
+        ["token", "username"]
+    );
+    assert_eq!(
+        contained_children(&result, "ConnectionService"),
+        ["Connect", "Disconnect", "HealthCheck"]
     );
 
-    // Docstrings
-    let endpoint = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::ProtoMessage && n.name == "Endpoint")
-        .unwrap();
-    assert!(
-        endpoint.docstring.is_some(),
-        "Endpoint should have docstring"
+    assert_eq!(
+        docstring_of(&result, NodeKind::ProtoMessage, "Endpoint"),
+        Some("A network endpoint.")
     );
-
-    let log_level = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Enum && n.name == "LogLevel")
-        .unwrap();
-    assert!(
-        log_level.docstring.is_some(),
-        "LogLevel should have docstring"
-    );
-
-    // Contains edges
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(
-        contains.len() >= 10,
-        "expected >= 10 Contains edges, got {}",
-        contains.len()
+    assert_eq!(
+        docstring_of(&result, NodeKind::Enum, "LogLevel"),
+        Some("Represents the log level.")
     );
 }
 
@@ -1919,7 +1868,7 @@ fn test_fixture_proto() {
 fn test_fixture_nix() {
     let source = read_fixture("sample.nix");
     let extractor = tracedecay_code_extraction::NixExtractor;
-    let result = extractor.extract("sample.nix", &source);
+    let result = extractor.extract_artifact("sample.nix", &source).result;
     assert!(result.errors.is_empty(), "Nix errors: {:?}", result.errors);
 
     // File root
@@ -1971,34 +1920,31 @@ fn test_fixture_nix() {
 
     // Docstrings
     let log_fn = fns.iter().find(|f| f.name == "log").unwrap();
-    assert!(log_fn.docstring.is_some(), "log should have docstring");
-
-    let net = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Module && n.name == "networking")
-        .unwrap();
-    assert!(net.docstring.is_some(), "networking should have docstring");
-
-    // Call sites
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Calls),
-        "expected call refs"
+    assert_eq!(log_fn.docstring.as_deref(), Some("Formats a log message."));
+    assert_eq!(
+        docstring_of(&result, NodeKind::Module, "networking"),
+        Some("Networking utilities.")
     );
 
-    // Contains edges
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(
-        contains.len() >= 5,
-        "expected >= 5 Contains edges, got {}",
-        contains.len()
+    assert_eq!(
+        ref_names(&result, EdgeKind::Calls),
+        [
+            "builtins.trace",
+            "builtins.trace",
+            "toString",
+            "toString",
+            "builtins.genList",
+            "builtins.genList",
+            "mkConnection",
+        ]
+    );
+    assert_eq!(
+        contained_children(&result, "networking"),
+        ["mkPool", "validateConfig", "defaultConfig"]
+    );
+    assert_eq!(
+        contained_children(&result, "defaultConfig"),
+        ["host", "port", "tls"]
     );
 
     // Inherit (Use) nodes
@@ -2030,7 +1976,7 @@ fn test_fixture_nix() {
 fn test_fixture_vbnet() {
     let source = read_fixture("sample.vb");
     let extractor = tracedecay_code_extraction::VbNetExtractor;
-    let result = extractor.extract("sample.vb", &source);
+    let result = extractor.extract_artifact("sample.vb", &source).result;
 
     // File root
     assert!(result.nodes.iter().any(|n| n.kind == NodeKind::File));
@@ -2077,14 +2023,7 @@ fn test_fixture_vbnet() {
         .iter()
         .filter(|n| n.kind == NodeKind::EnumVariant)
         .collect();
-    assert!(
-        variants.len() >= 4,
-        "expected >= 4 enum variants, got {}",
-        variants.len()
-    );
-    assert!(variants.iter().any(|v| v.name == "Debug"));
-    assert!(variants.iter().any(|v| v.name == "Info"));
-    assert!(variants.iter().any(|v| v.name == "Warning"));
+    assert_eq!(names(&variants), ["Debug", "Info", "Warning", "[Error]"]);
 
     // Interface
     assert!(
@@ -2129,43 +2068,29 @@ fn test_fixture_vbnet() {
         "Helpers module not found"
     );
 
-    // Methods
-    let methods: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Method)
-        .collect();
-    assert!(
-        methods.len() >= 5,
-        "expected >= 5 methods, got {}",
-        methods.len()
+    assert_eq!(
+        contained_children(&result, "Base"),
+        ["Name", "New", "Description", "Validate"]
     );
-
-    // Constructor
-    assert!(
-        result.nodes.iter().any(|n| n.kind == NodeKind::Constructor),
-        "expected at least one Constructor node"
+    assert_eq!(
+        contained_children(&result, "Connection"),
+        [
+            "Port",
+            "_connected",
+            "New",
+            "Connect",
+            "Disconnect",
+            "IsConnected",
+            "ToJson",
+        ]
     );
+    assert_eq!(contained_children(&result, "Point"), ["X", "Y", "Distance"]);
+    assert_eq!(contained_children(&result, "Helpers"), ["LogMessage"]);
 
-    // Properties
-    let props: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Property)
-        .collect();
-    assert!(
-        props.len() >= 2,
-        "expected >= 2 properties, got {}",
-        props.len()
+    assert_eq!(
+        docstring_of(&result, NodeKind::Class, "Base"),
+        Some("Base class with shared functionality.")
     );
-
-    // Docstrings on classes
-    let base = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Class && n.name == "Base")
-        .unwrap();
-    assert!(base.docstring.is_some(), "Base class should have docstring");
 
     // Inheritance: Connection extends Base
     assert!(
@@ -2184,17 +2109,18 @@ fn test_fixture_vbnet() {
         "expected Implements ref to ISerializable"
     );
 
-    // Call sites
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Calls),
-        "expected Calls refs"
+    assert_eq!(
+        ref_names(&result, EdgeKind::Calls),
+        [
+            "Me.GetType",
+            "Debug.Assert",
+            "String.IsNullOrEmpty",
+            "MyBase.New",
+            "Console.WriteLine",
+            "Math.Sqrt",
+            "Console.WriteLine",
+        ]
     );
-
-    // Contains edges
-    assert!(result.edges.iter().any(|e| e.kind == EdgeKind::Contains));
 }
 
 // ── PowerShell ──────────────────────────────────────────────────────────────
@@ -2204,7 +2130,7 @@ fn test_fixture_vbnet() {
 fn test_fixture_powershell() {
     let source = read_fixture("sample.ps1");
     let extractor = tracedecay_code_extraction::PowerShellExtractor;
-    let result = extractor.extract("sample.ps1", &source);
+    let result = extractor.extract_artifact("sample.ps1", &source).result;
     assert!(
         result.errors.is_empty(),
         "PowerShell errors: {:?}",
@@ -2244,31 +2170,49 @@ fn test_fixture_powershell() {
         .filter(|n| n.kind == NodeKind::Use)
         .collect();
     assert_eq!(uses.len(), 2, "expected 2 Use nodes, got {}", uses.len());
-    assert!(uses.iter().any(|n| n.name == "ActiveDirectory"));
-    assert!(uses.iter().any(|n| n.name.contains("Utils.ps1")));
+    assert_eq!(names(&uses), ["ActiveDirectory", r".\Utils.ps1"]);
 
-    // Docstrings
-    let write_log = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "Write-Log")
-        .unwrap();
-    assert!(
-        write_log.docstring.is_some(),
-        "Write-Log should have docstring"
+    assert_eq!(
+        docstring_of(&result, NodeKind::Function, "Write-Log"),
+        Some(
+            ".SYNOPSIS\n    Logs a message with the given level.\n\
+             .PARAMETER Level\n    The log level.\n\
+             .PARAMETER Message\n    The message to log."
+        )
     );
 
-    // Call sites
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Calls),
-        "expected Calls refs"
+    assert_eq!(
+        ref_names(&result, EdgeKind::Calls),
+        [
+            "Write-Host",
+            "Get-Date",
+            "Write-Log",
+            "Write-Log",
+            "Write-Log",
+            "Test-Connection",
+            "Write-Log",
+            "Write-Log",
+            "Start-Sleep",
+            "Write-Log",
+            "Test-Config",
+            "Connect-Server",
+            "Disconnect-Server",
+        ]
     );
-
-    // Contains edges
-    assert!(result.edges.iter().any(|e| e.kind == EdgeKind::Contains));
+    assert_eq!(
+        contained_children(&result, "sample.ps1"),
+        [
+            "ActiveDirectory",
+            r".\Utils.ps1",
+            "MaxRetries",
+            "DefaultPort",
+            "Write-Log",
+            "Test-Config",
+            "Connect-Server",
+            "Disconnect-Server",
+            "Main",
+        ]
+    );
 }
 
 // ── Batch ───────────────────────────────────────────────────────────────────
@@ -2278,7 +2222,7 @@ fn test_fixture_powershell() {
 fn test_fixture_batch() {
     let source = read_fixture("sample.bat");
     let extractor = tracedecay_code_extraction::BatchExtractor;
-    let result = extractor.extract("sample.bat", &source);
+    let result = extractor.extract_artifact("sample.bat", &source).result;
     assert!(
         result.errors.is_empty(),
         "Batch errors: {:?}",
@@ -2317,19 +2261,37 @@ fn test_fixture_batch() {
         .iter()
         .find(|n| n.kind == NodeKind::Function && n.name == "Log")
         .unwrap();
-    assert!(log_fn.docstring.is_some(), "Log should have docstring");
-
-    // Call sites
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Calls),
-        "expected Calls refs"
+    assert_eq!(
+        log_fn.docstring.as_deref(),
+        Some("Logs a message with timestamp.")
     );
 
-    // Contains edges
-    assert!(result.edges.iter().any(|e| e.kind == EdgeKind::Contains));
+    assert_eq!(
+        ref_names(&result, EdgeKind::Calls),
+        [
+            "Log",
+            "Log",
+            "Log",
+            "Log",
+            "Log",
+            "Log",
+            "ValidateConfig",
+            "Connect",
+            "Disconnect",
+        ]
+    );
+    assert_eq!(
+        contained_children(&result, "sample.bat"),
+        [
+            "MAX_RETRIES",
+            "DEFAULT_PORT",
+            "Log",
+            "ValidateConfig",
+            "Connect",
+            "Disconnect",
+            "Main",
+        ]
+    );
 }
 
 // ── Perl ────────────────────────────────────────────────────────────────────
@@ -2339,7 +2301,7 @@ fn test_fixture_batch() {
 fn test_fixture_perl() {
     let source = read_fixture("sample.pl");
     let extractor = tracedecay_code_extraction::PerlExtractor;
-    let result = extractor.extract("sample.pl", &source);
+    let result = extractor.extract_artifact("sample.pl", &source).result;
     assert!(result.errors.is_empty(), "Perl errors: {:?}", result.errors);
 
     // File root node
@@ -2422,40 +2384,33 @@ fn test_fixture_perl() {
         .iter()
         .find(|n| n.kind == NodeKind::Function && n.name == "log_message")
         .unwrap();
-    assert!(
-        log_fn.docstring.is_some(),
-        "log_message should have docstring"
+    assert_eq!(
+        log_fn.docstring.as_deref(),
+        Some("Logs a message with the given level.")
+    );
+    assert_eq!(
+        docstring_of(&result, NodeKind::Const, "MAX_RETRIES"),
+        Some("Maximum number of retries.")
     );
 
-    let max_retries = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Const && n.name == "MAX_RETRIES")
-        .unwrap();
-    assert!(
-        max_retries.docstring.is_some(),
-        "MAX_RETRIES should have docstring"
+    assert_eq!(
+        ref_names(&result, EdgeKind::Calls),
+        [
+            "log_message",
+            "main::log_message",
+            "Connection->new",
+            "$conn->connect",
+            "croak",
+            "croak",
+        ]
     );
-
-    // Call sites
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Calls),
-        "expected Calls refs"
+    assert_eq!(
+        contained_children(&result, "Connection"),
+        ["new", "connect", "disconnect", "is_connected"]
     );
-
-    // Contains edges
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(
-        contains.len() >= 15,
-        "expected >= 15 Contains edges, got {}",
-        contains.len()
+    assert_eq!(
+        contained_children(&result, "Pool"),
+        ["new", "acquire", "release"]
     );
 }
 
@@ -2466,7 +2421,7 @@ fn test_fixture_perl() {
 fn test_fixture_objc() {
     let source = read_fixture("sample.m");
     let extractor = tracedecay_code_extraction::ObjcExtractor;
-    let result = extractor.extract("sample.m", &source);
+    let result = extractor.extract_artifact("sample.m", &source).result;
 
     // File root
     assert!(result.nodes.iter().any(|n| n.kind == NodeKind::File));
@@ -2536,38 +2491,46 @@ fn test_fixture_objc() {
         .iter()
         .find(|n| n.kind == NodeKind::Class && n.name == "Base")
         .unwrap();
-    assert!(base.docstring.is_some(), "Base should have docstring");
-
-    // Implementation blocks
-    let impls: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Impl)
-        .collect();
-    assert_eq!(impls.len(), 2, "expected 2 implementation blocks");
-
-    // Properties
-    let props: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Property)
-        .collect();
-    assert!(
-        props.len() >= 3,
-        "expected >= 3 properties, got {}",
-        props.len()
+    assert_eq!(
+        base.docstring.as_deref(),
+        Some("Base class with shared functionality.")
     );
 
-    // Methods (from both @interface declarations and @implementation definitions)
-    let methods: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Method)
-        .collect();
-    assert!(
-        methods.len() >= 6,
-        "expected >= 6 methods, got {}",
-        methods.len()
+    assert_eq!(kind_names(&result, NodeKind::Impl), ["Base", "Connection"]);
+    assert_eq!(
+        kind_names(&result, NodeKind::Property),
+        ["name", "port", "connected"]
+    );
+
+    // Methods come from both the @interface declaration and the
+    // @implementation definition of each class, which share its name.
+    assert_eq!(
+        contained_children(&result, "Base"),
+        [
+            "name",
+            "initWithName",
+            "description",
+            "initWithName",
+            "description",
+            "validate",
+        ]
+    );
+    assert_eq!(
+        contained_children(&result, "Connection"),
+        [
+            "port",
+            "connected",
+            "initWithHost",
+            "connect",
+            "disconnect",
+            "connectionWithHost",
+            "initWithHost",
+            "connect",
+            "disconnect",
+            "connectionWithHost",
+            "toJson",
+            "toJsonString",
+        ]
     );
 
     // C function
@@ -2582,54 +2545,37 @@ fn test_fixture_objc() {
         .iter()
         .find(|n| n.kind == NodeKind::Function && n.name == "logMessage")
         .unwrap();
-    assert!(
-        log_fn.docstring.is_some(),
-        "logMessage should have docstring"
+    assert_eq!(
+        log_fn.docstring.as_deref(),
+        Some("Top-level C function for logging.")
     );
 
-    // Inheritance
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Extends && r.reference_name == "NSObject"),
-        "expected Extends ref to NSObject"
+    // Base extends NSObject and Connection extends Base; both conform to
+    // protocols.
+    assert_eq!(ref_names(&result, EdgeKind::Extends), ["NSObject", "Base"]);
+    assert_eq!(
+        ref_names(&result, EdgeKind::Implements),
+        ["NSObject", "Serializable"]
     );
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Extends && r.reference_name == "Base"),
-        "expected Extends ref to Base"
-    );
-
-    // Protocol conformance
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Implements),
-        "expected Implements refs for protocol conformance"
-    );
-
-    // Call sites
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Calls)
-    );
-
-    // Contains edges
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(
-        contains.len() >= 15,
-        "expected >= 15 Contains edges, got {}",
-        contains.len()
+    assert_eq!(
+        ref_names(&result, EdgeKind::Calls),
+        [
+            "super.init",
+            "name.copy",
+            "NSString.stringWithFormat",
+            "NSStringFromClass",
+            "self.class",
+            "NSAssert",
+            "super.initWithName",
+            "NSLog",
+            "[self alloc].initWithHost",
+            "self.alloc",
+            "NSJSONSerialization.dataWithJSONObject",
+            "self.toJson",
+            "[NSString alloc].initWithData",
+            "NSString.alloc",
+            "NSLog",
+        ]
     );
 }
 
@@ -2640,7 +2586,7 @@ fn test_fixture_objc() {
 fn test_fixture_fortran() {
     let source = read_fixture("sample.f90");
     let extractor = tracedecay_code_extraction::FortranExtractor;
-    let result = extractor.extract("sample.f90", &source);
+    let result = extractor.extract_artifact("sample.f90", &source).result;
     assert!(
         result.errors.is_empty(),
         "Fortran errors: {:?}",
@@ -2700,17 +2646,11 @@ fn test_fixture_fortran() {
         "PooledEndpoint type not found"
     );
 
-    // Fields
-    let fields: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Field)
-        .collect();
-    assert!(
-        fields.len() >= 4,
-        "expected >= 4 fields, got {}",
-        fields.len()
+    assert_eq!(
+        contained_children(&result, "Endpoint"),
+        ["host", "port", "connected"]
     );
+    assert_eq!(contained_children(&result, "PooledEndpoint"), ["pool_size"]);
 
     // Interface
     assert!(
@@ -2750,9 +2690,9 @@ fn test_fixture_fortran() {
 
     // Docstrings
     let log_msg = fns.iter().find(|f| f.name == "log_message").unwrap();
-    assert!(
-        log_msg.docstring.is_some(),
-        "log_message should have docstring"
+    assert_eq!(
+        log_msg.docstring.as_deref(),
+        Some("Logs a message with the given level.")
     );
 
     // Use imports
@@ -2773,25 +2713,35 @@ fn test_fixture_fortran() {
         "expected Extends ref for PooledEndpoint -> Endpoint"
     );
 
-    // Call sites
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Calls)
+    assert_eq!(
+        ref_names(&result, EdgeKind::Calls),
+        [
+            "trim",
+            "trim",
+            "present",
+            "log_message",
+            "trim",
+            "create_endpoint",
+            "connect_endpoint",
+            "disconnect_endpoint",
+        ]
     );
-
-    // Contains edges
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(
-        contains.len() >= 5,
-        "expected >= 5 Contains edges, got {}",
-        contains.len()
+    assert_eq!(
+        contained_children(&result, "networking"),
+        [
+            "MAX_RETRIES",
+            "DEFAULT_PORT",
+            "Endpoint",
+            "PooledEndpoint",
+            "Connectable",
+            "log_message",
+            "create_endpoint",
+            "connect_endpoint",
+            "disconnect_endpoint",
+            "is_connected",
+        ]
     );
+    assert_eq!(contained_children(&result, "main"), ["networking"]);
 }
 
 // -- COBOL ────────────────────────────────────────────────────────────────────
@@ -2801,7 +2751,7 @@ fn test_fixture_fortran() {
 fn test_fixture_cobol() {
     let source = read_fixture("sample.cob");
     let extractor = tracedecay_code_extraction::CobolExtractor;
-    let result = extractor.extract("sample.cob", &source);
+    let result = extractor.extract_artifact("sample.cob", &source).result;
     assert!(
         result.errors.is_empty(),
         "COBOL errors: {:?}",
@@ -2875,30 +2825,41 @@ fn test_fixture_cobol() {
 
     // Docstrings
     let validate = fns.iter().find(|f| f.name == "VALIDATE-CONFIG").unwrap();
-    assert!(
-        validate.docstring.is_some(),
-        "VALIDATE-CONFIG should have docstring"
+    assert_eq!(
+        validate.docstring.as_deref(),
+        Some("Validates the configuration.")
     );
 
-    // Call sites
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Calls),
-        "expected Calls refs"
+    // PERFORM targets
+    assert_eq!(
+        ref_names(&result, EdgeKind::Calls),
+        [
+            "VALIDATE-CONFIG",
+            "CONNECT-SERVER",
+            "DISCONNECT-SERVER",
+            "LOG-MESSAGE",
+            "LOG-MESSAGE",
+            "LOG-MESSAGE",
+            "LOG-MESSAGE",
+        ]
     );
-
-    // Contains edges
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(
-        contains.len() >= 10,
-        "expected >= 10 Contains edges, got {}",
-        contains.len()
+    assert_eq!(
+        contained_children(&result, "NETWORKING"),
+        [
+            "WS-MAX-RETRIES",
+            "WS-DEFAULT-PORT",
+            "WS-HOST",
+            "WS-PORT",
+            "WS-CONNECTED",
+            "WS-LOG-LEVEL",
+            "WS-LOG-MESSAGE",
+            "WS-RETRY-COUNT",
+            "MAIN-PROGRAM",
+            "VALIDATE-CONFIG",
+            "LOG-MESSAGE",
+            "CONNECT-SERVER",
+            "DISCONNECT-SERVER",
+        ]
     );
 }
 
@@ -2909,7 +2870,7 @@ fn test_fixture_cobol() {
 fn test_fixture_msbasic2() {
     let source = read_fixture("sample.bas");
     let extractor = tracedecay_code_extraction::MsBasic2Extractor;
-    let result = extractor.extract("sample.bas", &source);
+    let result = extractor.extract_artifact("sample.bas", &source).result;
     assert!(
         result.errors.is_empty(),
         "MS BASIC 2.0 errors: {:?}",
@@ -2951,9 +2912,9 @@ fn test_fixture_msbasic2() {
 
     // Docstrings
     let log_fn = fns.iter().find(|f| f.name == "LOG_A_MESSAGE").unwrap();
-    assert!(
-        log_fn.docstring.is_some(),
-        "LOG_A_MESSAGE should have docstring"
+    assert_eq!(
+        log_fn.docstring.as_deref(),
+        Some("LOG A MESSAGE\nPARAMS: L$=LEVEL, M$=MESSAGE")
     );
 
     // Complexity: CONNECT_TO_SERVER has a FOR loop
@@ -2963,25 +2924,20 @@ fn test_fixture_msbasic2() {
         "CONNECT_TO_SERVER should have >= 1 loop"
     );
 
-    // Call sites (GOSUB references)
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Calls),
-        "expected Calls refs"
+    // GOSUB targets are line numbers
+    assert_eq!(
+        ref_names(&result, EdgeKind::Calls),
+        ["200", "300", "400", "200", "200"]
     );
-
-    // Contains edges
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(
-        contains.len() >= 5,
-        "expected >= 5 Contains edges, got {}",
-        contains.len()
+    assert_eq!(
+        contained_children(&result, "sample.bas"),
+        [
+            "MR",
+            "DP",
+            "LOG_A_MESSAGE",
+            "CONNECT_TO_SERVER",
+            "DISCONNECT"
+        ]
     );
 }
 
@@ -2992,7 +2948,7 @@ fn test_fixture_msbasic2() {
 fn test_fixture_gwbasic() {
     let source = read_fixture("sample.gw");
     let extractor = tracedecay_code_extraction::GwBasicExtractor;
-    let result = extractor.extract("sample.gw", &source);
+    let result = extractor.extract_artifact("sample.gw", &source).result;
     assert!(
         result.errors.is_empty(),
         "GW-BASIC errors: {:?}",
@@ -3018,19 +2974,14 @@ fn test_fixture_gwbasic() {
         .iter()
         .filter(|n| n.kind == NodeKind::Function)
         .collect();
-    assert!(fns.len() >= 4, "expected >= 4 functions, got {}", fns.len());
-    assert!(fns.iter().any(|f| f.name == "FNLOG"), "FNLOG not found");
-    assert!(
-        fns.iter().any(|f| f.name == "VALIDATE_CONFIGURATION"),
-        "VALIDATE_CONFIGURATION not found"
-    );
-    assert!(
-        fns.iter().any(|f| f.name == "CONNECT_TO_SERVER"),
-        "CONNECT_TO_SERVER not found"
-    );
-    assert!(
-        fns.iter().any(|f| f.name == "DISCONNECT"),
-        "DISCONNECT not found"
+    assert_eq!(
+        names(&fns),
+        [
+            "FNLOG",
+            "VALIDATE_CONFIGURATION",
+            "CONNECT_TO_SERVER",
+            "DISCONNECT",
+        ]
     );
 
     // Docstrings
@@ -3038,9 +2989,9 @@ fn test_fixture_gwbasic() {
         .iter()
         .find(|f| f.name == "VALIDATE_CONFIGURATION")
         .unwrap();
-    assert!(
-        validate_fn.docstring.is_some(),
-        "VALIDATE_CONFIGURATION should have docstring"
+    assert_eq!(
+        validate_fn.docstring.as_deref(),
+        Some("VALIDATE CONFIGURATION")
     );
 
     // Complexity: CONNECT_TO_SERVER has a WHILE loop
@@ -3050,25 +3001,21 @@ fn test_fixture_gwbasic() {
         "CONNECT_TO_SERVER should have >= 1 loop"
     );
 
-    // Call sites (GOSUB references)
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Calls),
-        "expected Calls refs"
+    // GOSUB targets are line numbers
+    assert_eq!(
+        ref_names(&result, EdgeKind::Calls),
+        ["1000", "2000", "3000"]
     );
-
-    // Contains edges
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(
-        contains.len() >= 6,
-        "expected >= 6 Contains edges, got {}",
-        contains.len()
+    assert_eq!(
+        contained_children(&result, "sample.gw"),
+        [
+            "MR",
+            "DP",
+            "FNLOG",
+            "VALIDATE_CONFIGURATION",
+            "CONNECT_TO_SERVER",
+            "DISCONNECT",
+        ]
     );
 }
 
@@ -3079,7 +3026,7 @@ fn test_fixture_gwbasic() {
 fn test_fixture_qbasic() {
     let source = read_fixture("sample.qb");
     let extractor = tracedecay_code_extraction::QBasicExtractor;
-    let result = extractor.extract("sample.qb", &source);
+    let result = extractor.extract_artifact("sample.qb", &source).result;
     assert!(
         result.errors.is_empty(),
         "QBasic errors: {:?}",
@@ -3109,10 +3056,10 @@ fn test_fixture_qbasic() {
         .iter()
         .filter(|n| n.kind == NodeKind::Field && n.qualified_name.contains("Endpoint"))
         .collect();
-    assert!(
-        struct_fields.len() >= 3,
-        "expected >= 3 Endpoint fields, got {}",
-        struct_fields.len()
+    assert_eq!(names(&struct_fields), ["host", "port", "connected"]);
+    assert_eq!(
+        contained_children(&result, "Endpoint"),
+        ["host", "port", "connected"]
     );
 
     // SUBs and FUNCTION as Function nodes
@@ -3121,33 +3068,22 @@ fn test_fixture_qbasic() {
         .iter()
         .filter(|n| n.kind == NodeKind::Function)
         .collect();
-    assert!(fns.len() >= 5, "expected >= 5 functions, got {}", fns.len());
-    assert!(
-        fns.iter().any(|f| f.name == "LogMessage"),
-        "LogMessage not found"
-    );
-    assert!(
-        fns.iter().any(|f| f.name == "ValidateConfig"),
-        "ValidateConfig not found"
-    );
-    assert!(
-        fns.iter().any(|f| f.name == "ConnectServer"),
-        "ConnectServer not found"
-    );
-    assert!(
-        fns.iter().any(|f| f.name == "DisconnectServer"),
-        "DisconnectServer not found"
-    );
-    assert!(
-        fns.iter().any(|f| f.name == "IsConnected"),
-        "IsConnected not found"
+    assert_eq!(
+        names(&fns),
+        [
+            "LogMessage",
+            "ValidateConfig",
+            "ConnectServer",
+            "DisconnectServer",
+            "IsConnected",
+        ]
     );
 
     // Docstrings on functions
     let log_fn = fns.iter().find(|f| f.name == "LogMessage").unwrap();
-    assert!(
-        log_fn.docstring.is_some(),
-        "LogMessage should have docstring"
+    assert_eq!(
+        log_fn.docstring.as_deref(),
+        Some("Logs a message with the given level.")
     );
 
     // Complexity: ValidateConfig has IF branches, ConnectServer has FOR loop
@@ -3159,32 +3095,24 @@ fn test_fixture_qbasic() {
     let connect_fn = fns.iter().find(|f| f.name == "ConnectServer").unwrap();
     assert!(connect_fn.loops >= 1, "ConnectServer should have >= 1 loop");
 
-    // CONST nodes
-    let consts: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Const)
-        .collect();
-    assert!(!consts.is_empty(), "expected at least 1 CONST node");
-
-    // Call sites (CALL references)
-    assert!(
-        result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Calls),
-        "expected Calls refs"
+    assert_eq!(
+        kind_names(&result, NodeKind::Const),
+        ["MAX_RETRIES", "DEFAULT_PORT"]
     );
 
-    // Contains edges
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(
-        contains.len() >= 10,
-        "expected >= 10 Contains edges, got {}",
-        contains.len()
+    assert_eq!(
+        ref_names(&result, EdgeKind::Calls),
+        [
+            "ValidateConfig",
+            "ConnectServer",
+            "DisconnectServer",
+            "LogMessage",
+            "LogMessage",
+            "LogMessage",
+            "LogMessage",
+            "LogMessage",
+            "LogMessage",
+            "LogMessage",
+        ]
     );
 }

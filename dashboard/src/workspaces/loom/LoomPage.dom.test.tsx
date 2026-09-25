@@ -577,8 +577,9 @@ describe('LoomPage', () => {
     expect(screen.getByText(/Session hierarchy: partial/).textContent).toContain('1 missing parents · 1 cycles');
     const spawns = document.querySelectorAll('[data-event][data-kind="spawn"]');
     expect(spawns).toHaveLength(1);
-    expect(spawns[0]!.getAttribute('data-grade')).toBe('exact');
+    expect(spawns[0]!.getAttribute('data-grade')).toBe('inferred');
     expect(spawns[0]!.querySelector('title')?.textContent).toContain('tool-parent-7');
+    expect(spawns[0]!.querySelector('title')?.textContent).toContain('fork placed at the child start');
     // The curve leaves the parent lane at the child's recorded start: the spawn
     // glyph and the child's session-start glyph share one x. Hit rects are
     // centred on the node, so equal centres means equal x + width/2.
@@ -940,11 +941,11 @@ describe('LoomPage', () => {
     await screen.findByRole('button', { name: 'Select session Deliver Git primitive runtime' });
     const figure = screen.getByRole('region', { name: /Temporal execution field:/ });
     expect(figure.getAttribute('aria-label')).toContain('drawn open');
-    expect(figure.getAttribute('aria-label')).toContain('handoff and rejoin remain unavailable');
+    expect(figure.getAttribute('aria-label')).toContain('handoff and result remain unavailable');
     expect(screen.getByRole('table')).toBeTruthy();
     for (const grade of ['EXACT', 'EXPLICIT', 'INFERRED', 'AMBIGUOUS', 'STALE', 'UNAVAILABLE']) {
       expect(screen.getByText(grade)).toBeTruthy();
     }
-    expect(screen.getByText('LOADED END')).toBeTruthy();
+    expect(screen.getByText('NOW = newest record in this loaded page · not a live stream')).toBeTruthy();
   });
 });

@@ -228,48 +228,19 @@ fn classify_project_root(
             );
         }
     };
-    // Legacy read-only evidence: markers written before the working-tree
-    // cutover still vouch for orphan re-adoption; nothing rewrites them.
-    let enrollment = match read_legacy_enrollment_marker(&canonical_root) {
-        Ok(marker) => marker.map(|marker| marker.project_id),
-        Err(error) => {
-            return (
-                RegistryOrphanRelinkStatus::Blocked,
-                Some(format!("could not validate enrollment marker: {error}")),
-                canonical_root,
-            );
-        }
-    };
-    let identity = match (repository_identity.as_deref(), enrollment.as_deref()) {
-        (Some(repository), Some(enrolled)) if repository != enrolled => (
-            RegistryOrphanRelinkStatus::Blocked,
-            Some(format!(
-                "repository identity project '{repository}' disagrees with enrollment project '{enrolled}'"
-            )),
-        ),
-        (Some(repository), Some(_)) if repository == project_id => {
-            (RegistryOrphanRelinkStatus::Eligible, None)
-        }
-        (Some(repository), Some(_)) => (
+    let identity = match repository_identity.as_deref() {
+        Some(owner) if owner == project_id => (RegistryOrphanRelinkStatus::Eligible, None),
+        Some(owner) => (
             RegistryOrphanRelinkStatus::Retired,
             Some(format!(
-                "repository identity and enrollment name retired project '{repository}' instead of manifest project '{project_id}'"
+                "repository identity names retired project '{owner}' instead of manifest project '{project_id}'"
             )),
         ),
-        (Some(owner), None) | (None, Some(owner)) if owner == project_id => {
-            (RegistryOrphanRelinkStatus::Eligible, None)
-        }
-        (Some(owner), None) | (None, Some(owner)) => (
-            RegistryOrphanRelinkStatus::Retired,
-            Some(format!(
-                "project marker names retired project '{owner}' instead of manifest project '{project_id}'"
-            )),
-        ),
-        (None, None) if reject_ephemeral_root => (
+        None if reject_ephemeral_root => (
             RegistryOrphanRelinkStatus::Blocked,
-            Some("project has no repository identity or enrollment marker".to_string()),
+            Some("project has no repository identity marker".to_string()),
         ),
-        (None, None) => (RegistryOrphanRelinkStatus::Eligible, None),
+        None => (RegistryOrphanRelinkStatus::Eligible, None),
     };
     (identity.0, identity.1, canonical_root)
 }
@@ -292,13 +263,6 @@ fn validate_manifest_shape(
             "store manifest '{}' is {:?}, not code_project",
             manifest_path.display(),
             manifest.store_kind
-        ));
-    }
-    if manifest.storage_mode != StorageMode::ProfileSharded {
-        issues.push(format!(
-            "store manifest '{}' is {:?}, not profile_sharded",
-            manifest_path.display(),
-            manifest.storage_mode
         ));
     }
     if strip_profile_root(profile_root, &manifest.data_root).is_none() {

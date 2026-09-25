@@ -11,7 +11,7 @@ pub use facts::{
     fetch_facts, overview_payload, providers_payload,
 };
 pub use graph::{MemoryGraphPayloadV1, graph_payload};
-pub use oplog::oplog_payload;
+pub use oplog::{MemoryOplogPayloadV1, oplog_payload};
+pub use projection::{MemoryProjectionPayloadV1, projection_payload, projection_point_cap};
 pub(crate) use projection::{ProjectionCacheRevision, ProjectionComputation};
-pub use projection::{projection_payload, projection_point_cap};
-pub use similarity::{coerce_similarity_score, similarity_payload};
+pub use similarity::{MemorySimilarityPayloadV1, coerce_similarity_score, similarity_payload};

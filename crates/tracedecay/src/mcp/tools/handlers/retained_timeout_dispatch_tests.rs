@@ -26,8 +26,8 @@ use tracedecay_tool_catalog::EffectClass;
 
 use super::dispatch_test_support::SelectorEnv;
 use super::*;
-use crate::config::lock_user_data_dir_test_env;
-use crate::project::TraceDecay;
+use tracedecay_project::config::lock_user_data_dir_test_env;
+use tracedecay_project::project::TraceDecay;
 
 use tracedecay_domain::test_fixtures::digest;
 
@@ -80,9 +80,7 @@ fn post_commit_partial_effect(
 fn deadline_from_now(offset: Duration) -> Deadline {
     let offset = i64::try_from(offset.as_micros()).expect("fixture deadline fits domain clock");
     Deadline::new(UtcMicros(
-        tracedecay_daemon_protocol::invocation_now_micros()
-            .0
-            .saturating_add(offset),
+        tracedecay_contracts::now_micros().0.saturating_add(offset),
     ))
     .expect("fixture deadline")
 }
@@ -205,7 +203,7 @@ struct FactStoreCurateSuccessExecutor {
 impl tracedecay_contracts::ApplicationInvocationExecutor for FactStoreCurateSuccessExecutor {
     fn invoke(
         &self,
-        _invocation: tracedecay_contracts::ApplicationInvocation,
+        invocation: tracedecay_contracts::ApplicationInvocation,
     ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
@@ -213,7 +211,15 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for FactStoreCurateSucc
             tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async { Err(tracedecay_contracts::InvocationError::Unavailable) })
+        Box::pin(async move {
+            let (context, request) = invocation.into_parts();
+            let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request
+            else {
+                return Err(tracedecay_contracts::InvocationError::Unavailable);
+            };
+            tracedecay_daemon_protocol::invoke_application_surface(self, context, binding, payload)
+                .await
+        })
     }
 }
 
@@ -291,7 +297,7 @@ struct ExpiredDeadlineExecutor {
 impl tracedecay_contracts::ApplicationInvocationExecutor for ExpiredDeadlineExecutor {
     fn invoke(
         &self,
-        _invocation: tracedecay_contracts::ApplicationInvocation,
+        invocation: tracedecay_contracts::ApplicationInvocation,
     ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
@@ -299,7 +305,15 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for ExpiredDeadlineExec
             tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async { Err(tracedecay_contracts::InvocationError::Unavailable) })
+        Box::pin(async move {
+            let (context, request) = invocation.into_parts();
+            let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request
+            else {
+                return Err(tracedecay_contracts::InvocationError::Unavailable);
+            };
+            tracedecay_daemon_protocol::invoke_application_surface(self, context, binding, payload)
+                .await
+        })
     }
 }
 
@@ -322,26 +336,25 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ExpiredDeadlineExe
             policy,
             tracedecay_daemon_protocol::InvocationCancellationPolicy::AuthoritativeEffect,
         );
-        assert!(deadline.is_elapsed_at(tracedecay_daemon_protocol::invocation_now_micros()));
-        let response =
-            if deadline.is_elapsed_at(tracedecay_daemon_protocol::invocation_now_micros()) {
-                tracedecay_daemon_protocol::DaemonInvocationResponse::application_problem(
-                    &request.request_id,
-                    ApplicationProblem::timed_out_before_admission(),
-                )
-            } else {
-                self.mutations.fetch_add(1, Ordering::SeqCst);
-                tracedecay_daemon_protocol::DaemonInvocationResponse::application_problem(
-                    &request.request_id,
-                    ApplicationProblem::unavailable(
-                        SafeDiagnostic::new(
-                            "retained.fixture.unexpected-deadline-mutation",
-                            "The expired fixture would have attempted a mutation.",
-                        )
-                        .expect("fixture diagnostic"),
-                    ),
-                )
-            };
+        assert!(deadline.is_elapsed_at(tracedecay_contracts::now_micros()));
+        let response = if deadline.is_elapsed_at(tracedecay_contracts::now_micros()) {
+            tracedecay_daemon_protocol::DaemonInvocationResponse::application_problem(
+                &request.request_id,
+                ApplicationProblem::timed_out_before_admission(),
+            )
+        } else {
+            self.mutations.fetch_add(1, Ordering::SeqCst);
+            tracedecay_daemon_protocol::DaemonInvocationResponse::application_problem(
+                &request.request_id,
+                ApplicationProblem::unavailable(
+                    SafeDiagnostic::new(
+                        "retained.fixture.unexpected-deadline-mutation",
+                        "The expired fixture would have attempted a mutation.",
+                    )
+                    .expect("fixture diagnostic"),
+                ),
+            )
+        };
         Box::pin(async move { Ok(response) })
     }
 
@@ -502,7 +515,7 @@ impl PostCommitPartialEffectExecutor {
 impl tracedecay_contracts::ApplicationInvocationExecutor for PostCommitPartialEffectExecutor {
     fn invoke(
         &self,
-        _invocation: tracedecay_contracts::ApplicationInvocation,
+        invocation: tracedecay_contracts::ApplicationInvocation,
     ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
@@ -510,7 +523,15 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for PostCommitPartialEf
             tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async { Err(tracedecay_contracts::InvocationError::Unavailable) })
+        Box::pin(async move {
+            let (context, request) = invocation.into_parts();
+            let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request
+            else {
+                return Err(tracedecay_contracts::InvocationError::Unavailable);
+            };
+            tracedecay_daemon_protocol::invoke_application_surface(self, context, binding, payload)
+                .await
+        })
     }
 }
 
@@ -563,7 +584,7 @@ struct PreCommitInterruptionExecutor {
 impl tracedecay_contracts::ApplicationInvocationExecutor for PreCommitInterruptionExecutor {
     fn invoke(
         &self,
-        _invocation: tracedecay_contracts::ApplicationInvocation,
+        invocation: tracedecay_contracts::ApplicationInvocation,
     ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
@@ -571,7 +592,15 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for PreCommitInterrupti
             tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async { Err(tracedecay_contracts::InvocationError::Unavailable) })
+        Box::pin(async move {
+            let (context, request) = invocation.into_parts();
+            let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request
+            else {
+                return Err(tracedecay_contracts::InvocationError::Unavailable);
+            };
+            tracedecay_daemon_protocol::invoke_application_surface(self, context, binding, payload)
+                .await
+        })
     }
 }
 

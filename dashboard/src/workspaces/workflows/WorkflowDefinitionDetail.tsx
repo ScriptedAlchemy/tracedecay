@@ -56,7 +56,7 @@ export function SelectedDefinitionPanel({
           {definition.definition_id}
         </h3>
         <span
-          className="td-value border border-edge-strong px-1.5 py-px text-2xs text-accent"
+          className="td-value border border-edge-strong px-1.5 py-px text-sm text-accent"
           data-cell="numeric"
         >
           v{definition.definition_version}
@@ -64,7 +64,7 @@ export function SelectedDefinitionPanel({
         <DispositionCell receipt={receipt} />
       </div>
 
-      <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-3xs 2xl:grid-cols-4">
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm 2xl:grid-cols-4">
         <Term label="project">
           {entry.projectAgreement === 'agree' ? (
             definition.project_id
@@ -93,7 +93,7 @@ export function SelectedDefinitionPanel({
       </div>
 
       {shape.unresolvedReferences.length > 0 ? (
-        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-3xs">
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
           <GradeTag grade="AMBIGUOUS" source="registry" />
           <span className="text-text-secondary">
             {shape.unresolvedReferences.length} reference
@@ -109,7 +109,7 @@ export function SelectedDefinitionPanel({
         <DigestLine label="policy" digest={definition.pinned_policy_digest} />
         <DigestLine label="configuration" digest={definition.pinned_configuration_digest} />
         <DigestLine label="catalog" digest={definition.pinned_catalog_digest} />
-        <p className="text-3xs text-text-muted">
+        <p className="text-sm text-text-muted">
           Digests are the pin. No dashboard route resolves a digest to its policy, configuration, or
           catalog document, so the referent is not shown here.
         </p>
@@ -128,7 +128,7 @@ function Term({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="flex min-w-0 flex-col gap-0.5">
       <dt className="td-legend">{label}</dt>
-      <dd className="td-value min-w-0 break-all text-3xs text-text-secondary">{children}</dd>
+      <dd className="td-value min-w-0 break-all text-xs text-text-secondary">{children}</dd>
     </div>
   );
 }
@@ -181,7 +181,7 @@ export function VersionTrackPanel({
       ) : (
         <div className="min-w-0 overflow-x-auto">
           {foreign.length > 0 ? (
-            <div className="mb-2 flex flex-wrap items-baseline gap-x-2 text-3xs">
+            <div className="mb-2 flex flex-wrap items-baseline gap-x-2 text-sm">
               <GradeTag grade="AMBIGUOUS" source="definition history" />
               <span className="text-text-secondary">
                 {foreign.length} served version{foreign.length === 1 ? '' : 's'} name a different
@@ -194,7 +194,7 @@ export function VersionTrackPanel({
             onKeyDown={(event: KeyboardEvent) => {
               moveRovingFocus(tableRef.current, event);
             }}
-            className="w-full min-w-[26rem] border-collapse text-3xs"
+            className="w-full min-w-[26rem] border-collapse text-sm"
             data-workflow-version-track={rows.length}
           >
             <caption className="sr-only">
@@ -230,7 +230,7 @@ export function VersionTrackPanel({
                         type="button"
                         aria-pressed={selected}
                         onClick={() => onSelectVersion(version)}
-                        className="td-value min-h-[var(--touch-target-min)] min-w-[var(--touch-target-min)] px-1 text-left text-2xs text-text-primary hover:bg-surface-3"
+                        className="td-value min-h-[var(--touch-target-min)] min-w-[var(--touch-target-min)] px-1 text-left text-sm text-text-primary hover:bg-surface-3"
                       >
                         v{version}
                         {row.definition.definition_id === definitionId
@@ -272,7 +272,7 @@ export function VersionTrackPanel({
               })}
             </tbody>
           </table>
-          <p className="mt-1.5 text-3xs text-text-muted">
+          <p className="mt-1.5 text-sm text-text-muted">
             Pin columns compare each version's digest with the previous version's. Which steps
             changed is the daemon's diff (`operation.workflow.diff_definition`), not declared on this
             surface. Created, activated, and retired instants are not carried by the definition
@@ -290,7 +290,7 @@ function PinDeltaCell({ delta, digest }: { delta: PinDelta; digest: string }) {
   return (
     <span
       className={cn(
-        'inline-block w-fit border px-1 uppercase tracking-[0.1em]',
+        'inline-block w-fit border px-1 text-3xs uppercase tracking-[0.1em]',
         delta === 'changed'
           ? 'border-solid border-state-partial text-text-secondary'
           : delta === 'first'
@@ -341,7 +341,7 @@ export function DecodedStepsPanel({ definition }: { definition: WorkflowDefiniti
             moveRovingFocus(tableRef.current, event);
           }}
           onMouseLeave={() => setHovered(null)}
-          className="w-full min-w-[34rem] border-collapse text-3xs"
+          className="w-full min-w-[34rem] border-collapse text-sm"
           data-workflow-steps={definition.steps.length}
         >
           <caption className="sr-only">
@@ -384,7 +384,7 @@ export function DecodedStepsPanel({ definition }: { definition: WorkflowDefiniti
           </tbody>
         </table>
       </div>
-      <p className="text-3xs text-text-muted">
+      <p className="text-sm text-text-muted">
         Timeout and retry budgets are not step fields; placement policy owns them at run time.
       </p>
     </Panel>
@@ -431,7 +431,7 @@ function StepRow({
           onClick={onPin}
           onFocus={() => onHover(step.step_id)}
           onBlur={() => onHover(null)}
-          className="td-value min-h-[var(--touch-target-min)] px-1 text-left text-2xs text-text-primary hover:bg-surface-3"
+          className="td-value min-h-[var(--touch-target-min)] px-1 text-left text-sm text-text-primary hover:bg-surface-3"
         >
           {step.step_id}
         </button>

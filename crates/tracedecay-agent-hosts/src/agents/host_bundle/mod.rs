@@ -6,7 +6,7 @@
 //! daemon lifecycle, product semantics, or host-specific business authority.
 //!
 //! The lifecycle is split along its seams: `planner` observes and plans,
-//! `writer` and `component_set` mutate under a recoverable journal,
+//! `writer` and `component_set` mutate with in-memory rollback,
 //! `doctor` discovers installed state, `control` owns the control
 //! directory layout and validators, and `runtime` composes injected
 //! verifier and storage authorities. Every public item is re-exported here so
@@ -18,17 +18,14 @@ pub use tracedecay_host_integration::{
     ClineFamilyAdmissionV1, ClineFamilyEvidenceV1, ClineFamilyProviderV1,
     EmbeddedHostIntegrationEvidenceV1, EmbeddedNativeHostFixtureV1,
     HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, HOST_BUNDLE_SCHEMA_VERSION, HostBundleArtifactContentV1,
-    HostBundleArtifactV1, HostBundleBackupArtifactV1, HostBundleBackupReceiptV1, HostBundleError,
-    HostBundleInstallReceiptV1, HostBundleJournalEntryV1, HostBundleJournalStateV1,
-    HostBundleJournalV1, HostBundleLifecycleOpV1, HostBundleManifestV1,
-    HostBundleReceiptArtifactV1, HostBundleRestoreReceiptV1, HostBundleRollbackBoundaryV1,
-    HostBundleVerificationAdapterV1, HostCapabilityRecordV1, HostCapabilityStateV1,
-    HostCapabilityUnavailableReasonV1, HostCapabilityV1, HostComponentSetJournalComponentV1,
-    HostComponentSetJournalStateV1, HostComponentSetJournalV1, HostComponentSetReceiptV1,
-    HostComponentV1, HostEditStopConformanceEvidenceV1, HostFeedbackBoundaryEvidenceV1,
-    HostFeedbackBoundaryV1, HostKindV1, HostNativeFixtureEvidenceV1, HostRegistrationEvidenceV1,
-    HostRegistrationRouteV1, MAX_ARTIFACT_CONTENT_BYTES, MAX_HOST_COMPONENTS,
-    MAX_MANIFEST_ARTIFACTS, MAX_RELATIVE_PATH_BYTES, stock_host_capabilities, validate_identifier,
+    HostBundleArtifactV1, HostBundleError, HostBundleInstallReceiptV1, HostBundleLifecycleOpV1,
+    HostBundleManifestV1, HostBundleReceiptArtifactV1, HostBundleVerificationAdapterV1,
+    HostCapabilityRecordV1, HostCapabilityStateV1, HostCapabilityUnavailableReasonV1,
+    HostCapabilityV1, HostComponentSetReceiptV1, HostComponentV1,
+    HostEditStopConformanceEvidenceV1, HostFeedbackBoundaryEvidenceV1, HostFeedbackBoundaryV1,
+    HostKindV1, HostNativeFixtureEvidenceV1, HostRegistrationEvidenceV1, HostRegistrationRouteV1,
+    MAX_ARTIFACT_CONTENT_BYTES, MAX_HOST_COMPONENTS, MAX_MANIFEST_ARTIFACTS,
+    MAX_RELATIVE_PATH_BYTES, stock_host_capabilities, validate_identifier,
     validate_relative_install_path,
 };
 use tracedecay_host_integration::{
@@ -52,9 +49,7 @@ mod writer;
 
 pub use capability_admission::{require_capability, require_component_capabilities};
 pub use component_set::HostComponentSetTransactionV1;
-pub use control::{
-    host_bundle_backup_root, latest_host_component_receipt_at, latest_host_component_set_receipt_at,
-};
+pub use control::{latest_host_component_receipt_at, latest_host_component_set_receipt_at};
 pub use doctor::{
     HostBundleArtifactDoctorResultV1, HostBundleComponentDoctorResultV1,
     HostBundleComponentDoctorStateV1, HostBundleDoctorReportV1, HostBundleRegistrationInspectorV1,
@@ -82,8 +77,8 @@ pub use runtime::{
 pub use writer::HostBundleWriterV1;
 
 /// Resolve the lifecycle authority from the active `TraceDecay` user profile.
-/// Host homes contain deployed artifacts only; receipts, journals, locks, and
-/// rollback backups are owned by this profile-scoped root.
+/// Host homes contain deployed artifacts only; receipts and locks are owned by
+/// this profile-scoped root.
 pub fn resolved_host_bundle_lifecycle_root() -> tracedecay_domain::errors::Result<PathBuf> {
     Ok(tracedecay_runtime_core::storage::default_profile_root()?.join("host-components"))
 }

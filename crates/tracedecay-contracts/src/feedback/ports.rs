@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::feedback::{
@@ -8,9 +9,7 @@ use tracedecay_domain::feedback::{
     FeedbackDiagnosticV1, FeedbackDurabilityV1, FeedbackEvaluationInputV1, FeedbackImpactV1,
 };
 use tracedecay_domain::{CodeGenerationId, UtcMicros};
-use tracedecay_policy::authorization::SourceAuthorizationEvaluator;
 
-use crate::authorization::{AuthorizationAdmission, AuthorizationPort, AuthorizationService};
 use crate::context::{RequestContext, ResolvedScope};
 use crate::diagnostics::{DiagnosticProviderIdentity, DiagnosticProviderResult};
 use crate::error::ApplicationContractError;
@@ -20,72 +19,24 @@ use crate::result::{ApplicationProblem, AuthorityReceipt};
 pub type FeedbackPortFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// One daemon-route authorization decision shared by feedback reads and the
-/// one-shot cycle. The route owner retains the opaque admission proof and
-/// reloads current authority immediately before publication; the feedback
-/// service never invents or reconstructs that proof.
-#[derive(Clone, Debug)]
-pub enum FeedbackRouteAdmission {
-    /// Boxed: the full admission proof is ~3x the receipt variant, and this
-    /// enum travels through async port futures by value.
-    Source(Box<AuthorizationAdmission>),
-    Routed(AuthorityReceipt),
-}
-
-impl FeedbackRouteAdmission {
-    pub fn receipt(&self) -> &AuthorityReceipt {
-        match self {
-            Self::Source(admission) => admission.receipt(),
-            Self::Routed(receipt) => receipt,
-        }
-    }
-}
-
+/// one-shot cycle. The route owner retains its admission receipt and reloads
+/// current authority immediately before publication; the feedback service
+/// never invents or reconstructs that receipt.
 pub trait FeedbackRouteAuthorizationPort {
     fn admit(
         &self,
         context: &RequestContext,
         operation: &ApplicationOperation,
         observed_at: UtcMicros,
-    ) -> Result<FeedbackRouteAdmission, ApplicationProblem>;
+    ) -> Result<AuthorityReceipt, ApplicationProblem>;
 
     fn recheck_publication(
         &self,
         context: &RequestContext,
         operation: &ApplicationOperation,
-        admission: &FeedbackRouteAdmission,
+        admission: &AuthorityReceipt,
         observed_at: UtcMicros,
     ) -> Result<AuthorityReceipt, ApplicationProblem>;
-}
-
-impl<P, E> FeedbackRouteAuthorizationPort for AuthorizationService<P, E>
-where
-    P: AuthorizationPort,
-    E: SourceAuthorizationEvaluator,
-{
-    fn admit(
-        &self,
-        context: &RequestContext,
-        operation: &ApplicationOperation,
-        observed_at: UtcMicros,
-    ) -> Result<FeedbackRouteAdmission, ApplicationProblem> {
-        AuthorizationService::admit(self, context, operation, observed_at)
-            .map(|admission| FeedbackRouteAdmission::Source(Box::new(admission)))
-    }
-
-    fn recheck_publication(
-        &self,
-        context: &RequestContext,
-        operation: &ApplicationOperation,
-        admission: &FeedbackRouteAdmission,
-        observed_at: UtcMicros,
-    ) -> Result<AuthorityReceipt, ApplicationProblem> {
-        let FeedbackRouteAdmission::Source(admission) = admission else {
-            return Err(ApplicationProblem::not_found_or_not_authorized(
-                crate::RetryDirective::Never,
-            ));
-        };
-        AuthorizationService::recheck_publication(self, context, operation, admission, observed_at)
-    }
 }
 
 /// Runtime state resolved by a daemon-owned authority. The current clean
@@ -170,17 +121,13 @@ pub trait FeedbackRuntimeStatePort {
     ) -> FeedbackPortFuture<'a, Option<FeedbackRuntimeStateV1>>;
 }
 
-impl<F> FeedbackRuntimeStatePort for F
-where
-    F: Fn(&RequestContext, &FeedbackEvaluationInputV1) -> Option<FeedbackRuntimeStateV1>,
-{
+impl FeedbackRuntimeStatePort for Arc<dyn FeedbackRuntimeStatePort + Send + Sync> {
     fn resolve<'a>(
         &'a self,
         context: &'a RequestContext,
         input: &'a FeedbackEvaluationInputV1,
     ) -> FeedbackPortFuture<'a, Option<FeedbackRuntimeStateV1>> {
-        let runtime = self(context, input);
-        Box::pin(async move { runtime })
+        (**self).resolve(context, input)
     }
 }
 
@@ -407,4 +354,10 @@ pub trait FeedbackPublicationReadPort {
 /// telemetry on the feedback path.
 pub trait FeedbackObservationPort {
     fn observe(&self, input: &FeedbackEvaluationInputV1, observation: FeedbackCycleObservationV1);
+}
+
+impl FeedbackObservationPort for Arc<dyn FeedbackObservationPort + Send + Sync> {
+    fn observe(&self, input: &FeedbackEvaluationInputV1, observation: FeedbackCycleObservationV1) {
+        (**self).observe(input, observation);
+    }
 }

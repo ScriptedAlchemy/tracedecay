@@ -13,11 +13,15 @@ const RAW_MESSAGE_TEST_SCHEMA: &str = "CREATE TABLE lcm_raw_messages (
     content_hash TEXT NOT NULL,
     storage_kind TEXT NOT NULL,
     payload_ref TEXT,
-    snippet_text TEXT NOT NULL,
-    index_text TEXT NOT NULL,
-    legacy_source INTEGER NOT NULL,
-    legacy_truncated INTEGER NOT NULL,
-    metadata_json TEXT
+    placeholder_text TEXT,
+    snippet_text TEXT NOT NULL DEFAULT '',
+    index_text TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT,
+    kind TEXT,
+    model TEXT,
+    tool_names TEXT,
+    source_path TEXT,
+    source_offset INTEGER
 );";
 
 #[tokio::test]
@@ -31,11 +35,11 @@ async fn exact_identity_reader_rejects_tampered_inline_content() {
         "INSERT INTO lcm_raw_messages (
             provider, message_id, session_id, role, ordinal, timestamp,
             content, content_hash, storage_kind, payload_ref,
-            snippet_text, index_text, legacy_source, legacy_truncated
+            snippet_text, index_text
          ) VALUES (
             'cursor', 'message-1', 'session-1', 'assistant', 1, 1,
             'canary-secret', 'not-the-content-hash', 'inline', NULL,
-            'canary-secret', 'canary-secret', 0, 0
+            'canary-secret', 'canary-secret'
          )",
         (),
     )
@@ -58,11 +62,11 @@ async fn exact_identity_reader_rejects_missing_inline_content() {
         "INSERT INTO lcm_raw_messages (
             provider, message_id, session_id, role, ordinal, timestamp,
             content, content_hash, storage_kind, payload_ref,
-            snippet_text, index_text, legacy_source, legacy_truncated
+            snippet_text, index_text
          ) VALUES (
             'cursor', 'message-1', 'session-1', 'assistant', 1, 1,
             NULL, 'not-an-empty-content-hash', 'inline', NULL,
-            '', '', 0, 0
+            '', ''
          )",
         (),
     )
@@ -133,11 +137,13 @@ async fn predecessor_range_skips_policy_anchor_roles() {
             content_hash TEXT NOT NULL,
             storage_kind TEXT NOT NULL,
             payload_ref TEXT,
-            snippet_text TEXT NOT NULL,
-            index_text TEXT NOT NULL,
-            legacy_source INTEGER NOT NULL,
-            legacy_truncated INTEGER NOT NULL,
+            placeholder_text TEXT,
             metadata_json TEXT,
+            kind TEXT,
+            model TEXT,
+            tool_names TEXT,
+            source_path TEXT,
+            source_offset INTEGER,
             UNIQUE(provider, message_id)
         );
         CREATE TABLE lcm_raw_predecessor_ranges (

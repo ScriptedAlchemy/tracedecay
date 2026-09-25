@@ -11,6 +11,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use serde_json::Value;
+use tracedecay_domain::configuration::{LcmSummarizerExecutableV1, LcmSummarizerExecutablesV1};
 use tracedecay_domain::{CanonicalObservationEnvelopeV1, CanonicalObservationFactV1};
 
 use tracedecay_lcm::{LcmError, LcmSummaryRequest};
@@ -20,9 +21,12 @@ use tracedecay_runtime_core::db::{
 };
 
 use super::cursor_agent::{CursorAgentSummaryConfig, summarize_with_cursor_agent};
-use super::{AuthoritativeSummary, LcmPredecessorRangeState, SummaryResolutionError};
+use super::{
+    AuthoritativeSummary, LcmPredecessorRangeState, MESSAGE_ENVELOPE_COLUMN,
+    SummaryResolutionError, decode_message_envelope,
+};
 
-/// One `session_messages` row offered to the recognizers.
+/// One stored message row offered to the recognizers.
 ///
 /// Both views of the row are carried because providers disagree about what
 /// their native summary looks like on disk: Codex records raw provider
@@ -208,28 +212,15 @@ async fn claude_summary_pair_is_exact(
     if summary_id.as_str() != summary_message_id {
         return Ok(false);
     }
-    // Production Claude ingest stores the boundary as `compact_boundary:{uuid}`
-    // while the summary parent remains the raw uuid. Accept either spelling.
-    let production_boundary_id = format!("compact_boundary:{}", boundary_id.as_str());
     let mut rows = snapshot
         .query(
-            "SELECT metadata_json
-             FROM session_messages
-             WHERE provider = ?1 AND session_id = ?2
-               AND message_id IN (?3, ?4)
-               AND kind IN ('compact_boundary', 'compaction')
-             ORDER BY
-               CASE WHEN json_extract(metadata_json, '$.canonical_envelope') IS NOT NULL
-                    THEN 0 ELSE 1 END,
-               CASE WHEN message_id LIKE 'compact_boundary:%' THEN 0 ELSE 1 END,
-               message_id
-             LIMIT 1",
-            params![
-                provider,
-                session_id.as_str(),
-                boundary_id.as_str(),
-                production_boundary_id.as_str(),
-            ],
+            &format!(
+                "SELECT {MESSAGE_ENVELOPE_COLUMN}
+                 FROM lcm_raw_messages AS message
+                 WHERE provider = ?1 AND session_id = ?2 AND message_id = ?3
+                   AND kind = 'compaction'"
+            ),
+            params![provider, session_id.as_str(), boundary_id.as_str()],
         )
         .await
         .map_err(|error| LcmError::Db(error.to_string()))?;
@@ -240,18 +231,13 @@ async fn claude_summary_pair_is_exact(
     else {
         return Ok(false);
     };
-    let metadata = row
-        .get::<Option<String>>(0)
-        .map_err(|error| LcmError::Db(error.to_string()))?;
-    let Some(metadata) = metadata
-        .as_deref()
-        .and_then(|metadata| serde_json::from_str::<Value>(metadata).ok())
+    let Some(boundary) = decode_message_envelope(
+        row.get::<Option<String>>(0)
+            .map_err(|error| LcmError::Db(error.to_string()))?
+            .as_deref(),
+    )?
     else {
         return Ok(false);
-    };
-    let boundary = match super::decode_canonical_observation_metadata(metadata)? {
-        super::CanonicalObservationMetadata::Envelope(envelope) => envelope,
-        super::CanonicalObservationMetadata::Unrecognized => return Ok(false),
     };
     let anchor = boundary.facts().iter().find_map(|fact| match fact {
         CanonicalObservationFactV1::Compaction {
@@ -269,13 +255,22 @@ type AuthoritativeSummaryFuture =
     Pin<Box<dyn Future<Output = Result<AuthoritativeSummary, SummaryResolutionError>> + Send>>;
 
 /// One provider's ability to be asked for a summary it has not already stored.
+///
+/// `executables` is the configured binding for this shard. A summarizer whose
+/// provider is unconfigured returns its typed `*_unconfigured` reason without
+/// spawning anything; there is no ambient executable lookup behind it.
 pub(super) trait AuthoritativeSummarizerV1: Sync {
     fn summarize(
         &self,
         request: LcmSummaryRequest,
         timeout: Duration,
+        executables: &LcmSummarizerExecutablesV1,
     ) -> AuthoritativeSummaryFuture;
 }
+
+/// Reason reported while a provider's summarizer executable is unconfigured.
+pub(super) const CURSOR_AGENT_UNCONFIGURED: &str = "cursor_agent_unconfigured";
+pub(super) const CODEX_APP_SERVER_UNCONFIGURED: &str = "codex_app_server_unconfigured";
 
 struct CursorAgentSummarizerV1;
 
@@ -284,16 +279,24 @@ impl AuthoritativeSummarizerV1 for CursorAgentSummarizerV1 {
         &self,
         request: LcmSummaryRequest,
         timeout: Duration,
+        executables: &LcmSummarizerExecutablesV1,
     ) -> AuthoritativeSummaryFuture {
-        Box::pin(cursor_agent_summary(request, timeout))
+        let executable = executables.cursor_agent.clone();
+        Box::pin(cursor_agent_summary(request, timeout, executable))
     }
 }
 
 async fn cursor_agent_summary(
     request: LcmSummaryRequest,
     timeout: Duration,
+    executable: LcmSummarizerExecutableV1,
 ) -> Result<AuthoritativeSummary, SummaryResolutionError> {
-    let mut config = CursorAgentSummaryConfig::from_env();
+    let Some(cursor_agent_bin) = executable.canonical_path() else {
+        return Err(SummaryResolutionError::Unavailable(
+            CURSOR_AGENT_UNCONFIGURED,
+        ));
+    };
+    let mut config = CursorAgentSummaryConfig::for_executable(cursor_agent_bin);
     config.timeout = config.timeout.min(timeout);
     let source_range = request.source_range.clone();
     let text = tokio::task::spawn_blocking(move || summarize_with_cursor_agent(&request, &config))
@@ -314,21 +317,29 @@ impl AuthoritativeSummarizerV1 for CodexAppServerSummarizerV1 {
         &self,
         request: LcmSummaryRequest,
         timeout: Duration,
+        executables: &LcmSummarizerExecutablesV1,
     ) -> AuthoritativeSummaryFuture {
-        Box::pin(codex_app_server_summary(request, timeout))
+        let executable = executables.codex.clone();
+        Box::pin(codex_app_server_summary(request, timeout, executable))
     }
 }
 
 async fn codex_app_server_summary(
     request: LcmSummaryRequest,
     timeout: Duration,
+    executable: LcmSummarizerExecutableV1,
 ) -> Result<AuthoritativeSummary, SummaryResolutionError> {
+    let Some(codex_bin) = executable.canonical_path() else {
+        return Err(SummaryResolutionError::Unavailable(
+            CODEX_APP_SERVER_UNCONFIGURED,
+        ));
+    };
     let mut config =
-        tracedecay_sessions::runtime::codex_app_server::CodexAppServerSummaryConfig::from_env();
+        tracedecay_sessions::runtime::hosts::codex_app_server::CodexAppServerSummaryConfig::for_executable(codex_bin);
     config.timeout = config.timeout.min(timeout);
     let source_range = request.source_range.clone();
     let result = tokio::task::spawn_blocking(move || {
-        tracedecay_sessions::runtime::codex_app_server::summarize_with_codex_app_server(
+        tracedecay_sessions::runtime::hosts::codex_app_server::summarize_with_codex_app_server(
             &request, &config,
         )
     })

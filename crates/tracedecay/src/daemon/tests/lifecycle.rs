@@ -653,6 +653,7 @@ async fn tools_list_answers_under_general_saturation() {
 async fn one_shot_tool_call_receives_a_matching_saturation_response() {
     let temp = TempDir::new().expect("temp dir");
     let socket = temp.path().join("daemon.sock");
+    let _authority = seed_socket_authority(&socket);
     let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept tool call");
@@ -889,6 +890,7 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
 async fn one_shot_tool_call_aborts_when_daemon_liveness_fails_after_write() {
     let temp = TempDir::new().expect("temp dir");
     let socket = temp.path().join("daemon.sock");
+    let _authority = seed_socket_authority(&socket);
     let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
     let server = tokio::spawn(async move {
         let (_stream, _) = listener.accept().await.expect("accept tool call");
@@ -926,6 +928,7 @@ async fn one_shot_tool_call_aborts_when_daemon_liveness_fails_after_write() {
 async fn proxied_request_uses_shared_liveness_boundary_after_write() {
     let temp = TempDir::new().expect("temp dir");
     let socket = temp.path().join("daemon.sock");
+    let _authority = seed_socket_authority(&socket);
     let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
     let server = tokio::spawn(async move {
         let (_stream, _) = listener.accept().await.expect("accept proxied request");
@@ -967,16 +970,14 @@ async fn proxied_request_uses_shared_liveness_boundary_after_write() {
 async fn post_write_disconnect_reports_ambiguous_outcome_without_retry() {
     let temp = TempDir::new().expect("temp dir");
     let socket = temp.path().join("daemon.sock");
+    let authority = seed_socket_authority(&socket);
+    let token = authority.auth_token().to_string();
     let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept proxied request");
         let (reader, _writer) = stream.into_split();
         let mut lines = tokio::io::BufReader::new(reader).lines();
-        lines
-            .next_line()
-            .await
-            .expect("read handshake")
-            .expect("handshake line");
+        read_authenticated_handshake(&mut lines, &token).await;
         lines
             .next_line()
             .await
@@ -1015,16 +1016,14 @@ async fn post_write_disconnect_reports_ambiguous_outcome_without_retry() {
 async fn one_shot_tool_call_allows_long_response_while_daemon_stays_live() {
     let temp = TempDir::new().expect("temp dir");
     let socket = temp.path().join("daemon.sock");
+    let authority = seed_socket_authority(&socket);
+    let token = authority.auth_token().to_string();
     let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept tool call");
         let (reader, mut writer) = stream.into_split();
         let mut lines = tokio::io::BufReader::new(reader).lines();
-        lines
-            .next_line()
-            .await
-            .expect("read handshake")
-            .expect("handshake line");
+        read_authenticated_handshake(&mut lines, &token).await;
         let request_line = lines
             .next_line()
             .await
@@ -1077,16 +1076,14 @@ async fn one_shot_tool_call_allows_long_response_while_daemon_stays_live() {
 async fn one_shot_tool_call_preserves_response_split_across_liveness_poll() {
     let temp = TempDir::new().expect("temp dir");
     let socket = temp.path().join("daemon.sock");
+    let authority = seed_socket_authority(&socket);
+    let token = authority.auth_token().to_string();
     let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept tool call");
         let (reader, mut writer) = stream.into_split();
         let mut lines = tokio::io::BufReader::new(reader).lines();
-        lines
-            .next_line()
-            .await
-            .expect("read handshake")
-            .expect("handshake line");
+        read_authenticated_handshake(&mut lines, &token).await;
         let request_line = lines
             .next_line()
             .await
@@ -1159,7 +1156,10 @@ async fn persistent_idle_client_closes_on_draining_without_timeout() {
     )
     .await;
 
-    assert_eq!(receipt.clients, super::super::ShutdownStatus::Clean);
+    assert_eq!(
+        receipt.clients,
+        tracedecay_daemon_service::shutdown::ShutdownStatus::Clean
+    );
     assert!(lifecycle.try_enter().is_none());
 }
 

@@ -591,6 +591,7 @@ mod tests {
             rejected_count: 0,
             skipped_count: 0,
             fallback_status: None,
+            session_evidence_budget_stage: None,
             error: None,
             error_classification: None,
             error_retryable: None,

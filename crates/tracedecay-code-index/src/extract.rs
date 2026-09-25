@@ -9,8 +9,6 @@
 //! constructs are preserved as evidence; extraction never invents successful
 //! structure.
 
-use std::sync::Arc;
-
 use serde::{Deserialize, Serialize};
 use tracedecay_code_extraction::{
     ExtractedImportEvidenceV1, ExtractedSchemaEvidenceV1, ExtractionArtifactV1,
@@ -63,9 +61,6 @@ pub struct ExtractionBatchV1 {
 pub enum ParseOutcomeV1 {
     Complete,
     Partial { reason: String },
-    TimedOut,
-    Cancelled,
-    Failed { reason: String },
 }
 
 /// Extraction coverage and ambiguity evidence. These are canonical raw
@@ -223,22 +218,15 @@ pub const MAX_EXTRACTION_SOURCE_BYTES: usize = 1024 * 1024;
 /// canonically ordered before hashing, so identical sanitized input under
 /// identical descriptor revisions produces identical digests.
 pub struct TreeSitterExtractor {
-    parsers: Arc<tracedecay_code_extraction::LanguageRegistry>,
+    parsers: tracedecay_code_extraction::LanguageRegistry,
 }
 
 impl TreeSitterExtractor {
     /// Create the adapter over a freshly built extraction registry.
     pub fn new() -> Self {
         Self {
-            parsers: Arc::new(tracedecay_code_extraction::LanguageRegistry::new()),
+            parsers: tracedecay_code_extraction::LanguageRegistry::new(),
         }
-    }
-
-    /// Share one generation-scoped registry with downstream chunking.
-    pub fn from_shared_registry(
-        parsers: Arc<tracedecay_code_extraction::LanguageRegistry>,
-    ) -> Self {
-        Self { parsers }
     }
 
     /// Resolve the parser for one file, falling back to the descriptor's

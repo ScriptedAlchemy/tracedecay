@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
-use crate::common::{clean_c_doc_comment, docstring_from_preceding_comments, local_node_id};
+use crate::common::{clean_c_comment, docstring_from_preceding_comments, local_node_id};
 use crate::complexity::{OBJC_COMPLEXITY, count_complexity};
 use crate::traversal::{find_descendant_by_kind, find_direct_child_by_kind};
 use crate::types::{
@@ -1030,7 +1030,7 @@ impl ObjcExtractor {
     /// Extract docstring for an `implementation_definition` by looking at preceding
     /// sibling comments within the `class_implementation`.
     fn extract_impl_method_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        docstring_from_preceding_comments(state.source, node, clean_c_doc_comment)
+        docstring_from_preceding_comments(state.source, node, clean_c_comment)
     }
 
     /// Extract a method definition (has a body).
@@ -1345,7 +1345,7 @@ impl ObjcExtractor {
 
     /// Extract docstrings from preceding comment nodes.
     fn extract_docstring(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        docstring_from_preceding_comments(state.source, node, clean_c_doc_comment)
+        docstring_from_preceding_comments(state.source, node, clean_c_comment)
     }
 
     /// Extract first line of text as a signature.

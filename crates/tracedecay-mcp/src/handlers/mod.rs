@@ -20,12 +20,12 @@ pub mod dependency_hints;
 pub mod edit;
 pub mod git;
 pub mod graph;
+pub mod graph_tool;
 pub mod grep;
 pub mod health;
 pub mod hook_runtime;
 pub mod info;
 mod multi_root;
-mod retained_response;
 mod session_authorities;
 pub mod skills;
 pub mod support;
@@ -37,17 +37,13 @@ pub mod workflow_family;
 pub use bounded_search::run_bounded_search;
 pub use multi_root::handle_multi_root;
 pub(crate) use multi_root::multi_root_operation_for_tool;
-pub use retained_response::{
-    retained_problem_envelope, retained_safe_diagnostic, validated_retained_response,
-};
 pub use session_authorities::SessionAuthorities;
 #[cfg(any(test, feature = "test-helpers"))]
 pub use session_authorities::mcp_session_authorities;
 pub use support::{
-    CONTEXT_MEMORY_ANALYTICS_KEY, decode_primitive_request, effective_path, generic_tool_result,
-    json_result, rendered_tool_result, require_node_id, require_object_args,
-    require_positive_limit, take_internal_context_memory_analytics, text_tool_result, tool_json,
-    tool_json_with_md, unique_file_paths, unknown_tool_error,
+    decode_primitive_request, effective_path, generic_tool_result, json_result,
+    rendered_tool_result, require_node_id, require_object_args, require_positive_limit,
+    text_tool_result, tool_json, tool_json_with_md, unique_file_paths, unknown_tool_error,
 };
 pub use verified_read::{VerifiedGraphOpen, VerifiedGraphOpenFuture, verified_read_operation};
 pub use work::handle_work;

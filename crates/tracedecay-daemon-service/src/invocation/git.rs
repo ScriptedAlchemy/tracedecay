@@ -129,7 +129,7 @@ pub(super) fn git_read_evidence_packet(
         .collect();
     let execution = OperationReceipt::completed(
         observed_at,
-        current_micros(),
+        now_micros(),
         deadline,
         OperationBudgetUsage::default(),
     )
@@ -231,7 +231,7 @@ pub(super) async fn execute_git_read(
             ApplicationProblem::cancelled_before_admission(),
         );
     }
-    if deadline.is_elapsed_at(observed_at) || deadline.is_elapsed_at(current_micros()) {
+    if deadline.is_elapsed_at(observed_at) || deadline.is_elapsed_at(now_micros()) {
         return application_problem(
             wire_request_id,
             ApplicationProblem::timed_out_before_admission(),
@@ -241,11 +241,7 @@ pub(super) async fn execute_git_read(
         Ok(authority) => authority,
         Err(_) => return concealed_application_problem(wire_request_id),
     };
-    let remaining_micros = deadline
-        .expires_at
-        .0
-        .saturating_sub(current_micros().0)
-        .max(0) as u64;
+    let remaining_micros = deadline.expires_at.0.saturating_sub(now_micros().0).max(0) as u64;
     let bounds = tracedecay_application::git_query::GitQueryBounds {
         max_entries: if matches!(
             &request.request,
@@ -317,7 +313,7 @@ pub(super) async fn execute_git_read(
                 ApplicationProblem::cancelled_before_admission(),
             );
         }
-        if deadline.is_elapsed_at(current_micros()) {
+        if deadline.is_elapsed_at(now_micros()) {
             return application_problem(
                 wire_request_id,
                 ApplicationProblem::timed_out_before_admission(),
@@ -372,7 +368,7 @@ pub(super) async fn execute_git_read(
         || initial.configuration_digest != terminal.configuration_digest
         || initial.catalog_digest != terminal.catalog_digest
         || initial.privacy_digest != terminal.privacy_digest
-        || current_micros() >= terminal.grant_expires_at
+        || now_micros() >= terminal.grant_expires_at
     {
         return concealed_application_problem(wire_request_id);
     }
@@ -829,7 +825,7 @@ async fn publish_invocation_terminal(
     started_at: UtcMicros,
     effective_deadline: Deadline,
 ) {
-    let ended_at = current_micros();
+    let ended_at = now_micros();
     let ended_at = if ended_at < started_at {
         started_at
     } else {

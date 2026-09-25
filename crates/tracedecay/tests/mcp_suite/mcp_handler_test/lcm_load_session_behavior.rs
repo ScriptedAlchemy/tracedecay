@@ -43,7 +43,7 @@ const CODEX_META: &str = r#"{"evidence":{"ordering_domain":"snapshot_order","ran
 #[tokio::test]
 async fn tracedecay_lcm_load_session_returns_the_messages_the_caller_asked_for() {
     let (cg, _env, _dir) = setup_empty_project().await;
-    // Message timestamps are Unix seconds. Knowledge time, which `as_of_micros`
+    // Message timestamps are Unix seconds. Knowledge time, which an `as_of` cutoff
     // cuts on, is that timestamp in UTC microseconds.
     let user = persist_temporal_lcm_observation(
         &cg,
@@ -107,7 +107,7 @@ async fn tracedecay_lcm_load_session_returns_the_messages_the_caller_asked_for()
         json!({
             "provider": "cursor",
             "session_id": SESSION,
-            "temporal_mode": "forensic"
+            "temporal_mode": {"kind": "forensic"}
         }),
     )
     .await;
@@ -167,8 +167,10 @@ async fn tracedecay_lcm_load_session_returns_the_messages_the_caller_asked_for()
         json!({
             "provider": "cursor",
             "session_id": SESSION,
-            "temporal_mode": "as_of",
-            "as_of_micros": ASSISTANT_AT.saturating_mul(1_000_000)
+            "temporal_mode": {
+                "kind": "as_of",
+                "cutoff": ASSISTANT_AT.saturating_mul(1_000_000)
+            }
         }),
     )
     .await;
@@ -248,12 +250,12 @@ async fn tracedecay_lcm_load_session_returns_the_messages_the_caller_asked_for()
         json!({"provider": "cursor", "session_id": SESSION, "limit": 101}),
     )
     .await;
-    let as_of_without_cutoff = load(
+    let as_of_without_cutoff = load_raw(
         &server,
         json!({
             "provider": "cursor",
             "session_id": SESSION,
-            "temporal_mode": "as_of"
+            "temporal_mode": {"kind": "as_of"}
         }),
     )
     .await;
@@ -657,7 +659,16 @@ async fn tracedecay_lcm_load_session_returns_the_messages_the_caller_asked_for()
     assert_invalid(&zero_content_limit);
     assert_invalid(&zero_limit);
     assert_invalid(&over_limit);
-    assert_invalid(&as_of_without_cutoff);
+    assert_eq!(
+        as_of_without_cutoff["error"]["code"], -32603,
+        "{as_of_without_cutoff}"
+    );
+    assert!(
+        as_of_without_cutoff["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("missing field `cutoff`")),
+        "an as-of mode without its cutoff must fail decode: {as_of_without_cutoff}"
+    );
 
     assert_decode(
         &missing_session,
@@ -665,7 +676,7 @@ async fn tracedecay_lcm_load_session_returns_the_messages_the_caller_asked_for()
     );
     assert_decode(
         &unknown_field,
-        "tool execution failed: config error: invalid retained application request for tracedecay_lcm_load_session: not_a_field: unknown field `not_a_field`, expected one of `provider`, `session_id`, `cursor`, `temporal_mode`, `as_of_micros`, `limit`, `role`, `roles`, `start_time`, `end_time`, `content_offset`, `content_limit`, `format`",
+        "tool execution failed: config error: invalid retained application request for tracedecay_lcm_load_session: not_a_field: unknown field `not_a_field`, expected one of `provider`, `session_id`, `cursor`, `temporal_mode`, `limit`, `role`, `roles`, `start_time`, `end_time`, `content_offset`, `content_limit`",
     );
     assert_decode(
         &negative_limit,
@@ -822,8 +833,6 @@ fn message(
         "content_hash": null,
         "storage_kind": "canonical_occurrence",
         "payload_ref": null,
-        "legacy_source": false,
-        "legacy_truncated": false,
         "metadata_json": metadata_json
     })
 }

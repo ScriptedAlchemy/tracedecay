@@ -175,9 +175,6 @@ fn open_indexed(runtime: &MemoryEvidenceGraphRuntime) -> GitEvidenceGraphView {
     match open_git_evidence_graph_view(runtime, &identity(), Arc::new(NeverCancelled)).unwrap() {
         GitEvidenceGraphHead::Indexed(view) => view,
         GitEvidenceGraphHead::Unpublished => panic!("projection was published"),
-        GitEvidenceGraphHead::Legacy { generation } => {
-            panic!("current publication reported legacy generation {generation}")
-        }
     }
 }
 
@@ -509,94 +506,59 @@ fn single_selector_scope_resolution_stops_after_the_caller_bound() {
     assert_eq!(decodes, 101);
 }
 
-#[test]
-fn legacy_head_is_fully_recoverable_but_serves_no_bounded_reads() {
-    let projection = seeded_projection(24);
-    let runtime = MemoryEvidenceGraphRuntime::default();
-    let manifest = legacy_git_evidence_manifest_for_test(identity(), &projection).unwrap();
-    let generation = manifest.generation.clone();
-    runtime
-        .publish_verified_manifest(
-            &manifest,
-            GraphIdempotencyKey::new("legacy-head").unwrap(),
-            never_cancelled(),
-        )
-        .unwrap();
-
-    match open_git_evidence_graph_view(&runtime, &identity(), Arc::new(NeverCancelled)).unwrap() {
-        GitEvidenceGraphHead::Legacy {
-            generation: observed,
-        } => assert_eq!(observed, generation),
-        GitEvidenceGraphHead::Unpublished => panic!("legacy head was published"),
-        GitEvidenceGraphHead::Indexed(_) => panic!("legacy head carries no index"),
-    }
-
-    let recovered = recover_git_evidence_projection(&runtime, &identity(), never_cancelled())
-        .unwrap()
-        .expect("legacy rows recover in full");
-    assert_eq!(
-        recovered.projector_revision(),
-        GitEvidenceProjectorRevision::LegacyV1
-    );
-    assert_eq!(recovered.projection(), &projection);
-
-    // Re-projecting the same content publishes an indexed successor.
-    let republished = publish_git_evidence_projection(
-        &runtime,
-        identity(),
-        recovered.projection(),
-        &revision(),
-        GraphIdempotencyKey::new("legacy-head-reprojected").unwrap(),
-        never_cancelled(),
-    )
-    .unwrap();
-    assert_ne!(republished.verified_snapshot().generation(), &generation);
-    let view = open_indexed(&runtime);
-    assert_eq!(
-        view.verified_snapshot().generation(),
-        republished.verified_snapshot().generation()
-    );
-    assert_eq!(
-        view.health(None).span_count,
-        projection.spans().len() as u64
-    );
-}
-
-#[test]
-fn unknown_recorded_projector_revision_is_corrupt_on_both_read_paths() {
+fn publish_with_recorded_revision(recorded: Option<&str>) -> MemoryEvidenceGraphRuntime {
     let projection = seeded_projection(6);
     let mut manifest =
         build_git_evidence_manifest_checked(identity(), &projection, &revision(), &|| Ok(()))
             .unwrap();
+    let revision_property = GraphPropertyName::new("projector-revision").unwrap();
     for entity in &mut manifest.entities {
         if entity.identity.as_str() == "projection:session-git-evidence" {
-            entity.properties.insert(
-                GraphPropertyName::new("projector-revision").unwrap(),
-                GraphProperty::String("session-git-evidence-projector.v9".to_owned()),
-            );
+            match recorded {
+                Some(recorded) => {
+                    entity.properties.insert(
+                        revision_property.clone(),
+                        GraphProperty::String(recorded.to_owned()),
+                    );
+                }
+                None => {
+                    entity.properties.remove(&revision_property);
+                }
+            }
         }
     }
     let runtime = MemoryEvidenceGraphRuntime::default();
     runtime
         .publish_verified_manifest(
             &manifest,
-            GraphIdempotencyKey::new("future-revision").unwrap(),
+            GraphIdempotencyKey::new("foreign-revision").unwrap(),
             never_cancelled(),
         )
         .unwrap();
+    runtime
+}
 
-    let view_error =
-        open_git_evidence_graph_view(&runtime, &identity(), Arc::new(NeverCancelled)).unwrap_err();
-    assert!(
-        matches!(&view_error, GitCorrelationError::Corrupt(detail) if detail.contains("projector.v9")),
-        "{view_error}"
-    );
-    let recovery_error =
-        recover_git_evidence_projection(&runtime, &identity(), never_cancelled()).unwrap_err();
-    assert!(
-        matches!(&recovery_error, GitCorrelationError::Corrupt(detail) if detail.contains("projector.v9")),
-        "{recovery_error}"
-    );
+#[test]
+fn unknown_or_missing_projector_revision_is_corrupt_on_both_read_paths() {
+    for (recorded, expected) in [
+        (Some("session-git-evidence-projector.v9"), "projector.v9"),
+        (None, "no projector revision"),
+    ] {
+        let runtime = publish_with_recorded_revision(recorded);
+        let view_error =
+            open_git_evidence_graph_view(&runtime, &identity(), Arc::new(NeverCancelled))
+                .unwrap_err();
+        assert!(
+            matches!(&view_error, GitCorrelationError::Corrupt(detail) if detail.contains(expected)),
+            "{view_error}"
+        );
+        let recovery_error =
+            recover_git_evidence_projection(&runtime, &identity(), never_cancelled()).unwrap_err();
+        assert!(
+            matches!(&recovery_error, GitCorrelationError::Corrupt(detail) if detail.contains(expected)),
+            "{recovery_error}"
+        );
+    }
 }
 
 #[test]

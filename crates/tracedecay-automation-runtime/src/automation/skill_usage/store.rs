@@ -1,23 +1,18 @@
-//! Per-skill usage files. Independent skills must not share a write target.
-//!
-//! The legacy `skill_usage.json` map is read once and split. After that, each
-//! skill owns `skill_usage/<hex(skill id)>.json`. Import-dedupe keys that
-//! already name a skill live on that skill's record. The leftover legacy key
-//! set is drained to a read-only file and never written by a new event.
+//! Per-skill usage files. Independent skills must not share a write target:
+//! each skill owns `skill_usage/<hex(skill id)>.json`, and its import-dedupe
+//! keys live on that record.
 
-use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use super::{SkillUsageLedger, SkillUsageRecord, config_error, skill_usage_ledger_path};
+use super::{SkillUsageLedger, SkillUsageRecord, config_error};
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_private_fs::FileLease;
 
 const SKILL_USAGE_DIR: &str = "skill_usage";
-const LEGACY_IMPORTS_FILE: &str = "legacy-imported-events.json";
-const MIGRATE_LOCK_FILE: &str = ".migrate.lock";
 
 pub(super) fn skill_usage_dir(profile_root: &Path) -> PathBuf {
     profile_root.join("agent_managed").join(SKILL_USAGE_DIR)
@@ -43,7 +38,6 @@ pub(super) async fn update_record(
     let root = profile_root.to_path_buf();
     let skill_id = skill_id.to_string();
     tokio::task::spawn_blocking(move || {
-        migrate_legacy(&root)?;
         with_skill_lock(
             &root,
             &skill_id,
@@ -69,16 +63,12 @@ pub(super) async fn record_imported_event(
     let root = profile_root.to_path_buf();
     let skill_id = skill_id.to_string();
     tokio::task::spawn_blocking(move || {
-        migrate_legacy(&root)?;
-        let legacy = read_legacy_imports(&root)?;
         let mut applied = false;
         let record = with_skill_lock(
             &root,
             &skill_id,
             |record| {
-                if record.imported_analytics_events.contains(&import_key)
-                    || legacy.contains(&import_key)
-                {
+                if record.imported_analytics_events.contains(&import_key) {
                     return Ok(false);
                 }
                 record.imported_analytics_events.insert(import_key.clone());
@@ -95,15 +85,11 @@ pub(super) async fn record_imported_event(
 }
 
 fn load_ledger_sync(profile_root: &Path) -> Result<SkillUsageLedger> {
-    migrate_legacy(profile_root)?;
     let mut ledger = SkillUsageLedger::default();
     let directory = skill_usage_dir(profile_root);
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            ledger.imported_analytics_events = read_legacy_imports(profile_root)?;
-            return Ok(ledger);
-        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(ledger),
         Err(error) => {
             return Err(config_error(format!(
                 "failed to read skill usage directory '{}': {error}",
@@ -131,9 +117,6 @@ fn load_ledger_sync(profile_root: &Path) -> Result<SkillUsageLedger> {
             .extend(record.imported_analytics_events.iter().cloned());
         ledger.records.insert(record.skill_id.clone(), record);
     }
-    ledger
-        .imported_analytics_events
-        .extend(read_legacy_imports(profile_root)?);
     Ok(ledger)
 }
 
@@ -168,6 +151,7 @@ fn with_skill_lock(
             "failed to lock skill usage record '{skill_id}': {error}"
         ))
     })?;
+    let lock = FileLease::held(lock, "automation.skill_usage.record");
     let path = skill_usage_record_path(profile_root, skill_id);
     let existing = read_record_if_present(&path)?;
     let mut record = existing
@@ -177,104 +161,11 @@ fn with_skill_lock(
     if mutate(&mut record)? {
         write_json(&path, &record)?;
     }
-    let _ = lock.unlock();
+    drop(lock);
     Ok(if path.exists() {
         read_record(&path)?
     } else {
         record
-    })
-}
-
-fn migrate_legacy(profile_root: &Path) -> Result<()> {
-    let legacy_path = skill_usage_ledger_path(profile_root);
-    if !legacy_path.exists() {
-        return Ok(());
-    }
-    let directory = skill_usage_dir(profile_root);
-    fs::create_dir_all(&directory).map_err(|error| {
-        config_error(format!(
-            "failed to create skill usage directory '{}': {error}",
-            directory.display()
-        ))
-    })?;
-    let lock_path = directory.join(MIGRATE_LOCK_FILE);
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(|error| {
-            config_error(format!(
-                "failed to open skill usage migration lock '{}': {error}",
-                lock_path.display()
-            ))
-        })?;
-    lock.lock()
-        .map_err(|error| config_error(format!("failed to lock skill usage migration: {error}")))?;
-    let result = migrate_legacy_locked(profile_root, &legacy_path);
-    let _ = lock.unlock();
-    result
-}
-
-fn migrate_legacy_locked(profile_root: &Path, legacy_path: &Path) -> Result<()> {
-    if !legacy_path.exists() {
-        return Ok(());
-    }
-    let ledger = read_legacy_ledger(legacy_path)?;
-    for (skill_id, record) in ledger.records {
-        let path = skill_usage_record_path(profile_root, &skill_id);
-        if path.exists() {
-            continue;
-        }
-        write_json(&path, &record)?;
-    }
-    let imports_path = skill_usage_dir(profile_root).join(LEGACY_IMPORTS_FILE);
-    if !imports_path.exists() && !ledger.imported_analytics_events.is_empty() {
-        write_json(&imports_path, &ledger.imported_analytics_events)?;
-    }
-    match fs::remove_file(legacy_path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(config_error(format!(
-            "failed to retire skill usage ledger '{}': {error}",
-            legacy_path.display()
-        ))),
-    }
-}
-
-fn read_legacy_ledger(path: &Path) -> Result<SkillUsageLedger> {
-    let bytes = fs::read(path).map_err(|error| {
-        config_error(format!(
-            "failed to read skill usage ledger '{}': {error}",
-            path.display()
-        ))
-    })?;
-    serde_json::from_slice(&bytes).map_err(|error| {
-        config_error(format!(
-            "failed to parse skill usage ledger '{}': {error}",
-            path.display()
-        ))
-    })
-}
-
-fn read_legacy_imports(profile_root: &Path) -> Result<BTreeSet<String>> {
-    let path = skill_usage_dir(profile_root).join(LEGACY_IMPORTS_FILE);
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
-        Err(error) => {
-            return Err(config_error(format!(
-                "failed to read legacy skill usage imports '{}': {error}",
-                path.display()
-            )));
-        }
-    };
-    serde_json::from_slice(&bytes).map_err(|error| {
-        config_error(format!(
-            "failed to parse legacy skill usage imports '{}': {error}",
-            path.display()
-        ))
     })
 }
 

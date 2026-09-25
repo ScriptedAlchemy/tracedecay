@@ -29,10 +29,6 @@ pub fn file_mtime_seconds(metadata: &std::fs::Metadata) -> i64 {
         .unwrap_or_default()
 }
 
-pub fn sha256_hex(content: &[u8]) -> String {
-    tracedecay_domain::canonical_text::sha256_hex(content)
-}
-
 pub async fn fetch_i64(
     conn: &(impl QueryExecutor + ?Sized),
     sql: &str,

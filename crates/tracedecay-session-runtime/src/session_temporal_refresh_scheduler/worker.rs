@@ -27,7 +27,8 @@ use super::wake::{
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_runtime_core::db::engine::Error as EngineError;
 use tracedecay_session_temporal_store::{
-    SessionRefreshRecoveryV1, SessionRefreshRestartStateV1, SessionTemporalStore,
+    SessionRefreshRecoveryV1, SessionRefreshRestartStateV1, SessionTemporalAccess,
+    SessionTemporalStore,
 };
 
 const HISTORY_IDLE_RECHECK_INTERVAL: Duration = Duration::from_mins(1);
@@ -723,7 +724,7 @@ pub async fn begin_admitted_session_refreshes(
     }
     let active_after = state.projection_discovery_after();
     let active_scan_slots = state.projection_discovery_active_slots(limit);
-    let page = match database
+    let page = match SessionTemporalAccess::new(database)
         .pending_session_temporal_refresh_page_result(
             limit,
             active_scan_slots,

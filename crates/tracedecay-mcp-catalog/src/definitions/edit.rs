@@ -439,7 +439,7 @@ pub(super) fn def_ast_grep_search() -> ToolDefinition {
          syntax (metavariables: `$X` one node, `$$$` many). Runs IN-PROCESS over the project \
          working tree using the bundled tree-sitter grammars, no external ast-grep binary, no \
          gating. Each hit resolves its enclosing symbol, so the natural next call is \
-         tracedecay_body. Routing: use this when the pattern is structural (e.g. `foo($$$)`, \
+         tracedecay_source_body with that symbol's node_id. Routing: use this when the pattern is structural (e.g. `foo($$$)`, \
          `if ($C) { $$$ }`); for a literal/regex string use tracedecay_grep; for a symbol name \
          use tracedecay_search. To rewrite a structural match, pair with tracedecay_ast_grep_rewrite.",
         json!({

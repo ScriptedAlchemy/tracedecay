@@ -2,9 +2,7 @@
 
 use crate::compaction_receipt::record_live_compaction_outcome;
 use crate::lease::ProjectStoreMaintenanceLeaseV1;
-use crate::store_maintenance::{
-    CodeGenerationRetentionOutcomeV1, run_branch_compaction, run_code_generation_retention,
-};
+use crate::store_maintenance::{CodeGenerationRetentionOutcomeV1, run_code_generation_retention};
 use crate::telemetry::StoreTelemetrySamplingRegistry;
 use crate::tick::{MaintenanceContinuation, MaintenanceTickOutcome};
 use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
@@ -20,7 +18,7 @@ pub async fn run_project_generation_maintenance(
     lease: &ProjectStoreMaintenanceLeaseV1,
     code_index_schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     maintenance_observations: &StoreTelemetrySamplingRegistry,
-    cancellation: &tracedecay_session_memory::context::CancellationToken,
+    cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
     compaction: Option<&CompactionThresholdConfig>,
     continuation: Option<MaintenanceContinuation>,
 ) -> MaintenanceTickOutcome {
@@ -66,12 +64,6 @@ pub async fn run_project_generation_maintenance(
             if !project_compacted {
                 outcome = MaintenanceTickOutcome::Retry;
             }
-            if !cancellation.is_cancelled() {
-                let branch_compacted = run_branch_compaction(lease, compaction);
-                if !branch_compacted {
-                    outcome = MaintenanceTickOutcome::Retry;
-                }
-            }
         });
     }
     finalize_generation_outcome(outcome, cancellation)
@@ -81,7 +73,7 @@ pub async fn run_project_generation_maintenance(
 /// silently retries forever is exactly the waste being diagnosed.
 fn finalize_generation_outcome(
     outcome: MaintenanceTickOutcome,
-    cancellation: &tracedecay_session_memory::context::CancellationToken,
+    cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
 ) -> MaintenanceTickOutcome {
     if cancellation.is_cancelled() {
         hotpath::gauge!("daemon.maintenance.generation.cancelled_total").inc(1_u64);

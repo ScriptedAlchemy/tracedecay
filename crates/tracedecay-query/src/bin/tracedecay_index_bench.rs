@@ -55,7 +55,7 @@ mod artifact_bench;
 use artifact_bench::{
     ActiveControl, AdmittedFile, ApplyingProjectionSink, MemoryPublicationStore, SealedDrainBounds,
     default_corpus_root, drain_pages, identity, load_corpus, millis, peak_rss_bytes, percentile,
-    replicate, sealed_state_digest,
+    replicate, seal_partitioned,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
@@ -86,9 +86,9 @@ use tracedecay_query::retrieval::lexical::{
     CLONE_NEAR_MATCH_MINIMUM_COVERAGE_MILLIONTHS_V1, CLONE_NEAR_MATCH_TOKEN_WORK_BUDGET_V1,
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CloneExactArtifactMemberV1,
     CodeLexicalArtifactBuilderV1, CodeLexicalArtifactFinalizationStepV1,
-    CodeLexicalArtifactReaderV1, CodeLexicalArtifactWriterRevisionV1,
-    CodeLexicalProjectionMetadataV1, MAX_CLONE_EXACT_PAGE_MEMBERS_V1,
-    MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1, VerifiedCodeLexicalArtifactV1,
+    CodeLexicalArtifactReaderV1, CodeLexicalCloneRouteV1, CodeLexicalProjectionMetadataV1,
+    MAX_CLONE_EXACT_PAGE_MEMBERS_V1, MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1,
+    VerifiedCodeLexicalArtifactV1,
 };
 
 /// Bumped whenever the workload shape changes, so a profile comparison
@@ -197,14 +197,13 @@ const HOTPATH_OUTPUT_PATH_ENV: &str = "HOTPATH_OUTPUT_PATH";
 const HOTPATH_OUTPUT_FORMAT_ENV: &str = "HOTPATH_OUTPUT_FORMAT";
 
 const USAGE: &str = "\
-usage: tracedecay-index-bench [--corpus DIR] [--replicas N] [--format-revision 14|15|16] [--clone-envelope]
+usage: tracedecay-index-bench [--corpus DIR] [--replicas N] [--clone-envelope]
 
   --corpus DIR   committed fixture corpus to index
                  (default: $TRACEDECAY_INDEX_BENCH_CORPUS, else
                  benchmark_data/index-bench/corpus beside this workspace)
   --replicas N   index the corpus N times under distinct logical path
                  prefixes (default: $TRACEDECAY_INDEX_BENCH_REPLICAS, else 1)
-  --format-revision  lexical artifact revision (default: 16)
   --clone-envelope  measure one-body refresh and clone query behavior
   -h, --help     print this message
 
@@ -215,8 +214,6 @@ report is written.";
 struct Options {
     corpus_root: PathBuf,
     replicas: usize,
-    writer_revision: CodeLexicalArtifactWriterRevisionV1,
-    format_revision: u32,
     clone_envelope: bool,
 }
 
@@ -224,8 +221,6 @@ impl Options {
     fn parse(arguments: impl Iterator<Item = String>) -> Result<Option<Self>, String> {
         let mut corpus_root: Option<PathBuf> = None;
         let mut replicas: Option<usize> = None;
-        let mut writer_revision = CodeLexicalArtifactWriterRevisionV1::default();
-        let mut format_revision = 16;
         let mut clone_envelope = false;
         let mut arguments = arguments.peekable();
         while let Some(argument) = arguments.next() {
@@ -242,20 +237,6 @@ impl Options {
                         .next()
                         .ok_or_else(|| "--replicas needs a count".to_owned())?;
                     replicas = Some(parse_replicas(&value)?);
-                }
-                "--format-revision" => {
-                    let value = arguments
-                        .next()
-                        .ok_or_else(|| "--format-revision needs 14, 15, or 16".to_owned())?;
-                    writer_revision = match value.as_str() {
-                        "14" => CodeLexicalArtifactWriterRevisionV1::V14,
-                        "15" => CodeLexicalArtifactWriterRevisionV1::V15,
-                        "16" => CodeLexicalArtifactWriterRevisionV1::V16,
-                        _ => return Err("--format-revision needs 14, 15, or 16".to_owned()),
-                    };
-                    format_revision = value
-                        .parse()
-                        .map_err(|error| format!("invalid artifact revision: {error}"))?;
                 }
                 "--clone-envelope" => clone_envelope = true,
                 other => return Err(format!("unrecognized argument {other:?}")),
@@ -274,8 +255,6 @@ impl Options {
         Ok(Some(Self {
             corpus_root,
             replicas,
-            writer_revision,
-            format_revision,
             clone_envelope,
         }))
     }
@@ -556,20 +535,15 @@ fn run(options: &Options) -> Result<String, String> {
         .map_err(|error| format!("read generation statistics: {error}"))?;
 
     let seal_started = Instant::now();
-    let sealed = generations
-        .generation
-        .encode_sealed()
-        .map_err(|error| format!("encode sealed generation: {error}"))?;
+    let sealed = seal_partitioned(&generations.generation)?;
     let seal_wall = seal_started.elapsed();
-    let sealed_len = sealed.len() as u64;
-    let state_digest = sealed_state_digest(&sealed)?;
+    let sealed_len = sealed.byte_len();
+    let state_digest = sealed.state_digest.clone();
 
     // Pass 3 - drain the sealed generation as bounded page batches.
     let drain_started = Instant::now();
     let (pages, source_receipt) = drain_pages(
         &sealed,
-        sealed_len,
-        &state_digest,
         &control,
         SealedDrainBounds {
             batch_pages: BATCH_MAX_PAGES,
@@ -587,10 +561,9 @@ fn run(options: &Options) -> Result<String, String> {
     let artifact_path = scratch.path().join("lexical.sqlite");
     let artifact = ingest_artifact(
         &artifact_path,
-        metadata,
+        metadata.clone(),
         &pages,
         &source_receipt,
-        options.writer_revision,
         &control,
     )?;
     let ingest_wall = ingest_started.elapsed();
@@ -598,7 +571,7 @@ fn run(options: &Options) -> Result<String, String> {
         measure_clone_queries(
             &artifact_path,
             &artifact.receipt,
-            options.format_revision,
+            &metadata,
             &pages,
             generations.body_refresh.changed_path.as_deref(),
             &control,
@@ -636,7 +609,7 @@ fn run(options: &Options) -> Result<String, String> {
         committed_pages: artifact.committed_pages,
         committed_chunks: artifact.committed_chunks,
         artifact: &artifact.receipt,
-        artifact_format_revision: options.format_revision,
+        artifact_format_revision: artifact.receipt.format_revision(),
         clone_queries,
         corpus_wall,
         clean_wall: generations.clean_wall,
@@ -747,6 +720,11 @@ fn projection_metadata(
             "retriever.lexical.index-bench.v1",
         ),
         exact_score_domain: identity::<ScoreDomainId>("score.exact.index-bench.v1"),
+        clone_route: Some(CodeLexicalCloneRouteV1 {
+            project_id: generation.manifest().project_id.clone(),
+            worktree_id: generation.snapshot().worktree.clone(),
+            snapshot_digest: generation.manifest().snapshot_digest.clone(),
+        }),
     }
 }
 
@@ -761,15 +739,10 @@ fn ingest_artifact(
     metadata: CodeLexicalProjectionMetadataV1,
     pages: &[VerifiedSealedLexicalPageV1],
     source_receipt: &VerifiedSealedLexicalSourceReceiptV1,
-    writer_revision: CodeLexicalArtifactWriterRevisionV1,
     control: &ActiveControl,
 ) -> Result<ArtifactIngestResult, String> {
-    let mut builder = CodeLexicalArtifactBuilderV1::create_with_format_revision(
-        artifact_path,
-        metadata,
-        writer_revision,
-    )
-    .map_err(|error| format!("create lexical artifact: {error}"))?;
+    let mut builder = CodeLexicalArtifactBuilderV1::create(artifact_path, metadata)
+        .map_err(|error| format!("create lexical artifact: {error}"))?;
     let mut progress = builder
         .progress()
         .map_err(|error| format!("read artifact progress: {error}"))?;
@@ -839,34 +812,23 @@ fn clone_census(pages: &[VerifiedSealedLexicalPageV1]) -> serde_json::Value {
 fn measure_clone_queries(
     artifact_path: &Path,
     receipt: &VerifiedCodeLexicalArtifactV1,
-    format_revision: u32,
+    metadata: &CodeLexicalProjectionMetadataV1,
     pages: &[VerifiedSealedLexicalPageV1],
     excluded_path: Option<&str>,
     control: &ActiveControl,
 ) -> Result<serde_json::Value, String> {
     let elapsed_micros =
         |duration: Duration| u64::try_from(duration.as_micros()).unwrap_or(u64::MAX);
-    // Always open the reader under --clone-envelope so peak RSS compares like
-    // with like across format revisions. Format 14 has no clone index, but it
-    // still mmaps the sealed artifact; skipping the open made v16−v14 look like
-    // a multi-GiB clone regression when most of the delta was "mmap vs no mmap".
     let open_started = Instant::now();
     let reader = CodeLexicalArtifactReaderV1::open_with_control(
         artifact_path,
         receipt,
+        metadata,
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
         control,
     )
     .map_err(|error| format!("open clone artifact reader: {error}"))?;
     let first_reader_open_micros = elapsed_micros(open_started.elapsed());
-    if format_revision < 15 {
-        drop(reader);
-        return Ok(serde_json::json!({
-            "state": "unavailable",
-            "reason": "artifact_has_no_clone_index",
-            "first_reader_open_micros": first_reader_open_micros,
-        }));
-    }
     let Some(source) = pages
         .iter()
         .flat_map(VerifiedSealedLexicalPageV1::clone_bodies)
@@ -925,7 +887,7 @@ fn measure_clone_queries(
             )
         })?;
 
-    let fingerprint = if reader.has_clone_fingerprints() {
+    let fingerprint = {
         let read = reader
             .clone_fingerprint_page(
                 &artifact_source.occurrence,
@@ -982,11 +944,6 @@ fn measure_clone_queries(
                 "point": cancelled.accounting.cancellation_point.map(|point| format!("{point:?}")),
             },
         })
-    } else {
-        serde_json::json!({
-            "state": "unavailable",
-            "reason": "artifact_has_no_clone_fingerprints",
-        })
     };
 
     drop(reader);
@@ -994,6 +951,7 @@ fn measure_clone_queries(
     let restarted = CodeLexicalArtifactReaderV1::open_with_control(
         artifact_path,
         receipt,
+        metadata,
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
         control,
     )

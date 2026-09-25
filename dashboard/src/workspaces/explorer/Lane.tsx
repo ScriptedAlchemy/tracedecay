@@ -104,13 +104,13 @@ export function Lane({
             {answered ? loaded.toLocaleString() : '—'}
           </span>
         </div>
-        <span className="flex items-center justify-between gap-2 text-3xs text-text-muted">
+        <span className="flex items-center justify-between gap-2 text-sm text-text-muted">
           <span className="flex min-w-0 items-center gap-1.5">
             {/* How well the count is known, on the shared pattern axis: solid
               * when the source reported a real denominator, hatched when rows
               * arrived without one. Distinct from the record grade beside it. */}
             {answered ? (
-              <EvidencePattern quality={laneEvidence(read)} className="shrink-0 text-3xs" />
+              <EvidencePattern quality={laneEvidence(read)} className="shrink-0 text-sm" />
             ) : null}
             <span className="truncate">
               {answered
@@ -135,7 +135,7 @@ export function Lane({
         </span>
         {share !== null ? <Meter fraction={share} className="w-full" tone="bg-accent/80" /> : null}
         {answered && read.unreadableRows > 0 ? (
-          <span className="text-3xs text-state-partial">
+          <span className="text-sm text-state-partial">
             {read.unreadableRows.toLocaleString()} returned rows could not be read
           </span>
         ) : null}
@@ -153,8 +153,8 @@ export function Lane({
         onPeek={onPeek}
       />
 
-      <footer className="flex shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-0.5 border-t border-edge-subtle px-2.5 py-1 text-3xs text-text-muted">
-        <span className="td-value text-3xs text-text-muted">
+      <footer className="flex shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-0.5 border-t border-edge-subtle px-2.5 py-1 text-sm text-text-muted">
+        <span className="td-value text-xs text-text-muted">
           {answered ? `${rows.length.toLocaleString()} shown` : '—'}
           {answered && read.hasMore === true ? ' · more rows remain past this page' : ''}
           {/* The source's own freshness word and watermark, so a served page
@@ -345,7 +345,7 @@ function LaneBody({
     >
       <StateChip kind={laneStateKind(read)} />
       <p className="text-xs font-medium text-text-primary">{condition.title}</p>
-      <p className="max-w-[18rem] text-2xs leading-relaxed text-text-muted">{condition.body}</p>
+      <p className="max-w-[18rem] text-body leading-relaxed text-text-muted">{condition.body}</p>
     </div>
   );
 }
@@ -415,15 +415,15 @@ function LaneRow({
         <Highlight
           text={hit.context}
           terms={terms}
-          className="min-w-0 truncate font-mono text-2xs text-text-muted"
+          className="min-w-0 truncate font-mono text-sm text-text-muted"
         />
       ) : hit.body ? (
-        <Highlight text={hit.body} terms={terms} className="min-w-0 truncate text-2xs text-text-muted" />
+        <Highlight text={hit.body} terms={terms} className="min-w-0 truncate text-body text-text-muted" />
       ) : (
-        <span className="text-2xs text-text-muted">{hit.titleField}</span>
+        <span className="text-body text-text-muted">{hit.titleField}</span>
       )}
-      <span className="flex min-w-0 items-center gap-2 text-3xs text-text-muted">
-        <span className="td-value text-3xs text-text-muted" data-cell="numeric">
+      <span className="flex min-w-0 items-center gap-2 text-sm text-text-muted">
+        <span className="td-value text-xs text-text-muted" data-cell="numeric">
           #{hit.rank}
         </span>
         {hit.signal ? (

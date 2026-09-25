@@ -1,3 +1,4 @@
+import { MemoryRouter } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -177,7 +178,7 @@ describe('AgentsPage read coverage', () => {
         recent_events: [
           {
             timestamp: 1_700_000_000,
-            tool_name: 'tracedecay_read',
+            tool_name: 'tracedecay_source_lines',
             outcome: 'error',
             event_kind: 'post_tool_use',
             hook_name: 'post_tool_use',
@@ -543,7 +544,9 @@ function renderAgents() {
   });
   return render(
     <QueryClientProvider client={client}>
-      <AgentsPage />
+      <MemoryRouter>
+        <AgentsPage />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }

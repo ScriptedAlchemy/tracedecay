@@ -12,7 +12,7 @@ mod git_intelligence_regression;
 mod host_bundle_acceptance;
 mod native_integration_surface_mount;
 // See `runtime_acceptance_suite`: the evaluator library is opt-in so transport
-// tests do not compile the eval-only lexical projection.
+// tests do not link it.
 #[cfg(feature = "search-eval")]
 mod packaged_search_evaluator;
 mod profile_backup_rehearsal_test;

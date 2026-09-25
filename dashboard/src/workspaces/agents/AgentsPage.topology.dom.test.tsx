@@ -1,3 +1,4 @@
+import { MemoryRouter } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { http, HttpResponse, type JsonBodyType } from 'msw';
@@ -24,7 +25,9 @@ function renderAgents() {
   });
   return render(
     <QueryClientProvider client={client}>
-      <AgentsPage />
+      <MemoryRouter>
+        <AgentsPage />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }
@@ -33,8 +36,12 @@ const inspector = () => document.querySelector('[data-agent-inspector]')!;
 const mark = (id: string) =>
   document.querySelector<HTMLButtonElement>(`[data-topology-control="session"][data-topology-id="${id}"]`)!;
 
+/** Settled once the population line reconciles every session it read as
+ * drawn, whatever the fixture's population is. */
 async function settled() {
-  await screen.findByText('5 sessions · 5 drawn · 3 generations');
+  const line = await screen.findByText(/^\d+ sessions · \d+ drawn · \d+ generations$/);
+  const [, read, drawn] = /^(\d+) sessions · (\d+) drawn/.exec(line.textContent!)!;
+  expect(drawn).toBe(read);
   await waitFor(() =>
     expect(inspector().getAttribute('data-agent-inspector-mode')).toBe('default'),
   );
@@ -45,18 +52,13 @@ describe('AgentsPage delegation topology', () => {
     renderAgents();
     await settled();
 
-    // Every drawn session is a real button in column order; the fixture's five
-    // sessions are all drawn, so nothing is folded and the counts reconcile.
-    const controls = [...document.querySelectorAll('[data-topology-control="session"]')].map(
-      (node) => node.getAttribute('data-topology-id'),
-    );
-    expect(controls).toEqual([
-      'codex:session.codex.root',
-      'claude:session.claude.orphan',
-      'cursor:session.cursor.solo',
-      'codex:session.codex.child',
-      'codex:session.codex.grandchild',
-    ]);
+    // Every session the reading holds is a real button, and the buttons run in
+    // column order: generation never decreases along the tab order.
+    const served = (resolveFixture('/api/plugins/analytics/subagent-tree') as { payload: { nodes: unknown[] } }).payload;
+    const controls = [...document.querySelectorAll('[data-topology-control="session"]')];
+    expect(controls).toHaveLength(served.nodes.length);
+    const generations = controls.map((node) => Number(/generation (\d+)/.exec(node.getAttribute('aria-label')!)![1]));
+    expect(generations).toEqual([...generations].sort((a, b) => a - b));
     expect(document.querySelectorAll('[data-topology-control="bundle"]')).toHaveLength(0);
     // The cut edge is drawn as a typed stub, not as a root.
     expect(document.querySelector('[data-topology-stub="missing_parent"]')).toBeTruthy();

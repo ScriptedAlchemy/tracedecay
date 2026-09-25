@@ -56,14 +56,12 @@ pub(crate) const SYNC_LONG_ABOUT: &str = "\
 Re-parses only files that changed since the last index and updates the code \
 graph in place. Use after editing, switching branches, or pulling; agent \
 hooks usually run it automatically. Incompatible derived lexical staging is \
-replaced automatically. The retained `--force` compatibility flag queues the \
-same authoritative reconciliation; it does not delete or fully rebuild the \
-project store. `--doctor`/`--verbose` explain what a sync actually did.";
+replaced automatically. `--doctor`/`--verbose` explain what a sync actually \
+did.";
 
 pub(crate) const SYNC_AFTER_HELP: &str = "\
 Examples:
   tracedecay sync                                Incremental refresh from cwd
-  tracedecay sync --force                        Compatible explicit refresh
   tracedecay sync --doctor                       List added/modified/removed files
   tracedecay sync --verbose                      Per-phase timings for slow syncs
 
@@ -163,11 +161,11 @@ Examples:
 Related: tracedecay dashboard (uses these servers for diagnostics).";
 
 pub(crate) const INSTALL_LONG_ABOUT: &str = "\
-Writes the MCP server registration, permissions, hooks, and prompt rules for \
-an agent host (Cursor, Codex, Claude Code, Hermes, Kiro, and others). \
-With --component, selects one compiled first-party Core or MCP companion \
-and uses the receipt-based host lifecycle instead of the compatibility installer. \
-Configures every detected agent when --agent is omitted, without prompting. \
+Installs an agent host's canonical first-party component set (MCP registration, \
+permissions, hooks, prompt rules) for Cursor, Codex, Claude Code, Hermes, Kiro, and \
+others through one receipt-backed host lifecycle. --component narrows that same \
+lifecycle to one named component; --dry-run prints the signed plan without mutating. \
+Configures every newly detected agent when --agent is omitted, without prompting. \
 Safe to re-run; use it after installing a new agent or moving the tracedecay binary. \
 Pass --git-hook to install the global post-commit sync hook; that flag is explicit \
 because setting core.hooksPath can redirect every repository away from .git/hooks.";
@@ -176,6 +174,7 @@ pub(crate) const INSTALL_AFTER_HELP: &str = "\
 Examples:
   tracedecay install                             Configure every detected agent
   tracedecay install --agent cursor              One agent only
+  tracedecay install --agent cursor --dry-run    Preview the full component-set plan
   tracedecay install --git-hook                  Also install the post-commit hook
   tracedecay install --agent cursor --component core --dry-run
   tracedecay install --agent cursor --component core
@@ -186,38 +185,40 @@ Examples:
   tracedecay install --agent hermes --profile dev
   tracedecay install --local                     Project-local config in cwd
 
-Related: tracedecay uninstall, tracedecay reinstall (refresh settings),
-tracedecay update-plugin (refresh generated assets only), tracedecay doctor.";
+Related: tracedecay uninstall, tracedecay reinstall (repair installed agents),
+tracedecay update-plugin (update installed agents), tracedecay doctor.";
 
 pub(crate) const REINSTALL_LONG_ABOUT: &str = "\
-Re-runs the installer for every agent that already has tracedecay configured, \
-rewriting MCP registrations, hooks, and prompt rules with current settings. \
-Use after upgrading the binary manually or when agent config drifted; it \
-never adds integration to agents that were not installed before.";
+Repairs every agent that already has tracedecay configured by re-running its \
+component-set lifecycle, rewriting artifacts, MCP registrations, hooks, and prompt \
+rules with current settings. Use after upgrading the binary manually or when agent \
+config drifted; it never adds integration to agents that were not installed before. \
+--dry-run previews each tracked agent's repair plan without mutating.";
 
 pub(crate) const REINSTALL_AFTER_HELP: &str = "\
 Examples:
-  tracedecay reinstall                           Refresh all installed agents
+  tracedecay reinstall                           Repair all installed agents
+  tracedecay reinstall --dry-run                 Preview every repair plan
   tracedecay reinstall --component core --dry-run
   tracedecay reinstall --component core          Repair signed Core components
 
 Related: tracedecay install (add an agent), tracedecay update-plugin
-(refresh generated plugin assets without touching config files).";
+(update installed agents to this binary).";
 
 pub(crate) const UPDATE_PLUGIN_AFTER_HELP: &str = "\
 Examples:
-  tracedecay update-plugin                       Refresh generated plugin assets
+  tracedecay update-plugin                       Update all installed agents
   tracedecay update-plugin --component context-mcp --dry-run
   tracedecay update-plugin --component context-mcp
 
-Related: tracedecay reinstall (also rewrites agent config files),
+Related: tracedecay reinstall (repair installed agents),
 tracedecay update (binary + plugins + daemon + health pass).";
 
 pub(crate) const UNINSTALL_LONG_ABOUT: &str = "\
 Removes tracedecay's MCP server registration, permissions, hooks, and prompt \
-rules from agent configuration. Removes every detected agent's integration \
-when --agent is omitted. Project indexes under .tracedecay/ are left intact. \
-use `tracedecay wipe` to delete data.";
+rules from agent configuration through the same component-set lifecycle. Removes \
+every installed agent's integration when --agent is omitted. Project indexes under \
+.tracedecay/ are left intact. use `tracedecay wipe` to delete data.";
 
 pub(crate) const UNINSTALL_AFTER_HELP: &str = "\
 Examples:
@@ -243,34 +244,6 @@ Examples:
 
 Related: tracedecay doctor (surfaces restart-safe rollback state), tracedecay
 install / update-plugin (refresh Core feedback routes).";
-
-pub(crate) const HOST_BUNDLE_LONG_ABOUT: &str = "\
-Inspects and recovers interrupted first-party host component lifecycle \
-transactions, and snapshots or restores one component's managed artifact files. \
-Artifact backup/restore never captures or changes host registration and refuses \
-components whose lifecycle depends on registration state. Each host keeps its \
-own recovery journal; a host whose journal is pending refuses further mutation \
-until it is rolled back. Recovery converges automatically whenever deployed \
-bytes already equal the pre-transaction backup or this transaction's cataloged \
-output.";
-
-pub(crate) const HOST_BUNDLE_AFTER_HELP: &str = "\
-Examples:
-  tracedecay host-bundle status
-  tracedecay host-bundle recover --dry-run
-  tracedecay host-bundle recover --agent opencode --yes
-  tracedecay host-bundle recover --agent opencode --quarantine --yes
-  tracedecay host-bundle artifact-backup --agent opencode --component agent --yes
-  tracedecay host-bundle artifact-restore --agent opencode --component agent --backup-id <32-hex-id> --yes
-
-Quarantine moves the journal aside into the lifecycle control directory and
-leaves every rollback backup on disk; nothing is deleted.
-
-Artifact restore changes only catalog-verified managed files. It fails closed
-when native registration is part of the selected component lifecycle.
-
-Related: tracedecay doctor (surfaces the pending recovery boundary),
-tracedecay reinstall (re-applies each host component set).";
 
 pub(crate) const DASHBOARD_LONG_ABOUT: &str = "\
 Starts the local web dashboard: holographic memory curation, LCM session \

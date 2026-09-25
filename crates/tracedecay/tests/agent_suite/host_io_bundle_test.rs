@@ -90,14 +90,14 @@ fn bundle_a() -> HostIo {
         A_LOG.lock().unwrap().push("export_hosts".into());
         Vec::new()
     }
-    fn write_text(path: &Path, contents: &str, _: Option<&Path>) -> Result<()> {
+    fn write_text(path: &Path, contents: &str) -> Result<()> {
         A_LOG
             .lock()
             .unwrap()
             .push(format!("write_text {}", path.display()));
         Ok(std::fs::write(path, stamped(path, "A", contents))?)
     }
-    fn write_json(path: &Path, value: &serde_json::Value, _: Option<&Path>) -> Result<()> {
+    fn write_json(path: &Path, value: &serde_json::Value) -> Result<()> {
         A_LOG
             .lock()
             .unwrap()
@@ -141,14 +141,14 @@ fn bundle_b() -> HostIo {
             error: Some("b-host refused".into()),
         }]
     }
-    fn write_text(path: &Path, contents: &str, _: Option<&Path>) -> Result<()> {
+    fn write_text(path: &Path, contents: &str) -> Result<()> {
         B_LOG
             .lock()
             .unwrap()
             .push(format!("write_text {}", path.display()));
         Ok(std::fs::write(path, stamped(path, "B", contents))?)
     }
-    fn write_json(path: &Path, value: &serde_json::Value, _: Option<&Path>) -> Result<()> {
+    fn write_json(path: &Path, value: &serde_json::Value) -> Result<()> {
         B_LOG
             .lock()
             .unwrap()
@@ -177,12 +177,12 @@ fn bundle_b() -> HostIo {
 
 /// A bundle whose write surface is refused by the host.
 fn refusing_bundle() -> HostIo {
-    fn write_text(path: &Path, _: &str, _: Option<&Path>) -> Result<()> {
+    fn write_text(path: &Path, _: &str) -> Result<()> {
         Err(TraceDecayError::Config {
             message: format!("host refused write to {}", path.display()),
         })
     }
-    fn write_json(path: &Path, _: &serde_json::Value, _: Option<&Path>) -> Result<()> {
+    fn write_json(path: &Path, _: &serde_json::Value) -> Result<()> {
         Err(TraceDecayError::Config {
             message: format!("host refused write to {}", path.display()),
         })
@@ -286,16 +286,20 @@ fn codex_agent_installer_and_remover_use_only_the_bundle_they_are_given() {
     let b_writes = drain(&B_LOG);
     assert_eq!(a_writes.len(), 2, "alpha agent + manifest: {a_writes:?}");
     assert_eq!(b_writes.len(), 3, "beta, gamma + manifest: {b_writes:?}");
+    // Compared as paths: Windows spells the joined `.codex/agents` with both
+    // separators, and a raw substring test reads that as a different directory.
+    let written_under = |entry: &String, home: &Path| {
+        entry
+            .strip_prefix("write_text ")
+            .and_then(|path| Path::new(path).parent())
+            == Some(home.join(".codex").join("agents").as_path())
+    };
     assert!(
-        a_writes
-            .iter()
-            .all(|entry| entry.contains("/a/.codex/agents/")),
+        a_writes.iter().all(|entry| written_under(entry, &a_home)),
         "{a_writes:?}"
     );
     assert!(
-        b_writes
-            .iter()
-            .all(|entry| entry.contains("/b/.codex/agents/")),
+        b_writes.iter().all(|entry| written_under(entry, &b_home)),
         "{b_writes:?}"
     );
 

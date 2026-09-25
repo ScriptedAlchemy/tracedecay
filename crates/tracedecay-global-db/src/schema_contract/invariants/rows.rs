@@ -808,11 +808,12 @@ mod tests {
                 created_at, ready_at, activated_at, completed_at
              ) VALUES ('availability-session', 1, 'building', '{}', 1, NULL, NULL, NULL);
              INSERT INTO session_summary_nodes (
-                summary_id, session_id, summary_anchor_id, summary_text, index_text,
+                summary_id, session_id, provider, conversation_id, depth, summary_anchor_id,
+                summary_text, summary_hash, summary_token_count, source_token_count,
                 source_horizon_json, publication_json, created_at
              ) VALUES (
-                'summary-owned-elsewhere', 'summary-session', 'summary-anchor',
-                'summary', 'summary', '{}', NULL, 1
+                'summary-owned-elsewhere', 'summary-session', 'test', 'summary-session', 0,
+                'summary-anchor', 'summary', 'hash', 1, 1, '{}', NULL, 1
              );
              INSERT INTO session_summary_availability (
                 session_id, generation, summary_id, availability,

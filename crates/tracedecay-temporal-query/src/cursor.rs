@@ -7,9 +7,9 @@ use tracedecay_domain::{
 };
 
 use super::ports::{
-    CursorKeyError, CursorSignature, SessionCursorAuthenticator, TemporalExecutionSnapshot,
-    TemporalRetrievalScope,
+    CursorKeyError, CursorSignature, SessionCursorAuthenticator, TemporalRetrievalScope,
 };
+use super::snapshot::TemporalExecutionSnapshot;
 
 const CURSOR_FORMAT_VERSION: &str = "3";
 const MAX_CURSOR_PAYLOAD_HEX_BYTES: usize = 2 * 65_536;
@@ -470,14 +470,17 @@ mod tests {
 
     use super::*;
     use crate::candidates::CandidateChannel;
+    use crate::execution::BindingDigest;
     use crate::ports::{
-        BindingDigest, CursorKeyError, CursorSignature, KernelVersions, MAX_TEMPORAL_PARTICIPANTS,
-        SessionCursorAuthenticator, TemporalExecutionSnapshot, TemporalParticipantAuthorization,
-        TemporalParticipantGeneration, TemporalParticipantManifest,
-        TemporalPreparedCandidateCohort, TemporalSnapshotRequest, TemporalSourceAccess,
-        TemporalWatermarks,
+        CursorKeyError, CursorSignature, SessionCursorAuthenticator, TemporalSnapshotRequest,
     };
     use crate::ranking::RankingCandidate;
+    use crate::snapshot::{
+        KernelVersions, MAX_TEMPORAL_PARTICIPANTS, TemporalExecutionSnapshot,
+        TemporalParticipantAuthorization, TemporalParticipantGeneration,
+        TemporalParticipantManifest, TemporalPreparedCandidateCohort, TemporalSourceAccess,
+        TemporalWatermarks,
+    };
 
     const TEST_NOW_MICROS: i64 = 1_800_000_000_000_000;
 

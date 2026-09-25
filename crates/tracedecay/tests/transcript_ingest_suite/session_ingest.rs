@@ -63,7 +63,7 @@ impl IngestTestRuntime {
         &self,
     ) -> GlobalDbSessionIngestAuthority<RegisteredGlobalDbLeaseV1> {
         let background_cpu =
-            tracedecay::test_support::host_admission::ensure_process_background_cpu_authority()
+            tracedecay_project::test_support::host_admission::ensure_process_background_cpu_authority()
                 .expect("install fixture worker plan authority");
         GlobalDbSessionIngestAuthority::new(self.database.clone())
             .with_background_cpu(background_cpu)

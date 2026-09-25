@@ -20,12 +20,13 @@ use tracedecay_contracts::{
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::OperationId;
 
+use tracedecay_contracts::now_micros;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_daemon_protocol::InvocationCancellationPolicy;
 use tracedecay_daemon_protocol::{
     DaemonInvocationOutcome, DaemonInvocationRequest, WorkflowApplicationInvocation,
     WorkflowApplicationOutcome,
 };
-use tracedecay_daemon_protocol::{InvocationCancellationPolicy, invocation_now_micros};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use crate::application_cli::{WORKFLOW, config_error};
@@ -185,7 +186,7 @@ pub async fn invoke_workflow_cli(
         mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
             message: "could not allocate a Workflow CLI request id".to_owned(),
         })?;
-    let observed_at = invocation_now_micros();
+    let observed_at = now_micros();
     let deadline = deadline_from_maximum_millis(maximum_millis, observed_at)?;
     let cancellation =
         CancellationSignal::active(format!("cancellation.cli.{}", request_id.as_str()))
@@ -235,6 +236,9 @@ pub async fn invoke_workflow_cli(
                 request_id,
                 scope,
                 outcome: erase_workflow_outcome(outcome)?,
+                touched_files: Vec::new(),
+                code_graph: None,
+                analytics: None,
             }))
         }
         DaemonInvocationOutcome::ApplicationProblem { problem } => Ok(Err(

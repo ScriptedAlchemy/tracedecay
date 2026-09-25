@@ -16,7 +16,8 @@ use tracedecay_domain::{
     WorkAttemptIdentityV1, canonical_sha256,
 };
 use tracedecay_temporal_query::TemporalCandidateExport;
-use tracedecay_temporal_query::ports::{TemporalExecutionSnapshot, TemporalRetrievalScope};
+use tracedecay_temporal_query::ports::TemporalRetrievalScope;
+use tracedecay_temporal_query::snapshot::TemporalExecutionSnapshot;
 
 use super::evidence_lanes::{EvidenceLaneExecutionControlV1, LaneEvidenceBinding, execute_lane};
 use super::ports::{RetrievalPortError, contract_error};

@@ -24,7 +24,8 @@ import {
   pullRequestStateKind,
 } from './PullRequestInspector.tsx';
 import { relatedAcrossProjects, umbrellasFor } from './umbrella.ts';
-import { UmbrellaField } from './UmbrellaField.tsx';
+import { LaneField } from './LaneField.tsx';
+import { laneZoom, zoomPatch } from './lanes.ts';
 
 const STATUS_OPTIONS = [
   ['open', 'Open'],
@@ -47,7 +48,7 @@ export function InboxWorkspace({
   rows: readonly DeliveryInboxPullRequestV1[];
   selectedRow: DeliveryInboxPullRequestV1 | null;
 }) {
-  const { inbox, location, navigate, umbrellas } = context;
+  const { inbox, location, umbrellas } = context;
   const scopedProject = projectFor(inbox, location.project);
   const related =
     location.project === null ? [] : relatedAcrossProjects(umbrellas, location.project);
@@ -83,7 +84,7 @@ export function InboxWorkspace({
       ) : location.layout === 'table' ? (
         <InboxTable context={context} rows={rows} related={related} />
       ) : (
-        <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[19rem_minmax(0,1fr)] xl:grid-cols-[19rem_minmax(0,1fr)_22rem]">
+        <div className="grid flex-1 grid-cols-1 max-lg:flex-none max-lg:auto-rows-max lg:min-h-0 lg:grid-cols-[16rem_minmax(0,1fr)] xl:grid-cols-[16rem_minmax(0,1fr)_20rem]">
           <div className="flex min-h-0 flex-col border-r border-edge-subtle bg-surface-1">
             <PullRequestQueue
               context={context}
@@ -94,17 +95,7 @@ export function InboxWorkspace({
             {scopedProject === null ? null : <RelatedRail context={context} related={related} />}
           </div>
           <div className="flex min-h-64 min-w-0 flex-col border-r border-edge-subtle p-3">
-            <UmbrellaField
-              inbox={inbox}
-              rows={rows}
-              projection={umbrellas}
-              focusUmbrellaId={null}
-              selectedRowId={selectedRow?.id ?? null}
-              selectedUmbrellaId={null}
-              onSelectRow={(row) => navigate({ pullRequest: row.id })}
-              onSelectUmbrella={(umbrella) => navigate({ mode: 'umbrella', umbrella })}
-            />
-            <FieldLegend />
+            <InboxLanes context={context} rows={rows} selectedRow={selectedRow} />
           </div>
           {selectedRow === null ? (
             <aside className="flex items-center justify-center p-6 text-center text-xs text-text-muted lg:col-span-2 xl:col-span-1">
@@ -126,7 +117,7 @@ export function InboxWorkspace({
 function InboxFilters({ context }: { context: DeliveryContext }) {
   const { inbox, location, navigate } = context;
   const select =
-    'h-9 border border-edge-subtle bg-surface-0 px-2 text-xs normal-case tracking-normal text-text-primary';
+    'h-[var(--touch-target-min)] border border-edge-subtle bg-surface-0 px-2 text-xs normal-case tracking-normal text-text-primary';
   return (
     <div className="flex flex-wrap items-end gap-3 border-b border-edge-subtle bg-surface-1 px-3 py-2">
       <label className="flex min-w-44 flex-col gap-1 text-3xs uppercase tracking-wider text-text-muted">
@@ -250,7 +241,7 @@ function ProjectStrip({ context }: { context: DeliveryContext }) {
           type="button"
           aria-pressed={location.project === project.project_id}
           className={cn(
-            'flex items-center gap-2 border border-transparent px-2 py-1 text-3xs hover:border-edge-subtle',
+            'flex min-h-[var(--touch-target-min)] items-center gap-2 border border-transparent px-2 py-1 text-3xs hover:border-edge-subtle',
             location.project === project.project_id && 'border-edge-strong bg-surface-2',
           )}
           onClick={() =>
@@ -265,14 +256,30 @@ function ProjectStrip({ context }: { context: DeliveryContext }) {
   );
 }
 
-function FieldLegend() {
+/** The inbox field: repositories as lanes over observed time, zoomed through
+ * the URL scope (portfolio, repository, pull request). */
+function InboxLanes({
+  context,
+  rows,
+  selectedRow,
+}: {
+  context: DeliveryContext;
+  rows: readonly DeliveryInboxPullRequestV1[];
+  selectedRow: DeliveryInboxPullRequestV1 | null;
+}) {
+  const { inbox, location, navigate, umbrellas } = context;
+  const focusProject = location.project ?? selectedRow?.project_id ?? null;
   return (
-    <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1 font-mono text-3xs text-text-muted" aria-label="Field legend">
-      <li>◎ project hub</li>
-      <li>● admitted PR · amber dot = active attention</li>
-      <li>◌ umbrella root at member centroid</li>
-      <li className="flex items-center gap-1">edge grade <GradeMark grade="explicit" /> <GradeMark grade="inferred" /></li>
-    </ul>
+    <LaneField
+      inbox={inbox}
+      rows={rows}
+      projection={umbrellas}
+      zoom={laneZoom(location.project, selectedRow?.id ?? null)}
+      focusProject={focusProject}
+      selectedRowId={selectedRow?.id ?? null}
+      onSelectRow={(row) => navigate({ pullRequest: row.id })}
+      onZoom={(zoom) => navigate(zoomPatch(zoom, focusProject))}
+    />
   );
 }
 

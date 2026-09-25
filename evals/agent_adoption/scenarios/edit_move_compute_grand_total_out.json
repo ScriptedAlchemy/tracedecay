@@ -16,7 +16,7 @@
     "acceptable": [
       "tracedecay_context",
       "tracedecay_search",
-      "tracedecay_body"
+      "tracedecay_source_body"
     ],
     "forbidden_first": [
       "Grep",

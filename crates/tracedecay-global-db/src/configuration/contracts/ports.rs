@@ -56,10 +56,6 @@ pub trait ScopeResolutionPort: Sync {
     ) -> ConfigurationOperationFuture<'a, ScopeRevalidationEvidenceV1>;
 }
 
-pub trait ConfigurationClock: Sync {
-    fn now(&self) -> UtcMicros;
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurrentConfigurationMutationAuthorizationV1 {
     pub grant_revision: u64,

@@ -31,8 +31,8 @@ use tracedecay_session_memory::session::lcm::{
 };
 use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionStatus};
 use tracedecay_sessions::observation::ObservationCancellation;
-use tracedecay_sessions::runtime::claude_observation::ClaudeObservationIngestStats;
-use tracedecay_sessions::runtime::hermes::HermesSweepOutcome;
+use tracedecay_sessions::runtime::hosts::claude_observation::ClaudeObservationIngestStats;
+use tracedecay_sessions::runtime::hosts::hermes::HermesSweepOutcome;
 use tracedecay_sessions::runtime::snapshot_observation::SnapshotCaptureOutcome;
 
 use super::super::{required_str, required_user_db};
@@ -278,13 +278,13 @@ async fn capture_claude_profile(
     required_user_db(&ctx.session_authorities)?;
     let roots = registered_project_roots(global_db).await?;
     let stats =
-        tracedecay_sessions::runtime::claude_observation::ingest_user_sessions_with_admission(
+        tracedecay_sessions::runtime::hosts::claude_observation::ingest_user_sessions_with_admission(
             profile_root,
             Some(session_id),
             roots,
             ctx.facade,
             Some(ctx.max_new_bytes.unwrap_or(
-                tracedecay_sessions::runtime::claude_observation::CLAUDE_HOOK_MAX_NEW_BYTES,
+                tracedecay_sessions::runtime::hosts::claude_observation::CLAUDE_HOOK_MAX_NEW_BYTES,
             )),
             ctx.cancellation.clone(),
         )
@@ -311,8 +311,9 @@ async fn capture_codex_profile(
             roots,
             ctx.facade,
             Some(
-                ctx.max_new_bytes
-                    .unwrap_or(tracedecay_sessions::runtime::codex::CODEX_HOOK_MAX_NEW_BYTES),
+                ctx.max_new_bytes.unwrap_or(
+                    tracedecay_sessions::runtime::hosts::codex::CODEX_HOOK_MAX_NEW_BYTES,
+                ),
             ),
         )
         .await
@@ -332,7 +333,7 @@ async fn capture_cursor_profile(
     let event_json = required_str(ctx.args, "event_json")?;
     let roots = registered_project_roots(global_db).await?;
     let stats =
-        tracedecay_sessions::runtime::cursor::try_ingest_cursor_user_transcript_event_capped_with_admission(
+        tracedecay_sessions::runtime::hosts::cursor::try_ingest_cursor_user_transcript_event_capped_with_admission(
             event_json,
             ctx.facade,
             ctx.max_new_bytes,
@@ -349,14 +350,15 @@ async fn capture_hermes_profile(
     ctx.profile_root()?;
     let global_db = ctx.global_db()?;
     let roots = registered_project_roots(global_db).await?;
-    let outcome = tracedecay_sessions::runtime::hermes::ingest_user_sessions_capped_with_admission(
-        ctx.facade,
-        &roots,
-        ctx.max_new_bytes,
-        ctx.cancellation,
-    )
-    .await
-    .ok_or_else(|| config_error("Hermes transcript source is unavailable"))?;
+    let outcome =
+        tracedecay_sessions::runtime::hosts::hermes::ingest_user_sessions_capped_with_admission(
+            ctx.facade,
+            &roots,
+            ctx.max_new_bytes,
+            ctx.cancellation,
+        )
+        .await
+        .ok_or_else(|| config_error("Hermes transcript source is unavailable"))?;
     hermes_capture_outcome(&outcome)
 }
 
@@ -365,11 +367,11 @@ async fn capture_kiro_profile(
 ) -> Result<TranscriptCaptureOutcome> {
     let profile_root = ctx.profile_root()?;
     let global_db = ctx.global_db()?;
-    let source = tracedecay_sessions::runtime::kiro::KiroSource::new()
+    let source = tracedecay_sessions::runtime::hosts::kiro::KiroSource::new()
         .ok_or_else(|| config_error("Kiro transcript source is unavailable"))?;
     let roots = registered_project_roots(global_db).await?;
     let source = source.for_user_scope(roots);
-    let capture = tracedecay_sessions::runtime::kiro::capture_kiro_snapshot_observations(
+    let capture = tracedecay_sessions::runtime::hosts::kiro::capture_kiro_snapshot_observations(
         ctx.facade,
         &source,
         profile_root,
@@ -396,7 +398,7 @@ async fn capture_hermes_project(
     ctx: TranscriptCaptureContext<'_>,
 ) -> Result<TranscriptCaptureOutcome> {
     let project = ctx.project()?;
-    let outcome = tracedecay_sessions::runtime::hermes::ingest_for_project_capped_with_admission_and_cancellation(
+    let outcome = tracedecay_sessions::runtime::hosts::hermes::ingest_for_project_capped_with_admission_and_cancellation(
         project.project_root(),
         project_observation_id(project)?,
         ctx.facade,
@@ -412,7 +414,7 @@ async fn capture_codex_project(
     ctx: TranscriptCaptureContext<'_>,
 ) -> Result<TranscriptCaptureOutcome> {
     let cg = ctx.project()?;
-    let source = tracedecay_sessions::runtime::codex::CodexSource::new()
+    let source = tracedecay_sessions::runtime::hosts::codex::CodexSource::new()
         .ok_or_else(|| config_error("Codex transcript source is unavailable"))?;
     let project_id = project_observation_id(cg)?;
     let scope = ObservationScopeV1::Project {
@@ -444,7 +446,7 @@ async fn capture_cursor_project(
 ) -> Result<TranscriptCaptureOutcome> {
     let cg = ctx.project()?;
     let event_json = required_str(ctx.args, "event_json")?;
-    let stats = tracedecay_sessions::runtime::cursor::try_ingest_cursor_transcript_event_capped_with_admission(
+    let stats = tracedecay_sessions::runtime::hosts::cursor::try_ingest_cursor_transcript_event_capped_with_admission(
         event_json,
         project_observation_id(cg)?,
         ctx.facade,
@@ -456,7 +458,7 @@ async fn capture_cursor_project(
 }
 
 fn cursor_capture_outcome(
-    stats: tracedecay_sessions::runtime::cursor::CursorTranscriptIngestStats,
+    stats: tracedecay_sessions::runtime::hosts::cursor::CursorTranscriptIngestStats,
 ) -> TranscriptCaptureOutcome {
     TranscriptCaptureOutcome {
         messages_upserted: stats.messages_upserted,
@@ -575,13 +577,13 @@ async fn capture_kiro_project(
     ctx: TranscriptCaptureContext<'_>,
 ) -> Result<TranscriptCaptureOutcome> {
     let cg = ctx.project()?;
-    let source = tracedecay_sessions::runtime::kiro::KiroSource::new()
+    let source = tracedecay_sessions::runtime::hosts::kiro::KiroSource::new()
         .ok_or_else(|| config_error("Kiro transcript source is unavailable"))?;
     let project_id = project_observation_id(cg)?;
     let scope = ObservationScopeV1::Project {
         project_id: project_id.clone(),
     };
-    let capture = tracedecay_sessions::runtime::kiro::capture_kiro_snapshot_observations(
+    let capture = tracedecay_sessions::runtime::hosts::kiro::capture_kiro_snapshot_observations(
         ctx.facade,
         &source,
         cg.project_root(),
@@ -607,7 +609,7 @@ mod tests {
     #[test]
     fn cursor_capture_preserves_deferred_projection() {
         let outcome = cursor_capture_outcome(
-            tracedecay_sessions::runtime::cursor::CursorTranscriptIngestStats {
+            tracedecay_sessions::runtime::hosts::cursor::CursorTranscriptIngestStats {
                 messages_upserted: 3,
                 source_deferred: true,
                 ..Default::default()

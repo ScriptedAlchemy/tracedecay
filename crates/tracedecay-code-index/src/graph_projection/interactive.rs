@@ -177,19 +177,9 @@ impl CodeGraphProjectionStore {
         if cancellation.is_cancelled() {
             return Err(CodeGraphProjectionError::Cancelled);
         }
-        let expected_generation = crate::graph_projection::code_graph_generation_id(
-            &self.generation,
-            &tracedecay_graph_db::GraphProjectorRevision::try_from(
-                crate::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
-            )?,
-        )?;
         let catalog = hotpath::measure_block!(
             "code_graph.catalog.bundle_install",
-            artifact::decode_interactive_catalog_artifact(
-                bytes,
-                expected_generation.as_str(),
-                cancellation.as_ref(),
-            )
+            artifact::decode_interactive_catalog_artifact(bytes, cancellation.as_ref())
         )?;
         let mut state = self
             .interactive_catalog

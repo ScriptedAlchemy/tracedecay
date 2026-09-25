@@ -9,7 +9,7 @@ use tracedecay_code_extraction::{
     import_module_kind,
 };
 use tracedecay_domain::{
-    CanonicalRelationEdgeV1, CodeGenerationId, FileOccurrenceId, ManifestDigest,
+    CanonicalRelationEdgeV1, CodeGenerationId, EdgeKind, FileOccurrenceId, ManifestDigest,
     RelationEdgeKindV1, SourceSpan, SymbolOccurrenceId,
 };
 
@@ -226,7 +226,7 @@ pub enum CodeIndexEdgeAbstentionReasonV1 {
 pub struct CodeIndexEdgeAbstentionV1 {
     pub source_node_id: String,
     pub target_node_id: String,
-    pub legacy_kind: String,
+    pub kind: EdgeKind,
     pub reason: CodeIndexEdgeAbstentionReasonV1,
 }
 
@@ -258,24 +258,6 @@ impl CodeFileIndexArtifactsV1 {
             clone_bodies,
             artifact.schema_evidence.clone(),
             unresolved_references,
-        )?;
-        artifacts.validate_generation_import_authority(extraction)?;
-        Ok(artifacts)
-    }
-
-    pub(crate) fn without_parser_rows(
-        chunks: CodeFileChunksV1,
-        extraction: &ExtractionBatchV1,
-    ) -> Result<Self, ChunkingFailureV1> {
-        let artifacts = Self::from_parts(
-            chunks,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            None,
-            Vec::new(),
         )?;
         artifacts.validate_generation_import_authority(extraction)?;
         Ok(artifacts)

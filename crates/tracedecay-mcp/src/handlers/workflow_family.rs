@@ -10,9 +10,9 @@ use std::future::Future;
 
 use serde_json::Value;
 use tracedecay_api::{HttpApplicationControls, WorkflowHttpRequest, WorkflowOperation};
+use tracedecay_contracts::now_micros;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::{CancellationSignal, Deadline, RequestId};
-use tracedecay_daemon_protocol::invocation_now_micros;
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_tool_catalog::OperationId;
@@ -129,7 +129,7 @@ fn workflow_controls(
             "The canonical Workflow deadline exceeds the domain clock",
         )
     })?;
-    let maximum_deadline = UtcMicros(invocation_now_micros().0.saturating_add(maximum_micros));
+    let maximum_deadline = UtcMicros(now_micros().0.saturating_add(maximum_micros));
     let deadline = protocol_deadline
         .filter(|deadline| deadline.expires_at <= maximum_deadline)
         .map_or_else(|| Deadline::new(maximum_deadline), Ok)

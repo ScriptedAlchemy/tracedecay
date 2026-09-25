@@ -1,36 +1,49 @@
 /**
- * The Cortex aperture: the graph slice as one luminous field, with its HUD.
+ * The Cortex aperture: the graph slice as one relief field, with its HUD.
  *
- * The canvas is `GraphCanvas`, Sigma over Graphology, force-settled once,
- * and everything drawn over it is a reading of the same slice: the scale and
- * the rule that chose it (top left), the symbol kinds on the field with their
- * counts (bottom left), and the relation kinds the wire served (bottom right).
- * The legends list what is DRAWN, not what the index holds; the register
- * above the aperture states the whole.
+ * The field is `CortexSceneCanvas` drawing `reliefPainter`: symbols inside
+ * their directory's hull, a relief of measured coupling under each hull, and
+ * relations across directories bundled into trunks. Everything drawn over it
+ * is a reading of the same slice: the scale and the rule that chose it (top
+ * left), the symbol kinds on the field with their counts (bottom left), and
+ * the strip beneath naming what each mark measures. The legends list what is
+ * DRAWN, not what the index holds; the register above the aperture states the
+ * whole.
  *
- * Hover on the field inspects; click pins. Both are wired through the canvas's
- * own `onInspect` / `onSelect`, so the list beside it and the inspector share
- * one identity model with the picture and the picture never owns a selection.
+ * Hover on the field inspects; click pins. Both are wired through the
+ * canvas's own `onInspect` / `onSelect`, so the list beside it and the
+ * inspector share one identity model with the picture and the picture never
+ * owns a selection.
  */
-import type { ComponentProps, ReactNode } from 'react';
+import { useMemo, type ReactNode } from 'react';
 
 import type { GraphSubgraphPayloadV1 } from '../../contracts/generated.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
 import { CenteredState, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { cn } from '../../ui/cn';
-import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
-import { kindColorVars } from '../../viz/graph/kindColor.ts';
+import type { ActivationField } from '../../viz/graph/activation.ts';
+import { kindColor } from '../../viz/graph/kindColor.ts';
+import { CortexSceneCanvas } from './CortexSceneCanvas.tsx';
 import { kindLegend, relationLegend, type LegendEntry } from './cortex.ts';
+import { reliefPainter } from './cortexReliefField.ts';
+import { kindShape, sceneFromSlice, type KindShape } from './cortexScene.ts';
 import { describeSubgraph } from './hubs.ts';
 
 /** The most kinds a legend prints before folding the rest into one line. */
 const LEGEND_ROWS = 7;
 
+/** What each mark on the field measures, printed beneath it. */
+const READINGS: readonly (readonly [string, string])[] = [
+  ['size', 'degree · area ∝ in + out'],
+  ['hue + shape', 'kind'],
+  ['relief', 'drawn relation endpoints, per directory'],
+  ['hull', 'directory of the file'],
+  ['trunk', 'relations across directories · brighter = more'],
+];
+
 export function CortexField({
   pending,
   result,
-  nodes,
-  edges,
   selectedId,
   inspectedId,
   onSelect,
@@ -41,13 +54,11 @@ export function CortexField({
 }: {
   pending: boolean;
   result: EnvelopeResult<GraphSubgraphPayloadV1> | undefined;
-  nodes: ComponentProps<typeof GraphCanvas>['nodes'];
-  edges: ComponentProps<typeof GraphCanvas>['edges'];
   selectedId: string | null;
   inspectedId: string | null;
   onSelect: (id: string | null) => void;
   onInspect: (id: string | null) => void;
-  activation: ComponentProps<typeof GraphCanvas>['activation'];
+  activation: ActivationField;
   totalNodes: number | null;
   seedLabel: string | null;
 }) {
@@ -81,71 +92,183 @@ export function CortexField({
       </div>
     );
   }
+  return (
+    <ReliefField
+      payload={payload}
+      totalNodes={totalNodes}
+      seedLabel={seedLabel}
+      selectedId={selectedId}
+      inspectedId={inspectedId}
+      onSelect={onSelect}
+      onInspect={onInspect}
+      activation={activation}
+    />
+  );
+}
+
+function ReliefField({
+  payload,
+  totalNodes,
+  seedLabel,
+  selectedId,
+  inspectedId,
+  onSelect,
+  onInspect,
+  activation,
+}: {
+  payload: GraphSubgraphPayloadV1;
+  totalNodes: number | null;
+  seedLabel: string | null;
+  selectedId: string | null;
+  inspectedId: string | null;
+  onSelect: (id: string | null) => void;
+  onInspect: (id: string | null) => void;
+  activation: ActivationField;
+}) {
+  const scene = useMemo(() => sceneFromSlice(payload.nodes, payload.edges), [payload]);
   const caption = describeSubgraph(payload, totalNodes, seedLabel);
   const kinds = kindLegend(payload.nodes);
   const relations = relationLegend(payload.edges);
   return (
-    <div className="flex min-h-0 flex-1 flex-col p-3" data-cortex-field="ready">
-      <GraphCanvas
-        fill
-        cameraControls
-        nodes={nodes}
-        edges={edges}
+    <div className="flex min-h-0 flex-1 flex-col gap-1.5 p-3" data-cortex-field="ready">
+      <CortexSceneCanvas
+        scene={scene}
+        painter={reliefPainter}
         selectedId={selectedId}
         inspectedId={inspectedId}
         onSelect={onSelect}
         onInspect={onInspect}
         activation={activation}
-        canvasClassName="min-h-[52vw] md:min-h-[46vh] lg:min-h-[18rem]"
         ariaLabel={fieldDescription(payload, caption?.scale ?? null, kinds, seedLabel)}
-        fallbackDescription="the symbol list and inspector beside this field remain available as a text alternative"
-        encoding={{
-          body: 'symbol',
-          size: 'degree · in + out edges',
-          hue: 'symbol kind',
-          signal: 'search hit or click; never hover',
-          relation: 'relation of any kind, drawn alike',
-        }}
-        caption={
-          caption ? (
-            <p className="text-3xs leading-relaxed text-text-muted">{caption.rule}</p>
-          ) : null
-        }
         overlay={
           <>
             {caption ? (
               <Hud className="left-3 top-3 max-w-[60%]" label="slice">
                 <span className="td-value text-2xs text-text-primary">{caption.scale}</span>
                 {caption.capped ? (
-                  <span className="td-legend text-state-partial">capped at the limit</span>
+                  <span className="td-legend text-state-partial">capped at the limit · more exists</span>
                 ) : null}
                 <span className="td-legend normal-case tracking-normal text-text-muted">
                   {payload.mode === 'seeded' ? 'seeded neighbourhood' : 'busiest connected region'}
                 </span>
+                {scene.unknownDegree > 0 ? (
+                  <span className="td-legend normal-case tracking-normal text-state-unknown">
+                    degree absent for {scene.unknownDegree} · dashed, not zero
+                  </span>
+                ) : null}
               </Hud>
             ) : null}
             <Hud className="bottom-3 left-3" label="symbol kind">
-              <LegendList entries={kinds} unit="drawn" />
-            </Hud>
-            <Hud className="bottom-3 right-3" label="reading">
-              <dl className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-3xs">
-                <dt className="td-legend">size</dt>
-                <dd className="td-value text-text-secondary">degree</dd>
-                <dt className="td-legend">hue</dt>
-                <dd className="td-value text-text-secondary">kind</dd>
-                <dt className="td-legend">glow</dt>
-                <dd className="td-value text-text-secondary">search / click</dd>
-              </dl>
-              {relations.length > 0 ? (
-                <div className="mt-1 border-t border-edge-subtle/70 pt-1">
-                  <LegendList entries={relations} unit="edges" swatch="line" />
-                </div>
-              ) : null}
+              <KindShapeList entries={kinds} />
             </Hud>
           </>
         }
       />
+      <div
+        className="flex flex-wrap items-center gap-x-4 gap-y-1 border-y border-edge-subtle/70 py-1 text-3xs"
+        aria-label="Field reading"
+      >
+        {READINGS.map(([term, value]) => (
+          <span key={term} className="inline-flex items-baseline gap-1.5">
+            <span className="td-legend">{term}</span>
+            <span className="text-text-secondary">{value}</span>
+          </span>
+        ))}
+        <StateKey />
+        {relations.length > 0 ? <RelationList entries={relations} /> : null}
+      </div>
+      {caption ? <p className="text-3xs leading-relaxed text-text-muted">{caption.rule}</p> : null}
     </div>
+  );
+}
+
+/** Selection vocabulary. Pinning is a ring, not a hue: kinds share the cyan band. */
+function StateKey() {
+  return (
+    <ul className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-3xs text-text-secondary">
+      <li className="flex items-center gap-1.5">
+        <svg aria-hidden width="12" height="12" viewBox="0 0 12 12" className="shrink-0">
+          <circle cx="6" cy="6" r="4.5" fill="none" strokeWidth="2" className="stroke-accent" />
+        </svg>
+        pinned · 2px ring, neighbourhood lifted
+      </li>
+      <li>hover or focus · dims the unrelated, inspects only</li>
+      <li className="flex items-center gap-1.5">
+        <svg aria-hidden width="12" height="12" viewBox="0 0 12 12" className="shrink-0">
+          <circle cx="6" cy="6" r="5" fill="none" strokeWidth="0.8" className="stroke-accent opacity-60" />
+        </svg>
+        search hit · decays
+      </li>
+    </ul>
+  );
+}
+
+function ShapeSwatch({ shape, kind }: { shape: KindShape; kind: string }) {
+  const color = kindColor(kind, false);
+  return (
+    <svg aria-hidden width="10" height="10" viewBox="0 0 10 10" className="shrink-0">
+      {shape === 'square' ? (
+        <rect x="1.5" y="1.5" width="7" height="7" fill={color} />
+      ) : shape === 'diamond' ? (
+        <path d="M5 0.5 L9.5 5 L5 9.5 L0.5 5 Z" fill={color} />
+      ) : shape === 'ring' ? (
+        <circle cx="5" cy="5" r="3.3" fill="none" stroke={color} strokeWidth="1.6" />
+      ) : (
+        <circle cx="5" cy="5" r="3.8" fill={color} />
+      )}
+    </svg>
+  );
+}
+
+function KindShapeList({ entries }: { entries: readonly LegendEntry[] }) {
+  const folded = entries.slice(LEGEND_ROWS);
+  return (
+    <ul className="flex flex-col gap-0.5 text-3xs" aria-label="drawn by kind">
+      {entries.slice(0, LEGEND_ROWS).map((entry) => (
+        <li key={entry.kind} className="flex items-center gap-1.5">
+          <ShapeSwatch shape={kindShape(entry.kind)} kind={entry.kind} />
+          <span className="td-value min-w-0 flex-1 truncate text-text-secondary">{entry.kind}</span>
+          <span className="td-value shrink-0 text-text-muted" data-cell="numeric">
+            {entry.count.toLocaleString()}
+          </span>
+        </li>
+      ))}
+      {folded.length > 0 ? (
+        <li className="text-text-muted">
+          + {folded.length} more ·{' '}
+          {folded.reduce((sum, entry) => sum + entry.count, 0).toLocaleString()} drawn
+        </li>
+      ) : null}
+    </ul>
+  );
+}
+
+const RELATION_DASH: Record<string, string> = { references: '3 2', contains: '1 2' };
+
+/** Relation kinds on the slice, each with the line style the field draws it in. */
+function RelationList({ entries }: { entries: readonly LegendEntry[] }) {
+  return (
+    <ul className="flex flex-wrap gap-x-3 gap-y-0.5 text-3xs" aria-label="edges by kind">
+      {entries.map((entry) => (
+        <li key={entry.kind} className="flex items-center gap-1.5">
+          <svg aria-hidden width="12" height="4" viewBox="0 0 12 4" className="shrink-0">
+            <line
+              x1="0"
+              y1="2"
+              x2="12"
+              y2="2"
+              strokeWidth="1"
+              className="stroke-edge-strong"
+              strokeDasharray={RELATION_DASH[entry.kind]}
+            />
+          </svg>
+          <span className="td-value text-text-secondary">{entry.kind}</span>
+          <span className="td-value text-text-muted" data-cell="numeric">
+            {entry.count.toLocaleString()}
+          </span>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -178,46 +301,6 @@ function Hud({
   );
 }
 
-function LegendList({
-  entries,
-  unit,
-  swatch = 'disc',
-}: {
-  entries: readonly LegendEntry[];
-  unit: string;
-  swatch?: 'disc' | 'line';
-}) {
-  const shown = entries.slice(0, LEGEND_ROWS);
-  const folded = entries.slice(LEGEND_ROWS);
-  const foldedCount = folded.reduce((sum, entry) => sum + entry.count, 0);
-  return (
-    <ul className="flex flex-col gap-0.5 text-3xs" aria-label={`${unit} by kind`}>
-      {shown.map((entry) => (
-        <li key={entry.kind} className="flex items-center gap-1.5">
-          {swatch === 'disc' ? (
-            <span
-              aria-hidden
-              className="size-1.5 shrink-0 rounded-full bg-[var(--kind-dark)] [[data-theme=light]_&]:bg-[var(--kind-light)]"
-              style={kindColorVars(entry.kind)}
-            />
-          ) : (
-            <span aria-hidden className="h-px w-3 shrink-0 bg-edge-strong" />
-          )}
-          <span className="td-value min-w-0 flex-1 truncate text-text-secondary">{entry.kind}</span>
-          <span className="td-value shrink-0 text-text-muted" data-cell="numeric">
-            {entry.count.toLocaleString()}
-          </span>
-        </li>
-      ))}
-      {folded.length > 0 ? (
-        <li className="text-text-muted">
-          + {folded.length} more {folded.length === 1 ? 'kind' : 'kinds'} · {foldedCount.toLocaleString()} {unit}
-        </li>
-      ) : null}
-    </ul>
-  );
-}
-
 function fieldDescription(
   payload: GraphSubgraphPayloadV1,
   scale: string | null,
@@ -232,5 +315,5 @@ function fieldDescription(
     payload.mode === 'seeded'
       ? `the neighbourhood of ${seedLabel ?? 'the selected symbol'}, one edge deep`
       : "the graph's busiest connected region";
-  return `Code cortex: ${scale ?? `${payload.nodes.length} symbols`} drawn as ${rule}. Symbol size is degree, hue is kind (${composition}). Hover inspects a symbol in the inspector; click pins it. The symbol list beside the field is the accessible equivalent.`;
+  return `Code cortex: ${scale ?? `${payload.nodes.length} symbols`} drawn as ${rule}. Symbols sit in their directory's hull; size is degree, hue and shape are kind (${composition}). Hover inspects a symbol in the inspector; click pins it. The symbol list beside the field is the accessible equivalent.`;
 }

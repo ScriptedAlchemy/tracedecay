@@ -55,7 +55,7 @@ pub(crate) async fn execute_workflow_application(
     else {
         return DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable);
     };
-    let observed_at = tracedecay_daemon_protocol::invocation_now_micros();
+    let observed_at = tracedecay_contracts::now_micros();
     let operation_key = request.operation_key();
     let Some((_, capability, use_case)) = tracedecay_contracts::WORKFLOW_APPLICATION_OPERATION_IDS
         .iter()

@@ -4,19 +4,20 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 use tracedecay_automation_runtime::automation::AutomationRunControl;
-use tracedecay_automation_runtime::automation::backend::AgentTaskKind;
+use tracedecay_automation_runtime::automation::backend::{AgentTaskBackend, AgentTaskKind};
 use tracedecay_automation_runtime::automation::maintenance_termination::MaintenanceTaskTermination;
 use tracedecay_automation_runtime::automation::scheduler_stop::AutomationSchedulerStop;
 
-use crate::project::TraceDecay;
 use tracedecay_automation_runtime::automation::effect_runtime::settlement::{
     AutomationEffectAdmission, AutomationEffectAuthority, RetainedAutomationSettlementOutcome,
     RetainedAutomationSettlementProjection, pinned_automation_configuration_digest,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_project::project::TraceDecay;
 
 use super::branch_admin::MaintenanceReaperKind;
-use super::{DAEMON_TASK_ABORT_DEADLINE, DaemonEngine, DaemonHandshake, ProjectServerKey};
+use super::{DaemonEngine, DaemonHandshake, ProjectServerKey};
+use tracedecay_daemon_service::shutdown::DAEMON_TASK_ABORT_DEADLINE;
 use tracedecay_runtime_core::logging::log_daemon_event;
 
 mod combined_effect;
@@ -395,7 +396,7 @@ impl DaemonEngine {
         key: ProjectServerKey,
         project_path: PathBuf,
         handshake: DaemonHandshake,
-        cg: Arc<crate::project::TraceDecay>,
+        cg: Arc<tracedecay_project::project::TraceDecay>,
     ) {
         if !self.lifecycle.accepting() {
             return;
@@ -994,7 +995,8 @@ impl DaemonEngine {
             .await
             .clear();
         let _child_shutdown =
-            tracedecay_sessions::runtime::codex_app_server::begin_codex_app_server_shutdown();
+            tracedecay_sessions::runtime::hosts::codex_app_server::begin_codex_app_server_shutdown(
+            );
         let _ = timeout(DAEMON_TASK_ABORT_DEADLINE, async {
             for retirement in retirements {
                 retirement.wait().await;
@@ -1486,19 +1488,15 @@ fn finish_global_retention(
 fn global_table_retention_config(
     config: &tracedecay_configuration::RetentionConfig,
 ) -> tracedecay_maintenance::retention::RetentionConfig {
-    let (session_messages_days, lcm_raw_messages_days) = if config.session_lcm.enabled {
-        (
-            config.session_lcm.dedupe_projected_after_days,
-            config.session_lcm.drop_after_days,
-        )
+    let lcm_raw_messages_days = if config.session_lcm.enabled {
+        config.session_lcm.drop_after_days
     } else {
-        (None, None)
+        None
     };
     tracedecay_maintenance::retention::RetentionConfig {
         // The root retention tree has no analytics-event window. Disabling
         // this legacy table is the only mapping that does not invent policy.
         analytics_events_days: None,
-        session_messages_days,
         lcm_raw_messages_days,
     }
 }
@@ -1518,7 +1516,7 @@ async fn maybe_run_global_retention(
     ) else {
         return;
     };
-    let now_secs = crate::project::current_timestamp();
+    let now_secs = tracedecay_runtime_core::tracedecay::current_timestamp();
     let global_config = global_table_retention_config(config);
     let Some(retention) = administration
         .try_with_writer(|| async {
@@ -1645,18 +1643,23 @@ mod global_retention_tests {
             .execute_batch(
                 "CREATE TABLE retention_delete_receipts (deleted_message_id TEXT NOT NULL);
                  CREATE TRIGGER retention_delete_receipt
-                 AFTER DELETE ON session_messages BEGIN
+                 AFTER DELETE ON lcm_raw_messages BEGIN
                     INSERT INTO retention_delete_receipts(deleted_message_id)
                     VALUES (OLD.message_id);
                  END;
-                 INSERT INTO lcm_summary_nodes(
-                    node_id, provider, conversation_id, session_id, depth, summary_text,
-                    summary_hash, summary_token_count, source_token_count
+                 INSERT INTO retrieval_anchors (
+                    anchor_id, anchor_json, owner_json, projection_generation
+                 ) VALUES ('retention-summary-anchor', '{}', '{}', 'test');
+                 INSERT INTO session_summary_nodes(
+                    summary_id, session_id, provider, conversation_id, depth,
+                    summary_anchor_id, summary_text, summary_hash, summary_token_count,
+                    source_token_count, source_horizon_json, created_at
                  ) VALUES (
-                    'retention-summary', 'claude', 'retention-session', 'retention-session', 0,
-                    'retention summary', 'retention-summary-hash', 1, 1
+                    'retention-summary', 'retention-session', 'claude', 'retention-session', 0,
+                    'retention-summary-anchor', 'retention summary', 'retention-summary-hash',
+                    1, 1, '{}', 1
                  );
-                 INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
+                 INSERT INTO session_summary_sources(summary_id, source_kind, source_id, ordinal)
                  SELECT 'retention-summary', 'raw_message', CAST(store_id AS TEXT), 0
                  FROM lcm_raw_messages
                  WHERE provider = 'claude' AND message_id = 'retention-message';",
@@ -1694,8 +1697,7 @@ mod global_retention_tests {
     fn global_retention_config() -> tracedecay_configuration::RetentionConfig {
         let mut config = tracedecay_configuration::RetentionConfig::default();
         config.session_lcm.enabled = true;
-        config.session_lcm.dedupe_projected_after_days = Some(1);
-        config.session_lcm.drop_after_days = None;
+        config.session_lcm.drop_after_days = Some(1);
         config.session_lcm.offload_after_days = None;
         config
     }
@@ -1841,7 +1843,7 @@ mod global_retention_tests {
             .expect("open registered writer for retention fault")
             .execute_batch(
                 "CREATE TRIGGER fail_global_retention_prune
-                 BEFORE DELETE ON session_messages
+                 BEFORE DELETE ON lcm_raw_messages
                  WHEN OLD.message_id = 'retention-message'
                  BEGIN
                     SELECT RAISE(ABORT, 'forced global retention prune failure');
@@ -1893,11 +1895,15 @@ struct PinnedAutomationConfiguration {
     configuration_revision_id: tracedecay_domain::configuration::ConfigurationRevisionId,
     configuration_digest: tracedecay_domain::ManifestDigest,
     settings: tracedecay_automation_runtime::automation::config::AutomationConfig,
+    /// The `codex` executable the same snapshot binds
+    /// (`lcm.summarizer_executables.v1`); the automation backend spawns only
+    /// this path.
+    codex_executable: tracedecay_domain::configuration::LcmSummarizerExecutableV1,
 }
 
 #[hotpath::measure(label = "daemon.scheduler.read_automation_config", future = true)]
 async fn effective_automation_config_for_project(
-    cg: &crate::project::TraceDecay,
+    cg: &tracedecay_project::project::TraceDecay,
 ) -> Result<PinnedAutomationConfiguration> {
     let configuration = cg
         .configuration_runtime()
@@ -1919,6 +1925,7 @@ async fn effective_automation_config_for_project(
         configuration_revision_id: configuration.revision_id().clone(),
         configuration_digest,
         settings,
+        codex_executable: configuration.config().lcm_summarizers.codex.clone(),
     })
 }
 
@@ -1960,7 +1967,7 @@ pub(super) fn automation_scheduler_configured(
 /// scheduled fixed task or a schedulable user-defined job.
 #[hotpath::measure(label = "daemon.scheduler.probe_scheduler_work", future = true)]
 async fn automation_scheduler_has_work(
-    cg: &crate::project::TraceDecay,
+    cg: &tracedecay_project::project::TraceDecay,
     config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
 ) -> Result<bool> {
     use tracedecay_automation_runtime::automation::config::{
@@ -2002,7 +2009,7 @@ async fn run_user_jobs_scheduler_pass(
     project_id: &tracedecay_domain::ProjectId,
     project_path: &Path,
     profile_root: &Path,
-    cg: &crate::project::TraceDecay,
+    cg: &tracedecay_project::project::TraceDecay,
     configuration_digest: tracedecay_domain::ManifestDigest,
     config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
     backend: &tracedecay_automation_runtime::automation::backend::CodexAppServerBackend,
@@ -2047,6 +2054,7 @@ async fn run_user_jobs_scheduler_pass(
         match tracedecay_automation_runtime::automation::jobs::evaluate_and_record_scheduler_skip(
             &dashboard_root,
             config,
+            backend.executable(),
             job,
             &requested_run_id,
             occurrence_anchor_run_id.as_deref(),

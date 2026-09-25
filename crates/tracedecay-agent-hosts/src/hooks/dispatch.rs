@@ -7,13 +7,14 @@ use tracedecay_contracts::ResolvedScope;
 use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1,
 };
+use tracedecay_domain::NativeHostIdentityV1;
 use tracedecay_domain::{ProjectId, UtcMicros};
 #[cfg(test)]
 use tracedecay_hooks::HookImmediateAdmissionStateV1;
 use tracedecay_hooks::{
     AsyncHookFeedbackDeliveryPortV1, HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1,
     HookConfigurationSnapshotV1, HookConfigurationSubscriberV1, HookEventEnvelopeV2,
-    HookFeedbackDeliveryV1, HookFeedbackRollbackSwitchV1, HookGuidanceStateV1, HookHostV1,
+    HookFeedbackDeliveryV1, HookFeedbackRollbackSwitchV1, HookGuidanceStateV1,
     HookImmediateAdmissionV1, HookRuntimeControlV1, HookScopeBindingV1, HookSpoolConfigV1,
     HookSpoolError, HookSpoolV1, HookSynchronousDeadlineV1, HookTransportDispositionV1,
     NativeContextScoutLifecycleV1, NativeEnvelopeMaterialV1, NativeHookDecodeError,
@@ -68,14 +69,14 @@ impl HookDispatch {
     }
 }
 
-pub const NATIVE_HOOK_HOSTS: &[HookHostV1] = &[
-    HookHostV1::ClaudeCode,
-    HookHostV1::Codex,
-    HookHostV1::CursorDesktop,
-    HookHostV1::Hermes,
-    HookHostV1::Kiro,
-    HookHostV1::KimiCode,
-    HookHostV1::OpenCode,
+pub const NATIVE_HOOK_HOSTS: &[NativeHostIdentityV1] = &[
+    NativeHostIdentityV1::ClaudeCode,
+    NativeHostIdentityV1::Codex,
+    NativeHostIdentityV1::CursorDesktop,
+    NativeHostIdentityV1::Hermes,
+    NativeHostIdentityV1::Kiro,
+    NativeHostIdentityV1::KimiCode,
+    NativeHostIdentityV1::OpenCode,
 ];
 
 pub fn project_id_for_layout(
@@ -402,15 +403,16 @@ impl NativeIdentityFields {
 }
 
 fn native_context_scout_lifecycle(
-    host: HookHostV1,
+    host: NativeHostIdentityV1,
     fields: &NativeIdentityFields,
     event_id: [u8; 16],
 ) -> Option<NativeContextScoutLifecycleV1> {
-    matches!(host, HookHostV1::KimiCode | HookHostV1::OpenCode)
-        .then(|| {
-            NativeContextScoutLifecycleV1::new(fields.session_id()?, fields.call_id()?, event_id)
-        })
-        .flatten()
+    matches!(
+        host,
+        NativeHostIdentityV1::KimiCode | NativeHostIdentityV1::OpenCode
+    )
+    .then(|| NativeContextScoutLifecycleV1::new(fields.session_id()?, fields.call_id()?, event_id))
+    .flatten()
 }
 
 const HOOK_ADMISSION_ACK_BUDGET_MICROS: u64 = 25_000;
@@ -430,7 +432,7 @@ fn admission_window_after_elapsed(elapsed: u64) -> Option<(HookSynchronousDeadli
 #[hotpath::measure(future = true, label = "hosts.hooks.dispatch")]
 pub(crate) async fn dispatch(
     runtime: &HookRuntimeV1,
-    host: HookHostV1,
+    host: NativeHostIdentityV1,
     event_json: &str,
     project_root: &Path,
     telemetry: Option<&HookTimingSpan>,
@@ -476,7 +478,7 @@ pub(crate) async fn dispatch(
 /// project identity. Both paths send only the closed event material.
 pub(crate) async fn dispatch_for_scope(
     runtime: &HookRuntimeV1,
-    host: HookHostV1,
+    host: NativeHostIdentityV1,
     event_json: &str,
     project_root: Option<&Path>,
     telemetry: Option<&HookTimingSpan>,
@@ -492,7 +494,7 @@ pub(crate) async fn dispatch_for_scope(
 
 async fn dispatch_profile_scoped(
     runtime: &HookRuntimeV1,
-    host: HookHostV1,
+    host: NativeHostIdentityV1,
     event_json: &str,
     telemetry: Option<&HookTimingSpan>,
     started: Instant,
@@ -578,7 +580,7 @@ pub(crate) async fn dispatch_opencode_tool_after(
     };
     let Some(prepared) = prepare_bound_hook(
         runtime,
-        HookHostV1::OpenCode,
+        NativeHostIdentityV1::OpenCode,
         event_json,
         project_root,
         decoded,
@@ -631,7 +633,7 @@ pub(crate) async fn dispatch_opencode_lsp_updated(
 }
 
 struct PreparedBoundHook {
-    host: HookHostV1,
+    host: NativeHostIdentityV1,
     layout: tracedecay_runtime_core::storage::StoreLayout,
     snapshot: HookConfigurationSnapshotV1,
     envelope: HookEventEnvelopeV2,
@@ -642,7 +644,7 @@ struct PreparedBoundHook {
 
 fn prepare_bound_hook(
     runtime: &HookRuntimeV1,
-    host: HookHostV1,
+    host: NativeHostIdentityV1,
     event_json: &str,
     project_root: &Path,
     decoded: tracedecay_hooks::DecodedNativeHookEventV1,
@@ -856,7 +858,7 @@ fn render_host_delivery(
 /// exit 0 and the event was never spooled.
 fn append_for_replay(
     data_root: &Path,
-    host: HookHostV1,
+    host: NativeHostIdentityV1,
     envelope: &HookEventEnvelopeV2,
     native_lifecycle: Option<NativeContextScoutLifecycleV1>,
     binding: &HookScopeBindingV1,
@@ -890,7 +892,7 @@ enum PendingEnvelopeV1 {
 
 fn replay_envelope_if_pending(
     data_root: &Path,
-    host: HookHostV1,
+    host: NativeHostIdentityV1,
     binding: &HookScopeBindingV1,
     retry: &HookEventEnvelopeV2,
     now: UtcMicros,

@@ -23,18 +23,18 @@ use tracedecay_domain::{
     SessionId, TemporalModeV1, UtcMicros, derive_exact_observation_anchor_id,
 };
 use tracedecay_lcm::contracts::{LcmDataFreshness, LcmRetrievalOutcome};
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
     SessionRecord, SessionTemporalSnapshotRequestV1, build_observation_resolution_authorization_v1,
-    build_observation_retrieval_anchor_v2,
+    build_observation_retrieval_anchor,
 };
 use tracedecay_temporal_query::context::{CompactContext, ContextBudget};
-use tracedecay_temporal_query::ports::{
-    BindingDigest, KernelVersions, TemporalAuthorizedRoot, TemporalSnapshotRequest,
-    TemporalWatermarks,
-};
+use tracedecay_temporal_query::execution::BindingDigest;
+use tracedecay_temporal_query::ports::{TemporalAuthorizedRoot, TemporalSnapshotRequest};
 use tracedecay_temporal_query::ranking::{DiversityLimits, RankedCandidate, RetrieverContribution};
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+use tracedecay_temporal_query::snapshot::{KernelVersions, TemporalWatermarks};
 use tracedecay_temporal_query::{TemporalHydratedResult, TemporalKernelResult};
 use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
 
@@ -269,7 +269,7 @@ async fn seed_real_page_fixture_in_session(
         tracedecay_store::OBSERVATION_CAPTURE_AUTHORITY_V1,
     )
     .expect("resolution authorization");
-    let anchor = build_observation_retrieval_anchor_v2(
+    let anchor = build_observation_retrieval_anchor(
         write.observation(),
         projection_generation.clone(),
         UtcMicros(1),
@@ -298,7 +298,7 @@ async fn seed_real_page_fixture_in_session(
             )
             .await
             .expect("materialize canonical temporal occurrence");
-        database
+        SessionTemporalAccess::new(database)
             .freeze_session_temporal_snapshot_result(SessionTemporalSnapshotRequestV1::new(
                 SessionId::new(session_id.clone()).expect("frozen session"),
             ))
@@ -1604,11 +1604,7 @@ async fn project_retrieval_mounts_each_branch_of_a_shared_graph_store() {
     )
     .unwrap();
     let mut branches = tracedecay_runtime_core::branch_meta::BranchMeta::new("master");
-    branches.add_branch(
-        "refs/heads/feature",
-        tracedecay_runtime_core::config::DB_FILENAME,
-        "master",
-    );
+    branches.add_branch("refs/heads/feature", "master");
     tracedecay_runtime_core::branch_meta::save_branch_meta(&layout.data_root, &branches).unwrap();
     let registry = runtime.profile_database();
     tracedecay_global_db::register_project_store(registry, &project, &layout)

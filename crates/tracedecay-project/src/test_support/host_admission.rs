@@ -19,7 +19,7 @@ use tracedecay_host_admission::{
 use tracedecay_sessions::admission::{
     HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus,
 };
-use tracedecay_sessions::runtime::codex::CodexDiscoveryHub;
+use tracedecay_sessions::runtime::hosts::codex::CodexDiscoveryHub;
 
 use crate::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -669,7 +669,7 @@ impl HostAdmissionTestRuntimeV1 {
         provider: &str,
         session_id: &str,
         transcript_path: &Path,
-    ) -> Result<(i64, i64, i64, i64, i64, i64, i64)> {
+    ) -> Result<(i64, i64, i64, i64, i64, i64)> {
         let snapshot = self
             .session_database_for_test(scope)?
             .read_snapshot()
@@ -679,8 +679,6 @@ impl HostAdmissionTestRuntimeV1 {
                 "SELECT
                     (SELECT COUNT(*) FROM sessions
                      WHERE provider = ?1 AND session_id = ?2),
-                    (SELECT COUNT(*) FROM session_messages
-                     WHERE provider = ?1 AND session_id = ?2),
                     (SELECT COUNT(*) FROM lcm_raw_messages
                      WHERE provider = ?1 AND session_id = ?2),
                     (SELECT COUNT(*) FROM lcm_raw_messages_fts
@@ -688,14 +686,16 @@ impl HostAdmissionTestRuntimeV1 {
                        ON raw.store_id = lcm_raw_messages_fts.rowid
                      WHERE raw.provider = ?1 AND raw.session_id = ?2),
                     (SELECT COUNT(*) FROM lcm_raw_messages_fts),
-                    (SELECT COUNT(*) FROM lcm_summary_nodes
+                    (SELECT COUNT(*) FROM session_summary_nodes
                      WHERE provider = ?1 AND session_id = ?2),
                     (SELECT COUNT(*) FROM parse_offsets
                      WHERE file_path = ?3)",
                 tracedecay_runtime_core::db::engine::params![
                     provider,
                     session_id,
-                    transcript_path.to_string_lossy().as_ref()
+                    tracedecay_sessions::runtime::shared::path_identity_key(
+                        transcript_path.to_string_lossy().as_ref()
+                    )
                 ],
             )
             .await?;
@@ -713,7 +713,6 @@ impl HostAdmissionTestRuntimeV1 {
             row.get(3)?,
             row.get(4)?,
             row.get(5)?,
-            row.get(6)?,
         ))
     }
 
@@ -880,7 +879,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         project_root: &Path,
         layout: &tracedecay_runtime_core::storage::StoreLayout,
-    ) -> Result<crate::config::DaemonRuntimeConfiguration> {
+    ) -> Result<tracedecay_configuration::config::PinnedRuntimeConfiguration> {
         crate::config::ensure_runtime_configuration_for_registered_database(
             project_root,
             layout,
@@ -894,7 +893,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         project_root: &Path,
         layout: &tracedecay_runtime_core::storage::StoreLayout,
-    ) -> Result<crate::config::DaemonRuntimeConfiguration> {
+    ) -> Result<tracedecay_configuration::config::PinnedRuntimeConfiguration> {
         crate::config::resolve_runtime_configuration_for_registered_database(
             project_root,
             layout,
@@ -908,7 +907,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         project_root: &Path,
         layout: &tracedecay_runtime_core::storage::StoreLayout,
-    ) -> Result<crate::config::DaemonRuntimeConfiguration> {
+    ) -> Result<tracedecay_configuration::config::PinnedRuntimeConfiguration> {
         crate::config::open_runtime_configuration_for_registered_database_read_only(
             project_root,
             layout,

@@ -5,6 +5,7 @@
 //! and a draining daemon never starts a new one.
 
 use super::*;
+use tracedecay_daemon_service::shutdown::DaemonLifecycle;
 use tracedecay_runtime_core::logging::log_daemon_event;
 
 /// Bounds how long a foreground request waits for a route's background open.
@@ -64,9 +65,18 @@ where
         // mid-statement. The lifecycle activity remains held until the task
         // reports its terminal outcome and shutdown explicitly joins it.
         let result = Box::pin(open_project_server(cancellation.clone())).await;
+        if cancellation.is_cancelled() {
+            log_daemon_event(
+                "project_server_warmup",
+                &[
+                    ("outcome", "cancelled".to_string()),
+                    ("project", project_path.display().to_string()),
+                ],
+            );
+            return Err(result.err().unwrap_or_else(project_open_cancellation_error));
+        }
         match result {
             Ok(server) => {
-                project_open_cancellation_checkpoint(&cancellation)?;
                 if let Some(initialize_request) = initialize_request {
                     // Preserve the regular initialize side effect that records
                     // the negotiated MCP client name on the real server.
@@ -78,9 +88,6 @@ where
                 Ok(())
             }
             Err(error) => {
-                if cancellation.is_cancelled() {
-                    return Err(error);
-                }
                 log_daemon_event(
                     "project_server_warmup",
                     &[
@@ -271,7 +278,7 @@ fn remote_deleted_project_route_error(identity: &str) -> TraceDecayError {
 /// manufacturing a new identity.
 ///
 /// The profile registry is a *derived* index: the authoritative identity chain
-/// in [`crate::project::TraceDecay::resolve_registered_configuration_layout`]
+/// in [`tracedecay_project::project::TraceDecay::resolve_registered_configuration_layout`]
 /// consults the project's own enrollment marker (and the repository-identity
 /// marker) BEFORE it ever asks the registry, and a successful open republishes
 /// the registry rows via `register_project_store_in_global_registry`. A guard

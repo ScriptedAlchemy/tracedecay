@@ -6,7 +6,7 @@ use tracedecay_contracts::{
     ApplicationProblemKind, AuthorityReceipt, CallableCodeOperationKind, CancellationContext,
     Deadline, EvidenceCoverage, EvidenceDomain, EvidencePacket, OperationBudgetUsage,
     OperationReceipt, PageState, PolicyDecisionRef, ResolvedScope, TemporalState,
-    callable_code_operations,
+    callable_code_operations, now_micros,
 };
 use tracedecay_daemon_service::{DaemonInvocationService, *};
 use tracedecay_domain::{
@@ -201,7 +201,7 @@ async fn context_scout_retirement_preserves_same_project_in_another_profile() {
 
 #[test]
 fn callable_code_outcome_is_distinct_and_context_grant_is_exact() {
-    let observed_at = current_micros();
+    let observed_at = now_micros();
     let completed_at = UtcMicros(
         observed_at
             .0

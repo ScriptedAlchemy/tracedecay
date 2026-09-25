@@ -42,15 +42,16 @@ use tracedecay_graph_query::queries::{GraphQueryManager, is_test_marker};
 use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadRequest,
 };
-use tracedecay_session_temporal_store::SessionTemporalCursorKeyProvider;
+use tracedecay_session_temporal_store::{SessionTemporalAccess, SessionTemporalCursorKeyProvider};
 use tracedecay_temporal_query::cursor::{
     CURSOR_LIFETIME_MICROS, StableSortKey, encode_cursor, verify_cursor,
 };
-use tracedecay_temporal_query::ports::{
-    BindingDigest, KernelVersions, SessionCursorAuthenticator, TemporalExecutionSnapshot,
-    TemporalSnapshotRequest, TemporalWatermarks,
-};
+use tracedecay_temporal_query::execution::BindingDigest;
+use tracedecay_temporal_query::ports::{SessionCursorAuthenticator, TemporalSnapshotRequest};
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+use tracedecay_temporal_query::snapshot::{
+    KernelVersions, TemporalExecutionSnapshot, TemporalWatermarks,
+};
 
 mod affected_tests;
 #[cfg(test)]
@@ -628,8 +629,7 @@ pub async fn open_production_primitive_runtime(
     let project_root = source_runtime.project_root().to_path_buf();
     let scope = access.scope.clone();
     let configuration_digest = access.configuration_digest.clone();
-    let key = session_db
-        .as_ref()
+    let key = SessionTemporalAccess::new(session_db.as_ref())
         .ensure_active_session_cursor_key_result()
         .await
         .map_err(|_| ApplicationContractError::Inconsistent {

@@ -77,15 +77,13 @@ pub use callable_code_catalog::{
     callable_code_operations, callable_code_request_schema, callable_code_result_schema,
 };
 pub use callable_code_service::{
-    CallableCodeAuthorizationAdmission, CallableCodeAuthorizationFuture,
-    CallableCodeAuthorizationPort, CallableCodeQueryFuture, CallableCodeQueryPort,
-    CallableCodeQueryService, UNPINNED_LATEST_GENERATION_SENTINEL,
+    CallableCodeAuthorizationFuture, CallableCodeAuthorizationPort, CallableCodeQueryFuture,
+    CallableCodeQueryPort, CallableCodeQueryService, UNPINNED_LATEST_GENERATION_SENTINEL,
 };
 pub use git_topology_anchor::{
-    GitTopologyAnchorAuthorityErrorV2, GitTopologyAnchorAuthorityV2, GitTopologyAnchorFutureV2,
-    GitTopologyAnchorPublicationOutcomeV2, GitTopologyAnchorPublicationV2,
-    GitTopologyAnchorResolutionOutcomeV2, GitTopologyAnchorResolutionV2,
-    MAX_GIT_TOPOLOGY_ANCHORS_PER_PUBLICATION_V2,
+    GitTopologyAnchorAuthority, GitTopologyAnchorAuthorityError, GitTopologyAnchorFuture,
+    GitTopologyAnchorPublication, GitTopologyAnchorPublicationOutcome, GitTopologyAnchorResolution,
+    GitTopologyAnchorResolutionOutcome, MAX_GIT_TOPOLOGY_ANCHORS_PER_PUBLICATION,
 };
 pub use ports::{
     AffectedTestsRetrievalPort, OperationalRetrievalPort, RetrievalPortContext,
@@ -94,16 +92,16 @@ pub use ports::{
     TemporalRetrievalFailure, TemporalRetrievalFuture, TemporalRetrievalPort,
 };
 pub use primitive_surface::{
-    CalleeV1, CalleesResultV1, CalleesSurfaceRequestV1, ContextCodeBlockV1, ContextModeV1,
-    ContextResultV1, ContextSearchMatchV1, ContextSurfaceRequestV1, ImpactNodeV1, ImpactResultV1,
-    ImpactSurfaceRequestV1, MAX_REDUNDANCY_FAMILIES_V1, MAX_REDUNDANCY_PULL_REQUEST_PATHS_V1,
-    MAX_REDUNDANCY_WORK_V1, NodeDepthSurfaceRequestV1, NodeDetailsV1, NodeExpansionCostV1,
-    NodeResultV1, NodeSurfaceRequestV1, PortCycleAnchorV1, PortCycleFileV1, PortCycleSymbolV1,
-    PortCycleV1, PortMatchedSymbolV1, PortOrderLevelV1, PortOrderResultV1,
-    PortOrderSurfaceRequestV1, PortOrderSymbolV1, PortStatusResultV1, PortStatusSurfaceRequestV1,
-    PortTargetOnlySymbolV1, PortUnmatchedSymbolV1, PrimitiveFreshnessStateV1,
-    PrimitiveIndexingStateV1, PrimitiveLaneCompleteV1, PrimitiveLaneStateV1, PrimitiveLaneStatusV1,
-    PrimitiveNotFoundV1, PrimitiveRecallV1, PrimitiveSearchCoverageV1, PrimitiveSearchFreshnessV1,
+    ContextCodeBlockV1, ContextExtensionPointV1, ContextModeV1, ContextPlanV1, ContextResultV1,
+    ContextSearchMatchV1, ContextSurfaceRequestV1, ImpactNodeV1, ImpactResultV1,
+    MAX_REDUNDANCY_FAMILIES_V1, MAX_REDUNDANCY_PULL_REQUEST_PATHS_V1, MAX_REDUNDANCY_WORK_V1,
+    NodeDepthSurfaceRequestV1, NodeDetailsV1, NodeExpansionCostV1, NodeResultV1,
+    NodeSurfaceRequestV1, PortCycleAnchorV1, PortCycleFileV1, PortCycleSymbolV1, PortCycleV1,
+    PortMatchedSymbolV1, PortOrderLevelV1, PortOrderResultV1, PortOrderSurfaceRequestV1,
+    PortOrderSymbolV1, PortStatusResultV1, PortStatusSurfaceRequestV1, PortTargetOnlySymbolV1,
+    PortUnmatchedSymbolV1, PrimitiveFreshnessStateV1, PrimitiveIndexingStateV1,
+    PrimitiveLaneCompleteV1, PrimitiveLaneStateV1, PrimitiveLaneStatusV1, PrimitiveNotFoundV1,
+    PrimitiveRecallV1, PrimitiveSearchCoverageV1, PrimitiveSearchFreshnessV1,
     PrimitiveSymbolLocationV1, PrimitiveUnavailableEvidenceV1, PrimitiveUnavailableStatusV1,
     RedundancyCoverageV1, RedundancyFamilyV1, RedundancyPartialReasonV1, RedundancyRankingV1,
     RedundancyResultV1, RedundancyScopeV1, RedundancySurfaceRequestV1, RenamePreviewNodeV1,
@@ -134,12 +132,12 @@ pub use source_read::{
 };
 pub use symbol_graph::{
     CodeGraphReadFreshnessV1, ExactSymbolRequest, GraphImpactPrimitiveRequest,
-    GraphRelationRequest, ImplementationSelector, ImplementationsRequest, MAX_SYMBOL_GRAPH_DEPTH,
-    MAX_SYMBOL_GRAPH_FILTERS, MAX_SYMBOL_GRAPH_QUERY_BYTES, PrimitiveFailure, PrimitiveFailureKind,
-    PrimitiveSupportGap, SignatureSearchRequest, SymbolGraphPage, SymbolGraphPortContext,
-    SymbolGraphPortFuture, SymbolGraphPortOutcome, SymbolGraphPrimitivePort, SymbolGraphScope,
-    SymbolPrimitiveRecord, SymbolRelationRecord, SymbolSearchPrimitiveRequest, TypeHierarchyRecord,
-    TypeHierarchyRequest,
+    GraphRelationRequest, ImplementationRecord, ImplementationSelector, ImplementationsRequest,
+    MAX_SYMBOL_GRAPH_DEPTH, MAX_SYMBOL_GRAPH_FILTERS, MAX_SYMBOL_GRAPH_QUERY_BYTES,
+    PrimitiveFailure, PrimitiveFailureKind, PrimitiveSupportGap, ServedCodeGraphGenerationV1,
+    SignatureSearchRequest, SymbolGraphPage, SymbolGraphPortContext, SymbolGraphPortFuture,
+    SymbolGraphPortOutcome, SymbolGraphPrimitivePort, SymbolGraphScope, SymbolPrimitiveRecord,
+    SymbolRelationRecord, SymbolSearchPrimitiveRequest, TypeHierarchyRecord, TypeHierarchyRequest,
 };
 pub use test_attribution::{
     AffectedFileTestsPrimitiveRequest, AffectedFileTestsPrimitiveResultV1, MAX_TEST_FILTER_BYTES,

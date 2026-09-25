@@ -30,17 +30,12 @@ pub use bootstrap::windows_hard_link_count;
 pub use lease::enter_maintenance_database_scope;
 #[cfg(not(test))]
 pub use lease::enter_owned_maintenance_database_scope;
-#[cfg(test)]
-use lease::fallback_scoped_runtime_role;
-use lease::{acquire_process_lease, exact_scoped_runtime_role, scoped_runtime_role};
+use lease::{acquire_process_lease, exact_scoped_runtime_role};
 pub use lease::{enter_daemon_database_scope, probe_writer_owner};
 use owner_io::{
     authority_token, epoch_ms, publish_record_atomically, read_record_strict, writer_owner,
 };
-use path_layout::{
-    canonical_profile_root, database_profile_root, is_legacy_repository_database,
-    platform_identity_key,
-};
+use path_layout::{canonical_profile_root, database_profile_root, platform_identity_key};
 pub use tracedecay_private_fs::is_lock_contended;
 
 static PROCESS_LEASES: LazyLock<Mutex<HashMap<PathBuf, ProcessLease>>> =
@@ -181,7 +176,6 @@ struct DatabaseIdentity {
     database_path: PathBuf,
     database_key: PathBuf,
     profile_root: PathBuf,
-    allows_ambient_profile_scope: bool,
 }
 
 #[derive(Debug)]
@@ -247,9 +241,6 @@ impl DatabaseAuthority {
         if maintenance_active {
             return Self::acquire_identity(identity, DatabaseAuthorityRole::Maintenance, intent);
         }
-        if let Some(role) = scoped_runtime_role(&identity, intent)? {
-            return Self::acquire_identity(identity, role, intent);
-        }
         Err(access_error(
             intent,
             &identity.database_path,
@@ -297,9 +288,6 @@ impl DatabaseAuthority {
         {
             return Self::acquire_identity(identity, DatabaseAuthorityRole::Test, intent);
         }
-        if let Some(role) = scoped_runtime_role(&identity, intent)? {
-            return Self::acquire_identity(identity, role, intent);
-        }
         Err(access_error(
             intent,
             &identity.database_path,
@@ -339,16 +327,14 @@ impl DatabaseAuthority {
             return Ok(());
         }
 
-        let active = match exact_scoped_runtime_role(&self.inner.identity.profile_root, intent)? {
-            Some(role) => role,
-            None => scoped_runtime_role(&self.inner.identity, intent)?.ok_or_else(|| {
+        let active = exact_scoped_runtime_role(&self.inner.identity.profile_root, intent)?
+            .ok_or_else(|| {
                 access_error(
                     intent,
                     &self.inner.identity.database_path,
                     "database write requires an active daemon or exclusive maintenance scope",
                 )
-            })?,
-        };
+            })?;
         if active == self.inner.role {
             return Ok(());
         }
@@ -483,7 +469,6 @@ impl DatabaseIdentity {
         let database_key = platform_identity_key(&database_path);
         let profile_root = database_profile_root(&database_path, parent);
         Ok(Self {
-            allows_ambient_profile_scope: is_legacy_repository_database(&database_path),
             database_path,
             database_key,
             profile_root: platform_identity_key(&profile_root),
@@ -561,7 +546,9 @@ fn foreign_daemon_authority_held(profile_root: &Path) -> bool {
     };
     match file.try_lock().map_err(std::io::Error::from) {
         Ok(()) => {
-            let _ = file.unlock();
+            if let Err(error) = file.unlock() {
+                tracing::warn!(%error, "daemon authority probe lock could not be released");
+            }
             false
         }
         Err(error) if is_lock_contended(&error) => true,

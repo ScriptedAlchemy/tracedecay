@@ -6,8 +6,7 @@ use tracedecay_code_index::{
     production::{
         CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
         CodeIndexGenerationScopeV1, CodeIndexIgnoredSourceAdmissionV1, CodeIndexProductionOwnerV1,
-        CodeIndexPublishedGenerationV1, MINIMUM_SEALED_GENERATION_FORMAT_REVISION,
-        SEALED_GENERATION_FORMAT_REVISION_V1, sealed_generation_payload_digest,
+        CodeIndexPublishedGenerationV1,
     },
 };
 use tracedecay_domain::{
@@ -19,7 +18,7 @@ use crate::{
     production_orchestration::{
         ActiveControl, ApplyingProjectionSink, SharedPublicationStore, config, request_with_source,
     },
-    support::id,
+    support::{PartitionedSealV1, id, reseal_manifest},
 };
 
 const PRIMARY_IGNORED_PATH: &str = "node_modules/alpha/index.ts";
@@ -128,28 +127,6 @@ fn assert_rejected_before_publication(request: CodeIndexBuildRequestV1) {
     );
 }
 
-fn sealed_envelope(generation: &CodeIndexPublishedGenerationV1) -> Value {
-    serde_json::from_slice(
-        &generation
-            .encode_sealed()
-            .expect("ignored-source generation seals"),
-    )
-    .expect("sealed ignored-source generation JSON")
-}
-
-fn reseal_outer_state(mut envelope: Value) -> Vec<u8> {
-    let format_revision = u32::try_from(
-        envelope["generation"]["format_revision"]
-            .as_u64()
-            .expect("forged generation format revision"),
-    )
-    .expect("format revision fits u32");
-    let state_digest = sealed_generation_payload_digest(format_revision, &envelope["generation"])
-        .expect("forged generation has a digest");
-    envelope["state_digest"] = Value::String(state_digest.as_str().to_owned());
-    serde_json::to_vec(&envelope).expect("forged sealed-generation JSON")
-}
-
 #[test]
 fn sorted_unique_ignored_source_roster_round_trips_with_present_snapshot_membership() {
     let generation = publish(request_with_ignored_sources(vec![
@@ -176,11 +153,8 @@ fn sorted_unique_ignored_source_roster_round_trips_with_present_snapshot_members
         }));
     }
 
-    let sealed = generation
-        .encode_sealed()
-        .expect("ignored-source generation seals");
-    let restored = CodeIndexPublishedGenerationV1::decode_sealed(&sealed)
-        .expect("ignored-source generation restores");
+    let sealed = PartitionedSealV1::of(&generation);
+    let restored = sealed.restored();
     assert_eq!(
         restored
             .ignored_source_admissions()
@@ -193,10 +167,7 @@ fn sorted_unique_ignored_source_roster_round_trips_with_present_snapshot_members
         restored.repository_parse_identity().dirty,
         RepositoryDirtyStateV1::Dirty
     );
-    assert_eq!(
-        restored.encode_sealed().expect("restored generation seals"),
-        sealed
-    );
+    assert_eq!(PartitionedSealV1::of(&restored).manifest, sealed.manifest);
 }
 
 #[test]
@@ -294,14 +265,15 @@ fn sealed_ignored_source_roster_rejects_semantic_tampering_after_outer_reseal() 
     let generation = publish(request_with_ignored_sources(vec![admission(
         PRIMARY_IGNORED_PATH,
     )]));
-    let mut envelope = sealed_envelope(&generation);
+    let seal = PartitionedSealV1::of(&generation);
+    let mut envelope = seal.envelope();
     let roster = envelope["generation"]["ignored_source_admissions"]
         .as_array_mut()
         .expect("sealed generation carries the required ignored-source roster");
     assert_eq!(roster.len(), 1);
     roster[0]["logical_path"] = Value::String(SECONDARY_IGNORED_PATH.to_owned());
 
-    CodeIndexPublishedGenerationV1::decode_sealed(&reseal_outer_state(envelope))
+    seal.restore(&reseal_manifest(envelope))
         .expect_err("a self-consistent outer digest cannot forge roster state");
 }
 
@@ -310,7 +282,8 @@ fn sealed_json_requires_repository_parse_identity_without_a_default() {
     let generation = publish(request_with_ignored_sources(vec![admission(
         PRIMARY_IGNORED_PATH,
     )]));
-    let mut envelope = sealed_envelope(&generation);
+    let seal = PartitionedSealV1::of(&generation);
+    let mut envelope = seal.envelope();
     assert!(
         envelope["generation"]
             .as_object_mut()
@@ -319,7 +292,8 @@ fn sealed_json_requires_repository_parse_identity_without_a_default() {
             .is_some()
     );
 
-    let error = CodeIndexPublishedGenerationV1::decode_sealed(&reseal_outer_state(envelope))
+    let error = seal
+        .restore(&reseal_manifest(envelope))
         .expect_err("sealed generations may not default missing repository parse identity");
     assert!(
         error.to_string().contains("repository_parse_identity"),
@@ -332,7 +306,8 @@ fn sealed_nonempty_roster_rejects_non_dirty_repository_identity_after_outer_rese
     let generation = publish(request_with_ignored_sources(vec![admission(
         PRIMARY_IGNORED_PATH,
     )]));
-    let envelope = sealed_envelope(&generation);
+    let seal = PartitionedSealV1::of(&generation);
+    let envelope = seal.envelope();
     assert_eq!(
         envelope["generation"]["repository_parse_identity"]["dirty"],
         Value::String("dirty".to_owned())
@@ -342,7 +317,7 @@ fn sealed_nonempty_roster_rejects_non_dirty_repository_identity_after_outer_rese
         let mut forged = envelope.clone();
         forged["generation"]["repository_parse_identity"]["dirty"] =
             Value::String(forged_dirty_state.to_owned());
-        CodeIndexPublishedGenerationV1::decode_sealed(&reseal_outer_state(forged))
+        seal.restore(&reseal_manifest(forged))
             .expect_err("a nonempty ignored-source roster requires durable Dirty evidence");
     }
 }
@@ -352,7 +327,7 @@ fn sealed_nonempty_roster_rejects_forged_snapshot_source_revision_after_outer_re
     let mut pinned_request = request_with_ignored_sources(Vec::new());
     pinned_request.snapshot.source_revision = Some(id::<CommitId>("commit.pinned-fixture"));
     let pinned = publish(pinned_request);
-    let pinned_envelope = sealed_envelope(&pinned);
+    let pinned_envelope = PartitionedSealV1::of(&pinned).envelope();
     let valid_source_revision =
         pinned_envelope["generation"]["snapshot"]["source_revision"].clone();
     assert!(!valid_source_revision.is_null());
@@ -360,10 +335,11 @@ fn sealed_nonempty_roster_rejects_forged_snapshot_source_revision_after_outer_re
     let generation = publish(request_with_ignored_sources(vec![admission(
         PRIMARY_IGNORED_PATH,
     )]));
-    let mut envelope = sealed_envelope(&generation);
+    let seal = PartitionedSealV1::of(&generation);
+    let mut envelope = seal.envelope();
     envelope["generation"]["snapshot"]["source_revision"] = valid_source_revision;
 
-    CodeIndexPublishedGenerationV1::decode_sealed(&reseal_outer_state(envelope))
+    seal.restore(&reseal_manifest(envelope))
         .expect_err("a nonempty ignored-source roster cannot restore with a pinned snapshot");
 }
 
@@ -372,7 +348,8 @@ fn sealed_json_requires_ignored_source_roster_without_a_default() {
     let generation = publish(request_with_ignored_sources(vec![admission(
         PRIMARY_IGNORED_PATH,
     )]));
-    let mut envelope = sealed_envelope(&generation);
+    let seal = PartitionedSealV1::of(&generation);
+    let mut envelope = seal.envelope();
     assert!(
         envelope["generation"]
             .as_object_mut()
@@ -381,7 +358,8 @@ fn sealed_json_requires_ignored_source_roster_without_a_default() {
             .is_some()
     );
 
-    let error = CodeIndexPublishedGenerationV1::decode_sealed(&reseal_outer_state(envelope))
+    let error = seal
+        .restore(&reseal_manifest(envelope))
         .expect_err("sealed generations may not default a missing ignored-source roster");
     assert!(
         error.to_string().contains("ignored_source_admissions"),
@@ -394,7 +372,8 @@ fn sealed_json_requires_ignored_source_admissions_digest_without_a_default() {
     let generation = publish(request_with_ignored_sources(vec![admission(
         PRIMARY_IGNORED_PATH,
     )]));
-    let mut envelope = sealed_envelope(&generation);
+    let seal = PartitionedSealV1::of(&generation);
+    let mut envelope = seal.envelope();
     assert!(
         envelope["generation"]
             .as_object_mut()
@@ -403,7 +382,8 @@ fn sealed_json_requires_ignored_source_admissions_digest_without_a_default() {
             .is_some()
     );
 
-    let error = CodeIndexPublishedGenerationV1::decode_sealed(&reseal_outer_state(envelope))
+    let error = seal
+        .restore(&reseal_manifest(envelope))
         .expect_err("sealed generations may not default a missing ignored-source roster digest");
     assert!(
         error
@@ -418,7 +398,8 @@ fn sealed_json_rejects_legacy_ignored_sources_alias_after_outer_reseal() {
     let generation = publish(request_with_ignored_sources(vec![admission(
         PRIMARY_IGNORED_PATH,
     )]));
-    let mut envelope = sealed_envelope(&generation);
+    let seal = PartitionedSealV1::of(&generation);
+    let mut envelope = seal.envelope();
     let generation = envelope["generation"]
         .as_object_mut()
         .expect("sealed generation object");
@@ -431,82 +412,22 @@ fn sealed_json_rejects_legacy_ignored_sources_alias_after_outer_reseal() {
             .is_none()
     );
 
-    CodeIndexPublishedGenerationV1::decode_sealed(&reseal_outer_state(envelope))
+    seal.restore(&reseal_manifest(envelope))
         .expect_err("legacy ignored_sources alias must not restore");
 }
 
 #[test]
 fn sealed_state_digest_changes_when_ignored_source_roster_changes() {
-    let one = sealed_envelope(&publish(request_with_ignored_sources(vec![admission(
+    let one = PartitionedSealV1::of(&publish(request_with_ignored_sources(vec![admission(
         PRIMARY_IGNORED_PATH,
-    )])));
-    let two = sealed_envelope(&publish(request_with_ignored_sources(vec![
+    )])))
+    .envelope();
+    let two = PartitionedSealV1::of(&publish(request_with_ignored_sources(vec![
         admission(PRIMARY_IGNORED_PATH),
         admission(SECONDARY_IGNORED_PATH),
-    ])));
+    ])))
+    .envelope();
 
     assert_eq!(one["generation"]["snapshot"], two["generation"]["snapshot"]);
     assert_ne!(one["state_digest"], two["state_digest"]);
-}
-
-#[test]
-fn sealed_format_refuses_superseded_revisions_beside_the_partitioned_revision() {
-    let generation = publish(request_with_ignored_sources(vec![admission(
-        PRIMARY_IGNORED_PATH,
-    )]));
-    let sealed = generation
-        .encode_sealed()
-        .expect("current monolithic generation seals");
-    assert!(
-        CodeIndexPublishedGenerationV1::sealed_format_is_compatible(&sealed)
-            .expect("current monolithic compatibility probe")
-    );
-
-    let mut superseded = sealed_envelope(&generation);
-    superseded["generation"]["format_revision"] = Value::from(5);
-    // No reseal: the revision gate fires ahead of any digest rule, so a
-    // superseded envelope is refused whatever its state digest says.
-    let superseded = serde_json::to_vec(&superseded).expect("superseded sealed-generation JSON");
-    assert!(
-        !CodeIndexPublishedGenerationV1::sealed_format_is_compatible(&superseded)
-            .expect("revision-five compatibility probe")
-    );
-    let error = CodeIndexPublishedGenerationV1::decode_sealed(&superseded)
-        .expect_err("a superseded revision must be refused, never migrated");
-    assert!(
-        error.to_string().contains("will be rebuilt from source"),
-        "superseded revision reached the wrong rejection: {error}"
-    );
-
-    for incompatible_revision in [4, 11, 13] {
-        let mut incompatible = sealed_envelope(&generation);
-        incompatible["generation"]["format_revision"] = Value::from(incompatible_revision);
-        let incompatible =
-            serde_json::to_vec(&incompatible).expect("incompatible sealed-generation JSON");
-        assert!(
-            !CodeIndexPublishedGenerationV1::sealed_format_is_compatible(&incompatible)
-                .expect("incompatible revision compatibility probe")
-        );
-        CodeIndexPublishedGenerationV1::decode_sealed(&incompatible)
-            .expect_err("adjacent sealed-generation revisions are incompatible");
-    }
-
-    let mut partitioned = sealed_envelope(&generation);
-    partitioned["generation"]["format_revision"] =
-        Value::from(SEALED_GENERATION_FORMAT_REVISION_V1);
-    let partitioned =
-        serde_json::to_vec(&partitioned).expect("partitioned-format generation manifest");
-    assert!(
-        CodeIndexPublishedGenerationV1::decode_sealed_if_compatible(&partitioned)
-            .expect("partitioned revision classification")
-            .is_none()
-    );
-
-    let mut retired = sealed_envelope(&generation);
-    retired["generation"]["format_revision"] =
-        Value::from(MINIMUM_SEALED_GENERATION_FORMAT_REVISION - 1);
-    let retired = serde_json::to_vec(&retired).expect("retired generation manifest");
-    let error = CodeIndexPublishedGenerationV1::decode_sealed_if_compatible(&retired)
-        .expect_err("pre-clone manifest must be rebuilt");
-    assert!(error.to_string().contains("will be rebuilt from source"));
 }

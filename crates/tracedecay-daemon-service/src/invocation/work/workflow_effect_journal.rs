@@ -21,11 +21,11 @@ use tracedecay_daemon_protocol::{
 };
 use tracedecay_domain::errors::TraceDecayError;
 
-use super::super::current_micros;
 use super::workflow_run_control::{
     workflow_coordination_application_problem, workflow_coordination_problem,
 };
 use super::{RegisteredWorkRuntime, work_command_effect, work_effect, work_evidence_packet};
+use tracedecay_contracts::now_micros;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn complete_workflow_run_effect(
@@ -207,7 +207,7 @@ pub(super) fn execute_journaled_workflow_effect(
             );
         }
     };
-    let prepared = if identity.deadline().is_elapsed_at(current_micros()) {
+    let prepared = if identity.deadline().is_elapsed_at(now_micros()) {
         WorkflowEffectPreparedV1::problem(
             identity.input_digest().clone(),
             WorkflowEffectProblemV1::TimedOut,
@@ -215,7 +215,7 @@ pub(super) fn execute_journaled_workflow_effect(
     } else {
         prepared
     };
-    let record = match authority.execute_effect(&identity, &prepared, current_micros()) {
+    let record = match authority.execute_effect(&identity, &prepared, now_micros()) {
         Ok(record) => record,
         Err(_) => {
             return DaemonInvocationResponse::problem(

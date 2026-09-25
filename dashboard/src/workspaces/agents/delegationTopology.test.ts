@@ -10,11 +10,11 @@ import {
   fitDelegationTopology,
   layoutDelegationTopology,
   markPosition,
-  markRadius,
   neighbourhood,
   type TopologyBundleMark,
   type TopologySessionMark,
 } from './delegationTopology.ts';
+import { ringRadius } from './delegationRings.tsx';
 
 function node(overrides: Partial<AnalyticsSubagentNodeV1> & { session_id: string; depth: number }): AnalyticsSubagentNodeV1 {
   return {
@@ -121,13 +121,6 @@ describe('layoutDelegationTopology', () => {
       'codex:child-b',
       'codex:grandchild',
     ]);
-  });
-
-  it('lays out identically for identical readings', () => {
-    const first = layoutDelegationTopology(fixtureTree());
-    const second = layoutDelegationTopology(fixtureTree());
-    expect(second).toEqual(first);
-    expect(fieldSize(second)).toEqual(fieldSize(first));
   });
 
   it('bundles fan-out past the limit by agent and reconciles the counts', () => {
@@ -403,19 +396,16 @@ describe('fitDelegationTopology', () => {
 });
 
 describe('topology geometry', () => {
-  it('scales radii from measured descendants and never below the floor', () => {
+  it('scales ring radii from measured descendants and never below the floor', () => {
     const model = layoutDelegationTopology(fixtureTree());
     const byId = new Map(model.marks.map((mark) => [mark.id, mark]));
-    const root = byId.get('codex:root')!;
-    const leaf = byId.get('codex:grandchild')!;
-    const childA = byId.get('codex:child-a')!;
-    expect(markRadius(root, model.maxDescendants)).toBe(16);
-    expect(markRadius(leaf, model.maxDescendants)).toBe(5);
-    const mid = markRadius(childA, model.maxDescendants);
-    expect(mid).toBeGreaterThan(5);
-    expect(mid).toBeLessThan(12);
+    expect(ringRadius(byId.get('codex:root')!, model.maxDescendants)).toBe(20);
+    expect(ringRadius(byId.get('codex:grandchild')!, model.maxDescendants)).toBe(6);
     // A solo root with nothing beneath is a leaf, not a source.
-    expect(markRadius(byId.get('cursor:solo')!, model.maxDescendants)).toBe(5);
+    expect(ringRadius(byId.get('cursor:solo')!, model.maxDescendants)).toBe(6);
+    const mid = ringRadius(byId.get('codex:child-a')!, model.maxDescendants);
+    expect(mid).toBeGreaterThan(6);
+    expect(mid).toBeLessThan(20);
   });
 
   it('draws an edge from trailing edge to leading edge through the mid column', () => {

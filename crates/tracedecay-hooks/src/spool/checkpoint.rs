@@ -13,9 +13,8 @@ use tracedecay_domain::{
 };
 use tracedecay_private_fs::framed_log::atomic_write_accelerator;
 
-use crate::{
-    HookHostV1, MAX_HOOK_PAYLOAD_BYTES, MAX_SPOOL_BYTES_PER_HOST, MAX_SPOOL_RECORDS_PER_HOST,
-};
+use crate::{MAX_HOOK_PAYLOAD_BYTES, MAX_SPOOL_BYTES_PER_HOST, MAX_SPOOL_RECORDS_PER_HOST};
+use tracedecay_domain::NativeHostIdentityV1;
 
 use super::{
     CHECKPOINT_FILE, CHECKPOINT_FORMAT_VERSION, HookSpoolConfigV1, HookSpoolError, TRANSITION_FILE,
@@ -138,7 +137,7 @@ mod revision_time {
 #[serde(deny_unknown_fields)]
 struct HookSpoolCheckpointHeaderV1 {
     version: u16,
-    host: HookHostV1,
+    host: NativeHostIdentityV1,
     records_revision: Option<RecordsFileRevisionV1>,
     record_count: u32,
 }

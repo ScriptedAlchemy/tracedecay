@@ -35,7 +35,7 @@ pub(super) fn def_message_search() -> ToolDefinition {
     def(
         "tracedecay_message_search",
         "Message Search",
-        "Read session-temporal message evidence from one authorized project or profile root. This tool never ingests or refreshes provider history. Omitted catch_up is false; explicit catch_up=true requires fresh data and returns typed refresh guidance when the selected root is stale or partial. Set goals=true to list each session's latest thread goal; goals mode makes query optional. project_scope=all_registered sweeps every registered project's own session store with per-root provenance; it cannot be combined with a project selector, cursor, or catch_up.",
+        "Read session-temporal message evidence from one authorized project or profile root. This tool never ingests or refreshes provider history. Omitted require_fresh is false; explicit require_fresh=true requires fresh data and returns typed refresh guidance when the selected root is stale or partial. Set goals=true to list each session's latest thread goal; goals mode makes query optional.",
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -64,10 +64,10 @@ pub(super) fn def_message_search() -> ToolDefinition {
                     "default": true,
                     "description": "Whether to include child subagent sessions in results (default: true)."
                 },
-                "catch_up": {
+                "require_fresh": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Deprecated compatibility flag. Omitted/false allows stored data. Explicit true is a freshness precondition only: the read executes when fresh, while stale or partial coverage returns refresh_required and a typed tracedecay_session_refresh_begin next action. This tool never performs catch-up, refresh, or ingest."
+                    "description": "Freshness precondition. Omitted/false allows stored data. Explicit true executes the read only when fresh; stale or partial coverage returns refresh_required and a typed tracedecay_session_refresh_begin next action. This tool never refreshes or ingests."
                 },
                 "cursor": {
                     "type": "string",
@@ -80,8 +80,6 @@ pub(super) fn def_message_search() -> ToolDefinition {
                 },
                 "since": time_filter_schema("Optional inclusive minimum message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like 'last hour'."),
                 "until": time_filter_schema("Optional inclusive maximum message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like 'last hour'."),
-                "time_from": time_filter_schema("Alias for since."),
-                "time_to": time_filter_schema("Alias for until."),
                 "scope": {
                     "type": "string",
                     "default": "all",
@@ -104,11 +102,6 @@ pub(super) fn def_message_search() -> ToolDefinition {
                 "project_selector": project_selector_object(
                     "Advanced optional registered project selector. Omit to use the active project."
                 ),
-                "project_scope": {
-                    "type": "string",
-                    "description": "all_registered fans the search out over every registered project's durable session store (bounded, deterministic merge, per-root provenance). Cannot be combined with project_selector, cursor, or catch_up.",
-                    "enum": ["all_registered"]
-                },
                 "branch": string_property("Optional git branch filter: only messages from sessions active on this branch (via the session-git correlation index)."),
                 "worktree": string_property("Optional git worktree root path filter: only messages from sessions active in this worktree (via the session-git correlation index)."),
                 "commit": string_property("Optional commit sha filter (full or >=6-char hex prefix): only messages from sessions attributed to this commit (via the session-git correlation index)."),
@@ -117,6 +110,7 @@ pub(super) fn def_message_search() -> ToolDefinition {
                 "format": {
                     "type": "string",
                     "enum": ["markdown", "json"],
+                    "default": "markdown",
                     "description": "Optional output format. MCP defaults to compact Markdown; use json for the full compatibility and temporal envelopes."
                 }
             },
@@ -266,24 +260,9 @@ mod message_search_definition_tests {
             definition.annotations.as_ref().unwrap()["readOnlyHint"],
             true
         );
-        assert!(
-            definition
-                .description
-                .contains("never ingests or refreshes")
-        );
         assert_eq!(
-            definition.input_schema["properties"]["catch_up"]["default"],
+            definition.input_schema["properties"]["require_fresh"]["default"],
             false
-        );
-        assert!(
-            definition.input_schema["properties"]["catch_up"]["description"]
-                .as_str()
-                .unwrap()
-                .contains("freshness precondition")
-        );
-        assert_eq!(
-            definition.input_schema["properties"]["project_scope"]["enum"],
-            json!(["all_registered"])
         );
         assert_closed_objects(&definition.input_schema);
     }

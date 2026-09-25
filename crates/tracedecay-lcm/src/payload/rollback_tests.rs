@@ -72,17 +72,6 @@ async fn direct_store_failure_rolls_back_metadata_and_payload_file() {
             project_key TEXT NOT NULL,
             project_path TEXT NOT NULL,
             PRIMARY KEY(provider, session_id)
-        );
-        CREATE TABLE session_messages (
-            provider TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            timestamp INTEGER,
-            ordinal INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            metadata_json TEXT,
-            PRIMARY KEY(provider, message_id)
         );",
     )
     .await

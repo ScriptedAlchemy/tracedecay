@@ -10,10 +10,8 @@ use super::invoke_admitted_workflow_operation;
 #[tokio::test]
 async fn missing_executor_returns_the_registered_workflow_problem_envelope() {
     let request_id = RequestId::new("request.workflow-missing-executor").expect("request id");
-    let deadline = Deadline::new(UtcMicros(
-        tracedecay_daemon_protocol::invocation_now_micros().0 + 30_000_000,
-    ))
-    .expect("deadline");
+    let deadline = Deadline::new(UtcMicros(tracedecay_contracts::now_micros().0 + 30_000_000))
+        .expect("deadline");
     let cancellation =
         CancellationSignal::active("cancellation.workflow-missing-executor").expect("cancellation");
     let result = handle_workflow(

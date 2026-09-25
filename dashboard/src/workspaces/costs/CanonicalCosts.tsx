@@ -66,12 +66,12 @@ function ProviderLatencyCohorts({
       <div className="flex min-w-0 items-center gap-2">
         <h3 className="td-legend truncate">provider latency cohorts</h3>
         <span aria-hidden className="td-rule" />
-        <span className="shrink-0 text-3xs text-text-muted tabular">
+        <span className="shrink-0 text-xs text-text-muted tabular">
           {cohorts.length.toLocaleString()} reported
         </span>
       </div>
       {cohorts.length === 0 ? (
-        <p className="text-2xs text-text-secondary">
+        <p className="text-body text-text-secondary">
           the canonical read returned no provider latency cohorts
         </p>
       ) : (
@@ -87,7 +87,7 @@ function ProviderLatencyCohorts({
                 <h4 className="text-xs font-semibold text-text-primary">
                   {providerLatencyHeading(cohort)}
                 </h4>
-                <p className="text-3xs text-text-muted">
+                <p className="text-sm text-text-muted">
                   identity provenance {cohort.identity_provenance.source} ·{' '}
                   {cohort.identity_provenance.source_revision} ·{' '}
                   {cohort.identity_provenance.watermark}

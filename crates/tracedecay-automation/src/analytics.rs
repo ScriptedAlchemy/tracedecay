@@ -87,8 +87,7 @@ pub fn normalize_tool_name(raw: &str) -> String {
 
 /// Same host MCP namespaces as `tracedecay_agent_hosts::tool_name`.
 fn strip_host_tool_prefix(name: &str) -> &str {
-    const PREFIXES: [&str; 4] = [
-        "mcp__plugin_tracedecay_tracedecay__",
+    const PREFIXES: [&str; 3] = [
         "mcp__plugin_tracedecay_graph__",
         "mcp__tracedecay__",
         "mcp_tracedecay_",

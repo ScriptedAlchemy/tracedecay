@@ -6,20 +6,21 @@
 //! indexing profiles the daemon's commit width, search profiles a narrower
 //! query ingest.
 
+use std::collections::BTreeMap;
 use std::fmt;
-use std::io::Cursor;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use tracedecay_code_index::production::{
     CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1,
-    CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-    VerifiedSealedLexicalPageBatchBoundsV1, VerifiedSealedLexicalPageBatchReadV1,
-    VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
-    VerifiedSealedLexicalSourceReceiptV1,
+    CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
+    SealedGenerationSegmentPublicationV1, VerifiedSealedLexicalPageBatchBoundsV1,
+    VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageSourceV1,
+    VerifiedSealedLexicalPageV1, VerifiedSealedLexicalSourceReceiptV1,
 };
 use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -253,24 +254,67 @@ impl CodeChunkProjectionSink for ApplyingProjectionSink {
     }
 }
 
-pub(crate) fn sealed_state_digest(sealed: &[u8]) -> Result<ManifestDigest, String> {
-    let envelope: serde_json::Value = serde_json::from_slice(sealed)
-        .map_err(|error| format!("decode sealed generation envelope: {error}"))?;
-    let digest = envelope
-        .get("state_digest")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "sealed generation envelope has no state digest".to_owned())?;
-    ManifestDigest::try_from(digest.to_owned())
-        .map_err(|error| format!("sealed generation state digest: {error:?}"))
+/// A partitioned sealed generation held in memory: the manifest, its content
+/// address (the daemon's lexical source state digest), and every published
+/// segment under its digest, with evidence pages assembled into their pack.
+pub(crate) struct PartitionedSealedV1 {
+    manifest: Vec<u8>,
+    pub(crate) state_digest: ManifestDigest,
+    segments: Arc<BTreeMap<String, Vec<u8>>>,
+}
+
+impl PartitionedSealedV1 {
+    /// Manifest plus every segment, the bytes a fresh publication writes.
+    pub(crate) fn byte_len(&self) -> u64 {
+        self.segments
+            .values()
+            .map(|segment| segment.len() as u64)
+            .sum::<u64>()
+            + self.manifest.len() as u64
+    }
+}
+
+pub(crate) fn seal_partitioned(
+    generation: &CodeIndexPublishedGenerationV1,
+) -> Result<PartitionedSealedV1, String> {
+    let mut segments = BTreeMap::new();
+    let mut evidence_pack = Vec::new();
+    let manifest = generation
+        .encode_partitioned_sealed(|publication| {
+            match publication {
+                SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
+                    segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+                }
+                SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
+                    evidence_pack.extend_from_slice(bytes);
+                }
+                SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
+                    segment_digest,
+                    ..
+                } => {
+                    segments.insert(
+                        segment_digest.as_str().to_owned(),
+                        std::mem::take(&mut evidence_pack),
+                    );
+                }
+            }
+            Ok(())
+        })
+        .map_err(|error| format!("encode partitioned sealed generation: {error}"))?;
+    let state_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&manifest))
+        .map_err(|error| format!("sealed manifest digest: {error}"))?;
+    Ok(PartitionedSealedV1 {
+        manifest,
+        state_digest,
+        segments: Arc::new(segments),
+    })
 }
 
 /// Drain the sealed generation through the bounded batch path the daemon uses
 /// to ingest an artifact. Page budgets stay with the caller so the two benches
 /// do not silently share a commit width.
 pub(crate) fn drain_pages(
-    sealed: &[u8],
-    sealed_len: u64,
-    state_digest: &ManifestDigest,
+    sealed: &PartitionedSealedV1,
     control: &impl CodeIndexExecutionControlV1,
     bounds: SealedDrainBounds,
 ) -> Result<
@@ -285,13 +329,20 @@ pub(crate) fn drain_pages(
         bounds.batch_retained_bytes,
     )
     .map_err(|error| format!("sealed lexical batch bounds: {error}"))?;
-    let mut source = VerifiedSealedLexicalPageSourceV1::open(
-        Cursor::new(sealed.to_vec()),
-        sealed_len,
-        state_digest.clone(),
+    let segments = Arc::clone(&sealed.segments);
+    let mut source = VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
+        &sealed.manifest,
+        sealed.state_digest.clone(),
+        move |digest, _, buffer, _control| {
+            let bytes = segments.get(digest.as_str()).ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract("bench segment is missing".to_owned())
+            })?;
+            buffer.clear();
+            buffer.extend_from_slice(bytes);
+            Ok(())
+        },
         bounds.page_chunks,
         bounds.page_bytes,
-        control,
     )
     .map_err(|error| format!("open sealed lexical page source: {error}"))?;
     let mut pages = Vec::new();

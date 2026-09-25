@@ -683,7 +683,17 @@ async fn count_summary_nodes(
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<i64, LcmError> {
-    util::count_by_provider_session(conn, "lcm_summary_nodes", provider, session_id).await
+    util::fetch_i64(
+        conn,
+        &format!(
+            "SELECT COUNT(*) FROM session_summary_nodes n
+             WHERE n.provider = ?1 AND (?2 IS NULL OR n.session_id = ?2) AND {}",
+            schema::SUMMARY_VISIBLE_SQL
+        ),
+        params![provider, util::opt_text(session_id)],
+        "summary count query returned no rows",
+    )
+    .await
 }
 
 async fn count_external_payloads(
@@ -1093,9 +1103,6 @@ mod tests {
         )
         .await
         .expect("session schema");
-        conn.execute_batch(test_support::SESSION_GENERATION_SCHEMA)
-            .await
-            .expect("session generation schema");
         schema::ensure_lcm_schema(&conn).await.expect("LCM schema");
         conn.execute(
             "INSERT INTO sessions(provider, session_id, project_key, project_path)
@@ -1193,7 +1200,7 @@ mod tests {
                      )
                      INSERT INTO lcm_raw_messages (
                          provider, message_id, session_id, role, ordinal, timestamp,
-                         content, content_hash, storage_kind, snippet_text, index_text
+                         content, content_hash, storage_kind
                      )
                      SELECT 'cursor',
                             printf('background-%09d', value),
@@ -1203,9 +1210,7 @@ mod tests {
                             value,
                             'retained background history',
                             printf('hash-%09d', value),
-                            'inline',
-                            'retained background history',
-                            'retained background history'
+                            'inline'
                      FROM fixture",
                     start = seeded + 1,
                     end = seeded + batch,
@@ -1219,14 +1224,12 @@ mod tests {
         conn.execute(
             "INSERT INTO lcm_raw_messages (
                 provider, message_id, session_id, role, ordinal, timestamp,
-                content, content_hash, storage_kind, snippet_text, index_text
+                content, content_hash, storage_kind
              ) VALUES
                 ('cursor', 'direct-user-match', 'session-direct-user', 'user', ?1, ?1,
-                 'unique:needle direct user', 'direct-user-hash', 'inline',
-                 'unique:needle direct user', 'unique:needle direct user'),
+                 'unique:needle direct user', 'direct-user-hash', 'inline'),
                 ('cursor', 'single-session-match', 'session-single', 'assistant', ?2, ?2,
-                 'unique:needle single session', 'single-session-hash', 'inline',
-                 'unique:needle single session', 'unique:needle single session')",
+                 'unique:needle single session', 'single-session-hash', 'inline')",
             params![rows + 1, rows + 2],
         )
         .await
@@ -1375,24 +1378,19 @@ mod tests {
             "{}alert:marker lossless tail",
             "filler ".repeat(crate::MAX_DERIVED_TEXT_CHARS)
         );
-        let index_text = crate::derived_text_for_index(&content);
         assert!(
-            !index_text.contains("alert:marker"),
+            !crate::derived_text_for_index(&content).contains("alert:marker"),
             "fixture must place the exact term beyond the FTS-derived text cap"
         );
         conn.execute(
             "INSERT INTO lcm_raw_messages (
                 provider, message_id, session_id, role, ordinal, timestamp,
-                content, content_hash, storage_kind, snippet_text, index_text
+                content, content_hash, storage_kind
              ) VALUES (
                 'cursor', 'tail-match', 'session-a', 'assistant', 1, 1,
-                ?1, 'hash', 'inline', ?2, ?3
+                ?1, 'hash', 'inline'
              )",
-            params![
-                content,
-                crate::retrieval_content::derived_text_for_snippet(&index_text),
-                index_text
-            ],
+            params![content],
         )
         .await
         .expect("lossless raw fixture");
@@ -1437,10 +1435,10 @@ mod tests {
             conn.execute(
                 "INSERT INTO lcm_raw_messages (
                     provider, message_id, session_id, role, ordinal, timestamp,
-                    content, content_hash, storage_kind, snippet_text, index_text
+                    content, content_hash, storage_kind
                  ) VALUES (
                     'cursor', ?1, 'session-a', 'assistant', ?2, ?2,
-                    '雪 candidate', 'hash', 'inline', '雪 candidate', '雪 candidate'
+                    '雪 candidate', 'hash', 'inline'
                  )",
                 params![format!("message-{ordinal}"), ordinal],
             )
@@ -1735,8 +1733,8 @@ mod tests {
             let summary_text = format!("summary {ordinal}");
             let summary_hash = crate::retrieval_content::projected_content_hash(&summary_text);
             conn.execute(
-                "INSERT INTO lcm_summary_nodes (
-                    node_id, provider, conversation_id, session_id, depth, summary_text,
+                "INSERT INTO session_summary_nodes (
+                    summary_id, provider, conversation_id, session_id, depth, summary_text,
                     summary_hash, summary_token_count, source_token_count
                  ) VALUES (?1, 'cursor', 'conversation-a', 'session-a', 0, ?2, ?3, 1, 1)",
                 params![
@@ -1747,6 +1745,7 @@ mod tests {
             )
             .await
             .expect("summary node");
+            test_support::mark_summary_available(&conn, "session-a", &node_id).await;
             node_ids.push(node_id);
         }
 
@@ -1785,8 +1784,8 @@ mod tests {
     ) {
         let summary_hash = crate::retrieval_content::projected_content_hash(summary_text);
         conn.execute(
-            "INSERT INTO lcm_summary_nodes (
-                node_id, provider, conversation_id, session_id, depth, summary_text,
+            "INSERT INTO session_summary_nodes (
+                summary_id, provider, conversation_id, session_id, depth, summary_text,
                 summary_hash, summary_token_count, source_token_count, created_at
              ) VALUES (?1, 'cursor', 'conversation-a', 'session-a', ?2, ?3, ?4, 1, 1, ?5)",
             params![
@@ -1806,7 +1805,7 @@ mod tests {
                 LcmSourceRef::SummaryNode { node_id } => ("summary_node", node_id.clone()),
             };
             conn.execute(
-                "INSERT INTO lcm_summary_sources (node_id, source_kind, source_id, ordinal)
+                "INSERT INTO session_summary_sources (summary_id, source_kind, source_id, ordinal)
                  VALUES (?1, ?2, ?3, ?4)",
                 params![node_id, source_kind, source_id.as_str(), ordinal as i64],
             )
@@ -1938,8 +1937,8 @@ mod tests {
         .expect("foreign session");
         let foreign_text = "foreign child summary";
         conn.execute(
-            "INSERT INTO lcm_summary_nodes (
-                node_id, provider, conversation_id, session_id, depth, summary_text,
+            "INSERT INTO session_summary_nodes (
+                summary_id, provider, conversation_id, session_id, depth, summary_text,
                 summary_hash, summary_token_count, source_token_count, created_at
              ) VALUES ('child-foreign', 'cursor', 'conversation-b', 'session-foreign', 0, ?1, ?2,
                        1, 1, 10)",

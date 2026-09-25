@@ -1005,7 +1005,7 @@ fn native_integration_evidence(
     let invalid = invalid_native_integration_request;
     let execution = OperationReceipt::completed(
         observed_at,
-        current_micros(),
+        now_micros(),
         deadline,
         OperationBudgetUsage::default(),
     )

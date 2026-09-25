@@ -334,7 +334,8 @@ fn append_codex_session_meta_agent_relations(
     native_thread_id: Option<&str>,
 ) -> CanonicalObservationRelationsV1 {
     let parent_session_id = string_field(payload, "forked_from_id")
-        .or_else(|| nested_string_field(payload, "/source/subagent/thread_spawn/parent_thread_id"));
+        .or_else(|| nested_string_field(payload, "/source/subagent/thread_spawn/parent_thread_id"))
+        .or_else(|| string_field(payload, "parent_thread_id"));
     let thread_source = string_field(payload, "thread_source");
     let is_subagent = thread_source.as_deref() == Some("subagent")
         || parent_session_id.is_some()
@@ -348,9 +349,16 @@ fn append_codex_session_meta_agent_relations(
     if let Some(agent_id) = native_thread_id.and_then(observation_id_from_native) {
         relations = relations.with_agent_id(agent_id);
     }
-    if let Some(parent_agent_id) = parent_session_id.and_then(|id| observation_id_from_native(&id))
-    {
-        relations = relations.with_parent_agent_id(parent_agent_id);
+    // The spawning `spawn_agent` call id is recorded only in the parent's
+    // rollout (`SubAgentActivity` `started` item), never in the child's, so
+    // the child carries no parent tool-use id.
+    if let Some(parent) = parent_session_id {
+        if let Some(parent_agent_id) = observation_id_from_native(&parent) {
+            relations = relations.with_parent_agent_id(parent_agent_id);
+        }
+        if let Ok(parent_session_id) = SessionId::new(parent) {
+            relations = relations.with_parent_session_id(parent_session_id);
+        }
     }
     relations
 }
@@ -387,6 +395,10 @@ fn append_codex_event_facts(
                 });
                 return;
             };
+            if item.get("type").and_then(Value::as_str) == Some("FileChange") {
+                append_codex_file_change_facts(payload, item, timestamp, facts);
+                return;
+            }
             if item.get("type").and_then(Value::as_str) != Some("UserMessage") {
                 facts.push(CanonicalObservationFactV1::Unknown {
                     native_kind: "item_completed".to_string(),
@@ -455,6 +467,67 @@ fn append_codex_event_facts(
             native_kind: "event_msg".to_string(),
             state: CanonicalUnknownStateV1::Absent,
         }),
+    }
+}
+
+/// One `item_completed` `FileChange` item: Codex's record of an applied patch.
+/// `changes` maps each path to `{type: add|update|delete, ...}`; `status`
+/// reports whether the apply succeeded. Only a completed apply becomes
+/// file-edit evidence, one fact per path, timed by the item's own
+/// `completed_at_ms` when present and the record timestamp otherwise. Diff
+/// bodies and file contents never leave the native record.
+fn append_codex_file_change_facts(
+    payload: &Value,
+    item: &Value,
+    timestamp: Option<i64>,
+    facts: &mut Vec<CanonicalObservationFactV1>,
+) {
+    let Some(changes) = item.get("changes").and_then(Value::as_object) else {
+        facts.push(CanonicalObservationFactV1::Unknown {
+            native_kind: "item_completed.FileChange".to_string(),
+            state: CanonicalUnknownStateV1::Malformed,
+        });
+        return;
+    };
+    if item.get("status").and_then(Value::as_str) != Some("completed") {
+        facts.push(CanonicalObservationFactV1::Unknown {
+            native_kind: "item_completed.FileChange".to_string(),
+            state: CanonicalUnknownStateV1::Unsupported,
+        });
+        return;
+    }
+    let edited_at_micros = payload
+        .get("completed_at_ms")
+        .and_then(Value::as_i64)
+        .and_then(|millis| millis.checked_mul(1_000))
+        .or_else(|| timestamp.and_then(|secs| secs.checked_mul(1_000_000)));
+    for (path, change) in changes.iter().filter(|(path, _)| !path.is_empty()) {
+        let mut content = serde_json::Map::new();
+        content.insert("type".to_string(), Value::String("FileChange".to_string()));
+        if let Some(id) = item.get("id").filter(|id| id.is_string()) {
+            content.insert("id".to_string(), id.clone());
+        }
+        if let Some(edited_at_micros) = edited_at_micros {
+            content.insert(
+                "edited_at_micros".to_string(),
+                Value::from(edited_at_micros),
+            );
+        }
+        if let Some(change_type) = change.get("type").and_then(Value::as_str) {
+            content.insert(
+                "change_type".to_string(),
+                Value::String(change_type.to_string()),
+            );
+        }
+        if let Some(diff) = change.get("unified_diff").and_then(Value::as_str) {
+            let hunks = diff.lines().filter(|line| line.starts_with("@@")).count();
+            content.insert("hunks".to_string(), Value::from(hunks));
+        }
+        facts.push(CanonicalObservationFactV1::Git {
+            evidence_kind: CanonicalGitEvidenceKindV1::FileEdit,
+            reference: Some(path.clone()),
+            content: Some(Value::Object(content)),
+        });
     }
 }
 

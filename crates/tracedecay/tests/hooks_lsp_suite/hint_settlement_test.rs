@@ -8,7 +8,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_agent_hosts::hooks::hint_outcomes::HintOutcomeStats;
 use tracedecay_agent_hosts::hooks::hint_outcomes::settlement::{
     HintOutcomeSettlement, settle_project_hint_outcomes,
@@ -20,6 +19,7 @@ use tracedecay_domain::{
     ProjectId,
 };
 use tracedecay_global_db::{AnalyticsEventInsert, RegisteredGlobalDb};
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 

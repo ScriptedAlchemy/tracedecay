@@ -62,7 +62,7 @@ fn storage_telemetry_endpoint_reports_observed_or_typed_budget_states() {
 }
 
 #[test]
-fn storage_findings_endpoint_reports_every_producer_source_honestly() {
+fn storage_doctor_findings_report_every_producer_source_honestly() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -72,11 +72,15 @@ fn storage_findings_endpoint_reports_every_producer_source_honestly() {
         let agent = http_agent();
         let (status, envelope) = get_json(
             &agent,
-            &format!("{}/api/storage/findings", fixture.base_url),
+            &format!(
+                "{}{}?family=storage",
+                fixture.base_url,
+                tracedecay_api::doctor::DOCTOR_FINDINGS_ROUTE_PATH
+            ),
         );
 
         assert_eq!(status, 200, "{envelope}");
-        let statuses = envelope["payload"]["kind_statuses"]
+        let statuses = envelope["payload"]["storage_kind_statuses"]
             .as_array()
             .unwrap_or_else(|| panic!("storage producer statuses should be an array: {envelope}"));
         let producer_kinds = statuses

@@ -612,8 +612,8 @@ impl SourceFreshnessFenceV1 {
 
     /// Whether the last completed proof was sealed from exactly this snapshot.
     ///
-    /// Clock age is not part of the answer. A seal or clone backfill can
-    /// outlive the admission window without the snapshot changing identity.
+    /// Clock age is not part of the answer. A seal can outlive the admission
+    /// window without the snapshot changing identity.
     pub(super) fn proof_describes_snapshot(
         &self,
         snapshot_content_identity: &ContentDigest,
@@ -2908,8 +2908,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// Bind a sealed snapshot to the source proof, renewing an expired clock
     /// when the sealed digests still match.
     ///
-    /// The admission window is 30s. This does not move the clone-successor
-    /// copy off the publication advance. It only stops an expired clock, or a
+    /// The admission window is 30s. This only stops an expired clock, or a
     /// predecessor disk witness, from clearing the generation those digests
     /// already name. A hook epoch or a digest mismatch still refuses.
     pub(super) fn currency_witness_for_sealed_snapshot(
@@ -3765,7 +3764,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                 for receipt in &active.snapshot().sanitization_receipts {
                     if file_occurrence_id(
                         &self.repository_id,
-                        &self.worktree_id,
                         &file.logical_path,
                         &file.content_digest,
                         receipt,
@@ -3781,7 +3779,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                 for file in &files {
                     if file_occurrence_id(
                         &self.repository_id,
-                        &self.worktree_id,
                         &file.logical_path,
                         &file.content_digest,
                         &receipt,

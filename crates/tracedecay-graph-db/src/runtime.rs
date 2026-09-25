@@ -1502,25 +1502,22 @@ impl GraphDb {
                 let path = validated.config.path.as_deref().ok_or_else(|| {
                     GraphDbError::unavailable("persistent graph database has no container path")
                 })?;
-                match crate::store_quarantine::recover_deterministically_corrupt_container_with(
+                match crate::corrupt_store::recover_deterministically_corrupt_container_with(
                     path,
                     &message,
                     &|| open_validated_graph(&validated, GraphEngineOpenSite::LazyFirstUse),
                 )? {
-                    crate::store_quarantine::CorruptStoreRecovery::Reopened(opened) => opened,
-                    crate::store_quarantine::CorruptStoreRecovery::Quarantined {
-                        quarantine_directory,
-                    } => {
+                    crate::corrupt_store::CorruptStoreRecovery::Reopened(opened) => opened,
+                    crate::corrupt_store::CorruptStoreRecovery::Deleted => {
                         let mut fresh = validated.clone();
                         fresh.preexisting_store = false;
                         let opened =
                             open_validated_graph(&fresh, GraphEngineOpenSite::LazyFirstUse)?;
                         tracing::info!(
-                            event = "store_rebuilt_after_quarantine",
+                            event = "store_rebuilt_after_corruption",
                             container = %path.display(),
-                            quarantine = %quarantine_directory.display(),
-                            "fresh graph store opened after corruption quarantine; canonical \
-                             replay authorities re-project its generations"
+                            "fresh graph store opened after deleting a corrupt container; \
+                             canonical replay authorities re-project its generations"
                         );
                         opened
                     }

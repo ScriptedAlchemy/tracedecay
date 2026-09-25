@@ -12,20 +12,21 @@
  * A join between two of them is only ever made on an exact recorded identity
  * (`run_id`, `task_key`), never on proximity or a name.
  */
-import type {
-  AutomationSchedulerStatusV1,
-  AutomationTaskStatusV1,
-} from '../../contracts/generated.ts';
 import {
-  SchedulerLastRunSchema,
+  assertNever,
+  type AgentTaskFailureClass,
+  type AutomationRunArtifactIntegrityV1,
+  type AutomationRunStatus,
+  type AutomationSchedulerStatusV1,
+  type AutomationTaskStatusV1,
   type AutomaticFactReceipt,
-  type JobRow,
-  type ListReading,
-  type RunArtifactPayload,
-  type RunArtifactRow,
-  type RunRow,
-  type SchedulerLastRun,
-} from '../../data/query/automation.ts';
+  type AutomationJob,
+  type AutomationRunArtifact,
+  type AutomationRunArtifactPayloadV1,
+  type AutomationRunRowV1,
+  type ManagedSkillState,
+} from '../../contracts/generated.ts';
+import type { ListReading } from '../../data/query/automation.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
 
 /* ---- what the inspector is looking at --------------------------------- */
@@ -119,10 +120,9 @@ const SIGNAL: Tone = {
   pattern: 'solid',
 };
 
-/** `AutomationRunStatus` (run_ledger.rs): queued, running, succeeded, failed,
- * skipped. Any other word is printed as-is under the unknown family, the
- * ledger's word is the truth, the tone only says which family it is in. */
-export function runStatusTone(status: string): Tone {
+/** The tone family of one ledger run status; the status word itself stays
+ * the displayed truth. */
+export function runStatusTone(status: AutomationRunStatus): Tone {
   switch (status) {
     case 'succeeded':
       return READY;
@@ -135,14 +135,12 @@ export function runStatusTone(status: string): Tone {
     case 'queued':
       return LOADING;
     default:
-      return UNKNOWN;
+      return assertNever(status);
   }
 }
 
-/** Whether a status word names a settled run. Mirrors
- * `AutomationRunStatus::is_terminal`; an unrecognised word is treated as
- * unsettled so a duration is never computed for it. */
-export function runIsTerminal(status: string): boolean {
+/** Whether a status names a settled run. Mirrors `AutomationRunStatus::is_terminal`. */
+export function runIsTerminal(status: AutomationRunStatus): boolean {
   return status === 'succeeded' || status === 'failed' || status === 'skipped';
 }
 
@@ -151,8 +149,7 @@ export function receiptStateTone(state: AutomaticFactReceipt['state']): Tone {
   return state === 'applied' ? READY : DEGRADED;
 }
 
-/** `ManagedSkillState`. */
-export function skillStateTone(state: string): Tone {
+export function skillStateTone(state: ManagedSkillState): Tone {
   switch (state) {
     case 'active':
       return READY;
@@ -161,14 +158,12 @@ export function skillStateTone(state: string): Tone {
     case 'archived':
       return UNKNOWN;
     default:
-      return UNKNOWN;
+      return assertNever(state);
   }
 }
 
-/** The daemon's chain-integrity verdict (automation_run_api.rs
- * `artifact_list`): verified, ledger_publication_mismatch,
- * publication_unavailable, verification_failed. */
-export function integrityTone(status: string): Tone {
+/** The daemon's chain-integrity verdict for one run's artifacts. */
+export function integrityTone(status: AutomationRunArtifactIntegrityV1): Tone {
   switch (status) {
     case 'verified':
       return READY;
@@ -179,13 +174,11 @@ export function integrityTone(status: string): Tone {
     case 'verification_failed':
       return DEGRADED;
     default:
-      return UNKNOWN;
+      return assertNever(status);
   }
 }
 
-/** `AgentTaskFailureClass`: retryable, permanent, timeout, unavailable,
- * denied, disconnected, malformed_output. */
-export function failureClassTone(classification: string): Tone {
+export function failureClassTone(classification: AgentTaskFailureClass): Tone {
   switch (classification) {
     case 'retryable':
     case 'timeout':
@@ -199,7 +192,7 @@ export function failureClassTone(classification: string): Tone {
     case 'disconnected':
       return DISCONNECTED;
     default:
-      return UNKNOWN;
+      return assertNever(classification);
   }
 }
 
@@ -257,18 +250,6 @@ export function schedulerReading(status: AutomationSchedulerStatusV1): Scheduler
   }
 }
 
-/** What the scheduler said about one task's last scheduler-triggered run. */
-export type LastRunReading =
-  | { kind: 'none' }
-  | { kind: 'unreadable' }
-  | { kind: 'run'; run: SchedulerLastRun };
-
-export function readLastSchedulerRun(value: unknown): LastRunReading {
-  if (value === null || value === undefined) return { kind: 'none' };
-  const parsed = SchedulerLastRunSchema.safeParse(value);
-  return parsed.success ? { kind: 'run', run: parsed.data } : { kind: 'unreadable' };
-}
-
 /** The newest scheduler-triggered completion across every task: the one
  * observed fact this surface has about the scheduler having run at all.
  * Null when no task carries a readable last run. */
@@ -277,12 +258,12 @@ export function observedSchedulerActivity(
 ): { runId: string; task: string; completedAt: number } | null {
   let newest: { runId: string; task: string; completedAt: number } | null = null;
   for (const task of tasks) {
-    const reading = readLastSchedulerRun(task.last_scheduler_run);
-    if (reading.kind !== 'run') continue;
-    const completedAt = epochSeconds(reading.run.completed_at);
+    const run = task.last_scheduler_run;
+    if (run == null) continue;
+    const completedAt = epochSeconds(run.completed_at);
     if (completedAt === null) continue;
     if (newest === null || completedAt > newest.completedAt) {
-      newest = { runId: reading.run.run_id, task: task.task, completedAt };
+      newest = { runId: run.run_id, task: task.task, completedAt };
     }
   }
   return newest;
@@ -348,7 +329,7 @@ export type RunTiming =
   /** One or both stamps are not epoch seconds: shown verbatim. */
   | { kind: 'unparsed'; startedAt: string; completedAt: string };
 
-export function runTiming(run: Pick<RunRow, 'status' | 'started_at' | 'completed_at'>): RunTiming {
+export function runTiming(run: Pick<AutomationRunRowV1, 'status' | 'started_at' | 'completed_at'>): RunTiming {
   const startedAt = epochSeconds(run.started_at);
   if (startedAt === null) {
     return { kind: 'unparsed', startedAt: run.started_at, completedAt: run.completed_at };
@@ -370,7 +351,6 @@ export interface StatusTally {
   readonly succeeded: number;
   readonly failed: number;
   readonly skipped: number;
-  readonly other: number;
 }
 
 /** The loaded ledger page as a declared window: how many rows it holds,
@@ -388,8 +368,8 @@ export interface LedgerWindow {
   readonly newestStart: number | null;
 }
 
-export function ledgerWindow(reading: ListReading<RunRow>): LedgerWindow {
-  const tally = { queued: 0, running: 0, succeeded: 0, failed: 0, skipped: 0, other: 0 };
+export function ledgerWindow(reading: ListReading<AutomationRunRowV1>): LedgerWindow {
+  const tally = { queued: 0, running: 0, succeeded: 0, failed: 0, skipped: 0 };
   let oldestStart: number | null = null;
   let newestStart: number | null = null;
   for (const run of reading.rows) {
@@ -410,7 +390,7 @@ export function ledgerWindow(reading: ListReading<RunRow>): LedgerWindow {
         tally.skipped += 1;
         break;
       default:
-        tally.other += 1;
+        assertNever(run.status);
     }
     const started = epochSeconds(run.started_at);
     if (started === null) continue;
@@ -445,9 +425,9 @@ export function missingArtifactKinds(chain: {
  * same kind, same recorded path and digest. A payload that fails this is a
  * body for some other artifact and must not be shown under this one. */
 export function artifactPayloadBelongsTo(
-  payload: Pick<RunArtifactPayload, 'run_id' | 'artifact'>,
+  payload: Pick<AutomationRunArtifactPayloadV1, 'run_id' | 'artifact'>,
   runId: string,
-  artifact: Pick<RunArtifactRow, 'kind' | 'path' | 'sha256'>,
+  artifact: Pick<AutomationRunArtifact, 'kind' | 'path' | 'sha256'>,
 ): boolean {
   return (
     payload.run_id === runId &&
@@ -488,21 +468,21 @@ export function jobTaskKey(jobId: string): string {
 /** The newest run in the loaded page recorded under `taskKey`. The page is
  * served newest-first, so the first match is the latest. `undefined` means
  * no run for this key is in the loaded page, not that the job never ran. */
-export function latestRunForKey(runs: readonly RunRow[], taskKey: string): RunRow | undefined {
+export function latestRunForKey(runs: readonly AutomationRunRowV1[], taskKey: string): AutomationRunRowV1 | undefined {
   return runs.find((run) => run.task_key === taskKey);
 }
 
 /** The newest run in the loaded page for a built-in scheduler task. Built-in
  * tasks record `task_key` equal to their task word; older rows carry only
  * `task`, so both are consulted. */
-export function latestRunForTask(runs: readonly RunRow[], task: string): RunRow | undefined {
+export function latestRunForTask(runs: readonly AutomationRunRowV1[], task: string): AutomationRunRowV1 | undefined {
   return runs.find((run) => run.task_key === task || (run.task_key === null && run.task === task));
 }
 
 /** The words a user job's schedule reduces to. Mirrors `parse_schedule`
  * inputs (jobs.rs) without evaluating them: `manual`, an interval, or the
  * schedule expression verbatim. */
-export function jobScheduleWord(job: Pick<JobRow, 'schedule' | 'interval_secs'>): string {
+export function jobScheduleWord(job: Pick<AutomationJob, 'schedule' | 'interval_secs'>): string {
   if (job.schedule === 'interval' || (job.schedule == null && job.interval_secs != null)) {
     return job.interval_secs != null ? `every ${formatDuration(job.interval_secs)}` : 'interval (unset)';
   }

@@ -39,7 +39,7 @@ use tracedecay_session_temporal_store::execution::{
     TaskSessionReauthorizationStageV1, TaskSessionSelectionCallbackErrorV1,
 };
 use tracedecay_temporal_query::context::ContextBudget;
-use tracedecay_temporal_query::ports::ExecutionLimits;
+use tracedecay_temporal_query::execution::ExecutionLimits;
 use tracedecay_temporal_query::ranking::DiversityLimits;
 
 const WORK_EVIDENCE_CONTEXT_BYTES: u64 = 64 * 1024;
@@ -682,7 +682,7 @@ const fn work_hydration_state(state: HydrationStateV1) -> WorkTaskSessionHydrati
         HydrationStateV1::RetentionExpired => WorkTaskSessionHydrationStateV1::RetentionExpired,
         HydrationStateV1::Unauthorized => WorkTaskSessionHydrationStateV1::Unauthorized,
         HydrationStateV1::Locked => WorkTaskSessionHydrationStateV1::Locked,
-        HydrationStateV1::UnverifiableLegacy => WorkTaskSessionHydrationStateV1::UnverifiableLegacy,
+        HydrationStateV1::Unverifiable => WorkTaskSessionHydrationStateV1::Unverifiable,
     }
 }
 

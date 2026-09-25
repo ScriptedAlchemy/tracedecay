@@ -34,7 +34,9 @@ export function CortexRegister({
       data-graph-register={state.kind === 'ready' ? state.value.domain_state : state.state}
     >
       {state.kind === 'ready' ? (
-        cortexRegister(state.value.payload).map((cell) => <Cell key={cell.label} cell={cell} />)
+        cortexRegister(state.value.payload).map((cell) => (
+          <Cell key={cell.label} cell={cell} />
+        ))
       ) : (
         <div className="flex min-w-0 items-center gap-3 px-3 py-2">
           <span className="td-legend shrink-0">graph</span>

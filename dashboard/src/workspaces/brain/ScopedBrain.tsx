@@ -1,7 +1,6 @@
 import { useMemo, useRef, useState } from 'react';
 import { GitBranch, FolderGit2 } from 'lucide-react';
-import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
-import { useActivationField } from '../../viz/graph/useActivationField.ts';
+import { ScopedField } from './BrainField.tsx';
 import {
   CenteredState,
   ReadSection,
@@ -91,7 +90,6 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
     DoctorFindingsPayloadV1Schema,
   );
 
-  const activation = useActivationField(3200);
   const graph = envelopePayload(subgraph.data);
   const nodes = useMemo(
     () =>
@@ -211,24 +209,12 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
             {(envelope) => {
               const slice = envelope.payload;
               return nodes.length > 0 ? (
-                <GraphCanvas
-                  cameraControls
-                  inspectedId={inspectedId}
-                  onInspect={setInspectedId}
+                <ScopedField
                   nodes={nodes}
                   edges={edges}
-                  fill
-                  canvasClassName="min-h-[70vw] md:min-h-[58vh] lg:min-h-0"
-                  activation={activation}
-                  ariaLabel={`${label} code graph: ${nodes.length} returned symbols, ${edges.length} returned relations. The returned symbol list alongside is the accessible equivalent.`}
-                  fallbackDescription="the returned symbol list beside this field remains available as a text alternative"
-                  encoding={{
-                    body: 'symbol',
-                    size: 'connectedness',
-                    hue: 'symbol kind',
-                    signal: 'static; no symbol activity supplied',
-                    relation: 'returned relation',
-                  }}
+                  inspectedId={inspectedId}
+                  onInspect={setInspectedId}
+                  label={label}
                   caption={
                     <>
                       {nodes.length} returned symbols · {edges.length} returned relations
@@ -239,8 +225,7 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
                           ]
                             .filter(Boolean)
                             .join(' and ')}`
-                        : ''}{' '}
-                      · size = connectedness · hover isolates a neighbourhood
+                        : ''}
                     </>
                   }
                 />

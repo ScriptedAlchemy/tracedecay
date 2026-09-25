@@ -287,9 +287,7 @@ fn main() {
                 .expect("open graph view")
             {
                 GitEvidenceGraphHead::Indexed(view) => view,
-                GitEvidenceGraphHead::Unpublished | GitEvidenceGraphHead::Legacy { .. } => {
-                    panic!("seeded head must be indexed")
-                }
+                GitEvidenceGraphHead::Unpublished => panic!("seeded head must be indexed"),
             };
 
         let mut reads = Vec::new();

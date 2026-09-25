@@ -13,17 +13,18 @@ use tracedecay_contracts::feedback::{
     FeedbackCycleExecutionRequest, FeedbackCycleExecutionResult, FeedbackCycleService,
     FeedbackDiagnosticsPort, FeedbackDiagnosticsRequest, FeedbackImpactPort,
     FeedbackImpactPortOutcome, FeedbackImpactRequest, FeedbackObservationPort,
-    FeedbackPublicationRecordState, FeedbackPublicationV1, FeedbackRuntimeStatePort,
-    FeedbackRuntimeStateV1, GenerationBoundFeedbackDiagnosticsAdapter,
+    FeedbackPublicationRecordState, FeedbackPublicationV1, FeedbackRouteAuthorizationPort,
+    FeedbackRuntimeStatePort, FeedbackRuntimeStateV1, GenerationBoundFeedbackDiagnosticsAdapter,
 };
 use tracedecay_contracts::{
-    AnalyzerAdmittedDiagnosticProviderV1, AuthorizationService, CancellationContext,
-    CurrentDiagnosticsRequest, Deadline, DiagnosticProviderDescriptor, DiagnosticProviderIdentity,
-    DiagnosticProviderIdentityParts, DiagnosticProviderPort, DiagnosticProviderResult,
-    DiagnosticProviderState, FreshnessState, GenerationDiagnosticHistoryPort,
-    GenerationDiagnosticHistoryRequest, ProviderCoverage, ProviderDocumentIdentity,
-    ProviderFreshness, ProviderOrigin, ProviderProvenance, ProviderSourceIdentity, RequestContext,
-    RevisionDigest,
+    AnalyzerAdmittedDiagnosticProviderV1, ApplicationOperation, ApplicationProblem,
+    AuthorityReceipt, CancellationContext, CurrentDiagnosticsRequest, Deadline,
+    DiagnosticProviderDescriptor, DiagnosticProviderIdentity, DiagnosticProviderIdentityParts,
+    DiagnosticProviderPort, DiagnosticProviderResult, DiagnosticProviderState, FreshnessState,
+    GenerationDiagnosticHistoryPort, GenerationDiagnosticHistoryRequest, ProviderCoverage,
+    ProviderDocumentIdentity, ProviderFreshness, ProviderOrigin, ProviderProvenance,
+    ProviderSourceIdentity, RequestAdmission, RequestContext, RetryDirective, RevisionDigest,
+    SafeDiagnostic,
 };
 use tracedecay_domain::configuration::{
     AnalyzerExecutableId, AnalyzerExecutableReferenceV1, AnalyzerLanguageId,
@@ -51,7 +52,6 @@ use tracedecay_policy::analyzer::{
     AnalyzerAdmissionEvaluatorV1, AnalyzerAdmissionInputV1, AnalyzerAvailabilityV1,
     AnalyzerCandidateV1, AnalyzerExecutionLocationV1,
 };
-use tracedecay_policy::authorization::SourceAuthorizationEvaluatorV1;
 use tracedecay_tool_catalog::CapabilityId;
 
 const GENERATION: &str = "generation.v1.fixture.00000001";
@@ -294,9 +294,9 @@ impl FeedbackCycleDedupePort for SerializedRaceDedupeFixture {
 }
 
 #[derive(Clone)]
-struct ConcurrentRuntimeFixture(FeedbackRuntimeStateV1);
+struct RuntimeStateFixture(FeedbackRuntimeStateV1);
 
-impl FeedbackRuntimeStatePort for ConcurrentRuntimeFixture {
+impl FeedbackRuntimeStatePort for RuntimeStateFixture {
     fn resolve<'a>(
         &'a self,
         _context: &'a RequestContext,
@@ -305,6 +305,29 @@ impl FeedbackRuntimeStatePort for ConcurrentRuntimeFixture {
     {
         let runtime = self.0.clone();
         Box::pin(async move { Some(runtime) })
+    }
+}
+
+/// Runtime authority answering each resolution from a fixed sequence.
+struct SequencedRuntimeFixture {
+    states: RefCell<VecDeque<Option<FeedbackRuntimeStateV1>>>,
+    calls: Rc<Cell<usize>>,
+}
+
+impl FeedbackRuntimeStatePort for SequencedRuntimeFixture {
+    fn resolve<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _input: &'a FeedbackEvaluationInputV1,
+    ) -> tracedecay_contracts::feedback::FeedbackPortFuture<'a, Option<FeedbackRuntimeStateV1>>
+    {
+        self.calls.set(self.calls.get() + 1);
+        let runtime = self
+            .states
+            .borrow_mut()
+            .pop_front()
+            .expect("runtime-state sequence is not exhausted");
+        Box::pin(async move { runtime })
     }
 }
 
@@ -374,6 +397,63 @@ struct ObservationFixture(Rc<RefCell<Vec<FeedbackCycleObservationV1>>>);
 impl FeedbackObservationPort for ObservationFixture {
     fn observe(&self, _input: &FeedbackEvaluationInputV1, observation: FeedbackCycleObservationV1) {
         self.0.borrow_mut().push(observation);
+    }
+}
+
+/// Route-owned authorization that, like the production route owner, applies
+/// the request's cancellation, deadline, and grant at admission and at every
+/// publication recheck. A revoked route admits, then reports its source
+/// unavailable before publication.
+#[derive(Clone, Copy, Default)]
+struct RouteAuthorizationFixture {
+    revoked_before_publication: bool,
+}
+
+impl FeedbackRouteAuthorizationPort for RouteAuthorizationFixture {
+    fn admit(
+        &self,
+        context: &RequestContext,
+        operation: &ApplicationOperation,
+        observed_at: UtcMicros,
+    ) -> Result<AuthorityReceipt, ApplicationProblem> {
+        match context.admission_at(observed_at) {
+            RequestAdmission::Cancelled => {
+                return Err(ApplicationProblem::cancelled_before_admission());
+            }
+            RequestAdmission::TimedOut => {
+                return Err(ApplicationProblem::timed_out_before_admission());
+            }
+            RequestAdmission::Admitted => {}
+        }
+        if !context.allows(operation.capability_id(), operation.use_case_id()) {
+            return Err(ApplicationProblem::not_found_or_not_authorized(
+                RetryDirective::Never,
+            ));
+        }
+        let mut receipt = common::authority(context);
+        receipt.revalidated_at = observed_at;
+        Ok(receipt)
+    }
+
+    fn recheck_publication(
+        &self,
+        context: &RequestContext,
+        operation: &ApplicationOperation,
+        admission: &AuthorityReceipt,
+        observed_at: UtcMicros,
+    ) -> Result<AuthorityReceipt, ApplicationProblem> {
+        if self.revoked_before_publication {
+            return Err(ApplicationProblem::unavailable(
+                SafeDiagnostic::new(
+                    "fixture.authorization.source-unavailable",
+                    "The feedback source became unavailable after admission.",
+                )
+                .unwrap(),
+            ));
+        }
+        let current = self.admit(context, operation, observed_at)?;
+        assert_eq!(admission.policy, current.policy);
+        Ok(current)
     }
 }
 
@@ -996,25 +1076,17 @@ fn runtime_state(input: &FeedbackEvaluationInputV1) -> FeedbackRuntimeStateV1 {
     .unwrap()
 }
 
-fn runtime_port(
-    input: &FeedbackEvaluationInputV1,
-) -> impl Fn(&RequestContext, &FeedbackEvaluationInputV1) -> Option<FeedbackRuntimeStateV1> + use<>
-{
-    let state = runtime_state(input);
-    move |_context, _input| Some(state.clone())
+fn runtime_port(input: &FeedbackEvaluationInputV1) -> RuntimeStateFixture {
+    RuntimeStateFixture(runtime_state(input))
 }
 
 fn sequenced_runtime(
     states: Vec<Option<FeedbackRuntimeStateV1>>,
     calls: Rc<Cell<usize>>,
-) -> impl Fn(&RequestContext, &FeedbackEvaluationInputV1) -> Option<FeedbackRuntimeStateV1> {
-    let states = Rc::new(RefCell::new(states.into_iter().collect::<VecDeque<_>>()));
-    move |_context, _input| {
-        calls.set(calls.get() + 1);
-        states
-            .borrow_mut()
-            .pop_front()
-            .expect("runtime-state sequence is not exhausted")
+) -> SequencedRuntimeFixture {
+    SequencedRuntimeFixture {
+        states: RefCell::new(states.into()),
+        calls,
     }
 }
 
@@ -1040,7 +1112,7 @@ fn execute_concurrent_cycle(
     provider: DiagnosticProviderIdentity,
     dedupe: SerializedRaceDedupeFixture,
 ) -> FeedbackCycleExecutionResult {
-    let runtime = ConcurrentRuntimeFixture(runtime_state(&input));
+    let runtime = RuntimeStateFixture(runtime_state(&input));
     let diagnostics = ConcurrentDiagnosticsFixture {
         results: vec![complete_result(provider.clone(), Vec::new())],
     };
@@ -1053,10 +1125,7 @@ fn execute_concurrent_cycle(
         impact,
         dedupe,
         NoopObservationFixture,
-        AuthorizationService::new(
-            common::StaticAuthorizationPort::authorized(),
-            SourceAuthorizationEvaluatorV1::default(),
-        ),
+        RouteAuthorizationFixture::default(),
         operation,
     );
     block_on(service.execute(&context, execution_request(input, provider))).unwrap()
@@ -1083,10 +1152,7 @@ fn execute_before_provider_work(
         },
         DedupeFixture(dedupe_state),
         ObservationFixture::default(),
-        AuthorizationService::new(
-            common::StaticAuthorizationPort::authorized(),
-            SourceAuthorizationEvaluatorV1::default(),
-        ),
+        RouteAuthorizationFixture::default(),
         common::operation(),
     );
     let mut request = execution_request(input, provider);
@@ -1118,10 +1184,7 @@ fn cycle_runs_diagnostics_impact_and_tests_once_with_anchored_new_findings() {
         },
         DedupeFixture(FeedbackCycleDedupeState::Unique),
         observations.clone(),
-        AuthorizationService::new(
-            common::StaticAuthorizationPort::authorized(),
-            SourceAuthorizationEvaluatorV1::default(),
-        ),
+        RouteAuthorizationFixture::default(),
         common::operation(),
     );
 
@@ -1260,10 +1323,7 @@ fn authoritative_history_identity_drives_pre_existing_and_stale_classification()
         },
         DedupeFixture(FeedbackCycleDedupeState::Unique),
         ObservationFixture::default(),
-        AuthorizationService::new(
-            common::StaticAuthorizationPort::authorized(),
-            SourceAuthorizationEvaluatorV1::default(),
-        ),
+        RouteAuthorizationFixture::default(),
         common::operation(),
     );
     let result = block_on(service.execute(
@@ -1297,10 +1357,7 @@ fn authoritative_history_identity_drives_pre_existing_and_stale_classification()
         },
         DedupeFixture(FeedbackCycleDedupeState::Unique),
         ObservationFixture::default(),
-        AuthorizationService::new(
-            common::StaticAuthorizationPort::authorized(),
-            SourceAuthorizationEvaluatorV1::default(),
-        ),
+        RouteAuthorizationFixture::default(),
         common::operation(),
     );
     let stale = block_on(stale_service.execute(
@@ -1343,10 +1400,7 @@ fn dedupe_key_changes_when_authoritative_evidence_changes() {
                 keys: keys.clone(),
             },
             ObservationFixture::default(),
-            AuthorizationService::new(
-                common::StaticAuthorizationPort::authorized(),
-                SourceAuthorizationEvaluatorV1::default(),
-            ),
+            RouteAuthorizationFixture::default(),
             common::operation(),
         );
         block_on(service.execute(
@@ -1379,10 +1433,7 @@ fn unavailable_authoritative_baseline_cannot_produce_clean() {
         },
         DedupeFixture(FeedbackCycleDedupeState::Unique),
         ObservationFixture::default(),
-        AuthorizationService::new(
-            common::StaticAuthorizationPort::authorized(),
-            SourceAuthorizationEvaluatorV1::default(),
-        ),
+        RouteAuthorizationFixture::default(),
         common::operation(),
     );
     let result = block_on(service.execute(
@@ -1413,9 +1464,7 @@ fn authoritative_no_prior_baseline_is_explicit_and_never_invented() {
     let mut no_prior_runtime = runtime_state(&input);
     no_prior_runtime.authoritative.baseline_horizon = None;
     let service = FeedbackCycleService::new(
-        move |_context: &RequestContext, _input: &FeedbackEvaluationInputV1| {
-            Some(no_prior_runtime.clone())
-        },
+        RuntimeStateFixture(no_prior_runtime),
         HistoryDiagnosticsFixture {
             calls: Rc::new(Cell::new(0)),
             history_calls: history_calls.clone(),
@@ -1428,10 +1477,7 @@ fn authoritative_no_prior_baseline_is_explicit_and_never_invented() {
         },
         DedupeFixture(FeedbackCycleDedupeState::Unique),
         ObservationFixture::default(),
-        AuthorizationService::new(
-            common::StaticAuthorizationPort::authorized(),
-            SourceAuthorizationEvaluatorV1::default(),
-        ),
+        RouteAuthorizationFixture::default(),
         common::operation(),
     );
 
@@ -1465,10 +1511,7 @@ fn complete_zero_diagnostics_and_impact_are_clean() {
         },
         DedupeFixture(FeedbackCycleDedupeState::Unique),
         ObservationFixture::default(),
-        AuthorizationService::new(
-            common::StaticAuthorizationPort::authorized(),
-            SourceAuthorizationEvaluatorV1::default(),
-        ),
+        RouteAuthorizationFixture::default(),
         common::operation(),
     );
     let result = block_on(service.execute(
@@ -1512,10 +1555,7 @@ fn duplicate_noop_is_decided_after_authoritative_evidence_is_read() {
         },
         DedupeFixture(FeedbackCycleDedupeState::Duplicate),
         observations.clone(),
-        AuthorizationService::new(
-            common::StaticAuthorizationPort::authorized(),
-            SourceAuthorizationEvaluatorV1::default(),
-        ),
+        RouteAuthorizationFixture::default(),
         common::operation(),
     );
 
@@ -1616,10 +1656,7 @@ fn duplicate_provider_diagnostics_collapse_to_one_finding() {
         },
         DedupeFixture(FeedbackCycleDedupeState::Unique),
         ObservationFixture::default(),
-        AuthorizationService::new(
-            common::StaticAuthorizationPort::authorized(),
-            SourceAuthorizationEvaluatorV1::default(),
-        ),
+        RouteAuthorizationFixture::default(),
         common::operation(),
     );
 
@@ -1651,10 +1688,7 @@ fn mismatched_diagnostic_address_is_failed_not_current_truth() {
         },
         DedupeFixture(FeedbackCycleDedupeState::Unique),
         ObservationFixture::default(),
-        AuthorizationService::new(
-            common::StaticAuthorizationPort::authorized(),
-            SourceAuthorizationEvaluatorV1::default(),
-        ),
+        RouteAuthorizationFixture::default(),
         common::operation(),
     );
 
@@ -1694,10 +1728,7 @@ fn bounded_preview_respects_its_byte_limit_for_unicode() {
         },
         DedupeFixture(FeedbackCycleDedupeState::Unique),
         ObservationFixture::default(),
-        AuthorizationService::new(
-            common::StaticAuthorizationPort::authorized(),
-            SourceAuthorizationEvaluatorV1::default(),
-        ),
+        RouteAuthorizationFixture::default(),
         common::operation(),
     );
 
@@ -1748,10 +1779,7 @@ fn overlay_cycle_returns_session_only_truth_without_observations() {
             keys: dedupe_keys.clone(),
         },
         observations.clone(),
-        AuthorizationService::new(
-            common::StaticAuthorizationPort::authorized(),
-            SourceAuthorizationEvaluatorV1::default(),
-        ),
+        RouteAuthorizationFixture::default(),
         common::operation(),
     );
 
@@ -1809,10 +1837,7 @@ fn overlay_provider_client_must_match_the_authenticated_owner_binding() {
         },
         DedupeFixture(FeedbackCycleDedupeState::Unique),
         ObservationFixture::default(),
-        AuthorizationService::new(
-            common::StaticAuthorizationPort::authorized(),
-            SourceAuthorizationEvaluatorV1::default(),
-        ),
+        RouteAuthorizationFixture::default(),
         common::operation(),
     );
 
@@ -1866,10 +1891,7 @@ fn every_post_port_runtime_drift_suppresses_evidence_and_later_reads() {
                     keys: dedupe_keys.clone(),
                 },
                 observations.clone(),
-                AuthorizationService::new(
-                    common::StaticAuthorizationPort::authorized(),
-                    SourceAuthorizationEvaluatorV1::default(),
-                ),
+                RouteAuthorizationFixture::default(),
                 common::operation(),
             );
 
@@ -1972,10 +1994,7 @@ fn partial_and_unavailable_impact_truth_never_becomes_clean() {
             },
             DedupeFixture(FeedbackCycleDedupeState::Unique),
             ObservationFixture::default(),
-            AuthorizationService::new(
-                common::StaticAuthorizationPort::authorized(),
-                SourceAuthorizationEvaluatorV1::default(),
-            ),
+            RouteAuthorizationFixture::default(),
             common::operation(),
         );
 
@@ -2023,10 +2042,7 @@ fn partial_affected_test_coverage_never_becomes_clean() {
         },
         DedupeFixture(FeedbackCycleDedupeState::Unique),
         ObservationFixture::default(),
-        AuthorizationService::new(
-            common::StaticAuthorizationPort::authorized(),
-            SourceAuthorizationEvaluatorV1::default(),
-        ),
+        RouteAuthorizationFixture::default(),
         common::operation(),
     );
     let result = block_on(service.execute(
@@ -2104,10 +2120,7 @@ fn every_terminal_reason_is_exact_and_one_shot() {
         },
         DedupeFixture(FeedbackCycleDedupeState::Unavailable),
         ObservationFixture::default(),
-        AuthorizationService::new(
-            common::StaticAuthorizationPort::authorized(),
-            SourceAuthorizationEvaluatorV1::default(),
-        ),
+        RouteAuthorizationFixture::default(),
         common::operation(),
     );
     let unavailable = block_on(unavailable_service.execute(
@@ -2159,15 +2172,9 @@ fn post_read_authorization_is_rechecked_before_findings_publish() {
         },
         DedupeFixture(FeedbackCycleDedupeState::Unique),
         ObservationFixture::default(),
-        AuthorizationService::new(
-            common::SequencedAuthorizationPort::snapshots([
-                common::source_snapshot(common::authorized_source_input()),
-                common::source_snapshot(common::source_authorization_input(
-                    "temporarily_unavailable_is_not_deletion",
-                )),
-            ]),
-            SourceAuthorizationEvaluatorV1::default(),
-        ),
+        RouteAuthorizationFixture {
+            revoked_before_publication: true,
+        },
         common::operation(),
     );
 
@@ -2211,15 +2218,9 @@ fn authorization_revocation_overrides_early_and_duplicate_terminal_outcomes() {
         },
         DedupeFixture(FeedbackCycleDedupeState::Unique),
         early_observations.clone(),
-        AuthorizationService::new(
-            common::SequencedAuthorizationPort::snapshots([
-                common::source_snapshot(common::authorized_source_input()),
-                common::source_snapshot(common::source_authorization_input(
-                    "temporarily_unavailable_is_not_deletion",
-                )),
-            ]),
-            SourceAuthorizationEvaluatorV1::default(),
-        ),
+        RouteAuthorizationFixture {
+            revoked_before_publication: true,
+        },
         operation.clone(),
     );
     let mut early_request = execution_request(early_input, early_provider);
@@ -2260,15 +2261,9 @@ fn authorization_revocation_overrides_early_and_duplicate_terminal_outcomes() {
         },
         DedupeFixture(FeedbackCycleDedupeState::Duplicate),
         duplicate_observations.clone(),
-        AuthorizationService::new(
-            common::SequencedAuthorizationPort::snapshots([
-                common::source_snapshot(common::authorized_source_input()),
-                common::source_snapshot(common::source_authorization_input(
-                    "temporarily_unavailable_is_not_deletion",
-                )),
-            ]),
-            SourceAuthorizationEvaluatorV1::default(),
-        ),
+        RouteAuthorizationFixture {
+            revoked_before_publication: true,
+        },
         operation,
     );
     let duplicate = block_on(duplicate_service.execute(
@@ -2315,10 +2310,7 @@ fn cancellation_suppresses_findings_from_other_completed_providers() {
         },
         DedupeFixture(FeedbackCycleDedupeState::Unique),
         ObservationFixture::default(),
-        AuthorizationService::new(
-            common::StaticAuthorizationPort::authorized(),
-            SourceAuthorizationEvaluatorV1::default(),
-        ),
+        RouteAuthorizationFixture::default(),
         common::operation(),
     );
     let mut request = execution_request(input, provider);

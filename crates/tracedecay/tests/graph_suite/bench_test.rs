@@ -1,6 +1,6 @@
 use tempfile::TempDir;
-use tracedecay::project::TraceDecay;
 use tracedecay_mcp::bench::{BenchOptions, OutputFormat, run_bench};
+use tracedecay_project::project::TraceDecay;
 
 #[tokio::test]
 async fn bench_fails_closed_until_admitted_graph_authority_is_mounted() {

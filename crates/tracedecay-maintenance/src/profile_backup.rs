@@ -593,7 +593,6 @@ fn rebound_store_manifest(
     if manifest.schema_version != tracedecay_runtime_core::storage::STORE_MANIFEST_SCHEMA_VERSION
         || manifest.project_id.as_deref() != Some(project_id)
         || manifest.store_kind != tracedecay_runtime_core::storage::StoreKind::CodeProject
-        || manifest.storage_mode != tracedecay_runtime_core::storage::StorageMode::ProfileSharded
     {
         return Err(ProfileBackupError::corrupt(format!(
             "restored store manifest '{}' does not match its enrollment",
@@ -1099,14 +1098,9 @@ fn restrict_private_directory(path: &Path) -> Result<(), ProfileBackupError> {
 /// private" step, not a repair of foreign material.
 #[cfg(windows)]
 fn restrict_private_directory(path: &Path) -> Result<(), ProfileBackupError> {
-    tracedecay_private_fs::make_private_directory(path)
-        .map(drop)
-        .map_err(|error| {
-            ProfileBackupError::unavailable(format!(
-                "restrict directory '{}': {error}",
-                path.display()
-            ))
-        })
+    tracedecay_private_fs::make_private_directory(path).map_err(|error| {
+        ProfileBackupError::unavailable(format!("restrict directory '{}': {error}", path.display()))
+    })
 }
 
 #[cfg(not(any(unix, windows)))]

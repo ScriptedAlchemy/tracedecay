@@ -122,7 +122,7 @@ pub(super) fn expanded_transcript_host_evals() -> Vec<HintEval> {
             "prompt-type-orientation-impls",
             "find trait impls and field writes for ToolHintInput",
             Some(HintCategory::TypeOrientation),
-            &["tracedecay_field_sites", "tracedecay_impls"],
+            &["tracedecay_field_sites", "tracedecay_implementations"],
         ),
         input_eval(
             "subagent-context-handoff",
@@ -199,14 +199,14 @@ pub(super) fn expanded_transcript_host_evals() -> Vec<HintEval> {
             "sed -n '1,120p' src/hooks/tool_hints.rs",
             "read this source range",
             Some(HintCategory::FileRead),
-            &["tracedecay_outline", "tracedecay_read"],
+            &["tracedecay_source_outline"],
         ),
         shell_eval(
             "cat-config-file-read",
             "cat Cargo.toml",
             "read config file",
             Some(HintCategory::FileRead),
-            &["tracedecay_outline", "tracedecay_read"],
+            &["tracedecay_source_outline"],
         ),
         shell_eval(
             "cargo-nextest-behavioral-failure-silent",
@@ -318,14 +318,14 @@ pub(super) fn expanded_transcript_host_evals() -> Vec<HintEval> {
             "Read",
             Some("package.json"),
             Some(HintCategory::FileRead),
-            &["tracedecay_outline"],
+            &["tracedecay_source_outline"],
         ),
         tool_eval(
             "cursor-read-file-alias",
             "read_file",
             Some("src/hooks/cursor.rs"),
             Some(HintCategory::FileRead),
-            &["tracedecay_outline"],
+            &["tracedecay_source_outline"],
         ),
         tool_eval(
             "cursor-list-dir-alias",

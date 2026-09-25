@@ -6,7 +6,6 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  COMMITTED_CONTOUR_ENCODING,
   CONTOUR_ENCODINGS,
   independentOfFileMass,
   separatesEqualMassLeakage,
@@ -18,7 +17,6 @@ import {
 describe('contour encoding comparison', () => {
   it('commits coupling ratio because it is the only sketch that passes every witness', () => {
     expect(winningContourEncoding()).toBe('coupling_ratio');
-    expect(COMMITTED_CONTOUR_ENCODING).toBe(winningContourEncoding());
   });
 
   it('rejects edges-per-file: equal mass and equal internal edges share one ring count', () => {

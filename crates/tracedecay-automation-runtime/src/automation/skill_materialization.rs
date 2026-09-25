@@ -41,6 +41,7 @@ pub use crate::automation::managed_skills::managed_skill_root;
 use crate::automation::managed_skills::{ManagedSkill, ManagedSkillState};
 use tracedecay_automation::skill_frontmatter::{SkillFrontmatterValue, parse_skill_frontmatter};
 use tracedecay_domain::errors::Result;
+use tracedecay_private_fs::FileLease;
 
 pub use tracedecay_automation::managed_skills::MATERIALIZED_SKILL_MANAGED_BY;
 
@@ -216,13 +217,11 @@ impl ReconcileReport {
 // Provenance parsing / fork detection
 // ---------------------------------------------------------------------------
 
-/// The provenance a materialized file carries, plus the body markdown as it
-/// currently sits on disk (for fork detection).
+/// The provenance a materialized file carries in its frontmatter.
 struct FileProvenance {
     managed_by: Option<String>,
     skill_id: Option<String>,
     content_hash: Option<String>,
-    body_hash: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -272,19 +271,6 @@ enum ArtifactState {
 impl FileProvenance {
     fn is_managed(&self) -> bool {
         self.managed_by.as_deref() == Some(MATERIALIZED_SKILL_MANAGED_BY)
-    }
-
-    /// Legacy (pre-package-hash) fork check: the recorded `content-hash` was
-    /// the body-only hash, so a file is a fork when the body on disk no longer
-    /// hashes to it. Only meaningful for the body-hash domain; callers first
-    /// try [`recompute_on_disk_package`] for the package-hash domain. A managed
-    /// file missing a content-hash is treated as forked so we never silently
-    /// overwrite something we cannot verify.
-    fn is_legacy_forked(&self) -> bool {
-        match (&self.content_hash, &self.body_hash) {
-            (Some(recorded), Some(actual)) => recorded != actual,
-            _ => true,
-        }
     }
 }
 
@@ -410,18 +396,6 @@ fn frontmatter_scalar<'a>(
     fields.get(key).and_then(SkillFrontmatterValue::as_scalar)
 }
 
-/// Extracts the raw body region after the leading frontmatter block, then
-/// strips exactly one leading and one trailing newline to recover the original
-/// `body_markdown` we wrote. Returns `None` when the file has no frontmatter.
-fn on_disk_body_markdown(contents: &str) -> Option<String> {
-    let after_open = contents.strip_prefix("---\n")?;
-    let close_at = after_open.find("\n---\n")?;
-    let region = &after_open[close_at + "\n---\n".len()..];
-    let region = region.strip_prefix('\n').unwrap_or(region);
-    let region = region.strip_suffix('\n').unwrap_or(region);
-    Some(region.to_string())
-}
-
 const INSTALLATION_ID_FILE: &str = ".materialization-installation-id";
 
 /// Returns a stable id for the local profile/installation, persisting a random
@@ -475,13 +449,16 @@ fn read_file_provenance(path: &Path) -> Result<Option<FileProvenance>> {
         ),
         None => (None, None, None),
     };
-    let body_hash = on_disk_body_markdown(&contents).map(|body| sha256_bytes(body.as_bytes()));
     Ok(Some(FileProvenance {
         managed_by,
         skill_id,
         content_hash,
-        body_hash,
     }))
+}
+
+fn package_lock_path(package_dir: &Path) -> PathBuf {
+    let key = sha256_hex(package_dir.to_string_lossy().as_bytes());
+    std::env::temp_dir().join(format!("tracedecay-materialization-{key}.lock"))
 }
 
 /// Inter-process lock held for the duration of a single package's
@@ -492,21 +469,8 @@ fn read_file_provenance(path: &Path) -> Result<Option<FileProvenance>> {
 /// the tracked skills tree (OS temp dir, keyed by the package path) so it never
 /// pollutes a repo; flock semantics only need to hold within one machine, which
 /// is exactly where the race occurs.
-struct PackageLock(fs::File);
-
-impl Drop for PackageLock {
-    fn drop(&mut self) {
-        let _ = self.0.unlock();
-    }
-}
-
-fn package_lock_path(package_dir: &Path) -> PathBuf {
-    let key = sha256_hex(package_dir.to_string_lossy().as_bytes());
-    std::env::temp_dir().join(format!("tracedecay-materialization-{key}.lock"))
-}
-
 #[hotpath::measure(label = "hosts.automation.skill_materialization.lock")]
-fn lock_package(package_dir: &Path) -> Result<PackageLock> {
+fn lock_package(package_dir: &Path) -> Result<FileLease> {
     let path = package_lock_path(package_dir);
     let file = fs::OpenOptions::new()
         .read(true)
@@ -515,7 +479,10 @@ fn lock_package(package_dir: &Path) -> Result<PackageLock> {
         .truncate(false)
         .open(&path)?;
     tracedecay_runtime_core::storage::retry_transient_file_op(|| file.lock())?;
-    Ok(PackageLock(file))
+    Ok(FileLease::held(
+        file,
+        "automation.skill_materialization.package",
+    ))
 }
 
 fn relative_artifact_path(relative: &str) -> Result<&Path> {
@@ -731,7 +698,7 @@ fn write_materialization_manifest(
     })?;
     let path = checked_descendant_path(dir, Path::new(MATERIALIZATION_MANIFEST_FILE))?;
     ensure_not_symlink(&PathBuf::from(format!("{}.new", path.display())))?;
-    host_io.safe_write_json_file(&path, &value, None)
+    host_io.safe_write_json_file(&path, &value)
 }
 
 fn write_pending_materialization(
@@ -746,7 +713,7 @@ fn write_pending_materialization(
     })?;
     let path = checked_descendant_path(dir, Path::new(MATERIALIZATION_PENDING_FILE))?;
     ensure_not_symlink(&PathBuf::from(format!("{}.new", path.display())))?;
-    host_io.safe_write_json_file(&path, &value, None)
+    host_io.safe_write_json_file(&path, &value)
 }
 
 fn decode_pending_artifacts(pending: &PendingMaterialization) -> Result<BTreeMap<String, Vec<u8>>> {
@@ -1016,26 +983,6 @@ fn reconcile_owned_package(
     )
 }
 
-fn legacy_support_files_are_forked(
-    dir: &Path,
-    artifacts: &BTreeMap<String, Vec<u8>>,
-) -> Result<bool> {
-    for (relative, desired) in artifacts {
-        if relative == SKILL_FILE {
-            continue;
-        }
-        let path = artifact_path(dir, relative)?;
-        if !path_exists_without_following_links(&path)? {
-            continue;
-        }
-        let desired_hash = sha256_bytes(desired);
-        if current_artifact_hash(&path)?.as_deref() != Some(desired_hash.as_str()) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 fn initial_support_path_conflicts(
     dir: &Path,
     artifacts: &BTreeMap<String, Vec<u8>>,
@@ -1082,7 +1029,7 @@ fn materialize_skill_into(
     let package_hash = skill.materialized_package_hash()?;
     let artifacts = desired_artifacts(skill)?;
     // Hold the per-package lock across the whole read-decide-commit window so a
-    // concurrent transaction cannot interleave (see [`PackageLock`]).
+    // concurrent transaction cannot interleave (see [`lock_package`]).
     let _lock = lock_package(&dir)?;
     if let Some(action @ (MaterializeAction::SkippedForeign | MaterializeAction::SkippedForked)) =
         recover_pending_materialization(host_io, &dir, Some(&skill.metadata.id))?
@@ -1115,9 +1062,8 @@ fn materialize_skill_into(
         (Some(existing), ManifestState::Missing) => {
             // Manifest lost (e.g. gitignored/uncommitted sidecar on a fresh
             // clone) but a managed file is on disk. Re-derive from disk: a
-            // pristine package-hash (#366+) package is treated as owned and
-            // reconciled (re-writing the manifest); otherwise fall back to the
-            // legacy body-hash (#362) domain before declaring a user fork.
+            // pristine package is treated as owned and reconciled (re-writing
+            // the manifest); anything else is a user fork.
             if let Some(rederived) = recompute_on_disk_package(&dir, existing)? {
                 fs::create_dir_all(&dir)?;
                 reconcile_owned_package(
@@ -1129,23 +1075,8 @@ fn materialize_skill_into(
                     installation_id,
                     &artifacts,
                 )?
-            } else if existing.is_legacy_forked()
-                || legacy_support_files_are_forked(&dir, &artifacts)?
-            {
-                MaterializeAction::SkippedForked
             } else {
-                fs::create_dir_all(&dir)?;
-                let previous_files = current_artifact_hashes(&dir, &artifacts)?;
-                commit_materialization_transaction(
-                    host_io,
-                    &dir,
-                    skill,
-                    package_hash,
-                    installation_id,
-                    &artifacts,
-                    previous_files,
-                    BTreeMap::new(),
-                )?
+                MaterializeAction::SkippedForked
             }
         }
         (None, ManifestState::Missing) if initial_support_conflict => {
@@ -1258,31 +1189,11 @@ pub fn remove_materialized_skill(
         match read_materialization_manifest(&dir, existing.skill_id.as_deref().unwrap_or(slug))? {
             ManifestState::Foreign => return Ok(RemoveAction::SkippedForked),
             ManifestState::Owned(manifest) => manifest,
-            ManifestState::Missing => {
-                if let Some(rederived) = recompute_on_disk_package(&dir, &existing)? {
-                    // Pristine package-hash (#366+) package with a lost manifest.
-                    rederived
-                } else if existing.is_legacy_forked() {
-                    return Ok(RemoveAction::SkippedForked);
-                } else {
-                    // Pristine legacy (#362) single-file package: synthesize a
-                    // manifest so the profile gate and owned-removal path apply.
-                    let mut files = BTreeMap::new();
-                    if let Some(hash) = current_artifact_hash(&path)? {
-                        files.insert(SKILL_FILE.to_string(), hash);
-                    }
-                    MaterializationManifest {
-                        managed_by: MATERIALIZED_SKILL_MANAGED_BY.to_string(),
-                        skill_id: existing
-                            .skill_id
-                            .clone()
-                            .unwrap_or_else(|| slug.to_string()),
-                        package_hash: existing.content_hash.clone().unwrap_or_default(),
-                        materialized_by: None,
-                        files,
-                    }
-                }
-            }
+            ManifestState::Missing => match recompute_on_disk_package(&dir, &existing)? {
+                // Pristine package with a lost manifest.
+                Some(rederived) => rederived,
+                None => return Ok(RemoveAction::SkippedForked),
+            },
         };
 
     if !may_remove_owned(scope, &manifest, installation_id) {

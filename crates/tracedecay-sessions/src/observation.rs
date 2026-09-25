@@ -19,7 +19,7 @@ use tracedecay_store::{
     ObservationCursorPort, ObservationPersistOutcome, ObservationProjectionStatus,
     ObservationReplayRequest, ObservationStore, ObservationStoreError, ObservationWrite,
     SESSION_MESSAGE_PROJECTOR_VERSION, StoredObservation,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
 
 use crate::repository_provenance::RepositoryProvenanceAdmissionContext;
@@ -565,7 +565,7 @@ where
                         )
                     },
                 );
-                let retrieval_anchor = build_observation_retrieval_anchor_v2(
+                let retrieval_anchor = build_observation_retrieval_anchor(
                     &observation,
                     projection_generation.clone(),
                     ingested_at,

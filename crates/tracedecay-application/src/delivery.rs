@@ -34,7 +34,7 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use crate::advisory::github_runtime::GitHubSourceAccessAuthorityV1;
 use crate::advisory::{
     CiRetainedObservationManifestLoadOutcomeV1, GitHubActionsConclusionV1, GitHubActionsStatusV1,
-    GitHubCiAnnotationLevelV1, GitHubCiCheckAnnotationV1, GitHubCiRepositoryTargetV1,
+    GitHubCheckAnnotationLevelV1, GitHubCheckAnnotationV1, GitHubCiRepositoryTargetV1,
     GitHubHttpReadConfigV1, GitHubReleaseReadControlV1, GitHubReviewBodyEvidenceAuthorityV1,
     GitHubReviewBodyReadOutcomeV1, GitHubReviewStoreManifestLoadOutcomeV1,
     ProjectCiRetainedObservationStoreV1, ProjectGitHubReleaseAuthorityOpenOutcomeV1,
@@ -2046,15 +2046,15 @@ fn delivery_ci_conclusion(conclusion: &GitHubActionsConclusionV1) -> ProjectDeli
     }
 }
 
-fn delivery_ci_annotation(annotation: &GitHubCiCheckAnnotationV1) -> ProjectDeliveryCiAnnotationV1 {
+fn delivery_ci_annotation(annotation: &GitHubCheckAnnotationV1) -> ProjectDeliveryCiAnnotationV1 {
     ProjectDeliveryCiAnnotationV1 {
         path: annotation.path.clone(),
         start_line: annotation.start_line,
         end_line: annotation.end_line,
         level: match annotation.annotation_level {
-            GitHubCiAnnotationLevelV1::Notice => ProjectDeliveryCiAnnotationLevelV1::Notice,
-            GitHubCiAnnotationLevelV1::Warning => ProjectDeliveryCiAnnotationLevelV1::Warning,
-            GitHubCiAnnotationLevelV1::Failure => ProjectDeliveryCiAnnotationLevelV1::Failure,
+            GitHubCheckAnnotationLevelV1::Notice => ProjectDeliveryCiAnnotationLevelV1::Notice,
+            GitHubCheckAnnotationLevelV1::Warning => ProjectDeliveryCiAnnotationLevelV1::Warning,
+            GitHubCheckAnnotationLevelV1::Failure => ProjectDeliveryCiAnnotationLevelV1::Failure,
         },
         title: annotation.title.clone(),
     }
@@ -2596,7 +2596,22 @@ mod tests {
                     && item.coverage == ProjectDeliveryInboxCoverageV1::Unsupported
             })
             .collect::<Vec<_>>();
-        assert!(!unsupported.is_empty());
+        assert_eq!(
+            unsupported
+                .iter()
+                .map(|item| item.source)
+                .collect::<Vec<_>>(),
+            [
+                ProjectDeliveryAttentionSourceV1::Contradiction,
+                ProjectDeliveryAttentionSourceV1::UnsafePattern,
+                ProjectDeliveryAttentionSourceV1::TestRisk,
+                ProjectDeliveryAttentionSourceV1::UnreviewedChangedCode,
+                ProjectDeliveryAttentionSourceV1::WeakEvidence,
+                ProjectDeliveryAttentionSourceV1::OverlappingEdit,
+                ProjectDeliveryAttentionSourceV1::ConfirmedConflict,
+                ProjectDeliveryAttentionSourceV1::DivergentSharedImplementation,
+            ]
+        );
         assert!(unsupported.iter().all(|item| {
             item.evidence.is_empty()
                 && item.coverage == ProjectDeliveryInboxCoverageV1::Unsupported

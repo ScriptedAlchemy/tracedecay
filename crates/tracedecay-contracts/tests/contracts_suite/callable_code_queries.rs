@@ -1,5 +1,6 @@
 use crate::common;
 
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::task::{Context, Poll, Waker};
 
@@ -16,27 +17,23 @@ use tracedecay_contracts::surface_contracts::{
 };
 use tracedecay_contracts::{
     ApplicationOperation, ApplicationOutcome, ApplicationProblem, ApplicationProblemKind,
-    AuthorityReceipt, AuthorizationService, CALLABLE_CODE_OPERATION_COUNT,
-    CallableCodeAuthorizationAdmission, CallableCodeAuthorizationFuture,
-    CallableCodeAuthorizationPort, CallableCodeOperationKind, CallableCodeQueryFuture,
-    CallableCodeQueryPort, CallableCodeQueryService, CodeHierarchyRequest, CodeImpactRequest,
-    CodeImplementationsRequest, CodeQueryPage, CodeQueryScope, CodeRelationRequest,
-    CodeSignatureRequest, CodeSymbolSearchRequest, CoverageCompleteness, ExactOccurrenceRecord,
-    ExactOccurrenceRequest, LexicalOccurrenceRecord, ModuleApiRequest, OpaqueCursor, PageCursor,
-    PageRequest, PhraseSearchRequest, QualifiedNameRequest, RequestContext, ResultProjection,
-    RetrievalOrder, RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta,
-    SourceMetadataRecord, SourceMetadataRequest, callable_code_catalog_contribution,
-    callable_code_handler_descriptors, callable_code_operations,
+    AuthorityReceipt, CallableCodeAuthorizationFuture, CallableCodeAuthorizationPort,
+    CallableCodeOperationKind, CallableCodeQueryFuture, CallableCodeQueryPort,
+    CallableCodeQueryService, CodeHierarchyRequest, CodeImpactRequest, CodeImplementationsRequest,
+    CodeQueryPage, CodeQueryScope, CodeRelationRequest, CodeSignatureRequest,
+    CodeSymbolSearchRequest, CoverageCompleteness, ExactOccurrenceRecord, ExactOccurrenceRequest,
+    LexicalOccurrenceRecord, ModuleApiRequest, OpaqueCursor, PageCursor, PageRequest,
+    PhraseSearchRequest, QualifiedNameRequest, RequestContext, ResultProjection, RetrievalOrder,
+    RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta, SourceMetadataRecord,
+    SourceMetadataRequest, callable_code_catalog_contribution, callable_code_handler_descriptors,
+    callable_code_operations,
 };
 use tracedecay_domain::{
     CodeGenerationId, EphemeralSanitizedQueryViewV1, FactId, PublicRetrieverStatus,
     QueryFallbackSubpayload, QueryNormalizationRevision, RetrieverKind, SanitizerRevision,
     TemporalModeV1, UtcMicros,
 };
-use tracedecay_policy::authorization::SourceAuthorizationEvaluatorV1;
-use tracedecay_tool_catalog::{
-    AuthorityRequirement, BindingStatus, BindingSurface, LifecycleClass,
-};
+use tracedecay_tool_catalog::{AuthorityRequirement, BindingSurface, LifecycleClass};
 
 fn meta() -> RetrievalRequestMeta {
     RetrievalRequestMeta::current(
@@ -243,28 +240,18 @@ impl CallableCodeAuthorizationPort for RoutedAuthorization {
         context: &'a RequestContext,
         _operation: &'a ApplicationOperation,
         _observed_at: UtcMicros,
-    ) -> CallableCodeAuthorizationFuture<
-        'a,
-        Result<CallableCodeAuthorizationAdmission, ApplicationProblem>,
-    > {
-        Box::pin(async move {
-            Ok(CallableCodeAuthorizationAdmission::Routed(
-                common::authority(context),
-            ))
-        })
+    ) -> CallableCodeAuthorizationFuture<'a, Result<AuthorityReceipt, ApplicationProblem>> {
+        Box::pin(async move { Ok(common::authority(context)) })
     }
 
     fn recheck_publication<'a>(
         &'a self,
         context: &'a RequestContext,
         _operation: &'a ApplicationOperation,
-        admission: &'a CallableCodeAuthorizationAdmission,
+        admission: &'a AuthorityReceipt,
         observed_at: UtcMicros,
     ) -> CallableCodeAuthorizationFuture<'a, Result<AuthorityReceipt, ApplicationProblem>> {
         Box::pin(async move {
-            let CallableCodeAuthorizationAdmission::Routed(admission) = admission else {
-                panic!("routed authorization admission remains opaque");
-            };
             let mut current = common::authority(context);
             assert_eq!(admission.policy, current.policy);
             current.revalidated_at = observed_at;
@@ -285,14 +272,8 @@ fn execute_exact_in_scope(
 ) -> tracedecay_contracts::ApplicationResult<CodeQueryPage<ExactOccurrenceRecord>> {
     let operations = callable_code_operations().unwrap();
     let context = common::context(operations.get(CallableCodeOperationKind::ExactOccurrence));
-    let service = CallableCodeQueryService::new(
-        ExactOnlyPort { scenario },
-        AuthorizationService::new(
-            common::StaticAuthorizationPort::authorized(),
-            SourceAuthorizationEvaluatorV1::default(),
-        ),
-        operations,
-    );
+    let service =
+        CallableCodeQueryService::new(ExactOnlyPort { scenario }, RoutedAuthorization, operations);
     block_on(service.exact_occurrence(
         &context,
         ExactOccurrenceRequest::new("ApplicationOperation", None, scope, meta()).unwrap(),
@@ -639,37 +620,17 @@ fn callable_code_catalog_exposes_only_production_owned_transport_bindings() {
     let operations = callable_code_operations().unwrap();
 
     assert_eq!(
-        CallableCodeOperationKind::ALL.len(),
-        CALLABLE_CODE_OPERATION_COUNT
+        descriptors
+            .iter()
+            .map(|descriptor| descriptor.operation().capability_id())
+            .collect::<BTreeSet<_>>(),
+        contribution
+            .capabilities()
+            .iter()
+            .map(|capability| capability.capability_id())
+            .collect::<BTreeSet<_>>(),
+        "advertised callable capabilities and their handlers are the same set"
     );
-    let canonical_equivalents = [
-        CallableCodeOperationKind::SymbolSearch,
-        CallableCodeOperationKind::QualifiedName,
-        CallableCodeOperationKind::SignatureSearch,
-        CallableCodeOperationKind::Implementations,
-        CallableCodeOperationKind::TypeHierarchy,
-        CallableCodeOperationKind::Callers,
-        CallableCodeOperationKind::Impact,
-        CallableCodeOperationKind::ModuleApi,
-        CallableCodeOperationKind::SourceMetadata,
-    ];
-    let callable_catalog_count = CALLABLE_CODE_OPERATION_COUNT - canonical_equivalents.len();
-    assert_eq!(contribution.capabilities().len(), callable_catalog_count);
-    assert_eq!(descriptors.len(), callable_catalog_count);
-    assert_eq!(operations.iter().count(), CALLABLE_CODE_OPERATION_COUNT);
-    for kind in canonical_equivalents {
-        let capability_id = format!(
-            "capability.application.code-query.{}",
-            kind.as_str().replace('_', "-")
-        );
-        assert!(
-            contribution
-                .capabilities()
-                .iter()
-                .all(|capability| capability.capability_id().as_str() != capability_id),
-            "{kind:?} is owned by its canonical application surface"
-        );
-    }
     let reachable = [
         ("exact_occurrence", "code_exact_occurrence"),
         ("phrase_search", "code_phrase_search"),
@@ -680,23 +641,25 @@ fn callable_code_catalog_exposes_only_production_owned_transport_bindings() {
         ("type_definition", "code_type_definition"),
         ("references", "code_references"),
     ];
-    let expected_lsp_bindings = 3;
-    assert_eq!(
-        contribution.bindings().len(),
-        reachable.len() * 3 + expected_lsp_bindings
-    );
+    for (operation, _) in reachable {
+        let capability_id = format!(
+            "capability.application.code-query.{}",
+            operation.replace('_', "-")
+        );
+        assert!(
+            contribution
+                .capabilities()
+                .iter()
+                .any(|capability| capability.capability_id().as_str() == capability_id),
+            "{capability_id} is advertised"
+        );
+    }
     for capability in contribution.capabilities() {
         assert_eq!(
             capability.authority(),
             AuthorityRequirement::CapabilityGrantWithRevalidation
         );
         assert_eq!(capability.lifecycle(), LifecycleClass::Resumable);
-        let pagination = capability
-            .pagination()
-            .expect("direct callable code query is resumable");
-        assert_eq!(pagination.default_page_size(), 10);
-        assert_eq!(pagination.maximum_page_size(), 1_000);
-        assert_eq!(pagination.cursor_ttl_millis(), 15 * 60 * 1_000);
         let kind = CallableCodeOperationKind::ALL
             .into_iter()
             .find(|kind| {
@@ -707,6 +670,12 @@ fn callable_code_catalog_exposes_only_production_owned_transport_bindings() {
                     )
             })
             .expect("capability maps to one callable-code operation");
+        let pagination = capability
+            .pagination()
+            .expect("direct callable code query is resumable");
+        assert_eq!(pagination.default_page_size(), 10, "{kind:?}");
+        assert_eq!(pagination.maximum_page_size(), 1_000);
+        assert_eq!(pagination.cursor_ttl_millis(), 15 * 60 * 1_000);
         let Some((_, surface_operation)) = reachable
             .iter()
             .find(|(operation, _)| *operation == kind.as_str())
@@ -748,12 +717,16 @@ fn callable_code_catalog_exposes_only_production_owned_transport_bindings() {
                 binding.binding_id().as_str(),
                 format!("binding.{surface_name}.{surface_operation}.v1")
             );
-            assert_eq!(binding.operation().as_str(), *surface_operation);
-            assert_eq!(binding.status(), &BindingStatus::Current);
+            let expected_operation = match (kind, surface) {
+                (CallableCodeOperationKind::Callees, BindingSurface::Cli | BindingSurface::Mcp) => {
+                    "callees"
+                }
+                _ => *surface_operation,
+            };
+            assert_eq!(binding.operation().as_str(), expected_operation);
             assert!(binding.protocol_revisions().contains(1));
             assert!(!binding.protocol_revisions().contains(2));
             assert!(binding.required_features().is_empty());
-            assert!(!binding.is_alias());
             assert!(capability.binding_ids().contains(binding.binding_id()));
         }
     }

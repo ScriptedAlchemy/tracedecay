@@ -3,16 +3,16 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_domain::{
-    AnchorProvenanceRelationV2, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
+    AnchorProvenanceRelation, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
     CopyProofV1, DurableObservationV1, LogicalCopyRecordV1, MessageOccurrenceIdV1, ObservationId,
     ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
     ObservationSourceRangeV1, PayloadReferenceV1, ProjectionGenerationId,
     ProjectionOutputOrdinalV1, ProviderId, RetentionClass, RetrievalAnchorId,
-    RetrievalAnchorRecordV2, SanitizationReceiptId, SanitizationReceiptRefV1,
-    SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId,
-    TemporalAssertionKindV1, TemporalValidityV1, UtcMicros, derive_exact_observation_anchor_id,
+    RetrievalAnchorRecord, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+    SanitizerDispositionV1, SensitivityV1, SessionId, TemporalAssertionKindV1, TemporalValidityV1,
+    UtcMicros, derive_exact_observation_anchor_id,
 };
 use tracedecay_graph_db::NeverCancelled;
 use tracedecay_store::{
@@ -22,15 +22,15 @@ use tracedecay_store::{
     SessionRefreshFrontierV1, SessionRefreshProgressV1, SessionRefreshStore,
     SessionRefreshTerminalStateV1, SessionStoreError, SessionTemporalProjectionBatchV1,
 };
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 use super::super::refresh::SessionRefreshRestartStateV1;
 use super::materialize::*;
 use super::persist::persist_occurrences;
 use super::record_canonical_observation_effect;
-use crate::SessionTemporalStore;
 use crate::handle::SessionTemporalRegisteredDb;
 use crate::test_support::QueryCountingConnection;
+use crate::{SessionTemporalAccess, SessionTemporalStore};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::tests::harness::{
     HostAdmissionScope, HostAdmissionTestRuntimeV1, SessionTemporalFixtureCountV1,
@@ -70,7 +70,7 @@ fn fixture_receipt(receipt_id: &str, payload: &Value) -> SanitizationReceiptV1 {
 fn fixture_observation(
     session_id: &SessionId,
     ordinal: u64,
-    lineage: Option<(AnchorProvenanceRelationV2, RetrievalAnchorId)>,
+    lineage: Option<(AnchorProvenanceRelation, RetrievalAnchorId)>,
     include_parent: bool,
 ) -> (DurableObservationV1, AnchoredObservationWrite) {
     let provider = ProviderId::new(format!("projector-test-{ordinal}")).unwrap();
@@ -104,7 +104,7 @@ fn fixture_observation(
 fn fixture_multi_output_observation(
     session_id: &SessionId,
     ordinal: u64,
-    lineage: Option<(AnchorProvenanceRelationV2, RetrievalAnchorId)>,
+    lineage: Option<(AnchorProvenanceRelation, RetrievalAnchorId)>,
     output_count: usize,
 ) -> (DurableObservationV1, AnchoredObservationWrite) {
     assert!(output_count > 1);
@@ -155,7 +155,7 @@ fn fixture_observation_from_facts(
     record_id: ObservationId,
     relations: CanonicalObservationRelationsV1,
     facts: Vec<CanonicalObservationFactV1>,
-    lineage: Option<(AnchorProvenanceRelationV2, RetrievalAnchorId)>,
+    lineage: Option<(AnchorProvenanceRelation, RetrievalAnchorId)>,
 ) -> (DurableObservationV1, AnchoredObservationWrite) {
     let source =
         ObservationSourceIdentityV1::for_provider(provider.clone(), session_id.clone()).unwrap();
@@ -202,7 +202,7 @@ fn fixture_observation_from_facts(
         "projector-test",
     )
     .unwrap();
-    let anchor = tracedecay_store::build_observation_retrieval_anchor_v2(
+    let anchor = tracedecay_store::build_observation_retrieval_anchor(
         write.observation(),
         projection_generation.clone(),
         UtcMicros(1),
@@ -217,7 +217,7 @@ fn fixture_observation_from_facts(
             "owner": write.observation().scope(),
         }]);
     }
-    let anchor: RetrievalAnchorRecordV2 = serde_json::from_value(anchor_json).unwrap();
+    let anchor: RetrievalAnchorRecord = serde_json::from_value(anchor_json).unwrap();
     let anchored = AnchoredObservationWrite::new(write, anchor, projection_generation).unwrap();
     (observation, anchored)
 }
@@ -266,7 +266,7 @@ fn fixture_goal_observation() -> (DurableObservationV1, AnchoredObservationWrite
         "projector-test",
     )
     .unwrap();
-    let anchor = tracedecay_store::build_observation_retrieval_anchor_v2(
+    let anchor = tracedecay_store::build_observation_retrieval_anchor(
         write.observation(),
         projection_generation.clone(),
         UtcMicros(1),
@@ -422,7 +422,7 @@ async fn multi_output_projection_reuses_source_derivation_and_activates_shared_a
     let (multi, multi_write) = fixture_multi_output_observation(
         &session_id,
         1,
-        Some((AnchorProvenanceRelationV2::Supersedes, first_anchor)),
+        Some((AnchorProvenanceRelation::Supersedes, first_anchor)),
         OUTPUT_COUNT,
     );
     let multi_observation_id = multi.observation_id().clone();
@@ -565,7 +565,7 @@ async fn relation_batch_persists_restarts_and_completes_without_duplicates() {
         let (second, second_write) = fixture_observation(
             &session_id,
             1,
-            Some((AnchorProvenanceRelationV2::Supersedes, first_anchor)),
+            Some((AnchorProvenanceRelation::Supersedes, first_anchor)),
             true,
         );
         Box::pin(persist_fixture(&runtime, second, second_write)).await;
@@ -1211,7 +1211,7 @@ async fn copied_from_lineage_is_not_auto_emitted_by_materializer() {
     let (second, second_write) = fixture_observation(
         &session_id,
         1,
-        Some((AnchorProvenanceRelationV2::CopiedFrom, first_anchor)),
+        Some((AnchorProvenanceRelation::CopiedFrom, first_anchor)),
         false,
     );
     Box::pin(persist_fixture(&runtime, second, second_write)).await;
@@ -1255,7 +1255,7 @@ async fn relation_derivation_backs_off_to_the_total_batch_limit() {
     for ordinal in 0..501 {
         let lineage = previous_anchor
             .take()
-            .map(|anchor| (AnchorProvenanceRelationV2::Supersedes, anchor));
+            .map(|anchor| (AnchorProvenanceRelation::Supersedes, anchor));
         let (observation, write) = fixture_observation(&session_id, ordinal, lineage, ordinal > 0);
         previous_anchor = Some(
             derive_exact_observation_anchor_id(observation.scope(), observation.observation_id())
@@ -1580,7 +1580,7 @@ async fn explicit_copy_survives_reconstruction_in_the_native_relation_graph() {
     let (second, second_write) = fixture_observation(
         &session_id,
         1,
-        Some((AnchorProvenanceRelationV2::CopiedFrom, first_anchor.clone())),
+        Some((AnchorProvenanceRelation::CopiedFrom, first_anchor.clone())),
         false,
     );
     Box::pin(persist_fixture(&runtime, second, second_write)).await;
@@ -1722,7 +1722,7 @@ async fn multi_batch_refresh_progress_survives_restart_under_guard() {
             let (observation, write) = fixture_observation(
                 &session_id,
                 ordinal,
-                Some((AnchorProvenanceRelationV2::Supersedes, first_anchor.clone())),
+                Some((AnchorProvenanceRelation::Supersedes, first_anchor.clone())),
                 false,
             );
             Box::pin(persist_fixture(&runtime, observation, write)).await;
@@ -2087,14 +2087,16 @@ async fn explicit_discovery_visits_only_output_effects_past_frontier() {
     );
     assert_eq!(filtered, 1, "one output-producing effect is pending");
 
-    let pending = runtime
-        .registered_database(HostAdmissionScope::Profile)
-        .expect("profile registered database")
-        .pending_session_temporal_refresh_page_result(128, 1, None)
-        .await
-        .unwrap()
-        .into_parts()
-        .0;
+    let pending = SessionTemporalAccess::new(
+        runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("profile registered database"),
+    )
+    .pending_session_temporal_refresh_page_result(128, 1, None)
+    .await
+    .unwrap()
+    .into_parts()
+    .0;
 
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].session_id(), &session_id);
@@ -2159,7 +2161,7 @@ async fn explicit_discovery_rediscovery_is_bounded_and_non_mutating() {
     let mut active_rows_scanned = 0usize;
     let mut pages = 0usize;
     loop {
-        let page = db
+        let page = SessionTemporalAccess::new(db)
             .pending_session_temporal_refresh_page_result(2, 1, cursor.as_ref())
             .await
             .expect("discover missing native relation projection");

@@ -11,10 +11,7 @@ use tracedecay_contracts::diagnostics::{
     ProviderSourceIdentity,
 };
 use tracedecay_domain::{CodeGenerationId, GenerationDiagnosticV1, RetrievalAnchorId};
-use tracedecay_store::{
-    DiagnosticPublicationReceiptV1, DiagnosticStore, DiagnosticStoreResult,
-    SanitizedCleanDiagnosticSnapshotV1,
-};
+use tracedecay_store::{DiagnosticStore, DiagnosticStoreResult};
 
 use crate::diagnostics_store::DiagnosticsStore;
 use crate::lsp_runtime::LspFeedbackDiagnosticRecordPort;
@@ -53,15 +50,6 @@ impl LspFeedbackDiagnosticRecordPort for DatabaseDiagnosticStore {
 }
 
 impl DiagnosticStore for DatabaseDiagnosticStore {
-    async fn publish_clean_diagnostics(
-        &self,
-        snapshot: SanitizedCleanDiagnosticSnapshotV1,
-    ) -> DiagnosticStoreResult<DiagnosticPublicationReceiptV1> {
-        DiagnosticsStore::new(self.database.clone())
-            .publish_clean_diagnostics(snapshot)
-            .await
-    }
-
     async fn current_diagnostic_generation(
         &self,
     ) -> DiagnosticStoreResult<Option<CodeGenerationId>> {
@@ -80,16 +68,6 @@ impl DiagnosticStore for DatabaseDiagnosticStore {
             .await?;
         crate::hotpath_observe::feedback_query(records.len());
         Ok(records)
-    }
-
-    async fn diagnostics_for_publication(
-        &self,
-        generation: &CodeGenerationId,
-        publication_revision: u64,
-    ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
-        DiagnosticsStore::new(self.database.clone())
-            .diagnostics_for_publication(generation, publication_revision)
-            .await
     }
 
     #[hotpath::measure(label = "usecases.diagnostics.current", future = true)]
@@ -115,15 +93,6 @@ impl DiagnosticStore for DatabaseDiagnosticStore {
             .await
     }
 
-    async fn stale_diagnostics(
-        &self,
-        generation: &CodeGenerationId,
-    ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
-        DiagnosticsStore::new(self.database.clone())
-            .stale_diagnostics(generation)
-            .await
-    }
-
     #[hotpath::measure(label = "usecases.diagnostics.by_anchor", future = true)]
     async fn diagnostic_by_anchor(
         &self,
@@ -131,25 +100,6 @@ impl DiagnosticStore for DatabaseDiagnosticStore {
     ) -> DiagnosticStoreResult<Option<GenerationDiagnosticV1>> {
         DiagnosticsStore::new(self.database.clone())
             .diagnostic_by_anchor(anchor)
-            .await
-    }
-
-    async fn diagnostic_supersession_chain(
-        &self,
-        anchor: &RetrievalAnchorId,
-    ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
-        DiagnosticsStore::new(self.database.clone())
-            .diagnostic_supersession_chain(anchor)
-            .await
-    }
-
-    async fn supersede_diagnostic_generation(
-        &self,
-        prior_generation: &CodeGenerationId,
-        successor_generation: &CodeGenerationId,
-    ) -> DiagnosticStoreResult<u64> {
-        DiagnosticsStore::new(self.database.clone())
-            .supersede_diagnostic_generation(prior_generation, successor_generation)
             .await
     }
 }

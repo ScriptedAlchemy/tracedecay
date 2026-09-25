@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use tracedecay::project::TraceDecay;
+use tracedecay_project::project::TraceDecay;
 
 use super::daemon::daemon_tool_json;
 
@@ -110,7 +110,7 @@ fn moved_store_adoption_request(
     adopt_project: Option<String>,
     fresh: bool,
     assume_yes: bool,
-) -> tracedecay_domain::errors::Result<tracedecay::project::MovedStoreAdoption> {
+) -> tracedecay_domain::errors::Result<tracedecay_project::project::MovedStoreAdoption> {
     if fresh && adopt_project.is_some() {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: "--fresh mints a new project identity and contradicts --adopt-project; \
@@ -119,10 +119,12 @@ fn moved_store_adoption_request(
         });
     }
     Ok(match (adopt_project, fresh, assume_yes) {
-        (Some(project_id), _, _) => tracedecay::project::MovedStoreAdoption::AdoptNamed(project_id),
-        (None, true, _) => tracedecay::project::MovedStoreAdoption::Never,
-        (None, false, true) => tracedecay::project::MovedStoreAdoption::AdoptUnique,
-        (None, false, false) => tracedecay::project::MovedStoreAdoption::OfferCandidates,
+        (Some(project_id), _, _) => {
+            tracedecay_project::project::MovedStoreAdoption::AdoptNamed(project_id)
+        }
+        (None, true, _) => tracedecay_project::project::MovedStoreAdoption::Never,
+        (None, false, true) => tracedecay_project::project::MovedStoreAdoption::AdoptUnique,
+        (None, false, false) => tracedecay_project::project::MovedStoreAdoption::OfferCandidates,
     })
 }
 
@@ -380,7 +382,7 @@ mod init_bootstrap_tests {
             client_instance_id: "commands-init-test".to_string(),
             tool_list_changed_capable: false,
             catalog_version: String::new(),
-            moved_store_adoption: tracedecay::project::MovedStoreAdoption::Never,
+            moved_store_adoption: tracedecay_project::project::MovedStoreAdoption::Never,
         }
     }
 
@@ -432,6 +434,13 @@ mod init_bootstrap_tests {
         let profile = temp.path().join("profile");
         std::fs::create_dir_all(&project).unwrap();
         let socket = temp.path().join("daemon.sock");
+        let authority = tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
+            temp.path(),
+            &tracedecay_daemon_protocol::DaemonEndpoint::Unix(socket.clone()),
+            env!("CARGO_PKG_VERSION"),
+        )
+        .expect("publish the fixture daemon's authority record");
+        let auth_token = authority.auth_token().to_owned();
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let _socket_env = SocketEnvGuard::set(&socket);
 
@@ -444,6 +453,13 @@ mod init_bootstrap_tests {
                     let (stream, _addr) = listener.accept().await.unwrap();
                     let (reader, mut writer) = stream.into_split();
                     let mut lines = tokio::io::BufReader::new(reader).lines();
+                    let preface = lines.next_line().await.unwrap().unwrap();
+                    assert!(
+                        tracedecay_daemon_protocol::DaemonAuthPreface::from_line(preface.trim())
+                            .expect("auth preface")
+                            .authenticate(&auth_token),
+                        "init must present the daemon token"
+                    );
                     let _handshake_line = lines.next_line().await.unwrap().unwrap();
                     let request_line = lines.next_line().await.unwrap().unwrap();
                     let request: serde_json::Value = serde_json::from_str(&request_line).unwrap();
@@ -598,7 +614,6 @@ mod init_bootstrap_tests {
 #[hotpath::measure(label = "cli.sync.run", future = true)]
 pub(crate) async fn handle_sync(
     path: Option<String>,
-    force: bool,
     skip_folders: Vec<String>,
     include_folders: Vec<String>,
     doctor: bool,
@@ -617,7 +632,7 @@ pub(crate) async fn handle_sync(
     let result = tracedecay::daemon::call_default_tool(
         &handshake,
         "tracedecay_admin_sync",
-        serde_json::json!({"force": force}),
+        serde_json::json!({}),
     )
     .await?;
     if verbose {

@@ -32,22 +32,6 @@ fn repository_identity_marker_is_discovered_without_graph_db() {
 }
 
 #[test]
-fn invalid_legacy_enrollment_marker_is_not_treated_as_initialized() {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path();
-    fs::create_dir_all(root.join(".tracedecay")).unwrap();
-    fs::write(
-        root.join(".tracedecay/enrollment.json"),
-        r#"{"project_id":"../bad","storage_mode":"profile_sharded"}"#,
-    )
-    .unwrap();
-
-    assert_eq!(discover_project_root(root), None);
-    assert!(!TraceDecay::is_initialized(root));
-    assert!(read_legacy_enrollment_marker(root).is_err());
-}
-
-#[test]
 fn repository_identity_marker_rejects_unknown_schema() {
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("repo");
@@ -117,10 +101,6 @@ fn profile_sharded_layout_maps_marker_to_profile_store_paths() {
         profile.join("projects/proj_123/tracedecay.db")
     );
     assert_eq!(
-        layout.config_path,
-        profile.join("projects/proj_123/config.json")
-    );
-    assert_eq!(
         layout.branch_meta_path,
         profile.join("projects/proj_123/branch-meta.json")
     );
@@ -144,7 +124,6 @@ fn profile_sharded_layout_maps_marker_to_profile_store_paths() {
         layout.manifest_path,
         Some(profile.join(format!("projects/proj_123/{STORE_MANIFEST_FILENAME}")))
     );
-    assert_eq!(layout.dirty_path, profile.join("projects/proj_123/dirty"));
     assert_eq!(
         layout.sync_lock_path,
         profile.join("projects/proj_123/sync.lock")

@@ -15,7 +15,7 @@ use tracedecay_session_memory::fact_store::ProjectMemoryDbHandle;
 use tracedecay_session_runtime::retained::map_execution_error;
 use tracedecay_store::StoreShardScopeV1;
 
-use crate::session_registry::{DaemonSessionRuntimeRegistryV1, open_user_memory_db};
+use crate::session_registry::DaemonSessionRuntimeRegistryV1;
 
 #[derive(Clone)]
 pub struct RetainedMemoryTargetAuthorityV1 {
@@ -112,9 +112,13 @@ pub async fn open_project_retained_memory_target(
         if selector.is_some() {
             return denied();
         }
-        let database = open_profile_memory(&authority.registry).await?;
+        let database = authority
+            .registry
+            .profile_memory()
+            .await
+            .map_err(map_execution_error)?;
         return Ok(RetainedMemoryTargetV1::new(
-            ProjectMemoryDbHandle::Owned(Box::new(database)),
+            ProjectMemoryDbHandle::Owned(Box::new(Arc::unwrap_or_clone(database))),
             FactOwnerV1::Profile,
         ));
     }
@@ -163,14 +167,6 @@ pub async fn open_project_retained_memory_target(
         return denied();
     }
     open_selected_project_read_only(authority, selected_project_id).await
-}
-
-async fn open_profile_memory(
-    registry: &DaemonSessionRuntimeRegistryV1,
-) -> Result<Database, RetainedSurfaceExecutionErrorV1> {
-    open_user_memory_db(registry)
-        .await
-        .map_err(map_execution_error)
 }
 
 #[hotpath::measure(label = "daemon.retained.memory.open_selected", future = true)]
