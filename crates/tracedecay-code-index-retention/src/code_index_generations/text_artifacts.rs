@@ -6,10 +6,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
+use cap_std::fs::Dir;
 use tracedecay_domain::canonical_text::is_lowercase_hex;
 use tracedecay_domain::{CodeGenerationId, UtcMicros, canonical_sha256};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write};
 
+use super::file_quarantine::{FileQuarantine, open_optional_dir};
 use super::journal::{
     BoundedJournalSpec, clear_journal, journal_path, load_journal, persist_journal,
 };
@@ -29,11 +31,13 @@ use super::{
     TEXT_ARTIFACT_TRANSACTION_SCHEMA, code_text_artifact_staging_root, code_text_artifacts_root,
     durable_generation_index_digest, generation_file_digest, observe_cancel,
     open_file_sha256_hex_cancellable, path_still_names_open_file, read_active_pointer,
-    read_optional_active_pointer, regular_file_exists, remove_empty_stage_root,
-    retain_bounded_generation_index_with_text_head, sha256_file_component, storage, sync_directory,
+    read_optional_active_pointer, regular_file_exists,
+    retain_bounded_generation_index_with_text_head, sha256_file_component, storage,
     validate_durable_generation_index, validate_sealed_generation_identity,
     validate_text_artifact_descriptor,
 };
+
+const TEXT_ARTIFACT_QUARANTINE_LABEL: &str = "text-artifact candidate";
 
 pub(super) const TEXT_ARTIFACT_TRANSACTION_JOURNAL: BoundedJournalSpec<
     CodeTextArtifactRetentionTransactionV1,
@@ -502,14 +506,6 @@ fn private_directory_exists(path: &Path) -> Result<bool, CodeGenerationRetention
     }
 }
 
-/// The directory a candidate of `kind` lives in.
-fn candidate_root(store_root: &Path, kind: CodeTextArtifactRetentionKindV1) -> PathBuf {
-    match kind {
-        CodeTextArtifactRetentionKindV1::Completed => code_text_artifacts_root(store_root),
-        CodeTextArtifactRetentionKindV1::Staging => code_text_artifact_staging_root(store_root),
-    }
-}
-
 pub(super) fn completed_text_artifact_digest(file_name: &str) -> Option<&str> {
     file_name
         .strip_prefix("text-artifact-")?
@@ -705,15 +701,6 @@ pub(super) fn text_artifact_transaction_path(store_root: &Path) -> PathBuf {
     journal_path(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL)
 }
 
-pub(super) fn text_artifact_transaction_stage_root(
-    store_root: &Path,
-    receipt: &CodeTextArtifactRetentionReceiptV1,
-) -> PathBuf {
-    store_root
-        .join(TEXT_ARTIFACT_QUARANTINE_DIRECTORY)
-        .join(&receipt.receipt_digest)
-}
-
 pub(super) fn validate_text_artifact_transaction(
     transaction: &CodeTextArtifactRetentionTransactionV1,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
@@ -814,31 +801,32 @@ pub(super) fn stage_collectable_text_artifacts_cancellable(
     transaction: &CodeTextArtifactRetentionTransactionV1,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
-    let stage_root = text_artifact_transaction_stage_root(store_root, &transaction.receipt);
-    std::fs::create_dir_all(&stage_root).map_err(storage)?;
-    sync_directory(stage_root.parent().ok_or_else(|| {
-        CodeGenerationRetentionErrorV1::UnsafeState(
-            "text-artifact retention quarantine has no parent".to_owned(),
-        )
-    })?)?;
+    let sources = TextArtifactSources::open(store_root)?;
+    let quarantine = FileQuarantine::prepare(
+        TEXT_ARTIFACT_QUARANTINE_LABEL,
+        &store_root.join(TEXT_ARTIFACT_QUARANTINE_DIRECTORY),
+        &transaction.receipt.receipt_digest,
+    )?;
     for candidate in &transaction.receipt.deleted_artifacts {
         if observe_cancel(is_cancelled) {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
         validate_text_artifact_candidate(candidate)?;
-        let artifacts_root = candidate_root(store_root, candidate.kind);
-        let source = artifacts_root.join(&candidate.artifact_file);
-        let staged = stage_root.join(&candidate.artifact_file);
-        match (regular_file_exists(&source)?, regular_file_exists(&staged)?) {
-            (true, false) => {
-                let metadata = std::fs::symlink_metadata(&source).map_err(storage)?;
-                if metadata.len() != candidate.size_bytes {
+        quarantine.stage(
+            sources.of(candidate.kind),
+            &candidate.artifact_file,
+            |file| {
+                if file.metadata().map_err(storage)?.len() != candidate.size_bytes {
                     return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
                         "text-artifact candidate '{}' changed after the mark phase",
                         candidate.artifact_file
                     )));
                 }
-                if let CodeTextArtifactRetentionKindV1::Completed = candidate.kind {
+                // An empty completed artifact has nothing to hash; its
+                // content address is checked by name alone.
+                if candidate.kind == CodeTextArtifactRetentionKindV1::Completed
+                    && candidate.size_bytes != 0
+                {
                     let digest = completed_text_artifact_digest(&candidate.artifact_file)
                         .ok_or_else(|| {
                             CodeGenerationRetentionErrorV1::UnsafeState(
@@ -846,20 +834,9 @@ pub(super) fn stage_collectable_text_artifacts_cancellable(
                                     .to_owned(),
                             )
                         })?;
-                    let candidate_verification = if candidate.size_bytes == 0 {
-                        GenerationDigestVerificationV1::MetadataOnly
-                    } else {
-                        GenerationDigestVerificationV1::Full
-                    };
-                    if !verify_unreferenced_completed_text_artifact(
-                        &source,
-                        digest,
-                        candidate.size_bytes,
-                        candidate_verification,
-                        is_cancelled,
-                    )? {
+                    if open_file_sha256_hex_cancellable(file, is_cancelled)? != digest {
                         return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                            "text-artifact candidate '{}' disappeared before quarantine",
+                            "code text artifact '{}' does not match its content address",
                             candidate.artifact_file
                         )));
                     }
@@ -867,64 +844,49 @@ pub(super) fn stage_collectable_text_artifacts_cancellable(
                 if observe_cancel(is_cancelled) {
                     return Err(CodeGenerationRetentionErrorV1::Cancelled);
                 }
-                std::fs::rename(&source, &staged).map_err(storage)?;
-                sync_directory(&artifacts_root)?;
-                sync_directory(&stage_root)?;
-            }
-            (false, false) => {
-                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                    "text-artifact candidate '{}' is missing before quarantine",
-                    candidate.artifact_file
-                )));
-            }
-            (false, true) => {
-                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                    "text-artifact candidate '{}' was already quarantined",
-                    candidate.artifact_file
-                )));
-            }
-            (true, true) => {
-                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                    "text-artifact candidate '{}' exists in source and quarantine",
-                    candidate.artifact_file
-                )));
-            }
-        }
+                Ok(())
+            },
+        )?;
     }
     Ok(())
+}
+
+/// The completed and staging artifact directories, each acquired once.
+struct TextArtifactSources {
+    completed: Option<Dir>,
+    staging: Option<Dir>,
+}
+
+impl TextArtifactSources {
+    fn open(store_root: &Path) -> Result<Self, CodeGenerationRetentionErrorV1> {
+        Ok(Self {
+            completed: open_optional_dir(&code_text_artifacts_root(store_root))?,
+            staging: open_optional_dir(&code_text_artifact_staging_root(store_root))?,
+        })
+    }
+
+    fn of(&self, kind: CodeTextArtifactRetentionKindV1) -> Option<&Dir> {
+        match kind {
+            CodeTextArtifactRetentionKindV1::Completed => self.completed.as_ref(),
+            CodeTextArtifactRetentionKindV1::Staging => self.staging.as_ref(),
+        }
+    }
 }
 
 pub(super) fn rollback_staged_text_artifact_transaction(
     store_root: &Path,
     transaction: &CodeTextArtifactRetentionTransactionV1,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
-    let stage_root = text_artifact_transaction_stage_root(store_root, &transaction.receipt);
+    let sources = TextArtifactSources::open(store_root)?;
+    let quarantine = FileQuarantine::recover(
+        TEXT_ARTIFACT_QUARANTINE_LABEL,
+        &store_root.join(TEXT_ARTIFACT_QUARANTINE_DIRECTORY),
+        &transaction.receipt.receipt_digest,
+    )?;
     for candidate in &transaction.receipt.deleted_artifacts {
-        let artifacts_root = candidate_root(store_root, candidate.kind);
-        let source = artifacts_root.join(&candidate.artifact_file);
-        let staged = stage_root.join(&candidate.artifact_file);
-        match (regular_file_exists(&source)?, regular_file_exists(&staged)?) {
-            (true, false) => {}
-            (false, true) => {
-                std::fs::rename(&staged, &source).map_err(storage)?;
-                sync_directory(&artifacts_root)?;
-                sync_directory(&stage_root)?;
-            }
-            (false, false) => {
-                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                    "text-artifact rollback cannot find '{}'",
-                    candidate.artifact_file
-                )));
-            }
-            (true, true) => {
-                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                    "text-artifact rollback found duplicate '{}'",
-                    candidate.artifact_file
-                )));
-            }
-        }
+        quarantine.restore(sources.of(candidate.kind), &candidate.artifact_file)?;
     }
-    remove_empty_stage_root(&stage_root)
+    quarantine.remove_empty_stage()
 }
 
 pub(super) fn cleanup_committed_text_artifact_transaction(
@@ -932,22 +894,16 @@ pub(super) fn cleanup_committed_text_artifact_transaction(
     transaction: &CodeTextArtifactRetentionTransactionV1,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
     ensure_text_artifact_transaction_liveness(store_root, transaction)?;
-    let stage_root = text_artifact_transaction_stage_root(store_root, &transaction.receipt);
+    let sources = TextArtifactSources::open(store_root)?;
+    let quarantine = FileQuarantine::recover(
+        TEXT_ARTIFACT_QUARANTINE_LABEL,
+        &store_root.join(TEXT_ARTIFACT_QUARANTINE_DIRECTORY),
+        &transaction.receipt.receipt_digest,
+    )?;
     for candidate in &transaction.receipt.deleted_artifacts {
-        let source = candidate_root(store_root, candidate.kind).join(&candidate.artifact_file);
-        if regular_file_exists(&source)? {
-            return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                "text-artifact receipt is durable but '{}' returned to its source root",
-                candidate.artifact_file
-            )));
-        }
-        let staged = stage_root.join(&candidate.artifact_file);
-        if regular_file_exists(&staged)? {
-            std::fs::remove_file(&staged).map_err(storage)?;
-            sync_directory(&stage_root)?;
-        }
+        quarantine.remove_committed(sources.of(candidate.kind), &candidate.artifact_file)?;
     }
-    remove_empty_stage_root(&stage_root)
+    quarantine.remove_empty_stage()
 }
 
 pub(super) fn ensure_text_artifact_transaction_liveness(

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::{ProjectId, RefId, RepositoryId, WorktreeId};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use tracedecay_runtime_core::storage::RepositoryIdentityMarker;
 
 use super::ApplicationScopeError;
@@ -165,7 +166,7 @@ fn canonical_root(root: &Path, label: &str) -> Result<PathBuf, ApplicationScopeE
             requested_root: root.display().to_string(),
         });
     }
-    root.canonicalize().map_err(|error| {
+    canonical_existing_identity(root).map_err(|error| {
         ApplicationScopeError::Resolution(format!(
             "{label} '{}' could not be canonicalized: {error}",
             root.display()
