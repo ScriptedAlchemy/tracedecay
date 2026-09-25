@@ -33,7 +33,7 @@ use super::{
     CONVERGENCE_PARK_PUBLICATION_RESET_FAILED_REMEDIATION_V1,
     CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1, CodeIndexSchedulerRegistryV1,
     ColdMountAdmissionV1, GraphActivationGateV1, GraphSeatGateV1, MountedCodeIndexWorktreeV1,
-    PendingWakeV1, PublishedTextProjectionOutcomeV1, ServingSwapOutcomeV1,
+    PendingWakeV1, PublishedTextProjectionOutcomeV1, ServingGenerationSlot, ServingSwapOutcomeV1,
     TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1, clear_convergence_park,
     convergence_park_retries_on_wake, is_repeated_conflict_verdict, park_convergence,
     publication_authority_is_terminal, retained_noop_requires_follow_up_wake,
@@ -314,8 +314,10 @@ impl CodeIndexSchedulerRegistryV1 {
         // Cold mount publishes only the exact route. The worker may seat a
         // complete identity-valid generation as stale serving before refresh
         // claims freshness; missing Git authority still leaves this empty.
-        let serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>> =
-            Arc::new(RwLock::new(None));
+        let serving_generation: Arc<ServingGenerationSlot> = Arc::new(hotpath::rw_lock!(
+            RwLock::new(None),
+            label = "daemon.code_index.serving_generation"
+        ));
         let complete_generation_requested = Arc::new(AtomicBool::new(false));
         let (
             complete_generation_requested_changed,
@@ -2063,31 +2065,55 @@ impl CodeIndexSchedulerRegistryV1 {
                                 &latest.generation().manifest().generation_id,
                                 &latest.generation().snapshot().content_identity,
                             );
+                            // A store that cannot answer keeps the incumbent
+                            // rather than displacing it.
+                            let incumbent_is_active =
+                                |incumbent: &Option<LatestCompleteCodeIndexV1>| {
+                                    incumbent.as_ref().is_some_and(|incumbent| {
+                                        scheduler
+                                            .active_publication_matches(incumbent)
+                                            .unwrap_or(true)
+                                    })
+                                };
+                            // The publication comparison runs outside the
+                            // write guard, so readers never queue behind it.
+                            // Every slot writer bumps the epoch, so an
+                            // unchanged epoch under the guard proves the
+                            // incumbent it judged is still seated.
+                            let observed_epoch = serving_generation_epoch.load(Ordering::Acquire);
+                            let observed_incumbent = serving_generation
+                                .read()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .clone();
+                            let observed_active = incumbent_is_active(&observed_incumbent);
+                            drop(observed_incumbent);
                             let mut serving = serving_generation
                                 .write()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            let incumbent_is_active = serving.as_ref().is_some_and(|incumbent| {
-                                // The active generation is already loaded
-                                // and cached by the check above, so this
-                                // is a second comparison, not a second
-                                // decode. A store that cannot answer keeps
-                                // the incumbent rather than displacing it.
-                                scheduler
-                                    .active_publication_matches(incumbent)
-                                    .unwrap_or(true)
-                            });
+                            let incumbent_is_active = if serving_generation_epoch
+                                .load(Ordering::Acquire)
+                                == observed_epoch
+                            {
+                                observed_active
+                            } else {
+                                incumbent_is_active(&serving)
+                            };
                             let outcome = ServingSwapOutcomeV1::decide(
                                 publication_matches,
                                 incumbent_is_active,
                                 replace_serving_generation,
                             );
+                            // The displaced seats can hold the last reference
+                            // to a whole generation; they drop after the
+                            // guards, not inside the swap.
+                            let mut displaced = (None, None);
                             if outcome.installs() {
-                                *serving = Some(latest.clone());
+                                displaced.0 = serving.replace(latest.clone());
                                 serving_generation_epoch.fetch_add(1, Ordering::AcqRel);
-                                *text_generation
+                                displaced.1 = text_generation
                                     .write()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                    Some(latest.text_generation_handle());
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .replace(latest.text_generation_handle());
                             }
                             // A pass is the only thing that verifies source
                             // against the sealed digests, so it is also the
@@ -2117,6 +2143,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 ServingSwapOutcomeV1::Superseded => {}
                             }
                             drop(serving);
+                            drop(displaced);
                             // The serving slot is now fully published, including
                             // its exact-source witness, so dependent readers
                             // may wake.

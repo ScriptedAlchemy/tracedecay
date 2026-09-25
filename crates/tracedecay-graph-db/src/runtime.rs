@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use grafeo_engine::GrafeoDB;
@@ -83,8 +83,36 @@ pub(crate) struct Inner {
     pub(crate) label_keys: crate::epoch_cache::LabelKeyCache,
     pub(crate) adjacency_ids: crate::adjacency_id_index::AdjacencyIdIndexCache,
     pub(crate) projection_approvals: crate::epoch_cache::ProjectionApprovalCache,
+    /// Live [`GraphServingEnginePin`]s. While any exists, no hibernation path
+    /// releases the native engine, so a serving generation opens once and
+    /// every reader shares it instead of reopening on the request path.
+    serving_pins: AtomicUsize,
     pub(crate) closed: AtomicBool,
     pub(crate) poisoned: AtomicBool,
+}
+
+/// Keeps one graph database's native engine resident for as long as the
+/// serving owner that took it holds it.
+///
+/// Taking the pin materializes the engine (the corpus-sized open) on the
+/// caller's thread, which is why serving owners take it during background
+/// activation, never on a request path.
+pub struct GraphServingEnginePin {
+    inner: Arc<Inner>,
+}
+
+impl Drop for GraphServingEnginePin {
+    fn drop(&mut self) {
+        self.inner.serving_pins.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl std::fmt::Debug for GraphServingEnginePin {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GraphServingEnginePin")
+            .finish_non_exhaustive()
+    }
 }
 
 struct OpenedGraphState {
@@ -183,6 +211,7 @@ impl GraphDb {
                 label_keys: crate::epoch_cache::LabelKeyCache::default(),
                 adjacency_ids: crate::adjacency_id_index::AdjacencyIdIndexCache::default(),
                 projection_approvals: crate::epoch_cache::ProjectionApprovalCache::default(),
+                serving_pins: AtomicUsize::new(0),
                 closed: AtomicBool::new(false),
                 poisoned: AtomicBool::new(false),
             }),
@@ -216,6 +245,7 @@ impl GraphDb {
                 label_keys: crate::epoch_cache::LabelKeyCache::default(),
                 adjacency_ids: crate::adjacency_id_index::AdjacencyIdIndexCache::default(),
                 projection_approvals: crate::epoch_cache::ProjectionApprovalCache::default(),
+                serving_pins: AtomicUsize::new(0),
                 closed: AtomicBool::new(false),
                 poisoned: AtomicBool::new(false),
             }),
@@ -1043,6 +1073,12 @@ impl GraphDb {
         {
             return Ok(false);
         }
+        // Checked before the gate so a pinned engine's admitted proofs are not
+        // retired, and again under the database write lock below, which a
+        // pin's own open also takes.
+        if self.serving_pinned() {
+            return Ok(false);
+        }
         let when_idle = claim == SnapshotGateClaim::WhenIdle;
         let _snapshot_gate = match claim {
             SnapshotGateClaim::Blocking => self.wait_snapshot_gate_write(),
@@ -1073,6 +1109,9 @@ impl GraphDb {
             )
             .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?
         };
+        if self.serving_pinned() {
+            return Ok(false);
+        }
         if when_idle {
             // A declined attempt leaves markers untouched. Once both the
             // snapshot and database gates are exclusively held, hibernation
@@ -1457,6 +1496,25 @@ impl GraphDb {
             self.inner.state.write()
         })
         .map_err(|_| GraphDbError::unavailable("graph state lock is poisoned"))
+    }
+
+    /// Materializes the native engine once and keeps it resident until the
+    /// returned pin drops. The pin is counted before the open, so a
+    /// concurrent hibernation either observes it or finishes first and this
+    /// open reopens; the engine is resident whenever this returns `Ok`.
+    #[hotpath::measure(label = "graph_db.runtime.pin_serving_engine", impl_type = "GraphDb")]
+    pub(crate) fn pin_serving_engine(&self) -> Result<GraphServingEnginePin, GraphDbError> {
+        self.inner.serving_pins.fetch_add(1, Ordering::AcqRel);
+        let pin = GraphServingEnginePin {
+            inner: Arc::clone(&self.inner),
+        };
+        self.ensure_available()?;
+        self.ensure_opened()?;
+        Ok(pin)
+    }
+
+    fn serving_pinned(&self) -> bool {
+        self.inner.serving_pins.load(Ordering::Acquire) > 0
     }
 
     #[hotpath::measure(label = "graph_db.runtime.ensure_opened", impl_type = "GraphDb")]
