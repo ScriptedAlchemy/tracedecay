@@ -1,4 +1,5 @@
 use std::path::{Component, PathBuf};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::SnapshotFileDispositionV1;
@@ -24,7 +25,7 @@ impl PublishedCodeIndexWorkspaceDocuments {
         scope: ResolvedScope,
         project_root: PathBuf,
     ) -> Self {
-        let project_root = project_root.canonicalize().ok();
+        let project_root = canonical_existing_identity(&project_root).ok();
         Self {
             registry,
             scope,
@@ -71,8 +72,8 @@ impl LspWorkspaceDocumentIndexPort for PublishedCodeIndexWorkspaceDocuments {
                 .ok_or_else(|| LspRuntimeFailure::new("workspace-root-uri-invalid"))?;
             let root_path = root_url
                 .to_file_path()
-                .map_err(|()| LspRuntimeFailure::new("workspace-root-uri-invalid"))?
-                .canonicalize()
+                .map_err(|()| LspRuntimeFailure::new("workspace-root-uri-invalid"))?;
+            let root_path = canonical_existing_identity(&root_path)
                 .map_err(|_| LspRuntimeFailure::new("workspace-root-unavailable"))?;
             if project_root != root_path {
                 return Err(LspRuntimeFailure::new("workspace-root-scope-mismatch"));

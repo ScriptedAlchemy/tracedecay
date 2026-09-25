@@ -17,6 +17,7 @@ use tracedecay_daemon_service::{
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use tracedecay_store::StoreShardScopeV1;
 
 fn record_project_open_refusal(
@@ -284,7 +285,7 @@ async fn open_scope_set_cas_projects<'a>(
                 ));
             }
         }
-        let root = selector.root.canonicalize().map_err(|_| {
+        let root = canonical_existing_identity(&selector.root).map_err(|_| {
             DaemonInvocationResponse::problem(
                 request_id.to_owned(),
                 DaemonInvocationProblem::NotFoundOrNotAuthorized,
@@ -660,13 +661,11 @@ pub(super) async fn resolve_multi_root_projects(
         }
         let registered_root = PathBuf::from(context.project.canonical_root);
         if !registered_root.is_absolute()
-            || registered_root.canonicalize().ok().as_ref() != Some(&registered_root)
+            || canonical_existing_identity(&registered_root).ok().as_ref() != Some(&registered_root)
         {
             return Err(DaemonInvocationProblem::Unavailable);
         }
-        let root = selector
-            .root
-            .canonicalize()
+        let root = canonical_existing_identity(&selector.root)
             .map_err(|_| DaemonInvocationProblem::Unavailable)?;
         tracedecay_session_memory::context::RegisteredScopeResolver::resolve(
             &registered_root,
