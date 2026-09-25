@@ -3829,9 +3829,7 @@ fn disk_artifact_term_insert_execution_is_monotone_by_primary_key() {
 #[test]
 fn disk_artifact_posting_insert_plans_obey_exact_memory_boundary_before_mutation() {
     const TERM_INSERT_PLAN_BYTES_PER_REF: usize = 5 * std::mem::size_of::<usize>();
-    const TERM_INSERT_SORT_RUN_ROWS: usize = 4_096;
     const EXACT_INSERT_PLAN_BYTES_PER_REF: usize = 8 * std::mem::size_of::<usize>();
-    const EXACT_INSERT_SORT_RUN_ROWS: usize = TERM_INSERT_SORT_RUN_ROWS;
 
     let (fixture, pages, _) = real_verified_pages();
     let pages = &pages[..1];
@@ -3858,21 +3856,11 @@ fn disk_artifact_posting_insert_plans_obey_exact_memory_boundary_before_mutation
     let entry_ledger = term_rows
         .checked_mul(TERM_INSERT_PLAN_BYTES_PER_REF)
         .expect("term plan ledger charge");
-    let merge_heap_ledger = term_rows
-        .div_ceil(TERM_INSERT_SORT_RUN_ROWS)
-        .checked_mul(std::mem::size_of::<(&str, i64, i64, usize, usize, usize)>())
-        .expect("term merge heap ledger charge");
     let exact_entry_ledger = exact_rows
         .checked_mul(EXACT_INSERT_PLAN_BYTES_PER_REF)
         .expect("exact plan ledger charge");
-    let exact_merge_heap_ledger = exact_rows
-        .div_ceil(EXACT_INSERT_SORT_RUN_ROWS)
-        .checked_mul(std::mem::size_of::<(i64, i64, i64, usize, usize)>())
-        .expect("exact merge heap ledger charge");
     let plan_ledger = entry_ledger
-        .checked_add(merge_heap_ledger)
-        .and_then(|bytes| bytes.checked_add(exact_entry_ledger))
-        .and_then(|bytes| bytes.checked_add(exact_merge_heap_ledger))
+        .checked_add(exact_entry_ledger)
         .expect("complete posting plan ledger charge");
     let exact_budget = fixed_ledger
         .checked_add(prepared_ledger)
