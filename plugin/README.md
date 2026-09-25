@@ -1,11 +1,12 @@
 # TraceDecay Plugin Bundle
 
 This source tree builds the TraceDecay integrations for Claude Code, Codex,
-Cursor, Kimi Code, OpenCode, and Pi. The installed bundles expose a host-specific MCP server
-key where the host admits MCP (`graph` for Claude/Codex, `tracedecay` for Cursor, Kimi Code, and OpenCode),
-shared workflow skills, and host-specific lifecycle hooks. Pi is the MCP-free host: its
-installed extension registers the graph tools over the `tracedecay tool` CLI bridge instead.
-Each hook is a bounded daemon-admission adapter; capture, sync, compaction, and advisory work stay in
+Cursor, Kimi Code, OpenCode, and Pi. The Claude, Codex, Cursor, Kimi Code, and
+OpenCode bundles expose a host-specific MCP server key (`graph` for
+Claude/Codex, `tracedecay` for Cursor, Kimi Code, and OpenCode). Pi has no MCP
+route: its extension registers the catalog tools over the CLI bridge. Every
+bundle ships shared workflow skills and host-specific lifecycle hooks. Each hook is a bounded
+daemon-admission adapter; capture, sync, compaction, and advisory work stay in
 the daemon.
 
 The manifest-driven package inventory also exposes an MCP-free core and
@@ -54,11 +55,14 @@ never a doubled `tracedecay`.
 - `opencode/`: OpenCode native plugin (`tracedecay.ts`), MCP companion
   (`tracedecay-mcp.ts`), and registration JSON (`opencode.registration.json`).
   OpenCode has no `plugin.json`; the host discovers the TypeScript module.
-- `pi/`: the Pi extension (`index.ts`) plus its `package.json` and the
-  `tracedecay-cli` routing skill. Pi has no MCP route: the extension registers
-  the `tracedecay_*` graph tools and lifecycle hooks inside the Pi process
-  over the CLI bridge, so the installer renders the resolved binary path into
-  the extension source exactly like the OpenCode plugin renderer.
+- `pi/`: the Pi extension (`index.ts`, tested by `index.test.ts`) plus its
+  `package.json` and the `tracedecay-cli` routing skill. The installer renders
+  the resolved binary path into the extension source like the OpenCode plugin
+  renderer and writes `schemas.json` beside it from the MCP catalog, the same
+  generated tool definitions the Hermes bridge uses. The extension registers
+  one Pi tool per catalog entry; mutating tools need operator approval and
+  refuse an explicit project selector. Pi's `session_start` and `agent_end`
+  events reach `tracedecay hook-pi-event`.
 - `README-claude.md`, `README-codex.md`, `README-cursor.md`, `README-kimi.md`:
   host README files, deployed as `README.md`.
 - `README-opencode.md`: OpenCode host README. It is source documentation;

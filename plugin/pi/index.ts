@@ -3,119 +3,86 @@
  *
  * Deployed by `tracedecay install --agent pi` into
  * `~/.pi/agent/extensions/tracedecay/` and refreshed by the receipt-backed
- * host lifecycle. Mirrors the Codex / Cursor plugin surface inside Pi:
- *   - model-callable code-graph tools (CLI bridge over `tracedecay tool`)
- *   - an index-sync lifecycle hook after mutating tool calls
- *   - / commands for status, sync, and version
- *
- * Tool schemas are NOT hand-written here. The installer renders
- * `schemas.json` from the same generated MCP catalog authority the Hermes
- * plugin consumes (name, description, JSON Schema parameters, `read_only`),
- * and this extension derives every TypeBox schema from it at load time. The
- * `tracedecay_tool` passthrough is gated to the catalog's read-only subset
- * and rejects any name that is not a bare snake_case catalog identifier, so a
- * model-driven call can never reach a mutation tool through this surface.
+ * host lifecycle:
+ *   - one model-callable tool per TraceDecay catalog tool, generated from the
+ *     installer-rendered `schemas.json` and bridged over `tracedecay tool`
+ *   - `session_start` / `agent_end` forwarded to `tracedecay hook-pi-event`
+ *   - index sync after edits, and `/tracedecay{,-sync,-version}` commands
  *
  * The tracedecay daemon owns the shared graph; tools and hooks run the
  * supported CLI, never direct database reads.
  */
 
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
-import {
-  CORE_TOOL_NAMES,
-  parseCatalog,
-  resolvePassthroughTool,
-  jsonSchemaToTypeBox,
-  toolArguments,
-  type CatalogTool,
-} from "./lib";
-
-/** Marker for install-time rendering and uninstall ownership checks. */
+/** Marker for install-time rendering and ownership checks. */
 const TD_EXTENSION_MARKER = "TraceDecayPiExtension";
 const TD_BIN = "__TRACEDECAY_BIN__";
 const TOOL_TIMEOUT_MS = 120_000;
+const HOOK_TIMEOUT_MS = 10_000;
 const SYNC_TIMEOUT_MS = 300_000;
 const MAX_OUTPUT_CHARS = 120_000;
 const SYNC_DEBOUNCE_MS = 45_000;
-
-// ---------------------------------------------------------------------------
-// Catalog loading (the installer-rendered generated authority)
-// ---------------------------------------------------------------------------
-
-function loadCatalog(): Map<string, CatalogTool> {
-  const here =
-    typeof __dirname !== "undefined"
-      ? __dirname
-      : new URL(".", import.meta.url).pathname;
-  const raw = readFileSync(join(here, "schemas.json"), "utf-8");
-  return new Map(parseCatalog(raw).map((tool) => [tool.name, tool]));
-}
-
-/** Human labels and prompt snippets for the curated first-class tools. */
-const CORE_TOOL_LABELS: Record<string, [string, string]> = {
-  status: ["TraceDecay Status", "Code-graph counts and freshness for the active project"],
-  active_project: ["TraceDecay Active Project", "Resolved TraceDecay project id, root, and branch identity"],
-  context: ["TraceDecay Context", "AI-ready semantic context for a task description"],
-  search: ["TraceDecay Symbol Search", "Ranked symbol search over the project code graph"],
-  grep: ["TraceDecay Content Grep", "Graph-enriched literal/regex content search"],
-  files: ["TraceDecay Files", "Indexed project file listing"],
-  find_exact_symbol: ["TraceDecay Exact Symbol", "Exact-name symbol lookup, O(log n) index probe"],
-  source_outline: ["TraceDecay Source Outline", "Symbol outline of one file"],
-  source_body: ["TraceDecay Source Body", "Current source body for a symbol node id"],
-  node: ["TraceDecay Node", "Detailed information for one graph node id"],
-  callers: ["TraceDecay Callers", "Callers / call sites of a symbol node id"],
-  callees: ["TraceDecay Callees", "Outgoing calls of a symbol node id"],
-  impact: ["TraceDecay Impact", "Dependent-symbol impact radius of a node id"],
-  diff_context: ["TraceDecay Diff Context", "Semantic diff context for changed file paths"],
-  affected: ["TraceDecay Affected Tests", "Affected-test selection for changed files"],
-  test_map: ["TraceDecay Test Map", "Which tests cover a symbol or file"],
-  diagnostics: ["TraceDecay Diagnostics", "Retained compiler diagnostics for the indexed generation"],
-  diagnose: ["TraceDecay Diagnose", "Map raw rustc stderr diagnostics to graph nodes"],
-};
+/** `tracedecay` exits with `EX_UNAVAILABLE` when no daemon serves the profile. */
+export const DAEMON_UNREACHABLE_EXIT_CODE = 69;
+/** Catalog tool names are fixed identifiers; nothing else may reach argv. */
+const TOOL_NAME = /^tracedecay_[a-z0-9_]+$/;
 
 // ---------------------------------------------------------------------------
 // Process helpers
 // ---------------------------------------------------------------------------
 
-interface RunResult {
-  ok: boolean;
-  text: string;
+export interface RunResult {
+  /** Process exit status; `null` when the child was killed or never spawned. */
+  code: number | null;
+  stdout: string;
+  stderr: string;
 }
 
-function runCli(
-  args: string[],
-  cwd: string,
-  timeoutMs: number,
-  signal?: AbortSignal
-): Promise<RunResult> {
-  return new Promise((resolve) => {
+export interface RunOptions {
+  cwd: string;
+  timeoutMs: number;
+  signal?: AbortSignal;
+  /** Written to the child's stdin, which is then closed either way. */
+  input?: string;
+  executable?: string;
+}
+
+export type Runner = (args: string[], options: RunOptions) => Promise<RunResult>;
+
+export const runCli: Runner = (args, options) =>
+  new Promise((resolve) => {
     const child = execFile(
-      TD_BIN,
+      options.executable ?? TD_BIN,
       args,
-      { cwd, timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
+      {
+        cwd: options.cwd,
+        timeout: options.timeoutMs,
+        maxBuffer: 8 * 1024 * 1024,
+        windowsHide: true,
+        signal: options.signal,
+      },
       (error, stdout, stderr) => {
-        if (error) {
-          const detail = (stderr || stdout || "").trim() || String(error.message);
-          resolve({ ok: false, text: detail });
-          return;
-        }
-        resolve({ ok: true, text: (stdout || stderr || "").trim() });
-      }
+        const code =
+          error === null ? 0 : typeof error.code === "number" ? error.code : null;
+        resolve({ code, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      },
     );
-    if (signal) {
-      const onAbort = () => child.kill("SIGTERM");
-      if (signal.aborted) {
-        child.kill("SIGTERM");
-      } else {
-        signal.addEventListener("abort", onAbort, { once: true });
-      }
-    }
+    // Every tracedecay entrypoint that reads stdin reads it to EOF, so an
+    // open pipe would hold the child until the timeout kills it.
+    child.stdin?.on("error", () => undefined);
+    child.stdin?.end(options.input);
   });
+
+function failureDetail(result: RunResult): string {
+  const detail = (result.stderr || result.stdout).trim();
+  if (detail) return detail;
+  return result.code === null ? "process was killed or could not start" : `exit status ${result.code}`;
 }
 
 function truncateOutput(text: string): string {
@@ -126,28 +93,171 @@ function truncateOutput(text: string): string {
   );
 }
 
-/** Run a graph tool; start the daemon once and retry when it is down. */
-async function runGraphTool(
-  tool: string,
-  params: Record<string, unknown>,
+// ---------------------------------------------------------------------------
+// Catalog tools
+// ---------------------------------------------------------------------------
+
+/** One entry of the installer-generated `schemas.json`. */
+export interface CatalogToolSchema {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  read_only: boolean;
+}
+
+export function parseToolSchemas(json: string): CatalogToolSchema[] {
+  const parsed: unknown = JSON.parse(json);
+  if (!Array.isArray(parsed)) {
+    throw new Error("tracedecay schemas.json is not an array");
+  }
+  return parsed.map((entry: Record<string, unknown>) => {
+    const { name, description, parameters, read_only } = entry ?? {};
+    if (typeof name !== "string" || !TOOL_NAME.test(name)) {
+      throw new Error(`tracedecay schemas.json has an invalid tool name: ${JSON.stringify(name)}`);
+    }
+    if (
+      typeof description !== "string" ||
+      typeof parameters !== "object" ||
+      parameters === null ||
+      typeof read_only !== "boolean"
+    ) {
+      throw new Error(`tracedecay schemas.json entry ${name} is malformed`);
+    }
+    return { name, description, parameters: parameters as Record<string, unknown>, read_only };
+  });
+}
+
+function loadToolSchemas(): CatalogToolSchema[] {
+  const path = join(dirname(fileURLToPath(import.meta.url)), "schemas.json");
+  return parseToolSchemas(readFileSync(path, "utf8"));
+}
+
+/** Mirrors the Hermes bridge: any explicit project selector targets a registered project. */
+export function hasExplicitProjectSelector(args: Record<string, unknown>): boolean {
+  const selector = args.project_selector;
+  const selectorFields =
+    typeof selector === "object" && selector !== null ? (selector as Record<string, unknown>) : {};
+  return [
+    args.project_id,
+    args.project_path,
+    selectorFields.path,
+    selectorFields.project_path,
+    selectorFields.project_id,
+  ].some((value) => typeof value === "string" && value.length > 0);
+}
+
+/**
+ * Run one catalog tool. A stopped daemon may be an operator hold, so this
+ * passive client reports it as unavailable instead of starting one.
+ */
+export async function runCatalogTool(
+  name: string,
+  args: Record<string, unknown>,
   cwd: string,
-  signal?: AbortSignal
+  signal: AbortSignal | undefined,
+  run: Runner = runCli,
 ): Promise<string> {
-  const attempt = () =>
-    runCli(["tool", tool, "--args", JSON.stringify(params)], cwd, TOOL_TIMEOUT_MS, signal);
-  let result = await attempt();
-  if (
-    !result.ok &&
-    /daemon/i.test(result.text) &&
-    /(socket|not available|unavailable|restarting)/i.test(result.text)
-  ) {
-    await runCli(["daemon", "start"], cwd, 60_000, signal);
-    result = await attempt();
+  const result = await run(["tool", name, "--args", "-"], {
+    cwd,
+    timeoutMs: TOOL_TIMEOUT_MS,
+    signal,
+    input: JSON.stringify(args),
+  });
+  if (result.code === DAEMON_UNREACHABLE_EXIT_CODE) {
+    throw new Error(`${name} unavailable: no TraceDecay daemon is serving. ${failureDetail(result)}`);
   }
-  if (!result.ok) {
-    throw new Error(`tracedecay ${tool} failed: ${result.text}`);
+  if (result.code !== 0) {
+    throw new Error(`${name} failed: ${failureDetail(result)}`);
   }
-  return truncateOutput(result.text);
+  return truncateOutput((result.stdout || result.stderr).trim());
+}
+
+type ApprovalContext = Pick<ExtensionContext, "hasUI" | "ui">;
+
+/**
+ * Mutating tools run only with the operator's approval, and never against an
+ * explicitly selected project: only catalog read-only tools may be routed at
+ * another registered project, as in the Hermes bridge.
+ */
+export async function admitCatalogTool(
+  schema: CatalogToolSchema,
+  args: Record<string, unknown>,
+  ctx: ApprovalContext,
+): Promise<void> {
+  if (schema.read_only) return;
+  if (hasExplicitProjectSelector(args)) {
+    throw new Error(`${schema.name} does not permit a cross-project mutating selector`);
+  }
+  if (!ctx.hasUI) {
+    throw new Error(`${schema.name} mutates project state and needs interactive approval`);
+  }
+  const approved = await ctx.ui.confirm(
+    `Allow ${schema.name}?`,
+    `${schema.name} changes project state.\n\n${truncateOutput(JSON.stringify(args, null, 2))}`,
+  );
+  if (!approved) {
+    throw new Error(`${schema.name} was not approved`);
+  }
+}
+
+function toolLabel(name: string): string {
+  return `TraceDecay ${name.slice("tracedecay_".length).replaceAll("_", " ")}`;
+}
+
+export function registerCatalogTools(
+  pi: Pick<ExtensionAPI, "registerTool">,
+  schemas: CatalogToolSchema[],
+  run: Runner = runCli,
+): void {
+  for (const schema of schemas) {
+    pi.registerTool({
+      name: schema.name,
+      label: toolLabel(schema.name),
+      description: schema.description,
+      parameters: schema.parameters as unknown as ToolDefinition["parameters"],
+      async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+        const args = (params ?? {}) as Record<string, unknown>;
+        await admitCatalogTool(schema, args, ctx);
+        const text = await runCatalogTool(schema.name, args, ctx.cwd, signal, run);
+        return { content: [{ type: "text" as const, text }], details: { tool: schema.name } };
+      },
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle hooks
+// ---------------------------------------------------------------------------
+
+export type PiLifecycleEvent = "session_start" | "agent_end";
+
+export function lifecyclePayload(
+  event: PiLifecycleEvent,
+  sessionId: string,
+  cwd: string,
+  reason?: string,
+): Record<string, string> {
+  return {
+    hook_event_name: event,
+    id: randomUUID(),
+    session_id: sessionId,
+    cwd,
+    ...(reason === undefined ? {} : { reason }),
+  };
+}
+
+/** Deliver one lifecycle event to `hook-pi-event`; resolves to its guidance. */
+export async function dispatchLifecycle(
+  payload: Record<string, string>,
+  run: Runner = runCli,
+): Promise<string | undefined> {
+  const result = await run(["hook-pi-event"], {
+    cwd: payload.cwd,
+    timeoutMs: HOOK_TIMEOUT_MS,
+    input: JSON.stringify(payload),
+  });
+  const guidance = result.stdout.trim();
+  return result.code === 0 && guidance.length > 0 ? guidance : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -156,68 +266,22 @@ async function runGraphTool(
 
 export default function tracedecayExtension(pi: ExtensionAPI) {
   void TD_EXTENSION_MARKER;
-  const catalog = loadCatalog();
-
-  for (const name of CORE_TOOL_NAMES) {
-    const catalogTool = catalog.get(name);
-    if (!catalogTool) continue;
-    const [label, snippet] = CORE_TOOL_LABELS[name] ?? [`TraceDecay ${name}`, ""];
-    pi.registerTool({
-      name: `tracedecay_${name}`,
-      label,
-      description: catalogTool.description,
-      ...(snippet ? { promptSnippet: snippet } : {}),
-      promptGuidelines: [
-        "Prefer the specific tracedecay_* tool that matches the task over raw file reads or grep.",
-        "Reuse returned node ids and continuation handles across tracedecay_* calls.",
-        "An empty index result does not prove absence; check tracedecay_status when coverage looks partial.",
-      ],
-      parameters: jsonSchemaToTypeBox(catalogTool.parameters, Type),
-      async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-        const args = toolArguments(name, params as Record<string, unknown>);
-        const text = await runGraphTool(name, args, ctx.cwd, signal ?? undefined);
-        return { content: [{ type: "text" as const, text }], details: { tool: name } };
-      },
-    });
-  }
-
-  // Passthrough for the remaining catalog, gated to read-only tools only.
-  pi.registerTool({
-    name: "tracedecay_tool",
-    label: "TraceDecay Tool (read-only)",
-    description:
-      "Invoke a read-only tracedecay catalog tool by bare name with its JSON arguments, through the same daemon the specific tools use. Mutation tools are rejected by this surface; use the tracedecay CLI for those.",
-    promptSnippet: "Passthrough to any remaining read-only tracedecay tool",
-    parameters: Type.Object({
-      tool: Type.String({ description: "Exact read-only tracedecay tool name" }),
-      args: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
-    }),
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const { tool: requested, args } = params as {
-        tool: unknown;
-        args: Record<string, unknown> | undefined;
-      };
-      const catalogTool = resolvePassthroughTool(requested, catalog);
-      const text = await runGraphTool(
-        catalogTool.name,
-        toolArguments(catalogTool.name, args ?? {}),
-        ctx.cwd,
-        signal ?? undefined
-      );
-      return {
-        content: [{ type: "text" as const, text }],
-        details: { tool: catalogTool.name },
-      };
-    },
-  });
-
-  // --- Lifecycle hook (no host-identity borrowing) -------------------------
+  registerCatalogTools(pi, loadToolSchemas());
 
   let lastSyncAt = 0;
 
+  pi.on("session_start", (event, ctx) => {
+    const payload = lifecyclePayload(
+      "session_start",
+      ctx.sessionManager.getSessionId(),
+      ctx.cwd,
+      event.reason,
+    );
+    void dispatchLifecycle(payload);
+  });
+
   pi.on("tool_result", (event, ctx) => {
-    // Keep the index current after mutating tool calls, debounced, like the
-    // Codex PostToolUse hook matcher (Bash | apply_patch).
+    // Keep the index current after mutating tool calls, debounced.
     if (event.toolName !== "bash" && event.toolName !== "edit" && event.toolName !== "write") {
       return;
     }
@@ -225,7 +289,14 @@ export default function tracedecayExtension(pi: ExtensionAPI) {
     const now = Date.now();
     if (now - lastSyncAt < SYNC_DEBOUNCE_MS) return;
     lastSyncAt = now;
-    void runCli(["sync"], ctx.cwd, SYNC_TIMEOUT_MS);
+    void runCli(["sync"], { cwd: ctx.cwd, timeoutMs: SYNC_TIMEOUT_MS });
+  });
+
+  pi.on("agent_end", (_event, ctx) => {
+    const payload = lifecyclePayload("agent_end", ctx.sessionManager.getSessionId(), ctx.cwd);
+    void dispatchLifecycle(payload).then((guidance) => {
+      if (guidance) ctx.ui.notify(`tracedecay: ${guidance}`, "info");
+    });
   });
 
   // --- Slash commands ------------------------------------------------------
@@ -233,51 +304,60 @@ export default function tracedecayExtension(pi: ExtensionAPI) {
   pi.registerCommand("tracedecay", {
     description: "Show tracedecay project status (graph counts, freshness)",
     handler: async (_args, ctx) => {
-      const result = await runCli(["status", "--json"], ctx.cwd, TOOL_TIMEOUT_MS, ctx.signal ?? undefined);
-      if (!result.ok) {
-        ctx.ui.notify(`tracedecay status failed: ${result.text}`, "error");
+      const result = await runCli(["status", "--json"], {
+        cwd: ctx.cwd,
+        timeoutMs: TOOL_TIMEOUT_MS,
+        signal: ctx.signal ?? undefined,
+      });
+      if (result.code !== 0) {
+        ctx.ui.notify(`tracedecay status failed: ${failureDetail(result)}`, "error");
         return;
       }
+      let parsed: {
+        project_root?: string;
+        graph_statistics?: { state?: string; reason?: string };
+        project_open?: { state?: string };
+      };
       try {
-        const parsed = JSON.parse(result.text) as {
-          project_root?: string;
-          graph_statistics?: { state?: string; reason?: string; summary?: unknown };
-          project_open?: { state?: string; detail?: string };
-        };
-        const graph = parsed.graph_statistics;
-        const openState = parsed.project_open?.state ?? "unknown";
-        const lines = [
-          `project: ${parsed.project_root ?? "unknown"}`,
-          `graph: ${graph?.state ?? "unknown"}${graph?.reason ? ` (${graph.reason})` : ""}`,
-          `open: ${openState}`,
-        ].join(" · ");
-        ctx.ui.notify(
-          `tracedecay ${lines}`,
-          graph?.state === "unavailable" || openState === "stalled" ? "error" : "info"
-        );
+        parsed = JSON.parse(result.stdout);
       } catch {
-        ctx.ui.notify(truncateOutput(result.text), "info");
+        ctx.ui.notify(truncateOutput(result.stdout.trim()), "info");
+        return;
       }
+      const graph = parsed.graph_statistics;
+      const lines = [
+        `project: ${parsed.project_root ?? "unreported"}`,
+        `graph: ${graph?.state ?? "unreported"}${graph?.reason ? ` (${graph.reason})` : ""}`,
+        `open: ${parsed.project_open?.state ?? "unreported"}`,
+      ].join(" · ");
+      ctx.ui.notify(`tracedecay ${lines}`, graph?.state === "unavailable" ? "error" : "info");
     },
   });
 
   pi.registerCommand("tracedecay-sync", {
     description: "Run an incremental tracedecay sync for the current project",
     handler: async (_args, ctx) => {
-      const result = await runCli(["sync"], ctx.cwd, SYNC_TIMEOUT_MS, ctx.signal ?? undefined);
-      if (result.ok) {
+      const result = await runCli(["sync"], {
+        cwd: ctx.cwd,
+        timeoutMs: SYNC_TIMEOUT_MS,
+        signal: ctx.signal ?? undefined,
+      });
+      if (result.code === 0) {
         ctx.ui.notify("tracedecay sync complete", "info");
       } else {
-        ctx.ui.notify(`tracedecay sync failed: ${result.text}`, "error");
+        ctx.ui.notify(`tracedecay sync failed: ${failureDetail(result)}`, "error");
       }
     },
   });
 
   pi.registerCommand("tracedecay-version", {
-    description: "Show the tracedecay binary and daemon versions",
+    description: "Show the tracedecay binary version",
     handler: async (_args, ctx) => {
-      const result = await runCli(["--version"], ctx.cwd, 10_000);
-      ctx.ui.notify(result.ok ? result.text : `tracedecay: ${result.text}`, result.ok ? "info" : "error");
+      const result = await runCli(["--version"], { cwd: ctx.cwd, timeoutMs: 10_000 });
+      ctx.ui.notify(
+        result.code === 0 ? result.stdout.trim() : `tracedecay: ${failureDetail(result)}`,
+        result.code === 0 ? "info" : "error",
+      );
     },
   });
 }

@@ -6,23 +6,23 @@
 //! therefore deploys a first-party extension plus a companion skill into the
 //! Pi agent directory:
 //!
-//! - `~/.pi/agent/extensions/tracedecay/index.ts` — the extension that
-//!   registers the `tracedecay_*` graph tools (bridged over `tracedecay tool`
-//!   through the daemon socket) and the `/tracedecay{, -sync, -version}`
-//!   commands. Tool schemas come from the generated `schemas.json` rendered
-//!   beside it from the same MCP catalog authority Hermes consumes, so the
-//!   extension never carries hand-copied parameter schemas. Owned by the
-//!   `Core` component together with its `package.json` and `schemas.json`.
-//! - `~/.pi/agent/skills/tracedecay-cli/SKILL.md` — the routing skill that
-//!   tells the model which tool answers which task. Owned by the `Agent`
-//!   component.
+//! - `~/.pi/agent/extensions/tracedecay/` — the `Core` component: `index.ts`
+//!   (the extension), its `package.json`, and `schemas.json`, the tool
+//!   definitions generated from the MCP catalog exactly as the Hermes bridge
+//!   renders them. The extension registers one Pi tool per catalog entry,
+//!   bridged over `tracedecay tool` through the daemon socket, forwards Pi's
+//!   `session_start` and `agent_end` events to `hook-pi-event`, and adds the
+//!   `/tracedecay{, -sync, -version}` commands.
+//! - `~/.pi/agent/skills/tracedecay-cli/SKILL.md` — the `Agent` component,
+//!   the routing skill that tells the model which tool answers which task.
 //!
-//! The agent directory is always `~/.pi/agent`. Ambient relocation
-//! (`PI_CODING_AGENT_DIR`) is deliberately not honored: the receipt-backed
-//! catalog artifacts are pinned to the home-relative paths, and honoring an
-//! ambient override would let `tracedecay install --home <other>` escape that
-//! home or let a unit test overwrite the operator's real install.
+//! The receipt-backed component transaction owns those bytes under
+//! `~/.pi/agent`. `PI_CODING_AGENT_DIR` relocates the directory Pi loads; it
+//! is honored only for the running process user's home and only when absolute,
+//! and activation then mirrors the receipt-owned bytes into it, the same shape
+//! OpenCode uses for `$XDG_CONFIG_HOME`.
 
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -30,87 +30,104 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use super::host_bundle::{HostBundleRegistrationStateV1, HostComponentV1};
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, safe_remove_host_file,
-    safe_write_text_file,
+    safe_write_bytes_file,
 };
+use crate::ports::mcp_tools::{advertised_tool_schemas_json, advertised_tools};
 
 pub struct PiIntegration;
 
 const PI_EXTENSION_SOURCE: &str = include_str!("../../../../plugin/pi/index.ts");
-const PI_LIB_SOURCE: &str = include_str!("../../../../plugin/pi/lib.ts");
 const PI_PACKAGE_TEMPLATE: &str = include_str!("../../../../plugin/pi/package.json");
+const PI_SKILL_SOURCE: &str = include_str!("../../../../plugin/pi/skill/SKILL.md");
 
 const PI_EXTENSION_MARKER: &str = "TraceDecayPiExtension";
 const PI_VERSION_PLACEHOLDER: &str = "__TRACEDECAY_VERSION__";
+const PI_AGENT_DIR_ENV: &str = "PI_CODING_AGENT_DIR";
+/// Home-relative directory Pi loads by default, and the only place the
+/// component transaction deploys Pi artifacts.
+pub(crate) const PI_AGENT_RELATIVE: &str = ".pi/agent";
 const PI_EXTENSION_RELATIVE: &str = "extensions/tracedecay/index.ts";
-const PI_LIB_RELATIVE: &str = "extensions/tracedecay/lib.ts";
 const PI_PACKAGE_RELATIVE: &str = "extensions/tracedecay/package.json";
 const PI_SCHEMAS_RELATIVE: &str = "extensions/tracedecay/schemas.json";
 const PI_SKILL_RELATIVE: &str = "skills/tracedecay-cli/SKILL.md";
-pub(crate) const PI_SKILL_SOURCE: &str = include_str!("../../../../plugin/pi/skill/SKILL.md");
+const PI_CORE_RELATIVE: [&str; 3] = [
+    PI_EXTENSION_RELATIVE,
+    PI_PACKAGE_RELATIVE,
+    PI_SCHEMAS_RELATIVE,
+];
+const PI_AGENT_COMPONENT_RELATIVE: [&str; 1] = [PI_SKILL_RELATIVE];
 
-/// Render the Pi Core component inventory with the resolved binary path and
-/// crate version, byte-identical to what `activate` deploys so the catalog
-/// transaction and the activation cannot disagree.
-pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'static str, String)>> {
+/// Render the Pi Core component inventory (agent-directory-relative paths)
+/// with the resolved binary path, crate version, and catalog schemas.
+pub(crate) fn rendered_core_files(tracedecay_bin: &str) -> Result<Vec<(&'static str, String)>> {
     Ok(vec![
         (
             PI_EXTENSION_RELATIVE,
             rendered_extension_source(tracedecay_bin)?,
         ),
-        (PI_LIB_RELATIVE, PI_LIB_SOURCE.to_owned()),
         (PI_PACKAGE_RELATIVE, rendered_package_json()?),
-        (PI_SCHEMAS_RELATIVE, rendered_schemas_json()?),
+        (
+            PI_SCHEMAS_RELATIVE,
+            advertised_tool_schemas_json(&advertised_tools()?)?,
+        ),
     ])
 }
 
-/// The agent directory for this home. Deliberately home-relative only: the
-/// receipt-owned catalog artifacts are pinned to these paths, so an ambient
-/// `PI_CODING_AGENT_DIR` override would split the receipts from the files Pi
-/// loads (see the module documentation).
+/// The Pi Agent component inventory (agent-directory-relative paths).
+pub(crate) fn rendered_agent_files() -> Vec<(&'static str, String)> {
+    vec![(PI_SKILL_RELATIVE, PI_SKILL_SOURCE.to_owned())]
+}
+
+fn component_relative_paths(components: &[HostComponentV1]) -> Vec<&'static str> {
+    let mut paths = Vec::new();
+    if components.contains(&HostComponentV1::Core) {
+        paths.extend(PI_CORE_RELATIVE);
+    }
+    if components.contains(&HostComponentV1::Agent) {
+        paths.extend(PI_AGENT_COMPONENT_RELATIVE);
+    }
+    paths
+}
+
+/// The agent directory Pi loads for `home`.
 fn pi_agent_dir(home: &Path) -> PathBuf {
-    home.join(".pi").join("agent")
+    pi_agent_dir_for(home, ambient_pi_agent_dir(home).as_deref())
 }
 
-fn pi_extension_path(home: &Path) -> PathBuf {
-    pi_agent_dir(home).join(PI_EXTENSION_RELATIVE)
+/// `PI_CODING_AGENT_DIR` names *this process user's* agent directory, so it
+/// only answers for that user's home. A sandbox or `--home` root stays inside
+/// the root it named.
+fn ambient_pi_agent_dir(home: &Path) -> Option<OsString> {
+    if !super::is_process_home(home) {
+        return None;
+    }
+    std::env::var_os(PI_AGENT_DIR_ENV)
 }
 
-fn pi_package_path(home: &Path) -> PathBuf {
-    pi_agent_dir(home).join(PI_PACKAGE_RELATIVE)
+/// Only an absolute override relocates the directory, so a malformed value
+/// cannot quietly deploy next to whatever the working directory happens to be.
+fn pi_agent_dir_for(home: &Path, ambient: Option<&OsStr>) -> PathBuf {
+    ambient
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(PI_AGENT_RELATIVE))
 }
 
-fn pi_lib_path(home: &Path) -> PathBuf {
-    pi_agent_dir(home).join(PI_LIB_RELATIVE)
-}
-
-fn pi_schemas_path(home: &Path) -> PathBuf {
-    pi_agent_dir(home).join(PI_SCHEMAS_RELATIVE)
-}
-
-/// Render the generated tool catalog for the extension, the same authority
-/// Hermes renders into its plugin: name, description, JSON-Schema parameters,
-/// and the read-only annotation the passthrough gate consumes.
-fn rendered_schemas_json() -> Result<String> {
-    let defs = crate::ports::mcp_tools::advertised_tools()?
+/// Receipt-owned source and relocated destination for each selected artifact.
+/// Empty when Pi loads the receipt-owned directory itself.
+fn relocated_assets(
+    home: &Path,
+    loaded: &Path,
+    components: &[HostComponentV1],
+) -> Vec<(PathBuf, PathBuf)> {
+    let owned = home.join(PI_AGENT_RELATIVE);
+    if loaded == owned {
+        return Vec::new();
+    }
+    component_relative_paths(components)
         .into_iter()
-        .map(|tool| {
-            serde_json::json!({
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.input_schema,
-                "read_only": tool.read_only,
-            })
-        })
-        .collect::<Vec<_>>();
-    serde_json::to_string_pretty(&defs)
-        .map(|json| format!("{json}\n"))
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("failed to serialize Pi schemas.json: {error}"),
-        })
-}
-
-fn pi_skill_path(home: &Path) -> PathBuf {
-    pi_agent_dir(home).join(PI_SKILL_RELATIVE)
+        .map(|relative| (owned.join(relative), loaded.join(relative)))
+        .collect()
 }
 
 fn rendered_package_json() -> Result<String> {
@@ -140,6 +157,47 @@ fn rendered_extension_source(tracedecay_bin: &str) -> Result<String> {
     Ok(rendered)
 }
 
+/// Registration state of one component in the directory Pi loads. A relocated
+/// copy is current only while it matches the receipt-owned bytes.
+fn component_state(home: &Path, component: HostComponentV1) -> HostBundleRegistrationStateV1 {
+    use HostBundleRegistrationStateV1 as State;
+
+    let loaded = pi_agent_dir(home);
+    let owned = home.join(PI_AGENT_RELATIVE);
+    let relatives = component_relative_paths(&[component]);
+    if relatives.is_empty() {
+        return State::Missing;
+    }
+    let present = relatives
+        .iter()
+        .filter(|relative| loaded.join(relative).is_file())
+        .count();
+    if present == 0 {
+        return State::Missing;
+    }
+    let current = present == relatives.len()
+        && relatives.iter().all(|relative| {
+            let Ok(bytes) = std::fs::read(loaded.join(relative)) else {
+                return false;
+            };
+            let marked = match *relative {
+                PI_EXTENSION_RELATIVE => contains(&bytes, PI_EXTENSION_MARKER),
+                PI_SKILL_RELATIVE => contains(&bytes, "tracedecay_"),
+                _ => true,
+            };
+            marked && (loaded == owned || std::fs::read(owned.join(relative)).ok() == Some(bytes))
+        });
+    if current {
+        State::Current
+    } else {
+        State::Repairable
+    }
+}
+
+fn contains(bytes: &[u8], marker: &str) -> bool {
+    std::str::from_utf8(bytes).is_ok_and(|text| text.contains(marker))
+}
+
 impl AgentIntegration for PiIntegration {
     fn name(&self) -> &'static str {
         "Pi"
@@ -150,50 +208,34 @@ impl AgentIntegration for PiIntegration {
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
+        use HostBundleRegistrationStateV1 as State;
+
         eprintln!("\n\x1b[1mPi integration\x1b[0m");
-        let extension_path = pi_extension_path(&ctx.home);
-        let package_path = pi_package_path(&ctx.home);
-        let lib_path = pi_lib_path(&ctx.home);
-        let schemas_path = pi_schemas_path(&ctx.home);
-        let skill_path = pi_skill_path(&ctx.home);
-        let extension_current = std::fs::read_to_string(&extension_path)
-            .is_ok_and(|contents| contents.contains(PI_EXTENSION_MARKER));
-        let package_current = package_path.is_file();
-        let lib_current = lib_path.is_file();
-        let schemas_current = std::fs::read_to_string(&schemas_path)
-            .is_ok_and(|contents| contents.contains("\"read_only\""));
-        let skill_current = std::fs::read_to_string(&skill_path)
-            .is_ok_and(|contents| contents.contains("tracedecay_"));
-        if extension_current && package_current && lib_current && schemas_current {
-            dc.pass(&format!(
-                "TraceDecay extension deployed at {}",
-                extension_path.display()
-            ));
-        } else if extension_path.exists()
-            || package_path.exists()
-            || lib_path.exists()
-            || schemas_path.exists()
-        {
-            dc.fail(&format!(
-                "TraceDecay Pi extension is incomplete at {}; run `tracedecay install --agent pi`",
-                pi_agent_dir(&ctx.home).display()
-            ));
-        } else {
-            dc.warn(&format!(
-                "{} not found, run `tracedecay install --agent pi` if you use Pi",
-                extension_path.display()
-            ));
-        }
-        if skill_current {
-            dc.pass(&format!(
-                "TraceDecay routing skill deployed at {}",
-                skill_path.display()
-            ));
-        } else {
-            dc.warn(&format!(
-                "{} not found, run `tracedecay install --agent pi` if you use Pi",
-                skill_path.display()
-            ));
+        let loaded = pi_agent_dir(&ctx.home);
+        for (component, label, relative) in [
+            (
+                HostComponentV1::Core,
+                "TraceDecay extension",
+                PI_EXTENSION_RELATIVE,
+            ),
+            (
+                HostComponentV1::Agent,
+                "TraceDecay routing skill",
+                PI_SKILL_RELATIVE,
+            ),
+        ] {
+            let path = loaded.join(relative);
+            match component_state(&ctx.home, component) {
+                State::Current => dc.pass(&format!("{label} deployed at {}", path.display())),
+                State::Missing => dc.warn(&format!(
+                    "{} not found, run `tracedecay install --agent pi` if you use Pi",
+                    path.display()
+                )),
+                _ => dc.fail(&format!(
+                    "{label} at {} is incomplete or stale; run `tracedecay install --agent pi`",
+                    loaded.display()
+                )),
+            }
         }
     }
 
@@ -202,46 +244,7 @@ impl AgentIntegration for PiIntegration {
         component: HostComponentV1,
         ctx: &HealthcheckContext,
     ) -> HostBundleRegistrationStateV1 {
-        use HostBundleRegistrationStateV1 as State;
-
-        let extension_path = pi_extension_path(&ctx.home);
-        let package_path = pi_package_path(&ctx.home);
-        let lib_path = pi_lib_path(&ctx.home);
-        let schemas_path = pi_schemas_path(&ctx.home);
-        let skill_path = pi_skill_path(&ctx.home);
-        let extension_current = std::fs::read_to_string(&extension_path)
-            .is_ok_and(|contents| contents.contains(PI_EXTENSION_MARKER));
-        let package_current = package_path.is_file();
-        let lib_current = lib_path.is_file();
-        let schemas_current = schemas_path.is_file();
-        let skill_current = std::fs::read_to_string(&skill_path)
-            .is_ok_and(|contents| contents.contains("tracedecay_"));
-
-        match component {
-            HostComponentV1::Core => {
-                if extension_current && package_current && lib_current && schemas_current {
-                    State::Current
-                } else if extension_path.exists()
-                    || package_path.exists()
-                    || lib_path.exists()
-                    || schemas_path.exists()
-                {
-                    State::Repairable
-                } else {
-                    State::Missing
-                }
-            }
-            HostComponentV1::Agent => {
-                if skill_current {
-                    State::Current
-                } else if skill_path.exists() {
-                    State::Repairable
-                } else {
-                    State::Missing
-                }
-            }
-            HostComponentV1::ContextMcp | HostComponentV1::OperatorMcp => State::Missing,
-        }
+        component_state(&ctx.home, component)
     }
 
     fn is_detected(&self, home: &Path) -> bool {
@@ -249,45 +252,41 @@ impl AgentIntegration for PiIntegration {
     }
 
     fn detected_host_surface(&self, home: &Path) -> Option<PathBuf> {
-        pi_agent_dir(home).is_dir().then(|| pi_agent_dir(home))
+        let dir = pi_agent_dir(home);
+        dir.is_dir().then_some(dir)
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
-        pi_extension_path(home).exists()
-            || pi_package_path(home).exists()
-            || pi_skill_path(home).exists()
+        let loaded = pi_agent_dir(home);
+        component_relative_paths(&[HostComponentV1::Core, HostComponentV1::Agent])
+            .into_iter()
+            .any(|relative| loaded.join(relative).exists())
     }
 
     fn primary_config_path(&self, home: &Path) -> Option<PathBuf> {
-        Some(pi_extension_path(home))
+        Some(pi_agent_dir(home).join(PI_EXTENSION_RELATIVE))
     }
 
     fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
-        vec![
-            pi_extension_path(home),
-            pi_lib_path(home),
-            pi_package_path(home),
-            pi_schemas_path(home),
-            pi_skill_path(home),
-        ]
+        self.host_component_registration_paths(
+            &[HostComponentV1::Core, HostComponentV1::Agent],
+            home,
+        )
     }
 
+    /// Only relocated mirrors are host registration state, snapshotted so a
+    /// failed lifecycle restores them. The receipt-owned artifacts under
+    /// `~/.pi/agent` belong to the component transaction, so without a
+    /// relocation there is nothing to register.
     fn host_component_registration_paths(
         &self,
         components: &[HostComponentV1],
         home: &Path,
     ) -> Vec<PathBuf> {
-        let mut paths = Vec::new();
-        if components.contains(&HostComponentV1::Core) {
-            paths.push(pi_extension_path(home));
-            paths.push(pi_lib_path(home));
-            paths.push(pi_package_path(home));
-            paths.push(pi_schemas_path(home));
-        }
-        if components.contains(&HostComponentV1::Agent) {
-            paths.push(pi_skill_path(home));
-        }
-        paths
+        relocated_assets(home, &pi_agent_dir(home), components)
+            .into_iter()
+            .map(|(_, relocated)| relocated)
+            .collect()
     }
 
     fn activate_deployed_host_component_registration(
@@ -295,34 +294,15 @@ impl AgentIntegration for PiIntegration {
         components: &[HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&HostComponentV1::Core) {
-            let agent_dir = pi_agent_dir(&ctx.home);
-            let extension_dir = agent_dir.join("extensions").join("tracedecay");
-            std::fs::create_dir_all(&extension_dir).map_err(|error| TraceDecayError::Config {
+        for (owned, relocated) in relocated_assets(&ctx.home, &pi_agent_dir(&ctx.home), components)
+        {
+            let bytes = std::fs::read(&owned).map_err(|error| TraceDecayError::Config {
                 message: format!(
-                    "failed to create Pi extension directory {}: {error}",
-                    extension_dir.display()
+                    "failed to read deployed Pi artifact {}: {error}",
+                    owned.display()
                 ),
             })?;
-            safe_write_text_file(
-                &pi_extension_path(&ctx.home),
-                &rendered_extension_source(&ctx.tracedecay_bin)?,
-            )?;
-            safe_write_text_file(&pi_lib_path(&ctx.home), PI_LIB_SOURCE)?;
-            safe_write_text_file(&pi_package_path(&ctx.home), &rendered_package_json()?)?;
-            safe_write_text_file(&pi_schemas_path(&ctx.home), &rendered_schemas_json()?)?;
-        }
-        if components.contains(&HostComponentV1::Agent) {
-            let skill_dir = pi_agent_dir(&ctx.home)
-                .join("skills")
-                .join("tracedecay-cli");
-            std::fs::create_dir_all(&skill_dir).map_err(|error| TraceDecayError::Config {
-                message: format!(
-                    "failed to create Pi skill directory {}: {error}",
-                    skill_dir.display()
-                ),
-            })?;
-            safe_write_text_file(&pi_skill_path(&ctx.home), PI_SKILL_SOURCE)?;
+            safe_write_bytes_file(&relocated, &bytes)?;
         }
         Ok(())
     }
@@ -332,67 +312,19 @@ impl AgentIntegration for PiIntegration {
         components: &[HostComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&HostComponentV1::Core) {
-            remove_owned_file(&pi_extension_path(&ctx.home), PI_EXTENSION_MARKER)?;
-            remove_owned_file(&pi_lib_path(&ctx.home), "resolvePassthroughTool")?;
-            remove_owned_file(&pi_package_path(&ctx.home), "tracedecay-pi-extension")?;
-            remove_owned_file(&pi_schemas_path(&ctx.home), "\"read_only\"")?;
-            let extension_dir = pi_agent_dir(&ctx.home)
-                .join("extensions")
-                .join("tracedecay");
-            if extension_dir.exists()
-                && std::fs::read_dir(&extension_dir)
-                    .is_ok_and(|mut entries| entries.next().is_none())
-            {
-                std::fs::remove_dir(&extension_dir).map_err(|error| TraceDecayError::Config {
-                    message: format!(
-                        "failed to remove empty Pi extension directory {}: {error}",
-                        extension_dir.display()
-                    ),
-                })?;
-            }
-        }
-        if components.contains(&HostComponentV1::Agent) {
-            remove_owned_file(&pi_skill_path(&ctx.home), "tracedecay_")?;
-            let skill_dir = pi_agent_dir(&ctx.home)
-                .join("skills")
-                .join("tracedecay-cli");
-            if skill_dir.exists()
-                && std::fs::read_dir(&skill_dir).is_ok_and(|mut entries| entries.next().is_none())
-            {
-                std::fs::remove_dir(&skill_dir).map_err(|error| TraceDecayError::Config {
-                    message: format!(
-                        "failed to remove empty Pi skill directory {}: {error}",
-                        skill_dir.display()
-                    ),
-                })?;
+        for (_, relocated) in relocated_assets(&ctx.home, &pi_agent_dir(&ctx.home), components) {
+            match safe_remove_host_file(&relocated) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(TraceDecayError::Config {
+                        message: format!("failed to remove {}: {error}", relocated.display()),
+                    });
+                }
             }
         }
         Ok(())
     }
-}
-
-/// Remove a TraceDecay-owned file after verifying its ownership marker.
-/// A file whose bytes were edited by the operator still carries the marker and
-/// is removed; a foreign file at the deploy path is refused untouched.
-fn remove_owned_file(path: &Path, marker: &str) -> Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    let contents = std::fs::read_to_string(path).map_err(|error| TraceDecayError::Config {
-        message: format!("failed to read {}: {error}", path.display()),
-    })?;
-    if !contents.contains(marker) {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "refusing to remove non-TraceDecay Pi artifact {}",
-                path.display()
-            ),
-        });
-    }
-    safe_remove_host_file(path).map_err(|error| TraceDecayError::Config {
-        message: format!("failed to remove {}: {error}", path.display()),
-    })
 }
 
 #[cfg(test)]
@@ -400,124 +332,136 @@ fn remove_owned_file(path: &Path, marker: &str) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn install_context(home: &Path) -> InstallContext {
-        InstallContext {
-            home: home.to_path_buf(),
-            tracedecay_bin: "/usr/local/bin/tracedecay".to_owned(),
-            project_root: None,
-            dashboard: true,
+    #[test]
+    fn ambient_agent_dir_is_honored_only_when_absolute() {
+        let home = Path::new("/home/operator");
+        assert_eq!(pi_agent_dir_for(home, None), home.join(".pi/agent"));
+        assert_eq!(
+            pi_agent_dir_for(home, Some(OsStr::new("/srv/pi-agent"))),
+            PathBuf::from("/srv/pi-agent")
+        );
+        for relative in ["relocated/agent", "./agent", "~/.pi/other", ""] {
+            assert_eq!(
+                pi_agent_dir_for(home, Some(OsStr::new(relative))),
+                home.join(".pi/agent"),
+                "relative override {relative:?} must not relocate the agent directory"
+            );
         }
     }
 
+    /// A tempdir is never the process user's home, so whatever the operator
+    /// exports as `PI_CODING_AGENT_DIR` cannot redirect a sandboxed home.
     #[test]
-    fn core_and_agent_components_deploy_the_full_pi_surface() {
+    fn a_foreign_home_never_resolves_outside_itself() {
         let home = tempfile::tempdir().unwrap();
-        let ctx = install_context(home.path());
-        let integration = PiIntegration;
+        assert!(ambient_pi_agent_dir(home.path()).is_none());
+        assert_eq!(pi_agent_dir(home.path()), home.path().join(".pi/agent"));
+        let paths = PiIntegration.host_registration_paths(home.path());
+        assert!(paths.is_empty(), "{paths:?}");
+    }
 
-        integration
-            .activate_deployed_host_component_registration(
-                &[HostComponentV1::Core, HostComponentV1::Agent],
-                &ctx,
-            )
-            .unwrap();
+    #[test]
+    fn core_inventory_renders_the_binary_version_and_catalog_schemas() {
+        let files = rendered_core_files("/usr/local/bin/tracedecay").unwrap();
+        let file = |relative: &str| {
+            files
+                .iter()
+                .find(|(path, _)| *path == relative)
+                .map(|(_, body)| body.as_str())
+                .unwrap()
+        };
 
-        let rendered = std::fs::read_to_string(pi_extension_path(home.path())).unwrap();
-        assert!(rendered.contains(PI_EXTENSION_MARKER));
-        assert!(rendered.contains("\"/usr/local/bin/tracedecay\""));
-        assert!(!rendered.contains(super::super::plugin_bundle::TRACEDECAY_BIN_PLACEHOLDER));
+        let extension = file(PI_EXTENSION_RELATIVE);
+        assert!(extension.contains(PI_EXTENSION_MARKER));
+        assert!(extension.contains("\"/usr/local/bin/tracedecay\""));
+        assert!(!extension.contains(super::super::plugin_bundle::TRACEDECAY_BIN_PLACEHOLDER));
 
-        let package = std::fs::read_to_string(pi_package_path(home.path())).unwrap();
+        let package = file(PI_PACKAGE_RELATIVE);
         assert!(package.contains(crate::PRODUCT_VERSION));
         assert!(!package.contains(PI_VERSION_PLACEHOLDER));
 
-        let skill = std::fs::read_to_string(pi_skill_path(home.path())).unwrap();
-        assert!(skill.contains("tracedecay_context"));
-
-        let health = HealthcheckContext {
-            home: home.path().to_path_buf(),
-            project_path: home.path().to_path_buf(),
-        };
-        assert_eq!(
-            integration.host_component_registration(HostComponentV1::Core, &health),
-            HostBundleRegistrationStateV1::Current
-        );
-        assert_eq!(
-            integration.host_component_registration(HostComponentV1::Agent, &health),
-            HostBundleRegistrationStateV1::Current
-        );
-        assert_eq!(
-            integration.host_component_registration(HostComponentV1::ContextMcp, &health),
-            HostBundleRegistrationStateV1::Missing
-        );
+        let schemas: Vec<serde_json::Value> =
+            serde_json::from_str(file(PI_SCHEMAS_RELATIVE)).unwrap();
+        let catalog = advertised_tools().unwrap();
+        assert_eq!(schemas.len(), catalog.len());
+        let search = schemas
+            .iter()
+            .find(|schema| schema["name"] == "tracedecay_search")
+            .unwrap();
+        assert_eq!(search["read_only"], true);
+        let edit = schemas
+            .iter()
+            .find(|schema| schema["name"] == "tracedecay_str_replace")
+            .unwrap();
+        assert_eq!(edit["read_only"], false);
     }
 
     #[test]
-    fn deactivate_removes_owned_files_and_refuses_foreign_bytes() {
+    fn relocated_mirror_tracks_the_receipt_owned_bytes() {
         let home = tempfile::tempdir().unwrap();
-        let ctx = install_context(home.path());
-        let integration = PiIntegration;
+        let relocated = tempfile::tempdir().unwrap();
+        let owned = home.path().join(PI_AGENT_RELATIVE);
         let components = [HostComponentV1::Core, HostComponentV1::Agent];
 
-        integration
-            .activate_deployed_host_component_registration(&components, &ctx)
-            .unwrap();
-
-        // A foreign file at the deploy path is refused, not deleted. The
-        // installed artifact is read-only, so replace it after removing it.
-        std::fs::remove_file(pi_skill_path(home.path())).unwrap();
-        std::fs::write(pi_skill_path(home.path()), "operator-owned\n").unwrap();
-        let refused = integration
-            .deactivate_deployed_host_component_registration(&[HostComponentV1::Agent], &ctx);
-        assert!(refused.is_err());
-        assert!(pi_skill_path(home.path()).exists());
-
-        // Owned files are removed together with their emptied directories.
-        integration
-            .deactivate_deployed_host_component_registration(&[HostComponentV1::Core], &ctx)
-            .unwrap();
-        assert!(!pi_extension_path(home.path()).exists());
-        assert!(!pi_package_path(home.path()).exists());
-        assert!(!pi_schemas_path(home.path()).exists());
-        assert!(
-            !pi_agent_dir(home.path())
-                .join("extensions")
-                .join("tracedecay")
-                .exists()
+        assert!(relocated_assets(home.path(), &owned, &components).is_empty());
+        let pairs = relocated_assets(home.path(), relocated.path(), &components);
+        assert_eq!(pairs.len(), 4);
+        for (source, destination) in &pairs {
+            assert!(source.starts_with(&owned));
+            assert!(destination.starts_with(relocated.path()));
+            assert_eq!(
+                source.strip_prefix(&owned).unwrap(),
+                destination.strip_prefix(relocated.path()).unwrap()
+            );
+        }
+        assert_eq!(
+            relocated_assets(home.path(), relocated.path(), &[HostComponentV1::Agent]),
+            vec![(
+                owned.join(PI_SKILL_RELATIVE),
+                relocated.path().join(PI_SKILL_RELATIVE)
+            )]
         );
     }
 
     #[test]
-    fn schemas_json_is_rendered_from_the_catalog_with_read_only_annotations() {
+    fn registration_state_follows_the_loaded_directory() {
+        use HostBundleRegistrationStateV1 as State;
+
         let home = tempfile::tempdir().unwrap();
-        let ctx = install_context(home.path());
-        let integration = PiIntegration;
+        let owned = home.path().join(PI_AGENT_RELATIVE);
+        assert_eq!(
+            component_state(home.path(), HostComponentV1::Core),
+            State::Missing
+        );
 
-        integration
-            .activate_deployed_host_component_registration(&[HostComponentV1::Core], &ctx)
-            .unwrap();
+        let write = |relative: &str, body: &str| {
+            let path = owned.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        };
+        for (relative, body) in rendered_core_files("/usr/local/bin/tracedecay").unwrap() {
+            write(relative, &body);
+        }
+        assert_eq!(
+            component_state(home.path(), HostComponentV1::Core),
+            State::Current
+        );
+        assert_eq!(
+            component_state(home.path(), HostComponentV1::Agent),
+            State::Missing
+        );
 
-        let schemas = std::fs::read_to_string(pi_schemas_path(home.path())).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&schemas).unwrap();
-        let entries = parsed.as_array().expect("schemas.json is an array");
-        assert!(entries.len() > 100, "the full catalog is rendered");
-        let find_exact = entries
-            .iter()
-            .find(|entry| entry["name"] == "tracedecay_search")
-            .expect("tracedecay_search is in the catalog");
-        assert!(find_exact["parameters"].get("required").is_some());
-        assert_eq!(find_exact["read_only"], true);
-    }
-
-    #[test]
-    fn the_agent_directory_is_always_home_relative() {
-        // A foreign home never escapes to an ambient agent directory: the
-        // receipt-backed catalog artifacts are pinned to the home-relative
-        // paths, so relocation must not exist until it is receipt-backed.
-        let home = tempfile::tempdir().unwrap();
-        assert_eq!(pi_agent_dir(home.path()), home.path().join(".pi/agent"));
-        assert!(pi_extension_path(home.path()).starts_with(home.path()));
-        assert!(pi_schemas_path(home.path()).starts_with(home.path()));
-        assert!(pi_skill_path(home.path()).starts_with(home.path()));
+        write(
+            PI_EXTENSION_RELATIVE,
+            "// operator replaced the extension\n",
+        );
+        assert_eq!(
+            component_state(home.path(), HostComponentV1::Core),
+            State::Repairable
+        );
+        assert_eq!(
+            component_state(home.path(), HostComponentV1::ContextMcp),
+            State::Missing
+        );
     }
 }

@@ -79,7 +79,7 @@ pub use host_config_io::{
 };
 pub(crate) use host_config_io::{
     JsonConfigMutation, collect_regular_files, ensure_project_local_safe_path,
-    ensure_project_local_safe_paths, hook_command, host_home_override,
+    ensure_project_local_safe_paths, hook_command, host_home_override, is_process_home,
     record_host_config_observation_bytes, update_json_config_transactionally,
     update_toml_config_transactionally,
 };

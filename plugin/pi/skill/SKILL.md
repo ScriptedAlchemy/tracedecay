@@ -5,10 +5,12 @@ description: Use the shared TraceDecay code graph from Pi for repository explora
 
 # TraceDecay in Pi
 
-Pi registers native `tracedecay_*` tools and `/tracedecay` commands (see the
-`tracedecay` extension in `~/.pi/agent/extensions/`). They bridge the same MCP
-tool surface that the Codex and Cursor plugins expose, through the supported
-CLI. Do not read `.tracedecay` databases directly.
+Pi registers one native `tracedecay_*` tool per TraceDecay catalog tool, plus
+`/tracedecay` commands (see the `tracedecay` extension in
+`~/.pi/agent/extensions/`). They bridge the same tool surface that the Codex
+and Cursor plugins expose over MCP, through the supported CLI. Tools that
+change project state ask for approval first and refuse an explicit project
+selector. Do not read `.tracedecay` databases directly.
 
 ## Preferred routes
 
@@ -25,7 +27,6 @@ Native tools first, one per task:
 - Compiler work: `tracedecay_diagnostics` before a build; `tracedecay_diagnose` after an error
 - Review: `tracedecay_diff_context` before a raw diff
 - Index state: `tracedecay_status` and `tracedecay_active_project`
-- Any other graph tool: `tracedecay_tool` with the exact tool name and JSON args
 
 Reuse returned node IDs and continuation handles. An empty index result does
 not prove absence; report partial coverage instead of assuming.
@@ -81,5 +82,6 @@ operation.
 - Do not run broad test suites before affected-test selection.
 - Do not expose secrets or store transient task progress as memory facts.
 - If a tool fails, read its corrective error and retry with the stated schema.
-- If the daemon is down, the tools start it once automatically; otherwise run
-  `tracedecay daemon start` and report the limitation.
+- If no daemon is running, the tools report TraceDecay as unavailable and do
+  not start one: a stopped daemon may be an intentional hold. Report the
+  limitation; `tracedecay daemon status` shows the state.

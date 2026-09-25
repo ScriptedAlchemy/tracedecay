@@ -255,6 +255,9 @@ impl IsolatedCli {
             .env("XDG_CONFIG_HOME", self.home.path().join(".config"))
             .env("TRACEDECAY_DATA_DIR", &self.profile)
             .env("TRACEDECAY_GLOBAL_DB", self.profile.join("global.db"))
+            // `HOME` is the sandbox here, so an inherited Pi relocation would
+            // otherwise be honored and point outside it.
+            .env_remove("PI_CODING_AGENT_DIR")
             .env("PATH", path)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -690,8 +693,23 @@ fn native_feedback(case: HostCase) -> Vec<(&'static str, &'static str, Vec<u8>)>
         | HostKindV1::Copilot
         | HostKindV1::Cline
         | HostKindV1::RooCode
-        | HostKindV1::Kilo
-        | HostKindV1::Pi => Vec::new(),
+        | HostKindV1::Kilo => Vec::new(),
+        HostKindV1::Pi => vec![
+            (
+                "session start",
+                "hook-pi-event",
+                include_bytes!(
+                    "../../../../crates/tracedecay-hooks/fixtures/host_events/pi/session-start.json"
+                )
+                .to_vec(),
+            ),
+            (
+                "stop",
+                "hook-pi-event",
+                include_bytes!("../../../../crates/tracedecay-hooks/fixtures/host_events/pi/agent-end.json")
+                    .to_vec(),
+            ),
+        ],
         _ => unreachable!("non-acceptance host"),
     }
 }
@@ -812,12 +830,8 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
             .home
             .path()
             .join(format!("{}-feedback-rollback.json", case.id));
-        // Pi has no native hook feedback route: its Core artifacts double as
-        // the registration surface, so the feedback transition rehearsal
-        // would rewrite the same receipt-owned bytes the snapshot guards
-        // compare. Skip the feedback-rollback leg for Pi; install, receipt,
-        // doctor, update sweep, repair, and uninstall are the journey it
-        // admits.
+        // Pi has no feedback route to switch: its extension is the whole
+        // registration, so the feedback-rollback leg has nothing to rehearse.
         if case.host != HostKindV1::Pi {
             let dry_run = cli.run_with_env(
                 &["feedback-rollback", "dry-run", "--agent", case.id],
@@ -1419,6 +1433,184 @@ fn kimi_lifecycle_reports_official_activation_deferral() {
             .join(".kimi-code/plugins/installed.json")
             .exists()
     );
+}
+
+const PI_ARTIFACTS: [&str; 4] = [
+    ".pi/agent/extensions/tracedecay/index.ts",
+    ".pi/agent/extensions/tracedecay/package.json",
+    ".pi/agent/extensions/tracedecay/schemas.json",
+    ".pi/agent/skills/tracedecay-cli/SKILL.md",
+];
+
+/// Operator-owned Pi state beside the TraceDecay extension; every lifecycle
+/// phase must leave these bytes exactly as seeded.
+fn seed_pi(cli: &IsolatedCli, agent_dir: &std::path::Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut originals = BTreeMap::new();
+    for (relative, bytes) in [
+        ("settings.json", &br#"{"defaultModel":"foreign"}"#[..]),
+        ("extensions/foreign.ts", b"export default function () {}\n"),
+        ("skills/foreign/SKILL.md", b"---\nname: foreign\n---\n"),
+    ] {
+        let path = agent_dir.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, bytes).unwrap();
+        originals.insert(
+            path.strip_prefix(cli.home.path()).unwrap().to_path_buf(),
+            bytes.to_vec(),
+        );
+    }
+    originals
+}
+
+fn pi_doctor_section(cli: &IsolatedCli, envs: &[(&str, &std::path::Path)]) -> String {
+    let mut command = cli.command(&["doctor"]);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let stderr = String::from_utf8(command.output().unwrap().stderr).unwrap();
+    let start = stderr
+        .find("Pi integration")
+        .unwrap_or_else(|| panic!("doctor omitted the Pi section:\n{stderr}"));
+    stderr[start..]
+        .split("\x1b[1m")
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+#[test]
+fn pi_lifecycle_installs_diagnoses_sweeps_and_uninstalls_exact_bytes() {
+    let cli = IsolatedCli::new();
+    let agent_dir = cli.home.path().join(".pi/agent");
+    let originals = seed_pi(&cli, &agent_dir);
+
+    assert_success("pi", "install", cli.run(&["install", "--agent", "pi"]));
+    let install_receipt = latest_receipt(&cli, HostKindV1::Pi);
+    assert_receipt_digests(&cli, &install_receipt);
+    let mut owned = install_receipt
+        .component_receipts
+        .iter()
+        .flat_map(|component| &component.artifacts)
+        .map(|artifact| artifact.relative_path.as_str())
+        .collect::<Vec<_>>();
+    owned.sort_unstable();
+    assert_eq!(owned, PI_ARTIFACTS);
+    let extension = fs::read_to_string(cli.home.path().join(PI_ARTIFACTS[0])).unwrap();
+    assert!(extension.contains(&serde_json::to_string(&cli.bin_dir.join("tracedecay")).unwrap()));
+    let schemas: Vec<serde_json::Value> =
+        serde_json::from_slice(&fs::read(cli.home.path().join(PI_ARTIFACTS[2])).unwrap()).unwrap();
+    assert!(
+        schemas
+            .iter()
+            .any(|tool| tool["name"] == "tracedecay_search" && tool["read_only"] == true)
+    );
+    assert!(
+        schemas
+            .iter()
+            .any(|tool| tool["name"] == "tracedecay_str_replace" && tool["read_only"] == false)
+    );
+    assert_seeded_bytes(&cli, &originals);
+
+    let doctor = pi_doctor_section(&cli, &[]);
+    assert!(
+        doctor.contains(&format!(
+            "TraceDecay extension deployed at {}",
+            cli.home.path().join(PI_ARTIFACTS[0]).display()
+        )) && doctor.contains("TraceDecay routing skill deployed at"),
+        "{doctor}"
+    );
+
+    assert_success("pi", "update", cli.run(&["update-plugin"]));
+    let update_receipt = latest_receipt(&cli, HostKindV1::Pi);
+    assert_ne!(update_receipt.operation_id, install_receipt.operation_id);
+    assert_eq!(update_receipt.operation, HostBundleLifecycleOpV1::Update);
+    assert_receipt_digests(&cli, &update_receipt);
+
+    fs::write(
+        cli.home.path().join(PI_ARTIFACTS[0]),
+        b"// operator-corrupted managed artifact\n",
+    )
+    .unwrap();
+    let doctor = pi_doctor_section(&cli, &[]);
+    assert!(doctor.contains("incomplete or stale"), "{doctor}");
+    assert_success("pi", "repair", cli.run(&["reinstall"]));
+    assert_receipt_digests(&cli, &latest_receipt(&cli, HostKindV1::Pi));
+    assert_eq!(
+        fs::read_to_string(cli.home.path().join(PI_ARTIFACTS[0])).unwrap(),
+        extension
+    );
+
+    assert_success("pi", "uninstall", cli.run(&["uninstall", "--agent", "pi"]));
+    for artifact in PI_ARTIFACTS {
+        assert!(
+            !cli.home.path().join(artifact).exists(),
+            "uninstall left {artifact}"
+        );
+    }
+    assert_seeded_bytes(&cli, &originals);
+}
+
+/// `PI_CODING_AGENT_DIR` relocates the directory Pi loads. The receipt-owned
+/// bytes stay under `~/.pi/agent`; activation mirrors them into the relocated
+/// directory, doctor and the sweep read that directory, and uninstall removes
+/// the mirror without touching the operator's files there.
+#[test]
+fn pi_relocated_agent_dir_tracks_the_receipt_owned_bytes() {
+    let cli = IsolatedCli::new();
+    let relocated = cli.home.path().join("relocated-pi-agent");
+    let originals = seed_pi(&cli, &relocated);
+    let env = [("PI_CODING_AGENT_DIR", relocated.as_path())];
+    let run = |args: &[&str]| {
+        let mut command = cli.command(args);
+        command.env(env[0].0, env[0].1);
+        command.output().unwrap()
+    };
+
+    assert_success(
+        "pi",
+        "relocated install",
+        run(&["install", "--agent", "pi"]),
+    );
+    let receipt = latest_receipt(&cli, HostKindV1::Pi);
+    assert_receipt_digests(&cli, &receipt);
+    for artifact in PI_ARTIFACTS {
+        let relative = artifact.strip_prefix(".pi/agent/").unwrap();
+        assert_eq!(
+            fs::read(relocated.join(relative)).unwrap(),
+            fs::read(cli.home.path().join(artifact)).unwrap(),
+            "{relative} mirror differs from the receipt-owned bytes"
+        );
+    }
+    let doctor = pi_doctor_section(&cli, &env);
+    assert!(
+        doctor.contains(&format!(
+            "TraceDecay extension deployed at {}",
+            relocated.join("extensions/tracedecay/index.ts").display()
+        )),
+        "{doctor}"
+    );
+
+    fs::remove_file(relocated.join("skills/tracedecay-cli/SKILL.md")).unwrap();
+    assert_success("pi", "relocated update", run(&["update-plugin"]));
+    assert!(relocated.join("skills/tracedecay-cli/SKILL.md").is_file());
+
+    assert_success(
+        "pi",
+        "relocated uninstall",
+        run(&["uninstall", "--agent", "pi"]),
+    );
+    for artifact in PI_ARTIFACTS {
+        let relative = artifact.strip_prefix(".pi/agent/").unwrap();
+        assert!(
+            !relocated.join(relative).exists(),
+            "uninstall left {relative}"
+        );
+        assert!(
+            !cli.home.path().join(artifact).exists(),
+            "uninstall left {artifact}"
+        );
+    }
+    assert_seeded_bytes(&cli, &originals);
 }
 
 #[test]

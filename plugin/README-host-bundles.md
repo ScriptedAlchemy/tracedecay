@@ -71,15 +71,15 @@ The first-party plugin hosts share one product skill tree and an MCP
 `serve` route where the host admits MCP. Commands, agents, hooks, LSP, and
 rules are host-specific. Gaps below are the current shipped state, not missed
 file sync. Do not treat Codex commands/agents or Kimi LSP/agents as omitted
-copies. Pi is the MCP-free host: its extension registers the graph tools over
-`tracedecay tool` and carries its lifecycle hooks inside the Pi process.
+copies. Pi is the MCP-free host: its extension registers the catalog tools over
+`tracedecay tool` and forwards its lifecycle events from inside the Pi process.
 
 | Capability | Claude | Cursor | Codex | Kimi | OpenCode | Pi |
 |---|---|---|---|---|---|---|
 | **Skills** (`plugin/skills/`) | yes | yes (same set; the `skills/tracedecay-*` filter is a no-op guard) | yes | yes | yes (Agent component) | `pi/skill/SKILL.md` routing skill (Agent component) |
 | **Commands** | yes (`plugin/commands/`) | overlay twins (`overlays/cursor/commands/`), independently authored | **no** (intentional: plugin deploy is manifest + skills + hooks + MCP) | yes (verbatim Claude command Markdown) | yes (Agent; shared command templates) | `/tracedecay{, -sync, -version}` registered by the extension |
 | **Agents** (`plugin/agents/`) | yes (verbatim) | yes (derived Markdown) | generated TOML exists for automation export, **not** in the plugin deploy set (intentional) | **no** (intentional) | yes (schema-adapted, Agent) | **no** (intentional) |
-| **Hooks** | `SessionStart`, `Stop`, `PostToolUse`, `PostCompact`, `SubagentStart` | `sessionStart`, `sessionEnd`, `stop`, `postToolUse`, `preCompact`, `afterFileEdit`, `afterShellExecution`, `workspaceOpen` | install-time table (`hooks-codex.json` seed is empty on purpose): `SessionStart`, `UserPromptSubmit`, `SubagentStart`, `PostToolUse`, `PostCompact`, `Stop` | inline `PostToolUse` + `Stop` in `.kimi-plugin/plugin.json` | `file.edited`, `lsp.updated`, `session.idle` / idle `session.status`, `tool.execute.after` | extension events: `session_start`, `tool_result` (debounced sync), `agent_end` (savings) |
+| **Hooks** | `SessionStart`, `Stop`, `PostToolUse`, `PostCompact`, `SubagentStart` | `sessionStart`, `sessionEnd`, `stop`, `postToolUse`, `preCompact`, `afterFileEdit`, `afterShellExecution`, `workspaceOpen` | install-time table (`hooks-codex.json` seed is empty on purpose): `SessionStart`, `UserPromptSubmit`, `SubagentStart`, `PostToolUse`, `PostCompact`, `Stop` | inline `PostToolUse` + `Stop` in `.kimi-plugin/plugin.json` | `file.edited`, `lsp.updated`, `session.idle` / idle `session.status`, `tool.execute.after` | extension events: `session_start` and `agent_end` forwarded to `hook-pi-event`; `tool_result` runs a debounced `sync` |
 | **MCP** | `.mcp.json` key `graph` | `mcp-cursor.json` key `tracedecay` | same `graph` key | session/user `mcp.json` key `tracedecay` (not in plugin manifest) | key `tracedecay` via `tracedecay-mcp.ts` + `opencode.registration.json` | **no** (typed unavailable; the extension bridges `tracedecay tool` over the daemon socket) |
 | **LSP** | `.lsp.json` | native VS Code extension (not `.lsp.json`) | **no** (typed unavailable; intentional) | **no** (intentional) | custom LSP in `opencode.registration.json` | **no** (intentional) |
 | **Rules** | **no** (intentional) | yes (`rules/tracedecay.mdc`) | **no** (intentional) | **no** (intentional) | `AGENTS.md` is Core instruction content, not a rules product | routing skill is Core instruction content |

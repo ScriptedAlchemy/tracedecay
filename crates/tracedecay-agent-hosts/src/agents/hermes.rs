@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use crate::ports::mcp_tools::{AdvertisedToolV1, advertised_tools};
+use crate::ports::mcp_tools::{AdvertisedToolV1, advertised_tool_schemas_json, advertised_tools};
 use profile_config::{disable_plugin, enable_plugin};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
@@ -303,7 +303,7 @@ fn rendered_plugin_files_with_tools(
             templates::plugin_manifest(generator_commit, tools),
         ),
         ("schemas.py", templates::plugin_schemas()),
-        ("schemas.json", templates::plugin_schemas_json(tools)?),
+        ("schemas.json", advertised_tool_schemas_json(tools)?),
         ("tools.py", templates::plugin_tools(tracedecay_bin)),
         ("__init__.py", templates::plugin_init(generator_commit)),
         ("cli.py", templates::PLUGIN_CLI_PY.to_string()),

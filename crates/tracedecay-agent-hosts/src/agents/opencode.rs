@@ -379,24 +379,10 @@ fn opencode_config_path(home: &Path) -> std::path::PathBuf {
 /// the ambient value is scoped; [`opencode_config_path_for`] still honors an
 /// explicit external root exactly as before.
 fn ambient_xdg_config_home(home: &Path) -> Option<std::ffi::OsString> {
-    if !is_process_home(home) {
+    if !super::is_process_home(home) {
         return None;
     }
     std::env::var_os("XDG_CONFIG_HOME")
-}
-
-/// True when `home` is the home directory of the running process.
-fn is_process_home(home: &Path) -> bool {
-    let Some(own) = super::home_dir() else {
-        return false;
-    };
-    if own == home {
-        return true;
-    }
-    match (std::fs::canonicalize(&own), std::fs::canonicalize(home)) {
-        (Ok(own), Ok(home)) => own == home,
-        _ => false,
-    }
 }
 
 fn opencode_config_path_for(home: &Path, xdg: Option<&std::ffi::OsStr>) -> std::path::PathBuf {

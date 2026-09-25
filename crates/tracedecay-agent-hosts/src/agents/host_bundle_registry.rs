@@ -132,8 +132,7 @@ pub fn unsupported_host_component_set_reason(
         // native hook/plugin surfaces remain evidence-gated.
         | HostKindV1::Cline
         | HostKindV1::RooCode
-        | HostKindV1::Kilo => None,
-        // Pi's extension directory is its whole integration surface.
+        | HostKindV1::Kilo
         | HostKindV1::Pi => None,
         // Cursor cloud exposes no host registration API to install into. Its
         // presence in the host enum and capability catalog is not support
@@ -583,23 +582,26 @@ fn component_assets(
         return Ok(rendered);
     }
 
-    // Pi's extension source is the deployed artifact: Pi loads it from
-    // `~/.pi/agent/extensions`, and the rendered bytes are the receipt-owned
-    // catalog artifacts, exactly the OpenCode plugin shape. The Agent
-    // component owns the routing skill verbatim.
-    if (host, component) == (HostKindV1::Pi, HostComponentV1::Core) {
-        let files = super::pi::rendered_plugin_files(tracedecay_bin)
-            .map_err(|_| HostBundleRegistryError::Incompatible)?;
+    // Pi loads its extension and skill from `~/.pi/agent`; the rendered bytes
+    // are the receipt-owned artifacts, the OpenCode plugin shape. A relocated
+    // agent directory is mirrored from these by the Pi activation.
+    if host == HostKindV1::Pi && matches!(component, HostComponentV1::Core | HostComponentV1::Agent)
+    {
+        let files = if component == HostComponentV1::Core {
+            super::pi::rendered_core_files(tracedecay_bin)
+                .map_err(|_| HostBundleRegistryError::Incompatible)?
+        } else {
+            super::pi::rendered_agent_files()
+        };
         return Ok(files
             .into_iter()
-            .map(|(relative, body)| (format!(".pi/agent/{relative}"), body.into_bytes()))
+            .map(|(relative, body)| {
+                (
+                    format!("{}/{relative}", super::pi::PI_AGENT_RELATIVE),
+                    body.into_bytes(),
+                )
+            })
             .collect());
-    }
-    if (host, component) == (HostKindV1::Pi, HostComponentV1::Agent) {
-        return Ok(vec![(
-            ".pi/agent/skills/tracedecay-cli/SKILL.md".to_owned(),
-            super::pi::PI_SKILL_SOURCE.as_bytes().to_vec(),
-        )]);
     }
 
     let (prefix, files) = match (host, component) {
