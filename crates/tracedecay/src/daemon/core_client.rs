@@ -432,6 +432,18 @@ fn is_project_open_retryable_error(error: &TraceDecayError) -> bool {
 /// `data.reason_code`; those must round-trip as [`TraceDecayError::ProjectRoute`]
 /// so journey/client retry keys on the code rather than English detail.
 fn daemon_tool_call_error(error: JsonRpcError) -> TraceDecayError {
+    // A refused persisted shape stays the typed reset state across the wire:
+    // the CLI names the refused authority and the exact reset command from it.
+    if let Some(data) = error.data.as_ref()
+        && data.get("kind").and_then(serde_json::Value::as_str) == Some("reset_required")
+        && let Some(authority) = data.get("authority").and_then(serde_json::Value::as_str)
+    {
+        let reason = data
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(error.message.as_str());
+        return TraceDecayError::reset_required(authority, reason);
+    }
     if let Some(data) = error.data.as_ref()
         && let Some(reason_code) = data.get("reason_code").and_then(serde_json::Value::as_str)
     {
@@ -680,6 +692,37 @@ mod tests {
             )
             .is_some(),
             "a revoked response is re-sent, not returned"
+        );
+    }
+
+    #[test]
+    fn daemon_tool_call_error_round_trips_the_typed_reset_state() {
+        let refused = daemon_tool_call_error(JsonRpcError {
+            code: -32603,
+            message: "session temporal persisted shape requires reset: published v3 shape"
+                .to_owned(),
+            data: Some(json!({
+                "kind": "reset_required",
+                "retryable": false,
+                "authority": "session temporal",
+                "reason": "published v3 shape",
+            })),
+        });
+        assert_eq!(
+            refused.reset_required_context(),
+            Some(("session temporal", "published v3 shape"))
+        );
+        assert!(!error_is_project_open_retryable(&refused));
+        assert!(!tool_call_transport_error_is_retryable(&refused));
+
+        let unnamed = daemon_tool_call_error(JsonRpcError {
+            code: -32603,
+            message: "shape requires reset".to_owned(),
+            data: Some(json!({ "kind": "reset_required" })),
+        });
+        assert!(
+            unnamed.reset_required_context().is_none(),
+            "a reset state without its authority cannot name a reset command and stays untyped"
         );
     }
 

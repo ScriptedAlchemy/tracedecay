@@ -7,8 +7,8 @@ use std::process::{Command, Output, Stdio};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay_agent_hosts::agents::host_bundle::{
-    HostComponentSetReceiptV1, HostComponentV1, HostKindV1, latest_host_component_receipt_at,
-    latest_host_component_set_receipt_at,
+    HostBundleLifecycleOpV1, HostComponentSetReceiptV1, HostComponentV1, HostKindV1,
+    latest_host_component_receipt_at, latest_host_component_set_receipt_at,
 };
 use tracedecay_agent_hosts::agents::host_bundle_registry::unsupported_host_component_set_reason;
 use tracedecay_agent_hosts::agents::load_jsonc_file_strict;
@@ -1391,6 +1391,61 @@ fn unadmitted_catalog_hosts_never_fall_back_to_direct_installers() {
                 .is_none()
         );
     }
+}
+
+/// An integration rendered by an older binary whose profile config never
+/// tracked it is exactly what `doctor` reports as version skew. The unscoped
+/// `update-plugin` sweep must refresh it through the same install path and
+/// track it, never exit 0 having touched nothing.
+#[test]
+fn update_plugin_refreshes_detected_integrations_the_config_never_tracked() {
+    let cli = IsolatedCli::new();
+    let case = host_case(HostKindV1::Cline);
+    seed_host(case, &cli);
+    assert_success(
+        case.id,
+        "install",
+        cli.run(&["install", "--agent", case.id]),
+    );
+    let install_receipt = latest_receipt(&cli, case.host);
+    let config_path = cli.profile.join("config.toml");
+    let tracked = fs::read_to_string(&config_path).unwrap();
+    assert!(
+        tracked.contains("installed_agents = [\"cline\"]"),
+        "{tracked}"
+    );
+    fs::write(
+        &config_path,
+        tracked.replace("installed_agents = [\"cline\"]", "installed_agents = []"),
+    )
+    .unwrap();
+
+    assert_success(case.id, "update-plugin", cli.run(&["update-plugin"]));
+
+    let update_receipt = latest_receipt(&cli, case.host);
+    assert_ne!(update_receipt.operation_id, install_receipt.operation_id);
+    assert_eq!(update_receipt.operation, HostBundleLifecycleOpV1::Update);
+    assert_receipt_digests(&cli, &update_receipt);
+    assert!(
+        fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("installed_agents = [\"cline\"]"),
+        "the refreshed integration must be tracked again"
+    );
+}
+
+/// With nothing tracked and nothing detected there is nothing the sweep can
+/// refresh; that is a typed refusal naming the next step, not an empty exit 0.
+#[test]
+fn update_plugin_with_no_integration_refuses_instead_of_exiting_zero() {
+    let cli = IsolatedCli::new();
+
+    let output = cli.run(&["update-plugin"]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("nothing to update"), "{stderr}");
+    assert!(stderr.contains("tracedecay install"), "{stderr}");
 }
 
 /// Rollback bytes live only in the process that staged them, so a killed

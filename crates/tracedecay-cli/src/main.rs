@@ -616,7 +616,9 @@ fn main() -> ExitCode {
         Ok(CommandOutcome::Success) => ExitCode::SUCCESS,
         Ok(CommandOutcome::Exit(code)) => process_exit_code(code),
         Err(e) => {
-            eprintln!("Error: {}", e);
+            // A typed reset refusal from any command ends with the refused
+            // authority and the exact command that resets it.
+            eprintln!("Error: {}", commands::annotate_reset_required(e, None));
             ExitCode::FAILURE
         }
     }
@@ -882,7 +884,8 @@ async fn run_startup_preamble(command: &Commands) {
             }
             Err(error) if is_force_flush => {
                 eprintln!(
-                    "warning: canonical worldwide-counter upload setting is unavailable: {error}"
+                    "warning: canonical worldwide-counter upload setting is unavailable: {}",
+                    commands::annotate_reset_required(error, Some(&project_root))
                 );
             }
             Err(error) => {
@@ -1664,10 +1667,10 @@ async fn dispatch_hook_command(
 async fn dispatch_update_command(command: Commands) -> tracedecay_domain::errors::Result<()> {
     match command {
         Commands::Upgrade { no_reinstall } => {
-            update_cmd::run_upgrade_command(no_reinstall)?;
+            update_cmd::run_upgrade_command(no_reinstall).await?;
         }
         Commands::Update { no_reinstall } => {
-            update_cmd::run_update_command(no_reinstall)?;
+            update_cmd::run_update_command(no_reinstall).await?;
         }
         Commands::PostUpdate {
             no_reinstall,

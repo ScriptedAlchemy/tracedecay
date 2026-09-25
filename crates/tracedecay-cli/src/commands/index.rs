@@ -136,13 +136,7 @@ fn annotate_reset_required_init_error(
     error: tracedecay_domain::errors::TraceDecayError,
     project_path: &Path,
 ) -> tracedecay_domain::errors::TraceDecayError {
-    let is_reset_required = match &error {
-        tracedecay_domain::errors::TraceDecayError::ResetRequired { .. } => true,
-        // Daemon-brokered opens serialize the typed state over JSON-RPC; the
-        // schema-shape refusal text is the stable marker that survives it.
-        other => other.to_string().contains("shape this binary creates"),
-    };
-    if !is_reset_required {
+    if error.reset_required_context().is_none() {
         return error;
     }
     let project_path = project_path.to_string_lossy();

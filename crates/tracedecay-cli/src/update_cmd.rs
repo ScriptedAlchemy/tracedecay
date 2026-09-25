@@ -8,15 +8,10 @@
 //! upgrade. Pass `--no-reinstall` to skip that agent-integration refresh.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use crate::upgrade::UpgradeOutcome;
 use tracedecay_daemon_control as daemon_control;
 use tracedecay_session_memory::user_config::UserConfig;
-
-// Exceeds the daemon's sequential 15s client drain, 2s task abort, and 45s
-// server-shutdown bounds with margin for service-manager/process-exit latency.
-const DAEMON_RESTART_LEASE_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Rewrites the installed daemon service while preserving its captured
 /// lifecycle state, returning the service path and socket or `None` when no
@@ -126,9 +121,8 @@ where
 }
 
 pub(crate) fn restart_daemon_service() -> tracedecay_domain::errors::Result<()> {
-    let guard = daemon_control::QuiescedDaemonLifecycle::acquire_with_timeout(
+    let guard = daemon_control::QuiescedDaemonLifecycle::acquire(
         "daemon restart",
-        DAEMON_RESTART_LEASE_TIMEOUT,
         crate::product_runtime::PRODUCT_BUILD_VERSION,
     )?;
     let (stopped_state, desired_state) = match guard.previous_state() {
@@ -255,17 +249,21 @@ where
     }
 }
 
-#[hotpath::measure(label = "cli.update.run")]
-pub(crate) fn run_update_command(no_reinstall: bool) -> tracedecay_domain::errors::Result<()> {
-    run_update_flow("update", RefreshPolicy::Always, no_reinstall)
+#[hotpath::measure(label = "cli.update.run", future = true)]
+pub(crate) async fn run_update_command(
+    no_reinstall: bool,
+) -> tracedecay_domain::errors::Result<()> {
+    run_update_flow("update", RefreshPolicy::Always, no_reinstall).await
 }
 
-#[hotpath::measure(label = "cli.upgrade.run")]
-pub(crate) fn run_upgrade_command(no_reinstall: bool) -> tracedecay_domain::errors::Result<()> {
-    run_update_flow("upgrade", RefreshPolicy::AfterInstall, no_reinstall)
+#[hotpath::measure(label = "cli.upgrade.run", future = true)]
+pub(crate) async fn run_upgrade_command(
+    no_reinstall: bool,
+) -> tracedecay_domain::errors::Result<()> {
+    run_update_flow("upgrade", RefreshPolicy::AfterInstall, no_reinstall).await
 }
 
-fn run_update_flow(
+async fn run_update_flow(
     operation: &str,
     refresh_policy: RefreshPolicy,
     no_reinstall: bool,
@@ -286,7 +284,79 @@ fn run_update_flow(
                 installed_version,
             })
         },
+    )?;
+    reset_refused_profile_authorities(operation).await
+}
+
+/// What the post-window profile probe decided.
+#[derive(Debug, PartialEq, Eq)]
+enum ProfileResetDecision {
+    /// The restored daemon opens the profile; nothing to reset.
+    Opens,
+    /// The daemon refused the profile with a typed reset state.
+    Reset { authority: String, reason: String },
+    /// The probe could not decide (no reachable daemon, transport failure);
+    /// reported, never acted on.
+    Undecided(String),
+}
+
+fn profile_reset_decision(
+    probe: tracedecay_domain::errors::Result<serde_json::Value>,
+) -> ProfileResetDecision {
+    match probe {
+        Ok(_) => ProfileResetDecision::Opens,
+        Err(error) => match error.reset_required_context() {
+            Some((authority, reason)) => ProfileResetDecision::Reset {
+                authority: authority.to_owned(),
+                reason: reason.to_owned(),
+            },
+            None => ProfileResetDecision::Undecided(error.to_string()),
+        },
+    }
+}
+
+/// The upgrade journey ends with core tools that work, not with a typed
+/// refusal on the first tool call. Once the maintenance window has restored
+/// the daemon on the new binary, a projectless probe asks it to open the
+/// profile registry; a typed reset refusal is acted on here by resetting the
+/// complete profile database state, the one reset authority a profile-scoped
+/// refusal has. Old shapes are deleted, never migrated or backed up.
+async fn reset_refused_profile_authorities(
+    operation: &str,
+) -> tracedecay_domain::errors::Result<()> {
+    if !daemon_control::daemon_reachable() {
+        eprintln!(
+            "No reachable TraceDecay daemon after {operation}; the profile's persisted shape is \
+             checked on the daemon's next open."
+        );
+        return Ok(());
+    }
+    let probe = crate::commands::daemon_tool_json(
+        None,
+        "tracedecay_project_list",
+        serde_json::json!({ "limit": 1 }),
     )
+    .await;
+    match profile_reset_decision(probe) {
+        ProfileResetDecision::Opens => Ok(()),
+        ProfileResetDecision::Reset { authority, reason } => {
+            eprintln!(
+                "\n\x1b[33mThe upgraded daemon refuses the persisted {authority} shape: \
+                 {reason}\x1b[0m\n\
+                 Resetting the complete profile database state so core tools work on this \
+                 binary; refused authorities are never migrated or backed up. Re-run \
+                 `tracedecay init <project-root>` for each project afterwards."
+            );
+            crate::commands::handle_wipe(true, true).await
+        }
+        ProfileResetDecision::Undecided(detail) => {
+            eprintln!(
+                "  \x1b[33mwarning:\x1b[0m could not verify that the profile opens after \
+                 {operation}: {detail}"
+            );
+            Ok(())
+        }
+    }
 }
 
 fn combine_operation_and_restore<T>(
@@ -478,23 +548,18 @@ pub(crate) fn install_pass_covers_tracked_agents(
 /// resolved, no install runs and a descriptive failure is reported so the
 /// version markers stay put.
 async fn reinstall_tracked_agents_under_lease(
-    user_config: &UserConfig,
+    agent_ids: &[String],
+    home: &Path,
     lifecycle_lease: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
 ) -> ReinstallOutcome {
-    let (Some(home), Some(bin)) = (
-        tracedecay_agent_hosts::agents::home_dir(),
-        tracedecay_agent_hosts::agents::which_tracedecay(),
-    ) else {
+    let Some(bin) = tracedecay_agent_hosts::agents::which_tracedecay() else {
         return ReinstallOutcome::PartialFailure {
-            failed: vec![
-                "<environment>: could not resolve home directory or tracedecay binary on PATH"
-                    .to_string(),
-            ],
+            failed: vec!["<environment>: could not resolve tracedecay binary on PATH".to_string()],
         };
     };
     let results = crate::agent_cmd::reinstall_agent_integrations_under_lease(
-        &user_config.installed_agents,
-        &home,
+        agent_ids,
+        home,
         &bin,
         lifecycle_lease,
     )
@@ -549,17 +614,29 @@ async fn run_post_update_mutations(
     {
         eprintln!("warning: could not save tracedecay config: {err}");
     }
-    if config.installed_agents.is_empty() {
+    let Some(home) = tracedecay_agent_hosts::agents::home_dir() else {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
+            message: "could not determine home directory".to_string(),
+        });
+    };
+    // Detected integrations the config never tracked are refreshed too, so an
+    // upgrade over an older install does not leave doctor reporting stale
+    // rendered versions that no maintenance pass will touch.
+    let agent_ids = crate::agent_cmd::maintenance_sweep_agents(&config.installed_agents, &home);
+    if agent_ids.is_empty() {
         eprintln!("Refreshing agent integrations: nothing to refresh");
     } else {
-        eprintln!(
-            "Refreshing agent integrations: {}",
-            config.installed_agents.join(", ")
-        );
+        eprintln!("Refreshing agent integrations: {}", agent_ids.join(", "));
     }
     let reinstall_result =
-        match reinstall_tracked_agents_under_lease(&config, lifecycle_lease).await {
+        match reinstall_tracked_agents_under_lease(&agent_ids, &home, lifecycle_lease).await {
             ReinstallOutcome::AllOk => {
+                if config.installed_agents != agent_ids {
+                    config.installed_agents = agent_ids;
+                    if let Err(err) = config.save() {
+                        eprintln!("warning: could not save tracedecay config: {err}");
+                    }
+                }
                 if let Err(err) = record_completed_reinstall_pass(&mut config) {
                     eprintln!("warning: {err}");
                 }
@@ -621,14 +698,45 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        RefreshPolicy, ReinstallOutcome, current_tracedecay_exe_from,
+        ProfileResetDecision, RefreshPolicy, ReinstallOutcome, current_tracedecay_exe_from,
         install_pass_covers_tracked_agents, partition_reinstall_results, post_update_binary,
-        post_update_binary_from, prepare_post_update_lease, restart_daemon_service_with,
-        run_install_then_refresh,
+        post_update_binary_from, prepare_post_update_lease, profile_reset_decision,
+        restart_daemon_service_with, run_install_then_refresh,
     };
     use crate::upgrade::UpgradeOutcome;
     use tempfile::TempDir;
     use tracedecay_daemon_control as daemon_control;
+
+    /// Only the typed reset state authorizes deleting profile data after an
+    /// update; an opening profile is left alone and every other failure is
+    /// reported without acting.
+    #[test]
+    fn post_update_profile_reset_acts_only_on_the_typed_reset_state() {
+        assert_eq!(
+            profile_reset_decision(Ok(serde_json::json!({ "projects": [] }))),
+            ProfileResetDecision::Opens
+        );
+        assert_eq!(
+            profile_reset_decision(Err(
+                tracedecay_domain::errors::TraceDecayError::reset_required(
+                    "session temporal",
+                    "published v3 shape",
+                )
+            )),
+            ProfileResetDecision::Reset {
+                authority: "session temporal".to_owned(),
+                reason: "published v3 shape".to_owned(),
+            }
+        );
+        assert_eq!(
+            profile_reset_decision(Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "daemon tool call failed: storage unavailable".to_owned(),
+            })),
+            ProfileResetDecision::Undecided(
+                "config error: daemon tool call failed: storage unavailable".to_owned()
+            )
+        );
+    }
 
     #[test]
     fn daemon_restart_quiesces_service_before_acquiring_exclusive_lease() {

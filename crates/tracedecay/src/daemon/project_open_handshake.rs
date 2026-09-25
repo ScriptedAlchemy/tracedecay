@@ -212,8 +212,13 @@ fn tool_call_open_refusal_response(
     let tool_name = request.params.as_ref()?.get("name")?.as_str()?;
     let request_id =
         tracedecay_contracts::request_identity::mcp_connection_request_id(&id, connection_scope)?;
+    let reset_command = tracedecay_mcp::reset_required_command(authority, None);
     let envelope = tracedecay_daemon_service::application_surface::mcp_project_open_reset_refusal(
-        tool_name, request_id, authority, reason,
+        tool_name,
+        request_id,
+        authority,
+        reason,
+        &reset_command,
     )?;
     let text = serde_json::to_string(&envelope).ok()?;
     let problem = serde_json::to_value(envelope.problem.as_ref()).ok()?;
@@ -336,11 +341,16 @@ mod tests {
             envelope["problem"]["legal_actions"],
             serde_json::json!(["reset"])
         );
+        let message = envelope["problem"]["diagnostic"]["message"]
+            .as_str()
+            .expect("diagnostic message");
         assert!(
-            envelope["problem"]["diagnostic"]["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("schema v26 is incompatible")),
+            message.contains("schema v26 is incompatible"),
             "the refusal must carry the store's own reason: {envelope}"
+        );
+        assert!(
+            message.contains("tracedecay storage reset-project-store"),
+            "the refusal must name the exact reset command: {envelope}"
         );
     }
 
