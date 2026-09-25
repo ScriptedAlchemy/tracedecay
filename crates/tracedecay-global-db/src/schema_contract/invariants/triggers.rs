@@ -1,4 +1,6 @@
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use std::collections::HashMap;
+
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor};
 
 use crate::global_db_operation_error;
 
@@ -1608,51 +1610,43 @@ pub(super) async fn replace_trigger(
 pub(super) async fn trigger_contracts_intact(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<bool> {
-    for invariant in INVARIANTS {
-        for trigger in invariant.triggers {
-            if !trigger_matches(conn, trigger).await? {
-                return Ok(false);
-            }
-        }
-    }
-    Ok(true)
-}
-
-async fn trigger_matches(
-    conn: &impl QueryExecutor,
-    trigger: &Trigger,
-) -> tracedecay_domain::errors::Result<bool> {
-    trigger_matches_sql(conn, trigger, trigger.create_sql).await
-}
-
-async fn trigger_matches_sql(
-    conn: &impl QueryExecutor,
-    trigger: &Trigger,
-    expected_sql: &str,
-) -> tracedecay_domain::errors::Result<bool> {
+    // SQLite trigger names are unique under ASCII case folding, which is what
+    // `COLLATE NOCASE` and `to_ascii_lowercase` both apply.
     let mut rows = conn
         .query(
-            "SELECT tbl_name, sql FROM sqlite_master
-             WHERE type = 'trigger' AND name = ?1 COLLATE NOCASE",
-            params![trigger.name],
+            "SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'trigger'",
+            (),
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let Some(row) = rows
+    let mut actual = HashMap::new();
+    while let Some(row) = rows
         .next()
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?
-    else {
-        return Ok(false);
-    };
-    let table = row
-        .get::<String>(0)
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let sql = row
-        .get::<String>(1)
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    Ok(table.eq_ignore_ascii_case(trigger.table)
-        && normalize_trigger_sql(&sql) == normalize_trigger_sql(expected_sql))
+    {
+        let name = row
+            .get::<String>(0)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let table = row
+            .get::<String>(1)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let sql = row
+            .get::<String>(2)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        actual.insert(name.to_ascii_lowercase(), (table, sql));
+    }
+    Ok(INVARIANTS
+        .iter()
+        .flat_map(|invariant| invariant.triggers)
+        .all(|trigger| {
+            actual
+                .get(&trigger.name.to_ascii_lowercase())
+                .is_some_and(|(table, sql)| {
+                    table.eq_ignore_ascii_case(trigger.table)
+                        && normalize_trigger_sql(sql) == normalize_trigger_sql(trigger.create_sql)
+                })
+        }))
 }
 
 #[cfg(test)]
@@ -1669,6 +1663,44 @@ mod tests {
          INSERT INTO store_instances
          (store_id, project_id, store_kind, storage_mode, store_relpath, created_at)
          VALUES ('store_one', 'project_one', 'sessions', 'central', 'sessions', 1);";
+
+    /// A dropped guard and a same-name guard with a weakened body both break
+    /// the contract; reinstalling restores enforcement, and an intact
+    /// contract is reported as such without being rewritten.
+    #[tokio::test]
+    async fn damaged_guard_triggers_are_detected_and_reinstalled() {
+        let harness = RegisteredGlobalDbHarness::open("damaged-guard-triggers").await;
+        let transaction = harness
+            .registered
+            .begin_write_transaction()
+            .await
+            .expect("begin guard fixture transaction");
+        assert!(super::trigger_contracts_intact(&transaction).await.unwrap());
+
+        transaction
+            .execute_batch(
+                "DROP TRIGGER observations_immutable_delete;
+                 DROP TRIGGER observations_immutable_update;
+                 CREATE TRIGGER observations_immutable_update
+                     BEFORE UPDATE ON observations BEGIN SELECT 1; END;",
+            )
+            .await
+            .expect("damage guard triggers");
+        assert!(!super::trigger_contracts_intact(&transaction).await.unwrap());
+
+        assert!(
+            !super::super::ensure_authority_invariant_schema(&transaction)
+                .await
+                .unwrap(),
+            "reinstall must report the contract it found broken"
+        );
+        assert!(super::trigger_contracts_intact(&transaction).await.unwrap());
+        assert!(
+            super::super::ensure_authority_invariant_schema(&transaction)
+                .await
+                .unwrap()
+        );
+    }
 
     /// A store row carries the only binding between a physical store and the
     /// project that owns it. Letting `project_id` move would silently hand one

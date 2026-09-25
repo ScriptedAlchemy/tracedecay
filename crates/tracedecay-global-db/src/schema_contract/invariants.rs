@@ -124,9 +124,11 @@ pub async fn ensure_authority_invariant_schema(
 ) -> tracedecay_domain::errors::Result<bool> {
     ensure_audit_checkpoint_schema(conn).await?;
     let trigger_contracts_were_intact = trigger_contracts_intact(conn).await?;
-    for invariant in INVARIANTS {
-        for trigger in invariant.triggers {
-            replace_trigger(conn, trigger).await?;
+    if !trigger_contracts_were_intact {
+        for invariant in INVARIANTS {
+            for trigger in invariant.triggers {
+                replace_trigger(conn, trigger).await?;
+            }
         }
     }
     Ok(trigger_contracts_were_intact)
