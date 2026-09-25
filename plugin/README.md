@@ -2,9 +2,10 @@
 
 This source tree builds the TraceDecay integrations for Claude Code, Codex,
 Cursor, Kimi Code, OpenCode, and Pi. The installed bundles expose a host-specific MCP server
-key (`graph` for Claude/Codex, `tracedecay` for Cursor, Kimi Code, and OpenCode), shared
-workflow skills, and host-specific lifecycle hooks. Each hook is a bounded
-daemon-admission adapter; capture, sync, compaction, and advisory work stay in
+key where the host admits MCP (`graph` for Claude/Codex, `tracedecay` for Cursor, Kimi Code, and OpenCode),
+shared workflow skills, and host-specific lifecycle hooks. Pi is the MCP-free host: its
+installed extension registers the graph tools over the `tracedecay tool` CLI bridge instead.
+Each hook is a bounded daemon-admission adapter; capture, sync, compaction, and advisory work stay in
 the daemon.
 
 The manifest-driven package inventory also exposes an MCP-free core and

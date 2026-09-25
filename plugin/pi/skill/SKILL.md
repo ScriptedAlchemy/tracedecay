@@ -53,14 +53,14 @@ Use the nearest initialized project when it exists. For a new linked worktree
 that has no local TraceDecay store, use the source project for pre-edit context:
 
 ```sh
-tracedecay tool context --project /Users/pacific/Developer/pkg --args - <<'JSON'
-{"query":"the exact delegated task","max_tokens":2500}
+tracedecay tool context --project /path/to/source-project --args - <<'JSON'
+{"task":"the exact delegated task","max_tokens":2500}
 JSON
 ```
 
 Create branch indexes only when a long-lived worktree has diverged enough that
 source-project context is stale. Do not run manual sync after each edit. The
-Pi extension and hooks keep an initialized project current.
+Pi extension hooks keep an initialized project current.
 
 ## Operational boundaries
 

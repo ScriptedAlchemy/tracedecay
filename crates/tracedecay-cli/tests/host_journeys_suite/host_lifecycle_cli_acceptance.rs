@@ -192,6 +192,7 @@ fn host_case(host: HostKindV1) -> HostCase {
         HostKindV1::Cline => CLINE_CONFIGS,
         HostKindV1::RooCode => ROO_CONFIGS,
         HostKindV1::Kilo => KILO_CONFIGS,
+        HostKindV1::Pi => &[],
         unsupported => panic!("no production lifecycle case for unsupported host {unsupported:?}"),
     };
     HostCase {
@@ -335,6 +336,54 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
             "mcpServers",
         ),
         HostKindV1::Kilo => (".config/kilo/kilo.jsonc", "mcp"),
+        HostKindV1::Pi => {
+            let extension = fs::read_to_string(
+                cli.home
+                    .path()
+                    .join(".pi/agent/extensions/tracedecay/index.ts"),
+            )
+            .unwrap();
+            assert!(extension.contains("TraceDecayPiExtension"));
+            assert!(
+                extension.contains(
+                    &serde_json::to_string(cli.bin_dir.join("tracedecay").to_str().unwrap())
+                        .unwrap()
+                ),
+                "{} extension did not render the resolved binary",
+                case.id
+            );
+            let package = fs::read_to_string(
+                cli.home
+                    .path()
+                    .join(".pi/agent/extensions/tracedecay/package.json"),
+            )
+            .unwrap();
+            assert!(package.contains(env!("CARGO_PKG_VERSION")));
+            let schemas: serde_json::Value = serde_json::from_slice(
+                &fs::read(
+                    cli.home
+                        .path()
+                        .join(".pi/agent/extensions/tracedecay/schemas.json"),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert!(
+                schemas
+                    .as_array()
+                    .is_some_and(|entries| entries.len() > 100),
+                "{} schemas.json did not carry the generated catalog",
+                case.id
+            );
+            let skill = fs::read_to_string(
+                cli.home
+                    .path()
+                    .join(".pi/agent/skills/tracedecay-cli/SKILL.md"),
+            )
+            .unwrap();
+            assert!(skill.contains("tracedecay_context"));
+            return;
+        }
         _ => return,
     };
     let config_path = cli.home.path().join(relative);
@@ -641,7 +690,8 @@ fn native_feedback(case: HostCase) -> Vec<(&'static str, &'static str, Vec<u8>)>
         | HostKindV1::Copilot
         | HostKindV1::Cline
         | HostKindV1::RooCode
-        | HostKindV1::Kilo => Vec::new(),
+        | HostKindV1::Kilo
+        | HostKindV1::Pi => Vec::new(),
         _ => unreachable!("non-acceptance host"),
     }
 }
@@ -681,6 +731,7 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
         HostKindV1::Antigravity,
         HostKindV1::Vibe,
         HostKindV1::Hermes,
+        HostKindV1::Pi,
     ] {
         let case = host_case(host);
         assert!(!lifecycle_requires_absent_host_binary(case.host));
@@ -761,58 +812,66 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
             .home
             .path()
             .join(format!("{}-feedback-rollback.json", case.id));
-        let dry_run = cli.run_with_env(
-            &["feedback-rollback", "dry-run", "--agent", case.id],
-            "TRACEDECAY_TEST_FEEDBACK_ROUTE_REVISION",
-            "next",
-        );
-        assert!(
-            !String::from_utf8_lossy(&dry_run.stdout).contains(" 0 mutation(s)"),
-            "{} feedback route planned no real byte mutation",
-            case.id
-        );
-        assert_success(case.id, "feedback rollback dry-run", dry_run);
-        let before_feedback = owned_bytes(&cli, &repaired_receipt, &originals);
-        assert_success(
-            case.id,
-            "feedback rollback apply",
-            cli.run_with_env(
-                &[
+        // Pi has no native hook feedback route: its Core artifacts double as
+        // the registration surface, so the feedback transition rehearsal
+        // would rewrite the same receipt-owned bytes the snapshot guards
+        // compare. Skip the feedback-rollback leg for Pi; install, receipt,
+        // doctor, update sweep, repair, and uninstall are the journey it
+        // admits.
+        if case.host != HostKindV1::Pi {
+            let dry_run = cli.run_with_env(
+                &["feedback-rollback", "dry-run", "--agent", case.id],
+                "TRACEDECAY_TEST_FEEDBACK_ROUTE_REVISION",
+                "next",
+            );
+            assert!(
+                !String::from_utf8_lossy(&dry_run.stdout).contains(" 0 mutation(s)"),
+                "{} feedback route planned no real byte mutation",
+                case.id
+            );
+            assert_success(case.id, "feedback rollback dry-run", dry_run);
+            let before_feedback = owned_bytes(&cli, &repaired_receipt, &originals);
+            assert_success(
+                case.id,
+                "feedback rollback apply",
+                cli.run_with_env(
+                    &[
+                        "feedback-rollback",
+                        "apply",
+                        "--agent",
+                        case.id,
+                        "--state",
+                        state.to_str().unwrap(),
+                        "--yes",
+                    ],
+                    "TRACEDECAY_TEST_FEEDBACK_ROUTE_REVISION",
+                    "next",
+                ),
+            );
+            let applied_feedback = owned_bytes(&cli, &repaired_receipt, &originals);
+            assert_ne!(
+                applied_feedback, before_feedback,
+                "{} feedback apply did not change any owned bytes",
+                case.id
+            );
+            assert_success(
+                case.id,
+                "feedback rollback restore",
+                cli.run(&[
                     "feedback-rollback",
-                    "apply",
-                    "--agent",
-                    case.id,
+                    "restore",
                     "--state",
                     state.to_str().unwrap(),
                     "--yes",
-                ],
-                "TRACEDECAY_TEST_FEEDBACK_ROUTE_REVISION",
-                "next",
-            ),
-        );
-        let applied_feedback = owned_bytes(&cli, &repaired_receipt, &originals);
-        assert_ne!(
-            applied_feedback, before_feedback,
-            "{} feedback apply did not change any owned bytes",
-            case.id
-        );
-        assert_success(
-            case.id,
-            "feedback rollback restore",
-            cli.run(&[
-                "feedback-rollback",
-                "restore",
-                "--state",
-                state.to_str().unwrap(),
-                "--yes",
-            ]),
-        );
-        assert_snapshot_eq(
-            case.id,
-            "feedback rollback",
-            &owned_bytes(&cli, &latest_receipt(&cli, case.host), &originals),
-            &before_feedback,
-        );
+                ]),
+            );
+            assert_snapshot_eq(
+                case.id,
+                "feedback rollback",
+                &owned_bytes(&cli, &latest_receipt(&cli, case.host), &originals),
+                &before_feedback,
+            );
+        }
 
         assert_success(
             case.id,

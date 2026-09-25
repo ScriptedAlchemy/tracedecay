@@ -1008,6 +1008,7 @@ mod tests {
                     crate::agents::TEST_GENERATOR_COMMIT,
                 )
                 .unwrap();
+                assert_eq!(bundle.manifest.catalog_digest, expected_catalog_digest);
                 assert_eq!(
                     bundle.manifest.integration_manifest_digest,
                     catalog.host_capability_digest(host).unwrap()
