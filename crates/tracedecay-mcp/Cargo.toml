@@ -48,40 +48,40 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt", "macros", "io-util", "io-std", "signal", "sync", "time"] }
 tokio-util = { version = "0.7.19", default-features = false }
 toml = "1"
-tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0" }
-tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
-tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
-tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
-tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0" }
-tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
-tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
-tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, features = ["lite"] }
-tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", version = "0.1.0" }
-tracedecay-configuration = { path = "../tracedecay-configuration", version = "0.1.0" }
-tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
-tracedecay-daemon-service = { path = "../tracedecay-daemon-service", version = "0.1.0" }
-tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0" }
-tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
-tracedecay-framing = { path = "../tracedecay-framing", version = "0.1.0" }
-tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
-tracedecay-graph-query = { path = "../tracedecay-graph-query", version = "0.1.0" }
-tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
-tracedecay-host-admission = { path = "../tracedecay-host-admission", version = "0.1.0" }
-tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
-tracedecay-maintenance = { path = "../tracedecay-maintenance", version = "0.1.0" }
-tracedecay-mcp-catalog = { path = "../tracedecay-mcp-catalog", version = "0.1.0" }
-tracedecay-privacy = { path = "../tracedecay-privacy", version = "0.1.0" }
-tracedecay-project = { path = "../tracedecay-project", version = "0.1.0-beta.37" }
-tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
-tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
-tracedecay-session-runtime = { path = "../tracedecay-session-runtime", version = "0.1.0" }
-tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
-tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
-tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
-tracedecay-store-runtime = { path = "../tracedecay-store-runtime", version = "0.1.0" }
-tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
-tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
+tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts" }
+tracedecay-api = { path = "../tracedecay-api" }
+tracedecay-application = { path = "../tracedecay-application" }
+tracedecay-automation = { path = "../tracedecay-automation" }
+tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime" }
+tracedecay-contracts = { path = "../tracedecay-contracts" }
+tracedecay-code-extraction = { path = "../tracedecay-code-extraction", default-features = false }
+tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false, features = ["lite"] }
+tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime" }
+tracedecay-configuration = { path = "../tracedecay-configuration" }
+tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol" }
+tracedecay-daemon-service = { path = "../tracedecay-daemon-service" }
+tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api" }
+tracedecay-domain = { path = "../tracedecay-domain" }
+tracedecay-framing = { path = "../tracedecay-framing" }
+tracedecay-global-db = { path = "../tracedecay-global-db" }
+tracedecay-graph-query = { path = "../tracedecay-graph-query" }
+tracedecay-hooks = { path = "../tracedecay-hooks" }
+tracedecay-host-admission = { path = "../tracedecay-host-admission" }
+tracedecay-lcm = { path = "../tracedecay-lcm" }
+tracedecay-maintenance = { path = "../tracedecay-maintenance" }
+tracedecay-mcp-catalog = { path = "../tracedecay-mcp-catalog" }
+tracedecay-privacy = { path = "../tracedecay-privacy" }
+tracedecay-project = { path = "../tracedecay-project" }
+tracedecay-query = { path = "../tracedecay-query" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
+tracedecay-session-memory = { path = "../tracedecay-session-memory" }
+tracedecay-session-runtime = { path = "../tracedecay-session-runtime" }
+tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store" }
+tracedecay-sessions = { path = "../tracedecay-sessions" }
+tracedecay-store = { path = "../tracedecay-store" }
+tracedecay-store-runtime = { path = "../tracedecay-store-runtime" }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query" }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 tracing = "0.1"
 tree-sitter = "0.26"
 url = "2"
@@ -90,16 +90,16 @@ url = "2"
 rmcp = { version = "3.0.1", default-features = false, features = ["client", "server", "transport-async-rw"] }
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
-tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity", version = "0.1.0" }
-tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity" }
+tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", features = ["test-helpers"] }
 # The dashboard LCM adapter's unit tests build request controls through the
 # dashboard-api test-transport constructor.
-tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0", features = ["test-transport"] }
-tracedecay-framing = { path = "../tracedecay-framing", version = "0.1.0", features = ["test-helpers"] }
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
-tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
-tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
+tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", features = ["test-transport"] }
+tracedecay-framing = { path = "../tracedecay-framing", features = ["test-helpers"] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }
+tracedecay-global-db = { path = "../tracedecay-global-db", features = ["test-helpers"] }
+tracedecay-graph-db = { path = "../tracedecay-graph-db" }
 # The moved handler tests open projects through the registered test runtime
 # and the explicit `TraceDecay::*_for_test` constructors.
-tracedecay-project = { path = "../tracedecay-project", version = "0.1.0-beta.37", features = ["test-helpers"] }
-tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-project = { path = "../tracedecay-project", features = ["test-helpers"] }
+tracedecay-sessions = { path = "../tracedecay-sessions", features = ["test-helpers"] }

@@ -17,13 +17,13 @@ schemars.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
-tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
-tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
-tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
+tracedecay-api = { path = "../tracedecay-api" }
+tracedecay-contracts = { path = "../tracedecay-contracts" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
+tracedecay-sessions = { path = "../tracedecay-sessions" }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 
 [dev-dependencies]
 # The advertised application schemas must round-trip through the shared
 # CLI/MCP request adapter that daemon-protocol owns.
-tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
+tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol" }
