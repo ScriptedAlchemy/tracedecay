@@ -334,7 +334,7 @@ async fn reset_refused_profile_authorities(
     let probe = crate::commands::daemon_tool_json(
         None,
         "tracedecay_project_list",
-        serde_json::json!({ "limit": 1 }),
+        serde_json::json!({ "limit": 1, "format": "json" }),
     )
     .await;
     match profile_reset_decision(probe) {
