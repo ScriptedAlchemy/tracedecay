@@ -34,12 +34,11 @@ use super::format::{
     BASE_SECTION_NAMES, CodeLexicalArtifactSectionDigestV1, PostingListDecoderV1,
     PostingListEncoderV1, RECEIPT_RESERVATION_BYTES, SECTION_NAMES, SERVING_INDEX_STEP_COUNT_V11,
     STATISTICS_STEP_COUNT_V11, VerifiedCodeLexicalArtifactV1, absorb_page_base_sections_receipt,
-    content_metadata_bytes, contract_number, decode_fingerprint_postings, decode_ngram_bitmap,
-    decode_padded_receipt, decode_padded_receipt_with_control, decode_page_base_sections_receipt,
-    encode_document_set, encode_fingerprint_postings, encode_term_lists,
-    finish_base_section_receipt_fold, hash_bytes, initial_base_section_receipt_fold,
-    metadata_digest, new_verified_receipt, padded_receipt, receipt_artifact_digest,
-    stored_metadata_digest, verify_artifact_table_layout,
+    content_metadata_bytes, contract_number, decode_fingerprint_postings, decode_padded_receipt,
+    decode_padded_receipt_with_control, decode_page_base_sections_receipt,
+    encode_fingerprint_postings, encode_term_lists, finish_base_section_receipt_fold, hash_bytes,
+    initial_base_section_receipt_fold, metadata_digest, new_verified_receipt, padded_receipt,
+    receipt_artifact_digest, stored_metadata_digest, verify_artifact_table_layout,
 };
 use super::postings::document_ngram_scratch;
 use super::prepared::document_ngram_keys;
@@ -53,8 +52,8 @@ use super::row_codec::{
 };
 use super::schema::{
     CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1, derive_row_dictionary, exact_field_code_from_encoded,
-    field_code, field_code_from_encoded, intern_exact_terms, require_served_revision,
-    stable_exact_term_id, stage_row_dictionary,
+    field_code, intern_exact_terms, require_served_revision, stable_exact_term_id,
+    stage_row_dictionary,
 };
 use super::{
     ARTIFACT_SQLITE_CACHE_BYTES, CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
@@ -2660,7 +2659,7 @@ fn prepare_term_insert_plan<'a>(
             for posting in &document.term_postings {
                 entries.push(PreparedTermInsertRefV1::new(
                     document.document_id,
-                    field_code_from_encoded(&posting.field)?,
+                    posting.field_code,
                     posting,
                 ));
             }
@@ -5152,10 +5151,11 @@ struct NgramListPartitionV1 {
 }
 
 impl NgramListPartitionV1 {
-    fn add(
+    /// Append one key's ascending documents from a window.
+    fn add_run(
         &mut self,
         key: (i64, i64),
-        document: u32,
+        documents: impl Iterator<Item = u32>,
         lower: Option<(i64, i64)>,
         cutoff: Option<(i64, i64)>,
     ) -> Result<(), CodeLexicalArtifactErrorV1> {
@@ -5168,7 +5168,9 @@ impl NgramListPartitionV1 {
             PostingListEncoderV1::new(false)
         });
         let before = list.retained_bytes();
-        list.push(document, 1)?;
+        for document in documents {
+            list.push(document, 1)?;
+        }
         self.held += list.retained_bytes() - before;
         Ok(())
     }
@@ -5228,10 +5230,22 @@ impl NgramListPassV1 {
                 .enumerate()
                 .try_for_each(|(index, partition)| {
                     tracedecay_code_index::parallelism::with_background_cpu_permit(|| {
-                        for task in buckets {
-                            for &(key, document) in &task[index] {
-                                partition.add(key, document, lower, cutoff)?;
-                            }
+                        // One hash lookup per key and window instead of per
+                        // posting; a stable sort keeps each key's documents
+                        // in the ascending order the tasks produced them.
+                        let mut postings = buckets
+                            .iter()
+                            .flat_map(|task| task[index].iter().copied())
+                            .collect::<Vec<_>>();
+                        postings.sort_by_key(|(key, _)| *key);
+                        for run in postings.chunk_by(|left, right| left.0 == right.0) {
+                            let [(key, _), ..] = run else { continue };
+                            partition.add_run(
+                                *key,
+                                run.iter().map(|(_, document)| *document),
+                                lower,
+                                cutoff,
+                            )?;
                         }
                         Ok(())
                     })
@@ -5286,9 +5300,7 @@ impl NgramListPassV1 {
                             .map(|(key, list)| {
                                 let document_frequency =
                                     i64::try_from(list.len()).map_err(contract_number)?;
-                                let documents =
-                                    encode_document_set(&decode_ngram_bitmap(&list.finish()?)?)?;
-                                Ok((key, document_frequency, documents))
+                                Ok((key, document_frequency, list.finish_document_set()?))
                             })
                             .collect::<Result<Vec<_>, CodeLexicalArtifactErrorV1>>()
                     })

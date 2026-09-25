@@ -298,7 +298,9 @@ impl CodeFileIndexArtifactsV1 {
             schema_evidence,
             unresolved_references,
         };
-        artifacts.validate()?;
+        // Every payload was just derived from its tokens or reused under a
+        // key covering every digest input; re-deriving them proves nothing.
+        artifacts.validate_reusing_clone_payloads()?;
         Ok(artifacts)
     }
 

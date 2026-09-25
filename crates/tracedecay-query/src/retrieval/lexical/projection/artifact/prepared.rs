@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use roaring::RoaringBitmap;
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::clones::{
     CloneExactKeyV1, CloneFingerprintPositionV1, CloneNormalizationClassV1, CodeIndexCloneBodyV1,
@@ -14,14 +13,15 @@ use super::super::{
 };
 use super::clone_codec::{encode_clone_eligibility, encode_clone_payload};
 use super::format::{
-    ArtifactRowV1, BASE_SECTION_NAMES, PageBaseSectionReceiptBuilderV1, contract_number,
-    encode_exact_field, encode_field, encode_ngram_bitmap, encode_page_base_sections_receipt,
+    ArtifactRowV1, BASE_SECTION_NAMES, PageBaseSectionReceiptBuilderV1, PostingListEncoderV1,
+    contract_number, encode_exact_field, encode_field, encode_page_base_sections_receipt,
     hash_bytes, ngram_page_digest,
 };
 use super::postings::{
     NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, document_ngrams, ngram_is_case_sensitive,
 };
 use super::row_codec::{BlockRowV1, RowDictionaryTableV1, encode_artifact_row, encode_row_blocks};
+use super::schema::field_code;
 use super::{
     CodeLexicalArtifactErrorV1, NGRAM_AGGREGATION_BYTES_PER_LOGICAL_POSTING_V1, checkpoint,
 };
@@ -169,6 +169,7 @@ pub(super) struct PreparedNgramShardV1 {
 #[derive(Debug)]
 pub(super) struct PreparedTermPostingV1 {
     pub(super) field: String,
+    pub(super) field_code: i64,
     pub(super) term: String,
     pub(super) frequency: i64,
 }
@@ -193,7 +194,7 @@ pub(super) fn prepare_page(
     let mut documents = Vec::with_capacity(page.chunks().len());
     let mut texts = Vec::with_capacity(page.chunks().len());
     let mut row_dictionary = RowDictionaryTableV1::new();
-    let mut ngram_documents = BTreeMap::<(i64, i64), RoaringBitmap>::new();
+    let mut ngram_postings = Vec::<((i64, i64), u32)>::new();
     let mut logical_ngram_postings = 0usize;
     if page.symbol_displays().len() != page.chunks().len() {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
@@ -236,21 +237,7 @@ pub(super) fn prepare_page(
                     "lexical artifact ngram aggregation count overflowed".to_owned(),
                 )
             })?;
-        for (kind, ngram) in ngrams {
-            // Pages enumerate documents by their contiguous source ordinal,
-            // and `document_ngrams` deduplicates each document first. Preserve
-            // that ordering at the bitmap boundary so Roaring can append
-            // instead of binary-searching every posting.
-            ngram_documents
-                .entry((kind, ngram))
-                .or_default()
-                .try_push(document)
-                .map_err(|_| {
-                    CodeLexicalArtifactErrorV1::Contract(
-                        "lexical artifact ngram documents are not strictly ordered".to_owned(),
-                    )
-                })?;
-        }
+        ngram_postings.extend(ngrams.into_iter().map(|key| (key, document)));
         documents.push(prepared);
         texts.push(text);
     }
@@ -274,17 +261,28 @@ pub(super) fn prepare_page(
         .next_cursor()
         .persisted_bytes()
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
-    let mut ngram_shards = Vec::with_capacity(ngram_documents.len());
-    for ((kind, ngram), documents) in ngram_documents {
+    // Documents were appended in ascending source order, so a stable sort by
+    // key leaves each key's documents ascending; `document_ngrams`
+    // deduplicates within a document, and the encoder refuses any repeat.
+    ngram_postings.sort_by_key(|(key, _)| *key);
+    let mut ngram_shards = Vec::new();
+    for run in ngram_postings.chunk_by(|left, right| left.0 == right.0) {
         checkpoint(control)?;
-        let encoded = encode_ngram_bitmap(&documents)?;
+        let [((kind, ngram), _), ..] = run else {
+            continue;
+        };
+        let mut documents = PostingListEncoderV1::new(false);
+        for (_, document) in run {
+            documents.push(*document, 1)?;
+        }
         ngram_shards.push(PreparedNgramShardV1 {
-            kind,
-            ngram,
-            documents: encoded,
+            kind: *kind,
+            ngram: *ngram,
             cardinality: documents.len(),
+            documents: documents.finish()?,
         });
     }
+    drop(ngram_postings);
     let ngram_digest = ngram_page_digest(
         page.page_ordinal(),
         ngram_shards.iter().map(|shard| {
@@ -540,6 +538,7 @@ fn prepare_document(
     for (field, terms) in &fields {
         checkpoint(control)?;
         let encoded_field = encode_field(*field)?;
+        let encoded_field_code = field_code(*field);
         let mut frequencies = BTreeMap::<&str, u32>::new();
         for term in terms {
             frequencies
@@ -550,6 +549,7 @@ fn prepare_document(
         for (term, frequency) in frequencies {
             term_postings.push(PreparedTermPostingV1 {
                 field: encoded_field.clone(),
+                field_code: encoded_field_code,
                 term: term.to_owned(),
                 frequency: i64::from(frequency),
             });

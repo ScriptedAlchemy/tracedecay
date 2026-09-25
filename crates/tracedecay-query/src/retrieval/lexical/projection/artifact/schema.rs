@@ -95,12 +95,6 @@ pub(super) fn field_from_code(code: i64) -> Result<LexicalFieldV1, CodeLexicalAr
     }
 }
 
-pub(super) fn field_code_from_encoded(encoded: &str) -> Result<i64, CodeLexicalArtifactErrorV1> {
-    let field: LexicalFieldV1 = serde_json::from_str(encoded)
-        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
-    Ok(field_code(field))
-}
-
 pub(super) fn exact_field_code(field: ExactFieldV1) -> i64 {
     match field {
         ExactFieldV1::Identifier => 1,
