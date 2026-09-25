@@ -11,7 +11,7 @@ pub use tracedecay_code_extraction::{
 };
 use tracedecay_domain::{
     CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, SourceSpan, SymbolOccurrenceId,
-    WorktreeId, canonical_json_bytes, canonical_sha256, nonnegative_sha256_prefix,
+    WorktreeId, canonical_json_bytes, nonnegative_sha256_prefix,
 };
 
 const BODY_DIGEST_DOMAIN: &str = "tracedecay.clone-body.v1";
@@ -287,62 +287,81 @@ struct ClonePayloadDigestsV1 {
     payload: ManifestDigest,
 }
 
+/// `canonical_sha256` of the tuple whose elements have the given canonical
+/// encodings. Canonical JSON writes a tuple as its elements' own encodings
+/// joined into an array, so one token stream serialized once binds every
+/// digest that embeds it.
+fn canonical_tuple_sha256(elements: &[&[u8]]) -> Result<ManifestDigest, String> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"[");
+    for (index, element) in elements.iter().enumerate() {
+        if index > 0 {
+            hasher.update(b",");
+        }
+        hasher.update(element);
+    }
+    hasher.update(b"]");
+    ManifestDigest::from_sha256_bytes(&hasher.finalize()).map_err(|error| error.to_string())
+}
+
 fn clone_payload_digests(
     input: ClonePayloadDigestInputV1<'_>,
 ) -> Result<ClonePayloadDigestsV1, String> {
-    let body = canonical_sha256(&(
-        BODY_DIGEST_DOMAIN,
-        input.language,
-        input.symbol_kind,
-        input.conservative_revision,
-        input.conservative_tokens,
-    ))
-    .map_err(|error| error.to_string())?;
-    let conservative = canonical_sha256(&(
-        CONSERVATIVE_DIGEST_DOMAIN,
-        input.language,
-        input.symbol_kind,
-        input.conservative_revision,
-        input.conservative_tokens,
-    ))
-    .map_err(|error| error.to_string())?;
+    fn json<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
+        canonical_json_bytes(value).map_err(|error| error.to_string())
+    }
+    let language = json(&input.language)?;
+    let symbol_kind = json(&input.symbol_kind)?;
+    let conservative_revision = json(&input.conservative_revision)?;
+    let conservative_tokens = json(&input.conservative_tokens)?;
+    let rename_tokens = json(&input.rename_tokens)?;
+    let body = canonical_tuple_sha256(&[
+        &json(&BODY_DIGEST_DOMAIN)?,
+        &language,
+        &symbol_kind,
+        &conservative_revision,
+        &conservative_tokens,
+    ])?;
+    let conservative = canonical_tuple_sha256(&[
+        &json(&CONSERVATIVE_DIGEST_DOMAIN)?,
+        &language,
+        &symbol_kind,
+        &conservative_revision,
+        &conservative_tokens,
+    ])?;
     let rename = if input.rename_coverage == CloneBodyRenameStatusV1::Complete
         && input.tokenization_status == CloneBodyTokenizationStatusV1::Complete
     {
         match (input.rename_revision, input.rename_tokens) {
-            (Some(revision), Some(tokens)) => Some(
-                canonical_sha256(&(
-                    RENAME_DIGEST_DOMAIN,
-                    input.language,
-                    input.symbol_kind,
-                    revision,
-                    tokens,
-                ))
-                .map_err(|error| error.to_string())?,
-            ),
+            (Some(revision), Some(_)) => Some(canonical_tuple_sha256(&[
+                &json(&RENAME_DIGEST_DOMAIN)?,
+                &language,
+                &symbol_kind,
+                &json(&revision)?,
+                &rename_tokens,
+            ])?),
             _ => return Err("complete rename payload is missing tokens or revision".to_owned()),
         }
     } else {
         None
     };
-    let payload = canonical_sha256(&(
-        PAYLOAD_DIGEST_DOMAIN,
-        input.language,
-        input.symbol_kind,
-        &body,
-        input.token_count,
-        input.conservative_revision,
-        &conservative,
-        input.conservative_tokens,
-        input.tokenization_status,
-        input.tokenization_issues,
-        input.rename_revision,
-        &rename,
-        input.rename_tokens,
-        input.rename_coverage,
-        input.rename_issues,
-    ))
-    .map_err(|error| error.to_string())?;
+    let payload = canonical_tuple_sha256(&[
+        &json(&PAYLOAD_DIGEST_DOMAIN)?,
+        &language,
+        &symbol_kind,
+        &json(&body)?,
+        &json(&input.token_count)?,
+        &conservative_revision,
+        &json(&conservative)?,
+        &conservative_tokens,
+        &json(&input.tokenization_status)?,
+        &json(&input.tokenization_issues)?,
+        &json(&input.rename_revision)?,
+        &json(&rename)?,
+        &rename_tokens,
+        &json(&input.rename_coverage)?,
+        &json(&input.rename_issues)?,
+    ])?;
     Ok(ClonePayloadDigestsV1 {
         body,
         conservative,
@@ -1188,6 +1207,107 @@ fn directional_coverage(shared: u32, total: usize) -> Option<u32> {
         return Some(0);
     }
     u32::try_from(u64::from(shared).saturating_mul(1_000_000) / total).ok()
+}
+
+#[cfg(test)]
+mod payload_digest_tests {
+    use std::sync::Arc;
+
+    use tracedecay_domain::canonical_sha256;
+
+    use super::{
+        BODY_DIGEST_DOMAIN, CONSERVATIVE_DIGEST_DOMAIN, CloneBodyPayloadPartsV1,
+        CloneBodyPayloadV1, CloneBodyRenameIssueV1, CloneBodyRenameStatusV1,
+        CloneBodyTokenizationIssueV1, CloneBodyTokenizationStatusV1, ConservativeCloneTokenV1,
+        PAYLOAD_DIGEST_DOMAIN, RENAME_DIGEST_DOMAIN,
+    };
+
+    fn tokens(texts: &[&str]) -> Arc<[ConservativeCloneTokenV1]> {
+        let mut tokens = vec![ConservativeCloneTokenV1::StructureStart {
+            syntax_kind: "block".into(),
+        }];
+        tokens.extend(texts.iter().map(|text| ConservativeCloneTokenV1::Syntax {
+            syntax_kind: "identifier".into(),
+            text: (*text).to_owned(),
+        }));
+        tokens.push(ConservativeCloneTokenV1::StructureEnd {
+            syntax_kind: "block".into(),
+        });
+        tokens.into()
+    }
+
+    #[test]
+    fn payload_digests_equal_the_canonical_tuple_digests() {
+        for rename in [Some(tokens(&["$0", "\"$1\"", "\u{7}"])), None] {
+            let complete = rename.is_some();
+            let payload = CloneBodyPayloadV1::from_parts(CloneBodyPayloadPartsV1 {
+                language: "rust".to_owned(),
+                symbol_kind: "function".to_owned(),
+                token_count: 5,
+                conservative_normalization_revision: 3,
+                conservative_tokens: tokens(&["a\"b", "\\c\n", "é\u{1}"]),
+                tokenization_status: CloneBodyTokenizationStatusV1::Complete,
+                tokenization_issues: if complete {
+                    Vec::new()
+                } else {
+                    vec![CloneBodyTokenizationIssueV1::BodyBoundaryUnavailable]
+                },
+                rename_normalization_revision: complete.then_some(2),
+                rename_tokens: rename.clone(),
+                rename_coverage: if complete {
+                    CloneBodyRenameStatusV1::Complete
+                } else {
+                    CloneBodyRenameStatusV1::UnsupportedLanguage
+                },
+                rename_issues: Vec::<CloneBodyRenameIssueV1>::new(),
+            })
+            .expect("payload");
+            let prefix = (
+                payload.language.as_str(),
+                payload.symbol_kind.as_str(),
+                payload.conservative_normalization_revision,
+                &*payload.conservative_tokens,
+            );
+            let body =
+                canonical_sha256(&(BODY_DIGEST_DOMAIN, prefix.0, prefix.1, prefix.2, prefix.3))
+                    .expect("body");
+            let conservative = canonical_sha256(&(
+                CONSERVATIVE_DIGEST_DOMAIN,
+                prefix.0,
+                prefix.1,
+                prefix.2,
+                prefix.3,
+            ))
+            .expect("conservative");
+            let rename_digest = rename.as_deref().map(|tokens| {
+                canonical_sha256(&(RENAME_DIGEST_DOMAIN, prefix.0, prefix.1, 2u16, tokens))
+                    .expect("rename")
+            });
+            let payload_digest = canonical_sha256(&(
+                PAYLOAD_DIGEST_DOMAIN,
+                prefix.0,
+                prefix.1,
+                &body,
+                payload.token_count,
+                prefix.2,
+                &conservative,
+                prefix.3,
+                payload.tokenization_status,
+                &payload.tokenization_issues,
+                payload.rename_normalization_revision,
+                &rename_digest,
+                payload.rename_tokens.as_deref(),
+                payload.rename_coverage,
+                &payload.rename_issues,
+            ))
+            .expect("payload digest");
+            assert_eq!(payload.body_digest, body);
+            assert_eq!(payload.conservative_digest, conservative);
+            assert_eq!(payload.rename_digest, rename_digest);
+            assert_eq!(payload.payload_digest, payload_digest);
+            payload.validate().expect("self-consistent payload");
+        }
+    }
 }
 
 #[cfg(test)]

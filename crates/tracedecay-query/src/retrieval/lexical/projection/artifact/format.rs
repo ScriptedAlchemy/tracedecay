@@ -524,6 +524,7 @@ pub(super) fn ngram_page_digest<'a>(
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
 }
 
+#[cfg(test)]
 pub(super) fn encode_ngram_bitmap(
     bitmap: &RoaringBitmap,
 ) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
@@ -557,20 +558,30 @@ pub(super) fn decode_ngram_bitmap(
 const DOCUMENT_SET_DELTAS: u8 = 0;
 const DOCUMENT_SET_BITSET: u8 = 1;
 
+/// [`document_set_from_deltas`] of a bitmap.
+#[cfg(test)]
+pub(super) fn encode_document_set(
+    documents: &RoaringBitmap,
+) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
+    let Some(last) = documents.max() else {
+        return Err(CodeLexicalArtifactErrorV1::Contract(
+            "lexical artifact document set is empty".to_owned(),
+        ));
+    };
+    document_set_from_deltas(encode_ngram_bitmap(documents)?, last)
+}
+
 /// A sealed n-gram document set in the smaller of two tagged encodings: the
 /// delta-varint list, or its first document followed by a bitset over the
 /// range it spans (bit `i` of byte `i / 8`, least significant first, is
 /// document `first + i`). The bitset wins once a list holds more than about
 /// one document in eight of that range, which the most common n-grams do.
-pub(super) fn encode_document_set(
-    documents: &RoaringBitmap,
+/// `deltas` is a non-empty document list whose last document is `last`.
+fn document_set_from_deltas(
+    deltas: Vec<u8>,
+    last: u32,
 ) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
-    let deltas = encode_ngram_bitmap(documents)?;
-    let (Some(first), Some(last)) = (documents.min(), documents.max()) else {
-        return Err(CodeLexicalArtifactErrorV1::Contract(
-            "lexical artifact document set is empty".to_owned(),
-        ));
-    };
+    let first = u32::try_from(take_varint(&mut deltas.as_slice())?).map_err(contract_number)?;
     let mut prefix = Vec::with_capacity(6);
     prefix.push(DOCUMENT_SET_BITSET);
     encode_varint(u64::from(first), &mut prefix);
@@ -584,8 +595,8 @@ pub(super) fn encode_document_set(
     }
     let offset = prefix.len();
     prefix.resize(offset + bitset_bytes, 0);
-    for document in documents {
-        let bit = document - first;
+    for posting in PostingListDecoderV1::new(&deltas, false) {
+        let bit = posting?.0 - first;
         prefix[offset + (bit / 8) as usize] |= 1 << (bit % 8);
     }
     Ok(prefix)
@@ -919,6 +930,23 @@ impl PostingListEncoderV1 {
             ));
         }
         Ok(self.bytes)
+    }
+
+    /// This document list in its sealed [`document_set_from_deltas`] form.
+    pub(super) fn finish_document_set(self) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
+        if self.frequencies {
+            return Err(CodeLexicalArtifactErrorV1::Contract(
+                "lexical artifact frequency list is not a document set".to_owned(),
+            ));
+        }
+        let last = self.previous;
+        let deltas = self.finish()?;
+        let last = last.ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Contract(
+                "lexical artifact document set is empty".to_owned(),
+            )
+        })?;
+        document_set_from_deltas(deltas, last)
     }
 }
 
@@ -1609,6 +1637,26 @@ mod tests {
             assert_eq!(encoded[0], tag);
             assert_eq!(&decode_document_set(&encoded).expect("decode"), documents);
         }
+        for documents in [&sparse, &dense, &RoaringBitmap::from_iter([7u32])] {
+            let mut list = PostingListEncoderV1::new(false);
+            for document in documents {
+                list.push(document, 1).expect("ascending");
+            }
+            assert_eq!(
+                list.finish_document_set().expect("list encode"),
+                encode_document_set(documents).expect("bitmap encode"),
+            );
+        }
+        assert!(
+            PostingListEncoderV1::new(false)
+                .finish_document_set()
+                .is_err()
+        );
+        assert!(
+            PostingListEncoderV1::new(true)
+                .finish_document_set()
+                .is_err()
+        );
         assert!(
             encode_document_set(&dense).expect("encode").len()
                 < 1 + encode_ngram_bitmap(&dense).expect("deltas").len() / 3,
