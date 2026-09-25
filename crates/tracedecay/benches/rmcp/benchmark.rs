@@ -27,7 +27,7 @@ use tracedecay_daemon_protocol::{
 };
 use tracedecay_domain::ProjectId;
 
-use super::{BrokerStreamTransport, serve_routed_rmcp_connection};
+use super::{BrokerStreamTransport, RoutedRmcpReplay, serve_routed_rmcp_connection};
 use crate::mcp::McpServer;
 use tracedecay_daemon_service::shutdown::DaemonLifecycle;
 use tracedecay_project::project::TraceDecayOpenOptions;
@@ -146,11 +146,14 @@ impl BenchmarkConnection {
             serve_routed_rmcp_connection(
                 server,
                 BrokerStreamTransport::new(accepted),
-                initialize_replay(),
-                VecDeque::new(),
-                None,
+                RoutedRmcpReplay {
+                    first_request_line: initialize_replay(),
+                    pending_lines: VecDeque::new(),
+                    initialize_route: None,
+                },
                 false,
                 &serving_lifecycle,
+                serving_lifecycle.try_enter(),
             )
             .await
         });
