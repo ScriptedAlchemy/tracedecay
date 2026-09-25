@@ -1,8 +1,8 @@
 use tracedecay_domain::{ProjectId, RetrievalAnchorId, SessionId};
 use tracedecay_runtime_core::db::engine::{Executor, TestConnection};
 use tracedecay_temporal_query::execution::ExecutionControl;
+use tracedecay_temporal_query::execution::TemporalPortError;
 use tracedecay_temporal_query::hydration::HydrationError;
-use tracedecay_temporal_query::ports::TemporalPortError;
 
 use super::{TemporalSqlRead, summary_has_provider_evidence};
 use crate::relations::{

@@ -4,6 +4,7 @@ use std::process::Command;
 use super::*;
 #[cfg(unix)]
 use tracedecay_daemon_protocol::{FramePoll, FrameSend};
+use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 /// How long a half-closed one-shot client may wait for its single response.
@@ -1580,12 +1581,11 @@ async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias()
         .expect("linked project registry context present");
     assert_eq!(
         context.project.canonical_root,
-        tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::canonical_project_key(
-            &primary
-        )
+        RegisteredGlobalDb::canonical_project_key(&primary)
     );
-    assert!(context.aliases.iter().any(|alias| {
-        alias.alias_path
-            == tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::canonical_project_key(&linked)
-    }));
+    assert!(
+        context.aliases.iter().any(|alias| {
+            alias.alias_path == RegisteredGlobalDb::canonical_project_key(&linked)
+        })
+    );
 }

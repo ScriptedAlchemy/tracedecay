@@ -9,8 +9,8 @@ use tracedecay_domain::{
     UtcMicros, canonical_sha256,
 };
 use tracedecay_temporal_query::execution::BindingDigest;
-use tracedecay_temporal_query::ports::TemporalSnapshotRequest;
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+use tracedecay_temporal_query::snapshot::TemporalSnapshotRequest;
 use tracedecay_temporal_query::snapshot::{
     KernelVersions, TemporalExecutionSnapshot, TemporalWatermarks,
 };

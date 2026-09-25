@@ -12,10 +12,10 @@ use tracedecay_domain::{
     RetrievalGrainV1, SessionId, SessionSourceCoverageV1, TemporalCoverageCountsV1,
 };
 use tracedecay_lcm::contracts::LcmRetrievalOutcome;
-use tracedecay_temporal_query::ports::{
+use tracedecay_temporal_query::snapshot::TemporalCandidatePopulationCount;
+use tracedecay_temporal_query::snapshot::{
     TemporalCandidateFilterV1, TemporalMessageTypeFilterV1, TemporalSessionScopeFilterV1,
 };
-use tracedecay_temporal_query::snapshot::TemporalCandidatePopulationCount;
 
 use tracedecay_lcm::{
     LcmContentSlice, LcmDescribeResponse, LcmDescribeTarget, LcmExpandResponse, LcmExpandTarget,

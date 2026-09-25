@@ -1,10 +1,17 @@
 use std::marker::PhantomData;
 
-use crate::execution::ExecutionControl;
-use crate::ports::{
-    MeasuredTemporalValue, ReadBudgetAccounting, TemporalPortError, TemporalRecord,
-};
+use crate::execution::{ExecutionControl, ReadBudgetAccounting, TemporalPortError};
 use crate::ranking::RankingCandidate;
+
+mod pull;
+#[cfg(test)]
+mod tests;
+
+pub use pull::{
+    MeasuredTemporalValue, PortFuture, SummarySourceRecord, TemporalReadPort, TemporalRecord,
+    TemporalRecordBatch, begin_prepared_candidate_pull, commit_prepared_candidate_pull,
+    pull_candidate_page, pull_temporal_record_page,
+};
 
 const MAX_READ_ITEMS: usize = 8_192;
 const MAX_READ_TOTAL_BYTES: usize = 64 * 1024 * 1024;

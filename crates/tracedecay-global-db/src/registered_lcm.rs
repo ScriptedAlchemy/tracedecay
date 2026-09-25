@@ -14,7 +14,7 @@ use tracedecay_lcm::{
 };
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionStoreAccess};
 use tracedecay_temporal_query::execution::ExecutionControl;
-use tracedecay_temporal_query::ports::TemporalPortError;
+use tracedecay_temporal_query::execution::TemporalPortError;
 
 use super::RegisteredGlobalDb;
 use tracedecay_session_temporal_store::SessionTemporalAccess;

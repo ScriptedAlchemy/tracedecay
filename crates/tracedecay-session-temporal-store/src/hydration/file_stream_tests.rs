@@ -24,10 +24,9 @@ use tracedecay_domain::{RetrievalAnchorId, RetrievalGrainV1, SessionId, Temporal
 use tracedecay_global_db::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_temporal_query::execution::{BindingDigest, ExecutionControl, ExecutionLimits};
-use tracedecay_temporal_query::ports::{
-    ReadBudgetAccounting, TemporalPortError, TemporalSnapshotRequest,
-};
+use tracedecay_temporal_query::execution::{ReadBudgetAccounting, TemporalPortError};
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+use tracedecay_temporal_query::snapshot::TemporalSnapshotRequest;
 use tracedecay_temporal_query::snapshot::{
     KernelVersions, TemporalExecutionSnapshot, TemporalWatermarks,
 };

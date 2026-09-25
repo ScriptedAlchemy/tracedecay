@@ -19,9 +19,8 @@ use tracedecay_automation_runtime::automation::run_ledger::{
 use tracedecay_automation_runtime::automation::skill_usage::{
     SkillUsageAction, load_skill_usage_record, record_skill_usage,
 };
+use tracedecay_global_db::RegisteredGlobalDb;
 #[cfg(feature = "test-transport")]
-use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
-
 #[tokio::test]
 async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
     let dir = TempDir::new().unwrap();
@@ -155,7 +154,7 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
     let cg = TestTraceDecay::new(fixture::init_project_from_template(&project).await.unwrap());
     let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
     let runtime = open_active_project_scoped_runtime(&cg).await;
-    let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(cg.project_root());
+    let project_id = RegisteredGlobalDb::canonical_project_key(cg.project_root());
 
     let active_skill = create_managed_skill(
         &profile_root,

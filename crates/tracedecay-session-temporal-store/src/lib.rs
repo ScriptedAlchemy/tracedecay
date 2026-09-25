@@ -86,8 +86,8 @@ use tracedecay_temporal_query::cursor::{CursorError, StableSortKey, encode_curso
 use tracedecay_temporal_query::execution::{BindingDigest, ExecutionControl};
 use tracedecay_temporal_query::hydrate_temporal_candidate_selection;
 use tracedecay_temporal_query::hydration::hydrate_selected;
-use tracedecay_temporal_query::ports::TemporalRetrievalScope;
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+use tracedecay_temporal_query::snapshot::TemporalRetrievalScope;
 use tracedecay_temporal_query::snapshot::{KernelVersions, TemporalExecutionSnapshot};
 use tracedecay_temporal_query::{execute_temporal_candidate_export, execute_temporal_kernel};
 
@@ -695,15 +695,15 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
         let control = snapshot.request().execution_control();
         let mut checkpoint = || {
             control.checkpoint().map_err(|error| match error {
-                tracedecay_temporal_query::ports::TemporalPortError::Cancelled => {
+                tracedecay_temporal_query::execution::TemporalPortError::Cancelled => {
                     LcmError::Cancelled
                 }
-                tracedecay_temporal_query::ports::TemporalPortError::DeadlineExceeded => {
+                tracedecay_temporal_query::execution::TemporalPortError::DeadlineExceeded => {
                     LcmError::DeadlineExceeded
                 }
-                tracedecay_temporal_query::ports::TemporalPortError::BudgetExceeded { .. } => {
-                    LcmError::BudgetExhausted
-                }
+                tracedecay_temporal_query::execution::TemporalPortError::BudgetExceeded {
+                    ..
+                } => LcmError::BudgetExhausted,
                 _ => LcmError::Db("temporal verification control failed".to_string()),
             })
         };
@@ -1324,38 +1324,38 @@ async fn session_record_from_frozen_read(
 }
 
 fn map_control_error(
-    error: tracedecay_temporal_query::ports::TemporalPortError,
+    error: tracedecay_temporal_query::execution::TemporalPortError,
 ) -> SessionTemporalExecutionError {
     match error {
-        tracedecay_temporal_query::ports::TemporalPortError::Cancelled => {
+        tracedecay_temporal_query::execution::TemporalPortError::Cancelled => {
             SessionTemporalExecutionError::Cancelled
         }
-        tracedecay_temporal_query::ports::TemporalPortError::DeadlineExceeded => {
+        tracedecay_temporal_query::execution::TemporalPortError::DeadlineExceeded => {
             SessionTemporalExecutionError::DeadlineExceeded
         }
-        tracedecay_temporal_query::ports::TemporalPortError::BudgetExceeded {
+        tracedecay_temporal_query::execution::TemporalPortError::BudgetExceeded {
             resource,
             accounting,
         } => SessionTemporalExecutionError::BudgetExhausted {
             stage: SessionRetrievalBudgetStageV1::for_port_budget_resource(resource),
             accounting: accounting.map(execution::port_budget_accounting),
         },
-        tracedecay_temporal_query::ports::TemporalPortError::ResetRequired { .. } => {
+        tracedecay_temporal_query::execution::TemporalPortError::ResetRequired { .. } => {
             SessionTemporalExecutionError::ResetRequired
         }
-        error @ (tracedecay_temporal_query::ports::TemporalPortError::ParticipantLimitExceeded {
+        error @ (tracedecay_temporal_query::execution::TemporalPortError::ParticipantLimitExceeded {
             ..
-        } | tracedecay_temporal_query::ports::TemporalPortError::ParticipantManifestBytesExceeded {
+        } | tracedecay_temporal_query::execution::TemporalPortError::ParticipantManifestBytesExceeded {
             ..
         }) => SessionTemporalExecutionError::Kernel(
             tracedecay_temporal_query::TemporalKernelError::Port(error),
         ),
         // The caller distinguishes a genuinely source-free root from sources
         // that exist but have not published a searchable generation.
-        tracedecay_temporal_query::ports::TemporalPortError::EmptyParticipantManifest => {
+        tracedecay_temporal_query::execution::TemporalPortError::EmptyParticipantManifest => {
             SessionTemporalExecutionError::Unavailable
         }
-        tracedecay_temporal_query::ports::TemporalPortError::Read { operation, message } => {
+        tracedecay_temporal_query::execution::TemporalPortError::Read { operation, message } => {
             SessionTemporalExecutionError::Storage {
                 operation,
                 detail: message,

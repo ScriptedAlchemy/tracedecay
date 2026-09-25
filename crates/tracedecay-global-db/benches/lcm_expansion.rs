@@ -23,8 +23,8 @@ use tracedecay_store::{
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
 use tracedecay_temporal_query::execution::{BindingDigest, ExecutionControl};
-use tracedecay_temporal_query::ports::TemporalSnapshotRequest;
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+use tracedecay_temporal_query::snapshot::TemporalSnapshotRequest;
 use tracedecay_temporal_query::snapshot::{
     KernelVersions, TemporalExecutionSnapshot, TemporalWatermarks,
 };

@@ -43,12 +43,13 @@ use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadRequest,
 };
 use tracedecay_session_temporal_store::{SessionTemporalAccess, SessionTemporalCursorKeyProvider};
+use tracedecay_temporal_query::cursor::SessionCursorAuthenticator;
 use tracedecay_temporal_query::cursor::{
     CURSOR_LIFETIME_MICROS, StableSortKey, encode_cursor, verify_cursor,
 };
 use tracedecay_temporal_query::execution::BindingDigest;
-use tracedecay_temporal_query::ports::{SessionCursorAuthenticator, TemporalSnapshotRequest};
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+use tracedecay_temporal_query::snapshot::TemporalSnapshotRequest;
 use tracedecay_temporal_query::snapshot::{
     KernelVersions, TemporalExecutionSnapshot, TemporalWatermarks,
 };

@@ -155,10 +155,6 @@ impl ProfileRegistryMaintenanceRuntime {
             .unwrap_or(location))
     }
 
-    pub fn canonical_project_key(project_root: &Path) -> String {
-        RegisteredGlobalDb::canonical_project_key(project_root)
-    }
-
     #[hotpath::measure(label = "daemon.profile_registry.retire_paths", future = true)]
     pub async fn delete_project_paths(
         &self,

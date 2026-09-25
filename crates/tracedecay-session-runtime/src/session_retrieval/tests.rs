@@ -31,10 +31,10 @@ use tracedecay_store::{
 };
 use tracedecay_temporal_query::context::{CompactContext, ContextBudget};
 use tracedecay_temporal_query::execution::BindingDigest;
-use tracedecay_temporal_query::ports::{TemporalAuthorizedRoot, TemporalSnapshotRequest};
 use tracedecay_temporal_query::ranking::{DiversityLimits, RankedCandidate, RetrieverContribution};
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 use tracedecay_temporal_query::snapshot::{KernelVersions, TemporalWatermarks};
+use tracedecay_temporal_query::snapshot::{TemporalAuthorizedRoot, TemporalSnapshotRequest};
 use tracedecay_temporal_query::{TemporalHydratedResult, TemporalKernelResult};
 use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
 

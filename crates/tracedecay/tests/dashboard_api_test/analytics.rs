@@ -20,7 +20,7 @@ use tracedecay_domain::{
     RejectedArgumentNameV1, RejectedArgumentObservedV1, RejectedArgumentSurfaceV1,
     RetrievalQueryObservedV1,
 };
-use tracedecay_global_db::AnalyticsEventInsert;
+use tracedecay_global_db::{AnalyticsEventInsert, RegisteredGlobalDb};
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
@@ -357,7 +357,7 @@ fn rejected_argument_event(
 }
 
 async fn seed_durable_analytics(runtime: &DashboardTestRuntimeV1, project_root: &Path) {
-    let project_id = DashboardTestRuntimeV1::canonical_project_key(project_root);
+    let project_id = RegisteredGlobalDb::canonical_project_key(project_root);
     let rows = [
         AnalyticsEventInsert {
             hint_category: Some("search".to_string()),
@@ -426,7 +426,7 @@ fn seed_hook_analytics(store_root: &Path) {
 }
 
 async fn seed_durable_recent_window(runtime: &DashboardTestRuntimeV1, project_root: &Path) {
-    let project_id = DashboardTestRuntimeV1::canonical_project_key(project_root);
+    let project_id = RegisteredGlobalDb::canonical_project_key(project_root);
     let mut events: Vec<_> = (0..10_000)
         .map(|offset| analytics_event(&project_id, 1_760_000_000 + offset, "older_noise"))
         .collect();
@@ -442,7 +442,7 @@ async fn seed_durable_recent_window(runtime: &DashboardTestRuntimeV1, project_ro
 }
 
 async fn seed_fallback_analytics(runtime: &DashboardTestRuntimeV1, project_root: &Path) {
-    let project_id = DashboardTestRuntimeV1::canonical_project_key(project_root);
+    let project_id = RegisteredGlobalDb::canonical_project_key(project_root);
     let rows = [
         AnalyticsEventInsert {
             hint_category: Some("search".to_string()),
@@ -943,7 +943,7 @@ fn observatory_counts_canonical_failed_outcomes() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(false).await;
-        let project_id = DashboardTestRuntimeV1::canonical_project_key(&fixture.project_root);
+        let project_id = RegisteredGlobalDb::canonical_project_key(&fixture.project_root);
         fixture
             .host_runtime
             .append_analytics_event_for_test(
@@ -982,7 +982,7 @@ fn observatory_serves_rejected_argument_groups_from_seeded_observations() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(false).await;
-        let project_id = DashboardTestRuntimeV1::canonical_project_key(&fixture.project_root);
+        let project_id = RegisteredGlobalDb::canonical_project_key(&fixture.project_root);
         let timestamp = tracedecay_runtime_core::tracedecay::current_timestamp();
         fixture
             .host_runtime

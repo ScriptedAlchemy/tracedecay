@@ -21,17 +21,21 @@ use tracedecay_domain::{
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine;
 use tracedecay_temporal_query::candidates::{CandidateChannel, CandidatePlan};
+use tracedecay_temporal_query::execution::TemporalPortError;
 use tracedecay_temporal_query::execution::await_controlled;
 use tracedecay_temporal_query::paging::{
     CANDIDATE_READ_BUDGET, CandidateFieldCaps, CandidatePageSink, CandidateReadState, PageLimits,
     PageRequest, PageStatus, TemporalRecordPageSink,
 };
-use tracedecay_temporal_query::ports::{
-    MeasuredTemporalValue, PortFuture, TemporalCandidateFilterV1, TemporalMessageTypeFilterV1,
-    TemporalPortError, TemporalReadPort, TemporalRetrievalScope, TemporalSessionScopeFilterV1,
-    TemporalSnapshotRequest, begin_prepared_candidate_pull, commit_prepared_candidate_pull,
+use tracedecay_temporal_query::paging::{
+    MeasuredTemporalValue, PortFuture, TemporalReadPort, begin_prepared_candidate_pull,
+    commit_prepared_candidate_pull,
 };
 use tracedecay_temporal_query::ranking::RankingCandidate;
+use tracedecay_temporal_query::snapshot::{
+    TemporalCandidateFilterV1, TemporalMessageTypeFilterV1, TemporalRetrievalScope,
+    TemporalSessionScopeFilterV1, TemporalSnapshotRequest,
+};
 use tracedecay_temporal_query::snapshot::{
     TemporalCandidatePopulationCount, TemporalExecutionSnapshot, TemporalPreparedCandidateCohort,
 };

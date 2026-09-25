@@ -32,7 +32,7 @@ use tracedecay_contracts::ResolvedScope;
 use tracedecay_contracts::retrieval::{
     AffectedTestAttributionV1, AffectedTestsRequest, RetrievalPortContext,
 };
-use tracedecay_temporal_query::ports::InMemoryCursorAuthenticator;
+use tracedecay_temporal_query::cursor::InMemoryCursorAuthenticator;
 
 struct AttributionFixture {
     calls: AtomicUsize,

@@ -25,7 +25,7 @@ use tracedecay_domain::{
 };
 use tracedecay_temporal_query::TemporalCandidateExport;
 use tracedecay_temporal_query::execution::ExecutionControl;
-use tracedecay_temporal_query::ports::TemporalPortError;
+use tracedecay_temporal_query::execution::TemporalPortError;
 
 use super::ports::{RetrievalPortError, contract_error};
 

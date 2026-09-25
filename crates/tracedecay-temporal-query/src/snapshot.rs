@@ -10,13 +10,20 @@ use tracedecay_domain::{
 };
 
 use crate::candidates::CandidateChannel;
-use crate::execution::{BindingDigest, ExecutionLimitTighteningError, ExecutionLimits};
-use crate::ports::validate_label;
-use crate::ports::{
-    MeasuredTemporalValue, TemporalPortError, TemporalRetrievalScope, TemporalSnapshotRequest,
+use crate::execution::{
+    BindingDigest, ExecutionLimitTighteningError, ExecutionLimits, TemporalPortError,
 };
+use crate::paging::MeasuredTemporalValue;
 use crate::ranking::RankingCandidate;
 use crate::resolution::types::ValidatedAuthorization;
+
+mod request;
+
+use request::validate_label;
+pub use request::{
+    TemporalAuthorizedRoot, TemporalCandidateFilterV1, TemporalMessageTypeFilterV1,
+    TemporalRetrievalScope, TemporalSessionScopeFilterV1, TemporalSnapshotRequest,
+};
 
 pub const MAX_TEMPORAL_PARTICIPANTS: usize = SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS;
 pub const MAX_TEMPORAL_PARTICIPANT_MANIFEST_BYTES: usize =

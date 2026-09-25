@@ -16,7 +16,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
-use tracedecay_global_db::AnalyticsEventQuery;
+use tracedecay_global_db::{AnalyticsEventQuery, RegisteredGlobalDb};
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::storage::{StorageMode, default_profile_sharded_layout};
 
@@ -464,7 +464,7 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
         replays.len(),
         "every native callback's timing row must bridge into analytics_events"
     );
-    let canonical_project = HostAdmissionTestRuntimeV1::canonical_project_key(&project_root);
+    let canonical_project = RegisteredGlobalDb::canonical_project_key(&project_root);
     for replay in &replays {
         let provider = format!("hook_{}", replay.agent);
         let event = events

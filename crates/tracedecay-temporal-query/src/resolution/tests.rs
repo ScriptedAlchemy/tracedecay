@@ -8,7 +8,6 @@ use tracedecay_domain::{
 };
 
 use super::super::execution::ExecutionControl;
-use super::super::ports::{ReadBudgetAccounting, TemporalPortError};
 use super::resolver::{
     resolve_temporal, resolve_temporal_controlled, resolve_temporal_with_checkpoints,
 };
@@ -20,6 +19,7 @@ use super::types::{
     ResolutionAssertion, ResolutionCheckpoint, ResolutionEvidence, ResolutionInputError,
     ResolutionLineageEdgeKind, ResolutionOccurrence, ValidatedAuthorization,
 };
+use crate::execution::{ReadBudgetAccounting, TemporalPortError};
 
 fn occurrence_id(byte: char) -> MessageOccurrenceIdV1 {
     MessageOccurrenceIdV1::new(format!("sha256:{}", byte.to_string().repeat(64)))

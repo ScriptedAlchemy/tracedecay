@@ -7,7 +7,7 @@ use tracedecay_domain::{
 };
 
 use super::super::execution::ExecutionControl;
-use super::super::ports::TemporalPortError;
+use crate::execution::TemporalPortError;
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 pub enum SummarySourceState {

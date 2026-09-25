@@ -6,7 +6,7 @@ use thiserror::Error;
 use tracedecay_domain::SignedCursorKeyRefV1;
 use zeroize::Zeroizing;
 
-pub(super) const MAX_CURSOR_SECRET_BYTES: usize = 256;
+pub(crate) const MAX_CURSOR_SECRET_BYTES: usize = 256;
 const CURSOR_KEY_DERIVATION_DOMAIN_V1: &[u8] = b"tracedecay.cursor-key-derivation.v1\0";
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]

@@ -21,7 +21,7 @@ use tracedecay_store::{
     SessionTemporalSnapshotRequestV1, SessionTemporalSnapshotV1,
 };
 use tracedecay_temporal_query::execution::ExecutionControl;
-use tracedecay_temporal_query::ports::TemporalPortError;
+use tracedecay_temporal_query::execution::TemporalPortError;
 
 use super::query::{decode_generation_i64, now_micros, storage, storage_message};
 use super::relations::{SessionRelationError, SummarySourceRef};

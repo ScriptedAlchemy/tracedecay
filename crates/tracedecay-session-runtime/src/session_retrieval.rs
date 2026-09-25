@@ -35,8 +35,8 @@ use tracedecay_session_temporal_store::{
 use tracedecay_sessions::runtime::SessionMessageSearchResult;
 use tracedecay_temporal_query::context::{ContextError, TokenPolicy, VersionedTokenEstimator};
 use tracedecay_temporal_query::execution::ExecutionLimits;
+use tracedecay_temporal_query::execution::TemporalPortError;
 use tracedecay_temporal_query::hydration::HydrationError;
-use tracedecay_temporal_query::ports::TemporalPortError;
 use tracedecay_temporal_query::ranking::RankedCandidate;
 use tracedecay_temporal_query::snapshot::{
     TemporalCandidatePopulationCount, TemporalExecutionSnapshot,

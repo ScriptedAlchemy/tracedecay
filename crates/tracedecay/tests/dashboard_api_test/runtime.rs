@@ -186,10 +186,6 @@ impl DashboardTestRuntimeV1 {
         })
     }
 
-    pub(crate) fn canonical_project_key(project_path: &Path) -> String {
-        RegisteredGlobalDb::canonical_project_key(project_path)
-    }
-
     pub(crate) fn profile_root(&self) -> &Path {
         &self.profile_root
     }
