@@ -170,31 +170,17 @@ impl CodexAppServerLaunchReceipt {
 }
 
 impl CodexAppServerSummaryConfig {
-    /// Tuning for an executable the caller resolved through configuration
-    /// (`lcm.summarizer_executables.v1`). Only the model and timeout knobs
-    /// come from the environment; the binary is never looked up on `PATH`.
+    /// Default tuning for an executable the caller resolved through
+    /// configuration (`lcm.summarizer_executables.v1`); the caller applies
+    /// the model and timeout that setting configures. Nothing here reads
+    /// `PATH` or the environment.
     pub fn for_executable(codex_bin: &Path) -> Self {
-        let mut config = Self {
+        Self {
             codex_bin: codex_bin.to_string_lossy().into_owned(),
             model: Some("gpt-5.6-sol".to_owned()),
             timeout: Duration::from_secs(90),
-        };
-        if let Some(model) = non_empty_env("TRACEDECAY_CODEX_SUMMARY_MODEL") {
-            config.model = Some(model);
         }
-        if let Some(secs) = non_empty_env("TRACEDECAY_CODEX_SUMMARY_TIMEOUT_SECS")
-            .and_then(|secs| secs.parse::<u64>().ok())
-        {
-            config.timeout = Duration::from_secs(secs.clamp(5, 300));
-        }
-        config
     }
-}
-
-fn non_empty_env(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
 }
 
 fn configured_model(config: &CodexAppServerSummaryConfig) -> Option<&str> {

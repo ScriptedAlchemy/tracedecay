@@ -37,7 +37,7 @@ use tracedecay_contracts::{
     RequestId, ResolvedScope, RetrievalEvidence, RetryDirective, SafeDiagnostic, TemporalState,
 };
 use tracedecay_domain::{CodeGenerationId, CommitId, ComponentVersion, UtcMicros};
-use tracedecay_lsp::TYPESCRIPT_INSTALL_COMMAND;
+use tracedecay_lsp::SearchedTsconfig;
 use tracedecay_tool_catalog::SortContractId;
 use url::Url;
 
@@ -50,7 +50,8 @@ use super::symbol_graph::{CanonicalSymbolGraphAdapter, SymbolGraphCursorPort};
 use crate::ProjectSourceAccessSnapshot;
 use crate::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
 use crate::diagnostics_producer::{
-    CompilerProducerRunV1, TypeScriptDiagnosticsAvailabilityV1, typescript_diagnostics_availability,
+    CompilerProducerRunV1, TypeScriptDiagnosticsAvailabilityV1, TypeScriptProjectCheckV1,
+    typescript_diagnostics_availability,
 };
 use crate::operation_stream::{
     CanonicalManagedTestRunReader, ManagedTestRunCurrentScope, ManagedTestRunReadOutcome,
@@ -949,6 +950,12 @@ async fn dispatch_admitted(
                 .extended
                 .diagnostics(retrieval_context(&context, &operation), &request)
                 .await;
+            let file = match &request.scope {
+                DiagnosticsPrimitiveScope::File(path) => Some(Path::new(path.as_str())),
+                DiagnosticsPrimitiveScope::Workspace | DiagnosticsPrimitiveScope::Package(_) => {
+                    None
+                }
+            };
             // A diagnostics read that reached no publishing authority has no
             // evidence to report. Returning the evidence envelope anyway made
             // the surface answer `success` with an empty page, indistinguishable
@@ -963,7 +970,20 @@ async fn dispatch_admitted(
                     &operation,
                     evidence.omissions.first().map(|omission| omission.reason),
                     &runtime.admitted_project_root,
+                    file,
                 );
+            }
+            // Another package's publication is no evidence about a file whose
+            // own tsconfig was never checked.
+            if let (Some(file), RetrievalPortOutcome::Completed(evidence)) = (file, &outcome)
+                && evidence
+                    .payload
+                    .as_ref()
+                    .is_some_and(|result| result.diagnostics.is_empty())
+                && let Some(unchecked) =
+                    unchecked_owner_problem(&runtime.admitted_project_root, file)?
+            {
+                return problem(&context, &operation, unchecked);
             }
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
@@ -1892,22 +1912,25 @@ fn diagnostics_unavailable_problem<T>(
     operation: &ApplicationOperation,
     reason: Option<OmissionReason>,
     project_root: &Path,
+    file: Option<&Path>,
 ) -> Result<ApplicationResult<T>, ApplicationContractError> {
     problem(
         context,
         operation,
-        diagnostics_absence_problem(reason, project_root)?,
+        diagnostics_absence_problem(reason, project_root, file)?,
     )
 }
 
 /// Maps the diagnostic authority's own omission reason onto the typed state a
-/// caller can act on. A missing publication is described through the
-/// TypeScript producer's real state for `project_root`, so every refusal
-/// carries the route that changes it; every other absence is worth retrying
-/// once a producer publishes.
+/// caller can act on. A missing publication is described through the real
+/// state of the TypeScript project that owns `file` (or, for a workspace read,
+/// of the project's TypeScript projects), so every refusal carries the route
+/// that changes it; every other absence is worth retrying once a producer
+/// publishes.
 fn diagnostics_absence_problem(
     reason: Option<OmissionReason>,
     project_root: &Path,
+    file: Option<&Path>,
 ) -> Result<ApplicationProblem, ApplicationContractError> {
     let (code, message) = match reason {
         Some(OmissionReason::Stale) => (
@@ -1916,7 +1939,7 @@ fn diagnostics_absence_problem(
                 .to_owned(),
         ),
         Some(OmissionReason::Unsupported) => {
-            return unpublished_diagnostics_problem(project_root);
+            return unpublished_diagnostics_problem(project_root, file);
         }
         Some(OmissionReason::Redacted) => (
             "application.diagnostics.redacted",
@@ -1941,31 +1964,23 @@ fn diagnostics_absence_problem(
 /// whole answer.
 fn unpublished_diagnostics_problem(
     project_root: &Path,
+    file: Option<&Path>,
 ) -> Result<ApplicationProblem, ApplicationContractError> {
-    let problem = match typescript_diagnostics_availability(project_root) {
-        TypeScriptDiagnosticsAvailabilityV1::NoTsconfig => ApplicationProblem::Unsupported {
-            diagnostic: SafeDiagnostic::new(
-                "application.diagnostics.unsupported",
-                "No diagnostic producer is configured for this project: it has no tsconfig.json, so \
-                 no compiler runs automatically. Run the project's own build or type check and \
-                 publish its output with tracedecay_diagnose (`cargo_output`), then read again.",
-            )?,
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::CorrectRequest],
-        },
-        TypeScriptDiagnosticsAvailabilityV1::CompilerMissing => ApplicationProblem::Unsupported {
-            diagnostic: SafeDiagnostic::new(
-                "application.diagnostics.producer-missing",
-                format!(
-                    "tsconfig.json was found but the project has no TypeScript compiler \
-                     (node_modules/.bin/tsc). Run `{TYPESCRIPT_INSTALL_COMMAND}` in the project, \
-                     then reopen it and read again."
-                ),
-            )?,
-            retry: RetryDirective::AfterRevalidate,
-            legal_actions: vec![LegalAction::Refresh],
-        },
-        TypeScriptDiagnosticsAvailabilityV1::Configured { compiler, last_run } => {
+    let problem = match typescript_diagnostics_availability(project_root, file) {
+        TypeScriptDiagnosticsAvailabilityV1::NoTsconfig { searched } => {
+            no_tsconfig_problem(file, &searched)?
+        }
+        TypeScriptDiagnosticsAvailabilityV1::CompilerMissing {
+            tsconfig,
+            install_command,
+        } => compiler_missing_problem(project_root, &tsconfig, install_command)?,
+        TypeScriptDiagnosticsAvailabilityV1::Configured {
+            check: Some(TypeScriptProjectCheckV1::Failed { reason }),
+            ..
+        } => producer_failed_problem(&reason)?,
+        TypeScriptDiagnosticsAvailabilityV1::Configured {
+            compiler, last_run, ..
+        } => {
             let compiler = compiler
                 .strip_prefix(project_root)
                 .unwrap_or(&compiler)
@@ -2004,17 +2019,7 @@ fn unpublished_diagnostics_problem(
                     }
                 }
                 Some(CompilerProducerRunV1::CompilerFailed { reason }) => {
-                    ApplicationProblem::Unsupported {
-                        diagnostic: SafeDiagnostic::new(
-                            "application.diagnostics.producer-failed",
-                            safe_problem_message(&format!(
-                                "The TypeScript producer could not check the project: {reason}. Fix the \
-                                 compiler setup, then reopen the project and read again."
-                            )),
-                        )?,
-                        retry: RetryDirective::AfterRevalidate,
-                        legal_actions: vec![LegalAction::Refresh],
-                    }
+                    producer_failed_problem(&reason)?
                 }
                 Some(CompilerProducerRunV1::PublicationFailed { reason }) => {
                     ApplicationProblem::unavailable(SafeDiagnostic::new(
@@ -2030,6 +2035,119 @@ fn unpublished_diagnostics_problem(
     };
     problem.validate()?;
     Ok(problem)
+}
+
+/// The typed state for a file whose read found a publication with nothing on
+/// it, when tsc never checked the file: its owning tsconfig has no compiler
+/// installed or failed its last check, or it is TypeScript no tsconfig owns.
+/// `None` when the empty page is a producer's own clean answer.
+fn unchecked_owner_problem(
+    project_root: &Path,
+    file: &Path,
+) -> Result<Option<ApplicationProblem>, ApplicationContractError> {
+    let problem = match typescript_diagnostics_availability(project_root, Some(file)) {
+        TypeScriptDiagnosticsAvailabilityV1::CompilerMissing {
+            tsconfig,
+            install_command,
+        } => compiler_missing_problem(project_root, &tsconfig, install_command)?,
+        TypeScriptDiagnosticsAvailabilityV1::Configured {
+            check: Some(TypeScriptProjectCheckV1::Failed { reason }),
+            ..
+        } => producer_failed_problem(&reason)?,
+        // Only tsc checks TypeScript sources, so no other producer's snapshot
+        // speaks for an unowned one.
+        TypeScriptDiagnosticsAvailabilityV1::NoTsconfig { searched }
+            if file
+                .extension()
+                .is_some_and(|ext| ["ts", "tsx", "mts", "cts"].iter().any(|ts| ext == *ts)) =>
+        {
+            no_tsconfig_problem(Some(file), &searched)?
+        }
+        TypeScriptDiagnosticsAvailabilityV1::Configured { .. }
+        | TypeScriptDiagnosticsAvailabilityV1::NoTsconfig { .. } => return Ok(None),
+    };
+    problem.validate()?;
+    Ok(Some(problem))
+}
+
+/// Nothing runs a compiler automatically, so the route is publishing the
+/// project's own check through `tracedecay_diagnose`. A file read names every
+/// tsconfig location the owner search checked.
+fn no_tsconfig_problem(
+    file: Option<&Path>,
+    searched: &[SearchedTsconfig],
+) -> Result<ApplicationProblem, ApplicationContractError> {
+    let reason = match file {
+        None => "no tsconfig.json was found under the project root".to_owned(),
+        Some(file) if searched.is_empty() => {
+            format!("`{}` is outside the project root", file.display())
+        }
+        Some(file) => {
+            let searched = searched
+                .iter()
+                .map(|candidate| {
+                    let path = candidate.path.display();
+                    if candidate.present {
+                        format!("{path} (does not include it)")
+                    } else {
+                        path.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "no tsconfig owns `{}` (searched {searched}, and their project references)",
+                file.display()
+            )
+        }
+    };
+    Ok(ApplicationProblem::Unsupported {
+        diagnostic: SafeDiagnostic::new(
+            "application.diagnostics.unsupported",
+            safe_problem_message(&format!(
+                "No diagnostic producer is configured for this scope: {reason}, so no compiler \
+                 runs automatically. Run the project's own build or type check and publish its \
+                 output with tracedecay_diagnose (`cargo_output`), then read again."
+            )),
+        )?,
+        retry: RetryDirective::Never,
+        legal_actions: vec![LegalAction::CorrectRequest],
+    })
+}
+
+fn compiler_missing_problem(
+    project_root: &Path,
+    tsconfig: &Path,
+    install_command: &str,
+) -> Result<ApplicationProblem, ApplicationContractError> {
+    let tsconfig = tsconfig.strip_prefix(project_root).unwrap_or(tsconfig);
+    Ok(ApplicationProblem::Unsupported {
+        diagnostic: SafeDiagnostic::new(
+            "application.diagnostics.producer-missing",
+            safe_problem_message(&format!(
+                "`{}` owns this scope but no TypeScript compiler (node_modules/.bin/tsc) is \
+                 installed in its package or the workspace root. Run `{install_command}` at the \
+                 workspace root, then reopen the project and read again.",
+                tsconfig.display()
+            )),
+        )?,
+        retry: RetryDirective::AfterRevalidate,
+        legal_actions: vec![LegalAction::Refresh],
+    })
+}
+
+fn producer_failed_problem(reason: &str) -> Result<ApplicationProblem, ApplicationContractError> {
+    Ok(ApplicationProblem::Unsupported {
+        diagnostic: SafeDiagnostic::new(
+            "application.diagnostics.producer-failed",
+            safe_problem_message(&format!(
+                "The TypeScript producer could not check the project: {reason}. Fix the compiler \
+                 setup, then reopen the project and read again."
+            )),
+        )?,
+        retry: RetryDirective::AfterRevalidate,
+        legal_actions: vec![LegalAction::Refresh],
+    })
 }
 
 /// Folds control characters out of producer-reported text and cuts it to the
@@ -2057,11 +2175,13 @@ fn contract_problem<T>(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::{
         ExtendedPrimitivePort, MAX_SAFE_DIAGNOSTIC_MESSAGE_BYTES, OmissionReason,
         PrimitiveCapacity, PrimitiveDispatch, PrimitiveRequest, StorageStatusPrimitiveRequest,
-        TYPESCRIPT_INSTALL_COMMAND, diagnostics_absence_problem, pre_admission_problem,
-        safe_problem_message, session_structural_refusal_problem, symbol_temporal_state,
+        diagnostics_absence_problem, pre_admission_problem, safe_problem_message,
+        session_structural_refusal_problem, symbol_temporal_state, unchecked_owner_problem,
         unpublished_diagnostics_problem, valid_owned_primitive_request, validate_admitted_root_uri,
     };
     use tracedecay_contracts::retrieval::{
@@ -2177,7 +2297,7 @@ mod tests {
                 "application.diagnostics.unsupported",
             ),
         ] {
-            let problem = diagnostics_absence_problem(reason, project.path())
+            let problem = diagnostics_absence_problem(reason, project.path(), None)
                 .expect("typed diagnostics absence");
             assert_eq!(problem.kind(), kind, "reason {reason:?}");
             assert_eq!(
@@ -2199,40 +2319,71 @@ mod tests {
     #[test]
     fn unpublished_diagnostics_name_the_producer_route() {
         let project = tempfile::tempdir().expect("project root");
+        let root = project.path();
+        let file = Path::new("packages/app/src/index.ts");
 
-        let no_tsconfig = unpublished_diagnostics_problem(project.path()).expect("no tsconfig");
-        assert_eq!(no_tsconfig.kind(), ApplicationProblemKind::Unsupported);
-        assert_eq!(
-            no_tsconfig.legal_actions(),
-            [LegalAction::CorrectRequest],
-            "a project without an automatic producer is routed to tracedecay_diagnose"
-        );
-        let message = no_tsconfig
-            .diagnostic()
-            .expect("diagnostic")
-            .message
-            .clone();
-        assert!(message.contains("tracedecay_diagnose"), "{message}");
+        for scope in [None, Some(file)] {
+            let no_tsconfig = unpublished_diagnostics_problem(root, scope).expect("no tsconfig");
+            assert_eq!(no_tsconfig.kind(), ApplicationProblemKind::Unsupported);
+            assert_eq!(
+                no_tsconfig.legal_actions(),
+                [LegalAction::CorrectRequest],
+                "a project without an automatic producer is routed to tracedecay_diagnose"
+            );
+            let message = no_tsconfig
+                .diagnostic()
+                .expect("diagnostic")
+                .message
+                .clone();
+            assert!(message.contains("tracedecay_diagnose"), "{message}");
+        }
 
-        std::fs::write(project.path().join("tsconfig.json"), "{}").expect("tsconfig");
-        let missing = unpublished_diagnostics_problem(project.path()).expect("missing compiler");
-        assert_eq!(missing.kind(), ApplicationProblemKind::Unsupported);
-        assert_eq!(missing.legal_actions(), [LegalAction::Refresh]);
-        assert_eq!(
-            missing.diagnostic().expect("diagnostic").code,
-            "application.diagnostics.producer-missing"
-        );
-        let message = missing.diagnostic().expect("diagnostic").message.clone();
+        // The issue #2025 layout: a package tsconfig extending a root base, no
+        // root tsconfig.json, and a pnpm workspace that is not installed.
+        std::fs::create_dir_all(root.join("packages/app/src")).expect("package");
+        std::fs::write(
+            root.join("tsconfig.base.json"),
+            "{ \"compilerOptions\": {} }",
+        )
+        .expect("base");
+        std::fs::write(
+            root.join("packages/app/tsconfig.json"),
+            "{ \"extends\": \"../../tsconfig.base.json\", \"include\": [\"src\"] }",
+        )
+        .expect("package tsconfig");
+        std::fs::write(root.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").expect("lock");
+        for scope in [None, Some(file)] {
+            let missing = unpublished_diagnostics_problem(root, scope).expect("missing compiler");
+            assert_eq!(missing.kind(), ApplicationProblemKind::Unsupported);
+            assert_eq!(missing.legal_actions(), [LegalAction::Refresh]);
+            assert_eq!(
+                missing.diagnostic().expect("diagnostic").code,
+                "application.diagnostics.producer-missing"
+            );
+            let message = missing.diagnostic().expect("diagnostic").message.clone();
+            assert!(
+                message.contains("`pnpm install`")
+                    && message.contains("packages/app/tsconfig.json"),
+                "the refusal names the owning tsconfig and the workspace install: {message}"
+            );
+        }
         assert!(
-            message.contains(TYPESCRIPT_INSTALL_COMMAND),
-            "the refusal carries the exact setup command: {message}"
+            unchecked_owner_problem(root, file)
+                .expect("owner state")
+                .is_some(),
+            "an empty page is no evidence for a file whose compiler is missing"
         );
 
-        let bin = project.path().join("node_modules/.bin");
+        let bin = root.join("node_modules/.bin");
         std::fs::create_dir_all(&bin).expect("node_modules/.bin");
         std::fs::write(bin.join(if cfg!(windows) { "tsc.cmd" } else { "tsc" }), "")
-            .expect("local tsc");
-        let pending = unpublished_diagnostics_problem(project.path()).expect("pending");
+            .expect("workspace tsc");
+        assert!(
+            unchecked_owner_problem(root, file)
+                .expect("owner state")
+                .is_none()
+        );
+        let pending = unpublished_diagnostics_problem(root, Some(file)).expect("pending");
         assert_eq!(pending.kind(), ApplicationProblemKind::Unavailable);
         assert_eq!(pending.legal_actions(), [LegalAction::Retry]);
         assert_eq!(

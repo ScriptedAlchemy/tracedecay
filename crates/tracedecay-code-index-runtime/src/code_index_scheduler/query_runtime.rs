@@ -867,6 +867,7 @@ where
             request,
             query_view,
             lanes,
+            &lexical_routes.anchor_tiers(),
             page_size,
             input.cursor.as_ref(),
         ),

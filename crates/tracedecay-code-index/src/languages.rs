@@ -222,13 +222,18 @@ impl StaticLanguageRegistry {
             // TypeScript v7 records `export … from` forwarding as public
             // import evidence and retains explicitly imported ubiquitous names
             // as cross-file candidates, so barrels and workspace packages bind.
+            // TypeScript v8 records same-module `export { a as b }` clauses as
+            // forwarding evidence, and its per-file pass no longer binds calls
+            // to test titles or to declarations outside the scope that shadows
+            // an import.
             // The C-comment docstring languages moved one revision when a
             // docstring stopped absorbing trailing or blank-line-detached
             // comments and `///` lost its stray `/`; QBasic dialects moved when
             // CONST names stopped losing their text before an underscore.
             let extractor_revision = match language.as_str() {
                 "rust" => 13,
-                "protobuf" | "typescript" => 7,
+                "typescript" => 8,
+                "protobuf" => 7,
                 "sql" => 6,
                 "c" | "cpp" | "metal" | "objc" | "go" | "glsl" | "pascal" | "qbasic"
                 | "quickbasic" => 6,

@@ -62,7 +62,9 @@ never a doubled `tracedecay`.
   generated tool definitions the Hermes bridge uses. The extension registers
   one Pi tool per catalog entry; mutating tools need operator approval and
   refuse an explicit project selector. Pi's `session_start` and `agent_end`
-  events reach `tracedecay hook-pi-event`.
+  events reach `tracedecay hook-pi-event`, record analytics under the `pi`
+  host, and land that session's `~/.pi/agent/sessions` transcript (or the
+  `PI_CODING_AGENT_DIR` one) through the Pi transcript source.
 - `README-claude.md`, `README-codex.md`, `README-cursor.md`, `README-kimi.md`:
   host README files, deployed as `README.md`.
 - `README-opencode.md`: OpenCode host README. It is source documentation;

@@ -39,7 +39,10 @@ use probe::{
     DaemonProtocolState, DaemonSocketState, daemon_readiness_probe, daemon_socket_state,
     daemon_transport_display,
 };
-use runner::{ServicePlatform, ServiceRunner, launchd_service_state};
+use runner::{
+    ServiceManagerUnreachable, ServicePlatform, ServiceRunner, ServiceStateError,
+    launchd_service_state,
+};
 use unit_file::{
     launchd_plist_env_value, read_service_unit, remove_service_unit, service_unit_exists,
     service_unit_path, socket_path_from_unit_text, write_service_unit,
@@ -1558,15 +1561,19 @@ pub fn service_status(socket_path: &Path, expected_version: &str) -> String {
         |path| path.display().to_string(),
     );
     let runner = ServiceRunner::current();
-    let state = runner.as_ref().map_or_else(
-        |error| format!("unavailable: {error}"),
-        |runner| {
-            runner.service_state(&transport_path).map_or_else(
-                |error| format!("unavailable: {error}"),
-                |state| format!("{state:?}"),
-            )
-        },
-    );
+    let service_manager = match runner
+        .as_ref()
+        .map(|runner| runner.observe_service_state(&transport_path))
+    {
+        Ok(Ok(state)) => format!("{state:?}"),
+        Ok(Err(ServiceStateError::ManagerUnreachable(unreachable))) => format!(
+            "unreachable from this shell ({}): {unreachable}",
+            ServiceManagerUnreachable::REMEDY
+        ),
+        Ok(Err(ServiceStateError::Failed(error))) => format!("unavailable: {error}"),
+        Err(error) => format!("unavailable: {error}"),
+    };
+    let state = daemon_headline(socket_state, &process);
     let detail = runner
         .as_ref()
         .ok()
@@ -1577,6 +1584,23 @@ pub fn service_status(socket_path: &Path, expected_version: &str) -> String {
     let transport_kind = if cfg!(unix) { "socket" } else { "endpoint" };
     let transport = daemon_transport_display(&transport_path);
     format!(
-        "service: {service}\nstate: {state}\n{transport_kind}: {transport} ({socket_state})\nprotocol: {process:?}\n{detail}logs: {logs}\n",
+        "state: {state}\nservice: {service}\nservice manager: {service_manager}\n{transport_kind}: {transport} ({socket_state})\nprotocol: {process:?}\n{detail}logs: {logs}\n",
     )
+}
+
+/// The daemon's own state, from the one socket probe status already made.
+/// The service manager's view is secondary: it can be unreachable from the
+/// calling shell while the daemon serves.
+fn daemon_headline(socket: DaemonSocketState, process: &DaemonProcessProofV1) -> &'static str {
+    match (socket, process) {
+        (DaemonSocketState::Connectable, DaemonProcessProofV1::Ready) => "running",
+        (DaemonSocketState::Connectable, DaemonProcessProofV1::VersionMismatch { .. }) => {
+            "running a different build"
+        }
+        (DaemonSocketState::Connectable, DaemonProcessProofV1::Unproven { .. }) => "not ready",
+        (DaemonSocketState::Missing | DaemonSocketState::Stale, _) => "stopped",
+        #[cfg(unix)]
+        (DaemonSocketState::PresentNotAccessible, _) => "unknown",
+        (DaemonSocketState::PresentUnreachable, _) => "unknown",
+    }
 }

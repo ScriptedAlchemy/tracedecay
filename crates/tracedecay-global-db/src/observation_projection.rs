@@ -1,4 +1,6 @@
 mod apply;
+#[cfg(test)]
+mod rearm_tests;
 mod rebuild;
 mod schema;
 mod source_transition;
@@ -20,7 +22,8 @@ pub(super) use schema::{
     ensure_observation_projection_performance_indexes, ensure_observation_projection_schema,
 };
 pub(crate) use source_transition::verify_native_source_supersession;
-pub(crate) use state::rearm_queued_projection_retries;
+#[cfg(test)]
+pub(crate) use state::RearmedProjectionRetries;
 #[cfg(test)]
 pub(super) use state::verify_projection_rows;
 pub(super) use state::{
@@ -28,3 +31,4 @@ pub(super) use state::{
     read_projection_rows_batch, resolve_output_projection, stored_output_digest,
     stored_row_matches, verify_projection_rows_from_records,
 };
+pub(crate) use state::{REARM_PROJECTION_RETRY_BATCH_ROWS, rearm_queued_projection_retries};

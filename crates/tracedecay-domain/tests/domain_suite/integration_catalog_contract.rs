@@ -9,7 +9,7 @@ use tracedecay_domain::{
 };
 
 const GOLDEN_CATALOG: &[u8] = include_bytes!("../fixtures/integration_catalog_v1.json");
-const HOST_EVENT_FIXTURES: [(&str, &str); 5] = [
+const HOST_EVENT_FIXTURES: [(&str, &str); 6] = [
     (
         "claude",
         include_str!("../../../../tests/fixtures/host_events/claude/baseline.json"),
@@ -29,6 +29,10 @@ const HOST_EVENT_FIXTURES: [(&str, &str); 5] = [
     (
         "kiro",
         include_str!("../../../../tests/fixtures/host_events/kiro/baseline.json"),
+    ),
+    (
+        "pi",
+        include_str!("../../../../tests/fixtures/host_events/pi/baseline.json"),
     ),
 ];
 
@@ -184,7 +188,7 @@ fn stable_direct_host_integration_ids_match_provider_ids() {
         .collect();
     assert_eq!(
         encoded,
-        ["claude", "codex", "cursor", "hermes", "kiro"].map(Value::from)
+        ["claude", "codex", "cursor", "hermes", "kiro", "pi"].map(Value::from)
     );
     for host in HostIntegrationIdV1::ALL {
         assert_eq!(HostIntegrationIdV1::from_wire(host.as_wire()), Some(host));
@@ -212,6 +216,10 @@ fn stock_host_kinds_project_only_fixture_backed_observation_integrations() {
     assert_eq!(
         HostKindV1::Kiro.fixture_backed_observation_integration_id(),
         Some(HostIntegrationIdV1::Kiro)
+    );
+    assert_eq!(
+        HostKindV1::Pi.fixture_backed_observation_integration_id(),
+        Some(HostIntegrationIdV1::Pi)
     );
     for host in [
         HostKindV1::CursorCloud,

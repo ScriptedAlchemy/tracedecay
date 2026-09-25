@@ -281,6 +281,33 @@ async fn coalesced_publication_failure_preserves_the_scheduler_error_family() {
     let registry = Arc::new(mount(fixture.path(), &store, 1).await);
     let baseline = latest(&registry, fixture.path()).await;
     let request = request_for(&baseline, "pkg");
+    // A background pass that reaches the faulted store resets it, deleting
+    // the injected directory, so the owner refuses the missing publication
+    // as `StaleGeneration`. The park turns every later wake away before it
+    // queues for the permit. A pass already running holds the build gate
+    // until it ends, so a refused admission through that gate proves none
+    // remains.
+    assert!(
+        registry
+            .plant_terminal_publication_authority_park_for_test(
+                fixture.path(),
+                "only the admission owner may observe the injected pointer fault",
+            )
+            .await
+    );
+    let mut unverified = request.clone();
+    unverified.verified_imports[0].imported_name = Some("FabricatedWidget".to_owned());
+    assert_refusal(
+        index_dependency(
+            &registry,
+            fixture.path(),
+            unverified,
+            StaticControl::active(),
+        )
+        .await
+        .expect_err("fabricated import evidence is refused behind the build gate"),
+        CodeIndexIgnoredDependencyRefusalV1::UnverifiedImportEvidence,
+    );
     let idle_admission = hold_idle_background_admission(&registry).await;
     registry.clear_pending_wake_for_scope(&request.scope).await;
     let hold = SchedulerHold::acquire(&registry, fixture.path()).await;

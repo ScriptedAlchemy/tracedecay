@@ -10,7 +10,8 @@
 //! `index` files, tsconfig `paths`/`baseUrl` aliases (with `extends`),
 //! workspace packages by their manifest `name` (`exports`, `main`, `module`,
 //! `types`, `source`, then the conventional `index`/`src/index`), and
-//! `export … from` chains through barrels.
+//! `export … from` chains through barrels, including same-module
+//! `export { a as b }` clauses that forward a declaration or a local import.
 //!
 //! A specifier that matches no alias and no workspace package is an external
 //! dependency and binds nothing. A specifier that names a project module but
@@ -27,7 +28,9 @@ use tracedecay_code_extraction::ImportNamespaceV1;
 use tracedecay_domain::{RelationEdgeKindV1, blank_json_comments};
 
 use super::FileGenerationArtifactsV1;
-use crate::chunks::{CodeIndexImportEvidenceV1, relation_target_kind_is_compatible};
+use crate::chunks::{
+    CodeIndexImportEvidenceV1, is_typescript_family, relation_target_kind_is_compatible,
+};
 use crate::lineage::LineageSymbolRecordV1;
 
 /// Extension order tried for an extensionless specifier, matching `tsc` and
@@ -42,14 +45,6 @@ const OUTPUT_DIRS: [&str; 7] = ["dist", "lib", "build", "out", "es", "esm", "cjs
 /// Deepest `export … from` chain followed before a barrel cycle or an
 /// unusually deep forwarding tree is treated as unresolved.
 const MAX_REEXPORT_DEPTH: usize = 16;
-
-/// Languages whose files import through TypeScript/JavaScript module syntax.
-pub(super) fn is_typescript_family(language: &str) -> bool {
-    matches!(
-        language,
-        "typescript" | "tsx" | "javascript" | "astro" | "svelte"
-    )
-}
 
 /// One resolved import binding.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -278,42 +273,51 @@ impl TypeScriptModuleIndexV1 {
         if depth > MAX_REEXPORT_DEPTH || !visited.insert((file_index, name.to_owned())) {
             return;
         }
-        let defined = by_simple_name
-            .get(name)
-            .into_iter()
-            .flatten()
-            .filter(|(index, symbol)| {
-                *index == file_index && relation_target_kind_is_compatible(kind, &symbol.kind)
-            })
-            .copied()
-            .collect::<Vec<_>>();
-        if !defined.is_empty() {
-            found.extend(defined);
-            return;
-        }
         let file = files[file_index].as_ref();
-        for binding in file
-            .artifacts
-            .imports
-            .iter()
-            .filter(|binding| binding.is_public)
-        {
+        let public = || file.artifacts.imports.iter().filter(|row| row.is_public);
+        // An export clause naming `name` is the export itself; a same-named
+        // declaration beside `export { a as name }` is a different binding.
+        // Either one shadows whatever `export *` forwards.
+        let mut forwarding = public()
+            .filter(|row| !row.is_glob && row.local_name.as_deref() == Some(name))
+            .collect::<Vec<_>>();
+        if forwarding.is_empty() {
+            let defined = defined_symbols(by_simple_name, file_index, name, kind);
+            if !defined.is_empty() {
+                found.extend(defined);
+                return;
+            }
+            forwarding.extend(public().filter(|row| row.is_glob));
+        }
+        for binding in forwarding {
             let forwarded = if binding.is_glob {
                 Some(name)
-            } else if binding.local_name.as_deref() == Some(name) {
+            } else {
                 binding
                     .imported_name
                     .as_deref()
                     .filter(|imported| *imported != "*")
-            } else {
-                None
             };
             let Some(forwarded) = forwarded else {
                 continue;
             };
-            if let ModuleTargetV1::File(next) =
+            let ModuleTargetV1::File(next) =
                 self.resolve_specifier(&binding.logical_path, &binding.module_specifier)
-            {
+            else {
+                continue;
+            };
+            if next == file_index {
+                self.collect_local_binding(
+                    files,
+                    by_simple_name,
+                    file_index,
+                    forwarded,
+                    kind,
+                    visited,
+                    depth + 1,
+                    found,
+                );
+            } else {
                 self.collect_exported_symbols(
                     files,
                     by_simple_name,
@@ -325,6 +329,53 @@ impl TypeScriptModuleIndexV1 {
                     found,
                 );
             }
+        }
+    }
+
+    /// The module-scope binding `name` a same-module export clause forwards:
+    /// a declaration in this file, or the module a local import names.
+    #[allow(clippy::too_many_arguments)]
+    fn collect_local_binding<'a, T>(
+        &self,
+        files: &'a [T],
+        by_simple_name: &HashMap<&str, Vec<(usize, &'a LineageSymbolRecordV1)>>,
+        file_index: usize,
+        name: &str,
+        kind: RelationEdgeKindV1,
+        visited: &mut HashSet<(usize, String)>,
+        depth: usize,
+        found: &mut Vec<(usize, &'a LineageSymbolRecordV1)>,
+    ) where
+        T: AsRef<FileGenerationArtifactsV1>,
+    {
+        let defined = defined_symbols(by_simple_name, file_index, name, kind);
+        if !defined.is_empty() {
+            found.extend(defined);
+            return;
+        }
+        let Some(binding) = unique_local_import(files[file_index].as_ref(), name, kind) else {
+            return;
+        };
+        let Some(imported) = binding
+            .imported_name
+            .as_deref()
+            .filter(|imported| *imported != "*")
+        else {
+            return;
+        };
+        if let ModuleTargetV1::File(next) =
+            self.resolve_specifier(&binding.logical_path, &binding.module_specifier)
+        {
+            self.collect_exported_symbols(
+                files,
+                by_simple_name,
+                next,
+                imported,
+                kind,
+                visited,
+                depth,
+                found,
+            );
         }
     }
 
@@ -629,6 +680,23 @@ fn tsconfig(dir: &str, symbols: &[Arc<LineageSymbolRecordV1>]) -> TsConfigV1 {
         }
     }
     config
+}
+
+fn defined_symbols<'a>(
+    by_simple_name: &HashMap<&str, Vec<(usize, &'a LineageSymbolRecordV1)>>,
+    file_index: usize,
+    name: &str,
+    kind: RelationEdgeKindV1,
+) -> Vec<(usize, &'a LineageSymbolRecordV1)> {
+    by_simple_name
+        .get(name)
+        .into_iter()
+        .flatten()
+        .filter(|(index, symbol)| {
+            *index == file_index && relation_target_kind_is_compatible(kind, &symbol.kind)
+        })
+        .copied()
+        .collect()
 }
 
 /// The one local (non-forwarding) import binding of `local_name` usable for

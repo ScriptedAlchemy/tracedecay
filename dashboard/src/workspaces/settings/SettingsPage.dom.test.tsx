@@ -736,10 +736,21 @@ describe('SettingsPage effective configuration review', () => {
     renderSettings();
 
     await findRow(MAX_FILE_SIZE);
+    const rowKeys = () =>
+      [...document.querySelectorAll('[role="row"][data-key]')].map((element) => element.getAttribute('data-key'));
+    const unfiltered = rowKeys();
+    expect(unfiltered).toContain(POLL_SECS);
+    expect(unfiltered).toContain('user.watcher_debounce');
+    expect(screen.getByText(`${unfiltered.length} settings`)).toBeTruthy();
+
     const filter = screen.getByLabelText('Filter configuration');
     await user.type(filter, 'poll');
-    expect([...document.querySelectorAll('[role="row"][data-key]')].map((element) => element.getAttribute('data-key'))).toEqual([POLL_SECS]);
-    expect(screen.getByText('1 of 54 settings')).toBeTruthy();
+    expect(rowKeys()).toEqual([POLL_SECS]);
+    expect(screen.getByText(`1 of ${unfiltered.length} settings`)).toBeTruthy();
+
+    await user.clear(filter);
+    await user.type(filter, 'codex_app_server');
+    expect(rowKeys()).toEqual(['automation.backend']);
 
     await user.clear(filter);
     await user.type(filter, 'zzzz-no-such-key');

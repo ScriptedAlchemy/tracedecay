@@ -197,6 +197,7 @@ impl CodeIndexSchedulerRegistryV1 {
         request: &tracedecay_domain::RetrievalRequest,
         query_view: &tracedecay_domain::EphemeralSanitizedQueryViewV1,
         lanes: Vec<tracedecay_query::retrieval::fusion::CompositionLaneInput>,
+        anchor_tiers: &std::collections::BTreeMap<tracedecay_domain::RetrievalAnchorId, u32>,
         page_size: usize,
         cursor: Option<&tracedecay_domain::RetrievalCursor>,
     ) -> Result<
@@ -207,7 +208,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .query_authority_for_scope(scope)
             .await
             .ok_or(tracedecay_query::retrieval::QueryAuthorityErrorV1::AuthorityUnavailable)?;
-        authority.compose(request, query_view, lanes, page_size, cursor)
+        authority.compose(request, query_view, lanes, anchor_tiers, page_size, cursor)
     }
 
     pub async fn generation_for(

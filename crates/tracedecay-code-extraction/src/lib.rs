@@ -147,7 +147,7 @@ pub use rust_extractor::RustExtractor;
 pub use scala_extractor::ScalaExtractor;
 pub use svelte_extractor::SvelteExtractor;
 pub use swift_extractor::SwiftExtractor;
-pub use typescript_extractor::TypeScriptExtractor;
+pub use typescript_extractor::{TypeScriptExtractor, is_test_framework_call_signature};
 
 // Medium
 #[cfg(feature = "lang-bash")]

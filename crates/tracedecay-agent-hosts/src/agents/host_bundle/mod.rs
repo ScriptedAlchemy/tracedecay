@@ -103,7 +103,7 @@ const CLINE_FAMILY_TRANSCRIPT_MANIFEST_PATH: &str =
     "tests/fixtures/transcript_golden/cline_like/manifest.json";
 const CLINE_FAMILY_TRANSCRIPT_MANIFEST: &[u8] =
     include_bytes!("../../../../../tests/fixtures/transcript_golden/cline_like/manifest.json");
-static EMBEDDED_NATIVE_HOST_FIXTURES: [EmbeddedNativeHostFixtureV1; 7] = [
+static EMBEDDED_NATIVE_HOST_FIXTURES: [EmbeddedNativeHostFixtureV1; 8] = [
     EmbeddedNativeHostFixtureV1 {
         host: HostKindV1::ClaudeCode,
         bytes: include_bytes!("../../../../../tests/fixtures/packaged_host_events/claude.json"),
@@ -133,6 +133,10 @@ static EMBEDDED_NATIVE_HOST_FIXTURES: [EmbeddedNativeHostFixtureV1; 7] = [
         bytes: include_bytes!(
             "../../../../../tests/fixtures/packaged_host_events/opencode/baseline.json"
         ),
+    },
+    EmbeddedNativeHostFixtureV1 {
+        host: HostKindV1::Pi,
+        bytes: include_bytes!("../../../../../tests/fixtures/packaged_host_events/pi.json"),
     },
 ];
 

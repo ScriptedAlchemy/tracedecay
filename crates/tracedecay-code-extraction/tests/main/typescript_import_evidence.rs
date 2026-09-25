@@ -465,7 +465,8 @@ fn svelte_artifact_wrapper_does_not_drop_script_type_import_evidence() {
 /// `export … from` forwards bindings without binding them locally: each
 /// forwarded name is public import evidence (`is_public`), a `*` forward is a
 /// public glob, and the exported name is the local name so a barrel walk can
-/// follow `export { sum as add }` from `add` back to `sum`.
+/// follow `export { sum as add }` from `add` back to `sum`. A same-module
+/// `export { local }` names the declaring file as its module.
 #[test]
 fn reexport_statements_are_public_import_evidence() {
     let source = concat!(
@@ -535,6 +536,14 @@ fn reexport_statements_are_public_import_evidence() {
                 Some("local"),
                 Some("local"),
                 false,
+                false,
+                ImportNamespaceV1::Value
+            ),
+            (
+                "./index.ts",
+                Some("local"),
+                Some("local"),
+                true,
                 false,
                 ImportNamespaceV1::Value
             ),

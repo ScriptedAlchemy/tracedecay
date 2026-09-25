@@ -36,7 +36,12 @@ provider:
 
 ```json
 {
-  "cursor_agent": { "state": "configured", "canonical_path": "/usr/local/bin/cursor-agent" },
+  "cursor_agent": {
+    "state": "configured",
+    "canonical_path": "/usr/local/bin/cursor-agent",
+    "model": "optional-model-id",
+    "timeout_secs": 90
+  },
   "codex": { "state": "unconfigured" }
 }
 ```
@@ -49,10 +54,12 @@ is not published reports `summarizer_configuration_unavailable`. Profile-wide
 session shards have no project configuration, so they stay unconfigured.
 
 Configured paths must be absolute. Set the value on the project layer with
-`tracedecay_configuration_set` or `tracedecay tool configuration_set`. The
-`TRACEDECAY_CURSOR_SUMMARY_*` and `TRACEDECAY_CODEX_SUMMARY_*` environment
-variables set the model, timeout, and workspace for a configured
-executable.
+`tracedecay_configuration_set` or `tracedecay tool configuration_set`. A
+configured entry may also set `model` (the provider default when absent) and
+`timeout_secs` (5 to 300; 90 when absent, never longer than the caller's
+budget). No environment variable tunes a summarizer. Each `cursor-agent` run
+gets a private temporary workspace holding only its prompt file, which is
+removed when the run ends.
 
 The same `codex` entry is the only executable the automation backend spawns
 for `codex_app_server`. That backend runs the memory curator, session

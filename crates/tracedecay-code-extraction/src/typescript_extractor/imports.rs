@@ -146,9 +146,22 @@ pub(super) fn visit_import(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
 /// from` keeps `a` as the imported name and `b` as the exported (local) name,
 /// `export * from` is a public glob, and `export * as ns from` exports the
 /// namespace under `ns`.
+///
+/// A same-module clause (`function a() {}; export { a as b }`) forwards this
+/// module's own binding, so its rows name the declaring file itself
+/// (`./util.ts`): the seal resolves that specifier back to this file and
+/// looks `a` up among its declarations and local imports.
 pub(super) fn visit_reexport(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
-    let Some(module_specifier) = extract_module_specifier(state, node) else {
-        return;
+    let module_specifier = match extract_module_specifier(state, node) {
+        Some(module_specifier) => module_specifier,
+        None if find_direct_child_by_kind(node, "export_clause").is_some() => {
+            let file_name = state.file_path.rsplit('/').next().unwrap_or_default();
+            if file_name.is_empty() {
+                return;
+            }
+            format!("./{file_name}")
+        }
+        None => return,
     };
     let Some(module_kind) = import_module_kind("typescript", &module_specifier) else {
         return;

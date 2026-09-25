@@ -611,14 +611,18 @@ mod tests {
     #[tokio::test]
     async fn findings_route_preserves_canonical_unknown_entries() {
         let report = compose_report(&DoctorTestSourcesV1::all_unknown()).await;
+        // Compare against the composed report rather than a fixed catalog size,
+        // so adding or retiring a finding kind does not break this route test.
+        let canonical_entries = report.entries().len();
+        assert!(
+            canonical_entries > 0,
+            "all-unknown report must carry entries"
+        );
         let envelope =
             findings_for_test(DoctorFindingsQueryV1 { family: None }, Some(report)).await;
 
         assert_eq!(envelope.domain_state, DashboardDomainStateV1::Partial);
-        // Advisory has both host-integration and feedback-owner findings;
-        // StorageRuntime has runtime, remote-replay, remote-operational, and
-        // profile-authority findings.
-        assert_eq!(envelope.payload.entries.len(), 11);
+        assert_eq!(envelope.payload.entries.len(), canonical_entries);
         assert!(envelope.payload.entries.iter().all(|entry| {
             entry.finding().state() == tracedecay_contracts::doctor::DoctorEvidenceStateV1::Unknown
         }));

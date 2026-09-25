@@ -50,10 +50,9 @@ const STATE_CLEARED: &str = DIAGNOSTIC_STATE_CLEARED;
 
 /// SQLite-backed store for durable generation-bound diagnostics.
 ///
-/// Records are immutable once persisted; state transitions (supersession,
-/// clearing) update only the `record_state`/`state_generation` columns so the
-/// full historical chain stays queryable while active publication reads only
-/// current rows (Plan 35: "Stale and historical diagnostics remain queryable
+/// Records are immutable once persisted; clearing updates only the
+/// `record_state`/`state_generation` columns so cleared records stay
+/// queryable while active publication reads only current rows (Plan 35: "Stale and historical diagnostics remain queryable
 /// through `TraceDecay` application APIs but are excluded from active
 /// publication").
 pub struct DiagnosticsStore<'a> {

@@ -44,6 +44,7 @@ where
 struct ProjectlessConnectionStateV1 {
     client_identity: DaemonClientIdentity,
     profile_authority: tracedecay_session_runtime::retained::ProfileRetainedConnectionAuthorityV1,
+    active_project_root: Option<PathBuf>,
 }
 
 /// Two profile roots name the same profile when they resolve to the same
@@ -119,17 +120,22 @@ fn admit_projectless_connection(
             pinned_profile_root.join("global.db"),
         ),
         profile_authority,
+        active_project_root: None,
     })
 }
 
+/// `active_project_root` is the handshake's project, used only to mark that
+/// project active in registry reads; it never mounts or opens the project.
 pub(super) async fn serve_projectless_client(
     transport: &mut (impl McpTransport + Send),
     client_identity: &DaemonClientIdentity,
+    active_project_root: Option<PathBuf>,
     timings_enabled: bool,
     lifecycle: &DaemonLifecycle,
     store_administration: &StoreAdministration,
 ) -> Result<()> {
-    let connection = admit_projectless_connection(client_identity, store_administration)?;
+    let mut connection = admit_projectless_connection(client_identity, store_administration)?;
+    connection.active_project_root = active_project_root;
     loop {
         let line = tokio::select! {
             result = read_line_handling_wire_oversized(transport) => result?,
@@ -359,9 +365,15 @@ async fn projectless_tools_call_response_with_connection(
             )),
             tool_name @ ("tracedecay_project_list"
             | "tracedecay_project_search"
-            | "tracedecay_project_context") => boxed_projectless_phase(
-                projectless_registry_response(id, tool_name, arguments, store_administration),
-            ),
+            | "tracedecay_project_context") => {
+                boxed_projectless_phase(projectless_registry_response(
+                    id,
+                    tool_name,
+                    arguments,
+                    connection.active_project_root.as_deref(),
+                    store_administration,
+                ))
+            }
             _ => {
                 // `projectless_tool_is_discoverable` admitted the name above,
                 // so any remaining tool is a retained profile operation.
@@ -394,12 +406,14 @@ fn requires_project_error(id: serde_json::Value, tool_name: &str) -> JsonRpcResp
 /// Registry reads are profile-scoped: they answer from the authenticated
 /// profile's project registry, the same authority `tracedecay projects`
 /// reads, so a connection without a mounted project still gets the real
-/// listing (possibly empty). No project is marked active. A registry that
-/// cannot be opened is a typed tool error, never an empty listing.
+/// listing (possibly empty). Only the handshake's project, if any, is marked
+/// active. A registry that cannot be opened is a typed tool error, never an
+/// empty listing.
 async fn projectless_registry_response(
     id: serde_json::Value,
     tool_name: &str,
     arguments: serde_json::Value,
+    active_project_root: Option<&Path>,
     store_administration: &StoreAdministration,
 ) -> tracedecay_mcp::JsonRpcResponse {
     let registry =
@@ -411,7 +425,7 @@ async fn projectless_registry_response(
     let result = match tool_name {
         "tracedecay_project_list" => {
             tracedecay_mcp::handlers::info::handle_project_list(
-                None,
+                active_project_root,
                 arguments,
                 Some(&registry_reads),
             )
@@ -419,7 +433,7 @@ async fn projectless_registry_response(
         }
         "tracedecay_project_search" => {
             tracedecay_mcp::handlers::info::handle_project_search(
-                None,
+                active_project_root,
                 arguments,
                 Some(&registry_reads),
             )
@@ -427,7 +441,7 @@ async fn projectless_registry_response(
         }
         "tracedecay_project_context" => {
             tracedecay_mcp::handlers::info::handle_project_context(
-                None,
+                active_project_root,
                 arguments,
                 Some(&registry_reads),
             )
@@ -756,7 +770,10 @@ pub(super) fn projectless_tool_call(
     Ok((tool_name, arguments))
 }
 
-pub(super) fn projectless_user_session_request(request: Option<&JsonRpcRequest>) -> bool {
+/// Whether a first request is served by the projectless dispatcher even when
+/// the handshake names a project: profile-session reads and profile registry
+/// reads never depend on that project's open or warm-up.
+pub(super) fn projectless_first_request(request: Option<&JsonRpcRequest>) -> bool {
     let Some(request) = request else {
         return false;
     };
@@ -766,7 +783,10 @@ pub(super) fn projectless_user_session_request(request: Option<&JsonRpcRequest>)
     let Ok((tool_name, arguments)) = projectless_tool_call(request.params.as_ref()) else {
         return false;
     };
-    ((tool_name.starts_with("tracedecay_lcm_") || tool_name == "tracedecay_message_search")
+    matches!(
+        tool_name,
+        "tracedecay_project_list" | "tracedecay_project_search" | "tracedecay_project_context"
+    ) || ((tool_name.starts_with("tracedecay_lcm_") || tool_name == "tracedecay_message_search")
         && arguments
             .get("storage_scope")
             .and_then(serde_json::Value::as_str)

@@ -882,6 +882,14 @@ async fn converge_registered_schema_on(
     database: &Database,
     convergence: RegisteredSchemaConvergence,
 ) -> tracedecay_domain::errors::Result<()> {
+    observation_projection::rearm_queued_projection_retries(
+        database,
+        observation_projection::REARM_PROJECTION_RETRY_BATCH_ROWS,
+    )
+    .await
+    .map_err(|error| {
+        global_db_operation_message("rearm queued projection retries", error.durable_detail())
+    })?;
     ensure_authority_invariants(database, convergence.force_exhaustive, convergence.is_fresh).await
 }
 

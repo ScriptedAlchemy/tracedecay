@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, sync_channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::gateway::{LspRuntimeFuture, LspRuntimeSpawner, LspRuntimeTask};
 
@@ -51,7 +51,6 @@ struct PendingOperation<M, T> {
 pub(crate) enum OperationAdmission<M> {
     Started(M),
     Existing(M),
-    Busy,
     Saturated,
 }
 
@@ -62,7 +61,6 @@ pub(crate) enum OperationPoll<M, T> {
     Mismatch(M),
     Dropped(M),
     Missing,
-    Busy,
 }
 
 pub(crate) struct BoundedOperationTable<K, M, T> {
@@ -87,6 +85,15 @@ where
         }
     }
 
+    /// Every critical section is a map operation plus a task spawn, so callers
+    /// wait for the table instead of reporting a peer's access as busy. A
+    /// panicked holder leaves the map itself consistent.
+    fn in_flight(&self) -> MutexGuard<'_, BTreeMap<K, PendingOperation<M, T>>> {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
     pub(crate) fn admit(
         &self,
         key: K,
@@ -108,9 +115,7 @@ where
         runtime: &dyn LspRuntimeSpawner,
         prepare: impl FnOnce() -> Result<(M, LspRuntimeFuture<T>), E>,
     ) -> Result<OperationAdmission<M>, E> {
-        let Ok(mut in_flight) = self.in_flight.try_lock() else {
-            return Ok(OperationAdmission::Busy);
-        };
+        let mut in_flight = self.in_flight();
         if let Some(pending) = in_flight.get(&key) {
             return Ok(OperationAdmission::Existing(pending.metadata.clone()));
         }
@@ -139,9 +144,7 @@ where
         key: &K,
         matches: impl FnOnce(&M) -> bool,
     ) -> OperationPoll<M, T> {
-        let Ok(mut in_flight) = self.in_flight.try_lock() else {
-            return OperationPoll::Busy;
-        };
+        let mut in_flight = self.in_flight();
         let Some(pending) = in_flight.get_mut(key) else {
             return OperationPoll::Missing;
         };
@@ -167,11 +170,7 @@ where
     }
 
     pub(crate) fn cancel(&self, key: &K) -> bool {
-        let pending = self
-            .in_flight
-            .lock()
-            .ok()
-            .and_then(|mut in_flight| in_flight.remove(key));
+        let pending = self.in_flight().remove(key);
         if let Some(pending) = pending {
             pending.task.abort();
             true
@@ -348,5 +347,101 @@ mod tests {
                 .expect("cancellation completes after contention")
         );
         cancellation.join().expect("cancellation thread");
+    }
+
+    #[test]
+    fn admission_and_poll_wait_for_table_contention() {
+        let table = Arc::new(BoundedOperationTable::new(2));
+        assert_eq!(
+            table.admit("first", (), &InlineSpawner::default(), || Box::pin(async {
+                1
+            })),
+            OperationAdmission::Started(())
+        );
+
+        let guard = table.in_flight.lock().unwrap();
+        let (sender, receiver) = sync_channel(2);
+        let admit_table = Arc::clone(&table);
+        let admit_sender = sender.clone();
+        let admission = thread::spawn(move || {
+            let outcome = admit_table.admit("second", (), &InlineSpawner::default(), || {
+                Box::pin(async { 2 })
+            });
+            admit_sender
+                .send(format!("{outcome:?}"))
+                .expect("send admission outcome");
+        });
+        let poll_table = Arc::clone(&table);
+        let poll = thread::spawn(move || {
+            sender
+                .send(format!("{:?}", poll_table.poll(&"first")))
+                .expect("send poll outcome");
+        });
+
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_millis(25)),
+            Err(RecvTimeoutError::Timeout),
+            "a peer holding the table must not turn admission or poll into a refusal"
+        );
+        drop(guard);
+        let mut outcomes = [
+            receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("first"),
+            receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("second"),
+        ];
+        outcomes.sort();
+        assert_eq!(
+            outcomes,
+            [
+                "Ready { metadata: (), result: 1 }".to_owned(),
+                "Started(())".to_owned()
+            ]
+        );
+        admission.join().expect("admission thread");
+        poll.join().expect("poll thread");
+        assert_eq!(
+            table.poll(&"second"),
+            OperationPoll::Ready {
+                metadata: (),
+                result: 2
+            }
+        );
+    }
+
+    #[test]
+    fn concurrent_admissions_all_start_and_complete() {
+        const WRITERS: usize = 32;
+        let table = Arc::new(BoundedOperationTable::new(WRITERS));
+        let barrier = Arc::new(std::sync::Barrier::new(WRITERS));
+        let workers: Vec<_> = (0..WRITERS)
+            .map(|writer| {
+                let table = Arc::clone(&table);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    let runtime = InlineSpawner::default();
+                    barrier.wait();
+                    let admitted = table.admit(writer, writer, &runtime, move || {
+                        Box::pin(async move { writer * 10 })
+                    });
+                    let polled = table.poll(&writer);
+                    (admitted, polled)
+                })
+            })
+            .collect();
+        for (writer, worker) in workers.into_iter().enumerate() {
+            assert_eq!(
+                worker.join().expect("writer thread"),
+                (
+                    OperationAdmission::Started(writer),
+                    OperationPoll::Ready {
+                        metadata: writer,
+                        result: writer * 10
+                    }
+                )
+            );
+        }
     }
 }

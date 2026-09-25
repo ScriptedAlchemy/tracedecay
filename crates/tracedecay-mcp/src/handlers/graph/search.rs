@@ -11,7 +11,8 @@ use tracedecay_contracts::InvocationAnalyticsV1;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
     ContextCodeBlockV1, ContextLexicalAnchorV1, ContextModeV1, ContextResultV1,
-    ContextSearchMatchV1, ContextSurfaceRequestV1, RedundancyScopeV1, RedundancySurfaceRequestV1,
+    ContextSearchMatchV1, ContextSurfaceRequestV1, LexicalAnchorDropReasonV1, RedundancyScopeV1,
+    RedundancySurfaceRequestV1,
     RenamePreviewNodeV1, RenamePreviewPrimitiveOutcomeV1, RenamePreviewPrimitiveRequestV1,
     RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1, RenamePreviewTextOnlyMatchV1,
     SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1, SimilarOccurrenceV1, SimilarResultV1,
@@ -21,7 +22,7 @@ use tracedecay_domain::ExactClass;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 #[cfg(test)]
 use tracedecay_query::retrieval::lexical::LexicalRoutingV1;
-use tracedecay_query::retrieval::lexical::{LexicalAnchorOutcomeV1, LexicalAnchorReceiptV1};
+use tracedecay_query::retrieval::lexical::LexicalAnchorOutcomeV1;
 
 #[cfg(test)]
 use crate::context_headings::CONTEXT_SEEN_NODE_IDS_LABEL;
@@ -575,20 +576,39 @@ fn context_search_matches(
         .collect()
 }
 
-/// The kernel's per-anchor receipts in the context wire shape.
-fn context_lexical_anchors(anchors: &[LexicalAnchorReceiptV1]) -> Vec<ContextLexicalAnchorV1> {
-    anchors
-        .iter()
+/// The kernel's per-anchor receipts in the context wire shape, counted
+/// against the search matches this context carries: a served site outside
+/// `scope_prefix` is dropped as out of scope.
+fn context_lexical_anchors(
+    complete: &tracedecay_query::code_search::CodeIndexSearchCompletedV1,
+    scope_prefix: Option<&str>,
+) -> Vec<ContextLexicalAnchorV1> {
+    let mut receipt = complete.lexical_routes.clone();
+    if let Some(prefix) = scope_prefix {
+        receipt.reconcile_served(|site| {
+            complete
+                .display_by_anchor
+                .get(site)
+                .filter(|display| !display.path.starts_with(prefix))
+                .map(|_| LexicalAnchorDropReasonV1::OutOfScope)
+        });
+    }
+    receipt
+        .anchors
+        .into_iter()
         .map(|receipt| {
             let anchor = receipt.anchor.as_str().to_owned();
             match receipt.outcome {
-                LexicalAnchorOutcomeV1::Matched { matched, admitted } => {
-                    ContextLexicalAnchorV1::Matched {
-                        anchor,
-                        matched,
-                        admitted,
-                    }
-                }
+                LexicalAnchorOutcomeV1::Matched {
+                    matched,
+                    admitted,
+                    dropped,
+                } => ContextLexicalAnchorV1::Matched {
+                    anchor,
+                    matched,
+                    admitted,
+                    dropped,
+                },
                 LexicalAnchorOutcomeV1::Unmatched => ContextLexicalAnchorV1::Unmatched { anchor },
                 LexicalAnchorOutcomeV1::NotServed => ContextLexicalAnchorV1::NotServed { anchor },
             }
@@ -781,7 +801,7 @@ where
         match outcome {
             tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(complete) => {
                 let search_matches = context_search_matches(&complete, scope_prefix);
-                let lexical_anchors = context_lexical_anchors(&complete.lexical_routes.anchors);
+                let lexical_anchors = context_lexical_anchors(&complete, scope_prefix);
                 let code_generation = Some(complete.code_generation.clone());
                 let coverage = primitive_search_coverage(&complete.coverage);
                 let freshness = search_freshness(

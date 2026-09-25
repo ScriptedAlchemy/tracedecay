@@ -1,6 +1,5 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(target_os = "linux")]
 use std::thread;
@@ -22,9 +21,7 @@ use tracedecay_sessions::runtime::hosts::codex_app_server::{
     CodexAppServerSummaryConfig, run_prompt_with_codex_app_server,
 };
 
-use crate::common::{EnvVarGuard, fake_codex_bin, install_fake_codex_launcher};
-
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+use crate::common::{fake_codex_bin, install_fake_codex_launcher};
 
 /// Success-path budget for the fake codex app-server child to spawn (a real
 /// python interpreter) and complete its scripted turn. This is the upper bound
@@ -505,21 +502,15 @@ fn codex_app_server_backend_falls_back_to_configured_model_when_server_omits_mod
 fn codex_app_server_backend_from_automation_config_uses_the_pinned_model() {
     register_runtime_ports();
     let fake = FakeCodexAppServer::new_with_behavior("json");
-    // Env vars are only read while the backend is constructed, so hold the
-    // env lock just for that window instead of across the subprocess run.
-    let backend = {
-        let _env_lock = ENV_LOCK.lock().unwrap();
-        let _ambient_model = EnvVarGuard::set("TRACEDECAY_CODEX_SUMMARY_MODEL", "ambient-model");
-        CodexAppServerBackend::from_automation_config(
-            &AutomationConfig {
-                backend: AutomationBackend::CodexAppServer,
-                model_id: Some("configured-model".to_owned()),
-                timeout_secs: fake_codex_response_timeout_secs(),
-                ..AutomationConfig::default()
-            },
-            &fake.executable(),
-        )
-    };
+    let backend = CodexAppServerBackend::from_automation_config(
+        &AutomationConfig {
+            backend: AutomationBackend::CodexAppServer,
+            model_id: Some("configured-model".to_owned()),
+            timeout_secs: fake_codex_response_timeout_secs(),
+            ..AutomationConfig::default()
+        },
+        &fake.executable_with_model("executable-model"),
+    );
     let request = AgentTaskRequest::new(
         "run_runtime_options".to_string(),
         AgentTaskKind::SessionReflector,
@@ -541,24 +532,20 @@ fn codex_app_server_backend_from_automation_config_uses_the_pinned_model() {
 }
 
 #[test]
-fn codex_app_server_backend_uses_environment_model_when_unpinned() {
+fn codex_app_server_backend_uses_configured_executable_model_when_unpinned() {
     register_runtime_ports();
     let fake = FakeCodexAppServer::new_with_behavior("json");
-    let backend = {
-        let _env_lock = ENV_LOCK.lock().unwrap();
-        let _ambient_model = EnvVarGuard::set("TRACEDECAY_CODEX_SUMMARY_MODEL", "ambient-model");
-        CodexAppServerBackend::from_automation_config(
-            &AutomationConfig {
-                backend: AutomationBackend::CodexAppServer,
-                model_id: None,
-                timeout_secs: fake_codex_response_timeout_secs(),
-                ..AutomationConfig::default()
-            },
-            &fake.executable(),
-        )
-    };
+    let backend = CodexAppServerBackend::from_automation_config(
+        &AutomationConfig {
+            backend: AutomationBackend::CodexAppServer,
+            model_id: None,
+            timeout_secs: fake_codex_response_timeout_secs(),
+            ..AutomationConfig::default()
+        },
+        &fake.executable_with_model("executable-model"),
+    );
     let request = AgentTaskRequest::new(
-        "run_env_model".to_string(),
+        "run_executable_model".to_string(),
         AgentTaskKind::SessionReflector,
         r#"{"facts":[]}"#.to_string(),
         None,
@@ -569,8 +556,8 @@ fn codex_app_server_backend_uses_environment_model_when_unpinned() {
 
     assert_eq!(response.model.as_deref(), Some("actual-model"));
     let messages = fake.logged_messages();
-    assert_eq!(messages[2]["params"]["model"], "ambient-model");
-    assert_eq!(messages[3]["params"]["model"], "ambient-model");
+    assert_eq!(messages[2]["params"]["model"], "executable-model");
+    assert_eq!(messages[3]["params"]["model"], "executable-model");
     assert_process_gone(fake.child_pid());
 }
 
@@ -712,6 +699,11 @@ impl FakeCodexAppServer {
     /// The configured `codex` binding an operator would publish for this fake.
     fn executable(&self) -> LcmSummarizerExecutableV1 {
         LcmSummarizerExecutableV1::configured(self.bin.clone()).unwrap()
+    }
+
+    fn executable_with_model(&self, model: &str) -> LcmSummarizerExecutableV1 {
+        LcmSummarizerExecutableV1::configured_with(self.bin.clone(), Some(model.to_owned()), None)
+            .unwrap()
     }
 }
 

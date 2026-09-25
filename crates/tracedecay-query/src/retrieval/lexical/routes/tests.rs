@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use tracedecay_contracts::retrieval::{LexicalAnchorDropReasonV1, LexicalAnchorDropV1};
 use tracedecay_domain::{
     CodeGenerationId, CompactCandidate, EvidenceRole, ExactTechnicalTermKindV1, FixedPointScore,
     FreshnessCompatibilityV1, RetrievalBudget, RetrievalFailure, RetrieverBatch,
@@ -522,6 +523,7 @@ fn anchor_route_reranks_and_names_itself_in_the_evidence() {
             outcome: LexicalAnchorOutcomeV1::Matched {
                 matched: 2,
                 admitted: 2,
+                dropped: Vec::new(),
             },
         }]
     );
@@ -808,6 +810,7 @@ fn a_multi_chunk_site_of_a_common_anchor_cannot_starve_a_rare_anchor() {
             outcome: LexicalAnchorOutcomeV1::Matched {
                 matched: 2,
                 admitted: 2,
+                dropped: Vec::new(),
             },
         }
     );
@@ -902,6 +905,7 @@ fn every_anchor_keeps_its_best_sites_through_the_lane_cap_and_reports_its_outcom
                 outcome: LexicalAnchorOutcomeV1::Matched {
                     matched: 6,
                     admitted: 4,
+                    dropped: Vec::new(),
                 },
             },
             LexicalAnchorReceiptV1 {
@@ -909,6 +913,7 @@ fn every_anchor_keeps_its_best_sites_through_the_lane_cap_and_reports_its_outcom
                 outcome: LexicalAnchorOutcomeV1::Matched {
                     matched: 2,
                     admitted: 2,
+                    dropped: Vec::new(),
                 },
             },
             LexicalAnchorReceiptV1 {
@@ -1033,4 +1038,105 @@ fn routes_merge_match_kinds_but_reject_source_binding_drift() {
         merge(anchor),
         Err(RetrievalPortError::Contract(_))
     ));
+}
+
+#[test]
+fn anchor_receipt_counts_only_the_sites_the_response_carries() {
+    let query_batch = lane_batch(vec![pair(
+        "occ.other",
+        &[(LexicalFieldV1::BodyText, 100_000)],
+        &["inventory"],
+    )]);
+    let reserve_batch = lane_batch(vec![
+        pair(
+            "occ.reserve",
+            &[(LexicalFieldV1::SymbolName, 900_000)],
+            &["reserve_stock"],
+        ),
+        pair(
+            "occ.allocate",
+            &[(LexicalFieldV1::BodyText, 50_000)],
+            &["reserve_stock"],
+        ),
+        pair(
+            "occ.release",
+            &[(LexicalFieldV1::BodyText, 40_000)],
+            &["reserve_stock"],
+        ),
+    ]);
+    let release_batch = lane_batch(vec![pair(
+        "occ.release",
+        &[(LexicalFieldV1::SymbolName, 800_000)],
+        &["release_stock"],
+    )]);
+    let (_, mut receipt) = merge_lexical_routes(
+        &generation(),
+        &budget(8),
+        &budget(8),
+        vec![
+            route(LexicalRouteKindV1::Query, query_batch),
+            route(anchor_kind("reserve_stock"), reserve_batch),
+            route(anchor_kind("release_stock"), release_batch),
+        ],
+    )
+    .expect("merge");
+    let site = |occurrence: &str| id(&format!("anchor.{occurrence}"));
+    assert_eq!(
+        receipt.anchor_tiers(),
+        BTreeMap::from([
+            (site("occ.allocate"), 1),
+            (site("occ.release"), 2),
+            (site("occ.reserve"), 1),
+        ]),
+        "tiers count distinct anchors per site; the query-only site has none"
+    );
+    let matched = |matched, admitted, dropped: &[(LexicalAnchorDropReasonV1, u64)]| {
+        LexicalAnchorOutcomeV1::Matched {
+            matched,
+            admitted,
+            dropped: dropped
+                .iter()
+                .map(|(reason, sites)| LexicalAnchorDropV1 {
+                    reason: *reason,
+                    sites: *sites,
+                })
+                .collect(),
+        }
+    };
+    assert_eq!(
+        receipt
+            .anchors
+            .iter()
+            .map(|anchor| anchor.outcome.clone())
+            .collect::<Vec<_>>(),
+        [matched(3, 3, &[]), matched(1, 1, &[])],
+        "the lane admits every site before serving narrows it"
+    );
+
+    receipt.reconcile_served(|served| {
+        (*served == site("occ.allocate")).then_some(LexicalAnchorDropReasonV1::OutsidePage)
+    });
+    // A later stage records only its own removals and never re-labels one.
+    receipt.reconcile_served(|served| {
+        (*served == site("occ.release") || *served == site("occ.allocate"))
+            .then_some(LexicalAnchorDropReasonV1::OutOfScope)
+    });
+    assert_eq!(
+        receipt
+            .anchors
+            .iter()
+            .map(|anchor| anchor.outcome.clone())
+            .collect::<Vec<_>>(),
+        [
+            matched(
+                3,
+                1,
+                &[
+                    (LexicalAnchorDropReasonV1::OutsidePage, 1),
+                    (LexicalAnchorDropReasonV1::OutOfScope, 1),
+                ],
+            ),
+            matched(1, 0, &[(LexicalAnchorDropReasonV1::OutOfScope, 1)]),
+        ]
+    );
 }

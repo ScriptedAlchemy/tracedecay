@@ -7,10 +7,12 @@ description: Diagnose build and type errors that span symbols or files with Trac
 
 When compiler output already exists, `diagnose` can map it to symbols without
 rerunning the build. Retained diagnostics belong to their clean generation;
-reading them does not run producers or refresh stale evidence. A TypeScript
-project with `tsconfig.json` and its own `node_modules/.bin/tsc` is checked by
-the daemon after each complete generation, so `diagnostics` is populated
-without a paste; any other toolchain publishes through `diagnose`. A read with
+reading them does not run producers or refresh stale evidence. Each TypeScript
+project (every package `tsconfig.json` in a monorepo, and the configs they
+reference) whose package or workspace root has `node_modules/.bin/tsc` is
+checked by the daemon after each complete generation, so `diagnostics` is
+populated without a paste; any other toolchain publishes through `diagnose`. A
+file read reports on the tsconfig that owns the file. A read with
 no publication returns a typed problem whose message names the exact next step
 (install the compiler, paste output, or retry while the producer runs). Use the
 native build check when fresh compiler evidence is required.

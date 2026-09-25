@@ -17,7 +17,7 @@ use crate::runtime::source::{
 use crate::runtime::{
     SessionProvider, hosts::claude, hosts::claude_observation, hosts::cline_like, hosts::codex,
     hosts::cursor, hosts::cursor_composer, hosts::hermes, hosts::kimi, hosts::kiro,
-    hosts::opencode, hosts::vibe,
+    hosts::opencode, hosts::pi, hosts::vibe,
 };
 
 use super::failure::{
@@ -31,6 +31,7 @@ pub(super) const PROJECT_CATCH_UP_PROVIDERS: &[SessionProvider] = &[
     SessionProvider::Kiro,
     SessionProvider::Kimi,
     SessionProvider::OpenCode,
+    SessionProvider::Pi,
     SessionProvider::Cline,
     SessionProvider::RooCode,
     SessionProvider::Kilo,
@@ -174,6 +175,7 @@ impl<'a> ProjectProviderRun<'a> {
                     ProjectProviderRunResult::provider(self.run_hermes().await)
                 }
                 SessionProvider::Vibe => ProjectProviderRunResult::provider(self.run_vibe().await),
+                SessionProvider::Pi => ProjectProviderRunResult::provider(self.run_pi().await),
             }
         })
     }
@@ -465,6 +467,66 @@ impl<'a> ProjectProviderRun<'a> {
                         "coverage",
                         &coverage_error,
                         "project Kimi coverage persistence failed",
+                    ));
+                }
+                run
+            }
+        }
+    }
+
+    #[hotpath::measure(label = "sessions.ingest.project.pi", future = true)]
+    async fn run_pi(self) -> ProviderRunOutcome {
+        let Some(source) = pi::PiSource::new() else {
+            return ProviderRunOutcome::skipped();
+        };
+        match pi::capture_pi_observations(
+            self.facade,
+            &source,
+            self.project_root,
+            self.scope.clone(),
+            Some(self.max_new_bytes),
+            self.cancellation,
+        )
+        .await
+        {
+            Ok(outcome) => {
+                let mut run = ProviderRunOutcome::bounded(
+                    TranscriptIngestStats::default(),
+                    outcome.bytes_consumed,
+                    outcome.deferred,
+                );
+                if outcome.discovery_failures > 0 {
+                    run.add_failure(TranscriptCatchUpFailure::source_discovery_partial("pi"));
+                }
+                run
+            }
+            Err(error) => {
+                if let Some(cancelled) = cancelled_provider_outcome(&error) {
+                    return cancelled;
+                }
+                let mut run = ProviderRunOutcome::failed(
+                    warn_transcript_catch_up_failure(
+                        "pi",
+                        "observation",
+                        &error,
+                        "project Pi observation catch-up failed",
+                    ),
+                    0,
+                );
+                if let Err(coverage_error) = persist_host_provider_coverage(
+                    self.facade,
+                    self.scope,
+                    "pi",
+                    HostProviderCoverage::Unavailable,
+                    1,
+                )
+                .await
+                {
+                    run.add_failure(warn_transcript_catch_up_failure(
+                        "pi",
+                        "coverage",
+                        &coverage_error,
+                        "project Pi coverage persistence failed",
                     ));
                 }
                 run

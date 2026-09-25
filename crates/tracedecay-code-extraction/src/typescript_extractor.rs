@@ -18,6 +18,8 @@ use crate::types::{
 mod imports;
 mod test_calls;
 
+pub use test_calls::is_test_framework_call_signature;
+
 /// Extracts code graph nodes and edges from TypeScript/JavaScript source files
 /// using tree-sitter.
 pub struct TypeScriptExtractor;

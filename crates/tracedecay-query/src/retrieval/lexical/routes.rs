@@ -10,9 +10,10 @@
 //! keeps a receipt naming the routes that ranked it.
 //!
 //! Caller anchors are must-have evidence, not a soft boost: a candidate that
-//! matched an anchor outranks every candidate that matched none, each anchor
-//! with matches keeps at least its best sites through the lane cap, and the
-//! receipt names every anchor's outcome, including "no matches".
+//! matched an anchor outranks every candidate that matched none, in this lane
+//! and in composition, each anchor with matches keeps at least its best sites
+//! through the lane cap, and the receipt names every anchor's outcome,
+//! including "no matches", counted against what the response carries.
 //!
 //! Routes are ranked retrieval, not exhaustive grep; they never widen the
 //! lane cap and never mint exact-tier admission.
@@ -21,6 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracedecay_contracts::retrieval::{LexicalAnchorDropReasonV1, LexicalAnchorDropV1};
 use tracedecay_domain::{
     CodeGenerationId, CompactCandidate, FixedPointScore, RetrievalAnchorId, RetrievalBudget,
     RetrievalFailure, RetrieverBatch, RetrieverContinuation, RetrieverCoverage, RetrieverKind,
@@ -45,9 +47,11 @@ pub const MAX_PREFERRED_SYMBOL_TOKENS_V1: usize = 8;
 
 /// Lexical score added per distinct caller anchor a merged candidate matched.
 ///
-/// Composition calibrates the lexical domain into `[0, 1]` and saturates
-/// well below any BM25 sum, so among lexical candidates only the raw score
-/// orders the page. Anchors are the caller's statement of what the answer is
+/// It orders the lexical lane's own committed prefix and its cap. Composition
+/// calibrates the lexical domain into `[0, 1]` and saturates well below any
+/// BM25 sum, so the tier cannot order the fused page; composition reads
+/// [`LexicalRouteReceiptV1::anchor_tiers`] for that. Anchors are the caller's
+/// statement of what the answer is
 /// about, so one anchor match must outrank any sum of incidental query-word
 /// matches. The bound is provable from the request contract: one
 /// `(term, field)` BM25 score is below 2^28 micros (idf of a 2^32-row corpus
@@ -533,13 +537,21 @@ pub struct LexicalRouteMatchV1 {
     pub spelling_variants: Vec<super::LexicalSpellingVariantV1>,
 }
 
-/// What one caller anchor contributed to the merged lexical lane.
+/// What one caller anchor contributed to the response.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum LexicalAnchorOutcomeV1 {
-    /// `matched` rows in the served generation carried the anchor and
-    /// `admitted` of them survived the lane cap.
-    Matched { matched: u64, admitted: u64 },
+    /// `matched` rows in the served generation carried the anchor.
+    /// `admitted` counts the result sites carrying it: those the lane kept
+    /// through its cap until [`LexicalRouteReceiptV1::reconcile_served`]
+    /// narrows it to the sites the response carries, moving the rest into
+    /// `dropped` by reason.
+    Matched {
+        matched: u64,
+        admitted: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        dropped: Vec<LexicalAnchorDropV1>,
+    },
     /// The anchor route served and found no row carrying the anchor.
     Unmatched,
     /// The anchor route did not serve; the lane outcome names why.
@@ -566,11 +578,77 @@ pub struct LexicalRouteReceiptV1 {
     pub routes: Vec<LexicalRouteKindV1>,
     pub matches_by_anchor: BTreeMap<RetrievalAnchorId, Vec<LexicalRouteMatchV1>>,
     pub anchors: Vec<LexicalAnchorReceiptV1>,
+    /// Lane-admitted sites a serving stage removed from the response.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub dropped_sites: BTreeMap<RetrievalAnchorId, LexicalAnchorDropReasonV1>,
 }
 
 impl LexicalRouteReceiptV1 {
     pub fn has_disclosure(&self) -> bool {
         self.routes.len() > 1 || !self.matches_by_anchor.is_empty()
+    }
+
+    /// How many distinct caller anchors each lane-admitted site carries;
+    /// composition ranks a site carrying more anchors ahead of every site
+    /// carrying fewer.
+    pub fn anchor_tiers(&self) -> BTreeMap<RetrievalAnchorId, u32> {
+        self.matches_by_anchor
+            .iter()
+            .filter_map(|(site, matches)| {
+                let anchors = matches
+                    .iter()
+                    .filter_map(|route_match| match &route_match.route {
+                        LexicalRouteKindV1::Anchor { anchor } => Some(anchor),
+                        _ => None,
+                    })
+                    .collect::<BTreeSet<_>>();
+                (!anchors.is_empty()).then(|| (site.clone(), anchors.len() as u32))
+            })
+            .collect()
+    }
+
+    /// Recount every matched anchor against the sites the response carries.
+    /// `classify` names why a lane-admitted site not already recorded as
+    /// dropped is absent from the response, or `None` when it is carried;
+    /// a later stage calls this again to record only its own removals.
+    pub fn reconcile_served(
+        &mut self,
+        classify: impl Fn(&RetrievalAnchorId) -> Option<LexicalAnchorDropReasonV1>,
+    ) {
+        for site in self.matches_by_anchor.keys() {
+            if !self.dropped_sites.contains_key(site)
+                && let Some(reason) = classify(site)
+            {
+                self.dropped_sites.insert(site.clone(), reason);
+            }
+        }
+        for receipt in &mut self.anchors {
+            let LexicalAnchorOutcomeV1::Matched {
+                admitted, dropped, ..
+            } = &mut receipt.outcome
+            else {
+                continue;
+            };
+            let mut carried = 0_u64;
+            let mut removed = BTreeMap::<LexicalAnchorDropReasonV1, u64>::new();
+            for (site, matches) in &self.matches_by_anchor {
+                let carries_anchor = matches.iter().any(|route_match| {
+                    matches!(&route_match.route, LexicalRouteKindV1::Anchor { anchor } if *anchor == receipt.anchor)
+                });
+                if !carries_anchor {
+                    continue;
+                }
+                match self.dropped_sites.get(site) {
+                    None => carried += 1,
+                    Some(reason) => *removed.entry(*reason).or_default() += 1,
+                }
+            }
+            *admitted = carried;
+            *dropped = removed
+                .into_iter()
+                .map(|(reason, sites)| LexicalAnchorDropV1 { reason, sites })
+                .collect();
+        }
     }
 }
 
@@ -628,8 +706,8 @@ pub fn merge_lexical_routes(
                 other,
                 LexicalRouteReceiptV1 {
                     routes: descriptors,
-                    matches_by_anchor: BTreeMap::new(),
                     anchors,
+                    ..LexicalRouteReceiptV1::default()
                 },
             ));
         }
@@ -659,7 +737,7 @@ pub fn merge_lexical_routes(
         let receipt = LexicalRouteReceiptV1 {
             routes: descriptors,
             matches_by_anchor,
-            anchors: Vec::new(),
+            ..LexicalRouteReceiptV1::default()
         };
         let outcome = match partial_reason {
             Some(reason) => RetrieverOutcome::Partial {
@@ -696,11 +774,13 @@ pub fn merge_lexical_routes(
     }
     let (batch, matches_by_anchor, anchors) =
         merged.into_batch(generation, lane_candidate_cap(lane_budget, base_budget))?;
-    let receipt = LexicalRouteReceiptV1 {
+    let mut receipt = LexicalRouteReceiptV1 {
         routes: descriptors,
         matches_by_anchor,
         anchors,
+        dropped_sites: BTreeMap::new(),
     };
+    receipt.reconcile_served(|_| None);
     let outcome = match partial_reason {
         Some(reason) => RetrieverOutcome::Partial {
             value: batch,
@@ -996,7 +1076,9 @@ impl MergedRoutes {
             kept.sort_by(merged_candidate_cmp);
             admitted = kept;
         }
-        let mut anchors = self
+        // Admitted site counts are filled from `matches_by_anchor` by
+        // `LexicalRouteReceiptV1::reconcile_served`.
+        let anchors = self
             .anchors
             .iter()
             .map(|route| LexicalAnchorReceiptV1 {
@@ -1009,6 +1091,7 @@ impl MergedRoutes {
                     LexicalAnchorOutcomeV1::Matched {
                         matched: route.matched,
                         admitted: 0,
+                        dropped: Vec::new(),
                     }
                 },
             })
@@ -1020,13 +1103,6 @@ impl MergedRoutes {
         for (ordinal, merged) in admitted.into_iter().enumerate() {
             let mut candidate = merged.candidate;
             candidate.ordinal_rank = ordinal as u32;
-            for receipt in &mut anchors {
-                if let LexicalAnchorOutcomeV1::Matched { admitted, .. } = &mut receipt.outcome
-                    && merged.anchors.contains(&receipt.anchor)
-                {
-                    *admitted += 1;
-                }
-            }
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), merged.evidence);
             matches_by_anchor
                 .entry(candidate.anchor_id.clone())
