@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use tracedecay_automation_runtime::automation::AutomationRunControl;
@@ -20,13 +20,34 @@ use tracedecay_daemon_service::automation_effect::{
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_project::project::TraceDecay;
-use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::logging::{StateChangeLogGate, log_daemon_event};
+
+/// One pre-admission problem per (project, task) is logged when it first
+/// appears and whenever its typed kind or code changes. A scheduler tick that
+/// re-observes the identical problem (a summarizer that times out on every
+/// tick, a missing executable) is counted, not re-logged; the line returns
+/// once the task is admitted again and the problem recurs.
+static SCHEDULER_PRE_ADMISSION_PROBLEM_GATE: StateChangeLogGate<
+    (PathBuf, &'static str),
+    (String, String),
+> = StateChangeLogGate::new();
 
 pub(super) fn log_scheduler_pre_admission_problem(
     project_path: &Path,
     task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
     problem: &tracedecay_contracts::ApplicationProblemEnvelope,
 ) {
+    let condition = (
+        format!("{:?}", problem.problem.kind()),
+        problem.problem.code.clone(),
+    );
+    if !SCHEDULER_PRE_ADMISSION_PROBLEM_GATE.admit(
+        scheduler_pre_admission_gate_key(project_path, task),
+        condition,
+    ) {
+        hotpath::gauge!("daemon.effect_admission.pre_admission_problem_repeats").inc(1_u64);
+        return;
+    }
     let mut fields = super::scheduler_project_task_fields(project_path, task);
     fields.extend([
         ("request_id", problem.request_id.as_str().to_owned()),
@@ -38,6 +59,25 @@ pub(super) fn log_scheduler_pre_admission_problem(
         Err(error) => fields.push(("observation_error", error.to_string())),
     }
     log_daemon_event("scheduler_task_application_pre_admission_problem", &fields);
+}
+
+fn scheduler_pre_admission_gate_key(
+    project_path: &Path,
+    task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
+) -> (PathBuf, &'static str) {
+    (
+        project_path.to_path_buf(),
+        tracedecay_automation_runtime::automation::backend::task_key(task),
+    )
+}
+
+/// Forget the suppressed pre-admission problem for an admitted task.
+pub(super) fn note_scheduler_task_admitted(
+    project_path: &Path,
+    task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
+) {
+    SCHEDULER_PRE_ADMISSION_PROBLEM_GATE
+        .clear(&scheduler_pre_admission_gate_key(project_path, task));
 }
 
 pub(super) fn log_scheduler_admission_conflict(
@@ -737,6 +777,113 @@ mod tests {
         fixed_task_schedule_decision, scheduler_effect_run_control,
         synchronize_scheduler_effect_control,
     };
+
+    /// The pre-admission problem the daemon log filled up with: the same
+    /// (project, task) refused with the same typed kind and code on every
+    /// scheduler tick. Ticks are one line each when every tick is admitted in
+    /// between (the pre-gate shape) and one line total when the condition
+    /// simply persists.
+    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+    #[test]
+    fn a_persisting_pre_admission_problem_is_logged_once_not_per_tick() {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        use std::os::fd::AsRawFd;
+
+        use tracedecay_automation_runtime::automation::backend::AgentTaskKind;
+        use tracedecay_contracts::{
+            ApplicationProblem, ApplicationProblemEnvelope, CancellationStage, RequestId,
+            ResultContractRef, RetryDirective,
+        };
+        use tracedecay_tool_catalog::SchemaId;
+
+        fn capture_stderr(emit: impl FnOnce()) -> String {
+            let mut tmp = tempfile::tempfile().expect("stderr capture file");
+            // SAFETY: `saved` is a fresh fd onto the current stderr and is
+            // restored onto fd 2 before this function returns, so process
+            // stderr is unchanged for every other test.
+            unsafe {
+                let saved = libc::dup(libc::STDERR_FILENO);
+                assert!(saved >= 0, "dup stderr");
+                assert_eq!(
+                    libc::dup2(tmp.as_raw_fd(), libc::STDERR_FILENO),
+                    libc::STDERR_FILENO
+                );
+                emit();
+                let _ = std::io::stderr().flush();
+                assert_eq!(libc::dup2(saved, libc::STDERR_FILENO), libc::STDERR_FILENO);
+                libc::close(saved);
+            }
+            tmp.seek(SeekFrom::Start(0)).expect("rewind capture");
+            let mut captured = String::new();
+            tmp.read_to_string(&mut captured).expect("read capture");
+            captured
+        }
+
+        let project = std::path::Path::new("/isolated/project/pre-admission-loop");
+        let problem = ApplicationProblemEnvelope::new(
+            ResultContractRef::new(SchemaId::new("schema.result.fixture").expect("schema"), 1)
+                .expect("result contract"),
+            RequestId::new("request.scheduler.pre-admission").expect("request"),
+            ApplicationProblem::TimedOut {
+                stage: CancellationStage::BeforeAdmission,
+                retry: RetryDirective::AfterDelay,
+                legal_actions: vec![],
+            },
+        )
+        .expect("pre-admission problem envelope");
+        const TICKS: usize = 200;
+        let event_lines = |captured: &str| {
+            captured
+                .lines()
+                .filter(|line| {
+                    line.contains("event=scheduler_task_application_pre_admission_problem")
+                })
+                .count()
+        };
+
+        // Every tick admitted in between: every observation is a transition.
+        let per_tick = capture_stderr(|| {
+            for _ in 0..TICKS {
+                super::note_scheduler_task_admitted(project, AgentTaskKind::MemoryCurator);
+                super::log_scheduler_pre_admission_problem(
+                    project,
+                    AgentTaskKind::MemoryCurator,
+                    &problem,
+                );
+            }
+        });
+        assert_eq!(event_lines(&per_tick), TICKS);
+
+        // The condition persists across ticks: one line, then silence.
+        super::note_scheduler_task_admitted(project, AgentTaskKind::MemoryCurator);
+        let persisting = capture_stderr(|| {
+            for _ in 0..TICKS {
+                super::log_scheduler_pre_admission_problem(
+                    project,
+                    AgentTaskKind::MemoryCurator,
+                    &problem,
+                );
+            }
+        });
+        assert_eq!(event_lines(&persisting), 1);
+        eprintln!(
+            "pre-admission loop over {TICKS} ticks: {} bytes per-tick, {} bytes gated",
+            per_tick.len(),
+            persisting.len()
+        );
+        assert!(persisting.len() * 10 < per_tick.len());
+
+        // Admission in between is a state change; the next problem logs again.
+        super::note_scheduler_task_admitted(project, AgentTaskKind::MemoryCurator);
+        let after_admission = capture_stderr(|| {
+            super::log_scheduler_pre_admission_problem(
+                project,
+                AgentTaskKind::MemoryCurator,
+                &problem,
+            );
+        });
+        assert_eq!(event_lines(&after_admission), 1);
+    }
 
     #[tokio::test]
     async fn disabled_fixed_task_preflight_creates_no_effect_journal() {

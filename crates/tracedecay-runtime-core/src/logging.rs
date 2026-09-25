@@ -5,6 +5,7 @@
 //! appears when `RUST_LOG` is unset; the stderr tracing subscriber (default
 //! WARN) does not filter it.
 
+use std::collections::BTreeMap;
 use std::fmt::Write;
 #[cfg(unix)]
 use std::fs::File;
@@ -12,6 +13,8 @@ use std::fs::File;
 use std::io::Write as _;
 #[cfg(unix)]
 use std::os::fd::{FromRawFd, RawFd};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 /// Opening marker of every bespoke daemon log line. Watcher recovery anchors
 /// on it, so `tracing` output, which never carries the marker, cannot forge
@@ -79,6 +82,119 @@ fn write_operator_line(line: &str) {
 #[cfg(not(unix))]
 fn write_operator_line(line: &str) {
     eprintln!("{line}");
+}
+
+/// Upper bound on distinct conditions one gate remembers. A gate that grows
+/// past it forgets everything and starts over: the cost is one repeated line
+/// per live condition, never unbounded memory for a log filter.
+const STATE_CHANGE_LOG_GATE_CAPACITY: usize = 4096;
+
+/// Admits a deterministic condition to the log once per state change instead
+/// of once per observation.
+///
+/// A background pass that re-observes the same terminal or deterministic
+/// condition on every tick (a corrupt store, a malformed session file, a
+/// pre-admission refusal) otherwise writes an identical warning per tick, and
+/// a managed service log grows without bound on a failure that is not
+/// changing. The gate keys on the typed condition (`K`) and its typed state
+/// (`S`): the first observation and every change of state are admitted,
+/// identical repeats are counted, and a condition that clears is forgotten so
+/// its next occurrence is admitted again.
+pub struct StateChangeLogGate<K, S> {
+    last: Mutex<BTreeMap<K, S>>,
+    suppressed: AtomicU64,
+}
+
+impl<K: Ord, S: PartialEq> StateChangeLogGate<K, S> {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            last: Mutex::new(BTreeMap::new()),
+            suppressed: AtomicU64::new(0),
+        }
+    }
+
+    /// Whether this observation of `key` in `state` should be logged.
+    pub fn admit(&self, key: K, state: S) -> bool {
+        let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
+        if last.get(&key) == Some(&state) {
+            self.suppressed.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        if last.len() >= STATE_CHANGE_LOG_GATE_CAPACITY && !last.contains_key(&key) {
+            last.clear();
+        }
+        last.insert(key, state);
+        true
+    }
+
+    /// Forget `key`. Returns whether a state was being suppressed for it, so
+    /// the caller can log the transition out of the condition exactly once.
+    pub fn clear(&self, key: &K) -> bool {
+        self.last
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(key)
+            .is_some()
+    }
+
+    /// Observations this gate kept out of the log.
+    #[must_use]
+    pub fn suppressed(&self) -> u64 {
+        self.suppressed.load(Ordering::Relaxed)
+    }
+}
+
+impl<K: Ord, S: PartialEq> Default for StateChangeLogGate<K, S> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod state_change_gate_tests {
+    use super::StateChangeLogGate;
+
+    #[test]
+    fn identical_repeats_are_suppressed_until_the_state_changes_or_clears() {
+        let gate: StateChangeLogGate<&str, &str> = StateChangeLogGate::new();
+        assert!(gate.admit("store", "corrupt"));
+        assert!(!gate.admit("store", "corrupt"));
+        assert!(!gate.admit("store", "corrupt"));
+        assert_eq!(gate.suppressed(), 2);
+
+        assert!(gate.admit("store", "busy"), "a changed state is a new line");
+        assert!(!gate.admit("store", "busy"));
+
+        assert!(gate.admit("kimi", "invalid"), "keys are independent");
+        assert!(gate.clear(&"store"));
+        assert!(!gate.clear(&"store"), "a cleared key is forgotten once");
+        assert!(
+            gate.admit("store", "busy"),
+            "the next occurrence logs again"
+        );
+        assert_eq!(gate.suppressed(), 3);
+    }
+
+    #[test]
+    fn a_full_gate_forgets_everything_instead_of_growing() {
+        let gate: StateChangeLogGate<usize, ()> = StateChangeLogGate::new();
+        for key in 0..super::STATE_CHANGE_LOG_GATE_CAPACITY {
+            assert!(gate.admit(key, ()));
+        }
+        assert!(
+            !gate.admit(0, ()),
+            "a full gate still suppresses known keys"
+        );
+        assert!(
+            gate.admit(usize::MAX, ()),
+            "a new key past capacity is admitted"
+        );
+        assert!(
+            gate.admit(0, ()),
+            "reaching capacity forgot the old keys rather than refusing the new one"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -169,6 +169,9 @@ where
         + 'static,
 {
     synchronize_scheduler_effect_control(run_control);
+    // The task was admitted, so a pre-admission problem that recurs later is
+    // a new transition and must be logged again.
+    effect_admission::note_scheduler_task_admitted(project_path, task);
     let settlement = effect.start_retained_automation_settlement(
         retained,
         Some(scheduler_run_observer(engine, project_id, project_path)),
