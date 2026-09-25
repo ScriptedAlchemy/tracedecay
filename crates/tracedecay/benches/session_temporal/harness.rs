@@ -861,7 +861,7 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
 }
 
 async fn run_one_repetition(repetition: usize) -> BenchResult<RepetitionMeasurement> {
-    let prepared = prepare_repetition(repetition).await?;
+    let prepared = Box::pin(prepare_repetition(repetition)).await?;
     let record_count = prepared.root_record_count;
     if record_count < root_relation_fixture::ROOT_RELATION_PARTICIPANT_COUNT {
         return Err(format!(
@@ -1286,7 +1286,7 @@ mod tests {
 
     #[tokio::test]
     async fn fixture_refresh_persists_progress_before_measurement() {
-        let prepared = prepare_repetition(0)
+        let prepared = Box::pin(prepare_repetition(0))
             .await
             .expect("production fixture refresh must persist durable progress");
         assert_eq!(

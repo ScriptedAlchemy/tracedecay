@@ -122,29 +122,8 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
         ("tracedecay_context", &["task"][..], "missing field `task`"),
     ] {
         assert_schema_requires(&tools, tool_name, required_args);
-        if matches!(
-            tool_name,
-            "tracedecay_diff_context"
-                | "tracedecay_changelog"
-                | "tracedecay_port_status"
-                | "tracedecay_port_order"
-        ) {
-            expect_real_server_missing_argument_error(
-                &server,
-                tool_name,
-                json!({}),
-                expected_message,
-            )
+        expect_real_server_missing_argument_error(&server, tool_name, json!({}), expected_message)
             .await;
-        } else {
-            expect_real_server_missing_argument_error(
-                &server,
-                tool_name,
-                json!({}),
-                expected_message,
-            )
-            .await;
-        }
     }
     // Nested-object parser style.
     assert_schema_requires(

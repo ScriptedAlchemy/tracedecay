@@ -12,7 +12,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
     ) -> tracedecay_domain::errors::Result<tracedecay_domain::SignedCursorKeyRefV1> {
-        SessionTemporalAccess::new(&*self.session_database_for_test(scope)?)
+        SessionTemporalAccess::new(self.session_database_for_test(scope)?)
             .ensure_active_session_cursor_key_result()
             .await
             .map_err(
