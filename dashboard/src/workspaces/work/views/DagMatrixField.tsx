@@ -141,6 +141,7 @@ export function DagMatrixField({
             )}
             style={{ left: 0, top: top + row * CELL, width: HEADER - 4, height: CELL }}
             onPointerEnter={() => onInspect(taskId)}
+            onPointerLeave={() => onInspect(null)}
             onClick={() => onSelect(taskId)}
             data-work-task={taskId}
             data-work-lane-family={treatment.family}
@@ -168,6 +169,10 @@ export function DagMatrixField({
         width={count * CELL}
         height={count * CELL}
         onPointerMove={onGridPointer}
+        onPointerLeave={() => {
+          setHover(null);
+          onInspect(null);
+        }}
         onClick={() => {
           if (hover !== null) onSelect(dsm.order[hover.row]!);
         }}
