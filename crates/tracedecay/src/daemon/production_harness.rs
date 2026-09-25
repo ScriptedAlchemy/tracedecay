@@ -25,6 +25,7 @@ use tracedecay_code_index_runtime::CodeIndexSchedulerRegistryV1;
 #[cfg(all(unix, feature = "test-transport"))]
 use tracedecay_code_index_runtime::git_transactions;
 use tracedecay_daemon_identity::profile_identity;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 #[cfg(unix)]
 use tracedecay_runtime_core::logging::log_daemon_event;
@@ -249,15 +250,16 @@ fn isolate_production_composition_roots(
                 isolation_root.display()
             ),
         })?;
-        let isolation_root =
-            std::fs::canonicalize(&isolation_root).map_err(|error| TraceDecayError::Config {
+        let isolation_root = canonical_existing_identity(&isolation_root).map_err(|error| {
+            TraceDecayError::Config {
                 message: format!(
                     "failed to canonicalize production-composition isolation root '{}': {error}",
                     isolation_root.display()
                 ),
-            })?;
+            }
+        })?;
         if let Some(live_profile_root) =
-            live_profile_root.and_then(|path| std::fs::canonicalize(path).ok())
+            live_profile_root.and_then(|path| canonical_existing_identity(&path).ok())
         {
             let overlaps_live_profile = isolation_root == live_profile_root
                 || isolation_root.starts_with(&live_profile_root)
@@ -286,11 +288,13 @@ fn isolate_production_composition_roots(
         let project_roots = project_roots
             .into_iter()
             .map(|project_root| {
-                std::fs::canonicalize(&project_root).map_err(|error| TraceDecayError::Config {
-                    message: format!(
-                        "failed to canonicalize production-composition project '{}': {error}",
-                        project_root.display()
-                    ),
+                canonical_existing_identity(&project_root).map_err(|error| {
+                    TraceDecayError::Config {
+                        message: format!(
+                            "failed to canonicalize production-composition project '{}': {error}",
+                            project_root.display()
+                        ),
+                    }
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -773,14 +777,13 @@ impl ProductionProjectCompositionHarnessV1 {
 
     pub fn server(&self, project_root: impl AsRef<Path>) -> Result<Arc<crate::mcp::McpServer>> {
         let canonical_project_path =
-            tracedecay_runtime_core::path_safety::canonical_existing_identity(
-                project_root.as_ref(),
-            )
-            .map_err(|error| TraceDecayError::Config {
-                message: format!(
-                    "failed to canonicalize production-composition project '{}': {error}",
-                    project_root.as_ref().display()
-                ),
+            canonical_existing_identity(project_root.as_ref()).map_err(|error| {
+                TraceDecayError::Config {
+                    message: format!(
+                        "failed to canonicalize production-composition project '{}': {error}",
+                        project_root.as_ref().display()
+                    ),
+                }
             })?;
         self.resources
             .as_ref()
