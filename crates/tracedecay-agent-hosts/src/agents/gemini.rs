@@ -33,6 +33,7 @@ use std::path::{Path, PathBuf};
 
 use tracedecay_domain::errors::Result;
 
+use super::host_bundle::HostComponentV1;
 use super::{AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, load_json_file};
 
 mod extension;
@@ -94,6 +95,33 @@ impl AgentIntegration for GeminiIntegration {
         gemini_extension_deactivate_with(&gemini, &ctx.home)
     }
 
+    /// The canonical set is the lone context-MCP component, and the extension
+    /// it installs is also the core registration, so either selects the
+    /// extension lifecycle. The trait default forwards only `Core`.
+    fn activate_deployed_host_component_registration(
+        &self,
+        components: &[HostComponentV1],
+        ctx: &InstallContext,
+    ) -> Result<()> {
+        if selects_extension(components) {
+            self.activate_deployed_host_registration(ctx)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn deactivate_deployed_host_component_registration(
+        &self,
+        components: &[HostComponentV1],
+        ctx: &InstallContext,
+    ) -> Result<()> {
+        if selects_extension(components) {
+            self.deactivate_deployed_host_registration(ctx)
+        } else {
+            Ok(())
+        }
+    }
+
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mGemini CLI integration\x1b[0m");
         doctor_check_staged_extension(dc, &ctx.home);
@@ -109,9 +137,7 @@ impl AgentIntegration for GeminiIntegration {
         component: super::host_bundle::HostComponentV1,
         ctx: &HealthcheckContext,
     ) -> super::host_bundle::HostBundleRegistrationStateV1 {
-        use super::host_bundle::HostComponentV1 as Component;
-
-        if !matches!(component, Component::Core | Component::ContextMcp) {
+        if !selects_extension(&[component]) {
             return super::host_bundle::HostBundleRegistrationStateV1::Missing;
         }
         gemini_extension_registration_state(&ctx.home, None)
@@ -174,6 +200,15 @@ impl AgentIntegration for GeminiIntegration {
 // ---------------------------------------------------------------------------
 // Lifecycle state
 // ---------------------------------------------------------------------------
+
+fn selects_extension(components: &[HostComponentV1]) -> bool {
+    components.iter().any(|component| {
+        matches!(
+            component,
+            HostComponentV1::Core | HostComponentV1::ContextMcp
+        )
+    })
+}
 
 /// Registration state from the host's installed extension alone.
 fn gemini_extension_registration_state(
