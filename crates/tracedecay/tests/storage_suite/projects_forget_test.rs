@@ -182,7 +182,7 @@ async fn forget_project_removes_exactly_one_registered_project() {
     // registry records `/private/var/folders/...` for the same directory.
     assert_eq!(
         db.project_ledger_paths_for_test().await.unwrap(),
-        vec![root_b.canonicalize().unwrap()],
+        vec![tracedecay_runtime_core::path_safety::canonical_root_identity(&root_b)],
         "only the forgotten project's token-ledger row is retired"
     );
     close_profile_runtime(db).await;
