@@ -13,6 +13,7 @@ use crate::common::fixture::{git_capture as git_stdout, git_run as git};
 
 use serde_json::{Value, json};
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 use crate::fixture;
 use crate::support::{TestTempDir, test_temp_dir};
@@ -52,7 +53,7 @@ async fn open_status_project() -> StatusProject {
     ))
     .await
     .expect("production composition harness");
-    let project_root = project_root.canonicalize().expect("canonical project root");
+    let project_root = canonical_existing_identity(&project_root).expect("canonical project root");
     StatusProject {
         harness,
         project_root,

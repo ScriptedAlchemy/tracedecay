@@ -19,6 +19,7 @@ pub(crate) use tracedecay_domain::{
 pub(crate) use tracedecay_lcm::{LcmSourceRef, LcmSummaryNodeDraft};
 pub(crate) use tracedecay_project::config::USER_DATA_DIR_ENV;
 pub(crate) use tracedecay_project::project::TraceDecay;
+pub(crate) use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 pub(crate) use tracedecay_sessions::admission::HostAdmissionScope;
 pub(crate) use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
@@ -929,9 +930,7 @@ async fn start_dashboard_fixture_with_options_and_delivery(
     delivery_authority: Option<FakeDeliveryAuthority>,
 ) -> DashboardFixture {
     let tmp = tempdir_or_panic();
-    let tmp_root = tmp
-        .path()
-        .canonicalize()
+    let tmp_root = canonical_existing_identity(tmp.path())
         .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
     let project_root = tmp_root.join("project");
     let profile_root = tmp_root.join("profile").join(".tracedecay");

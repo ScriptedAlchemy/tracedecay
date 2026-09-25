@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::mcp::McpServer;
 use tracedecay_domain::canonical_text::sha256_hex;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use tracedecay_runtime_core::storage::pin_fixture_repository_identity;
 
 use crate::support::{
@@ -237,7 +238,7 @@ async fn open_checkout() -> OpenedCheckout {
         ],
     );
 
-    let project_root = project_root.canonicalize().expect("canonical project");
+    let project_root = canonical_existing_identity(&project_root).expect("canonical project");
     let isolation_root = isolation
         .path()
         .canonicalize()

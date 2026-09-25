@@ -14,6 +14,7 @@ use tracedecay_global_db::{GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceU
 use tracedecay_mcp::McpTransport;
 use tracedecay_project::project::TraceDecay;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 use crate::support;
 
@@ -125,7 +126,8 @@ async fn project_list_returns_the_registry_page_the_caller_asked_for() {
     )
     .await
     .expect("project-scoped registry");
-    let active_git = fs::canonicalize(cg.project_root().join(".git")).expect("active .git");
+    let active_git =
+        canonical_existing_identity(&cg.project_root().join(".git")).expect("active .git");
     assert_eq!(
         cg.project_root().join(".git"),
         active_git,

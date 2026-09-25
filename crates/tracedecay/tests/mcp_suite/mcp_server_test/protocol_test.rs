@@ -10,6 +10,7 @@ use tracedecay::mcp::McpServer;
 use tracedecay_mcp::response_handles::{
     RESPONSE_HANDLE_TTL_SECS, cleanup_expired_response_handles, store_response_handle,
 };
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use tracedecay_runtime_core::storage::resolve_response_handle_root;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
@@ -402,7 +403,7 @@ async fn test_tools_call_timings_can_be_disabled() {
     assert_eq!(payload["project_admitted"], true, "{payload}");
     assert_eq!(
         payload["project_root"],
-        json!(dir.path().canonicalize().unwrap()),
+        json!(canonical_existing_identity(dir.path()).unwrap()),
         "{payload}"
     );
     assert!(
@@ -1492,7 +1493,7 @@ async fn test_resources_read_overview() {
                 "mimeType": "text/plain",
                 "text": format!(
                     "Project: {}\nGraph statistics: unavailable (sealed generation statistics are not published)",
-                    dir.path().canonicalize().unwrap().display()
+                    canonical_existing_identity(dir.path()).unwrap().display()
                 )
             }]
         })

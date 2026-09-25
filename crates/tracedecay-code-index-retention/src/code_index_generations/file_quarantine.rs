@@ -411,19 +411,34 @@ mod tests {
     fn a_rebound_source_path_cannot_redirect_the_rename() {
         let fixture = fixture(&[("payload", b"owned")]);
         let moved = fixture.source_path.with_file_name("source-moved");
-        std::fs::rename(&fixture.source_path, &moved).expect("move the held source");
-        std::fs::create_dir(&fixture.source_path).expect("rebind the source path");
-        std::fs::write(fixture.source_path.join("payload"), b"foreign").expect("foreign file");
+        let rebind = std::fs::rename(&fixture.source_path, &moved);
+        // A held Windows directory capability is opened without
+        // `FILE_SHARE_DELETE`, so the platform refuses the rebind itself.
+        #[cfg(windows)]
+        assert_eq!(
+            rebind.expect_err("a held source cannot be moved").raw_os_error(),
+            Some(32)
+        );
+        #[cfg(not(windows))]
+        {
+            rebind.expect("move the held source");
+            std::fs::create_dir(&fixture.source_path).expect("rebind the source path");
+            std::fs::write(fixture.source_path.join("payload"), b"foreign")
+                .expect("foreign file");
+        }
 
         fixture
             .quarantine
             .stage(Some(&fixture.source), "payload", |_| Ok(()))
             .expect("stage through the held capability");
 
+        #[cfg(not(windows))]
         assert_eq!(
             std::fs::read(fixture.source_path.join("payload")).expect("foreign file survives"),
             b"foreign"
         );
+        #[cfg(windows)]
+        assert!(!fixture.source_path.join("payload").exists());
         assert!(!moved.join("payload").exists());
         assert_eq!(
             std::fs::read(fixture.quarantine_path.join(STAGE).join("payload"))
@@ -434,25 +449,32 @@ mod tests {
 
     #[test]
     fn committed_removal_unlinks_only_the_staged_file_and_then_the_stage() {
-        let fixture = fixture(&[("payload", b"retire"), ("sibling", b"live")]);
-        fixture
-            .quarantine
-            .stage(Some(&fixture.source), "payload", |_| Ok(()))
+        let Fixture {
+            _temp,
+            source_path,
+            quarantine_path,
+            source,
+            quarantine,
+        } = fixture(&[("payload", b"retire"), ("sibling", b"live")]);
+        quarantine
+            .stage(Some(&source), "payload", |_| Ok(()))
             .expect("stage");
-        let recovered = FileQuarantine::recover("fixture file", &fixture.quarantine_path, STAGE)
+        // A restart releases the interrupted transaction's stage capability.
+        drop(quarantine);
+        let recovered = FileQuarantine::recover("fixture file", &quarantine_path, STAGE)
             .expect("reopen after a restart");
         recovered
-            .remove_committed(Some(&fixture.source), "payload")
+            .remove_committed(Some(&source), "payload")
             .expect("unlink the committed file");
         recovered
-            .remove_committed(Some(&fixture.source), "payload")
+            .remove_committed(Some(&source), "payload")
             .expect("a replayed unlink is idempotent");
         recovered.remove_empty_stage().expect("remove the stage");
 
-        assert!(!fixture.quarantine_path.join(STAGE).exists());
-        assert!(!fixture.source_path.join("payload").exists());
+        assert!(!quarantine_path.join(STAGE).exists());
+        assert!(!source_path.join("payload").exists());
         assert_eq!(
-            std::fs::read(fixture.source_path.join("sibling")).expect("live sibling"),
+            std::fs::read(source_path.join("sibling")).expect("live sibling"),
             b"live"
         );
     }
