@@ -28,7 +28,7 @@ lint_range() {
 lint_root_commit() {
   git -C "$repository" show --no-patch --format=%B "$head" | (
     cd "$project_root"
-    npm run --silent lint:commit --
+    pnpm run --silent lint:commit --
   )
 }
 

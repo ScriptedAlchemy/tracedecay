@@ -12,7 +12,13 @@ cargo test-ci
 ```
 
 Use the Rust toolchain pinned in `rust-toolchain.toml` (edition 2024) and
-**Node.js 22+ with npm**. Install `cargo-nextest` to run the `test-ci` and
+**Node.js 22+ and pnpm** (the version pinned by `packageManager` in
+`package.json`; an older pnpm switches to it automatically). Run
+`pnpm install` at the repository root after cloning and whenever
+`pnpm-lock.yaml` or a `Cargo.lock` changes. Besides the npm packages, it
+installs every crate into `.pnpm/crates`, which the committed
+`.cargo/config.toml` substitutes for crates.io and the pinned git sources, so
+`cargo` cannot resolve dependencies until it has run. Install `cargo-nextest` to run the `test-ci` and
 `test-all` aliases defined in `.cargo/config.toml`. Commands below run from the
 repository root unless noted.
 
@@ -23,10 +29,9 @@ The dashboard bundle at `dashboard/app-dist/` is generated output and is
 git-ignored, so a fresh clone has none. The CLI build script
 (`crates/tracedecay-cli/build.rs`), the only crate that embeds the bundle,
 builds the frontend into an immutable, digest-named copy under its own
-`OUT_DIR` rather than embedding `app-dist`: `npm ci` runs when
-`dashboard/node_modules` lacks the marker for the current `package-lock.json`,
-`npm run build` runs when the frontend inputs' content fingerprint changes,
-and the Rust build fails if npm is missing. Setting
+`OUT_DIR` rather than embedding `app-dist`: `pnpm run build` runs when the
+frontend inputs' content fingerprint changes, and the Rust build fails if pnpm
+is missing or the installed packages no longer match `pnpm-lock.yaml`. Setting
 `TRACEDECAY_SKIP_DASHBOARD_BUILD` stages a prebuilt `dashboard/app-dist`
 instead, and only when `TRACEDECAY_DASHBOARD_BUNDLE_SHA256` holds that
 bundle's digest (print it with `python3 scripts/check-dashboard-bundle.py
@@ -185,8 +190,8 @@ After changing any Rust type that crosses the dashboard API boundary:
 
 ```bash
 cd dashboard
-npm run contracts:generate   # rewrite the generated files
-npm run contracts:check      # what CI runs; exits 1 on any drift
+pnpm run contracts:generate   # rewrite the generated files
+pnpm run contracts:check      # what CI runs; exits 1 on any drift
 ```
 
 `contracts:check` is a blocking CI step in the `dashboard` job of `ci.yml`, not
@@ -232,7 +237,7 @@ scripts/install-git-hooks.sh
 CI validates commit messages with commitlint (`commitlint.config.cjs`):
 
 ```bash
-git show --no-patch --format=%B HEAD | npm run --silent lint:commit --
+git show --no-patch --format=%B HEAD | pnpm run --silent lint:commit --
 ```
 
 Run the same command locally (per commit) before pushing to lint every

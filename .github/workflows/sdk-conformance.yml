@@ -13,6 +13,8 @@ on:
       - "crates/tracedecay-sdk/**"
       - "crates/tracedecay-tool-catalog/**"
       - "sdks/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
       - "scripts/check-sdk-codegen.sh"
       - "scripts/check-sdk-publish-workflow.py"
       - "scripts/test-check-sdk-publish-workflow.py"
@@ -75,16 +77,13 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: sdks/typescript/package-lock.json
+      - uses: ./.github/actions/setup-pnpm
       - run: cargo test --manifest-path sdks/codegen/Cargo.toml
       - run: scripts/check-sdk-codegen.sh
       - run: cargo test --manifest-path crates/tracedecay-sdk/Cargo.toml
-      - run: npm ci
+      - run: pnpm run typecheck
         working-directory: sdks/typescript
-      - run: npm run typecheck
-        working-directory: sdks/typescript
-      - run: npm test
+      - run: pnpm test
         working-directory: sdks/typescript
 
   production-router:
@@ -97,13 +96,8 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: |
-            dashboard/package-lock.json
-            sdks/typescript/package-lock.json
-      - run: npm ci
-        working-directory: dashboard
-      - run: npm run build
+      - uses: ./.github/actions/setup-pnpm
+      - run: pnpm run build
         working-directory: dashboard
       - run: cargo build -p tracedecay-cli --bin tracedecay
       # This job owns every sdk_suite test that needs the production daemon.
@@ -115,7 +109,5 @@ jobs:
           --test sdk_suite
           --run-ignored all
           --no-tests=fail
-      - run: npm ci
-        working-directory: sdks/typescript
-      - run: npm run test:installed
+      - run: pnpm run test:installed
         working-directory: sdks/typescript

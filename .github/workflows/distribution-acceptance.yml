@@ -43,8 +43,8 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22.23.2"
-          cache: npm
-          cache-dependency-path: dashboard/package-lock.json
+
+      - uses: ./.github/actions/setup-pnpm
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -52,9 +52,7 @@ jobs:
 
       - name: Build dashboard
         working-directory: dashboard
-        run: |
-          npm ci
-          npm run build
+        run: pnpm run build
 
       - name: Export dashboard bundle digest for skip-mode builds
         shell: bash

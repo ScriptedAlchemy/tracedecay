@@ -89,10 +89,10 @@ def assert_build_job(job: dict[str, Any]) -> None:
     steps = job_steps(job)
     for required in (
         "npm install -g npm@12.0.2",
-        "npm ci",
+        "pnpm install --frozen-lockfile",
         "scripts/check-sdk-codegen.sh",
-        "npm run typecheck",
-        "npm test",
+        "pnpm run typecheck",
+        "pnpm test",
         "npm pack --dry-run --json --ignore-scripts",
         "npm pack --json --ignore-scripts",
         "npm pack npm@12.0.2 --ignore-scripts",
@@ -105,8 +105,8 @@ def assert_build_job(job: dict[str, Any]) -> None:
             fail(f"'{BUILD_JOB}' is missing {required!r}")
 
     parity_index = find_step(steps, "scripts/check-sdk-codegen.sh")
-    typecheck_index = find_step(steps, "npm run typecheck")
-    tests_index = find_step(steps, "npm test")
+    typecheck_index = find_step(steps, "pnpm run typecheck")
+    tests_index = find_step(steps, "pnpm test")
     dry_run_index = find_step(steps, "npm pack --dry-run --json --ignore-scripts")
     pack_index = find_step(steps, "npm pack --json --ignore-scripts")
     conformance_index = find_step(steps, "TRACEDECAY_SDK_TARBALL")

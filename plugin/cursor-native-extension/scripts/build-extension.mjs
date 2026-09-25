@@ -55,7 +55,7 @@ if (check) {
   const embedded = await readFile(embeddedPath);
   if (!embedded.equals(compiled)) {
     throw new Error(
-      'embedded/extension.js is stale; run npm run build and commit the result',
+      'embedded/extension.js is stale; run pnpm run build and commit the result',
     );
   }
 } else {
