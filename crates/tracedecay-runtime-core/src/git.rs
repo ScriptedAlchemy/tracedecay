@@ -146,10 +146,20 @@ fn resolve_git_program_from(
     .ok_or(GitProgramUnavailable)
 }
 
+/// [`find_in_path`] against the process `PATH` (and `PATHEXT` on Windows).
+pub(crate) fn find_executable_on_path(name: &str) -> Option<PathBuf> {
+    find_in_path(
+        name,
+        &std::env::var_os("PATH")?,
+        #[cfg(windows)]
+        std::env::var_os("PATHEXT").as_deref(),
+    )
+}
+
 /// Minimal `which`-style lookup: find `name` as an executable on `PATH`.
 ///
 /// On Windows, each `PATH` entry is probed with every `PATHEXT` suffix (and the
-/// bare name) so `git.exe` resolves from `git`. On Unix, the bare name is probed
+/// bare name when it already has an extension) so `git.exe` resolves from `git`. On Unix, the bare name is probed
 /// and the entry must carry at least one execute bit.
 fn find_in_path(
     name: &str,
@@ -185,9 +195,12 @@ fn probe_dir(dir: &Path, name: &str, pathext: Option<&OsStr>) -> Option<PathBuf>
         .and_then(OsStr::to_str)
         .unwrap_or(".COM;.EXE;.BAT;.CMD");
 
-    // If the name already carries an extension, try it verbatim first.
+    // `CreateProcess` cannot launch an extensionless file, and package
+    // managers install exactly such shell shims beside the runnable `.cmd`
+    // (npm's global bin directory), so the bare name is a candidate only when
+    // it already carries an extension.
     let bare = dir.join(name);
-    if is_executable_file(&bare) {
+    if bare.extension().is_some() && is_executable_file(&bare) {
         return Some(bare);
     }
     for ext in pathext.split(';') {
@@ -653,6 +666,25 @@ mod tests {
         );
         #[cfg(not(windows))]
         assert_eq!(resolved, executable.into_os_string());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_lookup_skips_an_extensionless_shell_shim() {
+        let temporary = tempfile::tempdir().expect("npm-style bin directory");
+        std::fs::write(temporary.path().join("ast-grep"), b"#!/bin/sh\n").expect("shell shim");
+        let launcher = temporary.path().join("ast-grep.cmd");
+        std::fs::write(&launcher, b"@echo off\r\n").expect("cmd launcher");
+        let path = std::env::join_paths([temporary.path()]).expect("fixture PATH");
+
+        let resolved = find_in_path("ast-grep", &path, Some(OsStr::new(".EXE;.CMD")))
+            .expect("the runnable launcher must resolve");
+
+        assert!(
+            crate::path_safety::same_canonical_path(&resolved, &launcher),
+            "resolved {} instead of the runnable launcher",
+            resolved.display()
+        );
     }
 
     #[test]
