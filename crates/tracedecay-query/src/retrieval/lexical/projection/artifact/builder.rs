@@ -2600,17 +2600,17 @@ fn prepare_term_insert_plan<'a>(
 /// Sort one batch's insert plan on the indexing pool.
 ///
 /// Runs of [`TERM_INSERT_CONTROL_INTERVAL`] sort in waves so cancellation is
-/// observed between them, and each wave takes a background CPU permit. A
-/// k-way merge then materializes the total order, checkpointing on the same
-/// interval. The merge holds a second copy of the plan until the first is
-/// dropped.
+/// observed between them, and each wave takes a background CPU permit.
+/// Pairwise merge rounds then double the sorted run length on the pool until
+/// one run remains, checkpointing between rounds. Each round holds a second
+/// copy of the plan until the first is dropped.
 fn sort_insert_plan<T, K>(
     entries: &mut Vec<T>,
     key: impl Fn(&T) -> K + Copy + Sync,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1>
 where
-    T: Copy + Send,
+    T: Copy + Send + Sync,
     K: Ord + Copy + Send,
 {
     if entries.len() <= 1 {
@@ -2642,46 +2642,63 @@ where
 
 fn merge_sorted_runs<T, K>(
     entries: &mut Vec<T>,
-    run: usize,
-    key: impl Fn(&T) -> K,
+    mut run: usize,
+    key: impl Fn(&T) -> K + Copy + Sync,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1>
 where
-    T: Copy,
-    K: Ord + Copy,
+    T: Copy + Send + Sync,
+    K: Ord,
 {
-    let mut heap = BinaryHeap::new();
-    let mut run_index = 0usize;
-    let mut start = 0usize;
-    while start < entries.len() {
-        heap.push((Reverse(key(&entries[start])), run_index, start));
-        run_index += 1;
-        start = start.saturating_add(run);
-    }
     let mut merged = Vec::new();
     merged.try_reserve_exact(entries.len()).map_err(|error| {
         CodeLexicalArtifactErrorV1::Io(format!(
             "bounded lexical insert plan merge allocation failed: {error}"
         ))
     })?;
-    let mut emitted = 0usize;
-    while let Some((Reverse(_), run_index, index)) = heap.pop() {
-        if emitted.is_multiple_of(TERM_INSERT_CONTROL_INTERVAL) {
-            checkpoint(control)?;
-        }
-        merged.push(entries[index]);
-        emitted += 1;
-        let next = index + 1;
-        let run_end = run_index
-            .saturating_add(1)
-            .saturating_mul(run)
-            .min(entries.len());
-        if next < run_end {
-            heap.push((Reverse(key(&entries[next])), run_index, next));
+    merged.extend_from_slice(entries);
+    while run < entries.len() {
+        checkpoint(control)?;
+        let pair = run.saturating_mul(2);
+        let source = entries.as_slice();
+        tracedecay_code_index::parallelism::install(|| {
+            source
+                .par_chunks(pair)
+                .zip(merged.par_chunks_mut(pair))
+                .for_each(|(input, output)| {
+                    tracedecay_code_index::parallelism::with_background_cpu_permit(|| {
+                        let (left, right) = input.split_at(run.min(input.len()));
+                        merge_two_runs(left, right, output, key);
+                    });
+                });
+        })
+        .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
+        std::mem::swap(entries, &mut merged);
+        run = pair;
+    }
+    Ok(())
+}
+
+/// Stable merge of two sorted runs into `output`, which holds exactly
+/// `left.len() + right.len()` slots.
+fn merge_two_runs<T: Copy, K: Ord>(
+    left: &[T],
+    right: &[T],
+    output: &mut [T],
+    key: impl Fn(&T) -> K,
+) {
+    let (mut left_index, mut right_index) = (0, 0);
+    for slot in output {
+        let take_left = right_index == right.len()
+            || (left_index < left.len() && key(&left[left_index]) <= key(&right[right_index]));
+        if take_left {
+            *slot = left[left_index];
+            left_index += 1;
+        } else {
+            *slot = right[right_index];
+            right_index += 1;
         }
     }
-    *entries = merged;
-    Ok(())
 }
 
 // Mirrors `prepare_term_insert_plan` for `exact_postings`,
@@ -5040,37 +5057,34 @@ const NGRAM_LIST_ENTRY_BYTES: usize = 96;
 /// entries of one rebuild pass stay bounded however large the corpus is.
 const NGRAM_DICTIONARY_WINDOW_ROWS: usize = 4_096;
 
-/// One sealed n-gram list under construction, keyed `(kind, ngram)`.
-type NgramListV1 = ((i64, i64), PostingListEncoderV1);
+/// An n-gram list key, `(kind, ngram)`.
+type NgramKeyV1 = (i64, i64);
 
-/// One rebuild pass's n-gram lists: keys at or above `lower` (the previous
-/// pass's cutoff) and below this pass's own cutoff. When the lists outgrow
-/// the memory authority the highest keys are shed and the cutoff drops to
-/// them, so a later pass rebuilds exactly those keys.
-struct NgramListPassV1 {
-    lower: Option<(i64, i64)>,
-    cutoff: Option<(i64, i64)>,
+/// One sealed n-gram list: its key, document frequency, and canonical
+/// document-set encoding.
+type SealedNgramListV1 = (NgramKeyV1, i64, Vec<u8>);
+
+/// One window's `(key, document)` pairs from one pool task, bucketed by
+/// [`ngram_partition`] and in document order within each bucket.
+type NgramKeyBucketsV1 = Vec<Vec<(NgramKeyV1, u32)>>;
+
+/// The lists of one key partition. Only this partition's worker appends to
+/// them, so every list still grows by appending ascending documents.
+#[derive(Default)]
+struct NgramListPartitionV1 {
     lists: HashMap<(i64, i64), PostingListEncoderV1>,
     held: usize,
-    memory_bytes: usize,
 }
 
-impl NgramListPassV1 {
-    fn new(lower: Option<(i64, i64)>, memory_bytes: usize) -> Self {
-        Self {
-            lower,
-            cutoff: None,
-            lists: HashMap::new(),
-            held: 0,
-            memory_bytes: memory_bytes.max(1),
-        }
-    }
-
-    /// Documents arrive in ascending order, so every list grows by appending.
-    fn add(&mut self, key: (i64, i64), document: u32) -> Result<(), CodeLexicalArtifactErrorV1> {
-        if self.lower.is_some_and(|lower| key < lower)
-            || self.cutoff.is_some_and(|cutoff| key >= cutoff)
-        {
+impl NgramListPartitionV1 {
+    fn add(
+        &mut self,
+        key: (i64, i64),
+        document: u32,
+        lower: Option<(i64, i64)>,
+        cutoff: Option<(i64, i64)>,
+    ) -> Result<(), CodeLexicalArtifactErrorV1> {
+        if lower.is_some_and(|lower| key < lower) || cutoff.is_some_and(|cutoff| key >= cutoff) {
             return Ok(());
         }
         let held = &mut self.held;
@@ -5081,25 +5095,135 @@ impl NgramListPassV1 {
         let before = list.retained_bytes();
         list.push(document, 1)?;
         self.held += list.retained_bytes() - before;
-        if self.held > self.memory_bytes {
-            let mut keys = self.lists.keys().copied().collect::<Vec<_>>();
-            keys.sort_unstable();
-            while self.held > self.memory_bytes / 2 && keys.len() > 1 {
-                let Some(shed) = keys.pop() else { break };
-                if let Some(list) = self.lists.remove(&shed) {
-                    self.held -= list.retained_bytes() + NGRAM_LIST_ENTRY_BYTES;
-                }
-                self.cutoff = Some(shed);
-            }
+        Ok(())
+    }
+}
+
+/// The partition owning `key`. Any stable split works: each key's list is
+/// built whole inside one partition and sealed lists are re-sorted by key.
+fn ngram_partition(key: (i64, i64), partitions: usize) -> usize {
+    let mixed = (key.0 as u64)
+        .rotate_left(32)
+        .wrapping_add(key.1 as u64)
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    ((mixed >> 32) as usize) % partitions
+}
+
+/// One rebuild pass's n-gram lists: keys at or above `lower` (the previous
+/// pass's cutoff) and below this pass's own cutoff. Keys are split across
+/// partitions so the pool builds lists in parallel; after each window, lists
+/// that outgrew the memory authority shed their highest keys and the cutoff
+/// drops to them, so a later pass rebuilds exactly those keys. The authority
+/// is therefore checked per window: a pass may exceed it by one window's
+/// postings, which the window's decoded keys already hold.
+struct NgramListPassV1 {
+    lower: Option<(i64, i64)>,
+    cutoff: Option<(i64, i64)>,
+    partitions: Vec<NgramListPartitionV1>,
+    memory_bytes: usize,
+}
+
+impl NgramListPassV1 {
+    fn new(lower: Option<(i64, i64)>, memory_bytes: usize, partitions: usize) -> Self {
+        Self {
+            lower,
+            cutoff: None,
+            partitions: std::iter::repeat_with(NgramListPartitionV1::default)
+                .take(partitions.max(1))
+                .collect(),
+            memory_bytes: memory_bytes.max(1),
         }
+    }
+
+    fn partition_count(&self) -> usize {
+        self.partitions.len()
+    }
+
+    /// Append one window's bucketed keys. Buckets arrive in document order,
+    /// so each partition appends ascending documents to its own lists.
+    fn add_window(
+        &mut self,
+        buckets: &[NgramKeyBucketsV1],
+    ) -> Result<(), CodeLexicalArtifactErrorV1> {
+        let (lower, cutoff) = (self.lower, self.cutoff);
+        let partitions = &mut self.partitions;
+        tracedecay_code_index::parallelism::install(|| {
+            partitions
+                .par_iter_mut()
+                .enumerate()
+                .try_for_each(|(index, partition)| {
+                    tracedecay_code_index::parallelism::with_background_cpu_permit(|| {
+                        for task in buckets {
+                            for &(key, document) in &task[index] {
+                                partition.add(key, document, lower, cutoff)?;
+                            }
+                        }
+                        Ok(())
+                    })
+                })
+        })
+        .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))??;
+        self.shed_to_memory();
         Ok(())
     }
 
-    /// This pass's lists in key order, and where the next pass starts.
-    fn finish(self) -> (Vec<NgramListV1>, Option<(i64, i64)>) {
-        let mut lists = self.lists.into_iter().collect::<Vec<_>>();
-        lists.sort_unstable_by_key(|(key, _)| *key);
-        (lists, self.cutoff)
+    fn shed_to_memory(&mut self) {
+        let mut held = self
+            .partitions
+            .iter()
+            .map(|partition| partition.held)
+            .sum::<usize>();
+        if held <= self.memory_bytes {
+            return;
+        }
+        let partition_count = self.partition_count();
+        let mut keys = self
+            .partitions
+            .iter()
+            .flat_map(|partition| partition.lists.keys().copied())
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        while held > self.memory_bytes / 2 && keys.len() > 1 {
+            let Some(shed) = keys.pop() else { break };
+            let partition = &mut self.partitions[ngram_partition(shed, partition_count)];
+            if let Some(list) = partition.lists.remove(&shed) {
+                let released = list.retained_bytes() + NGRAM_LIST_ENTRY_BYTES;
+                partition.held -= released;
+                held -= released;
+            }
+            self.cutoff = Some(shed);
+        }
+    }
+
+    /// This pass's sealed lists in key order, and where the next pass starts.
+    fn finish(
+        self,
+    ) -> Result<(Vec<SealedNgramListV1>, Option<NgramKeyV1>), CodeLexicalArtifactErrorV1> {
+        let partitions = self.partitions;
+        let sealed = tracedecay_code_index::parallelism::install(|| {
+            partitions
+                .into_par_iter()
+                .map(|partition| {
+                    tracedecay_code_index::parallelism::with_background_cpu_permit(|| {
+                        partition
+                            .lists
+                            .into_iter()
+                            .map(|(key, list)| {
+                                let document_frequency =
+                                    i64::try_from(list.len()).map_err(contract_number)?;
+                                let documents =
+                                    encode_document_set(&decode_ngram_bitmap(&list.finish()?)?)?;
+                                Ok((key, document_frequency, documents))
+                            })
+                            .collect::<Result<Vec<_>, CodeLexicalArtifactErrorV1>>()
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))??;
+        let mut lists = sealed.into_iter().flatten().collect::<Vec<_>>();
+        lists.sort_unstable_by_key(|(key, _, _)| *key);
+        Ok((lists, self.cutoff))
     }
 }
 
@@ -5159,34 +5283,31 @@ impl NgramDeriveWindowV1 {
                 decoded.push((stored.document_id, row));
             }
         }
-        let keys = tracedecay_code_index::parallelism::install(|| {
+        let partitions = pass.partition_count();
+        let buckets = tracedecay_code_index::parallelism::install(|| {
             decoded
                 .par_chunks(NGRAM_DERIVE_ROWS_PER_TASK)
                 .map(|rows| {
                     tracedecay_code_index::parallelism::with_background_cpu_permit(|| {
-                        rows.iter()
-                            .map(|(_, row)| {
-                                document_ngram_keys(
-                                    &normalized_search_text(row),
-                                    row.sanitized_text.as_str(),
-                                    &row.normalized_text,
-                                    control,
-                                )
-                            })
-                            .collect::<Result<Vec<_>, _>>()
+                        let mut buckets: NgramKeyBucketsV1 = vec![Vec::new(); partitions];
+                        for (document, row) in rows {
+                            for key in document_ngram_keys(
+                                &normalized_search_text(row),
+                                row.sanitized_text.as_str(),
+                                &row.normalized_text,
+                                control,
+                            )? {
+                                buckets[ngram_partition(key, partitions)].push((key, *document));
+                            }
+                        }
+                        Ok(buckets)
                     })
                 })
-                .collect::<Vec<_>>()
+                .collect::<Result<Vec<_>, CodeLexicalArtifactErrorV1>>()
         })
-        .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
-        for (rows, keys) in decoded.chunks(NGRAM_DERIVE_ROWS_PER_TASK).zip(keys) {
-            for ((document, _), keys) in rows.iter().zip(keys?) {
-                for key in keys {
-                    pass.add(key, *document)?;
-                }
-            }
-        }
-        Ok(())
+        .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))??;
+        drop(decoded);
+        pass.add_window(&buckets)
     }
 }
 
@@ -5208,9 +5329,11 @@ fn derive_ngram_postings(
             "INSERT INTO ngram_postings(kind, ngram, document_frequency, documents) VALUES (?1, ?2, ?3, ?4)",
         )
         .map_err(sqlite_error)?;
+    let partitions = tracedecay_code_index::parallelism::install(rayon::current_num_threads)
+        .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
     let mut lower: Option<(i64, i64)> = None;
     loop {
-        let mut pass = NgramListPassV1::new(lower, authority.ngram_memory_bytes);
+        let mut pass = NgramListPassV1::new(lower, authority.ngram_memory_bytes, partitions);
         let mut statement = transaction
             .prepare("SELECT first_document, payload FROM row_blocks ORDER BY first_document")
             .map_err(sqlite_error)?;
@@ -5247,13 +5370,11 @@ fn derive_ngram_postings(
         )?;
         drop(blocks);
         drop(statement);
-        let (lists, cutoff) = pass.finish();
-        for (ordinal, (key, list)) in lists.into_iter().enumerate() {
+        let (lists, cutoff) = pass.finish()?;
+        for (ordinal, (key, document_frequency, documents)) in lists.into_iter().enumerate() {
             if ordinal.is_multiple_of(TERM_INSERT_CONTROL_INTERVAL) {
                 checkpoint(control)?;
             }
-            let document_frequency = i64::try_from(list.len()).map_err(contract_number)?;
-            let documents = encode_document_set(&decode_ngram_bitmap(&list.finish()?)?)?;
             insert
                 .execute(params![key.0, key.1, document_frequency, documents])
                 .map_err(sqlite_error)?;
@@ -7087,9 +7208,30 @@ mod tests {
         );
     }
 
+    /// The parallel run merge yields the total order for plans of one run, a
+    /// ragged tail, and many runs. Plan keys are unique, as insert keys are.
+    #[test]
+    fn insert_plan_sort_matches_a_total_sort() {
+        for length in [
+            1u64,
+            TERM_INSERT_CONTROL_INTERVAL as u64,
+            TERM_INSERT_CONTROL_INTERVAL as u64 + 1,
+            7 * TERM_INSERT_CONTROL_INTERVAL as u64 + 311,
+        ] {
+            let mut entries = (0..length)
+                .map(|index| index.wrapping_mul(0x9e37_79b9_7f4a_7c15))
+                .collect::<Vec<_>>();
+            let mut expected = entries.clone();
+            expected.sort_unstable();
+            sort_insert_plan(&mut entries, |key| *key, &ActiveControl).expect("sort insert plan");
+            assert_eq!(entries, expected, "plan of {length} entries");
+        }
+    }
+
     /// A pass that outgrows its memory sheds its highest keys and a later
     /// pass rebuilds exactly them: the union of every pass equals one
-    /// unbounded pass, list for list, in key order.
+    /// unbounded pass, list for list, in key order, however the keys are
+    /// partitioned across workers and windows.
     #[test]
     fn bounded_ngram_passes_rebuild_exactly_the_unbounded_lists() {
         let postings = (0u32..600)
@@ -7099,22 +7241,28 @@ mod tests {
                     .map(move |ngram| ((ngram % 2, ngram), document))
             })
             .collect::<Vec<_>>();
-        let run = |memory_bytes: usize| {
+        let run = |memory_bytes: usize, partitions: usize, window_postings: usize| {
             let mut sealed = Vec::new();
             let mut passes = 0;
             let mut lower = None;
             loop {
                 passes += 1;
-                let mut pass = NgramListPassV1::new(lower, memory_bytes);
-                for (key, document) in &postings {
-                    pass.add(*key, *document).expect("ascending documents");
+                let mut pass = NgramListPassV1::new(lower, memory_bytes, partitions);
+                for window in postings.chunks(window_postings) {
+                    let buckets = window
+                        .chunks(97)
+                        .map(|task| {
+                            let mut buckets: NgramKeyBucketsV1 = vec![Vec::new(); partitions];
+                            for &(key, document) in task {
+                                buckets[ngram_partition(key, partitions)].push((key, document));
+                            }
+                            buckets
+                        })
+                        .collect::<Vec<_>>();
+                    pass.add_window(&buckets).expect("ascending documents");
                 }
-                let (lists, cutoff) = pass.finish();
-                sealed.extend(
-                    lists
-                        .into_iter()
-                        .map(|(key, list)| (key, list.finish().expect("non-empty list"))),
-                );
+                let (lists, cutoff) = pass.finish().expect("seal pass");
+                sealed.extend(lists);
                 match cutoff {
                     Some(cutoff) => lower = Some(cutoff),
                     None => break,
@@ -7122,8 +7270,8 @@ mod tests {
             }
             (sealed, passes)
         };
-        let (unbounded, single) = run(usize::MAX);
-        let (bounded, passes) = run(4 * 1024);
+        let (unbounded, single) = run(usize::MAX, 1, postings.len());
+        let (bounded, passes) = run(4 * 1024, 5, 512);
         assert_eq!(single, 1);
         assert!(
             passes > 2,

@@ -197,7 +197,11 @@ tracing = "0.1"
 ureq = { version = "3", features = ["json"] }
 url = "2"
 tikv-jemallocator = { version = "0.7.0", optional = true }
-mimalloc = { version = "0.1.52", optional = true }
+# `no_thp`: mimalloc otherwise madvises its arenas MADV_HUGEPAGE, and each
+# refault after its 10 ms purge runs synchronous huge-page compaction. On a
+# loaded 96-core host a restart reindex spent 9m22s of kernel CPU in zone-lock
+# compaction and TLB shootdowns against 52s of user CPU.
+mimalloc = { version = "0.1.52", optional = true, features = ["no_thp"] }
 
 # Windows release archives are `.zip` (Unix ships `.tar.gz` via flate2/tar);
 # consumed by the self-update extraction in src/upgrade.rs.
