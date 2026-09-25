@@ -707,6 +707,31 @@ impl crate::agents::host_bundle::HostComponentSetRegistrationV1
                 )),
             );
         }
+        if self.operation != crate::agents::host_bundle::HostBundleLifecycleOpV1::Uninstall {
+            let components = component_set
+                .components
+                .iter()
+                .map(|component| component.manifest.component)
+                .collect::<Vec<_>>();
+            let foreign = self
+                .integration
+                .foreign_bundle_entrypoints(&components, &self.context.home)
+                .map_err(|error| Self::registration_error(component_set.host, error))?;
+            if !foreign.is_empty() {
+                let paths = foreign
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(
+                    crate::agents::host_bundle::HostBundleError::OwnershipConflict(format!(
+                        "{paths}: not shipped by any TraceDecay release, but the host would load \
+                         it as part of the TraceDecay plugin; move it out of the plugin \
+                         directory and retry"
+                    )),
+                );
+            }
+        }
         // Claude's global install, Hermes' named-profile projection, and Pi's
         // relocated mirror all derive host-owned registration from deployed
         // component bytes. An install may replace those bytes while the

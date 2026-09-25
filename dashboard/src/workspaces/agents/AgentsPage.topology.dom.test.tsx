@@ -121,6 +121,21 @@ describe('AgentsPage delegation topology', () => {
     expect(inspector().getAttribute('data-agent-inspector-id')).toBe('cursor:session.cursor.solo');
   });
 
+  it('ends inspection when the pointer moves off a mark onto the empty field', async () => {
+    renderAgents();
+    await settled();
+    const child = mark('codex:session.codex.child');
+    fireEvent.mouseEnter(child);
+    expect(inspector().getAttribute('data-agent-inspector-mode')).toBe('inspecting');
+    expect(document.querySelectorAll('[data-topology-lit]')).toHaveLength(2);
+
+    // The pointer stays inside the field, on its empty ground.
+    const ground = screen.getByRole('group', { name: 'Delegation topology field' }).querySelector('svg')!;
+    fireEvent.mouseLeave(child, { relatedTarget: ground });
+    expect(inspector().getAttribute('data-agent-inspector-mode')).toBe('default');
+    expect(document.querySelectorAll('[data-topology-lit]')).toHaveLength(0);
+  });
+
   it('selects on click, reads that session\'s token frontier, and syncs the exact tree', async () => {
     const asked: string[] = [];
     server.use(

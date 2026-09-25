@@ -134,6 +134,22 @@ describe('provenance cameras', () => {
     expect(onSelect).toHaveBeenCalledWith('fact-three');
   });
 
+  it('stops dimming when the pointer moves off a row, leaving only the page inspection', () => {
+    const { container, onInspect } = draw();
+    const three = container.querySelector('[data-fact-id="fact-three"]')!;
+    const two = container.querySelector('[data-fact-id="fact-two"]')!;
+    fireEvent.pointerMove(three);
+    expect(two.getAttribute('opacity')).toBe('0.3');
+    // The page holds no inspection here (it was dismissed), so leaving the
+    // row onto the empty field lifts the neighbourhood dimming.
+    fireEvent.pointerLeave(three, { relatedTarget: screen.getByTestId('fact-constellation-svg') });
+    expect(two.getAttribute('opacity')).toBe('1');
+    expect(three.getAttribute('data-inspected')).toBeNull();
+    // Returning to the same row inspects it again.
+    fireEvent.pointerMove(three);
+    expect(onInspect).toHaveBeenCalledTimes(2);
+  });
+
   it("lifts the selected fact's relations with a halo and lets the others recede", () => {
     const { container } = draw(graph(), 'fact-three');
     const lifted = [...container.querySelectorAll('[data-lifted]')].map((node) => node.getAttribute('data-relation'));

@@ -153,7 +153,7 @@ function KnowledgeFacts({ onOpenGeometry }: { onOpenGeometry: () => void }) {
 
   const overview = useEnvelope(
     ['memory', 'overview', applied],
-    `${BASE}/?limit=100${applied ? `&q=${encodeURIComponent(applied)}` : ''}`,
+    `${BASE}?limit=100${applied ? `&q=${encodeURIComponent(applied)}` : ''}`,
     MemoryOverviewPayloadV1Schema,
   );
   // The overview histogram is the finest canonical store-wide distribution.

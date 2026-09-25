@@ -125,4 +125,23 @@ describe('DAG and Matrix cameras', () => {
     fireEvent.keyDown(matrix, { key: 'Enter' });
     await waitFor(() => expect(address.search).toContain('task=middle'));
   });
+
+  it('Matrix ends inspection when the pointer moves off a row or the grid inside the field', async () => {
+    const container = await renderBoard('/work?view=matrix');
+    const field = container.querySelector('[data-work-dag-field]')!;
+    // The pointer stays inside the matrix, on its axis and margin.
+    const matrix = container.querySelector<HTMLElement>('[data-work-dag-matrix]')!;
+    const row = matrix.querySelector<HTMLElement>('[data-work-task="side"]')!;
+    fireEvent.pointerEnter(row);
+    expect(field.getAttribute('data-work-dag-inspected')).toBe('side');
+    fireEvent.pointerLeave(row, { relatedTarget: matrix });
+    expect(field.getAttribute('data-work-dag-inspected')).toBeNull();
+
+    const grid = container.querySelector<SVGSVGElement>('[data-work-dag-matrix-grid]')!;
+    vi.spyOn(grid, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 400, 400));
+    fireEvent.pointerMove(grid, { clientX: 1, clientY: 1 });
+    expect(field.getAttribute('data-work-dag-inspected')).toBe('root');
+    fireEvent.pointerLeave(grid, { relatedTarget: matrix });
+    expect(field.getAttribute('data-work-dag-inspected')).toBeNull();
+  });
 });

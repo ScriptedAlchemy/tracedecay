@@ -608,6 +608,7 @@ async fn seed_github_diagnostic(database: &Database, observed_at: UtcMicros) {
 
 #[tokio::test]
 async fn concrete_feedback_source_projects_expands_and_clears_a_saved_github_finding() {
+    let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let root = tempfile::tempdir().expect("root");
     std::fs::create_dir_all(root.path().join("src")).expect("source directory");
     std::fs::write(root.path().join("src/lib.rs"), SOURCE).expect("source");

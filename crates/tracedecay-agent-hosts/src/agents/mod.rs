@@ -49,7 +49,7 @@ use tracedecay_domain::errors::TraceDecayError;
 pub use antigravity::AntigravityIntegration;
 pub(crate) use bundle_identity::{
     observed_bundle_content_digest, observed_bundle_discovery_matches,
-    rendered_bundle_content_digest,
+    rendered_bundle_content_digest, unexpected_bundle_entrypoints,
 };
 pub use claude::ClaudeIntegration;
 pub use cline::ClineIntegration;
@@ -401,6 +401,18 @@ pub trait AgentIntegration {
         _install: &InstallContext,
     ) -> host_bundle::HostBundleRegistrationStateV1 {
         self.host_component_registration(component, health)
+    }
+
+    /// Auto-discovered entrypoints inside TraceDecay's deployed bundle that no
+    /// TraceDecay release shipped. The host loads them as part of the
+    /// TraceDecay plugin, so activating `components` cannot converge while
+    /// they remain; lifecycle preflight refuses them as an ownership conflict.
+    fn foreign_bundle_entrypoints(
+        &self,
+        _components: &[host_bundle::HostComponentV1],
+        _home: &Path,
+    ) -> Result<Vec<PathBuf>> {
+        Ok(Vec::new())
     }
 
     /// Returns true if this agent appears to be installed on the system

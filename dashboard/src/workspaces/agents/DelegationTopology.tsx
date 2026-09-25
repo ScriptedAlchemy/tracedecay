@@ -429,6 +429,7 @@ function MarkControl({
   const at = markPosition(mark, geometry);
   const selected = mark.id === interaction.selectedId;
   const inspect = () => interaction.onInspect(mark.id);
+  const release = () => interaction.onInspect(null);
   const commonStyle = { top: at.y - HIT / 2, left: at.x - HIT / 2 } as const;
   const labelOffset = Math.max(0, radius - HIT / 2) + 8;
 
@@ -447,6 +448,7 @@ function MarkControl({
         aria-expanded={false}
         aria-label={`${bundleTitle(mark)}: ${mark.sessions} sessions in generation ${mark.generation}${mark.descendants > 0 ? `, ${mark.descendants} beneath them` : ''}. Open this bundle.`}
         onMouseEnter={inspect}
+        onMouseLeave={release}
         onFocus={inspect}
         onClick={() => interaction.onToggleExpanded(mark.id)}
         data-topology-control="bundle"
@@ -496,6 +498,7 @@ function MarkControl({
         aria-pressed={selected}
         aria-label={`${mark.label}, ${mark.node.provider} session ${mark.node.session_id}, generation ${mark.generation}${linkWord}. ${selected ? 'Selected.' : 'Select to read its token frontier.'}`}
         onMouseEnter={inspect}
+        onMouseLeave={release}
         onFocus={inspect}
         onClick={() => interaction.onSelect(mark.id)}
         data-topology-control="session"
@@ -527,6 +530,7 @@ function MarkControl({
           aria-expanded={false}
           aria-label={`Open the ${mark.foldedDescendants} ${mark.foldedDescendants === 1 ? 'session' : 'sessions'} beneath ${mark.label}`}
           onMouseEnter={inspect}
+          onMouseLeave={release}
           onFocus={inspect}
           onClick={() => interaction.onToggleExpanded(mark.id)}
           data-topology-control="fold"

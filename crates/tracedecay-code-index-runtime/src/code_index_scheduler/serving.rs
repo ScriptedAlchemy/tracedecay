@@ -3202,7 +3202,10 @@ pub(super) mod clone_census_gate {
         if let Some(gate) = gate {
             let mut released = gate.0.lock().unwrap_or_else(PoisonError::into_inner);
             while !*released {
-                released = gate.1.wait(released).unwrap_or_else(PoisonError::into_inner);
+                released = gate
+                    .1
+                    .wait(released)
+                    .unwrap_or_else(PoisonError::into_inner);
             }
         }
     }

@@ -228,6 +228,7 @@ export function WorkDagBoard({
     onFocus: () => setInspected(taskId),
     onBlur: () => setInspected(null),
     onPointerEnter: () => setInspected(taskId),
+    onPointerLeave: () => setInspected(null),
     onKeyDown: (event) => {
       const node = layout.byId.get(taskId);
       if (node !== undefined) traverse(event, node);

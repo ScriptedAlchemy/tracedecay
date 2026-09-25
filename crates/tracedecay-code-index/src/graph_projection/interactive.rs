@@ -48,13 +48,10 @@ use self::models::CatalogSymbol;
 pub(super) use self::models::InteractiveCatalog;
 pub use self::models::{
     CodeGraphDegreeRankingV1, CodeGraphEdgeKindCountsV1, CodeGraphImpactBatchV1,
-    CodeGraphImpactedSymbolV1, CodeGraphPathSearchV1, CodeGraphSemanticEdgeV1,
-    CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1, CodeGraphSymbolSummaryV1,
+    CodeGraphImpactedSymbolV1, CodeGraphPathSearchV1, CodeGraphRankedSymbolV1,
+    CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1,
+    CodeGraphSymbolSummaryV1,
 };
-
-/// Symbols measured per bulk degree read while ranking a generation. Bounds
-/// the batch-wide relation budget each measurement charges.
-const DEGREE_RANKING_BATCH_SYMBOLS: usize = 256;
 
 pub type CodeGraphSymbolPredicate<'a> = dyn Fn(
         &SymbolOccurrenceId,
@@ -661,92 +658,64 @@ impl CodeGraphInteractiveReader {
     }
 
     /// The `top` most-connected symbols of the generation, ranked by total
-    /// semantic degree.
+    /// semantic degree over every symbol of the generation.
     ///
-    /// This is the bounded replacement for the dashboard's degree pool and
-    /// top-connected panels, both of which aggregated the whole `edges` table
-    /// twice per read. `max_symbols_examined` bounds the scan itself, not just
-    /// the output: reaching it returns `complete: false` rather than silently
-    /// ranking a prefix as if it were the graph. Ordering is total and
+    /// Degrees come from the generation-pinned catalog, which tallied them
+    /// once from the relation rows, so a ranking costs one in-memory pass
+    /// over the catalog and no adjacency reads. Ordering is total and
     /// deterministic, total degree descending, then qualified name, then
     /// occurrence, so equal-degree symbols do not reshuffle between reads.
     pub fn degree_ranking(
         &self,
         top: usize,
-        max_symbols_examined: usize,
         request_cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<CodeGraphDegreeRankingV1, CodeGraphProjectionError> {
         require_positive(top, "code graph degree ranking size")?;
-        require_positive(
-            max_symbols_examined,
-            "code graph degree ranking examination budget",
-        )?;
-        let cancellation = self.read_cancellation(Arc::clone(&request_cancellation))?;
-        let catalog = self.catalog(cancellation)?;
-
-        let mut measured: Vec<(CodeGraphSymbolDegreesV1, String)> = Vec::new();
-        let mut complete = true;
-        let mut batch: Vec<SymbolOccurrenceId> = Vec::new();
-        let mut names: Vec<String> = Vec::new();
-        for (occurrence, record) in &catalog.symbols {
-            if measured.len() + batch.len() == max_symbols_examined {
-                complete = false;
-                break;
-            }
-            batch.push(occurrence.clone());
-            names.push(record.metadata.as_ref().map_or_else(
-                || occurrence.as_str().to_owned(),
-                |metadata| metadata.qualified_name.clone(),
-            ));
-            if batch.len() == DEGREE_RANKING_BATCH_SYMBOLS {
-                self.measure_degree_batch(
-                    &batch,
-                    &names,
-                    &mut measured,
-                    Arc::clone(&request_cancellation),
-                )?;
-                batch.clear();
-                names.clear();
-            }
+        let cancellation = self.read_cancellation(request_cancellation)?;
+        let catalog = self.catalog(Arc::clone(&cancellation))?;
+        let mut ranked: Vec<(u64, &str, &SymbolOccurrenceId, &CatalogSymbol)> = catalog
+            .symbols
+            .iter()
+            .map(|(occurrence, record)| {
+                let name = record
+                    .metadata
+                    .as_ref()
+                    .map_or(occurrence.as_str(), |metadata| {
+                        metadata.qualified_name.as_str()
+                    });
+                (
+                    record.outgoing.saturating_add(record.incoming),
+                    name,
+                    occurrence,
+                    record,
+                )
+            })
+            .collect();
+        catalog::check_cancelled(cancellation.as_ref())?;
+        let order = |left: &(u64, &str, &SymbolOccurrenceId, &CatalogSymbol),
+                     right: &(u64, &str, &SymbolOccurrenceId, &CatalogSymbol)| {
+            right
+                .0
+                .cmp(&left.0)
+                .then_with(|| left.1.cmp(right.1))
+                .then_with(|| left.2.cmp(right.2))
+        };
+        if ranked.len() > top {
+            ranked.select_nth_unstable_by(top - 1, order);
+            ranked.truncate(top);
         }
-        if !batch.is_empty() {
-            self.measure_degree_batch(&batch, &names, &mut measured, request_cancellation)?;
-        }
-
-        let symbols_examined = measured.len();
-        measured.sort_by(|left, right| {
-            let left_total = left.0.outgoing.saturating_add(left.0.incoming);
-            let right_total = right.0.outgoing.saturating_add(right.0.incoming);
-            right_total
-                .cmp(&left_total)
-                .then_with(|| left.1.cmp(&right.1))
-                .then_with(|| left.0.occurrence.cmp(&right.0.occurrence))
-        });
-        measured.truncate(top);
+        ranked.sort_unstable_by(order);
         Ok(CodeGraphDegreeRankingV1 {
-            ranked: measured.into_iter().map(|(degrees, _)| degrees).collect(),
-            symbols_examined,
-            complete,
+            ranked: ranked
+                .into_iter()
+                .map(|(_, _, occurrence, record)| CodeGraphRankedSymbolV1 {
+                    summary: InteractiveCatalog::symbol_summary(occurrence, record),
+                    outgoing: record.outgoing,
+                    incoming: record.incoming,
+                })
+                .collect(),
+            symbol_count: catalog.symbols.len(),
         })
-    }
-
-    /// Measures one batch of the degree ranking scan, pairing each measurement
-    /// with the sort name captured for it.
-    fn measure_degree_batch(
-        &self,
-        batch: &[SymbolOccurrenceId],
-        names: &[String],
-        measured: &mut Vec<(CodeGraphSymbolDegreesV1, String)>,
-        request_cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<(), CodeGraphProjectionError> {
-        let degrees = self.degrees(batch, request_cancellation)?;
-        if degrees.len() != names.len() {
-            return Err(CodeGraphProjectionError::Corrupt(
-                "code graph degree ranking batch shape does not match its seeds".to_owned(),
-            ));
-        }
-        measured.extend(degrees.into_iter().zip(names.iter().cloned()));
-        Ok(())
     }
 
     /// Semantic edges induced among a symbol set: edges whose endpoints are

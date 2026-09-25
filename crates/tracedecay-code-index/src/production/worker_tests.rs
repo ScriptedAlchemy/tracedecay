@@ -222,6 +222,71 @@ fn restored_generation_resolves_seal_references_once() {
     assert_eq!(restored.edges, published.edges);
 }
 
+/// A generation sealed by one build is reused by the next when only inputs
+/// that do not shape stored bytes differ, and only a stored-shape authority
+/// retires it. Upgrades restart the daemon, so this is what keeps a sealed
+/// generation serving across `tracedecay update`.
+#[test]
+fn sealed_generation_is_reusable_by_a_later_build_with_the_same_stored_shape() {
+    let mut sealing_build = CodeIndexProductionOwnerV1::new(
+        worker_config(),
+        WorkerPublicationStore::default(),
+        WorkerProjectionSink,
+    )
+    .expect("sealing owner");
+    let published = sealing_build
+        .build_and_publish(
+            worker_request_with_source(
+                "file.worker.cross-build",
+                1_100_000,
+                b"pub fn caller() { target(); }\npub fn target() {}\n",
+            ),
+            &UninterruptibleCodeIndexControlV1,
+        )
+        .expect("sealed generation");
+    let (manifest, segments) = partitioned_seal(&published);
+    drop(sealing_build);
+
+    let restored = partitioned_restore(&manifest, &segments);
+    let later_build = CodeIndexProductionConfigV1 {
+        max_snapshot_age_micros: Some(60_000_000),
+        ..worker_config()
+    };
+    let compatibility = restored.compatibility_with(&later_build);
+    assert!(
+        compatibility.is_reusable(),
+        "intake policy is not stored shape: {:?}",
+        compatibility.incompatibilities()
+    );
+
+    let rechunked = restored.compatibility_with(&CodeIndexProductionConfigV1 {
+        chunker_revision: worker_id::<ChunkerRevision>("chunker.v3"),
+        ..later_build.clone()
+    });
+    assert_eq!(
+        rechunked
+            .incompatibilities()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        [CodeIndexGenerationIncompatibilityV1::ChunkerRevision]
+    );
+    assert!(
+        rechunked.may_serve_while_rebuilding(),
+        "a chunker-only change keeps the sealed bytes serving until the successor is ready"
+    );
+
+    let resanitized = restored.compatibility_with(&CodeIndexProductionConfigV1 {
+        sanitizer_revision: worker_id::<SanitizerRevision>("sanitizer.v2"),
+        ..later_build
+    });
+    assert!(!resanitized.is_reusable());
+    assert!(
+        !resanitized.may_serve_while_rebuilding(),
+        "bytes sanitized under another revision must not serve"
+    );
+}
+
 #[test]
 fn unchanged_increment_shares_symbol_records_with_parent_generation() {
     let store = WorkerPublicationStore::default();

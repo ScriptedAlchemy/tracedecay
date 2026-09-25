@@ -224,6 +224,9 @@ function stub(options: { holographic?: Partial<MemoryHolographicPayloadV1>; fact
         );
       }
       if (path.endsWith('/status')) return json(STATUS);
+      // The daemon binds the overview without a trailing slash and answers
+      // `/api/plugins/holographic/` with a bare 404.
+      if (!/\/plugins\/holographic$/.test(path)) return new Response('', { status: 404 });
       const query = new URLSearchParams(url.split('?')[1] ?? '').get('q') ?? '';
       return json(overviewEnvelope(facts, options.holographic ?? {}, query));
     }),
