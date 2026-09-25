@@ -1112,14 +1112,18 @@ impl TranscriptSource for CursorSweepSource {
                     max_discovery_bytes: remaining_bytes,
                     ..default_bounds
                 };
+                let transcripts_dir = entry.path().join("agent-transcripts");
                 let report = collect_files_with_ext_bounded(
-                    &entry.path().join("agent-transcripts"),
+                    &transcripts_dir,
                     "jsonl",
                     MAX_SWEEP_SCAN_DEPTH,
                     bounds,
                 );
                 remaining_bytes = remaining_bytes.saturating_sub(report.bytes_charged);
-                paths.extend(report.paths);
+                paths.extend(without_top_level_subagent_copies(
+                    &transcripts_dir,
+                    report.paths,
+                ));
             }
             return select_cursor_session_authorities(paths);
         }
@@ -1158,26 +1162,8 @@ impl TranscriptSource for CursorSweepSource {
             TranscriptDiscoveryBounds::default_walk(),
         )
         .paths;
-        // Cursor materializes some subagent sessions twice: under their
-        // parent's `subagents/` dir and again as a top-level
-        // `<id>/<id>.jsonl` copy whose content drifts slightly (so byte
-        // offsets, and therefore message ids, diverge). Ingesting both
-        // would duplicate messages and overwrite the parent linkage; keep
-        // the subagent copy (it carries parentage, and it is the copy the
-        // live hook path ingests) and skip the top-level duplicate.
-        let subagent_stems: std::collections::HashSet<std::ffi::OsString> = files
-            .iter()
-            .filter(|path| is_subagent_transcript(path))
-            .filter_map(|path| path.file_stem().map(std::ffi::OsStr::to_os_string))
-            .collect();
-        files
+        without_top_level_subagent_copies(&transcripts_dir, files)
             .into_iter()
-            .filter(|path| {
-                is_subagent_transcript(path)
-                    || path
-                        .file_stem()
-                        .is_none_or(|stem| !subagent_stems.contains(stem))
-            })
             .filter(|path| {
                 // Composer-owned sessions are ingested (richer) by the composer
                 // sweep; skip the JSONL copy so neither path double-ingests.
@@ -1225,6 +1211,45 @@ impl TranscriptSource for CursorSweepSource {
             self.parse_new(path, prev, project_root, max_new_bytes)
         })
     }
+}
+
+/// Cursor materializes some subagent sessions twice: under their parent's
+/// `subagents/` dir and again as a top-level `<id>/<id>.jsonl` copy whose
+/// content drifts slightly. Both copies share one native session identity, so
+/// ingesting both duplicates observations, overwrites the parent linkage, and
+/// refuses byte-identical repeated lines as identity collisions. The subagent
+/// copy is the authority (it carries parentage, and the live hook path ingests
+/// it); drop every top-level duplicate of it.
+///
+/// Subagent stems are read from disk rather than from `files`: the bounded
+/// walk can retain a top-level copy while its subagent copy falls past the
+/// discovery cap, and the copy is a duplicate either way.
+fn without_top_level_subagent_copies(transcripts_dir: &Path, files: Vec<PathBuf>) -> Vec<PathBuf> {
+    let subagent_stems: std::collections::HashSet<std::ffi::OsString> =
+        std::fs::read_dir(transcripts_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|session| session.file_type().is_ok_and(|kind| kind.is_dir()))
+            .filter_map(|session| std::fs::read_dir(session.path().join("subagents")).ok())
+            .flatten()
+            .flatten()
+            .filter_map(|child| {
+                let name = PathBuf::from(child.file_name());
+                (name.extension().and_then(std::ffi::OsStr::to_str) == Some("jsonl"))
+                    .then(|| name.file_stem().map(std::ffi::OsStr::to_os_string))
+                    .flatten()
+            })
+            .collect();
+    files
+        .into_iter()
+        .filter(|path| {
+            is_subagent_transcript(path)
+                || path
+                    .file_stem()
+                    .is_none_or(|stem| !subagent_stems.contains(stem))
+        })
+        .collect()
 }
 
 fn select_cursor_session_authorities(paths: Vec<PathBuf>) -> Vec<PathBuf> {
