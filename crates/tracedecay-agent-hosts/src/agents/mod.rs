@@ -40,7 +40,9 @@ pub mod zed;
 
 use std::path::{Path, PathBuf};
 
-use tracedecay_automation_runtime::automation::host_io::ManagedSkillExportReport;
+use tracedecay_automation_runtime::automation::host_io::{
+    ManagedSkillExportReport, uses_default_user_profile,
+};
 use tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary;
 use tracedecay_domain::errors::Result;
 use tracedecay_domain::errors::TraceDecayError;
@@ -170,10 +172,6 @@ pub(crate) fn doctor_check_managed_skill_prompt_indexes(
             )),
         }
     }
-}
-
-pub(crate) fn uses_default_user_profile(home: &Path, profile_root: &Path) -> bool {
-    profile_root == home.join(".tracedecay")
 }
 
 /// Re-runs the managed-skill overlay/prompt-index export for every agent
