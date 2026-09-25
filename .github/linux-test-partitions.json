@@ -3,6 +3,7 @@
     {
       "name": "root-lib",
       "timeout_minutes": 40,
+      "windows_timeout_minutes": 70,
       "macos_group": "root-lib",
       "packages": [
         "tracedecay",
@@ -19,6 +20,7 @@
     {
       "name": "root-sessions",
       "timeout_minutes": 80,
+      "windows_timeout_minutes": 50,
       "macos_group": "root-suites",
       "packages": [
         "tracedecay",
@@ -42,6 +44,7 @@
     {
       "name": "root-journeys",
       "timeout_minutes": 75,
+      "windows_timeout_minutes": 85,
       "macos_group": "root-suites",
       "packages": [
         "tracedecay",
@@ -73,23 +76,10 @@
       ]
     },
     {
-      "name": "root-dashboard-api",
-      "timeout_minutes": 70,
-      "macos_group": "contracts-dashboard-api",
-      "packages": [
-        "tracedecay"
-      ],
-      "targets": [
-        "test:dashboard_api_test"
-      ],
-      "features": [
-        "tracedecay/test-transport"
-      ]
-    },
-    {
       "name": "root-transport",
       "timeout_minutes": 90,
-      "macos_group": "root-suites",
+      "windows_timeout_minutes": 90,
+      "macos_group": "root-transport",
       "packages": [
         "tracedecay",
         "tracedecay-cli"
@@ -109,9 +99,27 @@
       ]
     },
     {
+      "name": "root-dashboard-api",
+      "timeout_minutes": 70,
+      "windows_timeout_minutes": 65,
+      "macos_group": "root-transport",
+      "packages": [
+        "tracedecay",
+        "tracedecay-cli"
+      ],
+      "targets": [
+        "test:dashboard_api_test"
+      ],
+      "features": [
+        "tracedecay/test-transport",
+        "tracedecay-cli/test-transport"
+      ]
+    },
+    {
       "name": "runtime",
       "timeout_minutes": 65,
-      "macos_group": "runtime-storage",
+      "windows_timeout_minutes": 100,
+      "macos_group": "lower",
       "packages": [
         "tracedecay-application",
         "tracedecay-automation-runtime",
@@ -151,7 +159,8 @@
     {
       "name": "core-storage",
       "timeout_minutes": 50,
-      "macos_group": "runtime-storage",
+      "windows_timeout_minutes": 55,
+      "macos_group": "lower",
       "packages": [
         "tracedecay-code-index",
         "tracedecay-code-index-retention",
@@ -179,7 +188,8 @@
     {
       "name": "core-contracts",
       "timeout_minutes": 55,
-      "macos_group": "contracts-dashboard-api",
+      "windows_timeout_minutes": 70,
+      "macos_group": "lower",
       "packages": [
         "tracedecay-agent-hosts",
         "tracedecay-api",
@@ -215,27 +225,28 @@
       ]
     }
   ],
-  "macos_budget_basis": "Each group's budget is (1 min job setup + Linux warm compile x2 + Linux warm tests + 8 min cold-dependency allowance) x1.25, in minutes from run 34309279328 (ubuntu-24.04-arm, 4 vCPU). The 3-vCPU floor is compile x4/3; the one macOS measurement, run 34303181887, compiled the library chain beneath the root crate in 19.0 min against 9.3 on Arm (2.05x) and ran the whole suite in 19.9 min against ~19 across the Arm partitions (x1), so the budget takes the 2x. No group has run on macOS yet: replace these with measured wall time plus headroom after the first hosted run.",
+  "windows_budget_basis": "Measured wall time in run 36077289779 (windows-latest, 4 vCPU, prefix-matched dependency cache) x1.5, rounded up to 5: root-lib 46.0 (35.2 compile + 8.1 tests), root-sessions 30.8 (24.0 + 4.3), root-journeys 54.4 (38.7 + 10.9), root-transport 57.7 (38.0 + 17.3 with 36 failures and one hung test), root-dashboard-api 40.6 (34.4 + 3.3), runtime 66.5 (48.4 + 14.8), core-storage 36.5 (27.5 + 6.3), core-contracts 44.5 (39.4 + 2.5). The wider headroom is for this runner class: the archive lane's one workspace build measured 64.8 and 106.5 min on the same cache key (docs/ci-release-timing-census.md).",
+  "macos_budget_basis": "Each group's budget is measured wall time plus headroom, from run 36051245663 (macos-14, 3 vCPU, warm dependency cache) where the groups were root-lib, root-suites (sessions, journeys, transport), runtime-storage and contracts-dashboard-api: root-lib 21.7 compile + 4.3 tests; root-sessions 25.9 + 4.1; root-journeys 7.4 + 4.1 against the sessions tree; root-transport 18.2 + 12.6 against the journeys tree (test-transport re-resolves 31 workspace crates); root-dashboard-api 24.4 + 0.8 as a lone `-p tracedecay` resolution (108 dependency units and 48 workspace crates apart from every other root partition); runtime 38.8 + 5.2 and core-storage 15.3 + 2.8 with 213 dependency units missing the root cache; core-contracts 20.6 + 12.3 (one hung test, 33 s on Linux). Groups now pair partitions that share one resolution so a group compiles one chain, and the lower group carries its own dependency cache.",
   "macos_groups": [
     {
       "name": "root-lib",
       "timeout_minutes": 60,
-      "budget_basis": "(1 + 14.7 compile x2 + 7.5 tests + 8) x1.25 = 57.4; the root chain, library test target and 1675 tests are the lane's floor, so nothing shares this job"
+      "budget_basis": "27.4 (run 36051245663) and 30.4 (run 36077289779) measured: the root chain, library test target and 776 tests are the lane's floor, so nothing shares this job; kept at 60 for this runner class's variance"
     },
     {
       "name": "root-suites",
+      "timeout_minutes": 45,
+      "budget_basis": "34.4 measured in run 36077289779 (root-sessions 20.0 compile + 2.9 tests, root-journeys 6.1 + 3.4 against the sessions tree, prefix-matched dependency cache) x1.25 = 43"
+    },
+    {
+      "name": "root-transport",
+      "timeout_minutes": 45,
+      "budget_basis": "35.5 measured in run 36077289779 (root-transport 20.2 compile + 12.4 tests with one hung test, root-dashboard-api 0.9 + 0.7 against the transport tree) x1.25 = 44"
+    },
+    {
+      "name": "lower",
       "timeout_minutes": 110,
-      "budget_basis": "root-sessions + root-journeys prior 63.5, plus root-transport test-transport compile/run (~35-40 on Arm estimated until measured); (1 + prior + 32) x1.25 \u2248 110; replace with measured wall after first hosted run; retrigger after unarchive; Actions re-enable retrigger"
-    },
-    {
-      "name": "runtime-storage",
-      "timeout_minutes": 85,
-      "budget_basis": "runtime 15.6 compile + 2.4 tests, core-storage 10.4 + 1.9 on a different feature resolution: (1 + 26.0 x2 + 4.3 + 8) x1.25 = 81.6"
-    },
-    {
-      "name": "contracts-dashboard-api",
-      "timeout_minutes": 80,
-      "budget_basis": "root-dashboard-api 12.7 compile + 0.8 tests, core-contracts 13.9 + 0.6 on a different feature resolution: (1 + 26.6 x2 + 1.4 + 8) x1.25 = 79.5"
+      "budget_basis": "87.5 measured cold in run 36077289779 (no `ci-test-lower-macOS` entry yet: runtime 28.5 compile + 5.2 tests, core-storage 13.0 + 2.6, core-contracts 20.0 + 12.3 with one hung test, 604 dependency units from source) x1.25 = 109; replace with the warm measurement once the entry exists"
     }
   ],
   "not_run": {
