@@ -472,23 +472,18 @@ pub(crate) fn install_pass_covers_tracked_agents(
 /// resolved, no install runs and a descriptive failure is reported so the
 /// version markers stay put.
 async fn reinstall_tracked_agents_under_lease(
-    user_config: &UserConfig,
+    agent_ids: &[String],
+    home: &Path,
     lifecycle_lease: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
 ) -> ReinstallOutcome {
-    let (Some(home), Some(bin)) = (
-        tracedecay_agent_hosts::agents::home_dir(),
-        tracedecay_agent_hosts::agents::which_tracedecay(),
-    ) else {
+    let Some(bin) = tracedecay_agent_hosts::agents::which_tracedecay() else {
         return ReinstallOutcome::PartialFailure {
-            failed: vec![
-                "<environment>: could not resolve home directory or tracedecay binary on PATH"
-                    .to_string(),
-            ],
+            failed: vec!["<environment>: could not resolve tracedecay binary on PATH".to_string()],
         };
     };
     let results = crate::agent_cmd::reinstall_agent_integrations_under_lease(
-        &user_config.installed_agents,
-        &home,
+        agent_ids,
+        home,
         &bin,
         lifecycle_lease,
     )
@@ -543,17 +538,29 @@ async fn run_post_update_mutations(
     {
         eprintln!("warning: could not save tracedecay config: {err}");
     }
-    if config.installed_agents.is_empty() {
+    let Some(home) = tracedecay_agent_hosts::agents::home_dir() else {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
+            message: "could not determine home directory".to_string(),
+        });
+    };
+    // Detected integrations the config never tracked are refreshed too, so an
+    // upgrade over an older install does not leave doctor reporting stale
+    // rendered versions that no maintenance pass will touch.
+    let agent_ids = crate::agent_cmd::maintenance_sweep_agents(&config.installed_agents, &home);
+    if agent_ids.is_empty() {
         eprintln!("Refreshing agent integrations: nothing to refresh");
     } else {
-        eprintln!(
-            "Refreshing agent integrations: {}",
-            config.installed_agents.join(", ")
-        );
+        eprintln!("Refreshing agent integrations: {}", agent_ids.join(", "));
     }
     let reinstall_result =
-        match reinstall_tracked_agents_under_lease(&config, lifecycle_lease).await {
+        match reinstall_tracked_agents_under_lease(&agent_ids, &home, lifecycle_lease).await {
             ReinstallOutcome::AllOk => {
+                if config.installed_agents != agent_ids {
+                    config.installed_agents = agent_ids;
+                    if let Err(err) = config.save() {
+                        eprintln!("warning: could not save tracedecay config: {err}");
+                    }
+                }
                 if let Err(err) = record_completed_reinstall_pass(&mut config) {
                     eprintln!("warning: {err}");
                 }

@@ -98,16 +98,26 @@ pub(crate) async fn handle_host_lifecycle_command(
             {
                 eprintln!("warning: could not save tracedecay config: {err}");
             }
-            if user_config.installed_agents.is_empty() {
-                eprintln!("No installed agents found. Run `tracedecay install` first.");
-                return Ok(());
+            let agent_ids = maintenance_sweep_agents(&user_config.installed_agents, &home);
+            if agent_ids.is_empty() {
+                let next_step = match operation {
+                    HostBundleCliOperation::Uninstall => "",
+                    HostBundleCliOperation::Install
+                    | HostBundleCliOperation::Update
+                    | HostBundleCliOperation::Repair => "; run `tracedecay install` first",
+                };
+                return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                    message: format!(
+                        "nothing to {}: no TraceDecay host integration is tracked in the \
+                         profile config or detected under {}{next_step}",
+                        operation_verb(operation),
+                        home.display()
+                    ),
+                });
             }
-            user_config.installed_agents.clone()
+            agent_ids
         }
     };
-    if agent_ids.is_empty() {
-        eprintln!("No changes.");
-    }
 
     // Each agent runs independently: one host whose CLI is missing or whose
     // files conflict must not strand the others.
@@ -191,9 +201,14 @@ pub(crate) async fn handle_host_lifecycle_command(
                 user_config.installed_agents.retain(|id| id != agent_id);
                 user_config.agent_dashboard_enabled.remove(agent_id);
             }
-            HostBundleCliOperation::Uninstall
-            | HostBundleCliOperation::Update
-            | HostBundleCliOperation::Repair => {}
+            // A detected integration the profile config never tracked (rendered
+            // by an older binary) is tracked once this pass has refreshed it.
+            HostBundleCliOperation::Update | HostBundleCliOperation::Repair => {
+                if !user_config.installed_agents.contains(agent_id) {
+                    user_config.installed_agents.push(agent_id.clone());
+                }
+            }
+            HostBundleCliOperation::Uninstall => {}
         }
     }
     if !options.dry_run {
@@ -248,6 +263,22 @@ pub(crate) async fn handle_host_lifecycle_command(
         crate::update_cmd::deploy_managed_skills_after_lifecycle();
     }
     Ok(())
+}
+
+/// The hosts an unscoped `update-plugin` / `reinstall` sweep refreshes: every
+/// tracked id plus every integration whose on-disk registration already
+/// carries tracedecay, the same test `doctor` uses to report a host. A
+/// profile config that predates tracking (or lost it) must not turn the sweep
+/// into a no-op while doctor keeps reporting stale rendered versions.
+pub(crate) fn maintenance_sweep_agents(tracked: &[String], home: &Path) -> Vec<String> {
+    let mut agent_ids = tracked.to_vec();
+    for integration in tracedecay_agent_hosts::agents::all_integrations() {
+        let id = integration.id();
+        if !agent_ids.iter().any(|tracked| tracked == id) && integration.has_tracedecay(home) {
+            agent_ids.push(id.to_string());
+        }
+    }
+    agent_ids
 }
 
 fn operation_verb(operation: HostBundleCliOperation) -> &'static str {
