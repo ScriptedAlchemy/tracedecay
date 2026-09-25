@@ -74,7 +74,7 @@ pub enum FeedbackDiagnosticProjectionSkipV1 {
     GenerationMismatch,
     /// The record was collected against different file content.
     ContentDigestMismatch,
-    /// The record is superseded or cleared rather than current.
+    /// The record is cleared rather than current.
     RecordNotCurrent,
     /// The record names a different source revision than the cycle scope.
     SourceRevisionDrift,
