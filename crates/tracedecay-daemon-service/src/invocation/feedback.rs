@@ -19,6 +19,7 @@ pub(crate) struct DaemonFeedbackInvocationRequest {
 pub struct DaemonFeedbackInvocationResult {
     pub(crate) scope: ResolvedScope,
     pub(crate) evidence: EvidencePacket<serde_json::Value>,
+    pub(crate) touched_files: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -294,6 +295,7 @@ fn feedback_invocation_result_with<T>(
             execution: evidence.execution,
             payload,
         },
+        touched_files: application.touched_files,
     })
 }
 
@@ -371,7 +373,8 @@ pub(super) async fn execute_feedback(
                 wire_request_id,
                 DaemonInvocationOutcome::Feedback {
                     scope: result.scope,
-                    result: DaemonFeedbackResult::from_application(result.evidence),
+                    result: DaemonFeedbackResult::from_application(result.evidence)
+                        .with_touched_files(result.touched_files),
                 },
             )
         }
@@ -605,6 +608,7 @@ pub fn advisory_cycle_invocation_result(
             execution,
             payload,
         },
+        touched_files: Vec::new(),
     })
 }
 
@@ -738,6 +742,7 @@ pub fn feedback_proximity_invocation_result(
             execution,
             payload: Some(payload),
         },
+        touched_files: Vec::new(),
     })
 }
 
@@ -825,7 +830,8 @@ pub(super) async fn execute_feedback_advisory_cycle(
                 wire_request_id,
                 DaemonInvocationOutcome::Feedback {
                     scope: result.scope,
-                    result: DaemonFeedbackResult::from_application(result.evidence),
+                    result: DaemonFeedbackResult::from_application(result.evidence)
+                        .with_touched_files(result.touched_files),
                 },
             )
         }
@@ -874,7 +880,8 @@ pub(super) async fn execute_feedback_proximity(
                 wire_request_id,
                 DaemonInvocationOutcome::Feedback {
                     scope: result.scope,
-                    result: DaemonFeedbackResult::from_application(result.evidence),
+                    result: DaemonFeedbackResult::from_application(result.evidence)
+                        .with_touched_files(result.touched_files),
                 },
             )
         }

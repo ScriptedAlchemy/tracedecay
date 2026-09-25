@@ -88,6 +88,15 @@ impl TemporalState {
             freshness: FreshnessState::Current,
         }
     }
+
+    /// The code-graph generation this packet answered from, when a
+    /// code-graph read produced it.
+    pub fn served_code_graph(&self) -> Option<crate::retrieval::ServedCodeGraphGenerationV1> {
+        Some(crate::retrieval::ServedCodeGraphGenerationV1 {
+            generation: self.source_generation.as_ref()?.as_str().to_owned(),
+            freshness: self.code_graph_freshness?,
+        })
+    }
 }
 
 /// A policy decision pinned into a receipt or provider identity.

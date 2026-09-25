@@ -1,6 +1,7 @@
 #![cfg(feature = "test-transport")]
 
 mod callers_coverage;
+mod typed_evidence_trailers;
 mod typescript_module_resolution;
 
 use crate::support::*;

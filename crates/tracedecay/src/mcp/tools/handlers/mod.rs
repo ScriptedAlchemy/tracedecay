@@ -8,7 +8,7 @@ mod application_surface;
 pub(crate) use application_surface::graph_tool_error_problem;
 pub use application_surface::{
     RetainedSurfaceExecution, execute_graph_tool_surface, execute_retained_surface_tool,
-    render_retained_execution,
+    render_application_surface_result, render_retained_execution,
 };
 pub(crate) use dispatch_groups::compute_graph_tool_for_owner;
 #[cfg(test)]

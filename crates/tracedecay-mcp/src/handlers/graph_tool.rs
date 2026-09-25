@@ -18,7 +18,7 @@ use crate::handlers::graph::{
 use crate::handlers::info::{compute_port_order, compute_port_status, compute_todos};
 use crate::handlers::support::{generic_tool_result, unknown_tool_error};
 use crate::handlers::verified_read::{VerifiedGraphOpen, verified_read_operation as read};
-use crate::tools::response_trailers::append_code_graph_freshness;
+use crate::tools::response_trailers::ResponseTrailer;
 use crate::{McpToolContext, ToolResult};
 
 /// Computes one graph-tool operation's typed result on the owner's side.
@@ -73,9 +73,7 @@ pub fn render_graph_tool(
         analytics,
     } = completion;
     let mut rendered = match &result {
-        GraphToolResultV1::Context(context) => {
-            render_context(response_handle_root, args, context, touched_files)?
-        }
+        GraphToolResultV1::Context(context) => render_context(response_handle_root, args, context)?,
         GraphToolResultV1::Node(NodeResultV1::NotFound(not_found))
         | GraphToolResultV1::RenamePreview(RenamePreviewPrimitiveOutcomeV1::NotFound(not_found)) => {
             not_found_tool_result(not_found)?
@@ -84,12 +82,14 @@ pub fn render_graph_tool(
             response_handle_root,
             args,
             &result.result_value()?,
-            touched_files,
+            Vec::new(),
         ),
     };
-    if let Some(served) = &code_graph {
-        append_code_graph_freshness(&mut rendered, served);
+    ResponseTrailer {
+        touched_files: &touched_files,
+        code_graph: code_graph.as_ref(),
     }
+    .attach(&mut rendered);
     Ok(match analytics {
         Some(analytics) => rendered.with_internal_analytics(analytics.ledger_value()),
         None => rendered,
@@ -103,9 +103,10 @@ mod tests {
     use serde_json::json;
     use tracedecay_contracts::retrieval::{
         CodeGraphReadFreshnessV1, ContextExtensionPointV1, ContextModeV1, ContextPlanV1,
-        ContextResultV1, PrimitiveFreshnessStateV1, PrimitiveLaneCompleteV1, PrimitiveLaneStatusV1,
-        PrimitiveRecallV1, PrimitiveSearchCoverageV1, PrimitiveSearchFreshnessV1,
-        PrimitiveSymbolLocationV1, ServedCodeGraphGenerationV1, TodoMarkerV1, TodosResultV1,
+        ContextResultV1, ContextRetrievalPlanV1, ContextStageV1, PrimitiveFreshnessStateV1,
+        PrimitiveLaneCompleteV1, PrimitiveLaneStatusV1, PrimitiveRecallV1,
+        PrimitiveSearchCoverageV1, PrimitiveSearchFreshnessV1, PrimitiveSymbolLocationV1,
+        ServedCodeGraphGenerationV1, TodoMarkerV1, TodosResultV1,
     };
     use tracedecay_contracts::{ContextMemoryAnalyticsV1, InvocationAnalyticsV1};
     use tracedecay_domain::UtcMicros;
@@ -224,6 +225,13 @@ mod tests {
                 }],
                 test_files: Some(Vec::new()),
             }),
+            retrieval: ContextRetrievalPlanV1 {
+                search: ContextStageV1::ran(20, 1, true),
+                graph: ContextStageV1::ran(20, 1, false),
+                related: ContextStageV1::ran(20, 0, false),
+                code: ContextStageV1::NotRequested,
+                memory: ContextStageV1::Unavailable,
+            },
         }
     }
 
@@ -258,6 +266,10 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("seen_node_ids: [\"symbol.store\"]"), "{text}");
+        assert!(
+            text.contains("\n_Budget-bound, more may exist: search 1/20 (`max_nodes`)._\n"),
+            "{text}"
+        );
         assert_eq!(
             markdown.internal_analytics(),
             Some(&json!({"context_memory": {
@@ -281,6 +293,16 @@ mod tests {
         assert_eq!(
             payload["plan"]["extension_points"][0]["implementor_count"],
             2
+        );
+        assert_eq!(
+            payload["retrieval"],
+            json!({
+                "search": {"state": "ran", "budget": 20, "admitted": 1, "truncated": true},
+                "graph": {"state": "ran", "budget": 20, "admitted": 1, "truncated": false},
+                "related": {"state": "ran", "budget": 20, "admitted": 0, "truncated": false},
+                "code": {"state": "not_requested"},
+                "memory": {"state": "unavailable"},
+            })
         );
         assert!(payload.get("context_memory").is_none(), "{payload}");
         assert!(payload.get("analytics").is_none(), "{payload}");

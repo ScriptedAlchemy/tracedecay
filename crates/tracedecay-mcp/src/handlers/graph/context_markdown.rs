@@ -22,7 +22,8 @@ use serde_json::Value;
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_contracts::retrieval::{
     ContextCodeBlockV1, ContextExtensionPointV1, ContextLexicalAnchorV1, ContextPlanV1,
-    ContextResultV1, ContextSearchMatchV1, PrimitiveSymbolLocationV1,
+    ContextResultV1, ContextRetrievalPlanV1, ContextSearchMatchV1, ContextStageV1,
+    PrimitiveSymbolLocationV1,
 };
 use tracedecay_domain::RelationEdgeKindV1;
 use tracedecay_domain::code_intelligence::{NodeKind, Visibility};
@@ -40,7 +41,6 @@ pub(crate) fn render_context(
     response_handle_root: Option<&Path>,
     args: &Value,
     result: &ContextResultV1,
-    touched_files: Vec<String>,
 ) -> Result<ToolResult> {
     let value = serde_json::to_value(result)?;
     let mut output = freshness_lines(&result.freshness);
@@ -83,13 +83,14 @@ pub(crate) fn render_context(
         output.push('\n');
         output.push_str(&degradation);
     }
+    append_retrieval_budget_md(&mut output, &result.retrieval);
     let text = if render::wants_json(args) {
         render::finalize(response_handle_root, args, &value, || output)
     } else {
         let preview = context_markdown_lane_preview(&output);
         render::markdown_preview_with_handle(response_handle_root, &output, &preview)
     };
-    Ok(text_tool_result(&text, touched_files))
+    Ok(text_tool_result(&text, Vec::new()))
 }
 
 fn context_markdown(
@@ -175,6 +176,34 @@ fn append_context_lexical_anchors(output: &mut String, anchors: &[ContextLexical
         };
         output.push_str(&line);
         output.push('\n');
+    }
+}
+
+/// Names every stage a budget stopped, with the argument that raises it. An
+/// answer no budget bounded renders nothing.
+fn append_retrieval_budget_md(output: &mut String, retrieval: &ContextRetrievalPlanV1) {
+    let bounded = [
+        ("search", retrieval.search, "max_nodes"),
+        ("related", retrieval.related, "max_nodes"),
+        ("code", retrieval.code, "max_code_blocks"),
+        ("memory", retrieval.memory, "memory_limit"),
+    ]
+    .into_iter()
+    .filter_map(|(stage, state, argument)| match state {
+        ContextStageV1::Ran {
+            budget,
+            admitted,
+            truncated: true,
+        } => Some(format!("{stage} {admitted}/{budget} (`{argument}`)")),
+        _ => None,
+    })
+    .collect::<Vec<_>>();
+    if !bounded.is_empty() {
+        let _ = writeln!(
+            output,
+            "\n_Budget-bound, more may exist: {}._",
+            bounded.join(", ")
+        );
     }
 }
 

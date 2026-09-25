@@ -16,6 +16,10 @@ pub struct DaemonFeedbackResult {
     page: PageState,
     execution: OperationReceipt,
     payload: Option<serde_json::Value>,
+    /// Project-relative files the read touched, carried beside the packet
+    /// onto the application envelope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    touched_files: Vec<String>,
 }
 
 impl DaemonFeedbackResult {
@@ -43,11 +47,19 @@ impl DaemonFeedbackResult {
             page: packet.page,
             execution: packet.execution,
             payload: packet.payload,
+            touched_files: Vec::new(),
         }
     }
 
-    pub fn into_application(self) -> EvidencePacket<serde_json::Value> {
-        EvidencePacket {
+    #[must_use]
+    pub fn with_touched_files(mut self, touched_files: Vec<String>) -> Self {
+        self.touched_files = touched_files;
+        self
+    }
+
+    /// The evidence packet and the files the read touched.
+    pub fn into_application(self) -> (EvidencePacket<serde_json::Value>, Vec<String>) {
+        let packet = EvidencePacket {
             temporal: self.temporal,
             authority: self.authority,
             evidence_authorities: self.evidence_authorities,
@@ -58,6 +70,7 @@ impl DaemonFeedbackResult {
             page: self.page,
             execution: self.execution,
             payload: self.payload,
-        }
+        };
+        (packet, self.touched_files)
     }
 }

@@ -417,6 +417,64 @@ pub struct ContextResultV1 {
     /// Present in plan mode when the verified graph answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<ContextPlanV1>,
+    pub retrieval: ContextRetrievalPlanV1,
+}
+
+/// What one `context` stage ran with and kept.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum ContextStageV1 {
+    /// The request did not ask for this stage.
+    NotRequested,
+    /// A stage this one reads from produced nothing to work on.
+    Skipped,
+    /// The stage's authority could not answer.
+    Unavailable,
+    /// The stage admitted `admitted` entries under `budget`. `truncated` is
+    /// true when it stopped at that budget, so more entries may exist.
+    Ran {
+        budget: u32,
+        admitted: u32,
+        truncated: bool,
+    },
+}
+
+impl ContextStageV1 {
+    pub fn ran(budget: usize, admitted: usize, truncated: bool) -> Self {
+        Self::Ran {
+            budget: u32::try_from(budget).unwrap_or(u32::MAX),
+            admitted: u32::try_from(admitted).unwrap_or(u32::MAX),
+            truncated,
+        }
+    }
+
+    pub fn is_truncated(self) -> bool {
+        matches!(
+            self,
+            Self::Ran {
+                truncated: true,
+                ..
+            }
+        )
+    }
+}
+
+/// The retrieval plan `context` executed: which stages ran, what each
+/// admitted, and where a budget bounded the answer. Lane-level serving state
+/// stays in `coverage`.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextRetrievalPlanV1 {
+    /// Ranked code-index candidates, bounded by `max_nodes`.
+    pub search: ContextStageV1,
+    /// Candidates resolved to verified graph symbols.
+    pub graph: ContextStageV1,
+    /// Callers and callees of the selected symbols, bounded by `max_nodes`.
+    pub related: ContextStageV1,
+    /// Source bodies for selected symbols, bounded by `max_code_blocks`.
+    pub code: ContextStageV1,
+    /// Project memory facts, bounded by `memory_limit`.
+    pub memory: ContextStageV1,
 }
 
 impl ContextResultV1 {
@@ -785,10 +843,11 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        ContextModeV1, ContextResultV1, ContextSurfaceRequestV1, PrimitiveFreshnessStateV1,
-        PrimitiveIndexingStateV1, PrimitiveLaneCompleteV1, PrimitiveLaneStatusV1,
-        PrimitiveRecallV1, PrimitiveSearchCoverageV1, PrimitiveSearchFreshnessV1,
-        RedundancySurfaceRequestV1, SimilarSurfaceRequestV1,
+        ContextModeV1, ContextResultV1, ContextRetrievalPlanV1, ContextStageV1,
+        ContextSurfaceRequestV1, PrimitiveFreshnessStateV1, PrimitiveIndexingStateV1,
+        PrimitiveLaneCompleteV1, PrimitiveLaneStatusV1, PrimitiveRecallV1,
+        PrimitiveSearchCoverageV1, PrimitiveSearchFreshnessV1, RedundancySurfaceRequestV1,
+        SimilarSurfaceRequestV1,
     };
     use crate::code_index_freshness::CodeIndexStalenessStateV1;
     use crate::memory::{FactSearchGraphCoverageV1, FactSearchGraphDegradationV1};
@@ -818,7 +877,34 @@ mod tests {
             memory_matches_error: None,
             verified_graph_evidence: None,
             plan: None,
+            retrieval: ContextRetrievalPlanV1 {
+                search: ContextStageV1::ran(20, 0, false),
+                graph: ContextStageV1::Skipped,
+                related: ContextStageV1::Skipped,
+                code: ContextStageV1::NotRequested,
+                memory: ContextStageV1::NotRequested,
+            },
         }
+    }
+
+    #[test]
+    fn context_retrieval_plan_names_each_stage_and_its_budget() {
+        let mut result = context_result();
+        result.retrieval.code = ContextStageV1::ran(5, 5, true);
+        let wire = serde_json::to_value(&result).expect("context result serializes");
+        assert_eq!(
+            wire["retrieval"],
+            json!({
+                "search": {"state": "ran", "budget": 20, "admitted": 0, "truncated": false},
+                "graph": {"state": "skipped"},
+                "related": {"state": "skipped"},
+                "code": {"state": "ran", "budget": 5, "admitted": 5, "truncated": true},
+                "memory": {"state": "not_requested"},
+            })
+        );
+        let decoded: ContextResultV1 = serde_json::from_value(wire).expect("round trip");
+        assert!(decoded.retrieval.code.is_truncated());
+        assert!(!decoded.retrieval.search.is_truncated());
     }
 
     #[test]

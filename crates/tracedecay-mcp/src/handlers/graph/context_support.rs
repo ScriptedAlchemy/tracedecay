@@ -7,6 +7,7 @@ use serde_json::Value;
 use tracedecay_contracts::retained_surfaces::{
     FactCategoryV1, FactSearchGraphCoverageV1, FactSearchGraphDegradationV1, FactSearchHitV1,
 };
+use tracedecay_contracts::retrieval::ContextStageV1;
 use tracedecay_contracts::{
     CancellationSignal, ContextMemoryAnalyticsV1, Deadline, now_micros,
     retained_surface_execution_problem,
@@ -234,6 +235,26 @@ pub(super) fn context_memory_analytics(
             .map(|hit| hit.fact.fact_id.as_str().to_owned())
             .collect(),
         error: memory_matches_error.map(str::to_owned),
+    }
+}
+
+/// The memory stage of the context retrieval plan. A full page of hits
+/// reached `memory_limit`, so more facts may match.
+pub(super) fn context_memory_stage(
+    options: &ContextMemoryOptions,
+    memory_matches: &[FactSearchHitV1],
+    memory_matches_error: Option<&str>,
+) -> ContextStageV1 {
+    if !options.include_memory {
+        ContextStageV1::NotRequested
+    } else if memory_matches_error.is_some() {
+        ContextStageV1::Unavailable
+    } else {
+        ContextStageV1::ran(
+            options.limit,
+            memory_matches.len(),
+            memory_matches.len() >= options.limit,
+        )
     }
 }
 

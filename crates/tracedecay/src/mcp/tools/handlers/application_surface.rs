@@ -7,7 +7,6 @@ use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId};
 
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_contracts::retrieval::ServedCodeGraphGenerationV1;
 use tracedecay_daemon_protocol::{
     ApplicationSurfaceInvocationResult, ApplicationToolRequest, parse_application_surface_request,
 };
@@ -18,7 +17,7 @@ use tracedecay_mcp::tools::dispatch::{
     resolve_mcp_application_surface_for_target,
     resolve_mcp_application_surface_with_controls_for_target,
 };
-use tracedecay_mcp::tools::response_trailers::append_code_graph_freshness;
+use tracedecay_mcp::tools::response_trailers::ResponseTrailer;
 use tracedecay_project::project::TraceDecay;
 
 pub(super) fn request_id() -> Result<RequestId> {
@@ -171,46 +170,7 @@ pub(super) async fn handle_application_surface(
         }
     }
     .map_err(application_surface_dispatch_error)?;
-
-    let served = served_code_graph_read(&result);
-    let mut rendered = render_result(cg, result)?;
-    if let Some(served) = served.as_ref() {
-        append_code_graph_freshness(&mut rendered, served);
-    }
-    Ok(rendered)
-}
-
-fn served_code_graph_read(
-    result: &ApplicationSurfaceInvocationResult,
-) -> Option<ServedCodeGraphGenerationV1> {
-    let Ok(envelope) = &result.result else {
-        return None;
-    };
-    let ApplicationOutcome::Evidence(evidence) = &envelope.outcome else {
-        return None;
-    };
-    served_code_graph_temporal(result.operation, &evidence.temporal)
-}
-
-fn served_code_graph_temporal(
-    operation: ApplicationSurfaceOperation,
-    temporal: &tracedecay_contracts::TemporalState,
-) -> Option<ServedCodeGraphGenerationV1> {
-    if !matches!(
-        operation,
-        ApplicationSurfaceOperation::CodeSymbolSearch
-            | ApplicationSurfaceOperation::CodeSignatureSearch
-            | ApplicationSurfaceOperation::CodeImplementations
-            | ApplicationSurfaceOperation::CodeTypeHierarchy
-            | ApplicationSurfaceOperation::CodeCallers
-            | ApplicationSurfaceOperation::CodeCallees
-    ) {
-        return None;
-    }
-    Some(ServedCodeGraphGenerationV1 {
-        generation: temporal.source_generation.as_ref()?.as_str().to_owned(),
-        freshness: temporal.code_graph_freshness?,
-    })
+    render_application_surface_result(Some(&cg.store_layout().response_handle_root), &result)
 }
 
 /// Map surface-resolution failures to typed reason codes so MCP clients see
@@ -241,16 +201,11 @@ fn application_surface_dispatch_error(
     TraceDecayError::project_route(reason_code, retryable, error.to_string())
 }
 
-fn render_result(
-    cg: &TraceDecay,
-    result: ApplicationSurfaceInvocationResult,
-) -> Result<tracedecay_mcp::ToolResult> {
-    render_result_for_root(Some(&cg.store_layout().response_handle_root), result)
-}
-
-fn render_result_for_root(
+/// Render one settled application-surface call as its tool result. MCP and
+/// the `tracedecay tool` CLI both print this.
+pub fn render_application_surface_result(
     response_handle_root: Option<&std::path::Path>,
-    result: ApplicationSurfaceInvocationResult,
+    result: &ApplicationSurfaceInvocationResult,
 ) -> Result<tracedecay_mcp::ToolResult> {
     render_result_parts(
         response_handle_root,
@@ -294,7 +249,12 @@ fn render_result_parts(
         || markdown.unwrap_or_default(),
     );
     let mut rendered = super::text_tool_result(&text);
-    if let Err(problem) = result {
+    match result {
+        Ok(envelope) => ResponseTrailer {
+            touched_files: &envelope.touched_files,
+            code_graph: envelope.code_graph.as_ref(),
+        }
+        .attach(&mut rendered),
         // Keep the typed problem machine-readable in every presentation
         // format: markdown rendering alone would strand it in prose that
         // clients cannot classify. The whole record travels, not a
@@ -303,11 +263,13 @@ fn render_result_parts(
         // effect, the committed receipt. Publishing only kind/code left the
         // one instruction that matters ("reconcile this committed effect")
         // readable by humans and invisible to every client.
-        if let Some(object) = rendered.value.as_object_mut() {
-            object.insert(
-                "problem".to_string(),
-                serde_json::to_value(problem.problem.as_ref())?,
-            );
+        Err(problem) => {
+            if let Some(object) = rendered.value.as_object_mut() {
+                object.insert(
+                    "problem".to_string(),
+                    serde_json::to_value(problem.problem.as_ref())?,
+                );
+            }
         }
     }
     Ok(match failure_message {
@@ -651,12 +613,18 @@ fn render_canonical_markdown(
 
 #[cfg(test)]
 mod tests {
-    use serde_json::Value;
-    use tracedecay_contracts::{CancellationSignal, Deadline, RequestId, TemporalState};
-    use tracedecay_domain::{CodeGenerationId, UtcMicros};
+    use serde_json::json;
+    use tracedecay_contracts::retrieval::{CodeGraphReadFreshnessV1, ServedCodeGraphGenerationV1};
+    use tracedecay_contracts::{
+        ApplicationEnvelope, ApplicationOutcome, CancellationSignal, Deadline, RequestId,
+        ResolvedScope, ResultContractRef,
+    };
+    use tracedecay_daemon_protocol::RequestedOutputFormat;
+    use tracedecay_domain::{ProjectId, RepositoryId, UtcMicros, WorktreeId};
+    use tracedecay_mcp::tools::response_trailers::account_tool_result;
+    use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId, SchemaId};
 
-    use super::{complete_protocol_controls, served_code_graph_temporal};
-    use tracedecay_tool_catalog::ApplicationSurfaceOperation;
+    use super::{complete_protocol_controls, render_result_parts};
 
     #[test]
     fn preserves_a_supplied_deadline_when_cancellation_is_missing() {
@@ -722,31 +690,71 @@ mod tests {
         );
     }
 
+    fn texts(result: &tracedecay_mcp::ToolResult) -> Vec<String> {
+        result.value["content"]
+            .as_array()
+            .expect("content blocks")
+            .iter()
+            .map(|block| block["text"].as_str().expect("text block").to_owned())
+            .collect()
+    }
+
+    /// The shared renderer takes the stale trailer and the touched files from
+    /// the envelope alone, so any typed tool gains them in either format.
     #[test]
-    fn stale_page_freshness_drives_the_legacy_trailer() {
-        let mut temporal = TemporalState::current(UtcMicros(20));
-        temporal.source_generation =
-            Some(CodeGenerationId::new("generation.symbol-page.stale.1").unwrap());
-        temporal.code_graph_freshness = Some(
-            tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
-                sealed_at: UtcMicros(10),
-                rebuild_in_flight: true,
-            },
-        );
-        let served =
-            served_code_graph_temporal(ApplicationSurfaceOperation::CodeSymbolSearch, &temporal)
-                .expect("stale page metadata");
-        let mut rendered = super::super::text_tool_result("{}");
-        super::append_code_graph_freshness(&mut rendered, &served);
-        let trailer = rendered
-            .value
-            .pointer("/content/1/text")
-            .and_then(Value::as_str)
-            .expect("legacy freshness trailer");
-        assert!(trailer.contains("code_graph_freshness: stale"), "{trailer}");
-        assert!(
-            trailer.contains("generation.symbol-page.stale.1"),
-            "{trailer}"
-        );
+    fn envelope_freshness_and_files_render_the_trailer_and_footer_in_both_formats() {
+        let root = tempfile::tempdir().expect("project");
+        std::fs::create_dir_all(root.path().join("src")).expect("src");
+        std::fs::write(root.path().join("src/lib.rs"), "a".repeat(800)).expect("source");
+        let envelope = ApplicationEnvelope {
+            contract: ResultContractRef::new(SchemaId::new("schema.test.result").unwrap(), 1)
+                .unwrap(),
+            request_id: RequestId::new("request.mcp.render.trailers").unwrap(),
+            scope: ResolvedScope::new(
+                ProjectId::new("project.mcp.render").unwrap(),
+                RepositoryId::new("repository.mcp.render").unwrap(),
+                WorktreeId::new("worktree.mcp.render").unwrap(),
+                None,
+            )
+            .unwrap(),
+            outcome: ApplicationOutcome::Result(json!({"items": ["src/lib.rs::answer"]})),
+            touched_files: vec!["src/lib.rs".to_owned()],
+            code_graph: Some(ServedCodeGraphGenerationV1 {
+                generation: "generation.render.stale.1".to_owned(),
+                freshness: CodeGraphReadFreshnessV1::LastCompleteStale {
+                    sealed_at: UtcMicros(10),
+                    rebuild_in_flight: true,
+                },
+            }),
+            analytics: None,
+        };
+        let binding = BindingId::new("binding.mcp.code-callers.v1").unwrap();
+        for format in [RequestedOutputFormat::Markdown, RequestedOutputFormat::Json] {
+            let mut rendered = render_result_parts(
+                Some(root.path()),
+                "code_callers",
+                &binding,
+                &Ok(envelope.clone()),
+                format,
+            )
+            .expect("rendered");
+            assert_eq!(rendered.touched_files, vec!["src/lib.rs".to_owned()]);
+            account_tool_result(Some(root.path()), &mut rendered);
+            let blocks = texts(&rendered);
+            assert_eq!(blocks.len(), 3, "{format:?}: {blocks:?}");
+            assert!(
+                blocks[1].starts_with(
+                    "\ncode_graph_freshness: stale, serving the last complete generation \
+                     generation.render.stale.1 (sealed "
+                ),
+                "{format:?}: {blocks:?}"
+            );
+            let after = (blocks[0].len() + blocks[1].len()) / 4;
+            assert_eq!(
+                blocks[2],
+                format!("\ntracedecay_metrics: before=200 after={after}"),
+                "{format:?}"
+            );
+        }
     }
 }

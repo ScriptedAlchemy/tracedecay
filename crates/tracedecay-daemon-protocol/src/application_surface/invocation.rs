@@ -489,12 +489,11 @@ pub fn application_response(
         | DaemonInvocationOutcome::Primitive { scope, result }
         | DaemonInvocationOutcome::CallableCode { scope, result }
         | DaemonInvocationOutcome::ObservatoryRead { scope, result } => {
-            ApplicationEnvelope::evidence(
-                result_contract,
-                request_id,
-                scope,
-                result.into_application(),
-            )
+            let (packet, touched_files) = result.into_application();
+            ApplicationEnvelope {
+                touched_files,
+                ..ApplicationEnvelope::evidence(result_contract, request_id, scope, packet)
+            }
         }
         DaemonInvocationOutcome::GitPreview { scope, preview } => ApplicationEnvelope::preview(
             result_contract,

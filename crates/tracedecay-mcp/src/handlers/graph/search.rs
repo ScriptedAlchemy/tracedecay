@@ -11,11 +11,12 @@ use tracedecay_contracts::InvocationAnalyticsV1;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
     ContextCodeBlockV1, ContextLexicalAnchorV1, ContextModeV1, ContextResultV1,
-    ContextSearchMatchV1, ContextSurfaceRequestV1, LexicalAnchorDropReasonV1, RedundancyScopeV1,
-    RedundancySurfaceRequestV1, RenamePreviewNodeV1, RenamePreviewPrimitiveOutcomeV1,
-    RenamePreviewPrimitiveRequestV1, RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1,
-    RenamePreviewTextOnlyMatchV1, SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1,
-    SimilarOccurrenceV1, SimilarResultV1, SimilarSurfaceRequestV1, SimilarTargetV1,
+    ContextRetrievalPlanV1, ContextSearchMatchV1, ContextStageV1, ContextSurfaceRequestV1,
+    LexicalAnchorDropReasonV1, RedundancyScopeV1, RedundancySurfaceRequestV1, RenamePreviewNodeV1,
+    RenamePreviewPrimitiveOutcomeV1, RenamePreviewPrimitiveRequestV1,
+    RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1, RenamePreviewTextOnlyMatchV1,
+    SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1, SimilarOccurrenceV1, SimilarResultV1,
+    SimilarSurfaceRequestV1, SimilarTargetV1,
 };
 use tracedecay_domain::ExactClass;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -36,7 +37,7 @@ use crate::{McpToolContext, ToolResult};
 use super::context_markdown::verified_plan_context;
 use super::context_support::{
     ContextMemoryOutcome, context_memory_analytics, context_memory_options, context_memory_outcome,
-    context_memory_read_control,
+    context_memory_read_control, context_memory_stage,
 };
 use super::primitive_surface::{
     search_coverage as primitive_search_coverage, symbol_location as primitive_symbol_location,
@@ -559,6 +560,8 @@ fn context_related_relation_budget(max_nodes: usize) -> usize {
 struct ContextGraphProjection {
     selected: Vec<CodeGraphSymbolSummaryV1>,
     related: Vec<CodeGraphSymbolSummaryV1>,
+    /// A relation walk or the `max_nodes` cap stopped the related symbols.
+    related_truncated: bool,
     code_blocks: Vec<ContextCodeBlockV1>,
     touched_files: Vec<String>,
 }
@@ -671,12 +674,14 @@ fn context_graph_projection(
         .map(|symbol| symbol.occurrence.clone())
         .collect::<Vec<_>>();
     let mut related = Vec::new();
+    let mut related_truncated = false;
     if !seeds.is_empty() {
         let related_budget = context_related_relation_budget(max_nodes);
         for batches in [
             graph.callers_truncated(&seeds, &[], related_budget)?,
             graph.callees_truncated(&seeds, &[], related_budget)?,
         ] {
+            related_truncated |= batches.iter().map(Vec::len).sum::<usize>() >= related_budget;
             for edge in batches.into_iter().flatten() {
                 if !seeds.contains(&edge.neighbor.occurrence)
                     && !related.iter().any(|existing: &CodeGraphSymbolSummaryV1| {
@@ -688,6 +693,7 @@ fn context_graph_projection(
             }
         }
     }
+    related_truncated |= related.len() > max_nodes;
     related.truncate(max_nodes);
 
     let mut all_symbols = selected.clone();
@@ -731,6 +737,7 @@ fn context_graph_projection(
     Ok(ContextGraphProjection {
         selected,
         related,
+        related_truncated,
         code_blocks,
         touched_files,
     })
@@ -862,7 +869,8 @@ where
         Some(complete) => bind_verified_graph_to_search(graph, &complete.code_generation),
         None => graph,
     };
-    let (graph, projection, verified_graph_evidence) = match (graph, complete.as_ref()) {
+    let (graph, projection, verified_graph_evidence, graph_stage) = match (graph, complete.as_ref())
+    {
         (Ok(graph), Some(complete)) => match hotpath::measure_block!(
             "mcp.graph.context.graph",
             context_graph_projection(
@@ -875,19 +883,61 @@ where
                 max_code_blocks,
             )
         ) {
-            Ok(projection) => (Some(graph), projection, None),
+            Ok(projection) => {
+                let stage = ContextStageV1::ran(max_nodes, projection.selected.len(), false);
+                (Some(graph), projection, None, stage)
+            }
             Err(error) => (
                 None,
                 ContextGraphProjection::default(),
                 Some(dependency_hints::unavailable_evidence(&error)),
+                ContextStageV1::Unavailable,
             ),
         },
-        (Ok(graph), None) => (Some(graph), ContextGraphProjection::default(), None),
+        (Ok(graph), None) => (
+            Some(graph),
+            ContextGraphProjection::default(),
+            None,
+            ContextStageV1::Skipped,
+        ),
         (Err(error), _) => (
             None,
             ContextGraphProjection::default(),
             Some(dependency_hints::unavailable_evidence(&error)),
+            ContextStageV1::Unavailable,
         ),
+    };
+    let retrieval = ContextRetrievalPlanV1 {
+        search: match complete.as_ref() {
+            Some(complete) => ContextStageV1::ran(
+                max_nodes,
+                search_matches.len(),
+                complete.next_cursor.is_some(),
+            ),
+            None => ContextStageV1::Unavailable,
+        },
+        graph: graph_stage,
+        related: if projection.selected.is_empty() {
+            ContextStageV1::Skipped
+        } else {
+            ContextStageV1::ran(
+                max_nodes,
+                projection.related.len(),
+                projection.related_truncated,
+            )
+        },
+        code: if !include_code {
+            ContextStageV1::NotRequested
+        } else if projection.selected.is_empty() {
+            ContextStageV1::Skipped
+        } else {
+            ContextStageV1::ran(
+                max_code_blocks,
+                projection.code_blocks.len(),
+                projection.selected.len() > max_code_blocks,
+            )
+        },
+        memory: ContextStageV1::NotRequested,
     };
     let ContextMemoryOutcome {
         hits: memory_matches,
@@ -924,6 +974,14 @@ where
             memory_matches_error.as_deref(),
         )),
     };
+    let retrieval = ContextRetrievalPlanV1 {
+        memory: context_memory_stage(
+            &memory_options,
+            &memory_matches,
+            memory_matches_error.as_deref(),
+        ),
+        ..retrieval
+    };
     let result = ContextResultV1 {
         task: request.task,
         mode,
@@ -940,6 +998,7 @@ where
         memory_matches_error,
         verified_graph_evidence,
         plan,
+        retrieval,
     };
     Ok(GraphToolCompletionV1 {
         result: GraphToolResultV1::Context(Box::new(result)),
