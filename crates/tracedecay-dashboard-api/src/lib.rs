@@ -5,7 +5,7 @@
 //! - `/api/plugins/holographic/*`  → canonical project facts, verified Grafeo
 //!   topology, and deterministic FHRR projections derived on read
 //! - `/api/plugins/hermes-lcm/*`   → LCM session store
-//!   (`lcm_raw_messages` / `lcm_summary_nodes` in the resolved active project
+//!   (`lcm_raw_messages` / `session_summary_nodes` in the resolved active project
 //!   store where transcript ingest writes; see [`resolve_lcm_store`] for the
 //!   fail-closed authority selection)
 //!
