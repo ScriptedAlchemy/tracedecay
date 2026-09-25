@@ -177,6 +177,7 @@ transcript_capture_kernels! {
     CursorProjectKernelV1 => capture_cursor_project,
     HermesProjectKernelV1 => capture_hermes_project,
     KiroProjectKernelV1 => capture_kiro_project,
+    PiProjectKernelV1 => capture_pi_project,
     HermesCallbackKernelV1 => capture_hermes_callback,
 }
 
@@ -240,6 +241,12 @@ const TRANSCRIPT_CAPTURE_KERNELS: &[(
         false,
         TranscriptPayloadRouteV1::SourceScan,
         &KiroProjectKernelV1,
+    ),
+    (
+        "pi",
+        false,
+        TranscriptPayloadRouteV1::SourceScan,
+        &PiProjectKernelV1,
     ),
     (
         "hermes",
@@ -598,6 +605,59 @@ async fn capture_kiro_project(
     Ok(TranscriptCaptureOutcome {
         messages_upserted,
         snapshot: Some(capture),
+        ..TranscriptCaptureOutcome::default()
+    })
+}
+
+/// Lands the one Pi session a lifecycle event names into the project store.
+/// A session file whose header cannot be admitted is a typed partial scan,
+/// never an empty success.
+async fn capture_pi_project(ctx: TranscriptCaptureContext<'_>) -> Result<TranscriptCaptureOutcome> {
+    let cg = ctx.project()?;
+    let event: Value = serde_json::from_str(required_str(ctx.args, "event_json")?)
+        .map_err(|error| config_error(format!("invalid Pi event: {error}")))?;
+    let event_str = |key: &str| {
+        event
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| config_error(format!("Pi event omitted `{key}`")))
+    };
+    let session_id = event_str("session_id")?;
+    let cwd = Path::new(event_str("cwd")?);
+    let source = tracedecay_sessions::runtime::hosts::pi::PiSource::new()
+        .ok_or_else(|| config_error("Pi transcript source is unavailable"))?;
+    let scope = ObservationScopeV1::Project {
+        project_id: project_observation_id(cg)?,
+    };
+    let capture = tracedecay_sessions::runtime::hosts::pi::capture_pi_session(
+        ctx.facade,
+        &source,
+        cg.project_root(),
+        cwd,
+        session_id,
+        scope.clone(),
+        ctx.max_new_bytes,
+        ctx.cancellation,
+    )
+    .await
+    .map_err(|error| map_transcript_ingest_error(&error))?;
+    if capture.discovery_failures > 0 {
+        return Err(hook_admission_error(
+            HostAdmissionStatus::Unavailable,
+            "source_discovery_partial",
+            true,
+            format!(
+                "Pi session source was refused for {} file(s)",
+                capture.discovery_failures
+            ),
+        ));
+    }
+    let messages_upserted =
+        drain_host_observation_projections(ctx.facade, &scope, ctx.cancellation).await?;
+    Ok(TranscriptCaptureOutcome {
+        messages_upserted,
+        source_deferred: capture.deferred,
         ..TranscriptCaptureOutcome::default()
     })
 }

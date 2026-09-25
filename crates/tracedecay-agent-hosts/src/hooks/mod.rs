@@ -26,6 +26,9 @@ pub mod hint_outcomes;
 mod hook_boundary_failure_matrix;
 mod kiro;
 pub mod memory_inject;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod pi_tests;
 mod post_tool_use;
 mod steering;
 mod store_layout;
@@ -126,9 +129,9 @@ pub fn record_native_capture_invoked(
     }
 }
 
-/// Analytics agent key for a native host. Hosts outside the five typed
+/// Analytics agent key for a native host. Hosts outside the typed
 /// integrations record under the shared `other` key, matching the OpenCode and
-/// Kimi dispatchers above.
+/// Kimi dispatchers below.
 const fn native_capture_agent(host: NativeHostIdentityV1) -> Option<HostIntegrationIdV1> {
     match host {
         NativeHostIdentityV1::ClaudeCode => Some(HostIntegrationIdV1::Claude),
@@ -138,12 +141,12 @@ const fn native_capture_agent(host: NativeHostIdentityV1) -> Option<HostIntegrat
         }
         NativeHostIdentityV1::Hermes => Some(HostIntegrationIdV1::Hermes),
         NativeHostIdentityV1::Kiro => Some(HostIntegrationIdV1::Kiro),
+        NativeHostIdentityV1::Pi => Some(HostIntegrationIdV1::Pi),
         NativeHostIdentityV1::Cline
         | NativeHostIdentityV1::RooCode
         | NativeHostIdentityV1::Kilo
         | NativeHostIdentityV1::KimiCode
-        | NativeHostIdentityV1::OpenCode
-        | NativeHostIdentityV1::Pi => None,
+        | NativeHostIdentityV1::OpenCode => None,
     }
 }
 
@@ -173,6 +176,12 @@ pub async fn dispatch_kimi_event(
     .flatten()
 }
 
+const PI_HOT_INGEST_MAX_BYTES: u64 = 256 * 1024;
+const PI_HOT_INGEST_BUDGET: Duration = Duration::from_millis(1_500);
+
+/// Pi lifecycle events record under the Pi host with Pi's own event name, and
+/// each session boundary lands that session's transcript through the
+/// canonical Pi source so recall reflects the session the event names.
 #[hotpath::measure(future = true, label = "agent_hosts.hooks.dispatch_pi_event")]
 pub async fn dispatch_pi_event(
     runtime: &HookRuntimeV1,
@@ -180,8 +189,20 @@ pub async fn dispatch_pi_event(
     project_root: &Path,
     started: Instant,
 ) -> Option<String> {
-    let telemetry = record_other_hook_invoked(runtime, Some(project_root), "pi_event", event_json);
-    dispatch::dispatch(
+    let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
+    let hook_name = parsed
+        .get("hook_event_name")
+        .and_then(Value::as_str)
+        .unwrap_or("nativeCallback");
+    let telemetry = record_hook_invoked_parsed(
+        runtime,
+        Some(project_root),
+        HostIntegrationIdV1::Pi,
+        hook_name,
+        event_json,
+        &parsed,
+    );
+    let guidance = dispatch::dispatch(
         runtime,
         NativeHostIdentityV1::Pi,
         event_json,
@@ -191,7 +212,20 @@ pub async fn dispatch_pi_event(
     )
     .await
     .into_recorded_guidance(&telemetry)
-    .flatten()
+    .flatten();
+    if matches!(hook_name, "session_start" | "agent_end") {
+        ingest_transcript_for_event(
+            runtime,
+            "pi",
+            event_json,
+            Some(project_root),
+            Some(PI_HOT_INGEST_MAX_BYTES),
+            PI_HOT_INGEST_BUDGET,
+            Some(&telemetry),
+        )
+        .await;
+    }
+    guidance
 }
 
 #[hotpath::measure(future = true, label = "agent_hosts.hooks.dispatch_opencode_event")]

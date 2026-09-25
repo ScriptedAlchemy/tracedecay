@@ -1922,3 +1922,40 @@ fn stale_schema_receipts_require_an_adopting_reinstall() {
         [52; 16]
     );
 }
+
+#[test]
+fn pi_hook_capability_is_proven_by_its_embedded_fixture() {
+    let hooks = stock_host_capabilities(HostKindV1::Pi)
+        .into_iter()
+        .find(|record| record.capability == HostCapabilityV1::Hooks)
+        .unwrap();
+    assert_eq!(hooks.state, HostCapabilityStateV1::Supported);
+
+    let native = stock_host_native_fixture_evidence(HostKindV1::Pi)
+        .expect("Pi native fixture evidence is embedded");
+    assert_eq!(
+        native.source_path,
+        "crates/tracedecay-hooks/fixtures/host_events/pi.json"
+    );
+    assert_eq!(native.stop, HostCapabilityStateV1::Supported);
+    assert_eq!(
+        native.edit,
+        HostCapabilityStateV1::Unavailable(HostCapabilityUnavailableReasonV1::NativeFixtureLimited),
+        "the Pi extension forwards no edit callback"
+    );
+    assert!(
+        native_host_edit_stop_conformance_evidence()
+            .iter()
+            .any(|record| record.host == HostKindV1::Pi)
+    );
+
+    let conformance = supported_host_edit_stop_conformance_evidence()
+        .into_iter()
+        .find(|record| record.host == HostKindV1::Pi)
+        .unwrap();
+    assert_eq!(conformance.stop.route, Some(HostRegistrationRouteV1::Hook));
+    assert_eq!(conformance.edit.route, None);
+
+    require_component_capabilities(HostKindV1::Pi, HostComponentV1::Core)
+        .expect("Pi Core is admitted over proven Hooks and Cli");
+}

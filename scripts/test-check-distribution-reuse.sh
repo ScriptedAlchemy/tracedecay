@@ -55,7 +55,8 @@ for fixture in \
   kiro.json \
   kimi-code.json \
   kimi/post-tool-use-edit.json \
-  opencode/baseline.json; do
+  opencode/baseline.json \
+  pi.json; do
   mkdir -p -- \
     "$repo/crates/tracedecay-hooks/fixtures/host_events/$(dirname -- "$fixture")" \
     "$repo/tests/fixtures/packaged_host_events/$(dirname -- "$fixture")"

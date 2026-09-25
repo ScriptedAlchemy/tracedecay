@@ -16,15 +16,17 @@ pub enum SessionProvider {
     Kimi,
     OpenCode,
     Hermes,
+    Pi,
 }
 
 impl SessionProvider {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Claude,
         Self::Codex,
         Self::Cursor,
         Self::Hermes,
         Self::Kiro,
+        Self::Pi,
         Self::Kimi,
         Self::OpenCode,
         Self::Cline,
@@ -47,6 +49,7 @@ impl SessionProvider {
             Self::Kimi => "kimi",
             Self::OpenCode => "opencode",
             Self::Hermes => "hermes",
+            Self::Pi => "pi",
         }
     }
 
@@ -63,6 +66,7 @@ impl SessionProvider {
             "kimi" => Some(Self::Kimi),
             "opencode" => Some(Self::OpenCode),
             "hermes" => Some(Self::Hermes),
+            "pi" => Some(Self::Pi),
             _ => None,
         }
     }
@@ -86,17 +90,17 @@ impl SessionProvider {
     /// Whether the production provider driver persists bounded sweep coverage.
     #[hotpath::skip]
     pub const fn writes_typed_history_coverage(self) -> bool {
-        matches!(self, Self::Kimi | Self::OpenCode)
+        matches!(self, Self::Kimi | Self::OpenCode | Self::Pi)
     }
 }
 
 pub const MESSAGE_SEARCH_PROVIDER_IDS: &[&str] = &[
     "all", "cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo", "kiro", "kimi",
-    "opencode", "hermes",
+    "opencode", "hermes", "pi",
 ];
 
 pub const EXPECTED_MESSAGE_SEARCH_PROVIDER: &str =
-    "all, cursor, claude, codex, vibe, cline, roo-code, kilo, kiro, kimi, opencode, or hermes";
+    "all, cursor, claude, codex, vibe, cline, roo-code, kilo, kiro, kimi, opencode, hermes, or pi";
 
 /// Decodes the workspace path used by Kiro's `workspace-sessions` directory.
 ///
@@ -189,7 +193,7 @@ mod tests {
         assert_eq!(
             ProviderScope::parse_optional(Some("unknown")),
             Err(
-                "unknown session provider 'unknown' (expected all, cursor, claude, codex, vibe, cline, roo-code, kilo, kiro, kimi, opencode, or hermes)"
+                "unknown session provider 'unknown' (expected all, cursor, claude, codex, vibe, cline, roo-code, kilo, kiro, kimi, opencode, hermes, or pi)"
                     .to_owned()
             )
         );
