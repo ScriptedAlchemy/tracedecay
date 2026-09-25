@@ -133,7 +133,8 @@ pub(crate) fn report_cursor_mcp_log_findings(dc: &mut DoctorCounters, home: &Pat
     if findings.literal_placeholder_lines > 0 {
         dc.warn(&format!(
             "Cursor spawned tracedecay with a literal unexpanded `${{workspaceFolder}}` \
-             {} time(s) in recent logs (headless/background agent scopes may not expand it)",
+             {} time(s) in recent logs (Cursor does not expand it for plugin MCP servers; \
+             the current bundle passes no `--path`, run `tracedecay update-plugin`)",
             findings.literal_placeholder_lines
         ));
     }

@@ -1339,10 +1339,19 @@ fn serve_broker_socket_client_inner(
 
                 let bootstrap_handled = boxed_broker_connection_phase(async {
                     if let Some(request) = first_request.parsed() {
-                        let initialized_project_server_ready =
-                            matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
-                                && handshake.project_path.is_some()
-                                && engine.cached_project_server(&handshake).await?.is_some();
+                        let (initialized_project_server_ready, admission_refusal) = if matches!(
+                            classify_mcp_method(&request.method),
+                            McpMethod::Initialize
+                        )
+                            && handshake.project_path.is_some()
+                        {
+                            match engine.cached_project_server(&handshake).await {
+                                Ok(server) => (server.is_some(), None),
+                                Err(error) => (false, Some(error)),
+                            }
+                        } else {
+                            (false, None)
+                        };
                         let project_node_count =
                             if matches!(classify_mcp_method(&request.method), McpMethod::ToolsList)
                             {
@@ -1365,31 +1374,35 @@ fn serve_broker_socket_client_inner(
                                 project_node_count,
                             )
                         {
-                            let project_open_error = if handshake.project_path.is_some()
-                                && matches!(
-                                    classify_mcp_method(&request.method),
-                                    McpMethod::Initialize | McpMethod::ToolsList
-                                ) {
-                                match engine.cached_project_open_failure(&handshake).await {
-                                    Ok(Some(failure)) => Some(failure.to_error()),
-                                    Ok(None)
-                                        if matches!(
-                                            classify_mcp_method(&request.method),
-                                            McpMethod::Initialize
-                                        ) =>
-                                    {
-                                        Box::pin(engine.schedule_project_server_warmup(
-                                            handshake.clone(),
-                                            request.clone(),
-                                        ))
-                                        .await
-                                        .err()
+                            let project_open_error = match admission_refusal {
+                                Some(refusal) => initialize_project_open_error(refusal),
+                                None if handshake.project_path.is_some()
+                                    && matches!(
+                                        classify_mcp_method(&request.method),
+                                        McpMethod::Initialize | McpMethod::ToolsList
+                                    ) =>
+                                {
+                                    match engine.cached_project_open_failure(&handshake).await {
+                                        Ok(Some(failure)) => Some(failure.to_error()),
+                                        Ok(None)
+                                            if matches!(
+                                                classify_mcp_method(&request.method),
+                                                McpMethod::Initialize
+                                            ) =>
+                                        {
+                                            Box::pin(engine.schedule_project_server_warmup(
+                                                handshake.clone(),
+                                                request.clone(),
+                                            ))
+                                            .await
+                                            .err()
+                                            .and_then(initialize_project_open_error)
+                                        }
+                                        Ok(None) => None,
+                                        Err(error) => Some(error),
                                     }
-                                    Ok(None) => None,
-                                    Err(error) => Some(error),
                                 }
-                            } else {
-                                None
+                                None => None,
                             };
                             if let Some(error) = project_open_error {
                                 response = request
@@ -1834,21 +1847,24 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         return result;
     }
     if let Some(request) = first_request.parsed() {
-        let initialized_project_server_ready =
+        let (initialized_project_server_ready, admission_refusal) =
             if matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
                 && handshake.project_path.is_some()
             {
                 let (project_path, _) = project_route_for_handshake(&handshake)?;
-                Box::pin(portable_cached_project_server(
+                match Box::pin(portable_cached_project_server(
                     &store_administration,
                     &project_path,
                     &handshake,
                     ProjectServerRequirement::Core,
                 ))
-                .await?
-                .is_some()
+                .await
+                {
+                    Ok(server) => (server.is_some(), None),
+                    Err(error) => (false, Some(error)),
+                }
             } else {
-                false
+                (false, None)
             };
         let project_node_count =
             if matches!(classify_mcp_method(&request.method), McpMethod::ToolsList) {
@@ -1864,40 +1880,47 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
             && let Some(mut response) =
                 daemon_bootstrap_response(request, initialize_route.as_ref(), project_node_count)
         {
-            let project_open_error = if handshake.project_path.is_some()
-                && matches!(
-                    classify_mcp_method(&request.method),
-                    McpMethod::Initialize | McpMethod::ToolsList
-                ) {
-                match portable_cached_project_open_failure(project_open_gates.as_ref(), &handshake)
-                    .await
+            let project_open_error = match admission_refusal {
+                Some(refusal) => initialize_project_open_error(refusal),
+                None if handshake.project_path.is_some()
+                    && matches!(
+                        classify_mcp_method(&request.method),
+                        McpMethod::Initialize | McpMethod::ToolsList
+                    ) =>
                 {
-                    Ok(Some(failure)) => Some(failure.to_error()),
-                    Ok(None)
-                        if matches!(
-                            classify_mcp_method(&request.method),
-                            McpMethod::Initialize
-                        ) =>
+                    match portable_cached_project_open_failure(
+                        project_open_gates.as_ref(),
+                        &handshake,
+                    )
+                    .await
                     {
-                        Box::pin(schedule_portable_project_server_warmup(
-                            lifecycle.clone(),
-                            store_administration.clone(),
-                            Arc::clone(&project_open_gates),
-                            invocation.clone(),
-                            http_application_registry.clone(),
-                            handshake.clone(),
-                            request.clone(),
-                            #[cfg(test)]
-                            project_open_attempts.clone(),
-                        ))
-                        .await
-                        .err()
+                        Ok(Some(failure)) => Some(failure.to_error()),
+                        Ok(None)
+                            if matches!(
+                                classify_mcp_method(&request.method),
+                                McpMethod::Initialize
+                            ) =>
+                        {
+                            Box::pin(schedule_portable_project_server_warmup(
+                                lifecycle.clone(),
+                                store_administration.clone(),
+                                Arc::clone(&project_open_gates),
+                                invocation.clone(),
+                                http_application_registry.clone(),
+                                handshake.clone(),
+                                request.clone(),
+                                #[cfg(test)]
+                                project_open_attempts.clone(),
+                            ))
+                            .await
+                            .err()
+                            .and_then(initialize_project_open_error)
+                        }
+                        Ok(None) => None,
+                        Err(error) => Some(error),
                     }
-                    Ok(None) => None,
-                    Err(error) => Some(error),
                 }
-            } else {
-                None
+                None => None,
             };
             if let Some(error) = project_open_error {
                 response = request

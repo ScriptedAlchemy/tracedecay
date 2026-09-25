@@ -323,13 +323,16 @@ pub(super) async fn durable_enrollment_resolves_existing_store(
 }
 
 fn unenrolled_project_route_error(project_path: &Path) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: format!(
+    TraceDecayError::project_route(
+        PROJECT_NOT_ENROLLED_REASON_CODE,
+        false,
+        format!(
             "no TraceDecay index found at '{}': project is not enrolled in the authenticated \
-             profile; run 'tracedecay init' first",
+             profile; run 'tracedecay init' in that directory, or start the MCP server with \
+             'tracedecay serve --path <project>'",
             project_path.display()
         ),
-    }
+    )
 }
 
 #[cfg(any(not(unix), test))]

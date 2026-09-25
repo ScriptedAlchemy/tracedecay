@@ -14,24 +14,28 @@ GUI-launched Cursor does not depend on shell `PATH`.
 The plugin registers the TraceDecay MCP server under the `tracedecay` key as:
 
 ```bash
-tracedecay serve --path ${workspaceFolder}
+tracedecay serve
 ```
 
 Cursor Settings surfaces that MCP server key literally, so the Cursor bundle
 uses `tracedecay` (not the Claude/Codex `graph` key). Each Cursor workspace
-gets its own `.tracedecay/` index. Cursor's MCP runner resolves
-`${workspaceFolder}` in normal editor windows.
+gets its own project store.
 
-Some Cursor contexts (headless agent-session MCP scopes) pass the literal,
-unexpanded `${workspaceFolder}` from the user home directory. Cursor never
-retries a failed MCP scope, so `serve` detects unexpanded `${...}` values,
-warns on stderr, and falls back to project discovery: cwd walk-up, MCP
-initialize roots, then the global project registry. Registry fallback accepts
-only a unique registered project; otherwise `serve` exits with an actionable
-"multiple projects" error. The template keeps `--path ${workspaceFolder}`
-because normal Cursor windows expand it and home-dir discovery cannot scope
-multi-project setups. If tools still do not connect, run
-`tracedecay doctor`.
+Cursor runs plugin MCP servers in its profile scope, spawned per workspace
+with the workspace folder as the working directory, and it never expands
+`${workspaceFolder}` there (every spawn of the former `--path
+${workspaceFolder}` template logged the literal string). `serve` therefore
+resolves the workspace from its working directory (project walk-up, then the
+enclosing git checkout) and from MCP initialize roots. A `--path` value that
+still carries an unexpanded `${...}` template is discarded with a stderr
+warning and the same discovery runs.
+
+When discovery lands on a directory the profile has not enrolled, the MCP
+handshake still completes and every tool call answers with the typed
+`project_not_enrolled` refusal naming that directory and the fix
+(`tracedecay init` there). The daemon re-checks the route on each call, so
+the server recovers without a reload once the project is initialized. If
+tools still do not connect, run `tracedecay doctor`.
 
 Hook commands derive the active project from Cursor's event payload /
 `CURSOR_PROJECT_DIR`, not from the plugin directory. They only submit bounded
@@ -298,20 +302,19 @@ Notes:
 
 ## Troubleshooting a dead MCP scope
 
-Cursor spawns MCP servers with the user home directory as the working
-directory, and it **never retries a failed MCP server**: if the `tracedecay
-serve` process exits at startup (for example when a headless agent scope
-passes a literal, unexpanded `${workspaceFolder}`), every later tool call in
-that session reports "Timed out waiting for connection" until you toggle the
+Cursor **never retries a failed MCP server**: if the `tracedecay serve`
+process exits or fails `initialize` at startup, every later tool call in that
+session reports "Timed out waiting for connection" until you toggle the
 server or reload the window.
 
 Two layers of defense ship with this plugin:
 
-- `tracedecay serve` does not exit when project resolution fails at startup.
-  It completes the MCP handshake and answers tool calls with an actionable
-  error naming the failure and the fix; it rechecks the project on every tool
-  call and recovers automatically once `tracedecay init` (or a corrected
-  `--path`) makes resolution succeed.
+- `tracedecay serve` does not exit, and the daemon does not fail `initialize`,
+  when project resolution lands on an unenrolled directory. The handshake
+  completes and tool calls answer with the typed `project_not_enrolled` error
+  naming the directory and the fix; the daemon rechecks the route on every
+  tool call and recovers automatically once `tracedecay init` (or a corrected
+  `--path`) makes admission succeed.
 - `tracedecay doctor` scans supported host integration evidence
   (`~/.config/Cursor/logs` on Linux, `~/Library/Application Support/Cursor/logs`
   on macOS, `%APPDATA%\Cursor\logs` on Windows) for tracedecay spawn failures,

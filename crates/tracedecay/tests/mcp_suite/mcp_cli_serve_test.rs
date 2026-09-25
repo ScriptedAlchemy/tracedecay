@@ -17,7 +17,10 @@ use crate::common::tracedecay_command_with_home;
 #[cfg(unix)]
 use crate::serve_harness::runtime_project_root;
 #[cfg(unix)]
-use crate::serve_harness::{canonical_path_string, run_serve_runtime};
+use crate::serve_harness::{
+    assert_unenrolled_cwd_serve_session, canonical_path_string, run_serve_requests,
+    run_serve_runtime, unenrolled_cwd_serve_requests,
+};
 #[cfg(unix)]
 use crate::serve_harness::{init_project_under, register_global_project};
 use crate::serve_harness::{init_project_with_file, profile_root};
@@ -956,6 +959,48 @@ async fn explicit_read_only_open_reports_and_guards_read_only_store() {
         message.contains("read-only"),
         "write guard should report read-only state, got: {message}"
     );
+}
+
+/// A host that starts `serve` from a directory discovery cannot resolve (not a
+/// project, not a git checkout, no initialize roots) still gets a complete
+/// MCP handshake; the missing project is a typed per-call state the daemon
+/// re-derives on every `tools/call`, never a dropped connection.
+#[cfg(unix)]
+#[tokio::test]
+async fn unenrolled_cwd_completes_initialize_and_types_the_tool_call_refusal() {
+    let home = TempDir::new().unwrap();
+    let cwd = TempDir::new().unwrap();
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
+
+    let output = run_serve_requests(
+        home.path(),
+        cwd.path(),
+        None,
+        &unenrolled_cwd_serve_requests(),
+    );
+
+    assert_unenrolled_cwd_serve_session(&output, cwd.path());
+}
+
+/// An explicit `--path` naming an unenrolled directory is the same client
+/// state as a failed discovery: the route is authoritative, so the refusal
+/// names that path and the handshake still completes.
+#[cfg(unix)]
+#[tokio::test]
+async fn explicit_unenrolled_path_completes_initialize_and_types_the_tool_call_refusal() {
+    let home = TempDir::new().unwrap();
+    let cwd = TempDir::new().unwrap();
+    let explicit = TempDir::new().unwrap();
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
+
+    let output = run_serve_requests(
+        home.path(),
+        cwd.path(),
+        Some(explicit.path().as_os_str()),
+        &unenrolled_cwd_serve_requests(),
+    );
+
+    assert_unenrolled_cwd_serve_session(&output, explicit.path());
 }
 
 #[cfg(unix)]
