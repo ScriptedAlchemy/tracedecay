@@ -33,6 +33,7 @@ use tracedecay_dashboard_api::{
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_project::project::TraceDecay;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 const CONFIGURATION_REQUEST_DEADLINE_MICROS: i64 = 15_000_000;
 const CONFIGURATION_AUTHORITY_LIFETIME_MICROS: i64 = 3_600_000_000;
@@ -292,7 +293,7 @@ pub(crate) async fn dashboard_configuration_authorities_for_test(
     Arc<dyn DashboardApplicationRuntime>,
     Arc<dyn tracedecay_dashboard_api::DashboardProfileCodeIndexWorkerSettingsPort>,
 )> {
-    let project_root = cg.project_root().canonicalize()?;
+    let project_root = canonical_existing_identity(cg.project_root())?;
     let project_id = cg
         .configuration_runtime()
         .configuration_target()

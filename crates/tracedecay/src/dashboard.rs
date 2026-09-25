@@ -10,6 +10,8 @@
 //! resulting HTTP router and transport policy.
 
 use tracedecay_dashboard_api::DashboardProjectContext;
+#[cfg(feature = "test-transport")]
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 #[cfg(feature = "test-transport")]
 use tracedecay_daemon_service::DaemonInvocationService;
@@ -101,8 +103,8 @@ pub async fn dashboard_automation_authority_for_test(
     profile_root: impl AsRef<std::path::Path>,
 ) -> tracedecay_domain::errors::Result<(DashboardAutomationAuthorityV1, DashboardAutomationWriter)>
 {
-    let profile_root = profile_root.as_ref().canonicalize()?;
-    let project_root = cg.project_root().canonicalize()?;
+    let profile_root = canonical_existing_identity(profile_root.as_ref())?;
+    let project_root = canonical_existing_identity(cg.project_root())?;
     let configuration = hotpath::future!(
         cg.configuration_runtime().client().current(),
         label = "dashboard.automation.configuration"
@@ -111,7 +113,8 @@ pub async fn dashboard_automation_authority_for_test(
     .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
         message: format!("dashboard automation fixture configuration is unavailable: {error}"),
     })?;
-    let configured_project_root = configuration.target().project_root.canonicalize()?;
+    let configured_project_root =
+        canonical_existing_identity(&configuration.target().project_root)?;
     if configured_project_root != project_root {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: "dashboard automation fixture configuration resolved a different project root"

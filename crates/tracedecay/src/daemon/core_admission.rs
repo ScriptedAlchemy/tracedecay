@@ -5,7 +5,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use tracedecay_runtime_core::path_safety::canonical_existing_identity;
+use tracedecay_runtime_core::path_safety::{canonical_existing_identity, same_canonical_path};
 
 use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, Instant, timeout, timeout_at};
@@ -687,7 +687,7 @@ pub(super) fn coordinated_background_refresh_writer(
                 .await
                 .into_iter()
                 .find(|graph| {
-                    graph.project_root() == canonical_root
+                    same_canonical_path(graph.project_root(), &canonical_root)
                         && graph.active_branch() == active_branch.as_deref()
                 })
                 .ok_or_else(|| TraceDecayError::Config {
