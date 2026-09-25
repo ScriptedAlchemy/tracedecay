@@ -580,8 +580,9 @@ mod tests {
     ///
     /// `open_diagnostic_broker` reads the process user's home-level OpenCode
     /// registration, and a test must never read the operator's real host
-    /// configuration. The lock serializes every test in this module that
-    /// touches the ambient environment.
+    /// configuration. It takes the process-wide profile-environment lock so
+    /// `PinnedUserDataDir` guards in other modules cannot restore `HOME`
+    /// underneath it.
     struct HomeGuard {
         previous_home: Option<std::ffi::OsString>,
         previous_userprofile: Option<std::ffi::OsString>,
@@ -591,15 +592,12 @@ mod tests {
 
     impl HomeGuard {
         fn isolate(home: &std::path::Path) -> Self {
-            static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-            let lock = ENV_LOCK
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
             let previous_home = std::env::var_os("HOME");
             let previous_userprofile = std::env::var_os("USERPROFILE");
             let previous_xdg = std::env::var_os("XDG_CONFIG_HOME");
-            // SAFETY: the module env lock is held for the guard's lifetime,
-            // so no sibling test observes the override.
+            // SAFETY: the process-wide profile-environment lock is held for
+            // the guard's lifetime, so no other test observes the override.
             unsafe {
                 std::env::set_var("HOME", home);
                 std::env::set_var("USERPROFILE", home);
