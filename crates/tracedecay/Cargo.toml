@@ -305,7 +305,7 @@ tracedecay-policy = { path = "../tracedecay-policy", version = "0.1.0" }
 tracedecay-privacy = { path = "../tracedecay-privacy", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 # Workspace-versioned like this crate: it owns `version::PACKAGE_VERSION`.
-tracedecay-project = { path = "../tracedecay-project", version = "0.1.0-beta.37" }
+tracedecay-project = { path = "../tracedecay-project" }
 tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
@@ -390,7 +390,7 @@ tracedecay-mcp = { path = "../tracedecay-mcp", version = "0.1.0", features = ["t
 # Only `test-helpers`: the project crate's `test-transport` reroutes the plain
 # `TraceDecay::init`/`open` API onto the fixture, and the root's
 # `test-helpers`-only suites exercise the production standalone path.
-tracedecay-project = { path = "../tracedecay-project", version = "0.1.0-beta.37", features = ["test-helpers"] }
+tracedecay-project = { path = "../tracedecay-project", features = ["test-helpers"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-host-admission = { path = "../tracedecay-host-admission", version = "0.1.0", features = ["test-helpers"] }

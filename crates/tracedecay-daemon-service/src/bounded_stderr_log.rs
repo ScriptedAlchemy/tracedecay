@@ -297,8 +297,7 @@ mod tests {
             }
             let live = std::fs::metadata(&path).expect("live").len();
             let retained = std::fs::metadata(root.path().join("daemon.err.log.1"))
-                .map(|metadata| metadata.len())
-                .unwrap_or(0);
+                .map_or(0, |metadata| metadata.len());
             peak_on_disk = peak_on_disk.max(live + retained);
         }
         eprintln!(

@@ -993,7 +993,7 @@ impl HostAdmissionTestRuntimeV1 {
                     message: error.to_string(),
                 }
             })?;
-            let (_, mut session_relations) = SessionTemporalAccess::new(&*database)
+            let (_, mut session_relations) = SessionTemporalAccess::new(database)
                 .active_session_summary_relations(
                     &session_id,
                     &summary_ids,

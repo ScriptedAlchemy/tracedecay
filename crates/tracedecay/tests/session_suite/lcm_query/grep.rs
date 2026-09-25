@@ -447,7 +447,8 @@ async fn one_stored_body_serves_search_grep_and_expand_redacted() {
     let db = registered_lcm_runtime(&tmp).await;
     let secret = ["sk-proj-single-copy-", "1234567890abcdef"].concat();
     let body = format!("orchard ledger rotation uses {secret} for the nightly job");
-    let store_ids = insert_raw_messages(&db, "cursor", "session-1", &[body.clone()]).await;
+    let store_ids =
+        insert_raw_messages(&db, "cursor", "session-1", std::slice::from_ref(&body)).await;
 
     let snapshot_path = tmp.path().join("single-copy-snapshot.db");
     db.snapshot_session_database_for_test(HostAdmissionScope::Profile, &snapshot_path)

@@ -71,7 +71,7 @@ tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
 tracedecay-maintenance = { path = "../tracedecay-maintenance", version = "0.1.0" }
 tracedecay-mcp-catalog = { path = "../tracedecay-mcp-catalog", version = "0.1.0" }
 tracedecay-privacy = { path = "../tracedecay-privacy", version = "0.1.0" }
-tracedecay-project = { path = "../tracedecay-project", version = "0.1.0-beta.37" }
+tracedecay-project = { path = "../tracedecay-project" }
 tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
@@ -101,5 +101,5 @@ tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", fe
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
 # The moved handler tests open projects through the registered test runtime
 # and the explicit `TraceDecay::*_for_test` constructors.
-tracedecay-project = { path = "../tracedecay-project", version = "0.1.0-beta.37", features = ["test-helpers"] }
+tracedecay-project = { path = "../tracedecay-project", features = ["test-helpers"] }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
