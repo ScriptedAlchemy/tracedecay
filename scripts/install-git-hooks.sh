@@ -6,7 +6,7 @@ cd "$repo_root"
 
 npm ci
 git config core.hooksPath .githooks
-chmod +x .githooks/commit-msg
+chmod +x .githooks/commit-msg .githooks/pre-commit
 
 echo "Installed repository Git hooks via core.hooksPath=.githooks"
 echo "Commit messages will be checked with npm run lint:commit"
