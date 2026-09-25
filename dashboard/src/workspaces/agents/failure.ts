@@ -150,6 +150,8 @@ export interface AttemptFailure {
 export type AttemptFailureReading =
   | { readonly state: 'pending' }
   | { readonly state: 'refused'; readonly chip: DomainStateKind; readonly detail: string }
+  /** No Work graph exists yet, so no attempt could have run against one. */
+  | { readonly state: 'absent' }
   | {
       readonly state: 'read';
       readonly failures: readonly AttemptFailure[];
@@ -178,6 +180,7 @@ export function readAttemptFailures(
   if (result.outcome === 'refused') {
     return { state: 'refused', chip: result.state, detail: result.detail };
   }
+  if (result.value.mode === 'absent') return { state: 'absent' };
   const latest = latestGraphEntry(result.value);
   if (latest === null) {
     return {

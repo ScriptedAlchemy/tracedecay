@@ -677,105 +677,16 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
 #[tokio::test]
 async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-    let project = tempfile::tempdir().expect("project root");
-    let project_id = ProjectId::new("project.work.task-activity").expect("project id");
-    let host =
-        tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
-            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
-            project.path(),
-            project_id.clone(),
-        )
-        .await
-        .expect("registered project runtime");
-    let database = host
-        .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
-        .expect("registered project database");
-    let actor = ActorId::new("actor.work.task-activity").expect("actor id");
-    let scope = ResolvedScope::new(
-        project_id.clone(),
-        tracedecay_domain::RepositoryId::new("repository.work.task-activity")
-            .expect("repository id"),
-        tracedecay_domain::WorktreeId::new("worktree.work.task-activity").expect("worktree id"),
-        None,
-    )
-    .expect("resolved scope");
-    let grant_digest =
-        ManifestDigest::new(format!("sha256:{}", "d".repeat(64))).expect("grant digest");
-    let grant = CapabilityGrantSnapshot::new(
-        CapabilityGrantId::new("grant.work.task-activity").expect("grant id"),
-        1,
-        grant_digest.clone(),
-        actor.clone(),
-        UtcMicros(1),
-        UtcMicros(10_000),
-        scope.clone(),
-        tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
-            .iter()
-            .map(|(_, capability, _)| CapabilityId::new(*capability).expect("capability"))
-            .collect(),
-        tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
-            .iter()
-            .map(|(_, _, use_case)| UseCaseId::new(*use_case).expect("use case"))
-            .collect(),
-        DisclosureClass::Sensitive,
-    )
-    .expect("Work grant");
-    let authority = WorkAuthority::new(
-        scope.project_id.clone(),
-        scope.repository_id.clone(),
-        scope.worktree_id.clone(),
-        actor.clone(),
-        grant_digest,
-    )
-    .expect("Work authority");
-    let service = DaemonInvocationService::default();
-    let (proposal_routing, configuration_digest) =
-        empty_work_proposal_routing(scope.clone(), &grant);
-    let policy_digest = mount_test_work_observability(
-        &service,
-        project.path(),
-        database.clone(),
-        &scope,
-        &configuration_digest,
-    )
-    .await;
-    DaemonWorkRuntimeRegistrar::new(&service)
-        .register(
-            project.path().to_path_buf(),
-            database.clone(),
-            authority,
-            actor,
-            grant,
-            policy_digest,
-            configuration_digest,
-            tracedecay_domain::configuration::safe_work_topology_policy_v1(),
-            proposal_routing,
-            denied_work_evidence_retrieval(),
-        )
-        .await
-        .expect("registered Work runtime");
-    let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
+    let fixture = RegisteredWorkFixture::start("task-activity").await;
+    let (database, project_id, scope) = (
+        fixture.database.clone(),
+        fixture.scope.project_id.clone(),
+        fixture.scope.clone(),
+    );
 
     macro_rules! invoke {
         ($request_id:literal, $request:expr) => {
-            service
-                .invoke(
-                    &registry,
-                    Some(project.path()),
-                    None,
-                    None,
-                    None,
-                    DaemonInvocationRequest::work_application(
-                        $request_id,
-                        $request,
-                        UtcMicros(100),
-                        Deadline::new(UtcMicros(1_000)).expect("deadline"),
-                        CancellationContext::active(concat!("cancel.", $request_id))
-                            .expect("cancellation"),
-                    ),
-                )
-                .await
-                .outcome
+            fixture.invoke($request_id, $request).await
         };
     }
 
@@ -890,4 +801,208 @@ async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
         1,
         "a product graph read must not publish task activity"
     );
+}
+
+/// A profile that never created Work answers the views read, through the same
+/// daemon invocation path MCP, CLI and the dashboard use, with the typed
+/// absence under its authorized selection. A selection naming a project the
+/// caller is not scoped to is still the concealed denial.
+#[tokio::test]
+async fn a_views_read_before_any_task_is_absent_and_a_foreign_selection_stays_denied() {
+    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let fixture = RegisteredWorkFixture::start("absent-view").await;
+
+    let absent = fixture
+        .invoke(
+            "request.work.absent-view",
+            WorkApplicationInvocationV1::Views(WorkGraphReadRequestV1::current(
+                WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                UtcMicros(100),
+            )),
+        )
+        .await;
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome: WorkApplicationOutcomeV1::Views(ApplicationOutcome::Evidence(packet)),
+        ..
+    } = absent
+    else {
+        panic!("an authorized read of no graph must be answered: {absent:?}");
+    };
+    let mut wire = serde_json::to_value(packet.payload.expect("absent graph payload"))
+        .expect("serialize the views answer");
+    let owner = wire["authorized_scope"]
+        .as_object_mut()
+        .expect("authorized scope");
+    assert!(
+        owner
+            .remove("owner_brain_id")
+            .is_some_and(|id| id.is_string())
+    );
+    assert!(
+        owner
+            .remove("owner_profile_id")
+            .is_some_and(|id| id.is_string())
+    );
+    assert_eq!(
+        wire,
+        serde_json::json!({
+            "mode": "absent",
+            "authorized_scope": {"selection": {"selection": "profile_owned_no_git"}},
+            "selection_coverage": {"coverage": "complete", "covered_events": 0},
+        })
+    );
+
+    let foreign = fixture
+        .invoke(
+            "request.work.foreign-view",
+            WorkApplicationInvocationV1::Views(WorkGraphReadRequestV1::current(
+                WorkProductSelectionScopeV1::relations(
+                    [WorkProductAuthorizedRelationScopeV1::Project {
+                        project_id: ProjectId::new("project.work.someone-else")
+                            .expect("foreign project id"),
+                    }]
+                    .into_iter()
+                    .collect(),
+                )
+                .expect("foreign selection"),
+                UtcMicros(100),
+            )),
+        )
+        .await;
+    let DaemonInvocationOutcome::ApplicationProblem { problem } = foreign else {
+        panic!("a foreign selection must stay denied: {foreign:?}");
+    };
+    assert_eq!(
+        problem,
+        tracedecay_contracts::ApplicationProblem::not_found_or_not_authorized(
+            tracedecay_contracts::RetryDirective::Never
+        )
+    );
+}
+
+/// One registered project with the Work runtime mounted and an empty proposal
+/// route table, invoked through the production daemon invocation service.
+struct RegisteredWorkFixture {
+    _host: tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1,
+    project: tempfile::TempDir,
+    database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    scope: ResolvedScope,
+    service: DaemonInvocationService,
+    registry: Arc<Mutex<LspSessionRegistry>>,
+}
+
+impl RegisteredWorkFixture {
+    async fn start(name: &str) -> Self {
+        let project = tempfile::tempdir().expect("project root");
+        let project_id = ProjectId::new(format!("project.work.{name}")).expect("project id");
+        let host =
+            tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
+                tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+                project.path(),
+                project_id.clone(),
+            )
+            .await
+            .expect("registered project runtime");
+        let database = host
+            .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
+            .expect("registered project database");
+        let actor = ActorId::new(format!("actor.work.{name}")).expect("actor id");
+        let scope = ResolvedScope::new(
+            project_id,
+            tracedecay_domain::RepositoryId::new(format!("repository.work.{name}"))
+                .expect("repository id"),
+            tracedecay_domain::WorktreeId::new(format!("worktree.work.{name}"))
+                .expect("worktree id"),
+            None,
+        )
+        .expect("resolved scope");
+        let grant_digest =
+            ManifestDigest::new(format!("sha256:{}", "d".repeat(64))).expect("grant digest");
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new(format!("grant.work.{name}")).expect("grant id"),
+            1,
+            grant_digest.clone(),
+            actor.clone(),
+            UtcMicros(1),
+            UtcMicros(10_000),
+            scope.clone(),
+            tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
+                .iter()
+                .map(|(_, capability, _)| CapabilityId::new(*capability).expect("capability"))
+                .collect(),
+            tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
+                .iter()
+                .map(|(_, _, use_case)| UseCaseId::new(*use_case).expect("use case"))
+                .collect(),
+            DisclosureClass::Sensitive,
+        )
+        .expect("Work grant");
+        let authority = WorkAuthority::new(
+            scope.project_id.clone(),
+            scope.repository_id.clone(),
+            scope.worktree_id.clone(),
+            actor.clone(),
+            grant_digest,
+        )
+        .expect("Work authority");
+        let service = DaemonInvocationService::default();
+        let (proposal_routing, configuration_digest) =
+            empty_work_proposal_routing(scope.clone(), &grant);
+        let policy_digest = mount_test_work_observability(
+            &service,
+            project.path(),
+            database.clone(),
+            &scope,
+            &configuration_digest,
+        )
+        .await;
+        DaemonWorkRuntimeRegistrar::new(&service)
+            .register(
+                project.path().to_path_buf(),
+                database.clone(),
+                authority,
+                actor,
+                grant,
+                policy_digest,
+                configuration_digest,
+                tracedecay_domain::configuration::safe_work_topology_policy_v1(),
+                proposal_routing,
+                denied_work_evidence_retrieval(),
+            )
+            .await
+            .expect("registered Work runtime");
+        Self {
+            _host: host,
+            project,
+            database,
+            scope,
+            service,
+            registry: Arc::new(Mutex::new(LspSessionRegistry::default())),
+        }
+    }
+
+    async fn invoke(
+        &self,
+        request_id: &'static str,
+        request: WorkApplicationInvocationV1,
+    ) -> DaemonInvocationOutcome {
+        self.service
+            .invoke(
+                &self.registry,
+                Some(self.project.path()),
+                None,
+                None,
+                None,
+                DaemonInvocationRequest::work_application(
+                    request_id,
+                    request,
+                    UtcMicros(100),
+                    Deadline::new(UtcMicros(1_000)).expect("deadline"),
+                    CancellationContext::active(format!("cancel.{request_id}"))
+                        .expect("cancellation"),
+                ),
+            )
+            .await
+            .outcome
+    }
 }

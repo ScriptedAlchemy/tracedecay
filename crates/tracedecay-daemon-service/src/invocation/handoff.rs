@@ -71,7 +71,7 @@ impl HandoffOpenTargetPort for DaemonHandoffOpenTargets {
                             Ok(snapshot.graph().item(task_id).is_some()
                                 && snapshot.graph().version().get() == version.get())
                         }
-                        Err(tracedecay_contracts::WorkProductApplicationErrorV1::NotFoundOrNotAuthorized) => Ok(false),
+                        Ok(tracedecay_contracts::WorkGraphReadV1::Absent { .. }) => Ok(false),
                         Ok(
                             tracedecay_contracts::WorkGraphReadV1::AsOf { .. }
                             | tracedecay_contracts::WorkGraphReadV1::Evolution { .. }

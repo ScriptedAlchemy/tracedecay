@@ -114,60 +114,27 @@ where
         let port_context =
             WorkProductPortContextV1::from_request(context, authorized_scope, occurred_at);
         let read_request = WorkGraphReadRequestV1::current(request.selection.clone(), occurred_at);
-        let expected_authority = match self.graph.read_graph(&port_context, &read_request) {
-            Ok(read) => {
-                super::read::validate_result(
-                    &read_request,
-                    port_context.authorized_scope(),
-                    &read,
-                )?;
-                // Reads answer over the covered slice and disclose the rest.
-                // A mutation cannot: the head it would pin is the slice's
-                // head, not the journal's, so the change would be formed
-                // against a graph that is not current. Refused by name, with
-                // the selection remedy, rather than left to surface later as a
-                // version conflict that blames the wrong thing.
-                if read.selection_coverage().is_partial() {
-                    return Err(WorkProductApplicationErrorV1::SelectionCoverageIncomplete);
-                }
-                let WorkGraphReadV1::Current { snapshot, .. } = read else {
-                    return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
-                };
-                WorkProductExpectedAuthorityV1::Verified {
-                    verified_version: snapshot.verified_version().clone(),
-                }
-            }
-            Err(super::WorkGraphReadPortErrorV1::NotFoundOrNotAuthorized)
+        let read = self.graph.read_graph(&port_context, &read_request)?;
+        super::read::validate_result(&read_request, port_context.authorized_scope(), &read)?;
+        // Reads answer over the covered slice and disclose the rest. A mutation
+        // cannot: the head it would pin is the slice's head, not the journal's,
+        // so the change would be formed against a graph that is not current.
+        // Under partial coverage an absent slice is not an empty journal
+        // either: creating a root there would append a second `Created` event.
+        // Refused by name, with the selection remedy, rather than left to
+        // surface later as a version conflict that blames the wrong thing.
+        if read.selection_coverage().is_partial() {
+            return Err(WorkProductApplicationErrorV1::SelectionCoverageIncomplete);
+        }
+        let expected_authority = match read {
+            WorkGraphReadV1::Absent { .. }
                 if matches!(&request.change, WorkProductChangeDraftV1::CreateTask { .. }) =>
             {
-                let empty_request = WorkGraphReadRequestV1::forensic(
-                    request.selection.clone(),
-                    UtcMicros(i64::MIN),
-                    occurred_at,
-                    occurred_at,
-                )?;
-                let empty_read = self.graph.read_graph(&port_context, &empty_request)?;
-                super::read::validate_result(
-                    &empty_request,
-                    port_context.authorized_scope(),
-                    &empty_read,
-                )?;
-                // An empty covered slice is not the same fact as an empty
-                // journal. Under partial coverage a graph exists outside this
-                // selection, and creating a second root over it would append a
-                // `Created` event to a journal that already has one.
-                if empty_read.selection_coverage().is_partial() {
-                    return Err(WorkProductApplicationErrorV1::SelectionCoverageIncomplete);
-                }
-                let WorkGraphReadV1::Forensic { timeline, .. } = empty_read else {
-                    return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
-                };
-                if !timeline.entries().is_empty() {
-                    return Err(WorkProductApplicationErrorV1::NotFoundOrNotAuthorized);
-                }
                 WorkProductExpectedAuthorityV1::NoPriorGraph
             }
-            Err(error) => return Err(error.into()),
+            read => WorkProductExpectedAuthorityV1::Verified {
+                verified_version: read.into_current_snapshot()?.verified_version().clone(),
+            },
         };
         let expected_graph_version = match &expected_authority {
             WorkProductExpectedAuthorityV1::Verified { verified_version } => {
@@ -580,9 +547,7 @@ where
         if read.selection_coverage().is_partial() {
             return Err(WorkProductApplicationErrorV1::SelectionCoverageIncomplete);
         }
-        let WorkGraphReadV1::Current { snapshot, .. } = read else {
-            return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
-        };
+        let snapshot = read.into_current_snapshot()?;
         if snapshot.verified_version() != expected_verified_version {
             return Err(WorkProductApplicationErrorV1::VersionConflict);
         }

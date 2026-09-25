@@ -33,10 +33,9 @@ use crate::{
     VerifiedWorkGraphVersionV1, WorkAttemptProviderOutcomeV1, WorkAttemptReceiptReadPortV1,
     WorkAttemptReceiptV1, WorkEvidenceRootReadErrorV1, WorkEvidenceRootReadPortV1,
     WorkGraphReadModeV1, WorkGraphReadPortErrorV1, WorkGraphReadPortV1, WorkGraphReadRequestV1,
-    WorkGraphReadV1, WorkProductApplicationErrorV1, WorkProductBindingV1,
-    WorkProductOwnerAuthorizationErrorV1, WorkProductOwnerAuthorizationPortV1,
-    WorkProductPortContextV1, WorkProductSelectionScopeV1, WorkRoutingSnapshotErrorV1,
-    WorkRoutingSnapshotPortV1,
+    WorkProductApplicationErrorV1, WorkProductBindingV1, WorkProductOwnerAuthorizationErrorV1,
+    WorkProductOwnerAuthorizationPortV1, WorkProductPortContextV1, WorkProductSelectionScopeV1,
+    WorkRoutingSnapshotErrorV1, WorkRoutingSnapshotPortV1,
 };
 
 pub const MAX_WORK_EXPERIENCE_CANDIDATES_V1: u32 = 100;
@@ -462,9 +461,7 @@ where
         if read.authorized_scope() != &authorized_scope {
             return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
         }
-        let WorkGraphReadV1::Current { snapshot, .. } = read else {
-            return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
-        };
+        let snapshot = read.into_current_snapshot()?;
         let graph = snapshot.graph();
         let runtime = snapshot.runtime();
         graph
@@ -572,9 +569,7 @@ where
         if graph_read.authorized_scope() != &authorized_scope {
             return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
         }
-        let WorkGraphReadV1::Current { snapshot, .. } = graph_read else {
-            return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
-        };
+        let snapshot = graph_read.into_current_snapshot()?;
         if snapshot.verified_version() != &request.verified_version {
             return Err(WorkProductApplicationErrorV1::VersionConflict);
         }

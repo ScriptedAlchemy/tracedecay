@@ -476,10 +476,14 @@ impl WorkGraphReadPortV1 for WorkProductAttemptStore {
             .inner
             .lock()
             .map_err(|_| WorkGraphReadPortErrorV1::Unavailable)?;
-        let graph = rows
-            .graph
-            .as_ref()
-            .ok_or(WorkGraphReadPortErrorV1::NotFoundOrNotAuthorized)?;
+        let Some(graph) = rows.graph.as_ref() else {
+            return Ok(WorkGraphReadV1::Absent {
+                authorized_scope: context.authorized_scope().clone(),
+                selection_coverage: tracedecay_contracts::WorkGraphSelectionCoverageV1::Complete {
+                    covered_events: 0,
+                },
+            });
+        };
         let verified = rows
             .events
             .last()

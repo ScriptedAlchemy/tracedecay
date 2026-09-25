@@ -5882,7 +5882,7 @@ export const StoreGrowthDimensionV1Schema = z.discriminatedUnion("state", [z.obj
 export type StoreGrowthDimensionV1 = z.infer<typeof StoreGrowthDimensionV1Schema>;
 
 /** Logical name of one owner-profile store (for example `sessions.db`,
-`graph.db`, or `branches/feature-x`). Never an absolute on-disk path. */
+`graph.db`, or `projects/proj_x`). Never an absolute on-disk path. */
 export const StoreKeyV1Schema = z.string();
 export type StoreKeyV1 = z.infer<typeof StoreKeyV1Schema>;
 
@@ -7379,6 +7379,10 @@ export const WorkGraphReadRequestV1Schema = z.object({
 export type WorkGraphReadRequestV1 = z.infer<typeof WorkGraphReadRequestV1Schema>;
 
 export const WorkGraphReadV1Schema = z.discriminatedUnion("mode", [z.object({
+  authorized_scope: z.lazy(() => AuthorizedWorkProductScopeV1Schema),
+  mode: z.literal("absent"),
+  selection_coverage: z.lazy(() => WorkGraphSelectionCoverageV1Schema),
+}), z.object({
   authorized_scope: z.lazy(() => AuthorizedWorkProductScopeV1Schema),
   mode: z.literal("as_of"),
   selection_coverage: z.lazy(() => WorkGraphSelectionCoverageV1Schema),
