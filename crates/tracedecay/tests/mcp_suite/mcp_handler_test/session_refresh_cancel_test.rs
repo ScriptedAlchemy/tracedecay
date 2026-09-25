@@ -15,14 +15,18 @@ use crate::support::{GlobalDbEnvGuard, HomeEnvGuard, extract_text, lock_process_
 use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 #[cfg(feature = "test-transport")]
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
-use tracedecay::mcp::tools::{ToolCallRegistryOptions, handle_tool_call_with_registry_options};
-use tracedecay_contracts::SessionTemporalRefreshWakePort;
+use tracedecay_contracts::retained_surfaces::RetainedSurfaceOperation;
+use tracedecay_contracts::{
+    ApplicationEnvelope, ApplicationProblemEnvelope, CancellationSignal, Deadline, RequestId,
+    SessionTemporalRefreshWakePort, now_micros, retained_surface_application_operation,
+};
 use tracedecay_daemon_identity::profile_identity;
 use tracedecay_daemon_service::DaemonSessionRefreshService;
-use tracedecay_mcp::handlers::SessionAuthorities;
+use tracedecay_domain::UtcMicros;
 use tracedecay_project::project::TraceDecay;
 use tracedecay_runtime_core::storage::default_profile_root;
 
@@ -170,30 +174,74 @@ fn assert_cancel_payload(
     assert_eq!(payload["receipt"]["failure_code"], Value::Null, "{payload}");
 }
 
-async fn dispatch_cancel(
-    graph: &TraceDecay,
-    profile_root: &Path,
+/// Serve one profile refresh request through the profile retained owner and
+/// report the application envelope an MCP `format: json` call renders.
+async fn dispatch_profile_refresh(
+    profile_database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     authority: &tracedecay_session_runtime::retained::ProfileRetainedConnectionAuthorityV1,
     refresh: Option<&dyn tracedecay_session_runtime::retained::RetainedSessionRefreshPortV1>,
+    tool_name: &str,
     arguments: Value,
 ) -> Value {
-    let mut options = ToolCallRegistryOptions::with_session_authorities(
-        SessionAuthorities::default()
-            .with_profile_retained_authority(Some(authority))
-            .with_profile_session_refresh(refresh),
-    );
-    options.profile_root = Some(profile_root);
-    let result = handle_tool_call_with_registry_options(
-        graph,
-        "tracedecay_session_refresh_cancel",
-        arguments,
-        None,
-        None,
-        options,
+    static REQUESTS: AtomicUsize = AtomicUsize::new(0);
+    let operation = RetainedSurfaceOperation::from_tool_name(tool_name)
+        .unwrap_or_else(|| panic!("{tool_name} is a retained operation"));
+    let request = tracedecay_daemon_protocol::decode_retained_request(
+        operation,
+        tracedecay_daemon_protocol::separate_application_tool_request(arguments)
+            .expect("tool arguments")
+            .request,
+    )
+    .expect("canonical refresh request");
+    let request_id = RequestId::new(format!(
+        "request.session-refresh.{}",
+        REQUESTS.fetch_add(1, Ordering::Relaxed)
+    ))
+    .expect("request id");
+    let database = profile_database.clone();
+    let terminal = tracedecay_session_runtime::retained::execute_profile_retained_application(
+        tracedecay_session_runtime::retained::ProfileRetainedAuthoritiesV1 {
+            profile_sessions: Some(Arc::new(move || {
+                let database = database.clone();
+                Box::pin(async move { Ok(database) })
+            })),
+            session_identity: authority.session_identity().clone(),
+            configuration_digest: authority.configuration_digest().clone(),
+            lcm_authority: None,
+            session_refresh: refresh,
+            refresh_status: None,
+            memory: None,
+        },
+        authority,
+        request,
+        request_id.clone(),
+        Deadline::new(UtcMicros(now_micros().0.saturating_add(30_000_000))).expect("deadline"),
+        CancellationSignal::active(format!("cancellation.{}", request_id.as_str()))
+            .expect("cancellation"),
     )
     .await
-    .expect("session refresh cancel dispatch");
-    tool_envelope(&result.value)
+    .expect("profile refresh transport");
+    let contract = retained_surface_application_operation(operation)
+        .expect("retained operation")
+        .result_contract()
+        .clone();
+    match terminal.outcome {
+        Ok(outcome) => serde_json::to_value(ApplicationEnvelope {
+            contract,
+            request_id,
+            scope: terminal.scope,
+            outcome: tracedecay_daemon_protocol::application_outcome_value(outcome)
+                .expect("retained outcome"),
+            touched_files: Vec::new(),
+            code_graph: None,
+            analytics: None,
+        }),
+        Err(problem) => serde_json::to_value(
+            ApplicationProblemEnvelope::new(contract, request_id, problem)
+                .expect("problem envelope"),
+        ),
+    }
+    .expect("application envelope JSON")
 }
 
 #[cfg(feature = "test-transport")]
@@ -491,17 +539,17 @@ async fn cancel_of_an_unfinished_refresh_stores_a_cancelled_receipt() {
         .await
         .expect("profile session database");
     let refresh = DaemonSessionRefreshService::new(
-        profile_database,
+        profile_database.clone(),
         Arc::new(AcceptedIdleSessionRefreshWake),
         None,
     );
     let session_id = "session.idle-cancel";
 
-    let unmounted = dispatch_cancel(
-        &graph,
-        &profile_root,
+    let unmounted = dispatch_profile_refresh(
+        &profile_database,
         &authority,
         None,
+        "tracedecay_session_refresh_cancel",
         refresh_arguments(session_id, Some("not-a-handle")),
     )
     .await;
@@ -525,28 +573,14 @@ async fn cancel_of_an_unfinished_refresh_stores_a_cancelled_receipt() {
         ),
     );
 
-    let begun = {
-        let mut options = ToolCallRegistryOptions::with_session_authorities(
-            SessionAuthorities::default()
-                .with_profile_retained_authority(Some(&authority))
-                .with_profile_session_refresh(Some(
-                    &refresh
-                        as &dyn tracedecay_session_runtime::retained::RetainedSessionRefreshPortV1,
-                )),
-        );
-        options.profile_root = Some(&profile_root);
-        let result = handle_tool_call_with_registry_options(
-            &graph,
-            "tracedecay_session_refresh_begin",
-            refresh_arguments(session_id, None),
-            None,
-            None,
-            options,
-        )
-        .await
-        .expect("session refresh begin");
-        tool_envelope(&result.value)
-    };
+    let begun = dispatch_profile_refresh(
+        &profile_database,
+        &authority,
+        Some(&refresh),
+        "tracedecay_session_refresh_begin",
+        refresh_arguments(session_id, None),
+    )
+    .await;
     let begin = begun
         .pointer("/outcome/value/payload")
         .cloned()
@@ -561,11 +595,11 @@ async fn cancel_of_an_unfinished_refresh_stores_a_cancelled_receipt() {
         .unwrap_or_else(|| panic!("begin omitted its operation id: {begin}"))
         .to_owned();
 
-    let cancelled = dispatch_cancel(
-        &graph,
-        &profile_root,
+    let cancelled = dispatch_profile_refresh(
+        &profile_database,
         &authority,
         Some(&refresh),
+        "tracedecay_session_refresh_cancel",
         refresh_arguments(session_id, Some(&handle)),
     )
     .await;
@@ -604,11 +638,11 @@ async fn cancel_of_an_unfinished_refresh_stores_a_cancelled_receipt() {
         "{payload}"
     );
 
-    let repeated = dispatch_cancel(
-        &graph,
-        &profile_root,
+    let repeated = dispatch_profile_refresh(
+        &profile_database,
         &authority,
         Some(&refresh),
+        "tracedecay_session_refresh_cancel",
         refresh_arguments(session_id, Some(&handle)),
     )
     .await;

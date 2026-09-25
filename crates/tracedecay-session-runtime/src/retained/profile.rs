@@ -8,10 +8,10 @@ use crate::session_retrieval::SessionRetrievalServingIdentityV1;
 use tracedecay_contracts::retained_surfaces::RetainedSurfaceOperation;
 use tracedecay_contracts::retained_surfaces::{RetainedSurfaceRequestV1, RetainedSurfaceResultV1};
 use tracedecay_contracts::{
-    ApplicationEnvelope, ApplicationOperation, ApplicationProblem, ApplicationProblemEnvelope,
-    ApplicationResult, CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
-    DisclosureClass, RequestContext, RequestId, RetainedSurfacePortsV1, RetainedSurfaceServiceV1,
-    RetryDirective, SafeDiagnostic, now_micros,
+    ApplicationOperation, ApplicationOutcome, ApplicationProblem, CancellationSignal,
+    CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestContext,
+    RequestId, ResolvedScope, RetainedSurfacePortsV1, RetainedSurfaceServiceV1, RetryDirective,
+    SafeDiagnostic, now_micros,
 };
 use tracedecay_domain::{
     ActorId, BrainId, ManifestDigest, UserProfileId, UtcMicros, canonical_sha256,
@@ -247,8 +247,15 @@ fn profile_retained_connection_authority_from_persisted_identity(
     })
 }
 
-/// Execute one profile-scoped retained request through canonical admission and
-/// render the typed application result only after execution has completed.
+/// The settled terminal of one profile-scoped retained request, reported under
+/// the profile session scope it was admitted for.
+#[derive(Debug)]
+pub struct ProfileRetainedTerminalV1 {
+    pub scope: ResolvedScope,
+    pub outcome: Result<ApplicationOutcome<RetainedSurfaceResultV1>, ApplicationProblem>,
+}
+
+/// Execute one profile-scoped retained request through canonical admission.
 #[hotpath::measure(label = "daemon.retained.profile.execute", future = true)]
 pub async fn execute_profile_retained_application(
     authorities: ProfileRetainedAuthoritiesV1<'_>,
@@ -257,7 +264,7 @@ pub async fn execute_profile_retained_application(
     request_id: RequestId,
     deadline: Deadline,
     cancellation: CancellationSignal,
-) -> Result<ApplicationResult<RetainedSurfaceResultV1>, TraceDecayError> {
+) -> Result<ProfileRetainedTerminalV1, TraceDecayError> {
     let observed_at = now_micros();
     let operation = tracedecay_contracts::retained_surface_application_operation(
         request.operation(),
@@ -271,77 +278,39 @@ pub async fn execute_profile_retained_application(
         .map_err(|error| TraceDecayError::Config {
             message: error.to_string(),
         })?;
+    let refused = |problem| {
+        Ok(ProfileRetainedTerminalV1 {
+            scope: scope.clone(),
+            outcome: Err(problem),
+        })
+    };
     if deadline.is_elapsed_at(observed_at) {
-        return Ok(Err(application_problem_envelope(
-            operation.result_contract().clone(),
-            request_id,
-            ApplicationProblem::timed_out_before_admission(),
-        )?));
+        return refused(ApplicationProblem::timed_out_before_admission());
     }
     if connection.user_profile_id.as_str() != authorities.session_identity.profile_id().as_str()
         || connection.session_identity != authorities.session_identity
     {
-        return Ok(Err(application_problem_envelope(
-            operation.result_contract().clone(),
-            request_id,
-            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-        )?));
+        return refused(ApplicationProblem::not_found_or_not_authorized(
+            RetryDirective::Never,
+        ));
     }
     if connection.configuration_digest != authorities.configuration_digest {
-        return Ok(Err(application_problem_envelope(
-            operation.result_contract().clone(),
-            request_id,
-            ApplicationProblem::stale(SafeDiagnostic {
-                code: "application.retained.profile-configuration-stale".to_owned(),
-                message: "The retained profile authority changed after connection admission."
-                    .to_owned(),
-            }),
-        )?));
+        return refused(ApplicationProblem::stale(SafeDiagnostic {
+            code: "application.retained.profile-configuration-stale".to_owned(),
+            message: "The retained profile authority changed after connection admission."
+                .to_owned(),
+        }));
     }
-    let context = connection.admit_request(
-        &operation,
-        request_id.clone(),
-        deadline,
-        &cancellation,
-        observed_at,
-    )?;
+    let context =
+        connection.admit_request(&operation, request_id, deadline, &cancellation, observed_at)?;
     let ports = profile_retained_surface_ports(&authorities)?;
     let service = RetainedSurfaceServiceV1::new(ports);
-    Ok(
-        match hotpath::future!(
-            service.execute(&context, &cancellation, observed_at, &request),
-            label = "daemon.retained.profile.serve"
-        )
-        .await
-        {
-            Ok(outcome) => Ok(ApplicationEnvelope {
-                contract: operation.result_contract().clone(),
-                request_id,
-                scope,
-                outcome,
-                touched_files: Vec::new(),
-                code_graph: None,
-                analytics: None,
-            }),
-            Err(problem) => Err(application_problem_envelope(
-                operation.result_contract().clone(),
-                request_id,
-                problem,
-            )?),
-        },
+    let outcome = hotpath::future!(
+        service.execute(&context, &cancellation, observed_at, &request),
+        label = "daemon.retained.profile.serve"
     )
-}
-
-fn application_problem_envelope(
-    contract: tracedecay_contracts::ResultContractRef,
-    request_id: RequestId,
-    problem: ApplicationProblem,
-) -> Result<ApplicationProblemEnvelope, TraceDecayError> {
-    ApplicationProblemEnvelope::new(contract, request_id, problem).map_err(|error| {
-        TraceDecayError::Config {
-            message: format!("profile retained problem envelope is invalid: {error}"),
-        }
-    })
+    .await;
+    Ok(ProfileRetainedTerminalV1 { scope, outcome })
 }
 
 fn profile_retained_surface_ports<'a>(
@@ -640,9 +609,9 @@ mod tests {
         )
         .await
         .expect("transport result")
+        .outcome
         .expect_err("request must be denied before port execution")
-        .problem
-        .kind
+        .kind()
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -713,22 +682,17 @@ mod tests {
                 signal,
             )
             .await
-            .unwrap();
+            .unwrap()
+            .outcome;
             if expired {
-                assert_eq!(
-                    result.unwrap_err().problem.kind,
-                    ApplicationProblemKind::TimedOut
-                );
+                assert_eq!(result.unwrap_err().kind(), ApplicationProblemKind::TimedOut);
             } else if cancelled {
                 assert_eq!(
-                    result.unwrap_err().problem.kind,
+                    result.unwrap_err().kind(),
                     ApplicationProblemKind::Cancelled
                 );
             } else {
-                assert!(matches!(
-                    result.unwrap().outcome,
-                    ApplicationOutcome::Evidence(_)
-                ));
+                assert!(matches!(result.unwrap(), ApplicationOutcome::Evidence(_)));
             }
             assert_eq!(acquisitions.load(Ordering::SeqCst), 0, "{label}");
         }
@@ -747,8 +711,9 @@ mod tests {
         )
         .await
         .unwrap()
+        .outcome
         .unwrap_err();
-        assert_eq!(result.problem.kind, ApplicationProblemKind::Unavailable);
+        assert_eq!(result.kind(), ApplicationProblemKind::Unavailable);
         assert_eq!(acquisitions.load(Ordering::SeqCst), 1);
     }
 
@@ -877,8 +842,9 @@ mod tests {
         )
         .await
         .expect("profile message-search transport")
+        .outcome
         .expect("profile message search must be mounted");
-        let ApplicationOutcome::Evidence(packet) = result.outcome else {
+        let ApplicationOutcome::Evidence(packet) = result else {
             panic!("message search must return evidence")
         };
         let Some(RetainedSurfaceResultV1::MessageSearch(result)) = packet.payload else {
@@ -954,10 +920,11 @@ mod tests {
         )
         .await
         .expect("profile selection refusal transport")
+        .outcome
         .expect_err("project selection must not reach the profile store");
 
         assert_eq!(
-            problem.problem.kind,
+            problem.kind(),
             ApplicationProblemKind::NotFoundOrNotAuthorized
         );
     }
@@ -1012,9 +979,10 @@ mod tests {
         )
         .await
         .expect("profile sessions-for transport")
+        .outcome
         .expect_err("profile sessions-for must remain unsupported");
 
-        assert_eq!(problem.problem.kind, ApplicationProblemKind::Unsupported);
+        assert_eq!(problem.kind(), ApplicationProblemKind::Unsupported);
     }
 
     #[test]

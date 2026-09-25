@@ -332,13 +332,86 @@ pub fn render_retained_execution(
     )
 }
 
+/// Which store a retained tool call addresses.
+///
+/// `memory_scope: "user"` and a session refresh's `scope.kind: "profile"` are
+/// part of the canonical request. `storage_scope` is the LCM and
+/// message-search transport selector; it never reaches the request body.
+pub fn retained_tool_target(
+    operation: RetainedSurfaceOperation,
+    args: &Value,
+) -> Result<InvocationTarget> {
+    use RetainedSurfaceOperation as Op;
+    if let Some(storage_scope) = args.get("storage_scope") {
+        if !matches!(
+            operation,
+            Op::LcmStatus
+                | Op::LcmDoctor
+                | Op::LcmLoadSession
+                | Op::LcmGrep
+                | Op::LcmDescribe
+                | Op::LcmExpand
+                | Op::LcmExpandQuery
+                | Op::MessageSearch
+        ) {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "unknown parameter `storage_scope` for `tracedecay_{}`",
+                    operation.as_str()
+                ),
+            });
+        }
+        return match storage_scope.as_str() {
+            Some("user") => Ok(InvocationTarget::Profile),
+            Some("project") => Ok(InvocationTarget::CurrentProject),
+            _ => Err(TraceDecayError::Config {
+                message: "storage_scope must be one of project, user".to_owned(),
+            }),
+        };
+    }
+    let profile = match operation {
+        Op::FactStoreAdd
+        | Op::FactStoreSearch
+        | Op::FactStoreProbe
+        | Op::FactStoreRelated
+        | Op::FactStoreReason
+        | Op::FactStoreContradict
+        | Op::FactStoreGet
+        | Op::FactStoreUpdate
+        | Op::FactStoreRemove
+        | Op::FactStoreSupersede
+        | Op::FactStoreList
+        | Op::FactFeedback
+        | Op::MemoryStatus => args.get("memory_scope").and_then(Value::as_str) == Some("user"),
+        Op::SessionRefreshBegin | Op::SessionRefreshStatus | Op::SessionRefreshCancel => {
+            args.pointer("/scope/kind").and_then(Value::as_str) == Some("profile")
+        }
+        Op::FactStoreCurate
+        | Op::MessageSearch
+        | Op::SessionsFor
+        | Op::Workflows
+        | Op::LcmStatus
+        | Op::LcmDoctor
+        | Op::LcmLoadSession
+        | Op::LcmGrep
+        | Op::LcmDescribe
+        | Op::LcmExpand
+        | Op::LcmExpandQuery => false,
+    };
+    Ok(if profile {
+        InvocationTarget::Profile
+    } else {
+        InvocationTarget::CurrentProject
+    })
+}
+
 /// Decode, dispatch, and settle one retained tool call. `Err` is an argument
 /// or transport failure the caller reports as-is.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_retained_surface_tool(
     surface: tracedecay_tool_catalog::BindingSurface,
     operation: ApplicationSurfaceOperation,
-    args: Value,
+    mut args: Value,
     executor: Option<&dyn DaemonInvocationExecutor>,
     protocol_request_id: Option<RequestId>,
     deadline: Option<Deadline>,
@@ -347,6 +420,10 @@ pub async fn execute_retained_surface_tool(
     let tool_name = operation.mcp_tool_name();
     let retained = RetainedSurfaceOperation::from_application(operation)
         .ok_or_else(|| super::unknown_tool_error(tool_name))?;
+    let target = retained_tool_target(retained, &args)?;
+    if let Some(arguments) = args.as_object_mut() {
+        arguments.remove("storage_scope");
+    }
     let normalized =
         tracedecay_daemon_protocol::separate_application_tool_request(args).map_err(|error| {
             TraceDecayError::Config {
@@ -375,8 +452,9 @@ pub async fn execute_retained_surface_tool(
                 )
             })?;
     // The executor belongs to the selected project's server, and the retained
-    // daemon payload carries no resolved scope, so the target stays current.
-    let dispatched = tracedecay_daemon_service::application_surface::resolve_application_surface_dispatch_with_controls(
+    // daemon payload carries no resolved scope: the target is that project or
+    // the authenticated profile.
+    let mut dispatched = tracedecay_daemon_service::application_surface::resolve_application_surface_dispatch_with_controls(
         surface,
         operation,
         request_id.clone(),
@@ -389,6 +467,7 @@ pub async fn execute_retained_surface_tool(
         requested_format,
     )
     .map_err(application_surface_dispatch_error)?;
+    dispatched.invocation.invocation.scope = target;
     let binding_id = dispatched.invocation.binding_id.clone();
     let result_contract =
         tracedecay_contracts::ResultContractRef::from_schema(&dispatched.invocation.result_schema);
@@ -580,26 +659,6 @@ fn graph_tool_unavailable(
     }
 }
 
-pub(super) fn render_retained_result(
-    response_handle_root: Option<&std::path::Path>,
-    operation: RetainedSurfaceOperation,
-    binding_id: &BindingId,
-    result: ApplicationResult<tracedecay_contracts::retained_surfaces::RetainedSurfaceResultV1>,
-    requested_format: RequestedOutputFormat,
-) -> Result<tracedecay_mcp::ToolResult> {
-    let result = tracedecay_daemon_service::application_surface::retained::result_value(result)
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("invalid retained application result: {error}"),
-        })?;
-    render_result_parts(
-        response_handle_root,
-        operation.as_str(),
-        binding_id,
-        &result,
-        requested_format,
-    )
-}
-
 fn render_canonical_markdown(
     operation: &str,
     binding_id: &BindingId,
@@ -625,6 +684,73 @@ mod tests {
     use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId, SchemaId};
 
     use super::{complete_protocol_controls, render_result_parts};
+
+    #[test]
+    fn retained_calls_target_the_profile_only_through_their_canonical_selector() {
+        use super::retained_tool_target;
+        use serde_json::json;
+        use tracedecay_contracts::{InvocationTarget, RetainedSurfaceOperation as Op};
+
+        for (operation, arguments, expected) in [
+            (
+                Op::LcmGrep,
+                json!({"storage_scope": "user"}),
+                InvocationTarget::Profile,
+            ),
+            (
+                Op::MessageSearch,
+                json!({"storage_scope": "project"}),
+                InvocationTarget::CurrentProject,
+            ),
+            (
+                Op::FactStoreList,
+                json!({"memory_scope": "user"}),
+                InvocationTarget::Profile,
+            ),
+            (
+                Op::FactStoreList,
+                json!({"memory_scope": "project"}),
+                InvocationTarget::CurrentProject,
+            ),
+            (
+                Op::LcmGrep,
+                json!({"memory_scope": "user"}),
+                InvocationTarget::CurrentProject,
+            ),
+            (
+                Op::SessionRefreshBegin,
+                json!({"scope": {"kind": "profile"}}),
+                InvocationTarget::Profile,
+            ),
+            (
+                Op::SessionRefreshBegin,
+                json!({"scope": {"kind": "project"}}),
+                InvocationTarget::CurrentProject,
+            ),
+            (Op::Workflows, json!({}), InvocationTarget::CurrentProject),
+        ] {
+            assert_eq!(
+                retained_tool_target(operation, &arguments).unwrap(),
+                expected,
+                "{operation:?} {arguments}"
+            );
+        }
+        for (operation, arguments, message) in [
+            (
+                Op::MemoryStatus,
+                json!({"memory_scope": "user", "storage_scope": "user"}),
+                "unknown parameter `storage_scope` for `tracedecay_memory_status`",
+            ),
+            (
+                Op::LcmDoctor,
+                json!({"storage_scope": "hermes_profile"}),
+                "storage_scope must be one of project, user",
+            ),
+        ] {
+            let error = retained_tool_target(operation, &arguments).unwrap_err();
+            assert!(error.to_string().contains(message), "{error}");
+        }
+    }
 
     #[test]
     fn preserves_a_supplied_deadline_when_cancellation_is_missing() {

@@ -12,14 +12,11 @@ use std::sync::LazyLock;
 use tracedecay_mcp::get_tool_definitions;
 use tracedecay_mcp::tools::dispatch::McpDispatchMetadataError;
 
-pub(crate) use handlers::retained_catalog::{
-    execute_profile_retained_mcp_tool, session_refresh_profile_scope_requested,
-};
 pub use handlers::{
     RetainedSurfaceExecution, ToolCallRegistryOptions, execute_graph_tool_surface,
     execute_retained_surface_tool, execute_work_tool_surface, execute_workflow_tool_surface,
     handle_tool_call, handle_tool_call_with_registry_options, render_application_surface_result,
-    render_retained_execution,
+    render_retained_execution, retained_tool_target, run_retained_surface_tool,
 };
 pub(crate) use handlers::{compute_graph_tool_for_owner, graph_tool_error_problem};
 

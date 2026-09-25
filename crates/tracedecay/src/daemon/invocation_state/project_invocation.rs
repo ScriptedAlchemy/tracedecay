@@ -28,6 +28,7 @@ impl DaemonInvocationState {
             DaemonInvocationPayload::MultiRootScopeSetRead { .. }
                 | DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap { .. }
                 | DaemonInvocationPayload::MultiRootExecute { .. }
+                | DaemonInvocationPayload::ProfileRetainedApplication { .. }
         ) && request_cancellation.is_none()
         {
             let Some(lease) = self
@@ -47,6 +48,23 @@ impl DaemonInvocationState {
         let direct_request_cancellation = request_cancellation
             .clone()
             .or_else(|| direct_request_cancellation_lease.as_ref().map(Lease::token));
+        if let DaemonInvocationPayload::ProfileRetainedApplication {
+            request: retained_request,
+            deadline,
+            cancellation,
+            ..
+        } = request.payload
+        {
+            return super::super::profile_retained::invoke_profile_retained(
+                store_administration,
+                request.request_id,
+                retained_request,
+                deadline,
+                cancellation,
+                direct_request_cancellation,
+            )
+            .await;
+        }
         let request_project_path = request.requires_project().then_some(project_path).flatten();
         if let DaemonInvocationPayload::MultiRootScopeSetRead {
             request: scope_set_request,
