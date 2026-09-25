@@ -7,6 +7,7 @@ use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
+use tracedecay_domain::blank_json_comments;
 use url::Url;
 
 use super::detect::{
@@ -435,13 +436,28 @@ fn parse_json_document(
         // the parse fails, hand the document to the formats that have not had
         // their turn instead of quarantining a perfectly good TOML table. `{`
         // is not shared with any format here, so a broken object stays a
-        // refusal rather than falling through to a raw scan.
+        // refusal rather than falling through to a raw scan, after one retry
+        // with JSON-with-comments (`tsconfig.json`) comments blanked in place:
+        // the whole document still has to parse, and values are located in
+        // the raw text, which the blanking leaves byte-for-byte aligned.
         Err(JsonPreflightFailureV1::Malformed) => {
-            return if trimmed.starts_with('[') {
-                Ok(None)
-            } else {
-                Err(StructuredTextParseFailureV1::Malformed)
-            };
+            if trimmed.starts_with('[') {
+                return Ok(None);
+            }
+            let blanked = blank_json_comments(text);
+            if blanked == text {
+                return Err(StructuredTextParseFailureV1::Malformed);
+            }
+            match parse_json_value(&blanked, policy.depth, policy.values) {
+                Ok(value) => value,
+                Err(
+                    JsonPreflightFailureV1::DepthExceeded
+                    | JsonPreflightFailureV1::ValueCountExceeded,
+                ) => return Err(StructuredTextParseFailureV1::LimitsExceeded),
+                Err(JsonPreflightFailureV1::DuplicateKey | JsonPreflightFailureV1::Malformed) => {
+                    return Err(StructuredTextParseFailureV1::Malformed);
+                }
+            }
         }
     };
     (value.is_object() || value.is_array())
