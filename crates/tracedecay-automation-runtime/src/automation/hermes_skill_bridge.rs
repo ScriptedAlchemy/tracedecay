@@ -270,7 +270,7 @@ fn load_pending_skill_writes(
     agent_home: &Path,
     include_payloads: bool,
 ) -> Result<(Vec<HermesPendingSkillWrite>, usize)> {
-    let pending_dir = agent_home.join("pending/skills");
+    let pending_dir = agent_home.join("pending").join("skills");
     let Some(entries) = safe_read_dir(&pending_dir, agent_home, "Hermes pending skills")? else {
         return Ok((Vec::new(), 0));
     };

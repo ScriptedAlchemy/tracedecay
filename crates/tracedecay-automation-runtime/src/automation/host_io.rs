@@ -14,6 +14,7 @@ use serde_json::Value;
 
 use super::skill_targets::SkillInstallSummary;
 use tracedecay_domain::errors::Result;
+use tracedecay_runtime_core::path_safety::same_canonical_path;
 
 /// Per-agent outcome of a managed-skill export refresh.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,5 +106,5 @@ pub fn home_dir() -> Option<PathBuf> {
 
 #[must_use]
 pub fn uses_default_user_profile(home: &Path, profile_root: &Path) -> bool {
-    profile_root == home.join(".tracedecay")
+    same_canonical_path(profile_root, &home.join(".tracedecay"))
 }
