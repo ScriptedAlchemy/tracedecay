@@ -231,7 +231,10 @@ fn write_provider_fixture(
         .permissions();
     permissions.set_mode(0o700);
     std::fs::set_permissions(&path, permissions).expect("provider executable mode");
-    (path.canonicalize().expect("canonical provider"), script)
+    (
+        canonical_existing_identity(&path).expect("canonical provider"),
+        script,
+    )
 }
 
 #[cfg(windows)]
@@ -253,7 +256,10 @@ fn write_provider_fixture(
     .into_bytes();
     let path = root.join("workflow-provider.cmd");
     std::fs::write(&path, &script).expect("provider script");
-    (path.canonicalize().expect("canonical provider"), script)
+    (
+        canonical_existing_identity(&path).expect("canonical provider"),
+        script,
+    )
 }
 
 fn attempt_status(
