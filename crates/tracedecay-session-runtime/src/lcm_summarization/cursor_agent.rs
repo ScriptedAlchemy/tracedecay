@@ -2,14 +2,14 @@
 //! authoritative summary. Pressure-only hook compaction stays read-only and
 //! does not call this path.
 //!
-//! The executable is configuration data supplied by the caller from the
-//! `lcm.summarizer_executables.v1` setting. This module never consults `PATH`
-//! or the process environment to find it.
+//! The executable and its model/timeout tuning are configuration data the
+//! caller supplies from the `lcm.summarizer_executables.v1` setting. This
+//! module never consults `PATH` or the process environment for either.
 
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_lcm::LcmSummaryRequest;
@@ -22,51 +22,21 @@ pub(super) struct CursorAgentSummaryConfig {
     pub(super) cursor_agent_bin: PathBuf,
     pub(super) model: Option<String>,
     pub(super) timeout: Duration,
-    pub(super) workspace: Option<PathBuf>,
 }
 
-impl CursorAgentSummaryConfig {
-    /// Tuning for one configured executable. Model, timeout, and workspace
-    /// are operator tuning knobs read from the environment; the executable
-    /// itself is never resolved that way.
-    pub(super) fn for_executable(cursor_agent_bin: &Path) -> Self {
-        let mut config = Self {
-            cursor_agent_bin: cursor_agent_bin.to_path_buf(),
-            model: None,
-            timeout: Duration::from_secs(90),
-            workspace: None,
-        };
-        if let Some(model) = non_empty_env("TRACEDECAY_CURSOR_SUMMARY_MODEL") {
-            config.model = Some(model);
-        }
-        if let Some(secs) = non_empty_env("TRACEDECAY_CURSOR_SUMMARY_TIMEOUT_SECS")
-            .and_then(|secs| secs.parse::<u64>().ok())
-        {
-            config.timeout = Duration::from_secs(secs.clamp(5, 300));
-        }
-        if let Some(workspace) = non_empty_env("TRACEDECAY_CURSOR_SUMMARY_WORKSPACE") {
-            config.workspace = Some(PathBuf::from(workspace));
-        }
-        config
-    }
-}
-
-fn non_empty_env(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-}
-
+/// Each run gets a private workspace holding only its prompt file, removed
+/// when the run ends, so `--trust` never covers a shared directory.
 pub(super) fn summarize_with_cursor_agent(
     request: &LcmSummaryRequest,
     config: &CursorAgentSummaryConfig,
 ) -> Result<String> {
     let prompt = build_cursor_summary_prompt(request);
-    let workspace = config.workspace.clone().unwrap_or_else(std::env::temp_dir);
-    std::fs::create_dir_all(&workspace)?;
-    let prompt_path = workspace.join(cursor_summary_prompt_filename());
+    let workspace_dir = tempfile::Builder::new()
+        .prefix("tracedecay-cursor-summary-")
+        .tempdir()?;
+    let workspace = workspace_dir.path();
+    let prompt_path = workspace.join("summary-input.txt");
     std::fs::write(&prompt_path, prompt)?;
-    let _prompt_cleanup = FileCleanupGuard(prompt_path.clone());
     let driver_prompt = format!(
         "Read only the TraceDecay summary input file at {} and complete the summary task defined at its top. Return only the summary text.",
         prompt_path.display()
@@ -83,7 +53,7 @@ pub(super) fn summarize_with_cursor_agent(
         .arg("--sandbox")
         .arg("enabled")
         .arg("--workspace")
-        .arg(&workspace);
+        .arg(workspace);
     if let Some(model) = config.model.as_deref().filter(|model| !model.is_empty()) {
         command.arg("--model").arg(model);
     }
@@ -148,25 +118,6 @@ pub(super) fn summarize_with_cursor_agent(
         });
     }
     Ok(text.to_string())
-}
-
-struct FileCleanupGuard(PathBuf);
-
-impl Drop for FileCleanupGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-fn cursor_summary_prompt_filename() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    format!(
-        "tracedecay-cursor-summary-{}-{nanos}.txt",
-        std::process::id()
-    )
 }
 
 fn build_cursor_summary_prompt(request: &LcmSummaryRequest) -> String {

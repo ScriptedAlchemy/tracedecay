@@ -6,14 +6,20 @@
 //! lookup that could reach whatever binary the operator's shell resolves.
 
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::DomainError;
 
+/// Bounds for a configured summary run's wall-clock budget: below the floor a
+/// real model turn cannot finish, and above the ceiling a stuck provider would
+/// outlive the compaction or automation run waiting on it.
+pub const LCM_SUMMARIZER_TIMEOUT_SECS_RANGE: std::ops::RangeInclusive<u64> = 5..=300;
+
 /// One provider's summarizer executable: absent by default, or the exact
-/// absolute path the operator configured.
+/// absolute path the operator configured with its optional tuning.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum LcmSummarizerExecutableV1 {
@@ -21,12 +27,31 @@ pub enum LcmSummarizerExecutableV1 {
     Unconfigured,
     Configured {
         canonical_path: PathBuf,
+        /// Model requested for summary turns; the provider default when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        /// Wall-clock budget for one summary run, within
+        /// [`LCM_SUMMARIZER_TIMEOUT_SECS_RANGE`]; the caller's default when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_secs: Option<u64>,
     },
 }
 
 impl LcmSummarizerExecutableV1 {
     pub fn configured(canonical_path: PathBuf) -> Result<Self, DomainError> {
-        let executable = Self::Configured { canonical_path };
+        Self::configured_with(canonical_path, None, None)
+    }
+
+    pub fn configured_with(
+        canonical_path: PathBuf,
+        model: Option<String>,
+        timeout_secs: Option<u64>,
+    ) -> Result<Self, DomainError> {
+        let executable = Self::Configured {
+            canonical_path,
+            model,
+            timeout_secs,
+        };
         executable.validate()?;
         Ok(executable)
     }
@@ -35,14 +60,34 @@ impl LcmSummarizerExecutableV1 {
     pub fn canonical_path(&self) -> Option<&Path> {
         match self {
             Self::Unconfigured => None,
-            Self::Configured { canonical_path } => Some(canonical_path),
+            Self::Configured { canonical_path, .. } => Some(canonical_path),
+        }
+    }
+
+    /// The configured model, or `None` for the provider default.
+    pub fn model(&self) -> Option<&str> {
+        match self {
+            Self::Unconfigured => None,
+            Self::Configured { model, .. } => model.as_deref(),
+        }
+    }
+
+    /// The configured run budget, or `None` for the caller's default.
+    pub fn timeout(&self) -> Option<Duration> {
+        match self {
+            Self::Unconfigured => None,
+            Self::Configured { timeout_secs, .. } => timeout_secs.map(Duration::from_secs),
         }
     }
 
     pub fn validate(&self) -> Result<(), DomainError> {
         match self {
             Self::Unconfigured => Ok(()),
-            Self::Configured { canonical_path } => {
+            Self::Configured {
+                canonical_path,
+                model,
+                timeout_secs,
+            } => {
                 if !canonical_path.is_absolute()
                     || canonical_path.components().any(|component| {
                         matches!(component, Component::CurDir | Component::ParentDir)
@@ -50,6 +95,21 @@ impl LcmSummarizerExecutableV1 {
                 {
                     return Err(DomainError::NonCanonical {
                         field: "lcm summarizer executable path",
+                    });
+                }
+                if model
+                    .as_deref()
+                    .is_some_and(|model| model.trim().is_empty())
+                {
+                    return Err(DomainError::Empty {
+                        field: "lcm summarizer model",
+                    });
+                }
+                if timeout_secs
+                    .is_some_and(|secs| !LCM_SUMMARIZER_TIMEOUT_SECS_RANGE.contains(&secs))
+                {
+                    return Err(DomainError::InvalidRange {
+                        field: "lcm summarizer timeout_secs",
                     });
                 }
                 Ok(())
@@ -126,5 +186,39 @@ mod tests {
             Some(Path::new("/opt/bin/cursor-agent"))
         );
         assert_eq!(decoded.codex, LcmSummarizerExecutableV1::Unconfigured);
+        assert_eq!(decoded.cursor_agent.model(), None);
+        assert_eq!(decoded.cursor_agent.timeout(), None);
+    }
+
+    #[test]
+    fn configured_tuning_decodes_and_rejects_out_of_range_values() {
+        let path = std::env::temp_dir().join("bin").join("codex");
+        let decoded: LcmSummarizerExecutablesV1 = serde_json::from_value(serde_json::json!({
+            "codex": {
+                "state": "configured",
+                "canonical_path": path,
+                "model": "summary-model",
+                "timeout_secs": 5,
+            },
+        }))
+        .unwrap();
+        decoded.validate().unwrap();
+        assert_eq!(decoded.codex.model(), Some("summary-model"));
+        assert_eq!(decoded.codex.timeout(), Some(Duration::from_secs(5)));
+
+        for timeout_secs in [4, 301] {
+            assert_eq!(
+                LcmSummarizerExecutableV1::configured_with(path.clone(), None, Some(timeout_secs)),
+                Err(DomainError::InvalidRange {
+                    field: "lcm summarizer timeout_secs",
+                })
+            );
+        }
+        assert_eq!(
+            LcmSummarizerExecutableV1::configured_with(path, Some("  ".to_owned()), None),
+            Err(DomainError::Empty {
+                field: "lcm summarizer model",
+            })
+        );
     }
 }

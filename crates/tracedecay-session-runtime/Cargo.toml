@@ -31,6 +31,7 @@ hotpath.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
+tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracedecay-contracts = { path = "../tracedecay-contracts" }
@@ -56,7 +57,6 @@ tracedecay-application = { path = "../tracedecay-application" }
 
 [dev-dependencies]
 hex = "0.4"
-tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 tracedecay-configuration = { path = "../tracedecay-configuration", features = ["test-helpers"] }
 tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity" }

@@ -38,35 +38,15 @@ pub struct SummaryConfig {
 }
 
 impl SummaryConfig {
-    /// Tuning for an executable the caller resolved through configuration.
-    /// Only the model and timeout knobs come from the environment.
-    ///
-    /// The timeout is clamped to 5..=300 seconds: below that a real model turn
-    /// cannot finish, and above it a stuck backend would outlive the
-    /// automation run that is waiting on it.
+    /// Default tuning for an executable the caller resolved through
+    /// configuration. Nothing here reads `PATH` or the environment.
     #[must_use]
     pub fn for_executable(codex_bin: &Path) -> Self {
-        fn non_empty_env(key: &str) -> Option<String> {
-            std::env::var(key)
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        }
-
-        let mut config = Self {
+        Self {
             codex_bin: codex_bin.to_path_buf(),
             model: Some("gpt-5.6-sol".to_owned()),
             timeout: Duration::from_mins(2),
-        };
-        if let Some(model) = non_empty_env("TRACEDECAY_CODEX_SUMMARY_MODEL") {
-            config.model = Some(model);
         }
-        if let Some(secs) = non_empty_env("TRACEDECAY_CODEX_SUMMARY_TIMEOUT_SECS")
-            .and_then(|secs| secs.parse::<u64>().ok())
-        {
-            config.timeout = Duration::from_secs(secs.clamp(5, 300));
-        }
-        config
     }
 }
 
