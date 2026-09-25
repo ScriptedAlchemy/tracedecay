@@ -163,17 +163,7 @@ impl ServiceRunner {
                 }
             }
             Self::Launchd { launchctl, id } => {
-                let running = matches!(
-                    daemon_socket_state(socket_path),
-                    DaemonSocketState::Connectable
-                );
-                let enabled = !launchd_service_is_disabled(launchctl, id)?;
-                Ok(match (running, enabled) {
-                    (true, true) => DaemonServiceState::RunningEnabled,
-                    (true, false) => DaemonServiceState::RunningDisabled,
-                    (false, true) => DaemonServiceState::StoppedEnabled,
-                    (false, false) => DaemonServiceState::StoppedDisabled,
-                })
+                launchd_service_state(launchctl, id, daemon_socket_state(socket_path))
             }
             Self::WindowsTask => windows_task::service_state(),
         }
@@ -674,6 +664,23 @@ fn launchd_domain(id: &Path) -> Result<String> {
 
 fn launchd_service_target(id: &Path) -> Result<String> {
     Ok(format!("{}/{}", launchd_domain(id)?, LAUNCHD_LABEL))
+}
+
+/// launchd has no liveness query of its own: the agent is running when its
+/// daemon socket accepts a connection.
+pub(super) fn launchd_service_state(
+    launchctl: &Path,
+    id: &Path,
+    socket_state: DaemonSocketState,
+) -> Result<DaemonServiceState> {
+    let running = matches!(socket_state, DaemonSocketState::Connectable);
+    let enabled = !launchd_service_is_disabled(launchctl, id)?;
+    Ok(match (running, enabled) {
+        (true, true) => DaemonServiceState::RunningEnabled,
+        (true, false) => DaemonServiceState::RunningDisabled,
+        (false, true) => DaemonServiceState::StoppedEnabled,
+        (false, false) => DaemonServiceState::StoppedDisabled,
+    })
 }
 
 fn launchd_service_is_disabled(launchctl: &Path, id: &Path) -> Result<bool> {

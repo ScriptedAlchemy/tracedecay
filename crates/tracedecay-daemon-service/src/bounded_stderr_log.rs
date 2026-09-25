@@ -198,6 +198,8 @@ mod tests {
     use std::io::Write;
     use std::os::fd::AsRawFd;
 
+    use tracedecay_runtime_core::path_safety::canonical_root_identity;
+
     use super::{BoundedStderrLog, StderrLogRotation};
 
     #[test]
@@ -212,8 +214,11 @@ mod tests {
 
     #[test]
     fn an_oversized_stderr_file_rotates_once_and_keeps_one_previous_generation() {
-        let root = tempfile::tempdir().expect("log root");
-        let path = root.path().join("daemon.err.log");
+        let root_dir = tempfile::tempdir().expect("log root");
+        // A descriptor resolves to the kernel's spelling of its path, which on
+        // macOS is `/private/var/...` for a `/var/...` temp dir.
+        let root = canonical_root_identity(root_dir.path());
+        let path = root.join("daemon.err.log");
         let mut stderr = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -235,7 +240,7 @@ mod tests {
             log.rotate_if_oversized().expect("rotate"),
             StderrLogRotation::Rotated { size_bytes: 80 }
         );
-        let rotated = root.path().join("daemon.err.log.1");
+        let rotated = root.join("daemon.err.log.1");
         assert_eq!(std::fs::metadata(&rotated).expect("retained").len(), 80);
         assert_eq!(std::fs::metadata(&path).expect("fresh log").len(), 0);
 
@@ -261,9 +266,7 @@ mod tests {
         );
         assert_eq!(std::fs::metadata(&rotated).expect("replaced").len(), 85);
         assert_eq!(
-            std::fs::read_dir(root.path())
-                .expect("log root entries")
-                .count(),
+            std::fs::read_dir(&root).expect("log root entries").count(),
             2,
             "exactly the live file and one retained generation"
         );

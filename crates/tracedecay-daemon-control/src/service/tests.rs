@@ -4,11 +4,11 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(unix)]
 use std::io::BufRead;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::os::unix::net::UnixListener;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
 use tracing_subscriber::fmt::MakeWriter;
@@ -421,7 +421,7 @@ pub(super) fn serve_probe_response(
     })
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn serve_counted_authenticated_probe(
     listener: UnixListener,
     expected_auth_token: String,
@@ -895,10 +895,37 @@ fn unreachable_systemd_user_manager_is_an_error_not_a_stopped_unit() {
     assert!(message.contains("Failed to connect to bus"), "{message}");
 }
 
-/// The fixture is a systemd user unit plus a fake `systemctl`; launchd reads
-/// its plist from `~/Library/LaunchAgents` and probes liveness with its own
-/// socket connect, so this contract is systemd's.
+/// A fake service-manager program on the fixture's private bin directory.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn fake_service_program(bin: &std::path::Path, name: &str, script: &str) -> PathBuf {
+    let program = bin.join(name);
+    std::fs::write(&program, script).expect("fake service program");
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+        .expect("fake service program permissions");
+    program
+}
+
+/// systemd answers liveness from `systemctl is-active`.
 #[cfg(target_os = "linux")]
+fn enabled_service_runner(bin: &std::path::Path) -> ServiceRunner {
+    let systemctl = fake_service_program(
+        bin,
+        "systemctl",
+        "#!/bin/sh\n[ \"$2\" = is-active ] && echo active\n[ \"$2\" = is-enabled ] && echo enabled\nexit 0\n",
+    );
+    ServiceRunner::systemd(&systemctl).expect("fixture systemd runner")
+}
+
+/// launchd has no liveness query; an empty `print-disabled` leaves the agent
+/// enabled and the socket connect decides whether it runs.
+#[cfg(target_os = "macos")]
+fn enabled_service_runner(bin: &std::path::Path) -> ServiceRunner {
+    let launchctl = fake_service_program(bin, "launchctl", "#!/bin/sh\nexit 0\n");
+    let id = fake_service_program(bin, "id", "#!/bin/sh\necho 501\n");
+    ServiceRunner::launchd(&launchctl, &id).expect("fixture launchd runner")
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn running_service_snapshot_uses_one_authenticated_connection() {
     let _env_lock = lock_user_data_dir_test_env();
@@ -908,29 +935,22 @@ fn running_service_snapshot_uses_one_authenticated_connection() {
     let fake_bin = dir.path().join("bin");
     std::fs::create_dir_all(&home).expect("home dir");
     std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
-    let systemctl = fake_bin.join("systemctl");
-    std::fs::write(
-        &systemctl,
-        "#!/bin/sh\n[ \"$2\" = is-active ] && echo active\n[ \"$2\" = is-enabled ] && echo enabled\nexit 0\n",
-    )
-    .expect("fake systemctl");
-    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
-        .expect("systemctl permissions");
-    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
+    let runner = enabled_service_runner(&fake_bin);
     let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
     let _home_guard = EnvVarGuard::set("HOME", &home);
     let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
-    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
-    std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     let socket_path = dir.path().join("daemon.sock");
-    std::fs::write(
-        &service_path,
-        format!(
-            "[Service]\nExecStart=/old/tracedecay daemon run --socket {}\n",
-            socket_path.display()
-        ),
-    )
-    .expect("service unit");
+    let unit = DaemonServiceSpec {
+        tracedecay_bin: PathBuf::from("/old/tracedecay"),
+        socket_path: socket_path.clone(),
+        data_dir_override: None,
+        remote_tls: None,
+    }
+    .render_unit()
+    .expect("installed service unit");
+    let service_path = super::service_unit_path().expect("service unit path");
+    std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
+    std::fs::write(&service_path, unit).expect("service unit");
     let listener = UnixListener::bind(&socket_path).expect("bind readiness socket");
     let endpoint = tracedecay_daemon_protocol::DaemonEndpoint::Unix(socket_path.clone());
     let authority = tracedecay_daemon_identity::authority::DaemonAuthority::acquire(

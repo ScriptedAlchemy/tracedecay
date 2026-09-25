@@ -39,7 +39,7 @@ use probe::{
     DaemonProtocolState, DaemonSocketState, daemon_readiness_probe, daemon_socket_state,
     daemon_transport_display,
 };
-use runner::{ServicePlatform, ServiceRunner};
+use runner::{ServicePlatform, ServiceRunner, launchd_service_state};
 use unit_file::{
     launchd_plist_env_value, read_service_unit, remove_service_unit, service_unit_exists,
     service_unit_path, socket_path_from_unit_text, write_service_unit,
@@ -1459,6 +1459,7 @@ fn installed_service_status_snapshot(
     DaemonSocketState,
     DaemonProtocolState,
 )> {
+    const READINESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
     let service_path = service_unit_path()?;
     if !service_unit_exists(&service_path)? {
         let socket_path = default_socket_path()?;
@@ -1472,13 +1473,23 @@ fn installed_service_status_snapshot(
     }
     let unit = read_service_unit(&service_path)?;
     let socket_path = socket_path_from_unit_text(&unit).unwrap_or(default_socket_path()?);
+    // launchd's liveness is a socket connect, so the authenticated readiness
+    // probe doubles as that observation instead of the daemon seeing an extra
+    // bare connection ahead of it.
+    if let ServiceRunner::Launchd { launchctl, id } = runner {
+        let (socket_state, protocol_state) =
+            daemon_readiness_probe(&socket_path, expected_version, READINESS_TIMEOUT);
+        let actual = launchd_service_state(launchctl, id, socket_state)?;
+        let protocol_state = if actual.is_running() {
+            protocol_state
+        } else {
+            DaemonProtocolState::NotRequired
+        };
+        return Ok((actual, socket_path, socket_state, protocol_state));
+    }
     let actual = runner.service_state(&socket_path)?;
     let (socket_state, protocol_state) = if actual.is_running() {
-        daemon_readiness_probe(
-            &socket_path,
-            expected_version,
-            std::time::Duration::from_secs(10),
-        )
+        daemon_readiness_probe(&socket_path, expected_version, READINESS_TIMEOUT)
     } else {
         (
             daemon_socket_state(&socket_path),
