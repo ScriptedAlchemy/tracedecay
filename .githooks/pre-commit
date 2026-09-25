@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Refuses a commit whose staged Rust files are not rustfmt-clean. Agents
+# merge without waiting for CI, so the Repository gates fmt check only holds
+# if every commit is formatted when it is made.
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+mapfile -d '' staged < <(git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs')
+if [[ ${#staged[@]} -eq 0 ]]; then
+    exit 0
+fi
+
+if ! rustfmt --edition 2024 --check -- "${staged[@]}" >/dev/null 2>&1; then
+    echo "pre-commit: staged Rust files are not rustfmt-clean:" >&2
+    rustfmt --edition 2024 --check -l -- "${staged[@]}" 2>/dev/null | sed 's/^/  /' >&2 || true
+    echo "run \`cargo fmt --all\` and stage the result" >&2
+    exit 1
+fi
