@@ -1716,7 +1716,7 @@ fn daemon_project_cache_is_scoped_by_client_identity() {
     let expected_project_path = project_path.to_string_lossy();
     let stderr_lower = stderr.to_lowercase();
     assert!(
-        stderr.contains("daemon tool call failed")
+        stderr.contains("project route error (project_not_enrolled)")
             && stderr_lower.contains("no tracedecay index found")
             && stderr.contains(expected_project_path.as_ref()),
         "expected client B to fail because its profile has not initialized the project, got:\n{stderr}"

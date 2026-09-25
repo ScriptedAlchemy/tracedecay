@@ -5,10 +5,13 @@
 //! Unix broker, the portable broker, and the in-process test harness.
 
 use super::*;
+use tracedecay_agent_hosts::agents::context_scout::owner::unregister_registered_context_scout_owner;
+use tracedecay_agent_hosts::hooks::hook_project_id_for_layout;
 use tracedecay_code_index_runtime::code_index_scheduler;
 use tracedecay_daemon_identity::profile_identity;
 use tracedecay_daemon_service::daemon_owned_project_source_access_at;
 use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::path_safety::same_canonical_path;
 use tracedecay_session_runtime::session_sync::DaemonSessionSyncConfig;
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::{
     ProfileSessionHistoricalIngestor, ProjectSessionHistoricalIngestor,
@@ -314,56 +317,68 @@ pub(super) async fn production_project_server(
         GraphOpen::Cached(composition) => return Ok(composition),
         GraphOpen::Opened(opened) => opened,
     };
-    let (core_candidate, core) = Box::pin(inputs.compose_core_server(&opened)).await?;
-    let CoreRouteBinding {
-        mut resolved,
-        inserted,
-    } = Box::pin(inputs.bind_core_route(
-        admitted.route,
-        &opened.key,
-        core_candidate,
-        &core.route_registered,
-    ))
-    .await?;
-    if inserted {
-        let activation = Box::pin(inputs.activate_core_route(&opened, &core, &resolved)).await?;
-        let upgrade = match Box::pin(inputs.construct_full_server(&opened, &core, &resolved)).await
-        {
-            Ok(PublishedFullServer { server, session_db }) => {
-                match Box::pin(inputs.finish_full_server(
-                    &opened,
-                    &core,
-                    &activation,
-                    &resolved,
-                    &server,
-                    session_db,
-                ))
-                .await
-                {
-                    Ok(()) => Ok(server),
-                    Err(error) => Err((error, Some(server))),
+    let composed = async {
+        let (core_candidate, core) = Box::pin(inputs.compose_core_server(&opened)).await?;
+        let CoreRouteBinding {
+            mut resolved,
+            inserted,
+        } = Box::pin(inputs.bind_core_route(
+            admitted.route,
+            &opened.key,
+            core_candidate,
+            &core.route_registered,
+        ))
+        .await?;
+        if inserted {
+            let activation =
+                Box::pin(inputs.activate_core_route(&opened, &core, &resolved)).await?;
+            let upgrade =
+                match Box::pin(inputs.construct_full_server(&opened, &core, &resolved)).await {
+                    Ok(PublishedFullServer { server, session_db }) => {
+                        match Box::pin(inputs.finish_full_server(
+                            &opened,
+                            &core,
+                            &activation,
+                            &resolved,
+                            &server,
+                            session_db,
+                        ))
+                        .await
+                        {
+                            Ok(()) => Ok(server),
+                            Err(error) => Err((error, Some(server))),
+                        }
+                    }
+                    Err(error) => Err((error, None)),
+                };
+            match upgrade {
+                Ok(full_server) => resolved = full_server,
+                Err((error, published_full_server)) => {
+                    Box::pin(inputs.settle_failed_full_upgrade(
+                        &opened,
+                        &core,
+                        &activation,
+                        &resolved,
+                        published_full_server,
+                        error,
+                    ))
+                    .await?;
                 }
             }
-            Err(error) => Err((error, None)),
-        };
-        match upgrade {
-            Ok(full_server) => resolved = full_server,
-            Err((error, published_full_server)) => {
-                Box::pin(inputs.settle_failed_full_upgrade(
-                    &opened,
-                    &core,
-                    &activation,
-                    &resolved,
-                    published_full_server,
-                    error,
-                ))
-                .await?;
-            }
+        } else {
+            drop(admitted.foreground_project_open);
+            core.route_registered.store(false, Ordering::Release);
         }
-    } else {
-        drop(admitted.foreground_project_open);
-        core.route_registered.store(false, Ordering::Release);
+        Ok((resolved, inserted))
     }
+    .await;
+    let (resolved, inserted) = match composed {
+        Ok(composed) => composed,
+        Err(error) => {
+            inputs.retire_failed_open_scout_owner(&opened.cg).await;
+            return Err(error);
+        }
+    };
     Ok(ProductionProjectComposition {
         #[cfg(unix)]
         key: opened.key,
@@ -587,6 +602,26 @@ impl ProjectOpenInputs<'_> {
         log_project_open_phase(self.canonical_project_path, phase, detail, since);
     }
 
+    /// Opening the graph started the process-global Context Scout owner, which
+    /// holds that graph's `Database`. A failed open leaves no server to retire
+    /// it, and while registered its lease keeps the store runtime from ever
+    /// closing, so its WAL is never truncated. An owner that another published
+    /// server over the same database still serves stays registered.
+    async fn retire_failed_open_scout_owner(&self, cg: &tracedecay_project::project::TraceDecay) {
+        let graph_db_path = cg.db().canonical_database_path();
+        let served = self
+            .store_administration
+            .project_servers()
+            .lock()
+            .await
+            .servers
+            .keys()
+            .any(|key| same_canonical_path(&key.owner.graph_db_path, graph_db_path));
+        if !served && let Some(project_id) = hook_project_id_for_layout(cg.hook_store_layout()) {
+            unregister_registered_context_scout_owner(project_id, graph_db_path);
+        }
+    }
+
     /// Route admission: registry enrollment, the published-server cache, the
     /// route's single-flight gate, the foreground-open marker, and one graph
     /// admission slot (releasing an idle server when the daemon is at capacity).
@@ -674,6 +709,18 @@ impl ProjectOpenInputs<'_> {
             )
             .await?,
         );
+        let opened = self.admit_opened_graph(route, Arc::clone(&cg)).await;
+        if opened.is_err() {
+            self.retire_failed_open_scout_owner(&cg).await;
+        }
+        opened
+    }
+
+    async fn admit_opened_graph(
+        &self,
+        route: &ProjectRouteKey,
+        cg: Arc<tracedecay_project::project::TraceDecay>,
+    ) -> Result<GraphOpen> {
         let mut key = ProjectServerKey::from_open_project(&cg, self.handshake)?;
         if let Some(shared_root) = shared_primary_checkout_root(self.canonical_project_path) {
             key.project_root = shared_root;

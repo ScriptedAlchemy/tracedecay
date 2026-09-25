@@ -337,8 +337,9 @@ async fn generation_rollover_coalesces_same_and_changed_native_output() {
             .map(|row| row.6.as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        3,
-        "generation-owned metadata and replacement content retain distinct lineage digests"
+        2,
+        "unchanged content re-observed in a later generation shares its output digest; \
+         replacement content has its own"
     );
     let texts = projected_message_texts(&tmp).await;
     assert_eq!(texts.len(), 1);
@@ -404,7 +405,7 @@ async fn durable_projection_alias_survives_rebuild_without_rewriting_observation
             .unwrap()
             .unwrap()
             .observation()
-            .payload()["message"]["id"],
+            .payload()["stable_record_id"],
         "message-alias"
     );
 

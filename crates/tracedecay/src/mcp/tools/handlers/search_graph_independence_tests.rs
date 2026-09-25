@@ -10,7 +10,9 @@ use tracedecay_domain::{
     RetrievalAnchorId, RetrieverKind,
 };
 
-use super::dispatch_test_support::{SelectorEnv, verified_graph_options};
+use super::dispatch_test_support::{
+    SelectorEnv, dispatch_on_graph_authority, verified_graph_options,
+};
 use super::*;
 use tracedecay_project::config::lock_user_data_dir_test_env;
 
@@ -359,7 +361,7 @@ async fn tracedecay_context_preserves_fallback_results_while_graph_warms() {
 
     let mut options = lexical_search_options(&cg);
     options.verified_graph_query_port = None;
-    let result = handle_tool_call_with_registry_options(
+    let result = dispatch_on_graph_authority(
         &cg,
         "tracedecay_context",
         json!({
@@ -367,8 +369,6 @@ async fn tracedecay_context_preserves_fallback_results_while_graph_warms() {
             "include_memory": false,
             "format": "json",
         }),
-        None,
-        None,
         options,
     )
     .await
@@ -398,7 +398,7 @@ async fn tracedecay_context_preserves_fallback_results_while_graph_warms() {
 
     let mut markdown_options = lexical_search_options(&cg);
     markdown_options.verified_graph_query_port = None;
-    let markdown = handle_tool_call_with_registry_options(
+    let markdown = dispatch_on_graph_authority(
         &cg,
         "tracedecay_context",
         json!({
@@ -406,8 +406,6 @@ async fn tracedecay_context_preserves_fallback_results_while_graph_warms() {
             "include_memory": false,
             "format": "markdown",
         }),
-        None,
-        None,
         markdown_options,
     )
     .await
@@ -438,7 +436,7 @@ async fn tracedecay_context_waits_for_requested_code_graph_admission() {
 
     let mut options = lexical_search_options(&cg);
     options.verified_graph_query_port = Some(Arc::new(YieldingUnavailableVerifiedGraphQueryPort));
-    let result = handle_tool_call_with_registry_options(
+    let result = dispatch_on_graph_authority(
         &cg,
         "tracedecay_context",
         json!({
@@ -447,8 +445,6 @@ async fn tracedecay_context_waits_for_requested_code_graph_admission() {
             "include_memory": false,
             "format": "json",
         }),
-        None,
-        None,
         options,
     )
     .await
@@ -498,7 +494,7 @@ async fn tracedecay_context_returns_typed_pending_coverage_when_every_code_lane_
         verified_graph_query_port: None,
         ..lexical_search_options(&cg)
     };
-    let result = handle_tool_call_with_registry_options(
+    let result = dispatch_on_graph_authority(
         &cg,
         "tracedecay_context",
         json!({
@@ -506,8 +502,6 @@ async fn tracedecay_context_returns_typed_pending_coverage_when_every_code_lane_
             "include_memory": false,
             "format": "json",
         }),
-        None,
-        None,
         options,
     )
     .await
@@ -563,7 +557,7 @@ async fn tracedecay_context_preserves_stale_lane_coverage_markers() {
     let mut options = lexical_search_options(&cg);
     options.code_index_search_executor = Some(executor);
     options.verified_graph_query_port = None;
-    let result = handle_tool_call_with_registry_options(
+    let result = dispatch_on_graph_authority(
         &cg,
         "tracedecay_context",
         json!({
@@ -571,8 +565,6 @@ async fn tracedecay_context_preserves_stale_lane_coverage_markers() {
             "include_memory": false,
             "format": "json",
         }),
-        None,
-        None,
         options,
     )
     .await

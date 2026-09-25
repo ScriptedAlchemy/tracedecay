@@ -1768,12 +1768,10 @@ async fn a_warm_call_is_unaffected_by_the_ceiling() {
     .await
     .unwrap();
     let started = std::time::Instant::now();
-    let result = handle_tool_call_with_registry_options(
+    let result = dispatch_on_graph_authority(
         &cg,
         "tracedecay_context",
         json!({ "task": "probe" }),
-        None,
-        None,
         verified_graph_options(&cg, ToolCallRegistryOptions::default()),
     )
     .await

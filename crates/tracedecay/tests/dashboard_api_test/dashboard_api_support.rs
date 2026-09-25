@@ -779,7 +779,7 @@ pub(crate) fn configure_codex_summarizer(
     );
     assert_eq!(status, 200, "configuration read failed: {current}");
     let expected_revision = current
-        .pointer("/outcome/value/payload/revision_id")
+        .pointer("/value/outcome/value/payload/revision_id")
         .and_then(Value::as_str)
         .unwrap_or_else(|| panic!("configuration revision: {current}"))
         .to_owned();
@@ -801,7 +801,7 @@ pub(crate) fn configure_codex_summarizer(
     );
     assert_eq!(status, 200, "codex summarizer binding failed: {receipt}");
     assert_eq!(
-        receipt["outcome"]["outcome"], "effect",
+        receipt["value"]["outcome"]["outcome"], "effect",
         "codex summarizer binding must commit: {receipt}"
     );
 }

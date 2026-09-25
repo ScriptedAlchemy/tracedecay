@@ -3,7 +3,9 @@ use std::fs;
 use serde_json::json;
 use tempfile::TempDir;
 
-use super::dispatch_test_support::{SelectorEnv, verified_graph_options};
+use super::dispatch_test_support::{
+    SelectorEnv, dispatch_on_graph_authority, verified_graph_options,
+};
 use super::*;
 use tracedecay_project::config::lock_user_data_dir_test_env;
 
@@ -144,27 +146,6 @@ async fn clone_family_tools_refuse_absent_executors_without_awaiting_graph_query
         assert_eq!(detail, expected_detail, "{tool_name}");
     }
     cg.close();
-}
-
-/// Graph-tool operations execute on the project's graph-tool owner, which
-/// computes them under the owning server's admitted authorities; every other
-/// tool still dispatches through the MCP handler table.
-async fn dispatch_on_graph_authority(
-    cg: &TraceDecay,
-    tool_name: &str,
-    args: serde_json::Value,
-    options: ToolCallRegistryOptions<'_>,
-) -> Result<()> {
-    match ApplicationSurfaceOperation::from_tool_name(tool_name)
-        .filter(|operation| operation.is_graph_tool())
-    {
-        Some(operation) => super::compute_graph_tool_for_owner(cg, operation, args, None, options)
-            .await
-            .map(drop),
-        None => handle_tool_call_with_registry_options(cg, tool_name, args, None, None, options)
-            .await
-            .map(drop),
-    }
 }
 
 fn lower_level_ports_without_query(cg: &TraceDecay) -> ToolCallRegistryOptions<'_> {
@@ -339,15 +320,7 @@ async fn search_and_context_report_absent_query_port_as_typed_evidence() {
                 "format": "json",
             })
         };
-        let error = handle_tool_call_with_registry_options(
-            &cg,
-            tool_name,
-            args,
-            None,
-            None,
-            options.clone(),
-        )
-        .await;
+        let error = dispatch_on_graph_authority(&cg, tool_name, args, options.clone()).await;
         match error {
             Ok(result) => {
                 let payload: serde_json::Value = serde_json::from_str(
