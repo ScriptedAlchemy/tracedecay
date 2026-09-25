@@ -202,7 +202,7 @@ impl<'a> GenerationView<'a> {
             return Vec::new();
         };
         let read = authority.read_test_attribution(&self.generation.manifest().generation_id);
-        let Some(join) = read.evidence else {
+        let Some(join) = &read.evidence else {
             return Vec::new();
         };
         join.records

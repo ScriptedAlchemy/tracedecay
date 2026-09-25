@@ -1525,18 +1525,14 @@ pub struct CodeIndexSchedulerRegistryV1 {
     cadence_telemetry: Arc<Mutex<CodeIndexCadenceTelemetryV1>>,
     pub(super) relation_symbol_hydrations: Arc<AtomicU64>,
     activations: Arc<Mutex<BTreeMap<ManifestDigest, Weak<super::CodeIndexActivationV1>>>>,
-    test_attribution_authorities: Arc<
-        RwLock<
-            BTreeMap<
-                PathBuf,
-                (
-                    CodeGenerationId,
-                    crate::code_index::production::PublishedGenerationTestAttributionAuthorityV1,
-                ),
-            >,
-        >,
-    >,
+    /// The serving generation each root last proved current, held weakly so a
+    /// retired generation is not pinned here. Its test attribution is
+    /// materialized only on an attribution read, never on query admission.
+    test_attribution_authorities: Arc<RwLock<AttributionSeatsV1>>,
 }
+
+type AttributionSeatsV1 =
+    BTreeMap<PathBuf, (CodeGenerationId, Weak<CodeIndexPublishedGenerationV1>)>;
 
 impl CodeIndexSchedulerRegistryV1 {
     fn incomplete_text_slice_may_continue(pending_wake: &PendingWakeV1) -> bool {
@@ -3449,34 +3445,40 @@ impl crate::code_index::provider::GenerationTestAttributionJoinReadPort
     fn read_test_attribution(
         &self,
         generation: &CodeGenerationId,
-    ) -> crate::code_index::provider::GenerationProviderReadV1<
-        crate::code_index::test_attribution::GenerationTestJoinV1,
+    ) -> Arc<
+        crate::code_index::provider::GenerationProviderReadV1<
+            crate::code_index::test_attribution::GenerationTestJoinV1,
+        >,
     > {
-        let authorities = self
-            .test_attribution_authorities
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut matching = authorities
-            .values()
-            .filter(|(candidate, _)| candidate == generation);
-        let Some((_, authority)) = matching.next() else {
-            return crate::code_index::provider::GenerationProviderReadV1::new(
-                tracedecay_domain::ProviderEvaluationStateV1::Unavailable,
-                crate::code_index::provider::GenerationProviderCoverageV1::Unavailable,
-                None,
+        let unavailable = || {
+            Arc::new(
+                crate::code_index::provider::GenerationProviderReadV1::new(
+                    tracedecay_domain::ProviderEvaluationStateV1::Unavailable,
+                    crate::code_index::provider::GenerationProviderCoverageV1::Unavailable,
+                    None,
+                )
+                .unwrap_or_else(|_| panic!("static unavailable attribution read")),
             )
-            .unwrap_or_else(|_| panic!("static unavailable attribution read"));
         };
-        if matching.next().is_some() {
-            return crate::code_index::provider::GenerationProviderReadV1::new(
-                tracedecay_domain::ProviderEvaluationStateV1::Unavailable,
-                crate::code_index::provider::GenerationProviderCoverageV1::Unavailable,
-                None,
-            )
-            .unwrap_or_else(|_| panic!("static ambiguous attribution read"));
-        }
+        let seated = {
+            let authorities = self
+                .test_attribution_authorities
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut matching = authorities
+                .values()
+                .filter(|(candidate, _)| candidate == generation);
+            // Two roots claiming one generation is ambiguous, not a choice.
+            match (matching.next(), matching.next()) {
+                (Some((_, seated)), None) => seated.upgrade(),
+                _ => None,
+            }
+        };
+        let Some(Ok(authority)) = seated.map(|seated| seated.test_attribution_authority()) else {
+            return unavailable();
+        };
         crate::code_index::provider::GenerationTestAttributionJoinReadPort::read_test_attribution(
-            authority, generation,
+            &authority, generation,
         )
     }
 }

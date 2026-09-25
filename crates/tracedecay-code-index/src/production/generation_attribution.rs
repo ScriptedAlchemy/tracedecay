@@ -1,5 +1,7 @@
 //! Generation-bound affected-test attribution authority.
 
+use std::sync::Arc;
+
 use tracedecay_domain::{CodeGenerationId, ProviderEvaluationStateV1};
 
 use super::GenerationTestAttributionJoinReadPort;
@@ -12,23 +14,25 @@ use super::{GenerationProviderCoverageV1, GenerationProviderReadV1, GenerationTe
 #[derive(Clone, Debug)]
 pub struct PublishedGenerationTestAttributionAuthorityV1 {
     pub(super) generation_id: CodeGenerationId,
-    pub(super) read: GenerationProviderReadV1<GenerationTestJoinV1>,
+    pub(super) read: Arc<GenerationProviderReadV1<GenerationTestJoinV1>>,
 }
 
 impl GenerationTestAttributionJoinReadPort for PublishedGenerationTestAttributionAuthorityV1 {
     fn read_test_attribution(
         &self,
         generation: &CodeGenerationId,
-    ) -> GenerationProviderReadV1<GenerationTestJoinV1> {
+    ) -> Arc<GenerationProviderReadV1<GenerationTestJoinV1>> {
         if generation == &self.generation_id {
-            self.read.clone()
+            Arc::clone(&self.read)
         } else {
-            GenerationProviderReadV1::new(
-                ProviderEvaluationStateV1::Stale,
-                GenerationProviderCoverageV1::Unavailable,
-                None,
+            Arc::new(
+                GenerationProviderReadV1::new(
+                    ProviderEvaluationStateV1::Stale,
+                    GenerationProviderCoverageV1::Unavailable,
+                    None,
+                )
+                .unwrap_or_else(|_| panic!("static stale attribution read")),
             )
-            .unwrap_or_else(|_| panic!("static stale attribution read"))
         }
     }
 }
