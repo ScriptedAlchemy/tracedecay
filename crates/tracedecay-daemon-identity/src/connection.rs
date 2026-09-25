@@ -25,6 +25,24 @@ use crate::authority;
 /// different endpoint does not.
 pub const DAEMON_AUTHORITY_UNAVAILABLE: &str = "daemon_authority_unavailable";
 
+/// Process exit status (`EX_UNAVAILABLE`) of a CLI command refused because no
+/// daemon serves this profile, so a scripted caller can start one without
+/// reading error text.
+pub const DAEMON_UNREACHABLE_EXIT_CODE: u8 = 69;
+
+/// True for the typed refusals that starting the daemon resolves: no authority
+/// record yet, or an endpoint nothing is listening on. A record naming another
+/// endpoint is not retryable and stays an ordinary failure.
+pub fn daemon_unreachable(error: &TraceDecayError) -> bool {
+    error
+        .project_route_context()
+        .is_some_and(|(code, retryable, _)| {
+            retryable
+                && (code == DAEMON_AUTHORITY_UNAVAILABLE
+                    || code == tracedecay_daemon_protocol::DAEMON_CONNECT_DOWN)
+        })
+}
+
 /// A daemon endpoint plus its credential, both read from the authority record
 /// that names it. Distinct from the protocol crate's transport
 /// [`tracedecay_daemon_protocol::DaemonConnection`]; convert with
@@ -232,6 +250,7 @@ mod tests {
             .expect_err("a socket no record names has no credential");
 
         assert_eq!(route(&error), Some((DAEMON_AUTHORITY_UNAVAILABLE, true)));
+        assert!(daemon_unreachable(&error));
         let record = authority::record_path(temp.path()).unwrap();
         assert!(
             error.to_string().contains(&record.display().to_string()),
@@ -257,6 +276,10 @@ mod tests {
         let error = connection_for_socket_in(None, &other)
             .expect_err("a record naming another socket is not this daemon's credential");
         assert_eq!(route(&error), Some((DAEMON_AUTHORITY_UNAVAILABLE, false)));
+        assert!(
+            !daemon_unreachable(&error),
+            "a record naming another endpoint is misconfiguration, not a stopped daemon"
+        );
 
         let record = authority::record_path(temp.path()).unwrap();
         std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o644)).unwrap();

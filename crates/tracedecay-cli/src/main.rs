@@ -616,10 +616,15 @@ fn main() -> ExitCode {
         Ok(CommandOutcome::Success) => ExitCode::SUCCESS,
         Ok(CommandOutcome::Exit(code)) => process_exit_code(code),
         Err(e) => {
+            let code = if tracedecay_daemon_identity::daemon_unreachable(&e) {
+                ExitCode::from(tracedecay_daemon_identity::DAEMON_UNREACHABLE_EXIT_CODE)
+            } else {
+                ExitCode::FAILURE
+            };
             // A typed reset refusal from any command ends with the refused
             // authority and the exact command that resets it.
             eprintln!("Error: {}", commands::annotate_reset_required(e, None));
-            ExitCode::FAILURE
+            code
         }
     }
 }

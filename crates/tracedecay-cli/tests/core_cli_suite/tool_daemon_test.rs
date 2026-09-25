@@ -1741,7 +1741,14 @@ fn tool_cli_without_daemon_socket_reports_daemon_unavailable() {
         .output()
         .expect("tracedecay tool should run");
 
-    assert!(!output.status.success());
+    // Scripted callers (the Pi extension) branch on this typed status rather
+    // than on the error text.
+    assert_eq!(
+        output.status.code(),
+        Some(i32::from(
+            tracedecay_daemon_identity::DAEMON_UNREACHABLE_EXIT_CODE
+        ))
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("TraceDecay daemon socket") && stderr.contains("is not available"),

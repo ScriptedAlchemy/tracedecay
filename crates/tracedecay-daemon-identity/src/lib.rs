@@ -16,6 +16,7 @@ mod connection;
 pub mod profile_identity;
 
 pub use connection::{
-    DAEMON_AUTHORITY_UNAVAILABLE, ResolvedDaemonConnection, client_connection,
-    current_daemon_connection, invocation_client_for_current,
+    DAEMON_AUTHORITY_UNAVAILABLE, DAEMON_UNREACHABLE_EXIT_CODE, ResolvedDaemonConnection,
+    client_connection, current_daemon_connection, daemon_unreachable,
+    invocation_client_for_current,
 };
