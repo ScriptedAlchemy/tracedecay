@@ -773,14 +773,18 @@ fn load_record(
 ) -> TranscriptIngestResult<Option<OpenCodeRecord>> {
     let mut statement = connection
         .prepare(
-            "SELECT CASE WHEN length(data) <= ?1 THEN data ELSE NULL END
-             FROM message WHERE rowid = ?2",
+            "SELECT CASE WHEN length(m.data) <= ?1 THEN m.data ELSE NULL END,
+                    CASE WHEN length(s.parent_id) <= ?3 THEN s.parent_id ELSE NULL END,
+                    length(s.parent_id)
+             FROM message m LEFT JOIN session s ON s.id = m.session_id
+             WHERE m.rowid = ?2",
         )
         .map_err(|error| scan_error("prepare message payload query", database_path, error))?;
     let mut rows = statement
         .query(params![
             i64::try_from(MAX_NATIVE_JSON_BYTES).map_err(|_| invalid_frame())?,
-            reference.rowid
+            reference.rowid,
+            MAX_ID_BYTES
         ])
         .map_err(|error| scan_error("query message payload", database_path, error))?;
     let Some(row) = rows
@@ -793,6 +797,13 @@ fn load_record(
     let Some(data) = data else {
         return Ok(None);
     };
+    let parent_session_id = sql_text(row, 1, database_path, "decode parent session id")?;
+    let parent_bytes = row
+        .get::<_, Option<i64>>(2)
+        .map_err(|error| scan_error("decode parent session length", database_path, error))?;
+    if parent_bytes.is_some() && parent_session_id.is_none() {
+        return Ok(None);
+    }
     let Ok(mut message) = serde_json::from_slice::<Value>(&data) else {
         return Ok(None);
     };
@@ -809,11 +820,14 @@ fn load_record(
     if parts.deferred {
         return Ok(None);
     }
-    let payload = serde_json::to_vec(&serde_json::json!({
+    let mut record = serde_json::json!({
         "message": message,
         "parts": parts.values,
-    }))
-    .map_err(|_| invalid_frame())?;
+    });
+    if let Some(parent_session_id) = parent_session_id {
+        record["session"] = serde_json::json!({ "parentID": parent_session_id });
+    }
+    let payload = serde_json::to_vec(&record).map_err(|_| invalid_frame())?;
     if payload.len() as u64 > MAX_OPENCODE_RECORD_BYTES {
         return Ok(None);
     }
