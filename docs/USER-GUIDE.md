@@ -542,6 +542,25 @@ tracedecay daemon status
 
 On Linux this installs a systemd user service. On macOS this installs a LaunchAgent at `~/Library/LaunchAgents/com.tracedecay.daemon.plist`. On Windows this registers a least-privilege, per-user Task Scheduler task that starts at logon. The task name and ACL are scoped to the current Windows SID, and the daemon endpoint is an authenticated loopback connection discovered from the selected profile.
 
+The service is memory-bounded, sized from physical RAM when it is installed:
+`MemoryMax` is half of RAM up to 24 GiB, `MemoryHigh` is three quarters of
+that, and `MemorySwapMax` is an eighth of it (on a 128 GiB host: 18 GiB, 24
+GiB, and 3 GiB). `MemoryHigh` is the line where the daemon refuses new growth
+and sheds reclaimable caches; `MemoryMax` is the kernel kill line, after which
+the unit restarts. Override them with a drop-in, which reinstalls leave alone:
+
+```bash
+systemctl --user edit tracedecay
+# [Service]
+# MemoryHigh=12G
+# MemoryMax=16G
+# MemorySwapMax=2G
+```
+
+launchd has no enforced memory ceiling, so the LaunchAgent passes the same
+`MemoryMax` budget to the daemon as `TRACEDECAY_RESIDENT_MEMORY_LIMIT_BYTES`,
+where it bounds admission and triggers the same cache shedding.
+
 Use `tracedecay daemon start`, `stop`, or `restart` for explicit lifecycle control. Remove the service with:
 
 ```bash
