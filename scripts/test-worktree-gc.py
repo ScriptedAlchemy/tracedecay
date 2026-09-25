@@ -196,6 +196,30 @@ class WorktreeGcTest(unittest.TestCase):
         self.assertTrue(fx.branch_exists("unmerged"))
         self.assertEqual(fx.git(fx.primary, "worktree", "list").count("\n") + 1, 2)
 
+    def test_shallow_grafts_refuse_classification_until_history_is_whole(self) -> None:
+        fx = self.fx
+        squashed = fx.lane("grafted")
+        fx.write(squashed, "a.txt", "one\n")
+        fx.commit(squashed, "feat: a")
+        fx.squash_merge("grafted")
+        fx.land_on_master("chore: later", **{"later.txt": "later\n"})
+        fx.backdate(squashed)
+        shallow = fx.primary / ".git/shallow"
+        shallow.write_text(fx.git(fx.primary, "rev-parse", "origin/master") + "\n")
+
+        refused = fx.gc("--delete", "--stale-age-hours", "1")
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn("shallow", refused.stderr)
+        self.assertEqual(refused.stdout, "")
+        self.assertEqual((squashed / "a.txt").read_text(), "one\n")
+        self.assertTrue(fx.branch_exists("grafted"))
+
+        shallow.unlink()
+        deleted = fx.gc("--delete", "--stale-age-hours", "1")
+        self.assertEqual(deleted.returncode, 0, deleted.stdout + deleted.stderr)
+        self.assertEqual(status_line(deleted.stdout, squashed), "MERGED")
+        self.assertFalse(squashed.exists())
+
     def test_dirty_idle_lane_keeps_source_but_loses_build_output(self) -> None:
         fx = self.fx
         dirty = fx.lane("dirty")
