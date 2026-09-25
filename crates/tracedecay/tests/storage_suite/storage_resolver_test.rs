@@ -12,11 +12,11 @@ use tracedecay_global_db::{ProjectObservationStoreError, StoreInstanceUpsert};
 use tracedecay_mcp::response_handles::{
     ResponseHandleLookup, retrieve_response_handle, store_response_handle,
 };
-use tracedecay_project::config::USER_DATA_DIR_ENV;
-use tracedecay_project::config::discover_project_root;
 use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::branch_meta::{self, BranchMeta};
+use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
+use tracedecay_runtime_core::config::discover_project_root;
 use tracedecay_runtime_core::path_safety::{
     canonical_root_identity, plain_git_args, plain_host_path,
 };
@@ -119,7 +119,7 @@ fn assert_path_eq(actual: impl AsRef<Path>, expected: impl AsRef<Path>) {
 }
 
 fn maintenance_profile_root() -> PathBuf {
-    tracedecay_project::config::user_data_dir().expect("test profile root")
+    tracedecay_runtime_core::config::user_data_dir().expect("test profile root")
 }
 
 fn prepare_maintenance_profile(profile_root: &Path) {

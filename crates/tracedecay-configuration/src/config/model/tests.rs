@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
 use tracedecay_runtime_core::config::{
-    PinnedUserDataDir, USER_DATA_DIR_ENV, db_filename, discover_project_root, get_tracedecay_dir,
+    PinnedUserDataDir, USER_DATA_DIR_ENV, discover_project_root, get_tracedecay_dir,
     is_ambient_project_root, is_generated_dir_segment, lock_user_data_dir_test_env, user_data_dir,
 };
 
@@ -127,14 +127,6 @@ fn nextest_preserves_explicit_temp_profile_override() {
             .canonicalize()
             .unwrap()
             .join("test-profile/.tracedecay")
-    );
-}
-
-#[test]
-fn test_db_filename_tracks_dir_brand() {
-    assert_eq!(
-        db_filename(std::path::Path::new("/p/.tracedecay")),
-        "tracedecay.db"
     );
 }
 

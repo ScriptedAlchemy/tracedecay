@@ -91,7 +91,7 @@ fn inject_rehearsal_publication_fault(
     }
 }
 
-const BACKUP_MANIFEST_SCHEMA_VERSION: u32 = 2;
+const BACKUP_MANIFEST_SCHEMA_VERSION: u32 = 3;
 const REHEARSAL_MARKER_SCHEMA_VERSION: u32 = 3;
 const REHEARSAL_MARKER_FILENAME: &str = ".tracedecay-profile-rehearsal.json";
 const REQUIRED_PROFILE_PATHS: &[&str] = &[
@@ -99,9 +99,7 @@ const REQUIRED_PROFILE_PATHS: &[&str] = &[
     "user-sessions.db",
     "user-memory.db",
     "projects",
-    "enrollment.json",
     "config.toml",
-    "migration-inventory",
     "profile-identity.json",
 ];
 

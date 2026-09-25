@@ -117,7 +117,7 @@ pub(crate) fn has_path_local_profile_store(project_root: &Path) -> bool {
     };
     let data_root =
         profile_sharded_data_root(&profile_root, &path_local_profile_project_id(project_root));
-    data_root.join(config::db_filename(&data_root)).exists()
+    data_root.join(config::DB_FILENAME).exists()
 }
 
 pub fn default_profile_sharded_layout(
@@ -182,7 +182,7 @@ pub fn resolve_persisted_layout(
     // Nothing in the working tree carries identity.
     let project_id = default_profile_project_id(project_root);
     let data_root = profile_sharded_data_root(profile_root, &project_id);
-    let store_exists = data_root.join(config::db_filename(&data_root)).exists()
+    let store_exists = data_root.join(config::DB_FILENAME).exists()
         || data_root.join(STORE_MANIFEST_FILENAME).is_file();
     if store_exists {
         return profile_sharded_layout(project_root, profile_root, &project_id).map(Some);

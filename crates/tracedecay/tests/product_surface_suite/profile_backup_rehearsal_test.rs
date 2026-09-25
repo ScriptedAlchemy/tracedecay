@@ -63,18 +63,11 @@ fn seed_released_profile(temp: &TempDir) -> ReleasedProfileFixture {
         "user-memory.db",
         "user-memory.db-wal",
         "user-memory.db-shm",
-        "enrollment.json",
         "config.toml",
     ] {
         fs::write(profile.join(name), format!("released fixture: {name}")).unwrap();
     }
     write_profile_identity(&profile, "brain.release", "profile.release");
-    fs::create_dir(profile.join("migration-inventory")).unwrap();
-    fs::write(
-        profile.join("migration-inventory/released.json"),
-        b"released migration inventory",
-    )
-    .unwrap();
     for (name, contents) in [
         ("tracedecay.db", b"released memory identity".as_slice()),
         ("sessions.db", b"released LCM identity".as_slice()),

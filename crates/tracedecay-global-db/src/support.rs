@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 
 use tracedecay_domain::errors::TraceDecayError;
-use tracedecay_runtime_core::config::brand_env;
 use tracedecay_runtime_core::db::engine::Value as EngineValue;
 
 use crate::{AnalyticsEventRecord, project_path_alias_key};
@@ -91,14 +90,17 @@ pub fn env_flag(name: &str) -> bool {
 /// 2. `TRACEDECAY_DISABLE_GLOBAL_DB` truthy → disabled.
 /// 3. Otherwise → enabled.
 pub fn global_accounting_mode() -> AccountingMode {
-    if let Some(value) = brand_env("ENABLE_GLOBAL_DB") {
+    if let Ok(value) = std::env::var("TRACEDECAY_ENABLE_GLOBAL_DB") {
         return if env_value_truthy(&value) {
             AccountingMode::EnabledByEnv
         } else {
             AccountingMode::DisabledByEnv
         };
     }
-    if brand_env("DISABLE_GLOBAL_DB").is_some_and(|value| env_value_truthy(&value)) {
+    if std::env::var("TRACEDECAY_DISABLE_GLOBAL_DB")
+        .ok()
+        .is_some_and(|value| env_value_truthy(&value))
+    {
         return AccountingMode::DisabledByEnv;
     }
     AccountingMode::Default

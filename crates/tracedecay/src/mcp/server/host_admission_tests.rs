@@ -1364,7 +1364,8 @@ async fn committed_admissions_emit_post_commit_private_route_analytics() {
 async fn credential_canary_receipt_analytics_and_git_span_survive_database_reopen() {
     let (cg, project, authority) = init_indexed_repo().await;
     let dashboard_root = cg.store_layout().dashboard_root.clone();
-    let profile_root = tracedecay_project::config::user_data_dir().expect("isolated profile root");
+    let profile_root =
+        tracedecay_runtime_core::config::user_data_dir().expect("isolated profile root");
     let project_id = tracedecay_domain::ProjectId::new(
         cg.store_layout()
             .identity

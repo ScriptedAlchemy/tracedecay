@@ -115,7 +115,7 @@ impl Fixture {
             .env("USERPROFILE", &self.home_path)
             .env("XDG_CONFIG_HOME", self.home_path.join(".config"))
             .env(
-                tracedecay_project::config::USER_DATA_DIR_ENV,
+                tracedecay_runtime_core::config::USER_DATA_DIR_ENV,
                 self.home_path.join(".tracedecay"),
             )
             .env(

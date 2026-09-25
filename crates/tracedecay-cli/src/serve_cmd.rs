@@ -99,7 +99,7 @@ fn proxy_serve_handshake(
     };
 
     let ambient_discovery =
-        !explicit_path && tracedecay_project::config::is_ambient_project_root(&resolved_path);
+        !explicit_path && tracedecay_runtime_core::config::is_ambient_project_root(&resolved_path);
     let initialized = !ambient_discovery && TraceDecay::is_initialized(&resolved_path);
     // `serve` is a database-free proxy. It may consult only an already-pinned
     // in-memory snapshot.
@@ -117,7 +117,7 @@ fn proxy_serve_handshake(
         ))
     .then(|| tracedecay_runtime_core::worktree::git_worktree_root(&resolved_path))
     .flatten()
-    .filter(|root| !tracedecay_project::config::is_ambient_project_root(root));
+    .filter(|root| !tracedecay_runtime_core::config::is_ambient_project_root(root));
     if let Some(root) = auto_init_root.as_ref() {
         resolved_path.clone_from(root);
     }

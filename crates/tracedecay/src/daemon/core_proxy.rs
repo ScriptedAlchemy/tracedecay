@@ -517,7 +517,7 @@ pub(crate) async fn resolve_daemon_initialize_route(
             // to discover_project_root / Resolved admission.
             return Err(repository_discovery_deferred(&root, *reason));
         }
-        if let Some(project_path) = tracedecay_project::config::discover_project_root(&root) {
+        if let Some(project_path) = tracedecay_runtime_core::config::discover_project_root(&root) {
             return Ok(Some(InitializeRouteMetadata {
                 project_path,
                 allow_init: false,

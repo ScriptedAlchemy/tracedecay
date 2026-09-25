@@ -668,7 +668,7 @@ fn handle_list_inner(
     Box::pin(async move {
         use tracedecay_runtime_core::text::format_token_count;
 
-        let home_tracedecay = tracedecay_project::config::user_data_dir();
+        let home_tracedecay = tracedecay_runtime_core::config::user_data_dir();
         let project_paths = global::gather_target_projects(all).await?;
 
         if !all && project_paths.is_empty() {

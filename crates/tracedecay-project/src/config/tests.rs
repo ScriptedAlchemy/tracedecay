@@ -49,7 +49,7 @@ async fn discover_project_root_with_identity_does_not_open_registry_only_store()
     assert!(status.success(), "git init failed");
 
     assert!(
-        super::discover_project_root(&project_root).is_none(),
+        tracedecay_runtime_core::config::discover_project_root(&project_root).is_none(),
         "sync discover_project_root must not see a global-only store"
     );
 
@@ -187,14 +187,14 @@ async fn discover_project_root_with_identity_preserves_sync_fast_path() {
 
     let store = tracedecay_runtime_core::storage::default_profile_sharded_layout(
         &project_root,
-        &super::user_data_dir().unwrap(),
+        &tracedecay_runtime_core::config::user_data_dir().unwrap(),
     )
     .unwrap();
     fs::create_dir_all(&store.data_root).unwrap();
     fs::write(&store.graph_db_path, b"").unwrap();
 
     assert_eq!(
-        super::discover_project_root(&project_root),
+        tracedecay_runtime_core::config::discover_project_root(&project_root),
         Some(project_root.clone()),
         "sync resolver must see the path-local store"
     );

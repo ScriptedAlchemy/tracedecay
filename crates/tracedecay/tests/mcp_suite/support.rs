@@ -530,8 +530,10 @@ fn pin_production_composition_profile(
     harness: &ProductionProjectCompositionHarnessV1,
 ) -> (common::EnvVarGuard, common::EnvVarGuard) {
     let profile_root = harness.profile_root();
-    let data_dir_guard =
-        common::EnvVarGuard::set(tracedecay_project::config::USER_DATA_DIR_ENV, profile_root);
+    let data_dir_guard = common::EnvVarGuard::set(
+        tracedecay_runtime_core::config::USER_DATA_DIR_ENV,
+        profile_root,
+    );
     let global_db_guard =
         common::EnvVarGuard::set(common::GLOBAL_DB_ENV, profile_root.join("global.db"));
     (data_dir_guard, global_db_guard)
@@ -1063,14 +1065,15 @@ impl HomeEnvGuard {
     pub(crate) fn set(_process_env: &ProcessEnvGuard, home: &Path) -> Self {
         let previous_home = std::env::var_os("HOME");
         let previous_userprofile = std::env::var_os("USERPROFILE");
-        let previous_data_dir = std::env::var_os(tracedecay_project::config::USER_DATA_DIR_ENV);
+        let previous_data_dir =
+            std::env::var_os(tracedecay_runtime_core::config::USER_DATA_DIR_ENV);
         let home = canonicalize_test_dir(home);
         unsafe {
             std::env::set_var("HOME", &home);
             std::env::set_var("USERPROFILE", &home);
             std::env::set_var(
-                tracedecay_project::config::USER_DATA_DIR_ENV,
-                home.join(tracedecay_project::config::TRACEDECAY_DIR),
+                tracedecay_runtime_core::config::USER_DATA_DIR_ENV,
+                home.join(tracedecay_runtime_core::config::TRACEDECAY_DIR),
             );
         }
         Self {
@@ -1094,9 +1097,9 @@ impl Drop for HomeEnvGuard {
             }
             match self.previous_data_dir.take() {
                 Some(value) => {
-                    std::env::set_var(tracedecay_project::config::USER_DATA_DIR_ENV, value)
+                    std::env::set_var(tracedecay_runtime_core::config::USER_DATA_DIR_ENV, value)
                 }
-                None => std::env::remove_var(tracedecay_project::config::USER_DATA_DIR_ENV),
+                None => std::env::remove_var(tracedecay_runtime_core::config::USER_DATA_DIR_ENV),
             }
         }
     }

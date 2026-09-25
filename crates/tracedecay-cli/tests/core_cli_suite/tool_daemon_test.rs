@@ -1424,7 +1424,7 @@ fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
         &home_path.join(".tracedecay"),
         &default_profile_project_id(&project_path),
     );
-    let db_path = data_root.join(tracedecay_project::config::db_filename(&data_root));
+    let db_path = data_root.join(tracedecay_runtime_core::config::DB_FILENAME);
     common::create_runtime().block_on(async {
         let (db, _) = crate::common::open_test_database(&db_path)
             .await

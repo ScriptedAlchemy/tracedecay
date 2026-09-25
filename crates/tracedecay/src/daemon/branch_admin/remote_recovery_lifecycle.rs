@@ -264,7 +264,7 @@ impl RemoteRecoveryProjectLifecycleV1 {
         .await?;
         super::retire_registered_context_scout_owner(
             project_id,
-            &data_root.join(tracedecay_project::config::db_filename(data_root)),
+            &data_root.join(tracedecay_runtime_core::config::DB_FILENAME),
         );
         self.git_index_transaction_services
             .retire_project_database(project_id, database.db_path())

@@ -240,8 +240,7 @@ async fn registered_exact_root_ignores_sibling_worktree_manifests() {
         fs::create_dir_all(&data_root).unwrap();
         fs::write(data_root.join("tracedecay.db"), project_id).unwrap();
         fs::write(data_root.join("sessions.db"), b"sessions").unwrap();
-        branch_meta::save_branch_meta(&data_root, &BranchMeta::new_for_dir(&data_root, "main"))
-            .unwrap();
+        branch_meta::save_branch_meta(&data_root, &BranchMeta::new("main")).unwrap();
         write_store_manifest_to_path(
             &data_root.join(STORE_MANIFEST_FILENAME),
             &StoreManifest {

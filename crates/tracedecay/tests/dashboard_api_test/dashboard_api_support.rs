@@ -17,8 +17,8 @@ pub(crate) use tracedecay_domain::{
     ActorId, Confidence, FactCategoryV1, FactEventId, FactId, ProjectId,
 };
 pub(crate) use tracedecay_lcm::{LcmSourceRef, LcmSummaryNodeDraft};
-pub(crate) use tracedecay_project::config::USER_DATA_DIR_ENV;
 pub(crate) use tracedecay_project::project::TraceDecay;
+pub(crate) use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
 pub(crate) use tracedecay_sessions::admission::HostAdmissionScope;
 pub(crate) use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 

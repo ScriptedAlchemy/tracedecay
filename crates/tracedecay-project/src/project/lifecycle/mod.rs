@@ -395,7 +395,7 @@ impl TraceDecay {
             branch::detect_default_branch(project_root).or_else(|| active_branch.clone())
         });
         if let Some(ref default) = default_branch {
-            let meta = BranchMeta::new_for_dir(&store_layout.data_root, default);
+            let meta = BranchMeta::new(default);
             let _ = branch_meta::save_branch_meta(&store_layout.data_root, &meta);
         }
 

@@ -10,7 +10,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 use tracedecay_runtime_core::branch;
 use tracedecay_runtime_core::branch_meta;
-use tracedecay_runtime_core::config::db_filename;
+use tracedecay_runtime_core::config::DB_FILENAME;
 
 mod store_meta;
 
@@ -91,7 +91,7 @@ pub fn resolve_db_for_branch(
     tracedecay_dir: &Path,
     branch_name: Option<&str>,
 ) -> (PathBuf, Option<String>, Option<String>) {
-    let default_db = tracedecay_dir.join(db_filename(tracedecay_dir));
+    let default_db = tracedecay_dir.join(DB_FILENAME);
 
     let Some(meta) = branch_meta::load_branch_meta(tracedecay_dir) else {
         return (default_db, None, None);

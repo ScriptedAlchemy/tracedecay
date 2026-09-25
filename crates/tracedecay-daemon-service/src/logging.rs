@@ -316,7 +316,7 @@ pub fn recent_watcher_events(max_lines: usize) -> HashMap<String, WatcherEvent> 
 #[hotpath::measure(label = "daemon.engine.logging.read_tail")]
 fn read_daemon_log_tail(max_lines: usize) -> String {
     // macOS launchd: a plain err-log file next to the data dir.
-    if let Some(data_dir) = tracedecay_project::config::user_data_dir() {
+    if let Some(data_dir) = tracedecay_runtime_core::config::user_data_dir() {
         let err_log = data_dir.join("daemon.err.log");
         if let Ok(contents) = std::fs::read_to_string(&err_log) {
             let lines: Vec<&str> = contents.lines().collect();

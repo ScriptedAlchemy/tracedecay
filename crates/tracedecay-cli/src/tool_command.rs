@@ -935,7 +935,7 @@ fn requests_profile_authority(tool_name: &str, tool_args: &Value) -> bool {
 }
 
 fn implicit_tool_project_path(cwd: &Path) -> Option<PathBuf> {
-    tracedecay_project::config::discover_project_root(cwd)
+    tracedecay_runtime_core::config::discover_project_root(cwd)
 }
 
 /// `project_context` with an explicit uninitialised `--project` and no

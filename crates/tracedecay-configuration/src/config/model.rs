@@ -8,7 +8,6 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-pub use tracedecay_runtime_core::config::brand_env;
 use tracedecay_runtime_core::config::{discover_project_root, is_generated_dir_segment};
 
 /// Returns `true` if any component of `path` is a generated/vendored

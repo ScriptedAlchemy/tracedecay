@@ -337,7 +337,7 @@ pub fn classify_registry_storage_fields(
                 })
             },
         );
-        let status = if data_root.join(config::db_filename(&data_root)).exists() {
+        let status = if data_root.join(config::DB_FILENAME).exists() {
             ProjectStorageStatus::ProfileSharded
         } else if manifest_exists {
             ProjectStorageStatus::ManifestReconstructable

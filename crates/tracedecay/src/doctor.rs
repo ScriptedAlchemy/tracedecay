@@ -836,7 +836,7 @@ const DOMAIN_SYMBOL_RULES_FILENAME: &str = "domain-symbols.toml";
 /// nodes, so Doctor is where the author finds out. `None` (the normal case)
 /// keeps Doctor silent about a file that is not there.
 fn domain_symbol_rules_warning(project_path: &Path) -> Option<String> {
-    let rules = tracedecay_project::config::get_tracedecay_dir(project_path)
+    let rules = tracedecay_runtime_core::config::get_tracedecay_dir(project_path)
         .join(DOMAIN_SYMBOL_RULES_FILENAME);
     rules.is_file().then(|| {
         format!(

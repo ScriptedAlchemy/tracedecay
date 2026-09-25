@@ -74,10 +74,11 @@ async fn run_foreground_loopback(
     remote_tls: Option<RemoteBrainTlsConfig>,
 ) -> Result<()> {
     let bootstrap_started = Instant::now();
-    let profile_root =
-        tracedecay_project::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
+    let profile_root = tracedecay_runtime_core::config::user_data_dir().ok_or_else(|| {
+        TraceDecayError::Config {
             message: "could not determine TraceDecay user data directory".to_string(),
-        })?;
+        }
+    })?;
     let catalog_prewarm = tokio::task::spawn_blocking(prewarm_static_daemon_bootstrap_catalog);
     let requested = default_loopback_endpoint();
     let _lifecycle_lease = hotpath::measure_block!("daemon.bootstrap.lifecycle_lease", {
@@ -509,10 +510,11 @@ async fn run_foreground_unix(
     remote_tls: Option<RemoteBrainTlsConfig>,
 ) -> Result<()> {
     let bootstrap_started = Instant::now();
-    let profile_root =
-        tracedecay_project::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
+    let profile_root = tracedecay_runtime_core::config::user_data_dir().ok_or_else(|| {
+        TraceDecayError::Config {
             message: "could not determine TraceDecay user data directory".to_string(),
-        })?;
+        }
+    })?;
     let catalog_prewarm = tokio::task::spawn_blocking(prewarm_static_daemon_bootstrap_catalog);
     let endpoint = DaemonEndpoint::Unix(socket_path);
     let _lifecycle = hotpath::measure_block!("daemon.bootstrap.lifecycle_lease", {

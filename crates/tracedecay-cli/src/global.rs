@@ -62,9 +62,8 @@ fn elapsed_since(now: i64, recorded_at: i64) -> i64 {
 
 /// Best-effort: try to flush pending tokens to the worldwide counter.
 ///
-/// `upload_enabled` is the already-resolved canonical user-profile setting.
-/// Legacy user metadata carries the pending counter and cooldown timestamps,
-/// but it is never an authorization fallback for upload.
+/// `upload_enabled` is the already-resolved canonical user-profile setting;
+/// `config` only carries the pending counter and cooldown timestamps.
 /// `force` = true on status/sync commands (always attempt), false on others
 /// (only flush if stale > 30s).
 pub(crate) fn try_flush(
@@ -302,7 +301,7 @@ pub(crate) fn find_descendant_tracedecay(
             let path = entry.path();
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
-            if name_str == tracedecay_project::config::TRACEDECAY_DIR {
+            if name_str == tracedecay_runtime_core::config::TRACEDECAY_DIR {
                 continue;
             }
             if name_str == ".git" {
@@ -610,9 +609,8 @@ mod gather_tests {
     }
 
     #[test]
-    fn canonical_upload_denial_overrides_stale_legacy_metadata() {
+    fn canonical_upload_denial_leaves_pending_tokens_unflushed() {
         let mut config = tracedecay_session_memory::user_config::UserConfig {
-            upload_enabled: true,
             pending_upload: 42,
             ..tracedecay_session_memory::user_config::UserConfig::default()
         };

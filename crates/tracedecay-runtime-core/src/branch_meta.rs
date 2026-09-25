@@ -129,12 +129,6 @@ impl BranchMeta {
         Self::with_db_file(default_branch, crate::config::DB_FILENAME)
     }
 
-    /// Creates a new metadata whose default-branch entry references the main
-    /// DB filename appropriate for `data_dir`.
-    pub fn new_for_dir(data_dir: &Path, default_branch: &str) -> Self {
-        Self::with_db_file(default_branch, crate::config::db_filename(data_dir))
-    }
-
     fn with_db_file(default_branch: &str, db_file: &str) -> Self {
         let now = now_unix_str();
         let mut branches = HashMap::new();
@@ -654,7 +648,7 @@ mod tests {
     #[test]
     fn graph_source_publication_round_trips_exact_worktree_identity() {
         let dir = tempfile::tempdir().unwrap();
-        let meta = BranchMeta::new_for_dir(dir.path(), "main");
+        let meta = BranchMeta::new("main");
         save_branch_meta(dir.path(), &meta).unwrap();
         let source = BranchGraphSourceV1 {
             publication_epoch: BranchGraphPublicationEpochV1::new(1).unwrap(),
@@ -697,7 +691,7 @@ mod tests {
     #[test]
     fn graph_source_rollback_requires_the_exact_installed_entry() {
         let dir = tempfile::tempdir().unwrap();
-        let meta = BranchMeta::new_for_dir(dir.path(), "main");
+        let meta = BranchMeta::new("main");
         save_branch_meta(dir.path(), &meta).unwrap();
         let draft = BranchGraphSourceDraftV1 {
             project_id: "project.fixture".to_owned(),
@@ -745,7 +739,7 @@ mod tests {
     #[test]
     fn concurrent_graph_source_publications_allocate_distinct_epochs() {
         let dir = tempfile::tempdir().unwrap();
-        let mut meta = BranchMeta::new_for_dir(dir.path(), "main");
+        let mut meta = BranchMeta::new("main");
         meta.add_branch("feature/one", "main");
         meta.add_branch("feature/two", "main");
         save_branch_meta(dir.path(), &meta).unwrap();

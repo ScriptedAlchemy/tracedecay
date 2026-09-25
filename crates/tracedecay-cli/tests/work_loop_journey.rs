@@ -54,7 +54,7 @@ use tracedecay_domain::{
     CommitId, ManifestDigest, ProposalId, RefId, TaskId, WorkEffectStateV1, WorkGraphVersionV1,
     WorkRelationReplanProposalV1, WorkflowOperationRef,
 };
-use tracedecay_project::config::USER_DATA_DIR_ENV;
+use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 
 /// Pins the global database away from the operator's profile. The production

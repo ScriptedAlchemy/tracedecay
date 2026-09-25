@@ -210,7 +210,7 @@ fn reset_refused_project_graph_store(
 ) -> tracedecay_domain::errors::Result<ResetProjectGraphStoreOutcome> {
     let data_root =
         tracedecay_runtime_core::storage::profile_sharded_data_root(profile_root, project_id);
-    let graph_db_path = data_root.join(tracedecay_project::config::db_filename(&data_root));
+    let graph_db_path = data_root.join(tracedecay_runtime_core::config::DB_FILENAME);
     let canonical_schema_version = tracedecay_runtime_core::db::migrations::SCHEMA_VERSION;
     let nothing_refused = ResetProjectGraphStoreOutcome {
         data_root: data_root.clone(),
@@ -581,7 +581,7 @@ mod reset_project_store_tests {
     ) -> PathBuf {
         let data_root =
             tracedecay_runtime_core::storage::profile_sharded_data_root(profile_root, project_id);
-        let db_path = data_root.join(tracedecay_project::config::db_filename(&data_root));
+        let db_path = data_root.join(tracedecay_runtime_core::config::DB_FILENAME);
         write_graph_db_with_user_version(&db_path, version);
         db_path
     }
@@ -667,8 +667,7 @@ mod reset_project_store_tests {
             incompatible_project_id,
         );
         std::fs::create_dir_all(&incompatible_root).unwrap();
-        let incompatible_db =
-            incompatible_root.join(tracedecay_project::config::db_filename(&incompatible_root));
+        let incompatible_db = incompatible_root.join(tracedecay_runtime_core::config::DB_FILENAME);
         let source = rusqlite::Connection::open_with_flags(
             &healthy_db,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -727,7 +726,7 @@ mod reset_project_store_tests {
             "proj_not_sqlite",
         );
         std::fs::create_dir_all(&data_root).unwrap();
-        let db_path = data_root.join(tracedecay_project::config::db_filename(&data_root));
+        let db_path = data_root.join(tracedecay_runtime_core::config::DB_FILENAME);
         std::fs::write(&db_path, b"not a database").unwrap();
 
         let error =
