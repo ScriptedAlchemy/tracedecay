@@ -186,6 +186,7 @@ mod tests {
             },
             code_generation: Some("generation.context".to_owned()),
             search_matches: Vec::new(),
+            lexical_anchors: Vec::new(),
             symbols: vec![PrimitiveSymbolLocationV1 {
                 node_id: "symbol.store".to_owned(),
                 name: "Store".to_owned(),

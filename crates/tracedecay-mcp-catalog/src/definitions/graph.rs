@@ -46,7 +46,7 @@ pub(super) fn def_search() -> ToolDefinition {
                     "items": { "type": "string" },
                     "maxItems": SEARCH_MAX_LEXICAL_ANCHORS,
                     "description": format!(
-                        "Exact identifiers or technical terms (e.g. 'reserve_stock', 'Foo::bar', 'E0308') ranked through the lexical lane as additional routes fused with the query. Ranked retrieval, not exhaustive grep (use tracedecay_grep for that). Each result names the routes that ranked it. At most {SEARCH_MAX_LEXICAL_ANCHORS} anchors, each one whitespace-free term of at most {SEARCH_MAX_LEXICAL_ANCHOR_BYTES} bytes, no repeats."
+                        "Exact identifiers or technical terms (e.g. 'reserve_stock', 'Foo::bar', 'E0308') that the answer must be about. Each is ranked through the lexical lane as its own route: a hit carrying an anchor outranks every hit that carries none, every anchor with matches keeps at least its best sites through the lane cap, and `lexical_anchors` in the response reports each anchor's outcome (matched counts, `unmatched`, or `not_served`). Ranked retrieval, not exhaustive grep (use tracedecay_grep for that). Each result names the routes that ranked it. At most {SEARCH_MAX_LEXICAL_ANCHORS} anchors, each one whitespace-free term of at most {SEARCH_MAX_LEXICAL_ANCHOR_BYTES} bytes, no repeats."
                     )
                 },
                 "prefer_symbol": {

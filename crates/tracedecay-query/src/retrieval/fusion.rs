@@ -952,10 +952,6 @@ impl DeterministicFixedPointFusion {
                 decisions: Vec::new(),
             });
             entry.exact_class = strongest_exact_class(entry.exact_class, exact_class);
-            entry.utility_micros = entry
-                .utility_micros
-                .checked_add(weighted_contribution_micros)
-                .ok_or(FusionStageError::FixedPointOverflow)?;
             entry.occurrences.push(occurrence);
             entry.contributions.push(contribution);
             entry.freshness.push(candidate.freshness.clone());
@@ -972,6 +968,7 @@ impl DeterministicFixedPointFusion {
 
         let mut fused = fused.into_values().collect::<Vec<_>>();
         for candidate in &mut fused {
+            candidate.utility_micros = lane_saturated_utility_micros(&candidate.contributions)?;
             candidate.occurrences.sort_by(occurrence_cmp);
             candidate.occurrences.dedup();
             candidate.contributions.sort_by(contribution_cmp);
@@ -1052,6 +1049,26 @@ impl DeterministicFixedPointFusion {
             comparator_revision: self.comparator_revision.clone(),
         }
     }
+}
+
+/// Utility is the sum over lanes of each lane's strongest weighted
+/// contribution, so a lane never counts more than its profile weight for one
+/// candidate. Summing every occurrence instead made utility scale with how
+/// many chunks a candidate was split into: an oversized generated symbol whose
+/// thirteen fallback windows each saturated the lexical calibration outranked
+/// a two-chunk symbol thirteen to two on chunk count alone.
+fn lane_saturated_utility_micros(
+    contributions: &[CandidateContribution],
+) -> Result<u64, FusionStageError> {
+    let mut strongest_by_lane = BTreeMap::<RetrieverKind, u64>::new();
+    for contribution in contributions {
+        let strongest = strongest_by_lane.entry(contribution.retriever).or_default();
+        *strongest = (*strongest).max(contribution.weighted_contribution_micros);
+    }
+    strongest_by_lane
+        .into_values()
+        .try_fold(0_u64, |utility, lane| utility.checked_add(lane))
+        .ok_or(FusionStageError::FixedPointOverflow)
 }
 
 fn compact_candidate_cmp(left: &CompactCandidate, right: &CompactCandidate) -> Ordering {

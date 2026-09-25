@@ -49,9 +49,12 @@ pub struct ContextSurfaceRequestV1 {
     pub include_memory: Option<bool>,
     pub memory_limit: Option<u32>,
     pub memory_min_trust: Option<f64>,
-    /// Exact identifiers or technical terms ranked through the lexical lane as
-    /// additional routes fused with the task text. Bounded and validated by
-    /// the retrieval kernel; a violation is a typed request rejection.
+    /// Exact identifiers or technical terms the answer must be about. Each
+    /// runs as its own lexical route: hits carrying an anchor outrank hits
+    /// carrying none, every anchor with matches keeps at least its best sites
+    /// through the lane cap, and `lexical_anchors` in the result reports each
+    /// anchor's outcome. Bounded and validated by the retrieval kernel; a
+    /// violation is a typed request rejection.
     pub lexical_anchors: Option<Vec<String>>,
     /// Add a symbol-name lexical route for the identifier-shaped words of the
     /// task text.
@@ -319,6 +322,24 @@ pub struct ContextExtensionPointV1 {
     pub implementor_count: usize,
 }
 
+/// What one caller `lexical_anchors` entry contributed to the ranking, in
+/// caller order.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ContextLexicalAnchorV1 {
+    /// `matched` indexed rows carried the anchor; `admitted` of them ranked
+    /// into the lexical lane.
+    Matched {
+        anchor: String,
+        matched: u64,
+        admitted: u64,
+    },
+    /// No indexed row carries the anchor.
+    Unmatched { anchor: String },
+    /// The anchor's route did not serve; `coverage` names the lane state.
+    NotServed { anchor: String },
+}
+
 /// Plan-mode enrichment: where the selected code can be extended and which
 /// test files reach it.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -343,6 +364,10 @@ pub struct ContextResultV1 {
     pub code_generation: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub search_matches: Vec<ContextSearchMatchV1>,
+    /// Outcome of every caller `lexical_anchors` entry; empty when none
+    /// were supplied.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lexical_anchors: Vec<ContextLexicalAnchorV1>,
     pub symbols: Vec<PrimitiveSymbolLocationV1>,
     pub related_symbols: Vec<PrimitiveSymbolLocationV1>,
     pub code: Vec<ContextCodeBlockV1>,
@@ -743,6 +768,7 @@ mod tests {
             },
             code_generation: Some("generation.test".to_owned()),
             search_matches: vec![],
+            lexical_anchors: vec![],
             symbols: vec![],
             related_symbols: vec![],
             code: vec![],

@@ -1545,7 +1545,16 @@ impl DeterministicCodeChunker {
                     pieces.push((Vec::new(), symbol.span));
                 }
                 let line_end = offsets_line_end(source, symbol.span.start_byte);
-                let signature_end = line_end.min(symbol.span.end_byte);
+                // A minified declaration puts its whole body on the signature
+                // line. The signature chunk keeps the bounded prefix so one
+                // such file cannot fail the generation's chunk contract.
+                let signature_end = snap_down(
+                    source,
+                    line_end
+                        .min(symbol.span.end_byte)
+                        .min(symbol.span.start_byte + MAX_CHUNK_TEXT_BYTES as u64)
+                        as usize,
+                ) as u64;
                 let signature = (signature_end > symbol.span.start_byte).then_some(SourceSpan {
                     start_byte: symbol.span.start_byte,
                     end_byte: signature_end,
@@ -3542,6 +3551,37 @@ mod tests {
             piece.grain != CodeSearchChunkGrainV1::FileWindow
                 || !span_is_whitespace_only(source, piece.span)
         }));
+    }
+
+    #[test]
+    fn minified_single_line_symbol_keeps_its_signature_chunk_within_the_bound() {
+        let mut source = String::from("pub fn minified() -> u32 { let mut total = 0;");
+        while source.len() <= MAX_CHUNK_TEXT_BYTES + 4096 {
+            source.push_str(" total += 1;");
+        }
+        source.push_str(" total }\n");
+        let chunks = chunk_source(&source);
+        let signature = chunks
+            .chunks
+            .iter()
+            .find(|chunk| chunk.anchor.grain == CodeSearchChunkGrainV1::SymbolSignature)
+            .expect("a one-line symbol still emits a signature chunk");
+        assert_eq!(
+            signature.sanitized_text.as_str().len(),
+            MAX_CHUNK_TEXT_BYTES
+        );
+        assert!(
+            signature
+                .sanitized_text
+                .as_str()
+                .starts_with("pub fn minified() -> u32 {")
+        );
+        assert!(
+            chunks
+                .chunks
+                .iter()
+                .all(|chunk| { chunk.sanitized_text.as_str().len() <= MAX_CHUNK_TEXT_BYTES })
+        );
     }
 
     #[test]

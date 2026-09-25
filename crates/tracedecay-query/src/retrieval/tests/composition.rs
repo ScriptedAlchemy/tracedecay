@@ -144,6 +144,64 @@ fn fusion_retains_every_occurrence_evidence_pair_and_contribution() {
 }
 
 #[test]
+fn one_lane_counts_at_most_its_weight_per_candidate_however_many_chunks_matched() {
+    // One symbol split into three saturating chunks against one symbol that
+    // matched in a single chunk: chunk count must not decide the order.
+    let mut split = Vec::new();
+    for ordinal in 0..3 {
+        let mut chunk = candidate(RetrieverKind::Lexical, "split", 5_000_000, ordinal);
+        chunk.source_occurrence_id = id(&format!("occurrence.split.chunk-{ordinal}"));
+        chunk.retriever_evidence_anchor =
+            tracedecay_domain::RetrievalAnchorId::new(format!("evidence.split.chunk-{ordinal}"))
+                .unwrap();
+        split.push(chunk);
+    }
+    let whole = candidate(RetrieverKind::Lexical, "whole", 6_000_000, 3);
+    let mut lexical = split;
+    lexical.push(whole);
+
+    let output = CompositionKernel::new(id("ranking.fixture.v1"))
+        .compose(
+            &FusionStageInput {
+                profile: profile(),
+                lanes: composition_lanes(vec![
+                    (
+                        RetrieverKind::ExactLiteral,
+                        RetrieverOutcome::Complete(batch(Vec::new(), "empty")),
+                    ),
+                    (
+                        RetrieverKind::Lexical,
+                        RetrieverOutcome::Complete(batch(lexical, "lexical")),
+                    ),
+                    (
+                        RetrieverKind::Graph,
+                        RetrieverOutcome::Complete(batch(Vec::new(), "empty")),
+                    ),
+                ]),
+            },
+            &no_caps(),
+        )
+        .unwrap();
+
+    let ranked = &output.ranked_candidates;
+    assert_eq!(ranked.len(), 2);
+    let split = ranked
+        .iter()
+        .find(|ranked| ranked.candidate.anchor_id.as_str() == "anchor.split")
+        .expect("split symbol fused");
+    assert_eq!(split.candidate.contributions.len(), 3);
+    assert_eq!(
+        split.candidate.utility_micros, 500_000,
+        "three saturating chunks contribute the lexical weight once"
+    );
+    assert_eq!(
+        ranked[0].candidate.anchor_id.as_str(),
+        "anchor.whole",
+        "with equal utility the stronger raw score orders, not the chunk count"
+    );
+}
+
+#[test]
 fn fusion_calibrates_raw_scores_in_their_declared_score_domain() {
     let normal = candidate(RetrieverKind::Lexical, "normal-domain", 1_000_000, 0);
     let mut shifted = candidate(RetrieverKind::Lexical, "shifted-domain", 1_000_000, 1);
