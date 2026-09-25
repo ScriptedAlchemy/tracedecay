@@ -318,6 +318,16 @@ describe('mass axis frame', () => {
     expect(field.mass.lowerHalfCount).toBeGreaterThan(field.mass.total / 2);
   });
 
+  it('reports no crowd when every project measures the same', () => {
+    const uniform = Array.from({ length: 4 }, (_, i) =>
+      group(`u${i}`, [project(`u${i}`, 0.1 * (i + 1), { stores: 1, artifacts: 4 })]),
+    );
+    const field = composeRegistryField(uniform, NOW);
+    expect(field.mass.floor).toBe(5);
+    expect(field.mass.ceiling).toBe(5);
+    expect(field.mass.lowerHalfCount).toBe(0);
+  });
+
   it('frames the y axis from the bodies at its ends rather than a flat allowance', () => {
     const field = composeRegistryField(liveRegistry(), NOW);
     const [low, high] = field.extent.y;

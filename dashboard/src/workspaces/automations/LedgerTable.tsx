@@ -251,7 +251,7 @@ export function Term({
 }) {
   return (
     <div className="flex min-w-0 flex-col gap-0.5">
-      <dt className="td-legend">{label}</dt>
+      <dt className="td-legend whitespace-normal">{label}</dt>
       <dd className={cn('min-w-0 break-words text-body text-text-secondary', mono && 'td-value text-sm')}>
         {children}
       </dd>
