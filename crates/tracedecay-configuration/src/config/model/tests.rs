@@ -1,8 +1,7 @@
-use super::{is_generated_path_segment, is_ignored_by_explicit_global_excludes, is_ignored_by_git};
+use super::is_generated_path_segment;
 use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 use tempfile::TempDir;
 use tracedecay_runtime_core::config::{
     PinnedUserDataDir, USER_DATA_DIR_ENV, db_filename, discover_project_root, get_tracedecay_dir,
@@ -137,62 +136,6 @@ fn test_db_filename_tracks_dir_brand() {
         db_filename(std::path::Path::new("/p/.tracedecay")),
         "tracedecay.db"
     );
-}
-
-#[test]
-fn test_is_in_gitignore_respects_global_excludes_file() {
-    let sandbox = TempDir::new().unwrap();
-    let repo = sandbox.path().join("repo");
-    fs::create_dir(&repo).unwrap();
-
-    let mut init = Command::new("git");
-    init.env_clear().env("PATH", super::git_subprocess_path());
-    let init_status = init
-        .arg("-C")
-        .arg(&repo)
-        .arg("init")
-        .arg("-q")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .status()
-        .unwrap();
-    assert!(init_status.success(), "git init should succeed");
-
-    let excludes = sandbox.path().join("global_ignore");
-    fs::write(&excludes, ".tracedecay\n").unwrap();
-
-    let git_config = sandbox.path().join("gitconfig");
-    let excludes_value = excludes.to_string_lossy().replace('\\', "/");
-    fs::write(
-        &git_config,
-        format!("[core]\n\texcludesFile = {excludes_value}\n"),
-    )
-    .unwrap();
-
-    let ignored = is_ignored_by_git(&repo, Some(&git_config));
-
-    assert_eq!(ignored, Some(true));
-}
-
-#[test]
-fn test_explicit_global_excludes_ignores_comments_and_blank_lines() {
-    let sandbox = TempDir::new().unwrap();
-    let repo = sandbox.path().join("repo");
-    fs::create_dir(&repo).unwrap();
-
-    let excludes = sandbox.path().join("global_ignore");
-    fs::write(&excludes, "\n# comment\n.tracedecay/\n").unwrap();
-
-    let git_config = sandbox.path().join("gitconfig");
-    let excludes_value = excludes.to_string_lossy().replace('\\', "/");
-    fs::write(
-        &git_config,
-        format!("[core]\n\texcludesFile = {excludes_value}\n"),
-    )
-    .unwrap();
-
-    let ignored = is_ignored_by_explicit_global_excludes(&repo, &git_config);
-
-    assert_eq!(ignored, Some(true));
 }
 
 #[test]

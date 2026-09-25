@@ -19834,16 +19834,12 @@
         },
         "pr_autotrack": {
           "$ref": "#/$defs/PrAutoTrackPayloadV1"
-        },
-        "tracedecay_dir_gitignored": {
-          "type": "boolean"
         }
       },
       "required": [
         "configuration_snapshot_id",
         "configuration_revision_id",
         "config",
-        "tracedecay_dir_gitignored",
         "pr_autotrack"
       ],
       "type": "object"
