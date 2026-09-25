@@ -9,13 +9,15 @@
 //! and mutable line numbers cannot affect `CodeSearchChunkId`.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::{Arc, OnceLock},
 };
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracedecay_code_extraction::{ExtractedCloneBodyV1, ExtractionArtifactV1};
+use tracedecay_code_extraction::{
+    ExtractedCloneBodyV1, ExtractedImportEvidenceV1, ExtractionArtifactV1,
+};
 use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkLogicalIdentityV1, ChunkerRevision,
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
@@ -1180,8 +1182,13 @@ impl DeterministicCodeChunker {
             clone_build,
         )?;
         let (mut edges, edge_abstentions) = canonical_relation_edges(&result.edges, &symbol_rows);
-        let (same_file_edges, unresolved_references) =
-            resolve_file_references(source, &offsets, &result.unresolved_refs, &symbol_rows);
+        let (same_file_edges, unresolved_references) = resolve_file_references(
+            source,
+            &offsets,
+            &result.unresolved_refs,
+            &symbol_rows,
+            &artifact.imports,
+        );
         edges.extend(same_file_edges);
         edges.sort_by(|left, right| canonical_edge_key(left).cmp(&canonical_edge_key(right)));
 
@@ -2036,10 +2043,19 @@ fn resolve_file_references(
     offsets: &[u64],
     unresolved: &[UnresolvedRef],
     symbols: &[SymbolRow],
+    imports: &[ExtractedImportEvidenceV1],
 ) -> (
     Vec<CanonicalRelationEdgeV1>,
     Vec<CodeIndexUnresolvedReferenceV1>,
 ) {
+    // A TypeScript import binds one exact module and name, so a ubiquitous
+    // name (`format`, `parse`, `get`) imported explicitly is still a real
+    // cross-file candidate; only name-only binding needs the blocklist.
+    let imported_locals = imports
+        .iter()
+        .filter(|binding| !binding.is_public)
+        .filter_map(|binding| binding.local_name.as_deref())
+        .collect::<HashSet<&str>>();
     let mut by_name: BTreeMap<&str, Vec<&SymbolRow>> = BTreeMap::new();
     let mut by_file_relative_name: BTreeMap<String, Vec<&SymbolRow>> = BTreeMap::new();
     let mut type_path_aliases: Vec<(String, &SymbolRow)> = Vec::new();
@@ -2187,6 +2203,7 @@ fn resolve_file_references(
                     &references_by_site,
                     reference,
                     &by_node_id,
+                    &imported_locals,
                 ) {
                     retained.push(candidate);
                 }
@@ -2224,13 +2241,17 @@ fn cross_file_reference_candidate(
     references_by_site: &HashMap<(&str, EdgeKind, u32, u32), Vec<&UnresolvedRef>>,
     reference: &UnresolvedRef,
     by_node_id: &BTreeMap<&str, Option<&SymbolRow>>,
+    imported_locals: &HashSet<&str>,
 ) -> Option<CodeIndexUnresolvedReferenceV1> {
     let receiver_call = reference.reference_kind == EdgeKind::Calls
         && reference.file_path.ends_with(".rs")
         && reference.reference_name.contains('.');
+    let explicitly_imported = typescript_family_path(&reference.file_path)
+        && imported_locals.contains(reference.reference_name.as_str());
     if !receiver_call
         && (reference.reference_name.contains('.')
-            || cross_file_reference_name_is_blocklisted(&reference.reference_name))
+            || (!explicitly_imported
+                && cross_file_reference_name_is_blocklisted(&reference.reference_name)))
     {
         return None;
     }
@@ -2242,6 +2263,14 @@ fn cross_file_reference_candidate(
         kind,
         evidence_span: reference_evidence_span(source, offsets, references_by_site, reference)
             .unwrap_or(from.span),
+    })
+}
+
+/// Whether a path is a TypeScript-family source the TypeScript extractor
+/// produced import bindings for.
+fn typescript_family_path(path: &str) -> bool {
+    path.rsplit('.').next().is_some_and(|extension| {
+        matches!(extension, "ts" | "tsx" | "js" | "jsx" | "astro" | "svelte")
     })
 }
 
@@ -4661,6 +4690,7 @@ pub fn real_symbol() {}
             &line_offsets(source.as_bytes()),
             &references,
             &[caller],
+            &[],
         );
 
         assert!(resolved.is_empty());
@@ -4730,6 +4760,7 @@ pub fn real_symbol() {}
             &line_offsets(source.as_bytes()),
             &[reference],
             &[implementor, enum_variant, trait_target],
+            &[],
         );
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].kind, RelationEdgeKindV1::Implements);
@@ -4790,6 +4821,7 @@ pub fn real_symbol() {}
             &offsets,
             &artifact.result.unresolved_refs,
             &symbol_rows,
+            &[],
         );
 
         assert!(
@@ -4861,6 +4893,7 @@ pub fn real_symbol() {}
             &line_offsets(source.as_bytes()),
             std::slice::from_ref(&reference),
             &symbols,
+            &[],
         );
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].to_occurrence, right_occurrence);
@@ -4875,6 +4908,7 @@ pub fn real_symbol() {}
             &line_offsets(source.as_bytes()),
             &[missing_namespace],
             &symbols[..2],
+            &[],
         );
         assert!(
             resolved.is_empty(),
@@ -4890,6 +4924,7 @@ pub fn real_symbol() {}
             &line_offsets(source.as_bytes()),
             &[ambiguous],
             &symbols,
+            &[],
         );
         assert!(resolved.is_empty());
         assert!(retained.is_empty());

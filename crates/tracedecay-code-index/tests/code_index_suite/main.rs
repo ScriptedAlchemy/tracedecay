@@ -27,3 +27,4 @@ mod search_chunks;
 mod support;
 mod symbol_span_digest;
 mod test_attribution;
+mod typescript_module_resolution;

@@ -12,6 +12,9 @@ use crate::chunks::{
     rust_type_path_alias_for_trait_impl_method,
 };
 use crate::lineage::LineageSymbolRecordV1;
+use crate::production::typescript_resolution::{
+    ImportBindingOutcomeV1, TypeScriptModuleIndexV1, is_typescript_family, unique_local_import,
+};
 
 pub(crate) struct StagedGenerationV1 {
     pub(crate) files: Vec<Arc<FileGenerationArtifactsV1>>,
@@ -408,7 +411,7 @@ where
                 .sum::<u64>(),
         );
     }
-    let (by_simple_name, rust_files) =
+    let (by_simple_name, rust_files, typescript_modules) =
         hotpath::measure_block!("code_index.seal.reference_index", {
             let mut by_simple_name: HashMap<&str, Vec<(usize, &LineageSymbolRecordV1)>> =
                 HashMap::new();
@@ -420,7 +423,11 @@ where
                         .push((index, symbol));
                 }
             }
-            (by_simple_name, RustFileIndexV1::new(files))
+            (
+                by_simple_name,
+                RustFileIndexV1::new(files),
+                TypeScriptModuleIndexV1::new(files),
+            )
         });
     // Every file resolves against the same immutable whole-set index, so this
     // is one ordered fan-out over the indexing pool. Concatenating each file's
@@ -428,7 +435,13 @@ where
     // pushed, so the stable sort and dedup below, and therefore every edge
     // digest downstream, do not depend on the width.
     let per_file = collect_by_file_index_ordered(files.len(), workers, &|index| {
-        resolve_one_file_cross_file_references(files, &by_simple_name, &rust_files, index)
+        resolve_one_file_cross_file_references(
+            files,
+            &by_simple_name,
+            &rust_files,
+            &typescript_modules,
+            index,
+        )
     })?;
     let mut edges = per_file.into_iter().flatten().collect::<Vec<_>>();
     hotpath::measure_block!("code_index.seal.edge_materialization", {
@@ -436,6 +449,62 @@ where
         edges.dedup();
     });
     Ok(edges)
+}
+
+/// Retained TypeScript-family call sites whose import binding names project
+/// code the seal could not bind: a relative, aliased, or workspace-package
+/// specifier that reaches no indexed file, or a module that does not define
+/// the imported name (a default import, a local `export { x }` hop). These
+/// are the sites `callers` and `file_dependents` must disclose as gaps; an
+/// import of an external dependency is not one of them.
+pub(crate) fn unresolved_typescript_import_calls<T>(
+    files: &[T],
+) -> Vec<CodeIndexUnresolvedReferenceV1>
+where
+    T: AsRef<FileGenerationArtifactsV1>,
+{
+    let typescript_modules = TypeScriptModuleIndexV1::new(files);
+    if !typescript_modules.has_sources() {
+        return Vec::new();
+    }
+    let mut by_simple_name: HashMap<&str, Vec<(usize, &LineageSymbolRecordV1)>> = HashMap::new();
+    for (index, file) in files.iter().enumerate() {
+        for symbol in &file.as_ref().artifacts.symbols {
+            by_simple_name
+                .entry(symbol.simple_name.as_str())
+                .or_default()
+                .push((index, symbol));
+        }
+    }
+    let mut unresolved = Vec::new();
+    for file in files {
+        let file = file.as_ref();
+        if !is_typescript_family(file.extraction.language.as_str()) {
+            continue;
+        }
+        for reference in &file.artifacts.unresolved_references {
+            if reference.kind != RelationEdgeKindV1::Calls
+                || reference.reference_name.contains("::")
+                || reference.reference_name.contains('.')
+            {
+                continue;
+            }
+            let Some(binding) = unique_import(file, &reference.reference_name, reference.kind)
+            else {
+                continue;
+            };
+            if typescript_modules.resolve_import_binding(
+                files,
+                &by_simple_name,
+                binding,
+                reference.kind,
+            ) == ImportBindingOutcomeV1::Unresolved
+            {
+                unresolved.push(reference.clone());
+            }
+        }
+    }
+    unresolved
 }
 
 /// One ordered, panic-contained fan-out over file indices on the indexing pool.
@@ -487,6 +556,7 @@ fn resolve_one_file_cross_file_references<T>(
     files: &[T],
     by_simple_name: &HashMap<&str, Vec<(usize, &LineageSymbolRecordV1)>>,
     rust_files: &RustFileIndexV1,
+    typescript_modules: &TypeScriptModuleIndexV1,
     index: usize,
 ) -> Vec<CanonicalRelationEdgeV1>
 where
@@ -501,7 +571,14 @@ where
         } else {
             let resolved = hotpath::measure_block!(
                 "code_index.seal.reference_candidate_lookup",
-                resolve_cross_file_reference(files, by_simple_name, rust_files, index, reference)
+                resolve_cross_file_reference(
+                    files,
+                    by_simple_name,
+                    rust_files,
+                    typescript_modules,
+                    index,
+                    reference,
+                )
             );
             resolved_references.insert(cache_key, resolved.clone());
             resolved
@@ -540,6 +617,7 @@ fn resolve_cross_file_reference<T>(
     files: &[T],
     by_simple_name: &HashMap<&str, Vec<(usize, &LineageSymbolRecordV1)>>,
     rust: &RustFileIndexV1,
+    typescript_modules: &TypeScriptModuleIndexV1,
     index: usize,
     reference: &CodeIndexUnresolvedReferenceV1,
 ) -> Option<(usize, SymbolOccurrenceId)>
@@ -557,6 +635,26 @@ where
     let import = (!qualified)
         .then(|| unique_import(file, &reference.reference_name, reference.kind))
         .flatten();
+    // A TypeScript-family import binds one exact module and one exact name,
+    // so it resolves through module resolution rather than name matching;
+    // the ubiquity blocklist guards only name-only binding.
+    if let Some(binding) = import
+        && is_typescript_family(file.extraction.language.as_str())
+    {
+        return match typescript_modules.resolve_import_binding(
+            files,
+            by_simple_name,
+            binding,
+            reference.kind,
+        ) {
+            ImportBindingOutcomeV1::Bound(target_index, symbol) if target_index != index => {
+                Some((target_index, symbol.occurrence.clone()))
+            }
+            ImportBindingOutcomeV1::Bound(..)
+            | ImportBindingOutcomeV1::External
+            | ImportBindingOutcomeV1::Unresolved => None,
+        };
+    }
     let has_rust_glob = file.extraction.language.as_str() == "rust"
         && file.artifacts.imports.iter().any(|binding| binding.is_glob);
     if !qualified && import.is_none() && !has_rust_glob {
@@ -709,6 +807,11 @@ fn unique_import<'a>(
     local_name: &str,
     relation: RelationEdgeKindV1,
 ) -> Option<&'a CodeIndexImportEvidenceV1> {
+    if is_typescript_family(file.extraction.language.as_str()) {
+        // `export { x } from` forwards without binding `x` locally; Rust's
+        // `pub use` does both, so only TypeScript filters forwarding rows.
+        return unique_local_import(file, local_name, relation);
+    }
     let mut matches = file.artifacts.imports.iter().filter(|binding| {
         binding.local_name.as_deref() == Some(local_name)
             && match relation {

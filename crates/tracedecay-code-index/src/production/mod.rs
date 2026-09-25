@@ -68,6 +68,7 @@ mod clone_rows;
 mod helpers;
 mod lineage_rows;
 mod projection_rows;
+mod typescript_resolution;
 pub use helpers::generation_language_revisions_are_current;
 use helpers::*;
 mod ignored_sources;
@@ -870,6 +871,13 @@ impl CodeIndexPublishedGenerationV1 {
                 .iter()
                 .map(|reference| (file.authority.logical_path.as_str(), reference))
         })
+    }
+
+    /// TypeScript-family call sites whose import binding names project code
+    /// the seal could not bind; see
+    /// [`helpers::unresolved_typescript_import_calls`].
+    pub fn unresolved_typescript_import_calls(&self) -> Vec<CodeIndexUnresolvedReferenceV1> {
+        unresolved_typescript_import_calls(&self.files)
     }
 
     pub fn analysis_coverage(&self) -> impl Iterator<Item = (&str, &ExtractionBatchV1)> {

@@ -66,8 +66,10 @@ const TARGET_EDGE_KIND: &str = "CodeRelationTarget";
 /// than mixing row shapes under one identity. v6 stopped projecting one
 /// `CodeChunk` entity and one `CodeChunkDescribesSymbol` relation per chunk
 /// and stores record payloads as JSON strings instead of byte properties.
-/// v7 carries unresolved receiver-call limitations on each source symbol.
-pub const CODE_GRAPH_PROJECTOR_REVISION: &str = "code-graph-projector.v7";
+/// v7 carries unresolved receiver-call limitations on each source symbol. v8
+/// widens those limitations to bare TypeScript calls whose import the seal
+/// could not bind to project code.
+pub const CODE_GRAPH_PROJECTOR_REVISION: &str = "code-graph-projector.v8";
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum CodeGraphProjectionError {
@@ -899,10 +901,9 @@ fn validate_symbol_record(record: &SymbolRecordV1) -> Result<(), CodeGraphProjec
             .map_err(|error| CodeGraphProjectionError::Corrupt(error.to_string()))?;
         if reference.from_occurrence != record.occurrence
             || reference.kind != RelationEdgeKindV1::Calls
-            || !reference.reference_name.contains('.')
         {
             return Err(CodeGraphProjectionError::Corrupt(
-                "unresolved receiver call does not belong to its source symbol".to_owned(),
+                "unresolved call does not belong to its source symbol".to_owned(),
             ));
         }
     }
