@@ -340,6 +340,10 @@ impl CodeIndexSchedulerRegistryV1 {
         let build_publication_lock = Arc::new(tokio::sync::Mutex::new(()));
         let ignored_dependency_admissions = Arc::new(Mutex::new(BTreeMap::new()));
         let pending_wake = Arc::new(PendingWakeV1::default());
+        let worker_phase = Arc::new(tokio::sync::watch::Sender::new(
+            super::CodeIndexWorkerPhaseV1::default(),
+        ));
+        let worker_phase_signal = Arc::clone(&worker_phase);
         let index_observability = Arc::new(OnceLock::<
             super::super::observability::CodeIndexObservabilityV1,
         >::new());
@@ -493,11 +497,22 @@ impl CodeIndexSchedulerRegistryV1 {
             // seat reads and owes the worker no successor pass.
             let mut retained_projection_successor_only = false;
             loop {
-                hotpath::future!(
-                    worker_wake.notified(),
-                    label = "daemon.code_index.wake_wait"
-                )
-                .await;
+                let notified = worker_wake.notified();
+                tokio::pin!(notified);
+                // Parked only while registered with no banked permit: a
+                // banked permit resolves the wait at once, so the worker was
+                // never idle.
+                if !notified.as_mut().enable() {
+                    super::CodeIndexWorkerPhaseV1::enter(
+                        &worker_phase_signal,
+                        super::CodeIndexWorkerPhaseV1::Parked,
+                    );
+                }
+                hotpath::future!(notified, label = "daemon.code_index.wake_wait").await;
+                super::CodeIndexWorkerPhaseV1::enter(
+                    &worker_phase_signal,
+                    super::CodeIndexWorkerPhaseV1::Working,
+                );
                 if worker_shutting_down.load(Ordering::Acquire) {
                     tracing::info!(
                         event = "code_index_worker_shutdown_observed",
@@ -546,6 +561,10 @@ impl CodeIndexSchedulerRegistryV1 {
                     );
                     continue;
                 }
+                super::CodeIndexWorkerPhaseV1::enter(
+                    &worker_phase_signal,
+                    super::CodeIndexWorkerPhaseV1::AwaitingAdmission,
+                );
                 let Ok(_background_reconcile_admission) = hotpath::future!(
                     Arc::clone(&worker_background_reconcile_admission).acquire_owned(),
                     label = "daemon.code_index.admission_wait"
@@ -570,6 +589,10 @@ impl CodeIndexSchedulerRegistryV1 {
                     .await;
                     return;
                 }
+                super::CodeIndexWorkerPhaseV1::enter(
+                    &worker_phase_signal,
+                    super::CodeIndexWorkerPhaseV1::AwaitingPublicationGate,
+                );
                 let mut build_publication =
                     std::pin::pin!(Arc::clone(&worker_build_publication_lock).lock_owned());
                 let _build_publication = loop {
@@ -591,6 +614,10 @@ impl CodeIndexSchedulerRegistryV1 {
                         }
                     }
                 };
+                super::CodeIndexWorkerPhaseV1::enter(
+                    &worker_phase_signal,
+                    super::CodeIndexWorkerPhaseV1::Working,
+                );
                 let wake_to_gates_held_micros =
                     u64::try_from(pass_wake_observed_at.elapsed().as_micros()).unwrap_or(u64::MAX);
                 let scheduler = Arc::clone(&worker_scheduler);
@@ -2633,6 +2660,7 @@ impl CodeIndexSchedulerRegistryV1 {
             index_observability,
             shutting_down,
             reconcile_in_progress,
+            worker_phase,
             _active_generation_encoded_bytes: active_generation_encoded_bytes,
             task,
         });

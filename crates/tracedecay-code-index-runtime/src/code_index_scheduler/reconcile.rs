@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock, PoisonError, RwLock,
-        atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -412,23 +412,55 @@ impl CodeIndexSchedulerErrorV1 {
     }
 }
 
-/// Counts in-flight owner passes (retained activation or reconcile). A
-/// counter rather than a flag so the background worker can hold the state
-/// across an entire pass, claim of the pending wake through arrival restore,
-/// while the scheduler's own entry points nest inside it without clearing the
-/// in-progress signal early.
-pub struct ReconcilePassGuard(Arc<AtomicUsize>);
+/// Owner passes (retained activation or reconcile) one worktree has entered
+/// and left. Both counts only grow, so a subscriber that looks late still
+/// sees a pass that began and ended before it looked; a running level sampled
+/// on a timer cannot show that.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CodeIndexOwnerPassesV1 {
+    pub started: u64,
+    pub settled: u64,
+}
+
+impl CodeIndexOwnerPassesV1 {
+    pub fn running(self) -> bool {
+        self.started != self.settled
+    }
+}
+
+/// Counts in-flight owner passes. A counter rather than a flag so the
+/// background worker can hold the state across an entire pass, claim of the
+/// pending wake through arrival restore, while the scheduler's own entry
+/// points nest inside it without clearing the in-progress signal early.
+#[derive(Debug, Default)]
+pub struct ReconcilePassesV1(tokio::sync::watch::Sender<CodeIndexOwnerPassesV1>);
+
+impl ReconcilePassesV1 {
+    pub fn running(&self) -> bool {
+        self.0.borrow().running()
+    }
+
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<CodeIndexOwnerPassesV1> {
+        self.0.subscribe()
+    }
+}
+
+pub struct ReconcilePassGuard(Arc<ReconcilePassesV1>);
 
 impl ReconcilePassGuard {
-    pub fn enter(passes: &Arc<AtomicUsize>) -> Self {
-        passes.fetch_add(1, Ordering::AcqRel);
+    pub fn enter(passes: &Arc<ReconcilePassesV1>) -> Self {
+        passes
+            .0
+            .send_modify(|passes| passes.started = passes.started.wrapping_add(1));
         Self(Arc::clone(passes))
     }
 }
 
 impl Drop for ReconcilePassGuard {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
+        self.0
+            .0
+            .send_modify(|passes| passes.settled = passes.settled.wrapping_add(1));
     }
 }
 
@@ -707,9 +739,9 @@ pub struct CodeIndexWorktreeSchedulerV1 {
     pub(super) wake: Arc<tokio::sync::Notify>,
     pub(super) epoch: Arc<AtomicU64>,
     pub(super) shutting_down: Arc<AtomicBool>,
-    /// Number of in-flight owner passes; nonzero means activation or
-    /// reconcile work is running for this worktree.
-    pub(super) reconcile_in_progress: Arc<AtomicUsize>,
+    /// In-flight owner passes; running means activation or reconcile work
+    /// is in progress for this worktree.
+    pub(super) reconcile_in_progress: Arc<ReconcilePassesV1>,
     /// Typed owner-configuration recovery independently readable while a
     /// replacement generation is building.
     generation_recovery: Arc<RwLock<Option<CodeIndexGenerationRecoveryV1>>>,
@@ -1022,7 +1054,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             wake,
             epoch,
             shutting_down,
-            reconcile_in_progress: Arc::new(AtomicUsize::new(0)),
+            reconcile_in_progress: Arc::new(ReconcilePassesV1::default()),
             generation_recovery: Arc::new(RwLock::new(None)),
             latest_content_identity,
             ignored_source_admissions: Vec::new(),
@@ -3463,7 +3495,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             .map_err(|error| CodeIndexProductionErrorV1::Publication(error).into())
     }
 
-    pub fn reconcile_in_progress(&self) -> Arc<AtomicUsize> {
+    pub fn reconcile_in_progress(&self) -> Arc<ReconcilePassesV1> {
         Arc::clone(&self.reconcile_in_progress)
     }
 

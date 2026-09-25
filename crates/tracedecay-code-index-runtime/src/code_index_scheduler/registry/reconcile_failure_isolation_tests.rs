@@ -15,6 +15,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tracedecay_contracts::ResolvedScope;
 
+use super::super::tests::OwnerSignals;
 use super::super::{
     CodeIndexBuildProgressSlotStateV1, CodeIndexCadenceTriggerV1, CodeIndexDemandAdmissionV1,
     CodeIndexReconcileAdmissionV1,
@@ -181,11 +182,7 @@ impl Fixture {
         let canonical = canonical_existing_identity(&self.project).expect("canonical project");
         let mounted = self.registry.mounted.lock().await;
         let worktree = mounted.get(&canonical).expect("mounted worktree");
-        let pending = worktree
-            .pending_wake
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pending = worktree.pending_wake.lock();
         pending.micros
     }
 
@@ -247,12 +244,13 @@ impl Fixture {
 /// assertion would be vacuous.
 async fn wait_until_pending_wake_drained(fixture: &Fixture) -> u64 {
     let deadline = tokio::time::Instant::now() + SETTLE_DEADLINE;
+    let mut signals = OwnerSignals::subscribe(&fixture.registry, &fixture.project).await;
     loop {
         let micros = fixture.pending_wake_micros().await;
         if micros == 0 || tokio::time::Instant::now() >= deadline {
             return micros;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        signals.changed_before(deadline.into_std()).await;
     }
 }
 
@@ -261,6 +259,7 @@ async fn wait_until_pending_wake_drained(fixture: &Fixture) -> u64 {
 /// is the failure these tests exist to catch, not a timing artifact.
 async fn wait_for_latest_generation(fixture: &Fixture) -> String {
     let deadline = tokio::time::Instant::now() + SETTLE_DEADLINE;
+    let mut signals = OwnerSignals::subscribe(&fixture.registry, &fixture.project).await;
     loop {
         let freshness = fixture
             .registry
@@ -275,7 +274,7 @@ async fn wait_for_latest_generation(fixture: &Fixture) -> String {
             "the mount never sealed a generation: {freshness:?}"
         );
         fixture.wake_with_pending_arrival().await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        signals.changed_before(deadline.into_std()).await;
     }
 }
 
@@ -696,6 +695,7 @@ async fn planted_terminal_publication_park_suppresses_worker_reconcile() {
         .install_fault(ReconcileFaultKindV1::PublicationCorruption, usize::MAX)
         .await;
 
+    let mut signals = OwnerSignals::subscribe(&fixture.registry, &fixture.project).await;
     fixture.wake_with_pending_arrival().await;
     let deadline = tokio::time::Instant::now() + SETTLE_DEADLINE;
     while fixture.pending_wake_micros().await != 0 {
@@ -703,7 +703,7 @@ async fn planted_terminal_publication_park_suppresses_worker_reconcile() {
             tokio::time::Instant::now() < deadline,
             "planted terminal park did not drain the pending arrival"
         );
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        signals.changed_before(deadline.into_std()).await;
     }
     fixture.drive_external_wakes().await;
     fixture.settle_for(TERMINATION_QUIET_WINDOW).await;

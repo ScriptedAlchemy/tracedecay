@@ -10,6 +10,7 @@ use tracedecay_runtime_core::resident_memory::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentMemoryPressureV1,
 };
 
+use super::tests::OwnerSignals;
 use super::{
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
     SharedCodeIndexBytePoolV1,
@@ -357,13 +358,14 @@ async fn registry_reports_retained_generation_bytes_without_scheduler_locks() {
     // the background worker, so an empty store reports no retained bytes until
     // that reconcile lands. Settle on the post-reconcile state instead of
     // racing it; the assertions below are unchanged and must all hold at once.
+    let mut signals = OwnerSignals::subscribe(&registry, project.path()).await;
     let stats = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             let stats = registry.memory_stats().await;
             if stats.reconciling_worktrees == 0 && stats.retained_generation_encoded_bytes > 0 {
                 break stats;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            signals.changed().await;
         }
     })
     .await
