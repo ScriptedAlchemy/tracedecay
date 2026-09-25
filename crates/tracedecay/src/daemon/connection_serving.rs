@@ -1492,9 +1492,9 @@ fn serve_broker_socket_client_inner(
                     return Ok(());
                 }
 
-                let user_session_request = projectless_user_session_request(first_request.parsed());
+                let projectless_request = projectless_first_request(first_request.parsed());
                 let project_owner = boxed_broker_connection_phase(async {
-                    if handshake.project_path.is_some() && !user_session_request {
+                    if handshake.project_path.is_some() && !projectless_request {
                         match await_project_owner_for_first_request(
                             &mut transport,
                             first_request.parsed(),
@@ -1579,6 +1579,7 @@ fn serve_broker_socket_client_inner(
                     Box::pin(serve_projectless_client(
                         &mut transport,
                         &handshake.client_identity,
+                        handshake.project_path.clone(),
                         handshake.timings,
                         &engine.lifecycle,
                         &engine.store_administration,
@@ -1980,8 +1981,8 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
             return Ok(());
         }
     }
-    let user_session_request = projectless_user_session_request(first_request.parsed());
-    if handshake.project_path.is_some() && !user_session_request {
+    let projectless_request = projectless_first_request(first_request.parsed());
+    if handshake.project_path.is_some() && !projectless_request {
         // Heap-allocate the owner-await composition: embedded by value it
         // dominates this serve future's resident frame and overflows the
         // worker stack in perf-profile layouts.
@@ -2047,6 +2048,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         Box::pin(serve_projectless_client(
             &mut transport,
             &handshake.client_identity,
+            handshake.project_path.clone(),
             handshake.timings,
             lifecycle,
             &store_administration,

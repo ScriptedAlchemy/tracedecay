@@ -11,7 +11,8 @@ use tracedecay_store::{
 use tracedecay_lcm::raw::stored_message_record_select_columns;
 use tracedecay_lcm::retrieval_content::projected_content_hash;
 use tracedecay_lcm::{LcmError, LcmStorageKind};
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
+use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, Row, params};
 use tracedecay_sessions::runtime::shared::durable_project_path_key;
 use tracedecay_sessions::runtime::store_access::{
     message_record_from_row, session_record_from_row,
@@ -201,21 +202,124 @@ pub(super) async fn projection_retry_state(
     }))
 }
 
+/// Queue rows one re-arm transaction touches.
+pub(crate) const REARM_PROJECTION_RETRY_BATCH_ROWS: i64 = 1_024;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RearmedProjectionRetries {
+    pub(crate) rows: u64,
+    pub(crate) batches: u64,
+}
+
 /// A projection retry deadline paces re-attempts within the store mount that
 /// observed the failure. A fresh mount re-arms every queued projection for
-/// immediate replay so restart recovery drains commit-before-ack work on its
-/// first catch-up pass instead of waiting out a dead process's backoff.
-/// Attempt counts and last errors persist, so a projection that fails again
-/// resumes its escalating delay from the recorded attempt history.
+/// immediate replay so restart recovery drains commit-before-ack work instead
+/// of waiting out a dead process's backoff. Attempt counts and last errors
+/// persist, so a projection that fails again resumes its escalating delay from
+/// the recorded attempt history.
+///
+/// The queue grows with session history, so the re-arm walks it in rowid
+/// order, `batch_rows` deferred rows per short writer transaction: no single
+/// statement or transaction scales with the queue, and foreground writes
+/// interleave between batches. Rows queued after the walk starts belong to
+/// this mount and are left alone.
+#[hotpath::measure(
+    future = true,
+    label = "global_db.observation_projection.rearm_retries"
+)]
 pub(crate) async fn rearm_queued_projection_retries(
-    conn: &impl Executor,
-) -> ProjectionStoreResult<u64> {
-    conn.execute(
-        "UPDATE projection_queue SET next_retry_at_micros = 0 WHERE next_retry_at_micros > 0",
+    database: &Database,
+    batch_rows: i64,
+) -> ProjectionStoreResult<RearmedProjectionRetries> {
+    let mut rearmed = RearmedProjectionRetries::default();
+    let Some(last_rowid) = query_optional_i64(
+        &database.read_connection(),
+        "SELECT MAX(rowid) FROM projection_queue",
         params![],
     )
-    .await
-    .map_err(|error| storage("rearm queued projection retries", error))
+    .await?
+    else {
+        return Ok(rearmed);
+    };
+    let mut after_rowid = 0_i64;
+    while let Some((batch_end, rows)) =
+        rearm_projection_retry_batch(database, after_rowid, last_rowid, batch_rows).await?
+    {
+        rearmed.rows += rows;
+        rearmed.batches += 1;
+        after_rowid = batch_end;
+    }
+    Ok(rearmed)
+}
+
+/// Re-arms the next `batch_rows` deferred rows after `after_rowid` in one
+/// writer transaction and returns the last rowid it covered.
+#[hotpath::measure(
+    future = true,
+    label = "global_db.observation_projection.rearm_retries.batch"
+)]
+async fn rearm_projection_retry_batch(
+    database: &Database,
+    after_rowid: i64,
+    last_rowid: i64,
+    batch_rows: i64,
+) -> ProjectionStoreResult<Option<(i64, u64)>> {
+    const OPERATION: &str = "rearm queued projection retries";
+    let transaction = database
+        .begin_write_transaction(OPERATION)
+        .await
+        .map_err(|error| storage(OPERATION, error))?;
+    let Some(batch_end) = query_optional_i64(
+        &transaction,
+        "SELECT MAX(rowid) FROM (
+            SELECT rowid FROM projection_queue
+            WHERE rowid > ?1 AND rowid <= ?2 AND next_retry_at_micros > 0
+            ORDER BY rowid LIMIT ?3
+         )",
+        params![after_rowid, last_rowid, batch_rows],
+    )
+    .await?
+    else {
+        transaction
+            .rollback()
+            .await
+            .map_err(|error| storage(OPERATION, error))?;
+        return Ok(None);
+    };
+    let rows = transaction
+        .execute(
+            "UPDATE projection_queue SET next_retry_at_micros = 0
+             WHERE rowid > ?1 AND rowid <= ?2 AND next_retry_at_micros > 0",
+            params![after_rowid, batch_end],
+        )
+        .await
+        .map_err(|error| storage(OPERATION, error))?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| storage(OPERATION, error))?;
+    Ok(Some((batch_end, rows)))
+}
+
+async fn query_optional_i64(
+    conn: &impl QueryExecutor,
+    sql: &str,
+    params: impl IntoParams,
+) -> ProjectionStoreResult<Option<i64>> {
+    const OPERATION: &str = "read projection retry rearm window";
+    let mut rows = conn
+        .query(sql, params)
+        .await
+        .map_err(|error| storage(OPERATION, error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage(OPERATION, error))?
+    else {
+        return Ok(None);
+    };
+    row.get::<Option<i64>>(0)
+        .map_err(|error| storage(OPERATION, error))
 }
 
 pub(super) async fn schedule_projection_retry(
