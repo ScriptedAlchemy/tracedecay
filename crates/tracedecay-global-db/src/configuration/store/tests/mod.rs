@@ -107,11 +107,27 @@ async fn linked_worktree_default_converges_into_existing_snapshot() {
 /// project behind a reset verdict.
 #[tokio::test]
 async fn retired_semantic_runtime_key_converges_out_of_a_beta37_snapshot() {
+    assert_retired_key_converges_out("semantic.runtime.v1", ConfigurationValueV1::Boolean(true))
+        .await;
+}
+
+/// Every release through v0.1.0-beta.50 persisted the
+/// `sync.orphan_db_gc_days.v1` default (7 days).
+#[tokio::test]
+async fn retired_orphan_db_gc_days_key_converges_out_of_a_beta50_snapshot() {
+    assert_retired_key_converges_out(
+        "sync.orphan_db_gc_days.v1",
+        ConfigurationValueV1::Unsigned(7),
+    )
+    .await;
+}
+
+async fn assert_retired_key_converges_out(raw_key: &str, value: ConfigurationValueV1) {
     let (_directory, runtime, root) = Box::pin(global_setup()).await;
-    let retired = SettingKey::new("semantic.runtime.v1").unwrap();
+    let retired = SettingKey::new(raw_key).unwrap();
     let mut effective_values = root.snapshot.effective_values.clone();
     let mut provenance = root.snapshot.provenance.clone();
-    effective_values.insert(retired.clone(), ConfigurationValueV1::Boolean(true));
+    effective_values.insert(retired.clone(), value.clone());
     provenance.insert(
         retired.clone(),
         root.snapshot.provenance.values().next().unwrap().clone(),
@@ -130,7 +146,7 @@ async fn retired_semantic_runtime_key_converges_out_of_a_beta37_snapshot() {
         .unwrap();
     let entry = serde_json::json!({
         "schema_version": 1,
-        "value": ConfigurationValueV1::Boolean(true),
+        "value": value,
         "provenance": root.snapshot.provenance.values().next().unwrap(),
     })
     .to_string();

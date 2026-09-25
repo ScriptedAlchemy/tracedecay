@@ -45,8 +45,11 @@ pub const LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY: &str = "lcm.summarizer_executa
 /// Core setting keys that shipped in published betas and were then retired.
 /// A persisted snapshot carrying one converges by dropping it; its value has
 /// no registered owner anymore. `semantic.runtime.v1` shipped through
-/// v0.1.0-beta.37 and left with the dense retrieval runtime.
-pub const RETIRED_CORE_SETTING_KEYS_V1: &[&str] = &["semantic.runtime.v1"];
+/// v0.1.0-beta.37 and left with the dense retrieval runtime;
+/// `sync.orphan_db_gc_days.v1` shipped through v0.1.0-beta.50 and left with
+/// the orphan branch-database sweep.
+pub const RETIRED_CORE_SETTING_KEYS_V1: &[&str] =
+    &["semantic.runtime.v1", "sync.orphan_db_gc_days.v1"];
 
 /// Canonical user-profile settings.
 pub const USER_UPLOAD_ENABLED_SETTING_KEY: &str = "user.upload_enabled.v1";
