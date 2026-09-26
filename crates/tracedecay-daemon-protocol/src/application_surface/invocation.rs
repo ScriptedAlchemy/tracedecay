@@ -881,6 +881,12 @@ pub fn application_surface_feedback_operation(
         | ApplicationSurfaceOperation::UnsafePatterns
         | ApplicationSurfaceOperation::Constructors
         | ApplicationSurfaceOperation::FieldSites
+        | ApplicationSurfaceOperation::FindExactSymbol
+        | ApplicationSurfaceOperation::ByQualifiedName
+        | ApplicationSurfaceOperation::Signature
+        | ApplicationSurfaceOperation::Derives
+        | ApplicationSurfaceOperation::Grep
+        | ApplicationSurfaceOperation::AstGrepSearch
         | ApplicationSurfaceOperation::HealthRead
         | ApplicationSurfaceOperation::HealthDelta
         | ApplicationSurfaceOperation::StorageStatus

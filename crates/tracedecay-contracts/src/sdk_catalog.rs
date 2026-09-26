@@ -140,7 +140,13 @@ pub fn application_http_route_path(operation: ApplicationSurfaceOperation) -> St
         | ApplicationSurfaceOperation::GodClass
         | ApplicationSurfaceOperation::UnsafePatterns
         | ApplicationSurfaceOperation::Constructors
-        | ApplicationSurfaceOperation::FieldSites) => {
+        | ApplicationSurfaceOperation::FieldSites
+        | ApplicationSurfaceOperation::FindExactSymbol
+        | ApplicationSurfaceOperation::ByQualifiedName
+        | ApplicationSurfaceOperation::Signature
+        | ApplicationSurfaceOperation::Derives
+        | ApplicationSurfaceOperation::Grep
+        | ApplicationSurfaceOperation::AstGrepSearch) => {
             format!("/primitives/{}", operation.as_str())
         }
         operation @ (ApplicationSurfaceOperation::ConfigurationList

@@ -629,7 +629,7 @@ pub(crate) fn graph_tool_error_problem(
         TraceDecayError::Config { message } => {
             tracedecay_contracts::ApplicationProblem::invalid_request_without_action(
                 "application.surface.invalid_request",
-                message.clone(),
+                safe_diagnostic_message(message),
             )
         }
         TraceDecayError::ProjectRoute {
@@ -641,6 +641,27 @@ pub(crate) fn graph_tool_error_problem(
     }
 }
 
+/// A problem's diagnostic is one bounded line, but handler errors can span
+/// lines (a regex parse error draws a caret diagram), so whitespace and control
+/// characters are folded to single spaces and the text is bounded before it
+/// crosses the owner boundary.
+fn safe_diagnostic_message(message: &str) -> String {
+    const MAX_SAFE_DIAGNOSTIC_BYTES: usize = 512;
+    let folded = message
+        .split(|character: char| character.is_whitespace() || character.is_control())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if folded.len() <= MAX_SAFE_DIAGNOSTIC_BYTES {
+        return folded;
+    }
+    let mut end = MAX_SAFE_DIAGNOSTIC_BYTES;
+    while !folded.is_char_boundary(end) {
+        end -= 1;
+    }
+    folded[..end].trim_end().to_owned()
+}
+
 fn graph_tool_unavailable(
     code: &str,
     retryable: bool,
@@ -648,7 +669,7 @@ fn graph_tool_unavailable(
 ) -> tracedecay_contracts::ApplicationProblem {
     let diagnostic = tracedecay_contracts::SafeDiagnostic {
         code: code.to_owned(),
-        message: message.to_owned(),
+        message: safe_diagnostic_message(message),
     };
     if retryable {
         return tracedecay_contracts::ApplicationProblem::unavailable(diagnostic);

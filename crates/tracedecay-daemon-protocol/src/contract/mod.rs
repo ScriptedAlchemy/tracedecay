@@ -1012,7 +1012,13 @@ impl DaemonInvocationRequest {
             | ApplicationSurfaceOperation::GodClass
             | ApplicationSurfaceOperation::UnsafePatterns
             | ApplicationSurfaceOperation::Constructors
-            | ApplicationSurfaceOperation::FieldSites => {
+            | ApplicationSurfaceOperation::FieldSites
+            | ApplicationSurfaceOperation::FindExactSymbol
+            | ApplicationSurfaceOperation::ByQualifiedName
+            | ApplicationSurfaceOperation::Signature
+            | ApplicationSurfaceOperation::Derives
+            | ApplicationSurfaceOperation::Grep
+            | ApplicationSurfaceOperation::AstGrepSearch => {
                 unreachable!("graph-tool operations use their typed constructor")
             }
             ApplicationSurfaceOperation::FactStoreCurate

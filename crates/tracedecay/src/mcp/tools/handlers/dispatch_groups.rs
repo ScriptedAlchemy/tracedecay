@@ -505,6 +505,7 @@ pub(crate) fn compute_graph_tool_for_owner<'a>(
                 operation,
                 args,
                 scope_prefix,
+                options.code_index_ignored_dependency_admission.as_deref(),
             )
             .await
         };

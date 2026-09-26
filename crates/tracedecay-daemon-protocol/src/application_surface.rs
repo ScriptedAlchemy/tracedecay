@@ -916,7 +916,13 @@ pub fn parse_application_surface_request(
         | ApplicationSurfaceOperation::GodClass
         | ApplicationSurfaceOperation::UnsafePatterns
         | ApplicationSurfaceOperation::Constructors
-        | ApplicationSurfaceOperation::FieldSites => match value {
+        | ApplicationSurfaceOperation::FieldSites
+        | ApplicationSurfaceOperation::FindExactSymbol
+        | ApplicationSurfaceOperation::ByQualifiedName
+        | ApplicationSurfaceOperation::Signature
+        | ApplicationSurfaceOperation::Derives
+        | ApplicationSurfaceOperation::Grep
+        | ApplicationSurfaceOperation::AstGrepSearch => match value {
             Value::Object(arguments) => Ok(ApplicationSurfaceRequest::GraphTool(arguments)),
             _ => Err(ApplicationSurfaceAdapterError::invalid_request(format!(
                 "invalid arguments: {} expects a JSON object",

@@ -32,6 +32,12 @@ use crate::retrieval::analysis_report_surface::{
     UnmountedFilesSurfaceRequestV1, UnsafePatternsResultV1, UnsafePatternsSurfaceRequestV1,
 };
 use crate::retrieval::callable_code_catalog::CALLABLE_CODE_DEFAULT_PAGE_SIZE;
+use crate::retrieval::graph_lookup_surface::{
+    AstGrepSearchResultV1, AstGrepSearchSurfaceRequestV1, ByQualifiedNameResultV1,
+    ByQualifiedNameSurfaceRequestV1, DerivesResultV1, FindExactSymbolResultV1,
+    FindExactSymbolSurfaceRequestV1, GrepSearchResultV1, GrepSurfaceRequestV1, SignatureResultV1,
+    SymbolSelectorSurfaceRequestV1,
+};
 use crate::retrieval::graph_report_surface::{
     DependencyDepthSurfaceRequestV1, DiagnoseResultV1, DiagnoseSurfaceRequestV1, DsmResultV1,
     DsmSurfaceRequestV1, GiniResultV1, GiniSurfaceRequestV1, HealthResultV1,
@@ -212,6 +218,12 @@ const PRIMITIVE_READ_SPECS: &[PrimitiveReadSpec] = &[
     graph_report_spec("unsafe_patterns"),
     graph_report_spec("constructors"),
     graph_report_spec("field_sites"),
+    graph_report_spec("find_exact_symbol"),
+    graph_report_spec("by_qualified_name"),
+    graph_report_spec("signature"),
+    graph_report_spec("derives"),
+    graph_report_spec("grep"),
+    graph_report_spec("ast_grep_search"),
     primitive_spec("session_lookup"),
     primitive_spec("qualified_name"),
     primitive_spec("call_chain"),
@@ -250,9 +262,9 @@ fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface
         | "dependency_depth" | "health" | "dsm" | "diagnose" | "dead_code" | "circular"
         | "hotspots" | "unmounted_files" | "rank" | "largest" | "coupling"
         | "inheritance_depth" | "distribution" | "recursion" | "complexity" | "doc_coverage"
-        | "god_class" | "unsafe_patterns" | "constructors" | "field_sites" => {
-            &CLI_MCP_PRIMITIVE_SURFACES
-        }
+        | "god_class" | "unsafe_patterns" | "constructors" | "field_sites"
+        | "find_exact_symbol" | "by_qualified_name" | "signature" | "derives" | "grep"
+        | "ast_grep_search" => &CLI_MCP_PRIMITIVE_SURFACES,
         "health_read" | "storage_status" | "diagnostics_read" => &DASHBOARD_PRIMITIVE_SURFACES,
         _ => &PRE_DASHBOARD_PRIMITIVE_SURFACES,
     }
@@ -399,6 +411,24 @@ fn primitive_read_description(operation: &str) -> &'static str {
         "field_sites" => {
             "Find read and write sites of a named field, optionally narrowed to one owner's field."
         }
+        "find_exact_symbol" => {
+            "Return every indexed symbol whose bare name equals the given identifier, without ranking or fuzzy matching."
+        }
+        "by_qualified_name" => {
+            "Look up every indexed symbol sharing one exact qualified name, such as overloads, generics, or separate impl blocks."
+        }
+        "signature" => {
+            "Return the signature-level metadata of symbols addressed by node ID or qualified name: visibility, signature, docstring, async flag, and kind, without bodies."
+        }
+        "derives" => {
+            "List the exact derive macro names attached to a type addressed by node ID or qualified name. Generated implementations are reported unavailable."
+        }
+        "grep" => {
+            "Literal or regex content search over UTF-8 text sources in the working tree, each hit enriched with its enclosing graph symbol. Bounded omissions are reported as partial coverage."
+        }
+        "ast_grep_search" => {
+            "Structural (AST) pattern search over the working tree with the bundled tree-sitter grammars."
+        }
         _ => "Read bounded data from the admitted project's current retained state.",
     }
 }
@@ -421,9 +451,10 @@ const fn primitive_spec_with_default_page_size(
     }
 }
 
-/// A whole-project graph report. It keeps the two-minute interactive ceiling
-/// these reports have always dispatched under: a report over every file in a
-/// large repository is not a ten-second primitive read.
+/// A whole-project graph report or tree scan. It keeps the two-minute
+/// interactive ceiling these tools have always dispatched under: a report over
+/// every file, or a scan of every source, in a large repository is not a
+/// ten-second primitive read.
 const fn graph_report_spec(operation: &'static str) -> PrimitiveReadSpec {
     PrimitiveReadSpec {
         operation,
@@ -778,6 +809,28 @@ fn primitive_executable_schemas(
         "field_sites",
         FieldSitesSurfaceRequestV1,
         FieldSitesResultV1
+    );
+    add!(
+        "find_exact_symbol",
+        FindExactSymbolSurfaceRequestV1,
+        FindExactSymbolResultV1
+    );
+    add!(
+        "by_qualified_name",
+        ByQualifiedNameSurfaceRequestV1,
+        ByQualifiedNameResultV1
+    );
+    add!(
+        "signature",
+        SymbolSelectorSurfaceRequestV1,
+        SignatureResultV1
+    );
+    add!("derives", SymbolSelectorSurfaceRequestV1, DerivesResultV1);
+    add!("grep", GrepSurfaceRequestV1, GrepSearchResultV1);
+    add!(
+        "ast_grep_search",
+        AstGrepSearchSurfaceRequestV1,
+        AstGrepSearchResultV1
     );
     Ok(schemas)
 }

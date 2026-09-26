@@ -213,20 +213,9 @@ async fn tracedecay_grep_reports_literal_matches_and_typed_failures() {
     let missing = grep(&server, json!({"format": "json"})).await;
     assert_eq!(
         missing,
-        json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "error": {
-                "code": -32602,
-                "message": "missing required parameter: pattern",
-                "data": {
-                    "tool": "tracedecay_grep",
-                    "reason_code": "missing_required_parameter",
-                    "retryable": false,
-                    "detail": "missing required parameter: pattern",
-                }
-            }
-        })
+        execution_failed(
+            "tool execution failed: config error: invalid arguments for tracedecay_grep: missing field `pattern`"
+        )
     );
 
     let empty = grep(&server, json!({"pattern": "", "format": "json"})).await;
@@ -483,14 +472,14 @@ _Scanned {FILES_SCANNED} files._
     assert_eq!(
         invalid_group,
         execution_failed(
-            "tool execution failed: config error: invalid regex pattern '(': regex parse error:\n    (\n    ^\nerror: unclosed group"
+            "tool execution failed: config error: invalid regex pattern '(': regex parse error: ( ^ error: unclosed group"
         )
     );
     let invalid_braces = grep(&server, json!({"pattern": "Hello, {}!", "format": "json"})).await;
     assert_eq!(
         invalid_braces,
         execution_failed(
-            "tool execution failed: config error: invalid regex pattern 'Hello, {}!': regex parse error:\n    Hello, {}!\n            ^\nerror: repetition quantifier expects a valid decimal"
+            "tool execution failed: config error: invalid regex pattern 'Hello, {}!': regex parse error: Hello, {}! ^ error: repetition quantifier expects a valid decimal"
         )
     );
     let invalid_glob = grep(
