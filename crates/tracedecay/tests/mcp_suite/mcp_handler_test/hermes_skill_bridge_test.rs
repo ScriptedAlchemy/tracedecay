@@ -227,8 +227,11 @@ fn populated_inventory(home: &Path, include_bodies: bool, include_payloads: bool
     let skills_dir = agent_home.join("skills");
     let workflow_dir = skills_dir.join("ops").join("workflow");
     let bare_dir = skills_dir.join("bare-note");
-    let staged = agent_home.join("pending/skills/staged.json");
-    let other = agent_home.join("pending/skills/other.json");
+    let staged = agent_home
+        .join("pending")
+        .join("skills")
+        .join("staged.json");
+    let other = agent_home.join("pending").join("skills").join("other.json");
     let workflow_payload = json!({"name": "workflow", "body": "draft"});
     let other_payload = json!({"name": "missing-skill", "body": "other"});
     json!({

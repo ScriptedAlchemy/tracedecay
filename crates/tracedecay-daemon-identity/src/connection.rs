@@ -154,7 +154,7 @@ pub fn current_daemon_connection() -> Result<ResolvedDaemonConnection> {
             DAEMON_AUTHORITY_UNAVAILABLE,
             true,
             format!(
-                "no TraceDecay daemon authority record at '{}'. Start or restart the daemon.",
+                "TraceDecay daemon is not available: no authority record at '{}'. Start or restart the daemon.",
                 authority::record_path(&profile_root)?.display()
             ),
         )),

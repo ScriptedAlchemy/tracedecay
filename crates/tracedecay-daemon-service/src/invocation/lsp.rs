@@ -3,6 +3,7 @@
 use super::*;
 use tracedecay_lsp::LspRuntimeFailure;
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 mod project_lifecycle;
 mod workspace_admission;
@@ -98,7 +99,7 @@ impl DaemonInvocationService {
         {
             return Some(owner);
         }
-        let canonical_root = project_root.canonicalize().ok()?;
+        let canonical_root = canonical_existing_identity(project_root).ok()?;
         self.project_runtimes.get(&canonical_root).await
     }
 

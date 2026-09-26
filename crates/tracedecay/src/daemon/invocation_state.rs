@@ -5,6 +5,7 @@
 //! explicitly, including the `multi_root_family_allows` kill-switch.
 
 use std::sync::Arc;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 use serde_json::Value;
 use tracedecay_code_index_runtime::code_index_scheduler;
@@ -374,8 +375,7 @@ impl DaemonInvocationState {
             hotpath::gauge!("daemon.invocation_state.code_index_mount.skipped_total").inc(1_u64);
             return Ok(());
         }
-        let canonical_project_root = project_root
-            .canonicalize()
+        let canonical_project_root = canonical_existing_identity(project_root)
             .unwrap_or_else(|_| project_root.to_path_buf());
         self.code_index_schedulers
             .mount_worktree_with_graph_runtime(
@@ -633,7 +633,9 @@ impl DaemonInvocationState {
             // scope; resolving only by project id aliases every linked scope
             // back to the project's primary checkout.
             let root = locator.canonical_root.clone();
-            if !root.is_absolute() || root.canonicalize().ok().as_ref() != Some(&root) {
+            if !root.is_absolute()
+                || canonical_existing_identity(&root).ok().as_ref() != Some(&root)
+            {
                 let Ok(generation) = unavailable_root_generation(
                     scope,
                     tracedecay_domain::ScopeUnavailableReasonV1::RootMissing,

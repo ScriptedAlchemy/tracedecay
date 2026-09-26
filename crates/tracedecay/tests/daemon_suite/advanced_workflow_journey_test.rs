@@ -82,6 +82,7 @@ const PROVIDER_TRANSCRIPT_REFRESH_MESSAGE_ID: &str =
     "message.advanced-workflow-provider-participant-refresh";
 
 use tracedecay_domain::test_fixtures::id;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 fn run(command: &mut Command, operation: &str) -> Vec<u8> {
     let output = command
@@ -230,7 +231,10 @@ fn write_provider_fixture(
         .permissions();
     permissions.set_mode(0o700);
     std::fs::set_permissions(&path, permissions).expect("provider executable mode");
-    (path.canonicalize().expect("canonical provider"), script)
+    (
+        canonical_existing_identity(&path).expect("canonical provider"),
+        script,
+    )
 }
 
 #[cfg(windows)]
@@ -252,7 +256,10 @@ fn write_provider_fixture(
     .into_bytes();
     let path = root.join("workflow-provider.cmd");
     std::fs::write(&path, &script).expect("provider script");
-    (path.canonicalize().expect("canonical provider"), script)
+    (
+        canonical_existing_identity(&path).expect("canonical provider"),
+        script,
+    )
 }
 
 fn attempt_status(
@@ -442,7 +449,7 @@ fn feedback_proximity_http_is_mounted_in_an_isolated_project() {
     let home = scratch.path().join("home");
     let project = scratch.path().join("project");
     initialize_project(&home, &project);
-    let project = project.canonicalize().expect("canonical project root");
+    let project = canonical_existing_identity(&project).expect("canonical project root");
     let _daemon = spawn_project_daemon(&home, &project);
     run(
         common::tracedecay_command_with_home(&home)
@@ -504,7 +511,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     let home = scratch.path().join("home");
     let project = scratch.path().join("project");
     let (_commit_text, commit) = initialize_project(&home, &project);
-    let project = project.canonicalize().expect("canonical project root");
+    let project = canonical_existing_identity(&project).expect("canonical project root");
     let mut daemon = spawn_project_daemon(&home, &project);
     run(
         common::tracedecay_command_with_home(&home)

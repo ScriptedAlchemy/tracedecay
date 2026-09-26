@@ -3,6 +3,7 @@ use crate::mcp_server_test::support::*;
 use serde_json::json;
 #[cfg(feature = "test-transport")]
 use std::sync::Arc;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
@@ -21,9 +22,7 @@ async fn search_call_writes_mcp_runtime_analytics_event() {
         .expect("production project server");
     crate::support::warm_code_index_search(&server, "helper").await;
     server.ledger_writes_settled().await;
-    let project_path = fixture
-        .project_root
-        .canonicalize()
+    let project_path = canonical_existing_identity(&fixture.project_root)
         .expect("project path canonicalizes")
         .to_string_lossy()
         .to_string();
@@ -394,9 +393,7 @@ async fn ledger_records_by_default_without_env_opt_in() {
         .expect("production project server");
     crate::support::warm_code_index_search(&server, "helper").await;
     server.ledger_writes_settled().await;
-    let project_path = fixture
-        .project_root
-        .canonicalize()
+    let project_path = canonical_existing_identity(&fixture.project_root)
         .expect("project path canonicalizes")
         .to_string_lossy()
         .to_string();
@@ -482,10 +479,8 @@ async fn lifetime_counter_matches_ledger_net_savings() {
         .expect("production project server");
     crate::support::warm_code_index_search(&server, "helper").await;
     server.ledger_writes_settled().await;
-    let project_path = fixture
-        .project_root
-        .canonicalize()
-        .expect("project path canonicalizes");
+    let project_path =
+        canonical_existing_identity(&fixture.project_root).expect("project path canonicalizes");
     let project_key = project_path.to_string_lossy().to_string();
     let baseline = fixture
         .harness

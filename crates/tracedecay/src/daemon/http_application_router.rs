@@ -4,6 +4,7 @@
 //! resolver the registry uses to mount it on demand.
 
 use super::*;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 #[hotpath::measure(label = "daemon.http.application.router_build")]
 fn build_http_application_router(project_id: &str, project_path: &Path) -> Result<axum::Router> {
@@ -76,13 +77,13 @@ pub(super) fn install_http_application_cold_resolver(
                     });
                 }
                 let canonical_root =
-                    registered_root
-                        .canonicalize()
-                        .map_err(|error| TraceDecayError::Config {
+                    canonical_existing_identity(&registered_root).map_err(|error| {
+                        TraceDecayError::Config {
                             message: format!(
                                 "daemon HTTP registered project root is unavailable: {error}"
                             ),
-                        })?;
+                        }
+                    })?;
                 if canonical_root != registered_root {
                     return Err(TraceDecayError::Config {
                         message: "daemon HTTP registered project root is not canonical".to_owned(),

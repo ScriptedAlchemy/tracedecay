@@ -1005,22 +1005,22 @@ fn restore_feedback_file_permissions(
             ),
         })?
         .permissions();
+    let restore_error =
+        |error: std::io::Error| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!(
+                "could not restore feedback registration permissions {}: {error}",
+                path.display()
+            ),
+        };
+    let file = open_permission_restore_handle(path, &permissions).map_err(restore_error)?;
     #[cfg(unix)]
     if let Some(mode) = state.unix_mode {
         permissions.set_mode(mode);
     }
     #[cfg(not(unix))]
     permissions.set_readonly(state.readonly);
-    fs::set_permissions(path, permissions).map_err(|error| {
-        tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!(
-                "could not restore feedback registration permissions {}: {error}",
-                path.display()
-            ),
-        }
-    })?;
-    fs::File::open(path)
-        .and_then(|file| file.sync_all())
+    file.set_permissions(permissions).map_err(restore_error)?;
+    file.sync_all()
         .and_then(|()| sync_parent_directory(path, DirectorySyncPolicy::TolerateUnsupported))
         .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(
@@ -1028,6 +1028,29 @@ fn restore_feedback_file_permissions(
                 path.display()
             ),
         })
+}
+
+#[cfg(unix)]
+fn open_permission_restore_handle(
+    path: &Path,
+    _current: &fs::Permissions,
+) -> std::io::Result<fs::File> {
+    fs::File::open(path)
+}
+
+/// Windows flushes only through a writable handle. A read-only file refuses
+/// that open.
+#[cfg(not(unix))]
+fn open_permission_restore_handle(
+    path: &Path,
+    current: &fs::Permissions,
+) -> std::io::Result<fs::File> {
+    if current.readonly() {
+        let mut writable = current.clone();
+        writable.set_readonly(false);
+        fs::set_permissions(path, writable)?;
+    }
+    fs::OpenOptions::new().write(true).open(path)
 }
 
 fn write_feedback_state(

@@ -273,9 +273,11 @@ async fn git_common_dir_aliases_share_one_project_and_store_authority() {
         )
     );
     assert!(
-        inventory
-            .roots
-            .contains(&linked.to_string_lossy().into_owned())
+        inventory.roots.contains(
+            &tracedecay_runtime_core::path_safety::canonical_root_identity(&linked)
+                .to_string_lossy()
+                .into_owned()
+        )
     );
     assert_eq!(inventory.terminal_root_count, inventory.roots.len() as u64);
     harness

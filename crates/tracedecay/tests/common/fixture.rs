@@ -47,6 +47,7 @@ use std::sync::{Arc, OnceLock};
 use tracedecay_domain::ProjectId;
 use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use tracedecay_runtime_core::storage::{self, StoreLayout};
 
 use super::IsolatedEnv;
@@ -134,7 +135,7 @@ impl TestProfile {
                 path.display()
             )
         });
-        path.canonicalize().unwrap_or_else(|err| {
+        canonical_existing_identity(&path).unwrap_or_else(|err| {
             panic!(
                 "failed to canonicalize fixture directory '{}': {err}",
                 path.display()
@@ -160,7 +161,7 @@ impl TestProfile {
     }
 
     async fn enroll_inner(&self, project_root: &Path) -> RegisteredProject {
-        let project_root = project_root.canonicalize().unwrap_or_else(|err| {
+        let project_root = canonical_existing_identity(project_root).unwrap_or_else(|err| {
             panic!(
                 "fixture project root '{}' must exist to be enrolled: {err}",
                 project_root.display()
@@ -671,7 +672,7 @@ impl GitFixture {
         if !seeded {
             self.run(&["init", "--bare", &origin.to_string_lossy()]);
         }
-        let origin = origin.canonicalize().unwrap_or_else(|err| {
+        let origin = canonical_existing_identity(&origin).unwrap_or_else(|err| {
             panic!(
                 "failed to canonicalize fixture origin '{}': {err}",
                 origin.display()
@@ -700,16 +701,13 @@ impl GitFixture {
     }
 
     fn assert_collapses_onto_primary(&self, path: &Path) -> PathBuf {
-        let path = path.canonicalize().unwrap_or_else(|err| {
+        let path = canonical_existing_identity(path).unwrap_or_else(|err| {
             panic!(
                 "failed to canonicalize fixture worktree '{}': {err}",
                 path.display()
             )
         });
-        let primary = self
-            .root
-            .canonicalize()
-            .unwrap_or_else(|_| self.root.clone());
+        let primary = canonical_existing_identity(&self.root).unwrap_or_else(|_| self.root.clone());
         assert_eq!(
             tracedecay_runtime_core::worktree::repository_identity_root(&path),
             Some(primary.clone()),

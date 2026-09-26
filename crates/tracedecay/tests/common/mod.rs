@@ -31,6 +31,7 @@ use tokio::sync::OnceCell;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionScope};
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
@@ -552,7 +553,7 @@ pub fn canonicalize_test_dir(path: &Path) -> PathBuf {
             path.display()
         )
     });
-    path.canonicalize().unwrap_or_else(|err| {
+    canonical_existing_identity(path).unwrap_or_else(|err| {
         panic!(
             "failed to canonicalize test directory '{}': {err}",
             path.display()
@@ -580,7 +581,7 @@ pub fn canonicalize_test_db_path(path: &Path) -> PathBuf {
 }
 
 pub fn canonical_existing_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    canonical_existing_identity(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 pub fn tempdir_or_panic() -> TempDir {

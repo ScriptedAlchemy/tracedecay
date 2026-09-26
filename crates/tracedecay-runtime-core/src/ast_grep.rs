@@ -14,7 +14,8 @@ fn resolve_ast_grep_bin() -> PathBuf {
         return PathBuf::from(path);
     }
 
-    find_on_path("ast-grep")
+    crate::git::find_executable_on_path("ast-grep")
+        .map(|found| npm_native_binary(&found).unwrap_or(found))
         .or_else(|| {
             common_tool_paths("ast-grep")
                 .into_iter()
@@ -23,14 +24,21 @@ fn resolve_ast_grep_bin() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("ast-grep"))
 }
 
-fn find_on_path(tool: &str) -> Option<PathBuf> {
-    let paths = std::env::var_os("PATH")?;
-    std::env::split_paths(&paths)
-        .map(|dir| dir.join(tool))
-        .find(|path| is_executable_file(path))
+/// npm's Windows launcher is a `.cmd` that re-enters node, and `Command`
+/// refuses multi-line arguments to a batch file.
+fn npm_native_binary(launcher: &Path) -> Option<PathBuf> {
+    let is_batch = launcher
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("cmd"));
+    let native = launcher
+        .parent()?
+        .join("node_modules/@ast-grep/cli/ast-grep.exe");
+    (is_batch && native.is_file()).then_some(native)
 }
 
 fn common_tool_paths(tool: &str) -> Vec<PathBuf> {
+    let tool = format!("{tool}{}", std::env::consts::EXE_SUFFIX);
+    let tool = tool.as_str();
     let mut candidates = Vec::new();
 
     if let Ok(current_exe) = std::env::current_exe()

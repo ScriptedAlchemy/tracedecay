@@ -17,6 +17,7 @@ use tracedecay_global_db::{GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceU
 use tracedecay_mcp::McpTransport;
 use tracedecay_project::project::TraceDecay;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 use crate::support;
 
@@ -50,7 +51,7 @@ struct RegisteredProject {
 async fn project_list_returns_the_registry_page_the_caller_asked_for() {
     let (cg, _env, _project_dir) = support::setup_empty_project().await;
     let profile_dir = support::test_temp_dir();
-    let profile_root = fs::canonicalize(profile_dir.path()).expect("profile root");
+    let profile_root = canonical_existing_identity(profile_dir.path()).expect("profile root");
     let alpha_root = git_repository(&profile_root.join("listed-alpha"), ALPHA_HEAD);
     let beta_root = directory(&profile_root.join("listed-beta"));
 
@@ -134,7 +135,8 @@ async fn project_list_returns_the_registry_page_the_caller_asked_for() {
         cg.project_root(),
         &["symbolic-ref", "HEAD", &format!("refs/heads/{ACTIVE_HEAD}")],
     );
-    let active_git = fs::canonicalize(cg.project_root().join(".git")).expect("active .git");
+    let active_git =
+        canonical_existing_identity(&cg.project_root().join(".git")).expect("active .git");
     assert_eq!(
         cg.project_root().join(".git"),
         active_git,
@@ -317,7 +319,7 @@ async fn project_list_reports_an_empty_registry_as_an_empty_listing() {
 async fn project_list_reports_a_broken_registry_as_a_tool_error() {
     let (cg, _env, _project_dir) = support::setup_empty_project().await;
     let profile_dir = support::test_temp_dir();
-    let profile_root = fs::canonicalize(profile_dir.path()).expect("profile root");
+    let profile_root = canonical_existing_identity(profile_dir.path()).expect("profile root");
     let beta_root = directory(&profile_root.join("listed-beta"));
     {
         let runtime = HostAdmissionTestRuntimeV1::profile(&profile_root)
@@ -584,7 +586,7 @@ fn tool_json(response: Value) -> Value {
 
 fn directory(path: &Path) -> PathBuf {
     fs::create_dir_all(path).expect("create project directory");
-    fs::canonicalize(path).expect("canonicalize project directory")
+    canonical_existing_identity(path).expect("canonicalize project directory")
 }
 
 fn git_repository(path: &Path, head: &str) -> PathBuf {
