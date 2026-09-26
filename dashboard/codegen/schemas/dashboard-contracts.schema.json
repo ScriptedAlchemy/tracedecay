@@ -6931,6 +6931,92 @@
       ],
       "type": "object"
     },
+    "DeliveryAgentUsageRowV1": {
+      "properties": {
+        "agent": {
+          "description": "Managed-agent label, else the raw agent id; `None` groups the sessions\nthat record no agent at all.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "counters": {
+          "$ref": "#/$defs/AggregatedProviderUsageCountersV1",
+          "description": "Summed over `sessions_with_usage`; a counter is `None` unless every one\nof those sessions reported it."
+        },
+        "provider": {
+          "type": "string"
+        },
+        "sessions": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sessions_with_usage": {
+          "description": "Sessions the provider-usage projection holds usage for.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tool_calls": {
+          "description": "Tool invocations the session store recorded for these sessions.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "usage_complete": {
+          "description": "Every session in the row has usage and none of it was reduced with an\nissue; otherwise `counters` is a lower bound.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "agent",
+        "provider",
+        "sessions",
+        "sessions_with_usage",
+        "usage_complete",
+        "counters",
+        "tool_calls"
+      ],
+      "type": "object"
+    },
+    "DeliveryAgentUsageV1": {
+      "description": "The agents whose sessions the correlation index places on `branch`.",
+      "properties": {
+        "agents": {
+          "items": {
+            "$ref": "#/$defs/DeliveryAgentUsageRowV1"
+          },
+          "type": "array"
+        },
+        "branch": {
+          "description": "The live branch the correlation index was queried with.",
+          "type": "string"
+        },
+        "sessions": {
+          "description": "Correlated sessions this project's session store holds; the\ndenominator every row's `sessions` sums to.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "truncated": {
+          "description": "The correlation read reached its session ceiling, so further sessions\non this branch may exist.",
+          "type": "boolean"
+        },
+        "usage_coverage": {
+          "$ref": "#/$defs/ProviderUsageCoverageV1",
+          "description": "Coverage of the provider-usage read the token counters came from."
+        }
+      },
+      "required": [
+        "branch",
+        "sessions",
+        "truncated",
+        "usage_coverage",
+        "agents"
+      ],
+      "type": "object"
+    },
     "DeliveryAttentionEvidenceV1": {
       "oneOf": [
         {
@@ -7919,6 +8005,9 @@
     },
     "DeliveryOverviewV1": {
       "properties": {
+        "agent_usage": {
+          "$ref": "#/$defs/DeliveryProjectionV19"
+        },
         "changes": {
           "$ref": "#/$defs/DeliveryProjectionV1"
         },
@@ -7952,7 +8041,8 @@
         "ci_checks",
         "failure_localization",
         "releases",
-        "generation_freshness"
+        "generation_freshness",
+        "agent_usage"
       ],
       "type": "object"
     },
@@ -9539,6 +9629,206 @@
               "anyOf": [
                 {
                   "$ref": "#/$defs/DeliveryGenerationFreshnessV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "required_authority",
+            "reason",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryProjectionV19": {
+      "oneOf": [
+        {
+          "properties": {
+            "state": {
+              "const": "ready",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryAgentUsageV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "partial",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryAgentUsageV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "stale",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryAgentUsageV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "checkpoint": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryRateLimitCheckpointV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "retry_at_micros": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "state": {
+              "const": "rate_limited",
+              "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryAgentUsageV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "value",
+            "checkpoint",
+            "retry_at_micros"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "failed",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryAgentUsageV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "denied",
+              "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryAgentUsageV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "required_authority": {
+              "type": "string"
+            },
+            "state": {
+              "const": "not_published",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "required_authority",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "empty_measured",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryAgentUsageV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "required_authority": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unavailable",
+              "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryAgentUsageV1"
                 },
                 {
                   "type": "null"

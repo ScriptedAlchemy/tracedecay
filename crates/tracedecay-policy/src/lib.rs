@@ -10,12 +10,12 @@
 mod hotpath_observe;
 
 pub mod analyzer;
-pub mod authorization;
 pub mod configuration;
 pub mod curation;
 pub mod diagnostic_curation;
 pub mod git;
 pub mod hint_delivery;
+pub mod identity;
 pub mod routing;
 pub mod work_loop;
 

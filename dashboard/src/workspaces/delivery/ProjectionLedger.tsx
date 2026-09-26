@@ -6,7 +6,7 @@ import { Panel } from '../../ui/instrument.tsx';
 import { laneStateKind, projectionLaneState, type LaneState } from './journey.ts';
 
 /**
- * The eight independently typed Delivery projections, each with its own
+ * The independently typed Delivery projections, each with its own
  * state and the daemon's reason. One healthy local projection never paints a
  * provider projection green; a `not_published` row names the authority it
  * requires instead of reading as zero.
@@ -20,6 +20,7 @@ export const PROJECTION_ORDER = [
   ['failure_localization', 'Failure localization', 'retained CI localization'],
   ['releases', 'Releases', 'provider read'],
   ['generation_freshness', 'Index freshness', 'code index'],
+  ['agent_usage', 'Agent usage', 'session usage'],
 ] as const satisfies readonly (readonly [keyof DeliveryOverviewV1, string, string])[];
 
 export interface ProjectionRow {
@@ -71,7 +72,7 @@ export function ProjectionLedger({
 }) {
   const rows = projectionRows(overview);
   return (
-    <Panel legend="Delivery pipeline · 8 projections" className={className} bodyClassName="p-0">
+    <Panel legend={`Delivery pipeline · ${rows.length} projections`} className={className} bodyClassName="p-0">
       <ol className="divide-y divide-edge-subtle">
         {rows.map((row, index) => (
           <li key={row.key} className="flex items-start gap-3 px-3 py-2">

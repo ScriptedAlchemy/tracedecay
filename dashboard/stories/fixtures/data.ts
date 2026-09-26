@@ -4142,6 +4142,11 @@ function deliveryOverviewPayload(): Record<string, unknown> {
     ci_checks: notPublished('ci_provider_read_authority'),
     releases: notPublished('github_read_authority'),
     failure_localization: notPublished('ci_provider_read_authority'),
+    agent_usage: {
+      state: 'not_published',
+      reason: 'no session has recorded a Git branch span yet',
+      required_authority: 'session-Git correlation index',
+    },
   };
 }
 

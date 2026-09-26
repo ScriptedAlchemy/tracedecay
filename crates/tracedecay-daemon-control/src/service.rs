@@ -96,12 +96,56 @@ const DAEMON_RESTART_SEC: u64 = 2;
 const QUIESCED_LEASE_RELEASE_TIMEOUT: Duration =
     Duration::from_secs(DAEMON_STOP_TIMEOUT_SECS + DAEMON_STOP_TIMEOUT_MARGIN_SECS * 2);
 
+/// Largest `MemoryMax` the generated unit declares. A daemon serving several
+/// full-repository indexes fits well inside it; past it a leak or runaway
+/// build has the machine, not a service, as its only bound.
+const DAEMON_MEMORY_MAX_CEILING_BYTES: u64 = 24 * 1024 * 1024 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonServiceSpec {
     pub tracedecay_bin: PathBuf,
     pub socket_path: PathBuf,
     pub data_dir_override: Option<PathBuf>,
     pub remote_tls: Option<RemoteBrainTlsConfig>,
+    pub memory: DaemonServiceMemoryLimitsV1,
+}
+
+/// Memory bounds of the managed service, sized from physical RAM.
+///
+/// `max_bytes` is half of RAM up to [`DAEMON_MEMORY_MAX_CEILING_BYTES`]:
+/// the kernel kill line, after which `Restart=always` brings the daemon back.
+/// `high_bytes` is three quarters of it: the reclaim line the daemon's
+/// resident-memory authority reads as its pressure watermark, where it
+/// refuses growth and sheds retained caches. `swap_max_bytes` is an eighth
+/// of it, so a runaway cannot park tens of gigabytes in swap before the kill
+/// line fires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DaemonServiceMemoryLimitsV1 {
+    pub high_bytes: u64,
+    pub max_bytes: u64,
+    pub swap_max_bytes: u64,
+}
+
+impl DaemonServiceMemoryLimitsV1 {
+    #[must_use]
+    pub fn for_physical_memory(physical_bytes: u64) -> Self {
+        let max_bytes = (physical_bytes / 2).min(DAEMON_MEMORY_MAX_CEILING_BYTES);
+        Self {
+            high_bytes: max_bytes / 4 * 3,
+            max_bytes,
+            swap_max_bytes: max_bytes / 8,
+        }
+    }
+
+    fn detected() -> Result<Self> {
+        tracedecay_runtime_core::resident_memory::physical_memory_bytes_v1()
+            .map(Self::for_physical_memory)
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "cannot size the managed daemon's memory limits: this host does not \
+                          report its physical memory"
+                    .to_owned(),
+            })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -566,6 +610,13 @@ impl DaemonServiceSpec {
              RestartSec={}\n\
              TimeoutStopSec={}\n\
              LimitNOFILE={}\n\
+             # Sized from this host's physical RAM at install. MemoryHigh is\n\
+             # the pressure line where the daemon sheds caches; MemoryMax and\n\
+             # MemorySwapMax bound it before it can take the desktop down.\n\
+             # Override in a drop-in: `systemctl --user edit tracedecay`.\n\
+             MemoryHigh={}\n\
+             MemoryMax={}\n\
+             MemorySwapMax={}\n\
              \n\
              [Install]\n\
              WantedBy=default.target\n",
@@ -576,6 +627,9 @@ impl DaemonServiceSpec {
             DAEMON_RESTART_SEC,
             DAEMON_STOP_TIMEOUT_SECS,
             DAEMON_OPEN_FILE_LIMIT,
+            self.memory.high_bytes,
+            self.memory.max_bytes,
+            self.memory.swap_max_bytes,
         ))
     }
 
@@ -607,6 +661,14 @@ impl DaemonServiceSpec {
                 daemon_service_path_env(&self.tracedecay_bin),
             ),
             ("HOME".to_string(), home.display().to_string()),
+            // launchd enforces no memory ceiling, so the budget systemd
+            // hands the kernel goes to the daemon's own resident-memory
+            // authority: admission refuses growth and sheds caches at it.
+            (
+                tracedecay_runtime_core::resident_memory::PROCESS_RESIDENT_MEMORY_LIMIT_ENV_V1
+                    .to_string(),
+                self.memory.max_bytes.to_string(),
+            ),
         ];
         if let Some(data_dir_override) = &self.data_dir_override {
             env_entries.push((
@@ -942,6 +1004,7 @@ pub fn service_spec_with_remote_tls(
             .filter(|value| !value.is_empty())
             .map(PathBuf::from),
         remote_tls,
+        memory: DaemonServiceMemoryLimitsV1::detected()?,
     })
 }
 

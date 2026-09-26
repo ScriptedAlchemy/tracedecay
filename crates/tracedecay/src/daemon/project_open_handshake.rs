@@ -246,7 +246,7 @@ pub(super) fn initialize_project_open_error(error: TraceDecayError) -> Option<Tr
     (!error_is_project_not_enrolled(&error)).then_some(error)
 }
 
-pub(super) fn project_open_error_response(
+pub(crate) fn project_open_error_response(
     id: serde_json::Value,
     error: &TraceDecayError,
 ) -> JsonRpcResponse {

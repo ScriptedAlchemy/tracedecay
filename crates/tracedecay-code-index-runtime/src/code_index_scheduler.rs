@@ -209,8 +209,9 @@ pub use registry::CodeIndexReconcileAdmissionV1;
 pub use registry::CodeIndexSchedulerRegistryV1;
 pub use registry::watch_ingress::GitStateChangeRequestV1;
 pub use registry::{
-    ScopedFeedbackDocumentIdentityV1, ServingGenerationInstallationOutcomeV1,
-    ServingGenerationRollbackOutcomeV1, feedback_document_identity_from_generation,
+    CodeIndexOwnerActivityV1, CodeIndexWorkerPhaseV1, ScopedFeedbackDocumentIdentityV1,
+    ServingGenerationInstallationOutcomeV1, ServingGenerationRollbackOutcomeV1,
+    feedback_document_identity_from_generation,
 };
 pub type CodeIndexGenerationPublishedV1 = registry::CodeIndexGenerationPublishedV1;
 
@@ -234,9 +235,9 @@ use reconcile::{
     cancelled_code_index_reconcile,
 };
 pub use reconcile::{
-    CodeIndexNoopEvidenceV1, CodeIndexPublishEvidenceV1, CodeIndexReconcileOutcomeV1,
-    CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1, HistoricalCodeIndexGenerationOwnerV1,
-    ReconcilePassGuard,
+    CodeIndexNoopEvidenceV1, CodeIndexOwnerPassesV1, CodeIndexPublishEvidenceV1,
+    CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1,
+    HistoricalCodeIndexGenerationOwnerV1, ReconcilePassGuard, ReconcilePassesV1,
 };
 pub(crate) use reconcile::{ServingSourceWitnessV1, SourceFreshnessFenceV1};
 use serving::{

@@ -35,6 +35,7 @@ pub struct LcmStatusV1 {
     pub payload: LcmPayloadStatusV1,
     pub payload_gc: LcmPayloadGcStatusV1,
     pub lifecycle: LcmLifecycleStatusV1,
+    pub summary_convergence: LcmSummaryConvergenceStatusV1,
     pub redaction: LcmRedactionStatusV1,
 }
 
@@ -145,6 +146,37 @@ pub struct LcmLifecycleStatusV1 {
     pub current_frontier_store_id: Option<i64>,
     pub last_finalized_session_id: Option<String>,
     pub last_finalized_frontier_store_id: Option<i64>,
+}
+
+/// Retained-session summary convergence queue: disjoint per-state session
+/// counts and the reasons parked or failed sessions record.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LcmSummaryConvergenceStatusV1 {
+    pub pending_session_count: i64,
+    pub retryable_session_count: i64,
+    pub current_session_count: i64,
+    pub unavailable_session_count: i64,
+    pub permanent_session_count: i64,
+    pub reasons: Vec<LcmSummaryConvergenceReasonV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LcmSummaryConvergenceReasonV1 {
+    pub state: LcmSummaryConvergenceStateV1,
+    pub reason: String,
+    pub session_count: i64,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LcmSummaryConvergenceStateV1 {
+    Pending,
+    Retryable,
+    Current,
+    Unavailable,
+    Permanent,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

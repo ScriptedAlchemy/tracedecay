@@ -449,8 +449,18 @@ async fn ensure_raw_identity_schema(conn: &(impl Executor + ?Sized)) -> Result<(
     Ok(())
 }
 
-pub async fn schema_version(conn: &(impl QueryExecutor + ?Sized)) -> Option<i64> {
-    stored_schema_version(conn).await.ok().flatten()
+/// The LCM schema version the store actually persists.
+///
+/// An unreadable marker is the read error and a missing one is the same
+/// reset-required state admission reports; the compiled version never stands
+/// in for either.
+pub async fn schema_version(conn: &(impl QueryExecutor + ?Sized)) -> Result<i64, LcmError> {
+    stored_schema_version(conn)
+        .await?
+        .ok_or(LcmError::ProfileResetRequired {
+            found_version: None,
+            required_version: LCM_SCHEMA_VERSION,
+        })
 }
 
 async fn stored_schema_version(

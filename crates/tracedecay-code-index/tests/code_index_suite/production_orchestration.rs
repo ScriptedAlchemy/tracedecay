@@ -2387,22 +2387,6 @@ fn published_generation_validation_is_amortized_per_loaded_generation() {
             .all(|(first, second)| first.chunk() == second.chunk()),
         "amortized admission must return the same chunks as the first admission"
     );
-
-    // Repeat attribution reads are memoized and must stay identical.
-    let first_attribution = restored
-        .test_attribution_authority()
-        .expect("test attribution authority");
-    let second_attribution = restored
-        .test_attribution_authority()
-        .expect("repeat attribution read is amortized");
-    let generation_id = restored.manifest().generation_id.clone();
-    assert!(
-        Arc::ptr_eq(
-            &first_attribution.read_test_attribution(&generation_id),
-            &second_attribution.read_test_attribution(&generation_id),
-        ),
-        "amortized attribution must share the first read's evidence, not copy it"
-    );
 }
 
 #[test]

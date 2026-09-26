@@ -132,13 +132,33 @@ fn installed_artifact_serves_identically_to_the_warm_scan_without_scanning() {
         .symbols_page(None, 64, request())
         .expect("installed page");
     assert_eq!(warm_page, installed_page);
+    let installed_ranking = installed_reader
+        .degree_ranking(64, request())
+        .expect("installed ranking");
+    assert_eq!(installed_ranking.symbol_count, 4);
+    assert_eq!(
+        installed_ranking
+            .ranked
+            .iter()
+            .map(|ranked| (
+                ranked.summary.occurrence.as_str(),
+                ranked.outgoing,
+                ranked.incoming
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("sym.alpha.run", 1, 1),
+            ("sym.beta.run", 0, 2),
+            ("sym.beta.runner", 1, 0),
+            ("sym.gamma.main", 1, 0),
+        ],
+        "the installed artifact serves the degrees recorded at seal time"
+    );
     assert_eq!(
         warmed_reader
             .degree_ranking(64, request())
             .expect("warm ranking"),
-        installed_reader
-            .degree_ranking(64, request())
-            .expect("installed ranking"),
+        installed_ranking,
         "seal-time and scan-derived degrees must agree"
     );
     assert_eq!(

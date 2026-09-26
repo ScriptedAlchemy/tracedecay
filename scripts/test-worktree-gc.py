@@ -244,6 +244,28 @@ class WorktreeGcTest(unittest.TestCase):
         self.assertIn(f"reclaim {dirty_target} ", proc.stdout)
         self.assertIn(" reclaimed=1 ", proc.stdout)
 
+    def test_pnpm_trees_are_reclaimed_without_touching_the_shared_store(self) -> None:
+        fx = self.fx
+        fx.land_on_master(
+            "build: pnpm",
+            **{".gitignore": "/target\nnode_modules\n/.pnpm/\n", "pnpm-lock.yaml": "lockfileVersion: '9.0'\n"},
+        )
+        lane = fx.lane("pnpm")
+        fx.write(lane, "src.txt", "uncommitted edit\n")
+        store = fx.tmp / "pnpm-store/crates-io/serde-1.0.0"
+        fx.write(store.parent.parent, "crates-io/serde-1.0.0/Cargo.toml", "[package]\n")
+        fx.write(lane, "dashboard/node_modules/react/index.js", "module.exports = 1;\n")
+        (lane / ".pnpm/crates/crates-io").mkdir(parents=True)
+        (lane / ".pnpm/crates/crates-io/serde-1.0.0").symlink_to(store)
+        fx.backdate(lane)
+
+        proc = fx.gc("--delete", "--reclaim-builds", "--idle-hours", "1", "--stale-age-hours", "1")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse((lane / "dashboard/node_modules").exists())
+        self.assertFalse((lane / ".pnpm").exists())
+        self.assertEqual((store / "Cargo.toml").read_text(), "[package]\n")
+        self.assertIn(" reclaimed=2 ", proc.stdout)
+
     def test_active_lane_is_untouched_while_idle_twin_is_collected(self) -> None:
         fx = self.fx
         active = fx.lane("active")

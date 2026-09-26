@@ -88,10 +88,18 @@ impl AgentIntegration for ClaudeIntegration {
     }
 
     fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
+        // Claude copies the marketplace tree into its versioned cache. A
+        // receiptless older plugin keeps entrypoints the current catalog no
+        // longer ships; those survive artifact replacement and make the
+        // loaded cache fail discovery after `plugin install` exits 0.
+        remove_non_catalog_claude_marketplace_files(&ctx.home)?;
         if !claude_plugin_is_natively_active(&ctx.home, Some(&ctx.tracedecay_bin))? {
             let claude = require_claude_cli()?;
             claude_plugin_activate_with(&claude, &ctx.home)?;
         }
+        // Sibling version directories are not part of the registration
+        // snapshot. Claude leaves them in place across install and update.
+        remove_stale_claude_plugin_cache(&ctx.home)?;
         ensure_claude_plugin_permission(&ctx.home)
     }
 
@@ -343,6 +351,204 @@ fn claude_loaded_cache_matches_rendered_bundle(
     )
 }
 
+fn claude_plugin_needs_reinstall(home: &Path) -> Result<bool> {
+    let recorded = claude_plugin_registration_is_active(home)?
+        || claude_installed_plugins_records_plugin(home)?;
+    Ok(recorded && !claude_loaded_cache_matches_rendered_bundle(home, None)?)
+}
+
+fn claude_installed_plugins_path(home: &Path) -> PathBuf {
+    home.join(".claude/plugins/installed_plugins.json")
+}
+
+/// Stock Claude records an installed plugin at
+/// `/plugins/<plugin>@<marketplace>` as either a non-empty array of scope
+/// entries or one object. A missing file means the plugin is not recorded.
+/// Unreadable or invalid JSON is a typed failure, not "not installed".
+fn claude_installed_plugins_records_plugin(home: &Path) -> Result<bool> {
+    let path = claude_installed_plugins_path(home);
+    let document = read_optional_json(&path).map_err(|()| TraceDecayError::Config {
+        message: format!(
+            "could not read Claude installed plugin state at {}",
+            path.display()
+        ),
+    })?;
+    let Some(document) = document else {
+        return Ok(false);
+    };
+    let pointer = format!("/plugins/{PLUGIN_IDENTIFIER}");
+    Ok(claude_plugin_record_is_present(document.pointer(&pointer)))
+}
+
+fn claude_plugin_record_is_present(value: Option<&serde_json::Value>) -> bool {
+    match value {
+        Some(serde_json::Value::Array(entries)) => !entries.is_empty(),
+        Some(serde_json::Value::Object(entry)) => !entry.is_empty(),
+        Some(serde_json::Value::Null) | None => false,
+        Some(_) => true,
+    }
+}
+
+fn remove_non_catalog_claude_marketplace_files(home: &Path) -> Result<()> {
+    let deploy = plugin_deploy_dir(home);
+    match std::fs::symlink_metadata(&deploy) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "refusing to clean a symlinked Claude marketplace at {}",
+                    deploy.display()
+                ),
+            });
+        }
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "Claude marketplace at {} is not a directory",
+                    deploy.display()
+                ),
+            });
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "could not inspect Claude marketplace at {}: {error}",
+                    deploy.display()
+                ),
+            });
+        }
+    }
+    let catalog = claude_embedded_plugin_files();
+    let files = super::collect_regular_files(&deploy).map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "failed to list Claude marketplace {}: {error}",
+            deploy.display()
+        ),
+    })?;
+    for file in files {
+        let relative = marketplace_relative(&deploy, &file)?;
+        if catalog.iter().any(|(path, _)| *path == relative) {
+            continue;
+        }
+        super::safe_remove_host_file(&file).map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to remove non-catalog Claude marketplace file {}: {error}",
+                file.display()
+            ),
+        })?;
+        prune_empty_dirs_up_to(&file, &deploy)?;
+    }
+    Ok(())
+}
+
+fn marketplace_relative(deploy: &Path, file: &Path) -> Result<String> {
+    let relative = file
+        .strip_prefix(deploy)
+        .map_err(|_| TraceDecayError::Config {
+            message: format!(
+                "Claude marketplace file {} is outside {}",
+                file.display(),
+                deploy.display()
+            ),
+        })?;
+    let text = relative.to_str().ok_or_else(|| TraceDecayError::Config {
+        message: format!("Claude marketplace path is not UTF-8: {}", file.display()),
+    })?;
+    Ok(text.replace(std::path::MAIN_SEPARATOR, "/"))
+}
+
+fn prune_empty_dirs_up_to(file: &Path, root: &Path) -> Result<()> {
+    for dir in file.ancestors().skip(1).take_while(|dir| *dir != root) {
+        match std::fs::remove_dir(dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(TraceDecayError::Config {
+                    message: format!("failed to prune {}: {error}", dir.display()),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Delete every cache child that is not the version this binary ships.
+/// The current version directory is the registration snapshot; older
+/// siblings are not, and renaming them would leave a recoverable copy.
+fn remove_stale_claude_plugin_cache(home: &Path) -> Result<()> {
+    let versions = home.join(".claude/plugins/cache/tracedecay/tracedecay");
+    match std::fs::symlink_metadata(&versions) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "refusing to clean a symlinked Claude plugin cache at {}",
+                    versions.display()
+                ),
+            });
+        }
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "Claude plugin cache at {} is not a directory",
+                    versions.display()
+                ),
+            });
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "could not inspect Claude plugin cache at {}: {error}",
+                    versions.display()
+                ),
+            });
+        }
+    }
+    for entry in std::fs::read_dir(&versions).map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "failed to list Claude plugin cache {}: {error}",
+            versions.display()
+        ),
+    })? {
+        let entry = entry.map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to read a Claude plugin cache entry under {}: {error}",
+                versions.display()
+            ),
+        })?;
+        if entry.file_name() == crate::PRODUCT_VERSION {
+            continue;
+        }
+        let path = entry.path();
+        let metadata =
+            std::fs::symlink_metadata(&path).map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "could not inspect stale Claude plugin cache {}: {error}",
+                    path.display()
+                ),
+            })?;
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            std::fs::remove_dir_all(&path).map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to remove stale Claude plugin cache {}: {error}",
+                    path.display()
+                ),
+            })?;
+        } else {
+            super::safe_remove_host_file(&path).map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to remove stale Claude plugin cache {}: {error}",
+                    path.display()
+                ),
+            })?;
+        }
+    }
+    Ok(())
+}
+
 /// Name of Claude Code's lifecycle binary.
 const CLAUDE_CLI: &str = "claude";
 
@@ -376,14 +582,15 @@ fn require_claude_cli() -> Result<PathBuf> {
 /// `plugin update` both leave an installed version's cache untouched. A
 /// rebuilt bundle that keeps the version (every build between releases) is
 /// therefore only loaded after Claude's own uninstall drops the stale cache.
+/// Stock `plugin install` also exits 0 without copying when
+/// `installed_plugins.json` already records the plugin, which is how an
+/// unrecorded older install survives a receiptless adoption.
 ///
 /// Split from the trait method so tests can supply a launcher and an isolated
 /// `HOME` without mutating the process environment.
 #[hotpath::measure(label = "hosts.agent.claude.plugin_activate")]
 fn claude_plugin_activate_with(claude: &Path, home: &Path) -> Result<()> {
-    if claude_plugin_registration_is_active(home)?
-        && !claude_loaded_cache_matches_rendered_bundle(home, None)?
-    {
+    if claude_plugin_needs_reinstall(home)? {
         run_claude_plugin_step(
             claude,
             &["plugin", "uninstall", PLUGIN_SELECTION_NAME],

@@ -141,6 +141,8 @@ jobs:
 
       - uses: ./.github/actions/setup-linux-mold
 
+      - uses: ./.github/actions/setup-pnpm
+
       # This is the workflow's only dev-profile build, so `ci-dev-*` has one
       # writer. rust-cache stores dependency artifacts only. The repository
       # cache is capped at 10 GB and was full of per-job copies of the same
@@ -196,10 +198,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
 
-      - name: Install commit message lint dependencies
-        run: npm ci
+      - uses: ./.github/actions/setup-pnpm
 
       - name: Reject tracked ignored files
         run: scripts/check-release-pr-integrity.sh HEAD HEAD
@@ -313,6 +313,8 @@ jobs:
         with:
           node-version: 22
 
+      - uses: ./.github/actions/setup-pnpm
+
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -341,8 +343,8 @@ jobs:
       # (runs 36087768140 and 36095356282), because on three cores the
       # serial workspace chain plus the test targets are the whole path and
       # the dependency units fill the slots beside it. A lineage for them
-      # was tried and removed on that evidence. Restored before the first
-      # `cargo metadata` below so the registry index comes from the cache too.
+      # was tried and removed on that evidence. Crate sources come from the
+      # pnpm store that setup-pnpm restores, not from this cache.
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
@@ -534,6 +536,8 @@ jobs:
         with:
           node-version: 22
 
+      - uses: ./.github/actions/setup-pnpm
+
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -561,9 +565,8 @@ jobs:
       # run, measured in run 36051245663: 4-6 min beside chains that end
       # 4-12 min before `root-transport` does, cheaper than three more cache
       # entries in the 10 GB budget (macOS, where the same recompile is 2.5x
-      # longer and on the lane's critical path, carries one). Restored before
-      # the first `cargo metadata` below so the registry index comes from the
-      # cache too.
+      # longer and on the lane's critical path, carries one). Crate sources
+      # come from the pnpm store that setup-pnpm restores, not from this cache.
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
@@ -687,6 +690,8 @@ jobs:
 
       - uses: ./.github/actions/setup-linux-mold
 
+      - uses: ./.github/actions/setup-pnpm
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
@@ -771,6 +776,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+
+      - uses: ./.github/actions/setup-pnpm
 
       - uses: actions/setup-python@v6
         with:
@@ -893,8 +900,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: dashboard/package-lock.json
+
+      - uses: ./.github/actions/setup-pnpm
 
       - uses: actions/setup-python@v6
         with:
@@ -1039,6 +1046,8 @@ jobs:
 
       - uses: ./.github/actions/setup-linux-mold
 
+      - uses: ./.github/actions/setup-pnpm
+
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
@@ -1083,6 +1092,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: ./.github/actions/setup-linux-mold
+
+      - uses: ./.github/actions/setup-pnpm
 
       - name: Check feature-gated surfaces compile
         run: |
@@ -1129,17 +1140,15 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: dashboard/package-lock.json
+
+      - uses: ./.github/actions/setup-pnpm
 
       # `production` embeds the dashboard, so the bundle has to exist before
       # cargo runs. Handing build.rs the digest of this bundle keeps the build
-      # script from shelling out to npm a second time.
+      # script from building the frontend a second time.
       - name: Build the embedded dashboard bundle
         working-directory: dashboard
-        run: |
-          npm ci
-          npm run build
+        run: pnpm run build
 
       - name: Pin the embedded bundle for the skip-mode build
         shell: bash
@@ -1203,20 +1212,16 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: dashboard/package-lock.json
 
-      - name: Install dashboard dependencies
-        working-directory: dashboard
-        run: npm ci
+      - uses: ./.github/actions/setup-pnpm
 
       - name: Build dashboard assets
         working-directory: dashboard
-        run: npm run build
+        run: pnpm run build
 
       - name: Run dashboard unit tests
         working-directory: dashboard
-        run: npm test
+        run: pnpm test
 
       # The dashboard is one rsbuild app emitting `app-dist/` (the legacy
       # shell/holographic/lcm/graph/savings bundle split no longer exists), so
@@ -1228,7 +1233,7 @@ jobs:
           set -euo pipefail
           python3 ../scripts/check-dashboard-bundle.py app-dist
           (cd app-dist && find . -type f | sort | xargs sha256sum) > /tmp/dashboard-dist.sha
-          npm run build
+          pnpm run build
           (cd app-dist && find . -type f | sort | xargs sha256sum) | diff /tmp/dashboard-dist.sha -
 
   hermes-integration:

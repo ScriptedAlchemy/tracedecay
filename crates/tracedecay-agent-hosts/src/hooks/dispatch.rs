@@ -144,12 +144,15 @@ pub fn publish_daemon_bindings(
         // Publish a binding only after its transport is ready. Otherwise the
         // first live callback initializes the shared host spool while holding
         // its writer lease, and sibling callbacks can exhaust their bounded
-        // admission waits behind that cold filesystem work.
+        // admission waits behind that cold filesystem work. A live callback
+        // already appending to a prepared spool is a legitimate peer writer,
+        // so publication waits the same bounded budget instead of failing.
         drop(
-            tracedecay_hooks::HookSpoolV1::open(
+            tracedecay_hooks::HookSpoolV1::open_within(
                 tracedecay_hooks::hook_v2_spool_root(&layout.data_root, *host),
                 tracedecay_hooks::HookSpoolConfigV1::stock(*host),
                 now,
+                tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
             )
             .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!(
@@ -159,8 +162,9 @@ pub fn publish_daemon_bindings(
             })?,
         );
         drop(
-            tracedecay_hooks::HookDeliveryReceiptSpoolV1::open(
+            tracedecay_hooks::HookDeliveryReceiptSpoolV1::open_within(
                 tracedecay_hooks::hook_delivery_receipt_spool_root(&layout.data_root, *host),
+                tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
             )
             .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!(

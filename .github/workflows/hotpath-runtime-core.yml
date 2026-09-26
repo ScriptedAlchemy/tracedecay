@@ -46,6 +46,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: ./.github/actions/setup-pnpm
+
       - uses: ./.github/actions/setup-linux-mold
 
       - name: Check rust-cache restore lineage

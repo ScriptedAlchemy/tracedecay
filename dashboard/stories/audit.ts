@@ -1,7 +1,7 @@
 /**
  * Visual-audit + accessibility harness.
  *
- * `npm run visual:audit`
+ * `pnpm run visual:audit`
  *   Starts the dashboard (rsbuild dev) with every `/api` call served from the
  *   MSW-backed fixtures (`fixtures/route.ts`), no daemon required, then walks
  *   the code-driven story registry and captures each surface across
@@ -9,7 +9,7 @@
  *   `manifest.json` to `audit-gallery/`. A render check runs per
  *   surface and its violations are recorded in the manifest.
  *
- * `npm run visual:audit -- --diff`
+ * `pnpm run visual:audit -- --diff`
  *   Same capture, then pixelmatch every screenshot against the committed
  *   baseline of the same name in `audit-baselines/`, recording mismatched
  *   pixel counts (and writing diff PNGs) in the manifest.

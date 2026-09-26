@@ -48,6 +48,8 @@ jobs:
         with:
           fetch-depth: 0
 
+      - uses: ./.github/actions/setup-pnpm
+
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Check rust-cache restore lineage

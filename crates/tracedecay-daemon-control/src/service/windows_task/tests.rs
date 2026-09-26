@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use super::*;
+use crate::service::DaemonServiceMemoryLimitsV1;
 
 const TEST_SID: &str = "S-1-5-21-111-222-333-1001";
 
@@ -367,6 +368,7 @@ fn spec(executable: impl Into<PathBuf>, profile_root: impl Into<PathBuf>) -> Dae
         socket_path: PathBuf::from("ignored-by-windows-task"),
         data_dir_override: Some(profile_root.into()),
         remote_tls: None,
+        memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
     }
 }
 

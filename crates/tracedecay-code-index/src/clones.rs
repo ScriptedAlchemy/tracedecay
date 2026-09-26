@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
@@ -373,16 +374,20 @@ fn clone_payload_digests(
 impl CodeIndexCloneBodyV1 {
     pub fn retained_owned_bytes(&self) -> usize {
         fn token_bytes(tokens: &[ConservativeCloneTokenV1]) -> usize {
+            let owned_bytes = |name: &Cow<'static, str>| match name {
+                Cow::Borrowed(_) => 0,
+                Cow::Owned(name) => name.capacity(),
+            };
             tokens
                 .iter()
                 .fold(std::mem::size_of_val(tokens), |bytes, token| match token {
                     ConservativeCloneTokenV1::StructureStart { syntax_kind }
                     | ConservativeCloneTokenV1::StructureEnd { syntax_kind } => {
-                        bytes.saturating_add(syntax_kind.len())
+                        bytes.saturating_add(owned_bytes(syntax_kind))
                     }
                     ConservativeCloneTokenV1::Syntax { syntax_kind, text } => bytes
-                        .saturating_add(syntax_kind.len())
-                        .saturating_add(text.capacity()),
+                        .saturating_add(owned_bytes(syntax_kind))
+                        .saturating_add(owned_bytes(text)),
                 })
         }
         token_bytes(&self.payload.conservative_tokens)
@@ -1228,7 +1233,7 @@ mod payload_digest_tests {
         }];
         tokens.extend(texts.iter().map(|text| ConservativeCloneTokenV1::Syntax {
             syntax_kind: "identifier".into(),
-            text: (*text).to_owned(),
+            text: (*text).to_owned().into(),
         }));
         tokens.push(ConservativeCloneTokenV1::StructureEnd {
             syntax_kind: "block".into(),
@@ -1327,7 +1332,7 @@ mod fingerprint_tests {
         (0..count)
             .map(|ordinal| ConservativeCloneTokenV1::Syntax {
                 syntax_kind: std::borrow::Cow::Borrowed("identifier"),
-                text: format!("{prefix}{ordinal}"),
+                text: format!("{prefix}{ordinal}").into(),
             })
             .collect()
     }
@@ -1397,7 +1402,7 @@ mod fingerprint_tests {
         let mut right = left.clone();
         right[3] = ConservativeCloneTokenV1::Syntax {
             syntax_kind: std::borrow::Cow::Borrowed("identifier"),
-            text: "different".to_owned(),
+            text: "different".into(),
         };
 
         assert!(!verify_clone_token_anchor(&left, 0, &right, 0));
@@ -1453,7 +1458,7 @@ mod fingerprint_tests {
         let mut tokens = colliding.conservative_tokens.to_vec();
         tokens[0] = ConservativeCloneTokenV1::Syntax {
             syntax_kind: std::borrow::Cow::Borrowed("identifier"),
-            text: "colliding-but-different".to_owned(),
+            text: "colliding-but-different".into(),
         };
         colliding.conservative_tokens = tokens.into();
         assert_eq!(
@@ -1470,7 +1475,7 @@ mod fingerprint_tests {
         right.extend(left[10..20].iter().cloned());
         right.push(ConservativeCloneTokenV1::Syntax {
             syntax_kind: std::borrow::Cow::Borrowed("string"),
-            text: "\"changed\"".to_owned(),
+            text: "\"changed\"".into(),
         });
         right.extend(left[21..].iter().cloned());
         let anchors = [
@@ -1509,7 +1514,7 @@ mod fingerprint_tests {
             alignment.differences[1].right_tokens,
             vec![ConservativeCloneTokenV1::Syntax {
                 syntax_kind: std::borrow::Cow::Borrowed("string"),
-                text: "\"changed\"".to_owned(),
+                text: "\"changed\"".into(),
             }]
         );
         assert!(alignment.work > 0);

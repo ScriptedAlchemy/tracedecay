@@ -1478,6 +1478,38 @@ fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
 }
 
 #[test]
+fn doctor_reports_an_unenrolled_project_without_recovery_guidance() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+
+    let output = tracedecay_command_with_home(&home_path)
+        .arg("doctor")
+        .current_dir(&project_path)
+        .output()
+        .expect("doctor should run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not enrolled"),
+        "doctor did not report the project as not enrolled:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("tracedecay init"),
+        "doctor did not name the enroll command:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("daemon closed the connection"),
+        "doctor treated not-enrolled as a closed connection:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("Preserve this recovery set") && !stderr.contains("WAL:"),
+        "doctor printed store-recovery guidance for an unenrolled project:\n{stderr}"
+    );
+}
+
+#[test]
 fn daemon_project_handshake_uses_client_profile_identity() {
     let daemon_home = TempDir::new().unwrap();
     let client_home = TempDir::new().unwrap();

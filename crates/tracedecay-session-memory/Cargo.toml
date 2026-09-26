@@ -41,6 +41,7 @@ tracedecay-global-db = { path = "../tracedecay-global-db" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db" }
 tracedecay-lcm = { path = "../tracedecay-lcm" }
 tracedecay-privacy = { path = "../tracedecay-privacy" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs" }
 tracedecay-query = { path = "../tracedecay-query" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store" }

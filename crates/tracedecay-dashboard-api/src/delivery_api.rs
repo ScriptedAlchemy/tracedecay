@@ -53,6 +53,7 @@ use crate::application::git_reads::{
 };
 use crate::git_query::{GitQueryBounds, GitStatusSummaryV1};
 
+use super::delivery_agent_usage::{DeliveryAgentUsageV1, agent_usage_projection};
 use super::read_model::{
     DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
     DashboardLegalActionKindV1, DashboardLegalActionRefV1, DashboardVersionV1,
@@ -60,7 +61,7 @@ use super::read_model::{
 };
 use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl};
 
-const DELIVERY_SOURCE_COUNT: u64 = 8;
+const DELIVERY_SOURCE_COUNT: u64 = 9;
 const MAX_DELIVERY_INBOX_PROJECTS_V1: usize = 64;
 const MAX_DELIVERY_INBOX_PULL_REQUESTS_V1: usize = 64;
 const DELIVERY_AUTHORITY: &str = "daemon-owned ProjectDeliveryReadPortV1 authority";
@@ -109,7 +110,7 @@ impl<T> DeliveryProjectionV1<T> {
         Self::Ready { value }
     }
 
-    fn unavailable(authority: impl Into<String>, reason: impl Into<String>) -> Self {
+    pub(super) fn unavailable(authority: impl Into<String>, reason: impl Into<String>) -> Self {
         Self::Unavailable {
             required_authority: authority.into(),
             reason: reason.into(),
@@ -591,6 +592,7 @@ pub struct DeliveryOverviewV1 {
     pub failure_localization: DeliveryProjectionV1<DeliveryFailureLocalizationTimelineV1>,
     pub releases: DeliveryProjectionV1<DeliveryReleaseTimelineV1>,
     pub generation_freshness: DeliveryProjectionV1<DeliveryGenerationFreshnessV1>,
+    pub agent_usage: DeliveryProjectionV1<DeliveryAgentUsageV1>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
@@ -896,6 +898,7 @@ pub async fn overview(
     };
     let delivery_denied = matches!(&delivery, ProjectDeliveryReadOutcomeV1::Denied);
     let projections = delivery_projections(delivery);
+    let agent_usage = agent_usage_projection(&state, &changes).await;
     let payload = DeliveryOverviewV1 {
         changes,
         commits,
@@ -905,6 +908,7 @@ pub async fn overview(
         failure_localization: projections.failure_localization,
         releases: projections.releases,
         generation_freshness,
+        agent_usage,
     };
 
     let scope = scope_from_state(&state);
@@ -920,6 +924,7 @@ pub async fn overview(
             ("failure localization", &payload.failure_localization),
             ("releases", &payload.releases),
             ("generation freshness", &payload.generation_freshness),
+            ("agent usage", &payload.agent_usage),
         ];
         let (coverage, domain_state, freshness) = delivery_envelope_axes(&sources);
         DashboardEnvelopeV1::new(scope, domain_state, coverage, freshness, payload)
@@ -2449,7 +2454,8 @@ mod tests {
             ("five", &ready),
             ("six", &ready),
             ("seven", &ready),
-            ("eight", &stale),
+            ("eight", &ready),
+            ("nine", &stale),
         ];
 
         let (coverage, domain_state, freshness) = delivery_envelope_axes(&sources);

@@ -79,8 +79,7 @@ impl CodeIndexSchedulerRegistryV1 {
             );
             return Some(epoch.load(Ordering::Acquire));
         }
-        if pending_wake.has_pending_arrival() || reconcile_in_progress.load(Ordering::Acquire) != 0
-        {
+        if pending_wake.has_pending_arrival() || reconcile_in_progress.running() {
             return Some(epoch.load(Ordering::Acquire));
         }
         tokio::task::spawn_blocking(move || {
@@ -319,11 +318,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 progress
             });
-            let refresh_in_flight = reconcile_in_progress.load(Ordering::Acquire) != 0
-                || pending_wake
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            let refresh_in_flight = reconcile_in_progress.running()
+                || pending_wake.lock()
                     .micros
                     != 0;
             let source_change_pending = source_freshness.source_change_pending();
@@ -377,8 +373,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     );
                     let clone_update = text.as_ref().and_then(|text| {
                         cadence_telemetry
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .borrow()
                             .latest_clone_update(
                                 &canonical_root,
                                 &text.metadata().manifest().generation_id,
@@ -452,8 +447,7 @@ impl CodeIndexSchedulerRegistryV1 {
             );
             let clone_update = text.as_ref().and_then(|text| {
                 cadence_telemetry
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .borrow()
                     .latest_clone_update(
                         &canonical_root,
                         &text.metadata().manifest().generation_id,
@@ -645,13 +639,7 @@ impl CodeIndexSchedulerRegistryV1 {
             // Cold open has no servable generation. Verification and any
             // rebuild stay with the retained owner; reads only request the
             // wake and return typed unavailable/unverified.
-            if pending_wake
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .micros
-                == 0
-            {
+            if pending_wake.lock().micros == 0 {
                 // A cold read carries no source-change evidence. Preserve any
                 // snapshot the retained owner is already reconstructing and
                 // keep one follow-up authoritative scan pending instead.
@@ -929,7 +917,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .is_some_and(|witness| {
                 witness.generation_id == serving.generation().manifest().generation_id
             });
-        let wake_trigger = if reconcile_in_progress.load(Ordering::Acquire) == 0 {
+        let wake_trigger = if !reconcile_in_progress.running() {
             CodeIndexCadenceTriggerV1::QueryAdmission
         } else {
             CodeIndexCadenceTriggerV1::BusyFollowUp
@@ -1313,7 +1301,7 @@ impl CodeIndexSchedulerRegistryV1 {
             // event-to-ready latency measures the busy window, not the query
             // ladder's. Reporting both as `QueryAdmission` buried an unrelated
             // pass inside the query-admission cadence sample.
-            let trigger = if reconcile_in_progress.load(Ordering::Acquire) == 0 {
+            let trigger = if !reconcile_in_progress.running() {
                 CodeIndexCadenceTriggerV1::QueryAdmission
             } else {
                 CodeIndexCadenceTriggerV1::BusyFollowUp
@@ -1402,14 +1390,8 @@ impl CodeIndexSchedulerRegistryV1 {
         {
             return false;
         }
-        let refresh_in_flight = worktree.reconcile_in_progress.load(Ordering::Acquire) != 0
-            || worktree
-                .pending_wake
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .micros
-                != 0;
+        let refresh_in_flight =
+            worktree.reconcile_in_progress.running() || worktree.pending_wake.lock().micros != 0;
         refresh_in_flight && worktree.source_freshness.source_change_pending()
     }
 
@@ -1428,14 +1410,8 @@ impl CodeIndexSchedulerRegistryV1 {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_none()
-            && (worktree.reconcile_in_progress.load(Ordering::Acquire) != 0
-                || worktree
-                    .pending_wake
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .micros
-                    != 0)
+            && (worktree.reconcile_in_progress.running()
+                || worktree.pending_wake.lock().micros != 0)
     }
 
     /// Ask the background worker for a reconcile on behalf of a query admission

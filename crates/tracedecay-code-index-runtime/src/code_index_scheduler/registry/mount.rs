@@ -29,14 +29,17 @@ use super::super::{
 use super::{
     ACTIVATION_RETRY_BACKOFF_CEILING, ACTIVATION_RETRY_BACKOFF_FLOOR,
     CONVERGENCE_PARK_CONTRACT_REMEDIATION_V1,
+    CONVERGENCE_PARK_GRAPH_RESIDENT_MEMORY_REMEDIATION_V1,
     CONVERGENCE_PARK_PUBLICATION_CORRUPTION_REMEDIATION_V1,
     CONVERGENCE_PARK_PUBLICATION_RESET_FAILED_REMEDIATION_V1,
+    CONVERGENCE_PARK_RECONCILE_FAILURE_REMEDIATION_V1,
     CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1, CodeIndexSchedulerRegistryV1,
     ColdMountAdmissionV1, GraphActivationGateV1, GraphSeatGateV1, MountedCodeIndexWorktreeV1,
     PendingWakeV1, PublishedTextProjectionOutcomeV1, ServingGenerationSlot, ServingSwapOutcomeV1,
     TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1, clear_convergence_park,
-    convergence_park_retries_on_wake, is_repeated_conflict_verdict, park_convergence,
-    publication_authority_is_terminal, retained_noop_requires_follow_up_wake,
+    clear_graph_resident_memory_park, convergence_park_retries_on_wake,
+    is_repeated_conflict_verdict, park_convergence, publication_authority_is_terminal,
+    retained_noop_requires_follow_up_wake,
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
@@ -340,6 +343,10 @@ impl CodeIndexSchedulerRegistryV1 {
         let build_publication_lock = Arc::new(tokio::sync::Mutex::new(()));
         let ignored_dependency_admissions = Arc::new(Mutex::new(BTreeMap::new()));
         let pending_wake = Arc::new(PendingWakeV1::default());
+        let worker_phase = Arc::new(tokio::sync::watch::Sender::new(
+            super::CodeIndexWorkerPhaseV1::default(),
+        ));
+        let worker_phase_signal = Arc::clone(&worker_phase);
         let index_observability = Arc::new(OnceLock::<
             super::super::observability::CodeIndexObservabilityV1,
         >::new());
@@ -493,11 +500,22 @@ impl CodeIndexSchedulerRegistryV1 {
             // seat reads and owes the worker no successor pass.
             let mut retained_projection_successor_only = false;
             loop {
-                hotpath::future!(
-                    worker_wake.notified(),
-                    label = "daemon.code_index.wake_wait"
-                )
-                .await;
+                let notified = worker_wake.notified();
+                tokio::pin!(notified);
+                // Parked only while registered with no banked permit: a
+                // banked permit resolves the wait at once, so the worker was
+                // never idle.
+                if !notified.as_mut().enable() {
+                    super::CodeIndexWorkerPhaseV1::enter(
+                        &worker_phase_signal,
+                        super::CodeIndexWorkerPhaseV1::Parked,
+                    );
+                }
+                hotpath::future!(notified, label = "daemon.code_index.wake_wait").await;
+                super::CodeIndexWorkerPhaseV1::enter(
+                    &worker_phase_signal,
+                    super::CodeIndexWorkerPhaseV1::Working,
+                );
                 if worker_shutting_down.load(Ordering::Acquire) {
                     tracing::info!(
                         event = "code_index_worker_shutdown_observed",
@@ -531,21 +549,23 @@ impl CodeIndexSchedulerRegistryV1 {
                 // needs. It deliberately does not attribute the span to the
                 // SQL writer alone.
                 let pass_wake_observed_at = Instant::now();
-                // A quarantined or backing-off panic unit must not consume the
+                let pass_control_epoch = worker_control_epoch.load(Ordering::Acquire);
+                // A quarantined or backing-off unit must not consume the
                 // pending arrival: the wake stays outstanding so a later
                 // eligible pass still measures its full queue wait.
-                if panic_guard.suppresses_pass(
-                    tokio::time::Instant::now(),
-                    worker_control_epoch.load(Ordering::Acquire),
-                ) {
+                if panic_guard.suppresses_pass(tokio::time::Instant::now(), pass_control_epoch) {
                     tracing::debug!(
                         event = "code_index_reconcile_panic_suppressed",
                         path = "background_worker",
                         consecutive_panics = panic_guard.consecutive_panics(),
-                        "code-index reconcile is suppressed after repeated panics over unchanged input"
+                        "code-index reconcile is suppressed over unchanged input after a panic or a reproducing failure"
                     );
                     continue;
                 }
+                super::CodeIndexWorkerPhaseV1::enter(
+                    &worker_phase_signal,
+                    super::CodeIndexWorkerPhaseV1::AwaitingAdmission,
+                );
                 let Ok(_background_reconcile_admission) = hotpath::future!(
                     Arc::clone(&worker_background_reconcile_admission).acquire_owned(),
                     label = "daemon.code_index.admission_wait"
@@ -570,6 +590,10 @@ impl CodeIndexSchedulerRegistryV1 {
                     .await;
                     return;
                 }
+                super::CodeIndexWorkerPhaseV1::enter(
+                    &worker_phase_signal,
+                    super::CodeIndexWorkerPhaseV1::AwaitingPublicationGate,
+                );
                 let mut build_publication =
                     std::pin::pin!(Arc::clone(&worker_build_publication_lock).lock_owned());
                 let _build_publication = loop {
@@ -591,6 +615,10 @@ impl CodeIndexSchedulerRegistryV1 {
                         }
                     }
                 };
+                super::CodeIndexWorkerPhaseV1::enter(
+                    &worker_phase_signal,
+                    super::CodeIndexWorkerPhaseV1::Working,
+                );
                 let wake_to_gates_held_micros =
                     u64::try_from(pass_wake_observed_at.elapsed().as_micros()).unwrap_or(u64::MAX);
                 let scheduler = Arc::clone(&worker_scheduler);
@@ -1780,11 +1808,24 @@ impl CodeIndexSchedulerRegistryV1 {
                             next_seat_attempt_at = None;
                             seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
                             last_seat_conflict = None;
+                            clear_graph_resident_memory_park(&worker_convergence_park);
                         }
                         Err(error) if error.is_graph_activation_refusal() => {
                             next_seat_attempt_at = None;
                             seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
                             last_seat_conflict = None;
+                            // This generation never re-attempts its graph in
+                            // this daemon, so an unparked refusal read as an
+                            // indefinite `indexing` with no way forward.
+                            if error.is_resident_memory_graph_refusal() {
+                                park_convergence(
+                                    &worker_convergence_park,
+                                    error.to_string(),
+                                    CONVERGENCE_PARK_GRAPH_RESIDENT_MEMORY_REMEDIATION_V1,
+                                    Some(CodeIndexBuildBlockedReasonV1::ResidentMemory),
+                                    false,
+                                );
+                            }
                             tracing::warn!(
                                 event = "code_index_graph_activation_refused",
                                 error = %error,
@@ -2408,6 +2449,22 @@ impl CodeIndexSchedulerRegistryV1 {
                                         "code-index reconcile stopped retrying a capacity refusal; the next hint retries"
                                     ),
                                 }
+                            } else if error.reproduces_on_unchanged_input() {
+                                // The restored arrival alone read as an
+                                // indefinite `indexing` while every wake
+                                // rebuilt the whole worktree into the same
+                                // refusal. Park it typed and hold passes
+                                // until the input changes; a daemon restart
+                                // remounts with an empty park and retries.
+                                capacity_retry.record_progress();
+                                panic_guard.quarantine_unchanged_input(pass_control_epoch);
+                                park_convergence(
+                                    &worker_convergence_park,
+                                    error.to_string(),
+                                    CONVERGENCE_PARK_RECONCILE_FAILURE_REMEDIATION_V1,
+                                    None,
+                                    false,
+                                );
                             } else {
                                 capacity_retry.record_progress();
                             }
@@ -2633,6 +2690,7 @@ impl CodeIndexSchedulerRegistryV1 {
             index_observability,
             shutting_down,
             reconcile_in_progress,
+            worker_phase,
             _active_generation_encoded_bytes: active_generation_encoded_bytes,
             task,
         });

@@ -7,6 +7,7 @@
 //! upgraded to proof of execution or correctness.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -149,7 +150,10 @@ pub enum GenerationTestJoinDispositionV1 {
 pub struct GenerationTestJoinRecordV1 {
     pub attribution: GenerationTestAttributionV1,
     pub test_occurrence: Option<TestAttributionOccurrenceV1>,
-    pub covered_occurrences: Vec<TestAttributionOccurrenceV1>,
+    /// Shared with every other record covering the same occurrence: a test
+    /// covers its whole transitive closure, so owning each occurrence per
+    /// record made the join quadratic in resident strings.
+    pub covered_occurrences: Vec<Arc<TestAttributionOccurrenceV1>>,
     pub disposition: GenerationTestJoinDispositionV1,
 }
 
@@ -212,13 +216,18 @@ impl GenerationTestJoinV1 {
                 }]
             }
         };
+        let shared_occurrences: BTreeMap<&SymbolOccurrenceId, Arc<TestAttributionOccurrenceV1>> =
+            occurrence_by_id
+                .iter()
+                .map(|(id, occurrence)| (*id, Arc::new((*occurrence).clone())))
+                .collect();
         let mut records = Vec::with_capacity(attributions.len());
         for attribution in attributions {
             let test_occurrence = occurrence_by_id.get(&attribution.test_occurrence).copied();
-            let covered_occurrences: Vec<TestAttributionOccurrenceV1> = attribution
+            let covered_occurrences = attribution
                 .covered_occurrences
                 .iter()
-                .filter_map(|occurrence| occurrence_by_id.get(occurrence).copied().cloned())
+                .filter_map(|occurrence| shared_occurrences.get(occurrence).map(Arc::clone))
                 .collect();
             let disposition = disposition_for(
                 generation,

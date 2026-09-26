@@ -12,8 +12,10 @@ use std::time::Duration;
 use tracedecay_domain::NativeHostIdentityV1;
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
+use tracedecay_hooks::delivery_spool::HookDeliverySpoolError;
 use tracedecay_hooks::{
-    HookReplayAdmissionOutcomeV1, HookReplayPassReportV1, HookSpoolConfigV1, HookSpoolV1,
+    HookDeliveryReceiptSpoolV1, HookReplayAdmissionOutcomeV1, HookReplayPassReportV1,
+    HookSpoolConfigV1, HookSpoolError, HookSpoolV1,
     admit_replayed_envelope_with_authoritative_session, drain_host_spool_once, hook_v2_spool_root,
     published_hook_scope_binding,
 };
@@ -49,12 +51,15 @@ async fn drain_hook_delivery_receipts(
     if !root.is_dir() {
         return;
     }
-    let Ok(spool) = tracedecay_hooks::HookDeliveryReceiptSpoolV1::open(&root) else {
+    let Some(spool) = open_delivery_receipt_spool_for_drain(&root, host) else {
         return;
     };
-    let Ok(receipts) = spool.pending(usize::from(tracedecay_hooks::MAX_REPLAY_BATCH_RECORDS))
-    else {
-        return;
+    let receipts = match spool.pending(usize::from(tracedecay_hooks::MAX_REPLAY_BATCH_RECORDS)) {
+        Ok(receipts) => receipts,
+        Err(error) => {
+            tracing::warn!(host = host.hook_key(), %error, "hook delivery receipt drain could not read pending receipts");
+            return;
+        }
     };
     drop(spool);
 
@@ -83,11 +88,30 @@ async fn drain_hook_delivery_receipts(
     if settled.is_empty() {
         return;
     }
-    let Ok(spool) = tracedecay_hooks::HookDeliveryReceiptSpoolV1::open(root) else {
+    let Some(spool) = open_delivery_receipt_spool_for_drain(&root, host) else {
         return;
     };
     for receipt_id in settled {
-        let _ = spool.acknowledge(receipt_id);
+        if let Err(error) = spool.acknowledge(receipt_id) {
+            tracing::warn!(host = host.hook_key(), %error, "hook delivery receipt drain could not acknowledge a settled receipt");
+        }
+    }
+}
+
+/// The drain shares each delivery spool with hook callbacks, which legitimately
+/// write it while the daemon is down. A held writer lease is skipped and
+/// retried by the next sweep; any other failure is reported, not swallowed.
+fn open_delivery_receipt_spool_for_drain(
+    root: &Path,
+    host: NativeHostIdentityV1,
+) -> Option<HookDeliveryReceiptSpoolV1> {
+    match HookDeliveryReceiptSpoolV1::open(root) {
+        Ok(spool) => Some(spool),
+        Err(HookDeliverySpoolError::Busy) => None,
+        Err(error) => {
+            tracing::warn!(host = host.hook_key(), %error, "hook delivery receipt drain could not open the spool");
+            None
+        }
     }
 }
 
@@ -203,7 +227,16 @@ async fn drain_admitted_host_spool(
     if !HookSpoolV1::has_durable_records(&root).ok()? {
         return None;
     }
-    let (spool, _report) = HookSpoolV1::open(root, HookSpoolConfigV1::stock(host), now).ok()?;
+    // A hook callback holding the writer lease is retried by the next sweep;
+    // any other failure is reported, not swallowed.
+    let spool = match HookSpoolV1::open(root, HookSpoolConfigV1::stock(host), now) {
+        Ok((spool, _report)) => spool,
+        Err(HookSpoolError::WriterLeaseHeld) => return None,
+        Err(error) => {
+            tracing::warn!(host = host.hook_key(), %error, "hook spool replay could not open the spool");
+            return None;
+        }
+    };
     let binding = published_hook_scope_binding(data_root, worktree_id, host, now);
     Some(
         Box::pin(drain_host_spool_once(
