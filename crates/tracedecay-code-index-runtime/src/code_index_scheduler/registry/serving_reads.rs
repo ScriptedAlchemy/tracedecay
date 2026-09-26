@@ -716,6 +716,7 @@ impl CodeIndexSchedulerRegistryV1 {
             graph_enabled,
             wake,
             pending_wake,
+            memory_retry,
         ) = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&project_root)?;
@@ -739,6 +740,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree.graph_activation.policy().is_enabled(),
                 Arc::clone(&worktree.wake),
                 Arc::clone(&worktree.pending_wake),
+                Arc::clone(&worktree.memory_retry),
             )
         };
         let freshness_root = project_root.clone();
@@ -777,7 +779,12 @@ impl CodeIndexSchedulerRegistryV1 {
         })
         .await
         .ok()?;
-        if request_reconcile && admission == GenerationDecodeAdmissionV1::AwaitDecode {
+        // Parked on resident memory, a reader's pass would only repeat the
+        // refusal; memory given back or the retry delay wakes the worker.
+        if request_reconcile
+            && admission == GenerationDecodeAdmissionV1::AwaitDecode
+            && !memory_retry.waiting()
+        {
             Self::note_wake_if_idle(
                 &pending_wake,
                 &wake,

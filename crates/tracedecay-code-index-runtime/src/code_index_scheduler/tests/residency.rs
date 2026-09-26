@@ -385,3 +385,52 @@ async fn a_text_build_sheds_retained_state_before_it_refuses() {
 
     registry.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readers_of_a_build_waiting_for_memory_do_not_spin_the_worker() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let (registry, blocker, mut receipts) =
+        mount_with_refused_text_build(&fixture, &store, &owners).await;
+
+    // The first complete-generation demand is new work and wakes one pass,
+    // which finds the build still waiting for memory.
+    assert!(
+        registry
+            .latest_complete_ready(fixture.path())
+            .await
+            .is_none()
+    );
+    assert_eq!(
+        next_receipt_trigger(&mut receipts).await,
+        CodeIndexCadenceTriggerV1::QueryAdmission
+    );
+    wait_for_worker_phase(&registry, fixture.path(), CodeIndexWorkerPhaseV1::Parked).await;
+    receipts.borrow_and_update();
+    for _ in 0..20 {
+        assert!(
+            registry
+                .latest_complete_ready(fixture.path())
+                .await
+                .is_none(),
+            "no complete generation serves while its text build waits for memory"
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !receipts.has_changed().unwrap(),
+        "a reader's wake cannot help a build parked on memory, so no pass runs"
+    );
+
+    drop(blocker);
+    owners.note_headroom();
+    assert_eq!(
+        next_receipt_trigger(&mut receipts).await,
+        CodeIndexCadenceTriggerV1::MemoryHeadroom
+    );
+    let text = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+    assert!(text.query_owners_are_ready());
+
+    registry.shutdown().await;
+}

@@ -373,7 +373,8 @@ impl CodeIndexSchedulerRegistryV1 {
         // are no longer the bytes it is being asked to index.
         let worker_control_epoch = Arc::clone(&epoch);
         let worker_pending_wake = Arc::clone(&pending_wake);
-        let worker_memory_retry = super::MemoryRefusalRetryV1::default();
+        let memory_retry = Arc::new(super::MemoryRefusalRetryV1::default());
+        let worker_memory_retry = Arc::clone(&memory_retry);
         let worker_cadence_telemetry = Arc::clone(&self.cadence_telemetry);
         let worker_shutting_down = Arc::clone(&shutting_down);
         let worker_build_publication_lock = Arc::clone(&build_publication_lock);
@@ -970,15 +971,20 @@ impl CodeIndexSchedulerRegistryV1 {
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone();
-                // Memory given back is the retry for a graph refused at the
-                // watermark: its generation activates again on this pass.
-                if matches!(
+                let memory_pass = matches!(
                     trigger,
                     CodeIndexCadenceTriggerV1::MemoryHeadroom
                         | CodeIndexCadenceTriggerV1::MemoryRetry
-                ) && retained_text
-                    .as_ref()
-                    .is_some_and(LatestCodeTextGenerationV1::retry_resident_memory_graph_refusal)
+                );
+                if memory_pass {
+                    worker_memory_retry.retrying();
+                }
+                // Memory given back is the retry for a graph refused at the
+                // watermark: its generation activates again on this pass.
+                if memory_pass
+                    && retained_text.as_ref().is_some_and(
+                        LatestCodeTextGenerationV1::retry_resident_memory_graph_refusal,
+                    )
                 {
                     graph_seat_attempted = None;
                     tracing::info!(
@@ -2786,6 +2792,7 @@ impl CodeIndexSchedulerRegistryV1 {
             serving_generation,
             complete_generation_requested,
             complete_generation_requested_changed,
+            memory_retry,
             source_freshness,
             last_reconciled_at_micros,
             text_generation,
