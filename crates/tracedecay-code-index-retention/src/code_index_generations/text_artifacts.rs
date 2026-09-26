@@ -523,15 +523,18 @@ pub(super) fn staging_text_artifact_source_digest(file_name: &str) -> Option<&st
 /// The sidecar files a staging database leaves beside itself: SQLite's
 /// (`.staging-journal`, `.staging-wal`, `.staging-shm`) and the builder's
 /// compacted rewrite before it replaces the staging file
-/// (`.staging-compacting`). They carry the same source-generation digest as
-/// their staging file and share its liveness.
+/// (`.staging-compacting`), and the rollback journal SQLite keeps beside that
+/// rewrite while `VACUUM INTO` writes it (`.staging-compacting-journal`, which
+/// a kill mid-rewrite leaves behind). They carry the same source-generation
+/// digest as their staging file and share its liveness.
 pub(super) fn staging_sidecar_text_artifact_source_digest(file_name: &str) -> Option<&str> {
     let value = file_name.strip_prefix(".text-artifact-")?;
     let digest = value
         .strip_suffix(".staging-journal")
         .or_else(|| value.strip_suffix(".staging-wal"))
         .or_else(|| value.strip_suffix(".staging-shm"))
-        .or_else(|| value.strip_suffix(".staging-compacting"))?;
+        .or_else(|| value.strip_suffix(".staging-compacting"))
+        .or_else(|| value.strip_suffix(".staging-compacting-journal"))?;
     is_lowercase_hex(digest, 64).then_some(digest)
 }
 
