@@ -183,6 +183,7 @@ pub fn evidence<T>(payload: T) -> RetrievalEvidence<T> {
         finished_at: UtcMicros(3),
         budget: Default::default(),
         cancellation: None,
+        cost: None,
     }
 }
 

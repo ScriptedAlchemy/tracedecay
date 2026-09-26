@@ -147,6 +147,7 @@ fn completed_with_coverage<T>(
         finished_at,
         budget: OperationBudgetUsage::default(),
         cancellation: None,
+        cost: None,
     })
 }
 
@@ -191,6 +192,7 @@ fn failed<T>(domain: EvidenceDomain, finished_at: UtcMicros) -> RetrievalPortOut
         finished_at,
         budget: OperationBudgetUsage::default(),
         cancellation: None,
+        cost: None,
     })
 }
 
@@ -254,6 +256,7 @@ fn omitted_evidence<T>(
         finished_at,
         budget: OperationBudgetUsage::default(),
         cancellation: None,
+        cost: None,
     }
 }
 
@@ -340,6 +343,7 @@ fn diagnostics_result(
         finished_at,
         budget: OperationBudgetUsage::default(),
         cancellation: None,
+        cost: None,
     };
     RetrievalPortOutcome::Completed(evidence)
 }

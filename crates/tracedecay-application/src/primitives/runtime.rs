@@ -1259,6 +1259,7 @@ fn erase_retrieval_evidence<T: Serialize>(
         finished_at: evidence.finished_at,
         budget: evidence.budget,
         cancellation: evidence.cancellation,
+        cost: None,
     })
 }
 

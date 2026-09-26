@@ -15,6 +15,7 @@ mod projection;
 mod projection_identity_index;
 mod projection_read;
 mod publication;
+mod read_meter;
 mod recovery;
 mod registry;
 mod runtime;
@@ -77,6 +78,7 @@ pub use publication::{
 pub(crate) use publication::{
     GraphPublication, GraphPublicationDigest, GraphPublicationInputDigest, GraphPublicationReceipt,
 };
+pub use read_meter::{GraphReadCost, GraphReadMeter};
 pub use recovery::VerifiedGraphCommit;
 pub use registry::{
     CODE_GRAPH_SHARD_NAMESPACE_PREFIX, code_graph_shard_namespace, is_code_graph_shard_namespace,

@@ -20,6 +20,7 @@ pub struct DaemonFeedbackInvocationResult {
     pub(crate) scope: ResolvedScope,
     pub(crate) evidence: EvidencePacket<serde_json::Value>,
     pub(crate) touched_files: Vec<String>,
+    pub(crate) cost: Option<tracedecay_contracts::RequestCostReceiptV1>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -296,6 +297,7 @@ fn feedback_invocation_result_with<T>(
             payload,
         },
         touched_files: application.touched_files,
+        cost: application.cost,
     })
 }
 
@@ -374,7 +376,8 @@ pub(super) async fn execute_feedback(
                 DaemonInvocationOutcome::Feedback {
                     scope: result.scope,
                     result: DaemonFeedbackResult::from_application(result.evidence)
-                        .with_touched_files(result.touched_files),
+                        .with_touched_files(result.touched_files)
+                        .with_cost(result.cost),
                 },
             )
         }
@@ -609,6 +612,7 @@ pub fn advisory_cycle_invocation_result(
             payload,
         },
         touched_files: Vec::new(),
+        cost: None,
     })
 }
 
@@ -743,6 +747,7 @@ pub fn feedback_proximity_invocation_result(
             payload: Some(payload),
         },
         touched_files: Vec::new(),
+        cost: None,
     })
 }
 
@@ -831,7 +836,8 @@ pub(super) async fn execute_feedback_advisory_cycle(
                 DaemonInvocationOutcome::Feedback {
                     scope: result.scope,
                     result: DaemonFeedbackResult::from_application(result.evidence)
-                        .with_touched_files(result.touched_files),
+                        .with_touched_files(result.touched_files)
+                        .with_cost(result.cost),
                 },
             )
         }
@@ -881,7 +887,8 @@ pub(super) async fn execute_feedback_proximity(
                 DaemonInvocationOutcome::Feedback {
                     scope: result.scope,
                     result: DaemonFeedbackResult::from_application(result.evidence)
-                        .with_touched_files(result.touched_files),
+                        .with_touched_files(result.touched_files)
+                        .with_cost(result.cost),
                 },
             )
         }

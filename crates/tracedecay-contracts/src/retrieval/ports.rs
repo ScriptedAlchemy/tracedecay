@@ -44,6 +44,20 @@ impl<T> RetrievalPortOutcome<T> {
             | Self::Unavailable(evidence) => evidence,
         }
     }
+
+    /// This outcome with `cost` recorded on its evidence.
+    #[must_use]
+    pub fn with_cost(mut self, cost: crate::RequestCostReceiptV1) -> Self {
+        match &mut self {
+            Self::Completed(evidence)
+            | Self::Partial(evidence)
+            | Self::Cancelled(evidence)
+            | Self::TimedOut(evidence)
+            | Self::Failed(evidence)
+            | Self::Unavailable(evidence) => evidence.cost = Some(cost),
+        }
+        self
+    }
 }
 
 pub trait SourceRetrievalPort {

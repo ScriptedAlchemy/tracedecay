@@ -39,8 +39,9 @@ pub use self::interactive::{
     CodeGraphCensusV1, CodeGraphDegreeRankingV1, CodeGraphEdgeKindCountsV1,
     CodeGraphFileSymbolCountV1, CodeGraphImpactBatchV1, CodeGraphImpactedSymbolV1,
     CodeGraphInteractiveReader, CodeGraphPathSearchV1, CodeGraphRankedSymbolV1,
-    CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1,
-    CodeGraphSymbolPredicate, CodeGraphSymbolSearchPageV1, CodeGraphSymbolSummaryV1,
+    CodeGraphReadCostMeter, CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1,
+    CodeGraphSymbolPageV1, CodeGraphSymbolPredicate, CodeGraphSymbolSearchPageV1,
+    CodeGraphSymbolSummaryV1,
 };
 use self::schema::{
     SYMBOL_LABEL, SYMBOL_RECORD_PROPERTY, deserialize_property, has_label, record_property,

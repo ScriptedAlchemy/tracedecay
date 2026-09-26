@@ -151,7 +151,8 @@ pub(super) async fn execute_primitive(
             DaemonInvocationOutcome::Primitive {
                 scope: result.scope,
                 result: DaemonFeedbackResult::from_application(result.evidence)
-                    .with_touched_files(result.touched_files),
+                    .with_touched_files(result.touched_files)
+                    .with_cost(result.cost),
             },
         ),
         Err(problem) => application_problem(wire_request_id, problem),
@@ -460,7 +461,8 @@ fn callable_code_response<T: Serialize>(
             DaemonInvocationOutcome::CallableCode {
                 scope: result.scope,
                 result: DaemonFeedbackResult::from_application(result.evidence)
-                    .with_touched_files(result.touched_files),
+                    .with_touched_files(result.touched_files)
+                    .with_cost(result.cost),
             },
         ),
         Ok(_) => concealed_application_problem(wire_request_id),

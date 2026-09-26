@@ -371,3 +371,115 @@ async fn test_map_refuses_when_the_test_is_beyond_depth_three() {
     );
     fixture.harness.shutdown().await;
 }
+
+const SHARED_RS: &str = "\
+pub fn fan_alpha() -> i32 { 1 }\n\
+\n\
+pub fn fan_beta() -> i32 { 2 }\n\
+\n\
+pub fn fan_gamma() -> i32 { 3 }\n\
+";
+
+/// Four tests, each calling all three shared functions.
+const FAN_IN_RS: &str = "\
+use fan_in_probe::shared::{fan_alpha, fan_beta, fan_gamma};\n\
+\n\
+#[test]\n\
+fn first() { fan_alpha(); fan_beta(); fan_gamma(); }\n\
+\n\
+#[test]\n\
+fn second() { fan_alpha(); fan_beta(); fan_gamma(); }\n\
+\n\
+#[test]\n\
+fn third() { fan_alpha(); fan_beta(); fan_gamma(); }\n\
+\n\
+#[test]\n\
+fn fourth() { fan_alpha(); fan_beta(); fan_gamma(); }\n\
+";
+
+fn write_fan_in_probe(project: &Path) {
+    std::fs::create_dir_all(project.join("src")).expect("probe src");
+    std::fs::create_dir_all(project.join("tests")).expect("probe tests");
+    std::fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"fan_in_probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .expect("probe manifest");
+    std::fs::write(project.join("src/lib.rs"), "pub mod shared;\n").expect("probe lib");
+    std::fs::write(project.join("src/shared.rs"), SHARED_RS).expect("probe shared");
+    std::fs::write(project.join("tests/fan_in.rs"), FAN_IN_RS).expect("probe tests");
+}
+
+/// `(graph point reads, adjacency queries, adjacency rows)` from the call's
+/// `tracedecay_cost` trailer.
+fn read_cost(response: &JsonRpcResponse) -> (u64, u64, u64) {
+    let result = response
+        .result
+        .as_ref()
+        .expect("successful tools/call result");
+    let trailer = result["content"]
+        .as_array()
+        .expect("content blocks")
+        .iter()
+        .filter_map(|block| block["text"].as_str())
+        .find_map(|text| text.strip_prefix("\ntracedecay_cost: "))
+        .unwrap_or_else(|| panic!("no cost trailer: {result}"));
+    let field = |name: &str| -> u64 {
+        trailer
+            .split(' ')
+            .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("{name} missing from {trailer:?}"))
+    };
+    (
+        field("graph_sealed_reads") + field("graph_staging_reads"),
+        field("adjacency_queries"),
+        field("adjacency_rows"),
+    )
+}
+
+/// Mapping M tests over N symbols reads each reached symbol once, however
+/// many sources a test covers: the caller walk is batched across the file's
+/// symbols, and each fan-out row costs exactly one edge read, so point reads
+/// beyond the rows are symbol reads. Walking each source separately reads
+/// every test once per source it calls.
+#[tokio::test]
+async fn test_map_reads_each_test_once_across_the_symbols_it_covers() {
+    let fixture = production_composition_fixture_with_sources(write_fan_in_probe).await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production MCP server");
+    wait_for_current_graph(&server).await;
+
+    let response = call_test_map(&fixture, json!({"file": "src/shared.rs"})).await;
+    let mapped = success_payload(&response);
+    assert_eq!(mapped["covered_symbols"], 3, "{mapped}");
+    assert_eq!(
+        mapped["coverage"]
+            .as_array()
+            .expect("coverage rows")
+            .iter()
+            .map(|row| row["tests"].as_array().map_or(0, Vec::len))
+            .collect::<Vec<_>>(),
+        [4, 4, 4],
+        "{mapped}"
+    );
+    // Three batched fan-outs: callers of the three sources (twelve call
+    // rows), callers of the four tests (their four `#[test]` annotations),
+    // and the annotation check over all seven reached symbols (those sixteen
+    // rows again). The eight symbol reads are the four tests and their four
+    // markers, once each; a walk per source would read each test three times.
+    let (point_reads, adjacency_queries, adjacency_rows) = read_cost(&response);
+    assert_eq!(
+        (
+            point_reads - adjacency_rows,
+            adjacency_queries,
+            adjacency_rows
+        ),
+        (8, 3, 32),
+        "each reached symbol is read once"
+    );
+
+    fixture.harness.shutdown().await;
+}

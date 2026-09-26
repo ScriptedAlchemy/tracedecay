@@ -125,6 +125,10 @@ pub struct ApplicationEnvelope<T> {
     pub code_graph: Option<crate::retrieval::ServedCodeGraphGenerationV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub analytics: Option<super::InvocationAnalyticsV1>,
+    /// What answering cost the stores that served the read, for operations
+    /// whose port meters its lease.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<super::RequestCostReceiptV1>,
 }
 
 impl<T> ApplicationEnvelope<T> {
@@ -142,6 +146,7 @@ impl<T> ApplicationEnvelope<T> {
             outcome: ApplicationOutcome::Evidence(packet),
             touched_files: Vec::new(),
             analytics: None,
+            cost: None,
         }
     }
 
@@ -159,6 +164,7 @@ impl<T> ApplicationEnvelope<T> {
             touched_files: Vec::new(),
             code_graph: None,
             analytics: None,
+            cost: None,
         }
     }
 
@@ -176,6 +182,7 @@ impl<T> ApplicationEnvelope<T> {
             touched_files: Vec::new(),
             code_graph: None,
             analytics: None,
+            cost: None,
         }
     }
 }

@@ -269,6 +269,7 @@ fn page_evidence(
         finished_at,
         budget: OperationBudgetUsage::default(),
         cancellation: None,
+        cost: None,
     })
 }
 
@@ -319,6 +320,7 @@ fn terminal_evidence(
         finished_at,
         budget: OperationBudgetUsage::default(),
         cancellation,
+        cost: None,
     })
 }
 

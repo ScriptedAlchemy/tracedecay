@@ -26,7 +26,8 @@ pub use problem::{
 pub use receipt::{
     CancellationObservation, CancellationStage, EffectId, EffectReceipt, EffectResult,
     EffectTermination, IdempotencyKey, OperationBudgetUsage, OperationReceipt,
-    OperationTermination, PreviewId, PreviewResult, ReconciliationState,
+    OperationTermination, PreviewId, PreviewResult, ReconciliationState, RequestCostReceiptV1,
+    StorePointReadsV1,
 };
 pub use stream::{
     ResumeToken, StreamEvent, StreamEventKind, StreamFrontier, StreamGap, StreamTermination,

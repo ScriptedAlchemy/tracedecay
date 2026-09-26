@@ -79,6 +79,7 @@ pub(super) fn complete<T>(
         finished_at,
         budget: OperationBudgetUsage::default(),
         cancellation: None,
+        cost: None,
     })
 }
 
@@ -125,6 +126,7 @@ pub(super) fn unavailable<T>(
         finished_at,
         budget: OperationBudgetUsage::default(),
         cancellation: None,
+        cost: None,
     })
 }
 
@@ -182,6 +184,7 @@ fn terminal_interruption<T>(
             stage: CancellationStage::DuringRead,
             observed_at: finished_at,
         }),
+        cost: None,
     };
     if timed_out {
         RetrievalPortOutcome::TimedOut(evidence)

@@ -12,6 +12,7 @@ use std::sync::{Arc, OnceLock};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tracedecay_contracts::RequestCostReceiptV1;
 use tracedecay_global_db::AnalyticsEventRecord;
 
 pub trait HookReadinessProjectionPort: Send + Sync {
@@ -93,6 +94,9 @@ pub struct AnalyticsRecentEventV1 {
     pub hook_name: String,
     pub tool_name: String,
     pub outcome: String,
+    /// What the call cost its stores, for tool calls whose read was metered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<RequestCostReceiptV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -806,8 +810,22 @@ fn recent_event_rows(events: &[AnalyticsEventRecord], limit: usize) -> Vec<Analy
             hook_name: event.hook_name.clone().unwrap_or_default(),
             tool_name: event.tool_name.clone().unwrap_or_default(),
             outcome: event.outcome.clone().unwrap_or_default(),
+            cost: recorded_cost(event),
         })
         .collect()
+}
+
+/// The cost receipt the MCP server recorded in the event's metadata.
+fn recorded_cost(event: &AnalyticsEventRecord) -> Option<RequestCostReceiptV1> {
+    let metadata: Value = serde_json::from_str(event.metadata_json.as_deref()?).ok()?;
+    let cost = metadata.get("cost")?;
+    match serde_json::from_value(cost.clone()) {
+        Ok(cost) => Some(cost),
+        Err(error) => {
+            tracing::warn!(event_id = event.id, %error, "analytics event carries an unreadable cost receipt");
+            None
+        }
+    }
 }
 
 pub fn recent_hook_rows(rows: &[Value], limit: usize) -> Vec<AnalyticsRecentHookV1> {
@@ -837,4 +855,67 @@ fn optional_text(row: &Value, key: &str) -> Option<String> {
 
 fn normalize(value: &str) -> String {
     value.trim().to_ascii_lowercase().replace('-', "_")
+}
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_contracts::{RequestCostReceiptV1, StorePointReadsV1};
+    use tracedecay_global_db::AnalyticsEventRecord;
+
+    use super::{HookAnalyticsRows, diagnostics_payload_from_parts};
+
+    fn mcp_call(id: i64, tool_name: &str, metadata_json: &str) -> AnalyticsEventRecord {
+        AnalyticsEventRecord {
+            id,
+            provider: "mcp".to_owned(),
+            project_id: "/repo".to_owned(),
+            session_id: None,
+            timestamp: 1_790_000_000 + id,
+            event_kind: "mcp_tool_call".to_owned(),
+            hook_name: None,
+            tool_name: Some(tool_name.to_owned()),
+            tool_category: Some("code".to_owned()),
+            skill_name: None,
+            hint_category: None,
+            hint_id: None,
+            outcome: Some("success".to_owned()),
+            metadata_json: Some(metadata_json.to_owned()),
+        }
+    }
+
+    #[test]
+    fn the_recent_tape_carries_each_metered_call_its_recorded_cost() {
+        let events = [
+            mcp_call(1, "tracedecay_search", r#"{"duration_us":900}"#),
+            mcp_call(
+                2,
+                "tracedecay_callees",
+                r#"{"duration_us":1500,"cost":{"wall_micros":1234,"point_reads":{"graph_sealed":21,"graph_staging":0},"adjacency_queries":1,"adjacency_rows":107,"bytes_hydrated":40960}}"#,
+            ),
+        ];
+        let payload = diagnostics_payload_from_parts(0, &HookAnalyticsRows::empty(), Some(&events));
+        assert_eq!(
+            payload
+                .recent_events
+                .iter()
+                .map(|event| (event.tool_name.as_str(), event.cost))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "tracedecay_callees",
+                    Some(RequestCostReceiptV1 {
+                        wall_micros: 1234,
+                        point_reads: StorePointReadsV1 {
+                            graph_sealed: 21,
+                            graph_staging: 0,
+                        },
+                        adjacency_queries: 1,
+                        adjacency_rows: 107,
+                        bytes_hydrated: 40960,
+                    }),
+                ),
+                ("tracedecay_search", None),
+            ]
+        );
+    }
 }

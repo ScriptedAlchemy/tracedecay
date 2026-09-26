@@ -904,6 +904,17 @@
     },
     "AnalyticsRecentEventV1": {
       "properties": {
+        "cost": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RequestCostReceiptV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What the call cost its stores, for tool calls whose read was metered."
+        },
         "event_kind": {
           "type": "string"
         },
@@ -21136,6 +21147,48 @@
         }
       ]
     },
+    "RequestCostReceiptV1": {
+      "additionalProperties": false,
+      "description": "What one request cost the stores that answered it, counted on its read\nlease, so an operator can see why a call was slow.",
+      "properties": {
+        "adjacency_queries": {
+          "description": "Adjacency fan-outs issued; one batched call over many seeds is one.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "adjacency_rows": {
+          "description": "Relation rows those fan-outs returned.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "bytes_hydrated": {
+          "description": "Property payload bytes decoded from every row read.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "point_reads": {
+          "$ref": "#/$defs/StorePointReadsV1",
+          "description": "Entity and relation point reads, by the store that served them."
+        },
+        "wall_micros": {
+          "description": "Wall time of the metered read, from opening its lease to the last\nrow it hydrated.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "wall_micros",
+        "point_reads",
+        "adjacency_queries",
+        "adjacency_rows",
+        "bytes_hydrated"
+      ],
+      "type": "object"
+    },
     "RequiredCheckExpectationV1": {
       "enum": [
         "successful_terminal"
@@ -24097,6 +24150,29 @@
     "StoreKeyV1": {
       "description": "Logical name of one owner-profile store (for example `sessions.db`,\n`graph.db`, or `projects/proj_x`). Never an absolute on-disk path.",
       "type": "string"
+    },
+    "StorePointReadsV1": {
+      "additionalProperties": false,
+      "description": "Point reads per graph store kind.",
+      "properties": {
+        "graph_sealed": {
+          "description": "A sealed generation's compacted per-generation store.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "graph_staging": {
+          "description": "The shared staging database, which serves a generation until its\nsealed store is installed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "graph_sealed",
+        "graph_staging"
+      ],
+      "type": "object"
     },
     "StoreSizeSampleV1": {
       "additionalProperties": false,

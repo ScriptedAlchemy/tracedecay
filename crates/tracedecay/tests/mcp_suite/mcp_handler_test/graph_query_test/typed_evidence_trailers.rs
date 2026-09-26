@@ -1,6 +1,6 @@
-//! The trailer and footer a typed result carries beside its body, as an MCP
-//! client receives them from the production server for `search`, `context`
-//! and `callers`, in both output formats.
+//! The trailers and footer a typed result carries beside its body, as an MCP
+//! client receives them from the production server for `search`, `context`,
+//! `callers` and `callees`, in both output formats.
 
 use super::{
     GraphQueryFixture, call_production_tool, graph_query_fixture_with_sources,
@@ -210,5 +210,88 @@ async fn typed_callers_carry_their_envelope_files_and_the_accounting_footer() {
     .await;
     let body = body_before_footer(&markdown, 637);
     assert!(body.concat().contains("known"), "{body:?}");
+    shutdown_graph_fixture(fixture).await;
+}
+
+/// The `tracedecay_cost` trailer block among the body blocks.
+fn cost_trailer(body: &[String]) -> &str {
+    let trailers: Vec<&str> = body
+        .iter()
+        .map(String::as_str)
+        .filter(|text| text.starts_with("\ntracedecay_cost: "))
+        .collect();
+    assert_eq!(trailers.len(), 1, "one cost trailer: {body:?}");
+    trailers[0]
+}
+
+/// A metered code read carries its store cost on the envelope and renders
+/// the same receipt as a trailer, so an operator reading either surface sees
+/// what the call read.
+#[tokio::test]
+async fn typed_callees_carry_their_read_cost_on_the_envelope_and_the_trailer() {
+    let fixture = trailer_fixture().await;
+    let target = call_production_tool(
+        &fixture,
+        "tracedecay_by_qualified_name",
+        json!({"qualified_name": "src/lib.rs::known", "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .expect("exact function");
+    let target: Value = serde_json::from_str(extract_text(&target.value)).unwrap();
+    let node_id = target[0]["node_id"].as_str().expect("node id").to_owned();
+
+    let texts = call(
+        &fixture,
+        "tracedecay_callees",
+        json!({"node_id": node_id, "maximum_depth": 1, "format": "json"}),
+    )
+    .await;
+    let payload: Value = serde_json::from_str(&texts[0]).unwrap();
+    assert_eq!(
+        payload["outcome"]["value"]["payload"]["items"][0]["symbol"]["qualified_name"],
+        "src/walk.rs::Walk::read",
+        "{payload:#}"
+    );
+    // Nine point reads: the seed `known`; its two outgoing edges, each read
+    // to learn its kind; the one callee they reach; the trait-dispatch check
+    // on that callee (its summary, its two incoming edges, and the impl that
+    // contains it); and the callee's summary for the page. Two fan-outs:
+    // `known`'s outgoing edges and the callee's incoming ones.
+    let cost = &payload["cost"];
+    assert_eq!(
+        (
+            &cost["point_reads"],
+            &cost["adjacency_queries"],
+            &cost["adjacency_rows"],
+        ),
+        (
+            &json!({"graph_sealed": 9, "graph_staging": 0}),
+            &json!(2),
+            &json!(4),
+        ),
+        "{payload:#}"
+    );
+    assert_eq!(
+        cost_trailer(&texts),
+        format!(
+            "\ntracedecay_cost: wall_us={} graph_sealed_reads=9 graph_staging_reads=0 \
+             adjacency_queries=2 adjacency_rows=4 bytes_hydrated={}",
+            cost["wall_micros"], cost["bytes_hydrated"]
+        ),
+        "the trailer renders the envelope's receipt"
+    );
+
+    let markdown = call(
+        &fixture,
+        "tracedecay_callees",
+        json!({"node_id": node_id, "maximum_depth": 1}),
+    )
+    .await;
+    assert!(
+        cost_trailer(&markdown).contains(" graph_sealed_reads=9 graph_staging_reads=0 "),
+        "{markdown:?}"
+    );
     shutdown_graph_fixture(fixture).await;
 }

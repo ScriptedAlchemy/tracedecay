@@ -88,6 +88,7 @@ pub fn render_graph_tool(
     ResponseTrailer {
         touched_files: &touched_files,
         code_graph: code_graph.as_ref(),
+        cost: None,
     }
     .attach(&mut rendered);
     Ok(match analytics {
