@@ -2665,7 +2665,7 @@ impl CodeIndexSchedulerRegistryV1 {
             super::super::residency::WorktreeResidencyPartsV1 {
                 serving_generation: Arc::clone(&serving_generation),
                 serving_generation_epoch: Arc::clone(&serving_generation_epoch),
-                serving_generation_changed: serving_generation_changed.clone(),
+                serving_generation_changed: Arc::clone(&serving_generation_changed),
                 complete_generation_requested: Arc::clone(&complete_generation_requested),
                 reconcile_in_progress: Arc::clone(&reconcile_in_progress),
                 publication: residency_publication,

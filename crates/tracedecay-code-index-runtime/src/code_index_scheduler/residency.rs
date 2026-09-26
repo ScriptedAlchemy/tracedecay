@@ -9,7 +9,7 @@
 //! graph reads keep serving from the text artifact and the durable graph, and
 //! the next read that needs the whole generation re-decodes it.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
@@ -20,14 +20,15 @@ use tracedecay_runtime_core::resident_memory::{
 };
 
 use super::DaemonCodeIndexPublicationStoreV1;
+use super::reconcile::ReconcilePassesV1;
 use super::registry::ServingGenerationSlot;
 
 pub(super) struct WorktreeResidencyV1 {
     serving_generation: Arc<ServingGenerationSlot>,
     serving_generation_epoch: Arc<AtomicU64>,
-    serving_generation_changed: tokio::sync::watch::Sender<()>,
+    serving_generation_changed: Arc<tokio::sync::watch::Sender<()>>,
     complete_generation_requested: Arc<AtomicBool>,
-    reconcile_in_progress: Arc<AtomicUsize>,
+    reconcile_in_progress: Arc<ReconcilePassesV1>,
     publication: DaemonCodeIndexPublicationStoreV1,
     last_used: Mutex<Instant>,
 }
@@ -35,9 +36,9 @@ pub(super) struct WorktreeResidencyV1 {
 pub(super) struct WorktreeResidencyPartsV1 {
     pub(super) serving_generation: Arc<ServingGenerationSlot>,
     pub(super) serving_generation_epoch: Arc<AtomicU64>,
-    pub(super) serving_generation_changed: tokio::sync::watch::Sender<()>,
+    pub(super) serving_generation_changed: Arc<tokio::sync::watch::Sender<()>>,
     pub(super) complete_generation_requested: Arc<AtomicBool>,
-    pub(super) reconcile_in_progress: Arc<AtomicUsize>,
+    pub(super) reconcile_in_progress: Arc<ReconcilePassesV1>,
     pub(super) publication: DaemonCodeIndexPublicationStoreV1,
 }
 
@@ -78,7 +79,7 @@ impl WorktreeResidencyV1 {
     }
 
     fn busy(&self) -> bool {
-        self.reconcile_in_progress.load(Ordering::Acquire) > 0
+        self.reconcile_in_progress.running()
     }
 
     /// Register both of this worktree's owners with `owners`. The returned
