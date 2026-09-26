@@ -1396,12 +1396,30 @@ impl CodeIndexOwnerActivityV1 {
     /// Resolves on the next pass, pending-wake, or worker-phase transition, or with
     /// [`tokio::sync::watch::error::RecvError`] once the worktree's owner is
     /// gone.
+    ///
+    /// Every transition published before it resolves is consumed with it, so
+    /// a burst of intra-pass updates wakes a subscriber once.
     pub async fn changed(&mut self) -> Result<(), tokio::sync::watch::error::RecvError> {
-        tokio::select! {
+        let changed = tokio::select! {
             changed = self.passes.changed() => changed,
             changed = self.pending_wake.changed() => changed,
             changed = self.worker_phase.changed() => changed,
-        }
+        };
+        self.passes.borrow_and_update();
+        self.pending_wake.borrow_and_update();
+        self.worker_phase.borrow_and_update();
+        changed
+    }
+
+    /// Whether a transition was published since the last [`Self::changed`].
+    pub fn has_changed(&self) -> bool {
+        [
+            self.passes.has_changed(),
+            self.pending_wake.has_changed(),
+            self.worker_phase.has_changed(),
+        ]
+        .into_iter()
+        .any(|changed| changed.unwrap_or(true))
     }
 }
 

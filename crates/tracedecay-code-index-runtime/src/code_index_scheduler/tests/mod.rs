@@ -1686,6 +1686,45 @@ impl<'a> OwnerSignals<'a> {
                 }
             }
         }
+        self.settle_burst().await;
+    }
+
+    /// Consume publications until a scheduler turn passes without one, so a
+    /// burst of owner updates costs the waiter one probe instead of one per
+    /// update contending with the worker.
+    async fn settle_burst(&mut self) {
+        loop {
+            self.seats.borrow_and_update();
+            self.root_mounted.borrow_and_update();
+            self.receipts.borrow_and_update();
+            if let Some(serving) = self.serving.as_mut() {
+                serving.borrow_and_update();
+            }
+            tokio::task::yield_now().await;
+            let pending = [
+                self.seats.has_changed(),
+                self.root_mounted.has_changed(),
+                self.receipts.has_changed(),
+            ]
+            .into_iter()
+            .any(|changed| changed.unwrap_or(false))
+                || self
+                    .serving
+                    .as_ref()
+                    .is_some_and(|serving| serving.has_changed().unwrap_or(false))
+                || self.activity.as_ref().is_some_and(
+                    crate::code_index_scheduler::CodeIndexOwnerActivityV1::has_changed,
+                );
+            if !pending {
+                return;
+            }
+            if let Some(activity) = self.activity.as_mut()
+                && activity.has_changed()
+                && activity.changed().await.is_err()
+            {
+                self.activity = None;
+            }
+        }
     }
 
     /// [`Self::changed`] bounded by a caller's failure deadline, so the
