@@ -11,6 +11,7 @@ use super::{
     verify_final_schema_connection,
 };
 use crate::db::engine::params;
+use tracedecay_domain::errors::TraceDecayError;
 
 mod final_shape;
 mod fts;
@@ -161,6 +162,39 @@ async fn a_store_at_another_schema_version_is_refused_with_a_fresh_start_remedy(
             "refusal must never rewrite an incompatible schema stamp"
         );
     }
+}
+
+/// The handoff grant store lives in the project session store: a fresh graph
+/// store has no copy of it, and a v38 store that still carries one is refused
+/// for reset rather than admitted or rewritten.
+#[tokio::test]
+async fn the_graph_store_has_no_handoff_table_and_refuses_the_v38_shape_that_did() {
+    let (fresh, _fresh_dir) = create_schema_db().await;
+    assert!(!table_exists(&fresh, "handoff_open_grants_v1").await);
+
+    let (v38, _v38_dir) = create_schema_db().await;
+    v38.execute_batch(tracedecay_rusqlite_runtime::handoff::HANDOFF_OPEN_SCHEMA_V1)
+        .await
+        .unwrap();
+    set_user_version(&v38, 38).await;
+
+    let error = ensure_schema_current_connection(&v38)
+        .await
+        .expect_err("the v38 graph store must be refused");
+    let TraceDecayError::ResetRequired { authority, reason } = error else {
+        panic!("expected ResetRequired, got {error:?}");
+    };
+    assert_eq!(
+        (authority.as_str(), reason.as_str()),
+        (
+            "SQLite store",
+            "database schema v38 is not the v39 shape this binary creates; this store was \
+             created by an incompatible binary and cannot be upgraded in place. Remove the \
+             store directory and let this binary create a fresh one."
+        )
+    );
+    assert!(table_exists(&v38, "handoff_open_grants_v1").await);
+    assert_eq!(get_user_version(&v38).await, 38);
 }
 
 #[tokio::test]
