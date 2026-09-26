@@ -44,7 +44,7 @@ use tracedecay_application::pr_tracking::{
     prepare_pr_worktree, resolve_branch_head, save_state,
 };
 #[cfg(test)]
-use tracedecay_application::pr_tracking::{managed_summary, try_acquire_manual_branch_lifecycle};
+use tracedecay_application::pr_tracking::{acquire_manual_branch_lifecycle, managed_summary};
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::errors::TraceDecayError;
 
@@ -145,7 +145,8 @@ pub(crate) async fn activate_manual_branch_head(
             "code-index scheduler authority is unavailable for branch activation",
         ));
     }
-    let lifecycle = try_acquire_manual_branch_lifecycle(&graph.store_layout().data_root, branch)?;
+    let lifecycle =
+        acquire_manual_branch_lifecycle(&graph.store_layout().data_root, branch).await?;
     activate_manual_branch_head_with_lifecycle(
         repo_root,
         graph,

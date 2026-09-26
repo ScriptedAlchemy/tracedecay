@@ -388,12 +388,6 @@ async fn default_branch_bootstrap_persists_canonical_metadata() {
     assert!(!meta_path.with_extension("json.tmp").exists());
 }
 
-pub fn finalize_prepared_branch_tracking(tracedecay_dir: &Path, prepared: &PreparedBranchTracking) {
-    // Load-modify-save under the shared branch lock; the preparation no
-    // longer holds it across the sync.
-    crate::branch_meta::update_synced_timestamp(tracedecay_dir, &prepared.branch_name);
-}
-
 #[hotpath::measure(label = "runtime_core.branch.rollback_prepared")]
 pub fn rollback_prepared_branch_tracking(
     tracedecay_dir: &Path,

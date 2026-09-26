@@ -8,8 +8,8 @@ use std::sync::{
 
 use serde_json::json;
 use tracedecay_application::pr_tracking::{
-    ManualBranchLifecycleLeaseV1, manual_branch_source_owns_artifacts,
-    try_acquire_manual_branch_lifecycle,
+    ManualBranchLifecycleLeaseV1, acquire_manual_branch_lifecycle,
+    manual_branch_source_owns_artifacts,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
@@ -1825,7 +1825,8 @@ impl StoreAdministration {
             })
             .cloned()
             .collect::<Vec<_>>();
-        let lifecycle_leases = acquire_manual_branch_retirement_leases(data_root, &retirements)?;
+        let lifecycle_leases =
+            acquire_manual_branch_retirement_leases(data_root, &retirements).await?;
         let lifecycle_leases = cleanup_manual_branch_retirements(
             project_root,
             data_root,
@@ -1840,24 +1841,25 @@ impl StoreAdministration {
     }
 }
 
-#[hotpath::measure(label = "daemon.branch_admin.acquire_retirement_leases")]
-fn acquire_manual_branch_retirement_leases(
+#[hotpath::measure(label = "daemon.branch_admin.acquire_retirement_leases", future = true)]
+async fn acquire_manual_branch_retirement_leases(
     data_root: &Path,
     retirements: &[tracedecay_runtime_core::branch::SingleStoreBranchRetirementV1],
 ) -> Result<Vec<ManualBranchLifecycleLeaseV1>> {
-    retirements
-        .iter()
-        .map(|retirement| {
-            try_acquire_manual_branch_lifecycle(data_root, &retirement.branch).map_err(|error| {
-                TraceDecayError::Config {
+    let mut leases = Vec::with_capacity(retirements.len());
+    for retirement in retirements {
+        leases.push(
+            acquire_manual_branch_lifecycle(data_root, &retirement.branch)
+                .await
+                .map_err(|error| TraceDecayError::Config {
                     message: format!(
                         "branch removal for '{}' is contended or unavailable: {error}",
                         retirement.branch
                     ),
-                }
-            })
-        })
-        .collect()
+                })?,
+        );
+    }
+    Ok(leases)
 }
 
 #[hotpath::measure(label = "daemon.branch_admin.cleanup_retirements", future = true)]

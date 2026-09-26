@@ -1,5 +1,8 @@
+use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -8,9 +11,8 @@ use tracedecay_contracts::{
     SourceEditVerificationV1,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
-use tracedecay_private_fs::FileLease;
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_parent_directory};
-use tracedecay_runtime_core::storage::try_acquire_sidecar_lock;
+use tracedecay_private_fs::{FileLease, LockAdmissionError, lock_until};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
@@ -168,6 +170,29 @@ pub(super) struct ResolvedSourceEditPreview {
     pub(super) planned_files: Vec<PlannedSourceEditFile>,
 }
 
+/// Same-project callers queue this long for the store before the edit fails
+/// with a typed lock-deadline error.
+const SOURCE_EDIT_ADMISSION_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Held for one edit: the in-process queue position and the cross-process
+/// lock file, released together on drop.
+pub(super) struct SourceEditLease {
+    _file: FileLease,
+    _queued: tokio::sync::OwnedMutexGuard<()>,
+}
+
+/// The daemon's single owner per source-edit store root.
+// ponytail: entries are never evicted; one empty mutex per project store this
+// process has edited, bounded by its registered projects.
+fn source_edit_owner(root: &Path) -> Arc<tokio::sync::Mutex<()>> {
+    static OWNERS: OnceLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    let mut owners = OWNERS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    Arc::clone(owners.entry(root.to_path_buf()).or_default())
+}
+
 impl SourceEditDurability {
     pub(super) fn for_graph(graph: &SourceEditRuntime) -> Self {
         Self {
@@ -179,16 +204,45 @@ impl SourceEditDurability {
     }
 
     /// Serializes every preview, apply, rollback, and reconciliation on this
-    /// store behind one exclusive lock file. The lock is released when the
-    /// returned handle drops; contention is a typed refusal, never a wait.
-    #[hotpath::measure(label = "usecases.edit.lock")]
-    pub(super) fn lock(&self) -> Result<FileLease> {
+    /// store. The daemon owns the store: same-project callers queue on its
+    /// in-process owner, and the lock file fences any other process. Both
+    /// waits share one admission deadline, past which the edit fails with a
+    /// typed, retryable lock-deadline error.
+    #[hotpath::measure(label = "usecases.edit.lock", future = true)]
+    pub(super) async fn lock(&self) -> Result<SourceEditLease> {
+        let deadline = Instant::now() + SOURCE_EDIT_ADMISSION_DEADLINE;
         let lock_path = self.root.join("source-edit.lock");
-        try_acquire_sidecar_lock(&lock_path)?.ok_or_else(|| TraceDecayError::SyncLock {
+        let deadline_error = || TraceDecayError::SyncLock {
             message: format!(
-                "could not lock sync lockfile: another source edit holds {}",
+                "source edit writer lock at {} stayed busy past its admission deadline; retry the edit",
                 lock_path.display()
             ),
+        };
+        let queued =
+            tokio::time::timeout_at(deadline.into(), source_edit_owner(&self.root).lock_owned())
+                .await
+                .map_err(|_| deadline_error())?;
+        fs::create_dir_all(&self.root)
+            .map_err(|error| io_error("create source edit root", error))?;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|error| io_error("open source edit lock", error))?;
+        let file = tokio::task::spawn_blocking(move || lock_until(&file, deadline).map(|()| file))
+            .await
+            .map_err(|error| {
+                config_error(format!("source edit lock admission task failed: {error}"))
+            })?
+            .map_err(|error| match error {
+                LockAdmissionError::TimedOut => deadline_error(),
+                LockAdmissionError::Io(error) => io_error("acquire source edit lock", error),
+            })?;
+        Ok(SourceEditLease {
+            _file: FileLease::held(file, "source_edit.writer"),
+            _queued: queued,
         })
     }
 

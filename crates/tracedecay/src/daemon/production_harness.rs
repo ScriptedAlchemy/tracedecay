@@ -20,7 +20,7 @@ use super::project_composition::daemon_transcript_source_home;
 use super::project_server_lifecycle::{detach_project_servers, shutdown_detached_project_servers};
 use super::*;
 #[cfg(unix)]
-use tracedecay_application::pr_tracking::try_acquire_manual_branch_lifecycle;
+use tracedecay_application::pr_tracking::acquire_manual_branch_lifecycle;
 use tracedecay_code_index_runtime::CodeIndexSchedulerRegistryV1;
 #[cfg(all(unix, feature = "test-transport"))]
 use tracedecay_code_index_runtime::git_transactions;
@@ -900,14 +900,9 @@ impl ProductionProjectCompositionHarnessV1 {
         administration
             .run_manual_branch_publication(|cancellation| async move {
                 let _lifecycle =
-                    try_acquire_manual_branch_lifecycle(&graph.store_layout().data_root, &branch)
-                        .map_err(|error| {
-                        TraceDecayError::project_route(
-                            error.reason_code(),
-                            error.retryable(),
-                            error.detail(),
-                        )
-                    })?;
+                    acquire_manual_branch_lifecycle(&graph.store_layout().data_root, &branch)
+                        .await
+                        .map_err(super::branch_add::lifecycle_route_error)?;
                 super::branch_add::branch_publication_context(&graph)?
                     .track_exact_worktree_branch(
                         &schedulers,
@@ -1551,28 +1546,30 @@ mod code_index_activation_test {
         let owner_cancellation = cancellation.clone();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let owner = tokio::spawn(async move {
-            let _lease =
-                try_acquire_manual_branch_lifecycle(&data_root, "main").expect("lifecycle owner");
+            let _lease = acquire_manual_branch_lifecycle(&data_root, "main")
+                .await
+                .expect("lifecycle owner");
             ready_tx.send(()).expect("publish owner readiness");
             owner_cancellation.cancelled().await;
         });
         ready_rx.await.expect("lifecycle owner started");
 
-        let error = harness
-            .track_worktree_branch(&project, &project, "main")
-            .await
-            .expect_err("harness publication must not bypass the lifecycle owner");
-        assert!(
-            error.to_string().contains("lifecycle is already active"),
-            "{error}"
-        );
+        {
+            let publication = harness.track_worktree_branch(&project, &project, "main");
+            tokio::pin!(publication);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(200), &mut publication)
+                    .await
+                    .is_err(),
+                "harness publication must queue behind the lifecycle owner, not bypass it"
+            );
 
-        cancellation.cancel();
-        owner.await.expect("cancelled lifecycle owner");
-        harness
-            .track_worktree_branch(&project, &project, "main")
-            .await
-            .expect("publication proceeds after lifecycle owner cancellation");
+            cancellation.cancel();
+            owner.await.expect("cancelled lifecycle owner");
+            publication
+                .await
+                .expect("queued publication proceeds once the lifecycle owner releases");
+        }
         harness.shutdown().await;
     }
 }

@@ -1,9 +1,12 @@
 //! Exact Git ownership and managed worktree preparation/retirement.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::{Duration, Instant};
 
 use tracedecay_domain::canonical_text::sha256_hex;
-use tracedecay_private_fs::FileLease;
+use tracedecay_private_fs::{FileLease, LockAdmissionError, lock_until};
 use tracedecay_runtime_core::branch::BranchAddOutcome;
 
 use super::{
@@ -92,13 +95,13 @@ impl ManualBranchArtifactsV1 {
     }
 }
 
-/// Non-blocking exact-branch lifecycle gate. It deliberately spans activation,
-/// worktree replacement, scheduler mount, and metadata sealing; a concurrent
-/// caller receives a typed retryable contention rather than observing a
+/// Exact-branch lifecycle lease. It deliberately spans activation, worktree
+/// replacement, scheduler mount, and metadata sealing, so no caller observes a
 /// partially replaced branch route.
 pub struct ManualBranchLifecycleLeaseV1 {
     branch: String,
     _lock: FileLease,
+    _queued: tokio::sync::OwnedMutexGuard<()>,
 }
 
 impl ManualBranchLifecycleLeaseV1 {
@@ -107,12 +110,44 @@ impl ManualBranchLifecycleLeaseV1 {
     }
 }
 
-pub fn try_acquire_manual_branch_lifecycle(
+/// Same-branch lifecycle callers queue this long before the operation fails
+/// with typed, retryable [`ManualBranchActivationError::LifecycleContended`].
+const MANUAL_BRANCH_LIFECYCLE_ADMISSION_DEADLINE: Duration = Duration::from_secs(60);
+
+/// The daemon's single owner per exact branch lifecycle lock.
+// ponytail: entries are never evicted; one empty mutex per branch lifecycle
+// this process has touched, bounded by the branches it administers.
+fn manual_branch_lifecycle_owner(lock_path: &Path) -> Arc<tokio::sync::Mutex<()>> {
+    static OWNERS: OnceLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    let mut owners = OWNERS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    Arc::clone(owners.entry(lock_path.to_path_buf()).or_default())
+}
+
+/// Acquires the exact-branch lifecycle. The daemon owns branch lifecycles:
+/// same-branch callers queue on its in-process owner, and the lock file
+/// fences any other process. Both waits share one admission deadline.
+pub async fn acquire_manual_branch_lifecycle(
     data_root: &Path,
     branch: &str,
 ) -> std::result::Result<ManualBranchLifecycleLeaseV1, ManualBranchActivationError> {
+    let deadline = Instant::now() + MANUAL_BRANCH_LIFECYCLE_ADMISSION_DEADLINE;
     let artifacts = ManualBranchArtifactsV1::for_branch(data_root, branch);
     let lock_path = artifacts.lifecycle_lock_path(data_root);
+    let contended = || {
+        ManualBranchActivationError::lifecycle_contended(format!(
+            "branch '{branch}' lifecycle at '{}' stayed busy past its admission deadline; retry",
+            lock_path.display()
+        ))
+    };
+    let queued = tokio::time::timeout_at(
+        deadline.into(),
+        manual_branch_lifecycle_owner(&lock_path).lock_owned(),
+    )
+    .await
+    .map_err(|_| contended())?;
     let lock_directory = lock_path.parent().ok_or_else(|| {
         ManualBranchActivationError::activation_failed(format!(
             "manual branch lifecycle lock '{}' has no parent",
@@ -135,17 +170,26 @@ pub fn try_acquire_manual_branch_lifecycle(
                 lock_path.display()
             ))
         })?;
-    lock.try_lock()
-        .map_err(std::io::Error::from)
+    let lock = tokio::task::spawn_blocking(move || lock_until(&lock, deadline).map(|()| lock))
+        .await
         .map_err(|error| {
-            ManualBranchActivationError::lifecycle_contended(format!(
-                "branch '{branch}' lifecycle is already active at '{}': {error}",
-                lock_path.display()
+            ManualBranchActivationError::activation_failed(format!(
+                "manual branch lifecycle admission task failed: {error}"
             ))
+        })?
+        .map_err(|error| match error {
+            LockAdmissionError::TimedOut => contended(),
+            LockAdmissionError::Io(error) => {
+                ManualBranchActivationError::activation_failed(format!(
+                    "cannot lock manual branch lifecycle '{}': {error}",
+                    lock_path.display()
+                ))
+            }
         })?;
     Ok(ManualBranchLifecycleLeaseV1 {
         branch: branch.to_owned(),
         _lock: FileLease::held(lock, "pr_tracking.manual_branch_lifecycle"),
+        _queued: queued,
     })
 }
 

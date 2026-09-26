@@ -3,8 +3,9 @@ use std::sync::atomic::AtomicUsize;
 
 use tempfile::tempdir;
 use tracedecay_contracts::{
-    CancellationSignal, CancellationStage, Deadline, EffectTermination, IdempotencyKey,
-    SourceEditAuthorizationAdmissionV1, SourceEditKind, SourceEditRequest,
+    ApplicationOperation, CancellationSignal, CancellationStage, Deadline, EffectTermination,
+    IdempotencyKey, RequestContext, SourceEditAuthorizationAdmissionV1,
+    SourceEditAuthorizationFuture, SourceEditAuthorizationPort, SourceEditKind, SourceEditRequest,
     SourceEditRollbackRequestV1, source_edit_operation, source_edit_rollback_operation,
 };
 use tracedecay_domain::UtcMicros;
@@ -14,8 +15,9 @@ use super::test_support::{
     fixture_graph, fixture_request, fixture_request_for_edit, fixture_symbol_code_graph, git,
 };
 use crate::{
-    SourceEditEffectControlV1, execute_source_edit, execute_source_edit_rollback,
-    execute_source_edit_with_control, preview_source_edit_expected_state,
+    SourceEditApplicationResult, SourceEditEffectControlV1, execute_source_edit,
+    execute_source_edit_rollback, execute_source_edit_with_control,
+    preview_source_edit_expected_state,
 };
 
 #[tokio::test]
@@ -341,4 +343,106 @@ async fn move_symbol_rollback_restores_exact_preimages_without_semantic_inverse_
     .await
     .unwrap();
     assert!(replay.replayed);
+}
+
+/// Admits like the fixture authorization, but parks the first admission until
+/// released, holding that edit inside the store's critical section.
+struct GatedAuthorization {
+    inner: FixtureSourceEditAuthorization,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Semaphore,
+}
+
+impl SourceEditAuthorizationPort for GatedAuthorization {
+    fn admit<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        operation: &'a ApplicationOperation,
+        observed_at: UtcMicros,
+    ) -> SourceEditAuthorizationFuture<'a> {
+        Box::pin(async move {
+            self.entered.notify_one();
+            self.release.acquire().await.expect("gate open").forget();
+            self.inner.admit(context, operation, observed_at).await
+        })
+    }
+
+    fn recheck_effect<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        operation: &'a ApplicationOperation,
+        admission: &'a SourceEditAuthorizationAdmissionV1,
+        observed_at: UtcMicros,
+    ) -> SourceEditAuthorizationFuture<'a> {
+        self.inner
+            .recheck_effect(context, operation, admission, observed_at)
+    }
+}
+
+/// Two agents editing different files of one project at once both commit:
+/// the second queues on the daemon-owned store instead of being refused
+/// because the first holds its lock.
+#[tokio::test]
+async fn concurrent_same_project_edits_queue_and_both_commit() {
+    let project = tempdir().unwrap();
+    fs::create_dir_all(project.path().join("src")).unwrap();
+    fs::write(project.path().join("src/lib.rs"), b"old").unwrap();
+    fs::write(project.path().join("src/other.rs"), b"first").unwrap();
+    let (graph, code_graph) = fixture_graph(project.path()).await;
+    let operation = source_edit_operation(SourceEditKind::StrReplace).unwrap();
+
+    let mut first = fixture_request();
+    let mut second = fixture_request_for_edit(
+        SourceEditRequest::StrReplace {
+            path: "src/other.rs".to_owned(),
+            old_str: "first".to_owned(),
+            new_str: "second".to_owned(),
+            dry_run: false,
+            verify: false,
+        },
+        "source-edit.concurrent-second",
+    );
+    for request in [&mut first, &mut second] {
+        request.expected_state = preview_source_edit_expected_state(
+            &graph,
+            &code_graph,
+            &request.context,
+            request.observed_at,
+            request.edit.clone(),
+        )
+        .await
+        .unwrap();
+    }
+    let gated = GatedAuthorization {
+        inner: fixture_authorization(&first),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Semaphore::new(0),
+    };
+    let plain = fixture_authorization(&second);
+
+    let (first, second) = tokio::join!(
+        execute_source_edit(&graph, &code_graph, &operation, first, &gated),
+        async {
+            gated.entered.notified().await;
+            let second = execute_source_edit(&graph, &code_graph, &operation, second, &plain);
+            let release = async {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                gated.release.add_permits(1);
+            };
+            tokio::join!(second, release).0
+        },
+    );
+
+    let outcome = |result: tracedecay_domain::errors::Result<SourceEditApplicationResult>| {
+        result
+            .map(|applied| applied.effect.expect("effect").receipt.outcome)
+            .map_err(|error| error.to_string())
+    };
+    assert_eq!(outcome(first), Ok(EffectTermination::Completed));
+    assert_eq!(outcome(second), Ok(EffectTermination::Completed));
+    assert_eq!(fs::read(project.path().join("src/lib.rs")).unwrap(), b"new");
+    assert_eq!(
+        fs::read(project.path().join("src/other.rs")).unwrap(),
+        b"second"
+    );
 }

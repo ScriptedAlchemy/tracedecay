@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tracedecay_application::pr_tracking::{
-    ManualBranchLifecycleLeaseV1, PrCommandControlV1, manual_branch_source_owns_artifacts,
-    try_acquire_manual_branch_lifecycle,
+    ManualBranchLifecycleLeaseV1, PrCommandControlV1, acquire_manual_branch_lifecycle,
+    manual_branch_source_owns_artifacts,
 };
 
 use tracedecay_code_index_runtime::code_index_scheduler::{
@@ -161,14 +161,9 @@ async fn activate_and_track_manual_branch(
     administration
         .admit_manual_branch_publication(|cancellation, admitted| async move {
             let result = async {
-                let lifecycle =
-                    try_acquire_manual_branch_lifecycle(&data_root, &branch).map_err(|error| {
-                        TraceDecayError::project_route(
-                            error.reason_code(),
-                            error.retryable(),
-                            error.detail(),
-                        )
-                    })?;
+                let lifecycle = acquire_manual_branch_lifecycle(&data_root, &branch)
+                    .await
+                    .map_err(lifecycle_route_error)?;
                 let prepared = match prepare_branch_tracking_in_layout(
                     &project_root,
                     &branch,
@@ -500,4 +495,11 @@ fn branch_add_outcome_name(outcome: &BranchAddOutcome) -> &'static str {
         BranchAddOutcome::Added => "added",
         BranchAddOutcome::Deferred => "deferred",
     }
+}
+
+/// Maps a branch-lifecycle admission failure to its typed project-route error.
+pub(super) fn lifecycle_route_error(
+    error: tracedecay_application::pr_tracking::ManualBranchActivationError,
+) -> TraceDecayError {
+    TraceDecayError::project_route(error.reason_code(), error.retryable(), error.detail())
 }
