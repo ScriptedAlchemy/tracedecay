@@ -38,6 +38,7 @@ use tracedecay_contracts::{
     RequestContext, RequestId, ResolvedScope, RetrievalEvidence, RetryDirective, SafeDiagnostic,
     TemporalState,
 };
+use tracedecay_domain::text::forward_slash_path;
 use tracedecay_domain::{CodeGenerationId, CommitId, ComponentVersion, UtcMicros};
 use tracedecay_lsp::SearchedTsconfig;
 use tracedecay_tool_catalog::SortContractId;
@@ -2175,18 +2176,18 @@ fn no_tsconfig_problem(
             let searched = searched
                 .iter()
                 .map(|candidate| {
-                    let path = candidate.path.display();
+                    let path = forward_slash_path(&candidate.path);
                     if candidate.present {
                         format!("{path} (does not include it)")
                     } else {
-                        path.to_string()
+                        path
                     }
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
                 "no tsconfig owns `{}` (searched {searched}, and their project references)",
-                file.display()
+                forward_slash_path(file)
             )
         }
     };
