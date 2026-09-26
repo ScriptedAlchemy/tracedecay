@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,8 +22,9 @@ use crate::graph_projection::builder::ProductionCodeGraphInputs;
 use crate::graph_projection::schema::SYMBOL_LABEL;
 use crate::graph_projection::{
     CODE_GRAPH_PROJECTOR_REVISION, CodeGraphCatalogReleaseV1, CodeGraphProjectionError,
-    CodeGraphProjectionStore, CodeGraphSymbolSummaryV1, build_code_graph_manifest_inputs_checked,
-    code_graph_projection_identity, current_generation_entity, has_label,
+    CodeGraphProjectionStore, CodeGraphReadCostMeter, CodeGraphSymbolSummaryV1,
+    build_code_graph_manifest_inputs_checked, code_graph_projection_identity,
+    current_generation_entity, has_label,
 };
 use crate::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
 mod imports;
@@ -827,6 +828,45 @@ fn census_counts_come_from_catalog_aggregates() {
 }
 
 #[test]
+fn file_dependencies_are_served_from_the_catalog_without_store_reads() {
+    let reader = reader(&store_for(production_manifest()));
+    reader.census(0, request()).expect("warm catalog");
+    let cost = CodeGraphReadCostMeter::start();
+
+    let dependencies = reader
+        .metered(&cost)
+        .file_dependencies(request())
+        .expect("file dependencies");
+
+    assert_eq!(
+        *dependencies.adjacency,
+        HashMap::from([
+            (
+                "src/alpha.rs".to_owned(),
+                HashSet::from(["src/beta.rs".to_owned()])
+            ),
+            ("src/beta.rs".to_owned(), HashSet::new()),
+            (
+                "src/gamma.rs".to_owned(),
+                HashSet::from(["src/alpha.rs".to_owned()])
+            ),
+        ]),
+        "the same-file beta::Runner -> beta::run use folds away"
+    );
+    assert_eq!(dependencies.dependency_edges, 3);
+    let receipt = cost.receipt();
+    assert_eq!(
+        (
+            receipt.point_reads.graph_sealed,
+            receipt.adjacency_queries,
+            receipt.adjacency_rows,
+            receipt.bytes_hydrated,
+        ),
+        (0, 0, 0, 0)
+    );
+}
+
+#[test]
 fn symbol_search_ranks_exact_names_first_and_pages_without_a_full_scan() {
     let reader = reader(&store_for(production_manifest()));
 
@@ -939,7 +979,7 @@ fn a_released_catalog_gives_back_its_bytes_and_rebuilds_on_the_next_read() {
             .symbols,
     );
     let held = store.interactive_catalog_bytes();
-    assert_eq!(held, Some(4_066));
+    assert_eq!(held, Some(4_388));
 
     assert_eq!(
         store.release_interactive_catalog(),

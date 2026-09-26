@@ -49,11 +49,11 @@ use self::models::CatalogSymbol;
 pub(super) use self::models::InteractiveCatalog;
 pub use self::models::{
     CodeGraphCensusV1, CodeGraphDegreeRankingV1, CodeGraphEdgeKindCountsV1,
-    CodeGraphFileSymbolCountV1, CodeGraphImpactBatchV1, CodeGraphImpactedSymbolV1,
-    CodeGraphPathSearchV1, CodeGraphRankedSymbolV1, CodeGraphRelationKeyV1,
-    CodeGraphRelationKeysV1, CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1,
-    CodeGraphSymbolPageV1, CodeGraphSymbolRefV1, CodeGraphSymbolSearchPageV1,
-    CodeGraphSymbolSummaryV1,
+    CodeGraphFileDependenciesV1, CodeGraphFileSymbolCountV1, CodeGraphImpactBatchV1,
+    CodeGraphImpactedSymbolV1, CodeGraphPathSearchV1, CodeGraphRankedSymbolV1,
+    CodeGraphRelationKeyV1, CodeGraphRelationKeysV1, CodeGraphSemanticEdgeV1,
+    CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1, CodeGraphSymbolRefV1,
+    CodeGraphSymbolSearchPageV1, CodeGraphSymbolSummaryV1,
 };
 
 pub type CodeGraphSymbolPredicate<'a> = dyn Fn(
@@ -919,6 +919,16 @@ impl CodeGraphInteractiveReader {
                 .cloned()
                 .collect(),
         })
+    }
+
+    /// File-level `calls`/`uses` dependencies the catalog folded when it
+    /// was built.
+    pub fn file_dependencies(
+        &self,
+        request_cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<CodeGraphFileDependenciesV1, CodeGraphProjectionError> {
+        let cancellation = self.read_cancellation(request_cancellation)?;
+        Ok(self.catalog(cancellation)?.file_dependencies.clone())
     }
 
     /// Canonical symbol name search: exact simple-name hits from the

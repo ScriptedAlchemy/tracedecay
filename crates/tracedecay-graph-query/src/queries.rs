@@ -3,8 +3,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tracedecay_code_index::graph_projection::{
-    CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1, CodeGraphSymbolPageV1,
-    CodeGraphSymbolSummaryV1,
+    CodeGraphFileDependenciesV1, CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1,
+    CodeGraphSymbolPageV1, CodeGraphSymbolSummaryV1,
 };
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -27,13 +27,6 @@ const HEALTH_EDGE_KINDS: [RelationEdgeKindV1; 8] = [
     RelationEdgeKindV1::Receives,
     RelationEdgeKindV1::Annotates,
 ];
-
-#[derive(Debug)]
-pub struct FileAdjacencyScan {
-    pub adjacency: HashMap<String, HashSet<String>>,
-    pub files_examined: usize,
-    pub dependency_edges_examined: usize,
-}
 
 /// Files that call or use symbols defined in one file, and whether the graph
 /// also holds call sites it could not bind to that file's symbols.
@@ -360,96 +353,26 @@ impl<'a> GraphQueryManager<'a> {
         Ok(cycles)
     }
 
+    /// File-level `calls`/`uses` adjacency, restricted to files under
+    /// `path_prefix` when one is given.
     #[hotpath::measure(label = "usecases.graph.file_adjacency", future = true)]
     pub async fn build_file_adjacency(
         &self,
         path_prefix: Option<&str>,
     ) -> Result<HashMap<String, HashSet<String>>> {
-        if let Some(path_prefix) = path_prefix {
-            let files = hotpath::measure_block!("usecases.graph.adjacency.files", {
-                self.reader
-                    .files(MAX_ANALYTICAL_SYMBOLS, Arc::clone(&self.cancellation))
-                    .map_err(|error| {
-                        super::map_code_graph_read_runtime_error(map_projection_error(error))
-                    })
-            })?;
-            let logical_paths = files
-                .into_iter()
-                .map(|file| file.logical_path)
-                .filter(|path| path_is_within(path, path_prefix))
-                .collect::<HashSet<_>>();
-            let symbols = hotpath::measure_block!("usecases.graph.adjacency.symbols", {
-                self.symbols_in_logical_files_page(
-                    &logical_paths,
-                    None,
-                    MAX_ANALYTICAL_SYMBOLS,
-                    MAX_ANALYTICAL_SYMBOLS,
-                )
-                .map(|page| page.symbols)
-            })?;
-            let edges = hotpath::measure_block!("usecases.graph.adjacency.edges", {
-                self.incoming_edges(
-                    &symbols,
-                    &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Uses],
-                )
-            })?
-            .into_iter()
-            .map(|edge| edge.edge)
-            .collect::<Vec<_>>();
-            return Ok(file_adjacency(logical_paths, &symbols, &edges));
-        }
-        Ok(self
-            .build_file_adjacency_bounded(MAX_ANALYTICAL_SYMBOLS, MAX_ANALYTICAL_RELATIONS)
-            .await?
-            .adjacency)
+        let dependencies = self.file_dependencies()?;
+        Ok(match path_prefix {
+            Some(path_prefix) => scoped_file_adjacency(&dependencies.adjacency, path_prefix),
+            None => dependencies.adjacency.as_ref().clone(),
+        })
     }
 
-    #[hotpath::skip]
-    pub async fn build_file_adjacency_bounded(
-        &self,
-        max_files: usize,
-        max_dependency_edges: usize,
-    ) -> Result<FileAdjacencyScan> {
-        let files = hotpath::measure_block!("usecases.graph.adjacency.files", {
-            self.reader
-                .files(max_files, Arc::clone(&self.cancellation))
-                .map_err(|error| {
-                    super::map_code_graph_read_runtime_error(map_projection_error(error))
-                })
-        })?;
-        let symbols = hotpath::measure_block!("usecases.graph.adjacency.symbols", {
-            self.page_all_symbols(
-                max_dependency_edges.max(1),
-                "verified graph symbol census exceeded its analytical budget",
-            )
-        })?;
-        let occurrences = symbols
-            .iter()
-            .map(|symbol| symbol.occurrence.clone())
-            .collect::<Vec<_>>();
-        let edges = hotpath::measure_block!("usecases.graph.adjacency.edges", {
-            self.reader
-                .edges_among(
-                    &occurrences,
-                    &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Uses],
-                    max_dependency_edges,
-                    Arc::clone(&self.cancellation),
-                )
-                .map_err(|error| {
-                    super::map_code_graph_read_runtime_error(map_projection_error(error))
-                })
-        })?;
-        let dependency_edges_examined = edges.len();
-        let adjacency = file_adjacency(
-            files.into_iter().map(|file| file.logical_path).collect(),
-            &symbols,
-            &edges,
-        );
-        Ok(FileAdjacencyScan {
-            files_examined: adjacency.len(),
-            dependency_edges_examined,
-            adjacency,
-        })
+    /// The generation's file dependencies, folded once by the interactive
+    /// catalog.
+    pub fn file_dependencies(&self) -> Result<CodeGraphFileDependenciesV1> {
+        self.reader
+            .file_dependencies(Arc::clone(&self.cancellation))
+            .map_err(|error| super::map_code_graph_read_runtime_error(map_projection_error(error)))
     }
 
     /// Folds every health input from one immutable graph generation. Symbol
@@ -617,39 +540,25 @@ impl<'a> GraphQueryManager<'a> {
     }
 }
 
-fn file_adjacency(
-    logical_paths: HashSet<String>,
-    symbols: &[CodeGraphSymbolSummaryV1],
-    edges: &[CanonicalRelationEdgeV1],
+/// The adjacency induced on the files under `path_prefix`.
+fn scoped_file_adjacency(
+    adjacency: &HashMap<String, HashSet<String>>,
+    path_prefix: &str,
 ) -> HashMap<String, HashSet<String>> {
-    let paths = symbols
-        .iter()
-        .filter_map(|symbol| {
-            Some((
-                symbol.occurrence.clone(),
-                symbol.binding.as_ref()?.logical_path.clone()?,
-            ))
-        })
-        .collect::<HashMap<_, _>>();
-    let mut adjacency = logical_paths
-        .into_iter()
-        .map(|path| (path, HashSet::new()))
-        .collect::<HashMap<_, _>>();
-    for edge in edges {
-        let (Some(source), Some(target)) = (
-            paths.get(&edge.from_occurrence),
-            paths.get(&edge.to_occurrence),
-        ) else {
-            continue;
-        };
-        if source != target {
-            adjacency
-                .entry(source.clone())
-                .or_default()
-                .insert(target.clone());
-        }
-    }
     adjacency
+        .iter()
+        .filter(|(source, _)| path_is_within(source, path_prefix))
+        .map(|(source, targets)| {
+            (
+                source.clone(),
+                targets
+                    .iter()
+                    .filter(|target| path_is_within(target, path_prefix))
+                    .cloned()
+                    .collect(),
+            )
+        })
+        .collect()
 }
 
 fn health_symbol_metadata(
@@ -791,7 +700,7 @@ mod path_scope_tests {
         LanguageDescriptorRevision, RelationEdgeKindV1, SourceSpan, SymbolOccurrenceId,
     };
 
-    use super::{file_adjacency, fold_health_aggregates, path_is_within};
+    use super::{fold_health_aggregates, path_is_within, scoped_file_adjacency};
 
     fn digest<T>(byte: char) -> T
     where
@@ -870,48 +779,32 @@ mod path_scope_tests {
     }
 
     #[test]
-    fn scoped_adjacency_matches_whole_graph_induced_result_at_the_boundary() {
-        let inside = symbol("symbol.inside", "src/scoped/inside.rs");
-        let next = symbol("symbol.next", "src/scoped/next.rs");
-        let outside = symbol("symbol.outside", "src/outside.rs");
-        let edges = vec![edge(&inside, &next), edge(&outside, &inside)];
-        let whole = file_adjacency(
-            HashSet::from([
+    fn scoped_adjacency_keeps_only_dependencies_between_files_in_scope() {
+        let whole = HashMap::from([
+            (
                 "src/scoped/inside.rs".to_owned(),
-                "src/scoped/next.rs".to_owned(),
+                HashSet::from(["src/scoped/next.rs".to_owned(), "src/outside.rs".to_owned()]),
+            ),
+            ("src/scoped/next.rs".to_owned(), HashSet::new()),
+            (
                 "src/outside.rs".to_owned(),
-            ]),
-            &[inside.clone(), next.clone(), outside],
-            &edges,
-        );
-        let scoped = file_adjacency(
-            HashSet::from([
-                "src/scoped/inside.rs".to_owned(),
-                "src/scoped/next.rs".to_owned(),
-            ]),
-            &[inside, next],
-            &edges,
-        );
+                HashSet::from(["src/scoped/inside.rs".to_owned()]),
+            ),
+            (
+                "src/scoped-sibling.rs".to_owned(),
+                HashSet::from(["src/scoped/next.rs".to_owned()]),
+            ),
+        ]);
 
         assert_eq!(
-            scoped["src/scoped/inside.rs"],
-            HashSet::from(["src/scoped/next.rs".to_owned()])
-        );
-        assert_eq!(
-            scoped,
-            whole
-                .into_iter()
-                .filter(|(source, _)| source.starts_with("src/scoped/"))
-                .map(|(source, targets)| {
-                    (
-                        source,
-                        targets
-                            .into_iter()
-                            .filter(|target| target.starts_with("src/scoped/"))
-                            .collect(),
-                    )
-                })
-                .collect()
+            scoped_file_adjacency(&whole, "src/scoped"),
+            HashMap::from([
+                (
+                    "src/scoped/inside.rs".to_owned(),
+                    HashSet::from(["src/scoped/next.rs".to_owned()]),
+                ),
+                ("src/scoped/next.rs".to_owned(), HashSet::new()),
+            ])
         );
     }
 

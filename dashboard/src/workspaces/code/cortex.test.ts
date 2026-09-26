@@ -182,13 +182,10 @@ describe('strata for a file', () => {
       { path: 'src/storage/store.rs', depth: 2, scc_size: 1, chain: [] },
     ],
     scan: {
-      budget_ms: 250,
       cache_scope: 'sealed_generation',
       cache_state: 'warm',
       dependency_edges_examined: 100,
       files_examined: 2,
-      max_dependency_edges: 50_000,
-      max_files: 10_000,
     },
   };
 
@@ -200,7 +197,6 @@ describe('strata for a file', () => {
       idealDepth: 5,
       directory: 'src/storage',
       sccSize: 3,
-      capped: false,
     });
   });
 
@@ -209,20 +205,12 @@ describe('strata for a file', () => {
       kind: 'directory_only',
       directory: 'src/storage',
       depths: [2, 3],
-      capped: false,
     });
     expect(strataForPath(measurement, 'dashboard/src/x.tsx')).toEqual({
       kind: 'not_in_scan',
       filesLaidOut: 2,
-      capped: false,
     });
     expect(strataForPath(measurement, null)).toEqual({ kind: 'no_path' });
-  });
-
-  it('flags a budget-capped scan so a depth reads as a floor', () => {
-    const capped = { ...measurement, scan: { ...measurement.scan, files_examined: 10_000 } };
-    expect(strataForPath(capped, 'src/storage/store.rs')).toMatchObject({ capped: true });
-    expect(strataForPath(capped, 'nowhere.rs')).toMatchObject({ kind: 'not_in_scan', capped: true });
   });
 });
 

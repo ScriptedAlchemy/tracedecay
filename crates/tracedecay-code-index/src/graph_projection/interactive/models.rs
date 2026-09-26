@@ -1,6 +1,7 @@
 //! Public interactive graph results and the generation-pinned lookup catalog.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use serde::{Serialize, Serializer};
 use tracedecay_domain::{
@@ -132,6 +133,17 @@ pub struct CodeGraphCensusV1 {
     pub largest_files: Vec<CodeGraphFileSymbolCountV1>,
 }
 
+/// File-level `calls`/`uses` dependencies of one generation, folded once
+/// while the catalog is built from every such edge whose endpoints are
+/// bound to two different files.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CodeGraphFileDependenciesV1 {
+    /// Every file's logical path to the logical paths it depends on.
+    pub adjacency: Arc<HashMap<String, HashSet<String>>>,
+    /// The `calls`/`uses` edges of the generation the adjacency folds.
+    pub dependency_edges: u64,
+}
+
 /// One window of a symbol name search. `total` is the exact match count
 /// when the scan reached the end of the generation, and `None` when it
 /// stopped one match past the window (`has_more`).
@@ -205,6 +217,7 @@ pub(in crate::graph_projection) struct InteractiveCatalog {
     pub(super) files_by_language: BTreeMap<String, u64>,
     pub(super) largest_files: Vec<CodeGraphFileSymbolCountV1>,
     pub(super) semantic_edges: u64,
+    pub(super) file_dependencies: CodeGraphFileDependenciesV1,
 }
 
 impl InteractiveCatalog {
@@ -223,6 +236,7 @@ impl InteractiveCatalog {
             files_by_language: BTreeMap::new(),
             largest_files: Vec::new(),
             semantic_edges: 0,
+            file_dependencies: CodeGraphFileDependenciesV1::default(),
         }
     }
 
@@ -313,7 +327,22 @@ impl InteractiveCatalog {
                     .saturating_add(import.module_specifier.len())
                     .saturating_add(import.imported_name.as_ref().map_or(0, String::len))
                     .saturating_add(import.local_name.as_ref().map_or(0, String::len))
-            }));
+            }))
+            .saturating_add(self.file_dependencies.adjacency.iter().fold(
+                0,
+                |bytes, (path, dependencies)| {
+                    dependencies.iter().fold(
+                        bytes
+                            .saturating_add(size_of::<(String, HashSet<String>)>())
+                            .saturating_add(path.len()),
+                        |bytes, dependency| {
+                            bytes
+                                .saturating_add(size_of::<String>())
+                                .saturating_add(dependency.len())
+                        },
+                    )
+                },
+            ));
         u64::try_from(bytes).unwrap_or(u64::MAX)
     }
 

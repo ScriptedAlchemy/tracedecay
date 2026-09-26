@@ -4423,13 +4423,10 @@ function strataPayload(): Record<string, unknown> {
       })),
       files,
       scan: {
-        budget_ms: 250,
         cache_scope: 'sealed_generation',
         cache_state: 'warm',
         dependency_edges_examined: 1_872,
         files_examined: files.length,
-        max_dependency_edges: 50_000,
-        max_files: 10_000,
       },
     },
   };

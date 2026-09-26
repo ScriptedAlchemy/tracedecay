@@ -5981,13 +5981,10 @@ export const StrataMeasurementV1Schema = z.object({
 export type StrataMeasurementV1 = z.infer<typeof StrataMeasurementV1Schema>;
 
 export const StrataScanV1Schema = z.object({
-  budget_ms: z.number().int().safe().min(0),
   cache_scope: z.string(),
   cache_state: z.string(),
   dependency_edges_examined: z.number().int().safe().min(0),
   files_examined: z.number().int().safe().min(0),
-  max_dependency_edges: z.number().int().safe().min(0),
-  max_files: z.number().int().safe().min(0),
 });
 export type StrataScanV1 = z.infer<typeof StrataScanV1Schema>;
 

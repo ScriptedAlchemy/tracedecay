@@ -31,9 +31,7 @@ pub use projection::{
     application_graph_cancellation, map_code_graph_read_runtime_error, map_projection_error,
     request_graph_cancellation,
 };
-pub use queries::{
-    FileAdjacencyScan, FileDependentsV1, GraphQueryManager, VerifiedHealthFileAggregateV1,
-};
+pub use queries::{FileDependentsV1, GraphQueryManager, VerifiedHealthFileAggregateV1};
 pub use verified_query::{
     AdmittedVerifiedGraphQueryPort, VerifiedGraphQuery, VerifiedGraphQueryFuture,
     VerifiedGraphQueryPort, VerifiedGraphQueryRequest,

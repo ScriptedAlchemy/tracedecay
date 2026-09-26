@@ -191,14 +191,6 @@ function ReliefPlate({ model }: { model: CortexModel }) {
           </div>
         ))}
       </dl>
-      {model.capped ? (
-        <p className="border-b border-edge-subtle px-3 py-1.5 text-3xs leading-relaxed text-state-unknown">
-          the scan stopped at its budget, {model.scan.max_files.toLocaleString()} files and{' '}
-          {model.scan.max_dependency_edges.toLocaleString()} dependency edges in{' '}
-          {model.scan.budget_ms} ms, so this terrain is the part of the repository the scan
-          reached, and the strata above are a floor rather than a depth
-        </p>
-      ) : null}
       {model.unplacedRegions > 0 ? (
         <p className="border-b border-edge-subtle px-3 py-1.5 text-3xs leading-relaxed text-state-unknown">
           {model.unplacedRegions}{' '}

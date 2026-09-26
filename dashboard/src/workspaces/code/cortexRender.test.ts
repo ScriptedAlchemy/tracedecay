@@ -47,13 +47,10 @@ function twoRegionModel() {
     ideal_depth: 2,
     max_depth: 3,
     scan: {
-      budget_ms: 4000,
       cache_scope: 'graph_generation',
       cache_state: 'hit',
       dependency_edges_examined: 100,
       files_examined: 44,
-      max_dependency_edges: 40_000,
-      max_files: 20_000,
     },
   };
   return buildCortexModel(measurement);
