@@ -158,10 +158,9 @@ pub(super) fn is_source_edit_tool(tool_name: &str) -> bool {
 /// Reads that walk a git tree or the whole code graph, and so must not run
 /// without a horizon.
 ///
-/// The catalog-owned git reads are recognised by their surface operation; every
-/// other git-walking tool is recognised through the canonical MCP binding table
-/// rather than a second hand-maintained name list, so a newly bound git tool
-/// inherits the bound instead of silently running unbounded.
+/// The catalog-owned git reads and git-context reads are recognised by their
+/// surface operation; the internal branch-add tool is recognised through the
+/// canonical MCP binding table rather than a second hand-maintained name list.
 pub(super) fn is_controlled_read_tool(tool_name: &str) -> bool {
     matches!(
         ApplicationSurfaceOperation::from_tool_name(tool_name),
@@ -171,6 +170,14 @@ pub(super) fn is_controlled_read_tool(tool_name: &str) -> bool {
                 | ApplicationSurfaceOperation::GitHistory
                 | ApplicationSurfaceOperation::GitBlame
                 | ApplicationSurfaceOperation::GitHunks
+                | ApplicationSurfaceOperation::Affected
+                | ApplicationSurfaceOperation::DiffContext
+                | ApplicationSurfaceOperation::Changelog
+                | ApplicationSurfaceOperation::CommitContext
+                | ApplicationSurfaceOperation::PrContext
+                | ApplicationSurfaceOperation::BranchSearch
+                | ApplicationSurfaceOperation::BranchDiff
+                | ApplicationSurfaceOperation::BranchList
         )
     ) || crate::mcp::tools::handlers::tool_dispatches_git_reads(tool_name)
         || tool_name == "tracedecay_search"
@@ -185,6 +192,19 @@ pub(super) fn dispatch_deadline_horizon_micros(bounded_operation: bool) -> Optio
         return None;
     }
     i64::try_from(tracedecay_daemon_protocol::DEFAULT_DAEMON_OPERATION_DEADLINE.as_micros()).ok()
+}
+
+/// The horizon a dispatch carries when the caller named no deadline. A git
+/// walk carries the bounded git-read horizon even when its capability ceiling
+/// is longer; other application operations carry their ceiling.
+pub(super) fn carried_horizon_micros(tool_name: &str, ceiling: std::time::Duration) -> Option<i64> {
+    if is_controlled_read_tool(tool_name) {
+        dispatch_deadline_horizon_micros(true)
+    } else if ApplicationSurfaceOperation::from_tool_name(tool_name).is_some() {
+        i64::try_from(ceiling.as_micros()).ok()
+    } else {
+        dispatch_deadline_horizon_micros(is_source_edit_tool(tool_name))
+    }
 }
 
 fn tool_carries_effect(tool_name: &str) -> bool {
@@ -205,14 +225,7 @@ impl McpServer {
             .map_err(|error| TraceDecayError::Config {
                 message: format!("could not resolve MCP dispatch deadline: {error}"),
             })?;
-        let application_surface = ApplicationSurfaceOperation::from_tool_name(tool_name);
-        let carried_horizon_micros = if application_surface.is_some() {
-            i64::try_from(ceiling.as_micros()).ok()
-        } else {
-            dispatch_deadline_horizon_micros(
-                is_controlled_read_tool(tool_name) || is_source_edit_tool(tool_name),
-            )
-        };
+        let carried_horizon_micros = carried_horizon_micros(tool_name, ceiling);
         self.dispatch_authority
             .prepare_control(DispatchControlRequest {
                 wire_id: id,
@@ -1919,10 +1932,10 @@ mod git_read_control_tests {
         }
     }
 
-    /// These tools walk git trees but are not application-surface operations
-    /// and are not source edits, so the horizon predicate used to return `None`
-    /// for them: they dispatched with no deadline at all while the cheaper
-    /// `tracedecay_git_status` was bounded at thirty seconds.
+    /// These tools walk git trees and are not source edits. The horizon
+    /// predicate once returned `None` for them, so they dispatched with no
+    /// deadline at all while the cheaper `tracedecay_git_status` was bounded
+    /// at thirty seconds; their longer capability ceiling must not widen it.
     #[test]
     fn git_reading_tools_receive_a_bounded_deadline() {
         for tool_name in [
@@ -1936,22 +1949,18 @@ mod git_read_control_tests {
             "tracedecay_branch_diff",
             "tracedecay_branch_list",
         ] {
-            assert!(
-                ApplicationSurfaceOperation::from_tool_name(tool_name).is_none(),
-                "{tool_name} is not an application-surface operation, so only the \
-                 git-dispatch predicate can bound it",
-            );
             assert!(!is_source_edit_tool(tool_name));
             assert!(
                 is_controlled_read_tool(tool_name),
                 "{tool_name} walks a git tree and must be a controlled read",
             );
+            let ceiling =
+                tracedecay_mcp::tools::binding::canonical_tool_dispatch_ceiling(tool_name)
+                    .expect("dispatch ceiling");
             assert_eq!(
-                dispatch_deadline_horizon_micros(
-                    is_controlled_read_tool(tool_name) || is_source_edit_tool(tool_name),
-                ),
+                carried_horizon_micros(tool_name, ceiling),
                 Some(30_000_000),
-                "{tool_name} must dispatch with a bounded horizon",
+                "{tool_name} must dispatch with a bounded horizon under its {ceiling:?} ceiling",
             );
         }
     }
@@ -1971,6 +1980,14 @@ mod git_read_control_tests {
             );
         }
         assert!(is_controlled_read_tool("tracedecay_search"));
+        let health_ceiling =
+            tracedecay_mcp::tools::binding::canonical_tool_dispatch_ceiling("tracedecay_health")
+                .expect("health dispatch ceiling");
+        assert_eq!(
+            carried_horizon_micros("tracedecay_health", health_ceiling),
+            Some(120_000_000),
+            "a non-git application report carries its own ceiling",
+        );
     }
 }
 

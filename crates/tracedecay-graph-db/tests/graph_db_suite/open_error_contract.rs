@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use grafeo_common::types::Value;
 use tempfile::TempDir;
 use tracedecay_graph_db::{GraphDbError, GraphEntityId, GraphNamespace, NeverCancelled};
 
@@ -39,22 +40,26 @@ fn persisted_scalar_identity_mismatch_is_corrupt_on_point_read() {
         .create_node_with_props(
             &["__tracedecay_graph_db_format"],
             [
-                ("__tracedecay_graph_db_version", 2_i64.into()),
+                ("__tracedecay_graph_db_version", 3_i64.into()),
                 ("__tracedecay_graph_db_schema", "native-scalars-v1".into()),
                 ("__tracedecay_graph_db_sequence", 0_i64.into()),
             ],
         )
         .unwrap();
-    let stable_key = "776f726b7370616365:656e74697479";
-    let locator = format!(
-        "__tracedecay_graph_db_entity_key_{}",
-        hex::encode(stable_key.as_bytes())
-    );
+    // sha256("workspace")[..8], the raw-identity tag, then "entity".
+    let stable_key = [
+        &[0x21, 0xa3, 0x23, 0x0e, 0x03, 0x77, 0x2a, 0x58, 0x00][..],
+        b"entity",
+    ]
+    .concat();
     session
         .create_node_with_props(
-            &["__tracedecay_graph_db_entity", locator.as_str()],
+            &["__tracedecay_graph_db_entity"],
             [
-                ("__tracedecay_graph_db_entity_key", stable_key.into()),
+                (
+                    "__tracedecay_graph_db_entity_key",
+                    Value::Bytes(stable_key.into()),
+                ),
                 ("__tracedecay_graph_db_namespace", "workspace".into()),
                 ("__tracedecay_graph_db_projection", "code".into()),
                 ("__tracedecay_graph_db_entity_id", "different".into()),

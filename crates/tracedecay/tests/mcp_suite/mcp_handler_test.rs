@@ -69,6 +69,7 @@ mod feedback_list_test;
 #[cfg(feature = "test-transport")]
 mod files_behavior_test;
 mod find_exact_symbol_test;
+mod git_context_request_test;
 mod god_class_test;
 mod graph_analysis_test;
 mod graph_lookup_typed_request_test;

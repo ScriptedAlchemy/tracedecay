@@ -210,6 +210,7 @@ impl From<GraphDbError> for CodeGraphProjectionError {
                 message,
             },
             GraphDbError::ResetRequired { message } => Self::ResetRequired(message),
+            error @ GraphDbError::FormatSuperseded { .. } => Self::ResetRequired(error.to_string()),
             GraphDbError::Corrupt { message } => Self::Corrupt(message),
             GraphDbError::Unavailable { message }
             | GraphDbError::SealedStoreImmutable { message } => Self::Unavailable(message),

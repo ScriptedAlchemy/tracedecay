@@ -1610,6 +1610,23 @@ impl GraphDb {
                     }
                 }
             }
+            Err(GraphDbError::FormatSuperseded { .. })
+                if persistent_store_state == PersistentGraphStoreState::Existing =>
+            {
+                let path = validated.config.path.as_deref().ok_or_else(|| {
+                    GraphDbError::unavailable("persistent graph database has no container path")
+                })?;
+                match crate::corrupt_store::replace_superseded_container(path, &|| {
+                    open_validated_graph(&validated, GraphEngineOpenSite::LazyFirstUse)
+                })? {
+                    crate::corrupt_store::CorruptStoreRecovery::Reopened(opened) => opened,
+                    crate::corrupt_store::CorruptStoreRecovery::Deleted => {
+                        let mut fresh = validated.clone();
+                        fresh.preexisting_store = false;
+                        open_validated_graph(&fresh, GraphEngineOpenSite::LazyFirstUse)?
+                    }
+                }
+            }
             Err(error) => return Err(error),
         };
         if let Some(path) = validated.config.path.as_deref() {

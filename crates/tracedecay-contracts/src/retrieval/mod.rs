@@ -3,6 +3,7 @@ mod callable_code;
 mod callable_code_catalog;
 mod callable_code_service;
 pub mod catalog;
+mod git_context_surface;
 mod git_topology_anchor;
 mod graph_lookup_surface;
 mod graph_report_surface;
@@ -101,6 +102,25 @@ pub use callable_code_catalog::{
 pub use callable_code_service::{
     CallableCodeAuthorizationFuture, CallableCodeAuthorizationPort, CallableCodeQueryFuture,
     CallableCodeQueryPort, CallableCodeQueryService, UNPINNED_LATEST_GENERATION_SENTINEL,
+};
+pub use git_context_surface::{
+    AffectedRankingMetadataV1, AffectedResultV1, AffectedSurfaceRequestV1, BranchDiffCompleteV1,
+    BranchDiffPartialV1, BranchDiffReferenceUnavailableV1, BranchDiffResultV1, BranchDiffSummaryV1,
+    BranchDiffSurfaceRequestV1, BranchDiffUnavailableV1, BranchListPageV1, BranchListResultV1,
+    BranchListSurfaceRequestV1, BranchReadUnavailableV1, BranchReferenceUnavailableV1,
+    BranchSearchHitV1, BranchSearchPageV1, BranchSearchResultV1, BranchSearchSurfaceRequestV1,
+    BranchSearchUnavailableV1, BranchSnapshotEntryV1, BranchSymbolChangeV1, BranchSymbolV1,
+    ChangelogCompleteV1, ChangelogPartialV1, ChangelogResultV1, ChangelogSurfaceRequestV1,
+    CommitCategoryV1, CommitContextResultV1, CommitContextSummaryV1, CommitContextSurfaceRequestV1,
+    CommitFileRoleV1, CommitSymbolEntryV1, CommitSymbolV1, ConfigSummaryKindV1, ConfigSummaryV1,
+    DiffContextResultV1, DiffContextSurfaceRequestV1, GitCommitSubjectV1, GitComparedSymbolV1,
+    GitContextSymbolV1, GitFileChangeStatusV1, GitFileChangeV1, GitFileRoleV1, GitPageStatusV1,
+    GitReadCompleteV1, GitReadPartialV1, GitReadUnavailableV1, GitReferenceLimitV1,
+    GitResultLimitV1, GitToolErrorKindV1, GitToolErrorV1, GitToolFailureV1, GitToolOperationV1,
+    PrAnalysisCoverageV1, PrContextCompleteV1, PrContextGraphPendingV1, PrContextResultV1,
+    PrContextSurfaceRequestV1, PrContextSymbolsUnavailableV1, PrCoverageSelectionV1,
+    PrSelectionCoverageV1, PrSymbolChangesCompleteV1, PrSymbolEntryV1, PrSymbolPageV1,
+    PrSymbolSelectionV1, SymbolChangesCompleteV1, SymbolChangesUnavailableV1,
 };
 pub use git_topology_anchor::{
     GitTopologyAnchorAuthority, GitTopologyAnchorAuthorityError, GitTopologyAnchorFuture,

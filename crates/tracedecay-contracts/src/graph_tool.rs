@@ -1,17 +1,20 @@
-//! Typed terminals for the graph-backed reads and reports whose results are
-//! their catalog result schemas, plus the files they report beside the result.
+//! Typed terminals for the graph- and git-backed reads and reports whose
+//! results are their catalog result schemas, plus the files they report beside
+//! the result.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::InvocationAnalyticsV1;
 use crate::retrieval::{
-    AstGrepSearchResultV1, ByQualifiedNameResultV1, CircularResultV1, ComplexityReportV1,
-    ConstructorsResultV1, ContextResultV1, CouplingResultV1, DeadCodeResultV1,
-    DependencyDepthResultV1, DerivesResultV1, DiagnoseResultV1, DistributionResultV1,
-    DocCoverageResultV1, DsmResultV1, FieldSitesResultV1, FindExactSymbolResultV1, GiniResultV1,
-    GodClassResultV1, GrepSearchResultV1, HealthResultV1, HotspotsResultV1, ImpactResultV1,
-    InheritanceDepthResultV1, LargestResultV1, NodeResultV1, PortOrderResultV1, PortStatusResultV1,
+    AffectedResultV1, AstGrepSearchResultV1, BranchDiffResultV1, BranchListResultV1,
+    BranchSearchResultV1, ByQualifiedNameResultV1, ChangelogResultV1, CircularResultV1,
+    CommitContextResultV1, ComplexityReportV1, ConstructorsResultV1, ContextResultV1,
+    CouplingResultV1, DeadCodeResultV1, DependencyDepthResultV1, DerivesResultV1, DiagnoseResultV1,
+    DiffContextResultV1, DistributionResultV1, DocCoverageResultV1, DsmResultV1,
+    FieldSitesResultV1, FindExactSymbolResultV1, GiniResultV1, GodClassResultV1,
+    GrepSearchResultV1, HealthResultV1, HotspotsResultV1, ImpactResultV1, InheritanceDepthResultV1,
+    LargestResultV1, NodeResultV1, PortOrderResultV1, PortStatusResultV1, PrContextResultV1,
     RankResultV1, RecursionResultV1, RedundancyResultV1, RenamePreviewPrimitiveOutcomeV1,
     SignatureResultV1, SimilarResultV1, TestMapResultV1, TestRiskResultV1, TodosResultV1,
     UnmountedFilesResultV1, UnsafePatternsResultV1,
@@ -59,6 +62,14 @@ pub enum GraphToolResultV1 {
     Derives(DerivesResultV1),
     Grep(GrepSearchResultV1),
     AstGrepSearch(AstGrepSearchResultV1),
+    Affected(AffectedResultV1),
+    DiffContext(DiffContextResultV1),
+    Changelog(ChangelogResultV1),
+    CommitContext(CommitContextResultV1),
+    PrContext(PrContextResultV1),
+    BranchSearch(BranchSearchResultV1),
+    BranchDiff(BranchDiffResultV1),
+    BranchList(BranchListResultV1),
 }
 
 impl GraphToolResultV1 {
@@ -107,6 +118,14 @@ impl GraphToolResultV1 {
             Operation::Derives => Self::Derives(serde_json::from_value(value)?),
             Operation::Grep => Self::Grep(serde_json::from_value(value)?),
             Operation::AstGrepSearch => Self::AstGrepSearch(serde_json::from_value(value)?),
+            Operation::Affected => Self::Affected(serde_json::from_value(value)?),
+            Operation::DiffContext => Self::DiffContext(serde_json::from_value(value)?),
+            Operation::Changelog => Self::Changelog(serde_json::from_value(value)?),
+            Operation::CommitContext => Self::CommitContext(serde_json::from_value(value)?),
+            Operation::PrContext => Self::PrContext(serde_json::from_value(value)?),
+            Operation::BranchSearch => Self::BranchSearch(serde_json::from_value(value)?),
+            Operation::BranchDiff => Self::BranchDiff(serde_json::from_value(value)?),
+            Operation::BranchList => Self::BranchList(serde_json::from_value(value)?),
             operation => {
                 return Err(serde::de::Error::custom(format!(
                     "{} is not a graph-tool operation",
@@ -157,6 +176,14 @@ impl GraphToolResultV1 {
             Self::Derives(result) => serde_json::to_value(result),
             Self::Grep(result) => serde_json::to_value(result),
             Self::AstGrepSearch(result) => serde_json::to_value(result),
+            Self::Affected(result) => serde_json::to_value(result),
+            Self::DiffContext(result) => serde_json::to_value(result),
+            Self::Changelog(result) => serde_json::to_value(result),
+            Self::CommitContext(result) => serde_json::to_value(result),
+            Self::PrContext(result) => serde_json::to_value(result),
+            Self::BranchSearch(result) => serde_json::to_value(result),
+            Self::BranchDiff(result) => serde_json::to_value(result),
+            Self::BranchList(result) => serde_json::to_value(result),
         }
     }
 }

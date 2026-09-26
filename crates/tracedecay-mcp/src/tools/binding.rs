@@ -280,6 +280,14 @@ fn application_surface_branch_sensitivity(
         | ApplicationSurfaceOperation::Derives
         | ApplicationSurfaceOperation::Grep
         | ApplicationSurfaceOperation::AstGrepSearch
+        | ApplicationSurfaceOperation::Affected
+        | ApplicationSurfaceOperation::DiffContext
+        | ApplicationSurfaceOperation::Changelog
+        | ApplicationSurfaceOperation::CommitContext
+        | ApplicationSurfaceOperation::PrContext
+        | ApplicationSurfaceOperation::BranchSearch
+        | ApplicationSurfaceOperation::BranchDiff
+        | ApplicationSurfaceOperation::BranchList
         | HealthRead
         | HealthDelta
         | DiagnosticsRead
@@ -343,9 +351,7 @@ const BINDING_GROUPS: &[BindingGroup] = binding_groups![
     [Some(McpToolDispatchGroup::Admin), RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_hook_runtime", "tracedecay_admin_cli", "tracedecay_admin_project"],
     [Some(McpToolDispatchGroup::Git), RegisteredProjectAccess::ActiveProjectOnly,
-        "tracedecay_admin_branch_add", "tracedecay_affected", "tracedecay_diff_context", "tracedecay_changelog",
-        "tracedecay_commit_context", "tracedecay_pr_context", "tracedecay_branch_search",
-        "tracedecay_branch_diff", "tracedecay_branch_list"],
+        "tracedecay_admin_branch_add"],
     [Some(McpToolDispatchGroup::Health), RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_runtime"],
     [Some(McpToolDispatchGroup::Memory), RegisteredProjectAccess::ActiveProjectOnly,
@@ -756,11 +762,7 @@ fn compute_tool_supports_live_cancellation(tool_name: &str) -> bool {
         || compute_tool_dispatches_source_edit_effect(tool_name)
         || matches!(
             tool_name,
-            "tracedecay_admin_cli"
-                | "tracedecay_search"
-                | "tracedecay_run_affected_tests"
-                | "tracedecay_pr_context"
-                | "tracedecay_affected"
+            "tracedecay_admin_cli" | "tracedecay_search" | "tracedecay_run_affected_tests"
         )
 }
 

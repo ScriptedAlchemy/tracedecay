@@ -1018,7 +1018,15 @@ impl DaemonInvocationRequest {
             | ApplicationSurfaceOperation::Signature
             | ApplicationSurfaceOperation::Derives
             | ApplicationSurfaceOperation::Grep
-            | ApplicationSurfaceOperation::AstGrepSearch => {
+            | ApplicationSurfaceOperation::AstGrepSearch
+            | ApplicationSurfaceOperation::Affected
+            | ApplicationSurfaceOperation::DiffContext
+            | ApplicationSurfaceOperation::Changelog
+            | ApplicationSurfaceOperation::CommitContext
+            | ApplicationSurfaceOperation::PrContext
+            | ApplicationSurfaceOperation::BranchSearch
+            | ApplicationSurfaceOperation::BranchDiff
+            | ApplicationSurfaceOperation::BranchList => {
                 unreachable!("graph-tool operations use their typed constructor")
             }
             ApplicationSurfaceOperation::FactStoreCurate
