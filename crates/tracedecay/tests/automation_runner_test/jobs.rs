@@ -472,6 +472,61 @@ async fn user_job_delivers_output_to_file_and_records_ledger() {
 }
 
 #[tokio::test]
+async fn scheduled_user_job_resets_a_schema_v1_ledger_and_records_a_v2_run() {
+    let temp = tempdir().unwrap();
+    let dashboard_root = temp.path().join("dashboard");
+    let profile_root = temp.path().join("profile");
+    fs::create_dir_all(&profile_root).unwrap();
+    fs::create_dir_all(&dashboard_root).unwrap();
+    let ledger_path = dashboard_root.join("automation_runs.jsonl");
+    fs::write(
+        &ledger_path,
+        concat!(
+            r#"{"schema_version":1,"run_id":"released-v1-run","trigger":"scheduler","#,
+            r#""task":"user_job","task_key":"user_job:daily-digest","backend":"codex_app_server","#,
+            r#""status":"succeeded","accepted_count":0,"rejected_count":0,"#,
+            r#""started_at":"2099-01-01T00:00:00Z","completed_at":"2099-01-01T00:00:01Z"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let backend = ContentBackend::new("# Digest\n\nNothing changed today.");
+    let run = run_user_job_with_backend(
+        &dashboard_root,
+        &enabled_job_config(),
+        &backend,
+        &sample_job("daily-digest"),
+        UserJobRunOptions {
+            trigger: AutomationTrigger::Scheduler,
+            run_id: Some("after-reset-run".to_string()),
+            profile_root: Some(profile_root),
+            project_root: None,
+            occurrence_anchor_run_id: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(backend.calls(), 1);
+    assert_eq!(run.report["status"], json!("delivered"));
+    let records = load_run_records(&dashboard_root, 10).await.unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| (record.run_id.as_str(), record.schema_version, record.status))
+            .collect::<Vec<_>>(),
+        [("after-reset-run", 2, AutomationRunStatus::Succeeded)]
+    );
+    assert!(
+        !fs::read_to_string(&ledger_path)
+            .unwrap()
+            .contains("released-v1-run"),
+        "the retired row is deleted with its ledger"
+    );
+}
+
+#[tokio::test]
 async fn user_job_pre_run_command_is_refused_unless_allowed() {
     let temp = tempdir().unwrap();
     let dashboard_root = temp.path().join("dashboard");

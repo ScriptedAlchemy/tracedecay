@@ -40,8 +40,12 @@ use super::host_io::{HostIo, home_dir, uses_default_user_profile};
 pub use crate::automation::managed_skills::managed_skill_root;
 use crate::automation::managed_skills::{ManagedSkill, ManagedSkillState};
 use tracedecay_automation::skill_frontmatter::{SkillFrontmatterValue, parse_skill_frontmatter};
-use tracedecay_domain::errors::Result;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_private_fs::FileLease;
+
+/// Typed reset authority for a host-side materialized skill package; its reset
+/// deletes the refused package directory.
+const MATERIALIZED_SKILL_PACKAGE_AUTHORITY: &str = "materialized skill package";
 
 pub use tracedecay_automation::managed_skills::MATERIALIZED_SKILL_MANAGED_BY;
 
@@ -387,6 +391,36 @@ fn recompute_on_disk_package(
         materialized_by: None,
         files,
     }))
+}
+
+/// The released pre-package-hash shape recorded the body-only hash as its
+/// `content-hash`. A pristine one is refused rather than adopted as owned or
+/// misreported as a user fork.
+fn refuse_released_body_hash_package(dir: &Path, provenance: &FileProvenance) -> Result<()> {
+    let Some(recorded) = provenance.content_hash.as_deref() else {
+        return Ok(());
+    };
+    let contents = match fs::read_to_string(artifact_path(dir, SKILL_FILE)?) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err.into()),
+    };
+    let body = contents.strip_prefix("---\n").and_then(|after_open| {
+        let close_at = after_open.find("\n---\n")?;
+        let region = &after_open[close_at + "\n---\n".len()..];
+        let region = region.strip_prefix('\n').unwrap_or(region);
+        Some(region.strip_suffix('\n').unwrap_or(region))
+    });
+    if body.is_some_and(|body| sha256_bytes(body.as_bytes()) == recorded) {
+        return Err(TraceDecayError::reset_required(
+            MATERIALIZED_SKILL_PACKAGE_AUTHORITY,
+            format!(
+                "'{}' is the released body-hash package shape without a manifest",
+                dir.display()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn frontmatter_scalar<'a>(
@@ -1076,6 +1110,7 @@ fn materialize_skill_into(
                     &artifacts,
                 )?
             } else {
+                refuse_released_body_hash_package(&dir, existing)?;
                 MaterializeAction::SkippedForked
             }
         }
@@ -1192,7 +1227,10 @@ pub fn remove_materialized_skill(
             ManifestState::Missing => match recompute_on_disk_package(&dir, &existing)? {
                 // Pristine package with a lost manifest.
                 Some(rederived) => rederived,
-                None => return Ok(RemoveAction::SkippedForked),
+                None => {
+                    refuse_released_body_hash_package(&dir, &existing)?;
+                    return Ok(RemoveAction::SkippedForked);
+                }
             },
         };
 

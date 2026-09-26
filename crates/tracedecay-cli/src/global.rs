@@ -367,6 +367,7 @@ pub(crate) fn print_flash_warning(all: bool, targets: &[ProjectStorageLocation])
         eprintln!("  \x1b[31m✗\x1b[0m global registry, user memory and sessions");
         eprintln!("  \x1b[31m✗\x1b[0m project, legacy, and remote stores");
         eprintln!("  \x1b[31m✗\x1b[0m Grafeo WAL and host-admission state");
+        eprintln!("  \x1b[31m✗\x1b[0m agent-managed skills and their usage records");
         eprintln!("Profile identity, configuration, and agent integrations are preserved.");
     } else {
         eprintln!(

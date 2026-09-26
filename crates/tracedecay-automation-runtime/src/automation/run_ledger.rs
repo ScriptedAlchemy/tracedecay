@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use tracedecay_automation::evidence_budget::SESSION_EVIDENCE_BUDGET_EXHAUSTED;
+use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
 
 use super::backend::{
@@ -34,6 +35,9 @@ pub use publication::read_published_artifact_chain;
 pub(crate) use scheduler_diagnostic::append_or_reuse_scheduler_diagnostic;
 
 const RUN_LEDGER_FILENAME: &str = "automation_runs.jsonl";
+const RUN_LEDGER_AUTHORITY: &str = "automation run ledger";
+const RETIRED_SCHEMA_REASON: &str =
+    "a row predates schema v2 (the released v1 wrote RFC3339 timestamps)";
 const RUN_ARTIFACTS_DIR: &str = "automation_artifacts";
 /// Bounded tail window retained by durable append deduplication. Ledger
 /// readers use the fixed-buffer `exact_lookup` scanner instead of allocating
@@ -553,14 +557,83 @@ pub(super) fn canonical_started_at_seconds(
     parse_nonnegative_unix_integer(started_at, label)
 }
 
+/// A row below schema v2 is a typed reset that the locked read performs; a
+/// newer row is not, because a downgraded binary must not reset history a
+/// newer one wrote.
 fn require_supported_schema(schema_version: u32) -> Result<()> {
-    if schema_version == 2 {
-        Ok(())
-    } else {
-        Err(config_error(format!(
+    match schema_version {
+        2 => Ok(()),
+        0..2 => Err(TraceDecayError::reset_required(
+            RUN_LEDGER_AUTHORITY,
+            RETIRED_SCHEMA_REASON,
+        )),
+        _ => Err(config_error(format!(
             "automation run ledger schema version {schema_version} is unsupported"
-        )))
+        ))),
     }
+}
+
+fn is_retired_schema_refusal(error: &TraceDecayError) -> bool {
+    error.reset_required_context() == Some((RUN_LEDGER_AUTHORITY, RETIRED_SCHEMA_REASON))
+}
+
+/// One retired row makes every complete-ledger read refuse, so the locked
+/// read deletes the whole ledger; nothing is kept or converted.
+fn reset_retired_run_ledger(path: &Path, refusal: &TraceDecayError) -> Result<()> {
+    forget_rewritten_run_ledger(path);
+    tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(path)
+        .map_err(TraceDecayError::from)?;
+    tracing::warn!(
+        automation_run_ledger = %path.display(),
+        refusal = %refusal,
+        "reset retired automation run ledger"
+    );
+    Ok(())
+}
+
+/// A skipped row whose label is outside the closed skip-reason registry
+/// (retired aliases such as `task_disabled`) is deleted from the ledger on
+/// its own; every other row is kept byte for byte.
+fn reset_unregistered_skip_row(path: &Path, span: &std::ops::Range<u64>) -> Result<()> {
+    let bytes = std::fs::read(path).map_err(TraceDecayError::from)?;
+    let (Ok(start), Ok(end)) = (usize::try_from(span.start), usize::try_from(span.end)) else {
+        return Err(config_error(
+            "automation run ledger row span exceeds addressable memory",
+        ));
+    };
+    let end = if bytes.get(end) == Some(&b'\n') {
+        end + 1
+    } else {
+        end
+    };
+    let (Some(head), Some(tail)) = (bytes.get(..start), bytes.get(end..)) else {
+        return Err(config_error(
+            "automation run ledger row span lies outside the ledger",
+        ));
+    };
+    // ponytail: holds the ledger in memory once per unregistered row; a
+    // streaming copy is the upgrade if released ledgers prove large.
+    let kept = [head, tail].concat();
+    let temp_path = path.with_extension("jsonl.reset");
+    tracedecay_runtime_core::storage::PrivateStoreIo::write_file_atomically_durable(
+        path, &temp_path, &kept,
+    )
+    .map_err(TraceDecayError::from)?;
+    forget_rewritten_run_ledger(path);
+    tracing::warn!(
+        automation_run_ledger = %path.display(),
+        row_start = span.start,
+        "reset automation run ledger row with an unregistered skip reason"
+    );
+    Ok(())
+}
+
+/// A deleted or replaced ledger breaks the append-only witness both derived
+/// caches rely on.
+fn forget_rewritten_run_ledger(path: &Path) {
+    let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    run_ledger_summary_memo().retain(|(memo_path, _, _), _| *memo_path != canonical_path);
+    lifecycle_index::discard_run_ledger_index(path);
 }
 
 pub(super) fn validate_run_ledger_record_semantics(
@@ -906,6 +979,9 @@ fn validate_requested_task_key(task_key: &str) -> Result<()> {
 ///
 /// Only a proven `NotFound` is absence. A root that cannot be stat'd, or one
 /// that is not a directory, is a typed failure rather than an empty ledger.
+///
+/// A read refused for a row below schema v2 resets the ledger under the lock
+/// and answers from `absent`, exactly what the reset ledger holds.
 fn with_run_ledger_read_lock<T>(
     dashboard_root: &Path,
     path: &Path,
@@ -932,7 +1008,13 @@ fn with_run_ledger_read_lock<T>(
             exact_publication::ensure_no_exact_append_intent(dashboard_root)
                 .map_err(TraceDecayError::from)
         })?;
-        hotpath::measure_block!("automation.run_ledger.read_lock.body", read())
+        match hotpath::measure_block!("automation.run_ledger.read_lock.body", read()) {
+            Err(refusal) if is_retired_schema_refusal(&refusal) => {
+                reset_retired_run_ledger(path, &refusal)?;
+                Ok(absent())
+            }
+            answered => answered,
+        }
     })();
     let unlock = lock.unlock().map_err(TraceDecayError::from);
     result.and_then(|value| unlock.map(|()| value))
@@ -1228,19 +1310,44 @@ pub(super) fn is_session_evidence_budget_exhausted_reason(reason: Option<&str>) 
     reason == Some(SESSION_EVIDENCE_BUDGET_EXHAUSTED)
 }
 
-#[hotpath::measure(label = "automation_runtime.run_ledger.scan_task_summary")]
+/// Either the decoded summary or the span of a selected skipped row whose
+/// label the closed skip-reason registry does not know.
+enum TaskSummaryScan {
+    Summary(AutomationRunLedgerTaskSummary),
+    UnregisteredSkip(std::ops::Range<u64>),
+}
+
+/// The caller holds the exclusive ledger lock, so resetting an unregistered
+/// skip row and rescanning is one serialized step. Each reset deletes one row,
+/// which bounds the loop by the ledger's row count.
 fn read_run_ledger_task_summary(
     path: &Path,
     task: AgentTaskKind,
     requested_task_key: &str,
 ) -> Result<AutomationRunLedgerTaskSummary> {
+    loop {
+        match scan_run_ledger_task_summary(path, task, requested_task_key)? {
+            TaskSummaryScan::Summary(summary) => return Ok(summary),
+            TaskSummaryScan::UnregisteredSkip(span) => reset_unregistered_skip_row(path, &span)?,
+        }
+    }
+}
+
+#[hotpath::measure(label = "automation_runtime.run_ledger.scan_task_summary")]
+fn scan_run_ledger_task_summary(
+    path: &Path,
+    task: AgentTaskKind,
+    requested_task_key: &str,
+) -> Result<TaskSummaryScan> {
     // Visible bytes are stabilized by the committed lifecycle index consulted
     // below, which syncs only when the ledger actually grew.
     let Some(file) = hotpath::measure_block!("automation.run_ledger.task_summary.open", {
         exact_lookup::open_committed_run_ledger(path, false)
     })?
     else {
-        return Ok(AutomationRunLedgerTaskSummary::default());
+        return Ok(TaskSummaryScan::Summary(
+            AutomationRunLedgerTaskSummary::default(),
+        ));
     };
     // Answer an unchanged ledger from the memo instead of rescanning it. See
     // `RUN_LEDGER_SUMMARY_MEMO` for why `(len, tail digest)` read under the
@@ -1254,7 +1361,7 @@ fn read_run_ledger_task_summary(
         })?;
     if let Some(summary) = cached_run_ledger_task_summary(&memo_key, file_len, &tail_digest) {
         hotpath::gauge!("automation.run_ledger.task_summary.memo_hits").inc(1_u64);
-        return Ok(summary);
+        return Ok(TaskSummaryScan::Summary(summary));
     }
     hotpath::gauge!("automation.run_ledger.task_summary.memo_misses").inc(1_u64);
     let mut rows = exact_lookup::ForwardJsonlScanner::new(&file, path)?;
@@ -1310,17 +1417,18 @@ fn read_run_ledger_task_summary(
     .map(|projection| projection.run_id.clone())
     .collect::<std::collections::HashSet<_>>();
     let lifecycles = exact_lookup::read_committed_run_lifecycles(&file, path, &selected_run_ids)?;
-    let summary =
-        decode_task_summary(&file, path, task, requested_task_key, selected, &lifecycles)?;
-    store_run_ledger_task_summary(
-        memo_key,
-        CachedTaskSummary {
-            file_len,
-            tail_digest,
-            summary: summary.clone(),
-        },
-    );
-    Ok(summary)
+    let scan = decode_task_summary(&file, path, task, requested_task_key, selected, &lifecycles)?;
+    if let TaskSummaryScan::Summary(summary) = &scan {
+        store_run_ledger_task_summary(
+            memo_key,
+            CachedTaskSummary {
+                file_len,
+                tail_digest,
+                summary: summary.clone(),
+            },
+        );
+    }
+    Ok(scan)
 }
 
 fn select_summary_projection(
@@ -1346,7 +1454,7 @@ fn decode_task_summary(
     requested_task_key: &str,
     selected: TaskSummarySpans,
     lifecycles: &std::collections::HashMap<String, exact_lookup::LogicalRunLifecycle>,
-) -> Result<AutomationRunLedgerTaskSummary> {
+) -> Result<TaskSummaryScan> {
     let mut summary = AutomationRunLedgerTaskSummary::default();
     let TaskSummarySpans {
         latest_logical_activity,
@@ -1427,6 +1535,13 @@ fn decode_task_summary(
                     "automation task summary selection changed task identity during decode",
                 ));
             }
+            if record.status == AutomationRunStatus::Skipped
+                && record.error.as_deref().is_some_and(|reason| {
+                    AutomationSkipReasonV1::from_ledger_reason(reason).is_none()
+                })
+            {
+                return Ok(TaskSummaryScan::UnregisteredSkip(projection.span.clone()));
+            }
             summary.records.push(record);
             summary.records.len() - 1
         };
@@ -1454,7 +1569,7 @@ fn decode_task_summary(
             }
         }
     }
-    Ok(summary)
+    Ok(TaskSummaryScan::Summary(summary))
 }
 
 #[hotpath::measure(label = "automation_runtime.run_ledger.scan_page")]
@@ -1807,29 +1922,99 @@ mod tests {
     }
 
     #[test]
-    fn task_summary_selects_only_the_exact_budget_exhausted_token() {
-        let lines = vec![
-            skipped_session_reflector_line(
-                "run-budget-near-prefix",
-                "session_evidence_budget_exhaustedX",
+    fn task_summary_resets_only_a_non_canonical_budget_exhausted_row() {
+        for label in [
+            "session_evidence_budget_exhaustedX",
+            "session_evidence_budget_exhausted_request_candidate_bytes",
+        ] {
+            let kept = skipped_session_reflector_line(
+                "run-exhausted",
+                SESSION_EVIDENCE_BUDGET_EXHAUSTED,
                 100,
-            ),
-            skipped_session_reflector_line(
-                "run-budget-stage-suffix",
-                "session_evidence_budget_exhausted_request_candidate_bytes",
-                200,
-            ),
-        ];
-        let (_temp, path) = write_ledger(&lines);
+            );
+            let lines = vec![
+                kept.clone(),
+                skipped_session_reflector_line("run-retired-label", label, 200),
+            ];
+            let (_temp, path) = write_ledger(&lines);
 
-        let summary = read_run_ledger_task_summary(
-            &path,
-            AgentTaskKind::SessionReflector,
-            "session_reflector",
+            let summary = read_run_ledger_task_summary(
+                &path,
+                AgentTaskKind::SessionReflector,
+                "session_reflector",
+            )
+            .unwrap();
+
+            assert_eq!(
+                summary.latest_logical_activity().unwrap().run_id,
+                "run-exhausted",
+                "{label}"
+            );
+            assert_eq!(
+                summary
+                    .latest_session_evidence_budget_exhausted()
+                    .unwrap()
+                    .run_id,
+                "run-exhausted"
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("{kept}\n"));
+        }
+    }
+
+    #[tokio::test]
+    async fn locked_read_resets_a_ledger_holding_a_schema_v1_row() {
+        let retired = ledger_line("run-retired", 1)
+            .replace("\"schema_version\":2", "\"schema_version\":1")
+            .replace(
+                "\"started_at\":\"1\"",
+                "\"started_at\":\"1970-01-01T00:00:01Z\"",
+            );
+        let (temp, path) = write_ledger(&[ledger_line("run-current", 2), retired]);
+
+        let refusal =
+            read_run_ledger_task_summary(&path, AgentTaskKind::MemoryCurator, "memory_curator")
+                .expect_err("an unlocked scan only refuses");
+        assert_eq!(
+            refusal.reset_required_context(),
+            Some((
+                "automation run ledger",
+                "a row predates schema v2 (the released v1 wrote RFC3339 timestamps)"
+            ))
+        );
+        assert!(path.exists());
+
+        let summary = load_run_ledger_task_summary(
+            temp.path(),
+            AgentTaskKind::MemoryCurator,
+            "memory_curator",
         )
-        .expect("non-canonical errors must not create a projection/decode mismatch");
+        .await
+        .unwrap();
+        assert_eq!(summary.records().len(), 0);
+        assert!(!path.exists(), "the retired ledger is deleted, not kept");
+    }
 
-        assert!(summary.latest_session_evidence_budget_exhausted().is_none());
+    #[tokio::test]
+    async fn locked_read_refuses_a_newer_schema_row_without_a_reset() {
+        let newer =
+            ledger_line("run-newer", 1).replace("\"schema_version\":2", "\"schema_version\":3");
+        let (temp, path) = write_ledger(std::slice::from_ref(&newer));
+
+        let error = load_run_ledger_task_summary(
+            temp.path(),
+            AgentTaskKind::MemoryCurator,
+            "memory_curator",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "config error: automation run ledger schema version 3 is unsupported"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("{newer}\n")
+        );
     }
 
     #[test]
