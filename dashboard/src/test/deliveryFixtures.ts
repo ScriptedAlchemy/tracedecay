@@ -62,6 +62,7 @@ function pullRequestRow(
             outcome: 'complete',
             provider_base_commit_id: BASE_ALPHA,
             provider_head_commit_id: head,
+            quarantined: [],
           },
           latest_attempt: null,
         },

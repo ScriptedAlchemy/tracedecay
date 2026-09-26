@@ -21,7 +21,8 @@ use tracedecay_domain::feedback::{
     CiFailureKindV1, CiFailureRunIdentityV1, FeedbackScopeV1, GitHubPullRequestSnapshotV1,
     GitHubPullRequestStateV1, GitHubReviewCommentIdV1, GitHubReviewCoverageV1,
     GitHubReviewIngressProviderOutcomeV1, GitHubReviewItemV1, GitHubReviewLifecycleV1,
-    GitHubReviewRateLimitCheckpointV1, GitHubReviewReadCheckpointV1, GitHubReviewReadOperationV1,
+    GitHubReviewQuarantinedItemV1, GitHubReviewRateLimitCheckpointV1, GitHubReviewReadCheckpointV1,
+    GitHubReviewReadOperationV1,
 };
 use tracedecay_domain::{
     CanonicalObservationIdV1, CodeGenerationId, CommitId, ManifestDigest, ProjectId, ProviderId,
@@ -94,6 +95,8 @@ pub struct ProjectDeliveryGitHubOperationSnapshotV1 {
     pub merge_base_commit_id: CommitId,
     pub outcome: GitHubReviewIngressProviderOutcomeV1,
     pub coverage: GitHubReviewCoverageV1,
+    /// Comments this read observed but withheld from ingest.
+    pub quarantined: Vec<GitHubReviewQuarantinedItemV1>,
     pub fetched_at: UtcMicros,
     pub checkpoint: GitHubReviewReadCheckpointV1,
 }
@@ -1898,6 +1901,7 @@ fn github_operation_snapshot(
         merge_base_commit_id: response.ingress.merge_base_commit_id.clone(),
         outcome: response.ingress.outcome,
         coverage: response.ingress.coverage,
+        quarantined: response.ingress.quarantined.clone(),
         fetched_at: response.ingress.fetched_at,
         checkpoint: response.checkpoint.clone(),
     }
@@ -2221,8 +2225,25 @@ mod tests {
     };
     use tracedecay_runtime_core::db::{DatabaseAuthority, TestDatabaseRuntimeMode};
 
+    use serde_json::json;
+    use tracedecay_contracts::feedback::FeedbackPortFuture;
+    use tracedecay_domain::feedback::{
+        GitHubReviewCurrentBranchRemapV1, GitHubReviewImmutableAnchorV1,
+        GitHubReviewQuarantineReasonV1,
+    };
+    use tracedecay_domain::{ContentDigest, FileOccurrenceId};
+
     use super::*;
-    use crate::advisory::{CiRetainedProviderObservationAuthorityV1, GitHubCiProviderRecordV1};
+    use crate::advisory::{
+        CiRetainedProviderObservationAuthorityV1, GitHubCanonicalReviewAnchorAuthorityV1,
+        GitHubCanonicalReviewAnchorsV1, GitHubCiProviderRecordV1, GitHubCurrentBranchRemapper,
+        GitHubGraphQlReadRequestV1, GitHubOfficialResponseDecoderV1, GitHubProviderLifecycleV1,
+        GitHubReadNetworkMetadataV1, GitHubReadNetworkOutcomeV1, GitHubReadNetworkResponseV1,
+        GitHubReadNetworkStatusV1, GitHubReadOnlyConnector, GitHubReadOnlyDescriptorSetV1,
+        GitHubReadOnlyNetworkAuthorityV1, GitHubReadOnlyRuntimeTransportV1,
+        GitHubRestReadRequestV1, GitHubReviewAnchorSeedV1, GitHubReviewProviderIdentityV1,
+        GitHubReviewRefreshCoordinatorV1, GitHubReviewRefreshOutcomeV1,
+    };
 
     fn test_scope(
         fixture: &crate::advisory::fixtures::AdvisorySourceBackedCompositeFixtureV1,
@@ -2300,6 +2321,7 @@ mod tests {
                 outcome,
                 coverage,
                 items: Vec::new(),
+                quarantined: Vec::new(),
                 pull_request: None,
                 fetched_at: UtcMicros(11),
             },
@@ -2321,6 +2343,7 @@ mod tests {
             merge_base_commit_id: CommitId::new("commit.delivery.inbox.merge-base").unwrap(),
             outcome: GitHubReviewIngressProviderOutcomeV1::Complete,
             coverage: GitHubReviewCoverageV1::Complete,
+            quarantined: Vec::new(),
             fetched_at: UtcMicros(20),
             checkpoint: GitHubReviewReadCheckpointV1 {
                 etag: None,
@@ -3296,6 +3319,268 @@ mod tests {
         config.graphql_uri = "https://api.github.com/graphql".to_owned();
         assert!(!github_http_is_official(&config));
         assert!(github_http_is_official(&GitHubHttpReadConfigV1::default()));
+    }
+
+    struct ReviewThreadsNetwork(Vec<u8>);
+
+    impl GitHubReadOnlyNetworkAuthorityV1 for ReviewThreadsNetwork {
+        fn get<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _request: &'a GitHubRestReadRequestV1,
+        ) -> FeedbackPortFuture<'a, GitHubReadNetworkOutcomeV1> {
+            Box::pin(async { GitHubReadNetworkOutcomeV1::Unavailable })
+        }
+
+        fn query<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _request: &'a GitHubGraphQlReadRequestV1,
+        ) -> FeedbackPortFuture<'a, GitHubReadNetworkOutcomeV1> {
+            let body = self.0.clone();
+            Box::pin(async move {
+                GitHubReadNetworkOutcomeV1::Response(GitHubReadNetworkResponseV1 {
+                    metadata: GitHubReadNetworkMetadataV1 {
+                        status: GitHubReadNetworkStatusV1::Ok,
+                        etag: None,
+                        next_cursor: None,
+                        rate_limit: None,
+                        retry_at: None,
+                    },
+                    body,
+                })
+            })
+        }
+    }
+
+    struct ReviewAnchors;
+
+    impl GitHubCanonicalReviewAnchorAuthorityV1 for ReviewAnchors {
+        fn resolve<'a>(
+            &'a self,
+            request: &'a GitHubReviewReadRequestV1,
+            seed: &'a GitHubReviewAnchorSeedV1,
+        ) -> FeedbackPortFuture<'a, Option<GitHubCanonicalReviewAnchorsV1>> {
+            Box::pin(async move {
+                let anchor = |kind: &str| {
+                    RetrievalAnchorId::new(format!(
+                        "anchor.delivery.{kind}.{}",
+                        seed.comment_id.as_str()
+                    ))
+                    .ok()
+                };
+                let original = GitHubReviewImmutableAnchorV1 {
+                    repository_id: request.scope.repository_id.clone(),
+                    commit_id: seed.original_commit_id.clone(),
+                    retrieval_anchor_id: anchor("original")?,
+                    file: FileOccurrenceId::new("file.delivery.workflow").ok()?,
+                    content_digest: ContentDigest::new(format!("sha256:{}", "c".repeat(64)))
+                        .ok()?,
+                    span: None,
+                    symbol: None,
+                };
+                Some(GitHubCanonicalReviewAnchorsV1 {
+                    initial_remap: GitHubReviewCurrentBranchRemapV1::unmapped(
+                        original.clone(),
+                        request.scope.clone(),
+                    )
+                    .ok()?,
+                    original,
+                    author_anchor: anchor("author")?,
+                    body_anchor: anchor("body")?,
+                    safe_url_anchor: anchor("url"),
+                })
+            })
+        }
+    }
+
+    struct NoRemap;
+
+    impl GitHubCurrentBranchRemapper for NoRemap {
+        fn remap<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _current_scope: &'a FeedbackScopeV1,
+            _original: &'a GitHubReviewImmutableAnchorV1,
+        ) -> FeedbackPortFuture<'a, Option<GitHubReviewCurrentBranchRemapV1>> {
+            Box::pin(async { None })
+        }
+    }
+
+    struct ReadySourceAccess;
+
+    impl GitHubSourceAccessAuthorityV1 for ReadySourceAccess {
+        fn authorize<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _request: &'a GitHubReviewReadRequestV1,
+        ) -> FeedbackPortFuture<'a, GitHubProviderLifecycleV1> {
+            Box::pin(async { GitHubProviderLifecycleV1::Ready })
+        }
+    }
+
+    fn github_review_context(scope: &FeedbackScopeV1) -> RequestContext {
+        let resolved_scope = ResolvedScope::new(
+            scope.project_id.clone(),
+            scope.repository_id.clone(),
+            scope.worktree_id.clone(),
+            Some(RefId::new(scope.branch_ref.clone()).unwrap()),
+        )
+        .unwrap();
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new("grant.delivery-review-quarantine").unwrap(),
+            1,
+            ManifestDigest::new(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap(),
+            ActorId::new("actor.delivery-review-quarantine.issuer").unwrap(),
+            UtcMicros(1),
+            UtcMicros(i64::MAX),
+            resolved_scope.clone(),
+            BTreeSet::from([CapabilityId::new(GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1).unwrap()]),
+            BTreeSet::from([UseCaseId::new(GITHUB_REVIEW_INGEST_USE_CASE_ID_V1).unwrap()]),
+            DisclosureClass::Evidence,
+        )
+        .unwrap();
+        RequestContext::new(
+            ActorId::new("actor.delivery-review-quarantine").unwrap(),
+            resolved_scope,
+            grant,
+            RequestId::new("request.delivery-review-quarantine").unwrap(),
+            Deadline::new(UtcMicros(i64::MAX - 1)).unwrap(),
+            CancellationContext::active("cancel.delivery-review-quarantine").unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// rust-lang/log#741 as GitHub served it, with the reply body replaced
+    /// by one the privacy sanitizer must refuse.
+    #[tokio::test]
+    async fn one_quarantined_review_body_leaves_the_rest_of_the_pull_request_published() {
+        let mut capture: serde_json::Value = serde_json::from_str(include_str!(
+            "advisory/fixtures/rust_lang_log_741_review_threads.graphql.json"
+        ))
+        .unwrap();
+        let mut response = capture["response"].take();
+        let mut comments = response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .flat_map(|thread| thread["comments"]["nodes"].as_array_mut().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(comments.len(), 3);
+        let reply = comments
+            .iter_mut()
+            .find(|comment| comment["databaseId"] == 4_069_777_906_u64)
+            .unwrap();
+        reply["bodyText"] = json!("vault_passphrase: ordinary-value\n  broken: [unclosed\n");
+
+        let scope = FeedbackScopeV1 {
+            project_id: ProjectId::new("project.delivery-review-quarantine").unwrap(),
+            repository_id: RepositoryId::new("repository.delivery-review-quarantine").unwrap(),
+            worktree_id: WorktreeId::new("worktree.delivery-review-quarantine").unwrap(),
+            branch_ref: "refs/heads/ci/msrv-build-vs-test".to_owned(),
+            head_commit_id: CommitId::new("1a4b67cfc41237e673dafd0dfc414577f0b5d327").unwrap(),
+        };
+        let context = github_review_context(&scope);
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("delivery-review-quarantine.db");
+        crate::register_test_schema_installer();
+        let database_authority =
+            DatabaseAuthority::acquire_test(&path, "delivery-review-quarantine").unwrap();
+        let (database, _) = Database::publish_test_runtime(
+            &path,
+            &database_authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .unwrap();
+        let store = ProjectGitHubReviewStoreV1::new(database.clone(), scope.clone()).unwrap();
+        let base = CommitId::new("8034743dd9d7f7583bd9a670271483d176130911").unwrap();
+        let decoder = GitHubOfficialResponseDecoderV1::new(
+            GitHubReviewProviderIdentityV1 {
+                provider: ProviderId::new("provider.github").unwrap(),
+                repository_owner: "rust-lang".to_owned(),
+                repository_name: "log".to_owned(),
+                pull_request_number: 741,
+                base_commit_id: base.clone(),
+                head_commit_id: scope.head_commit_id.clone(),
+                merge_base_commit_id: base,
+            },
+            ReviewAnchors,
+        )
+        .unwrap();
+        let transport = GitHubReadOnlyRuntimeTransportV1::new(
+            store.clone(),
+            ReviewThreadsNetwork(serde_json::to_vec(&response).unwrap()),
+            decoder,
+        );
+        let connector = GitHubReadOnlyConnector::new(
+            GitHubReadOnlyDescriptorSetV1::new(Vec::new()).unwrap(),
+            transport,
+            NoRemap,
+        )
+        .unwrap();
+        let coordinator =
+            GitHubReviewRefreshCoordinatorV1::new(connector, store, ReadySourceAccess);
+        let request = GitHubReviewReadRequestV1 {
+            operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
+            scope: scope.clone(),
+            pull_request_id: GitHubPullRequestIdV1::new("2797381726").unwrap(),
+        };
+        let refresh = coordinator.refresh(&context, &request).await;
+
+        let authority = ProjectDeliveryReadAuthorityV1 {
+            profile_id: UserProfileId::new("profile.delivery-review-quarantine").unwrap(),
+            scope: scope.clone(),
+            github_reviews: ProjectGitHubReviewStoreV1::new(database.clone(), scope.clone())
+                .unwrap(),
+            ci_checks: ProjectCiRetainedObservationStoreV1::new(database, scope.clone()).unwrap(),
+            releases: ProjectDeliveryReleaseMountV1::Unavailable,
+            review_bodies: None,
+        };
+        let read = ProjectDeliveryReadRequestV1 {
+            kind: ProjectDeliveryReadKindV1::Overview,
+            expected_head_commit_id: scope.head_commit_id.clone(),
+            max_pull_requests: 1,
+            max_review_items: 8,
+            max_ci_checks: 1,
+            max_releases: 1,
+        };
+        let control = GitHubReleaseReadControlV1::bounded(Instant::now() + Duration::from_secs(1));
+        let ProjectDeliveryReadOutcomeV1::Ready { snapshot } =
+            authority.read(&context, &read, &control).await
+        else {
+            panic!("the delivery read must answer for its own scope");
+        };
+        let ProjectDeliveryGitHubSourceV1::Ready { timeline } = snapshot.github_reviews else {
+            panic!(
+                "the pull-request lane must publish: {:?} after refresh {refresh:?}",
+                snapshot.github_reviews
+            );
+        };
+        assert!(matches!(refresh, GitHubReviewRefreshOutcomeV1::Stored(_)));
+        assert_eq!(
+            timeline
+                .review_items
+                .iter()
+                .map(|item| item.comment_id.as_str())
+                .collect::<Vec<_>>(),
+            ["4069686687", "4069691901"]
+        );
+        let snapshot = timeline.pull_requests[0].operations[0]
+            .latest_attempt
+            .as_ref()
+            .unwrap();
+        assert_eq!(snapshot.coverage, GitHubReviewCoverageV1::Complete);
+        assert_eq!(
+            snapshot.quarantined,
+            [GitHubReviewQuarantinedItemV1 {
+                comment_id: GitHubReviewCommentIdV1::new("4069777906").unwrap(),
+                reason: GitHubReviewQuarantineReasonV1::PrivacySanitizer,
+            }]
+        );
     }
 
     #[tokio::test]

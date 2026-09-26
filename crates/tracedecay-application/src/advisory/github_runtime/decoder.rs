@@ -9,8 +9,9 @@ use tracedecay_domain::feedback::{
     GitHubReviewCommentIdV1, GitHubReviewCoverageV1, GitHubReviewCurrentBranchRemapV1,
     GitHubReviewIdV1, GitHubReviewImmutableAnchorV1, GitHubReviewIngressProviderOutcomeV1,
     GitHubReviewIngressResultV1, GitHubReviewItemV1, GitHubReviewLifecycleV1,
-    GitHubReviewReadOperationV1, GitHubReviewRemapStateV1, GitHubReviewStateV1,
-    GitHubReviewThreadIdV1, MAX_GITHUB_PULL_REQUEST_TITLE_BYTES_V1,
+    GitHubReviewQuarantineReasonV1, GitHubReviewQuarantinedItemV1, GitHubReviewReadOperationV1,
+    GitHubReviewRemapStateV1, GitHubReviewStateV1, GitHubReviewThreadIdV1,
+    MAX_GITHUB_PULL_REQUEST_TITLE_BYTES_V1,
 };
 use tracedecay_domain::{CommitId, ManifestDigest, ProviderId, RetrievalAnchorId, UtcMicros};
 
@@ -110,6 +111,17 @@ pub struct GitHubReviewAnchorSeedV1 {
     pub current_line: Option<u64>,
 }
 
+enum DecodedReviewCommentV1 {
+    Draft(Box<GitHubReviewItemDraftV1>),
+    Quarantined(GitHubReviewQuarantinedItemV1),
+}
+
+#[derive(Default)]
+struct DecodedReviewCommentsV1 {
+    items: Vec<GitHubReviewItemV1>,
+    quarantined: Vec<GitHubReviewQuarantinedItemV1>,
+}
+
 struct GitHubReviewItemDraftV1 {
     provider_lifecycle: GitHubReviewLifecycleV1,
     comment_id: GitHubReviewCommentIdV1,
@@ -180,18 +192,25 @@ where
                 provider_state(metadata.status, metadata.next_cursor.is_some());
             if metadata.status != GitHubReadNetworkStatusV1::Ok {
                 let fetched_at = try_now_micros().ok()?;
-                return self.ingress(request, outcome, coverage, Vec::new(), fetched_at);
+                return self.ingress_with_pull_request(
+                    request,
+                    outcome,
+                    coverage,
+                    DecodedReviewCommentsV1::default(),
+                    None,
+                    fetched_at,
+                );
             }
             let fetched_at = try_now_micros().ok()?;
             let mut pull_request = None;
-            let items = match request.operation {
+            let comments = match request.operation {
                 GitHubReviewReadOperationV1::RestGetPullRequest => {
                     pull_request = Some(self.decode_pull_request(request, body)?);
-                    Vec::new()
+                    DecodedReviewCommentsV1::default()
                 }
                 GitHubReviewReadOperationV1::RestListPullRequestReviews => {
                     self.decode_reviews(body)?;
-                    Vec::new()
+                    DecodedReviewCommentsV1::default()
                 }
                 GitHubReviewReadOperationV1::RestListPullRequestReviewComments => {
                     self.decode_rest_comments(request, body, outcome, fetched_at)
@@ -206,7 +225,7 @@ where
                 request,
                 outcome,
                 coverage,
-                items,
+                comments,
                 pull_request,
                 fetched_at,
             )
@@ -218,23 +237,12 @@ impl<A> GitHubOfficialResponseDecoderV1<A>
 where
     A: GitHubCanonicalReviewAnchorAuthorityV1 + Sync,
 {
-    fn ingress(
-        &self,
-        request: &GitHubReviewReadRequestV1,
-        outcome: GitHubReviewIngressProviderOutcomeV1,
-        coverage: GitHubReviewCoverageV1,
-        items: Vec<GitHubReviewItemV1>,
-        fetched_at: UtcMicros,
-    ) -> Option<GitHubReviewIngressResultV1> {
-        self.ingress_with_pull_request(request, outcome, coverage, items, None, fetched_at)
-    }
-
     fn ingress_with_pull_request(
         &self,
         request: &GitHubReviewReadRequestV1,
         outcome: GitHubReviewIngressProviderOutcomeV1,
         coverage: GitHubReviewCoverageV1,
-        items: Vec<GitHubReviewItemV1>,
+        DecodedReviewCommentsV1 { items, quarantined }: DecodedReviewCommentsV1,
         pull_request: Option<GitHubPullRequestSnapshotV1>,
         fetched_at: UtcMicros,
     ) -> Option<GitHubReviewIngressResultV1> {
@@ -249,6 +257,7 @@ where
             outcome,
             coverage,
             items,
+            quarantined,
             pull_request,
             fetched_at,
         };
@@ -312,21 +321,21 @@ where
         body: &[u8],
         outcome: GitHubReviewIngressProviderOutcomeV1,
         observed_at: UtcMicros,
-    ) -> Option<Vec<GitHubReviewItemV1>> {
+    ) -> Option<DecodedReviewCommentsV1> {
         let comments = serde_json::from_slice::<Vec<RestReviewCommentV1>>(body).ok()?;
-        let mut drafts = Vec::with_capacity(comments.len());
+        let mut decoded = Vec::with_capacity(comments.len());
         let mut comment_ids = BTreeSet::new();
         for comment in comments {
             if !comment_ids.insert(comment.id) {
                 return None;
             }
-            drafts.push(self.rest_comment_draft(comment)?);
+            decoded.push(self.rest_comment_draft(comment)?);
         }
-        self.anchored_items(request, drafts, outcome, observed_at)
+        self.anchored_items(request, decoded, outcome, observed_at)
             .await
     }
 
-    fn rest_comment_draft(&self, comment: RestReviewCommentV1) -> Option<GitHubReviewItemDraftV1> {
+    fn rest_comment_draft(&self, comment: RestReviewCommentV1) -> Option<DecodedReviewCommentV1> {
         let provider_lifecycle = rest_lifecycle(&comment);
         let comment_id = GitHubReviewCommentIdV1::new(comment.id.to_string()).ok()?;
         let review_id = comment
@@ -338,7 +347,7 @@ where
         let observed_commit_id = CommitId::new(comment.commit_id).ok()?;
         let body = comment.body.as_deref()?;
         let body_digest = body_digest(body)?;
-        let retained_body = retained_review_body(body)?;
+        let retained_body = retained_review_body(body);
         let version_digest = review_version_digest(
             &comment_id,
             &comment.updated_at,
@@ -355,6 +364,19 @@ where
             .author_association
             .clone()
             .unwrap_or_else(|| "NONE".to_owned());
+        let reply_to_comment_id = comment
+            .in_reply_to_id
+            .map(|id| GitHubReviewCommentIdV1::new(id.to_string()))
+            .transpose()
+            .ok()?;
+        let retained_body = match retained_body {
+            Ok(retained_body) => retained_body,
+            Err(reason) => {
+                return Some(DecodedReviewCommentV1::Quarantined(
+                    GitHubReviewQuarantinedItemV1 { comment_id, reason },
+                ));
+            }
+        };
         let seed = GitHubReviewAnchorSeedV1 {
             comment_id: comment_id.clone(),
             author_node_id: user_node_id,
@@ -369,32 +391,39 @@ where
             current_start_line: comment.start_line,
             current_line: comment.line,
         };
-        Some(GitHubReviewItemDraftV1 {
-            provider_lifecycle,
-            comment_id,
-            review_id,
-            thread_id: None,
-            reply_to_comment_id: comment
-                .in_reply_to_id
-                .map(|id| GitHubReviewCommentIdV1::new(id.to_string()))
-                .transpose()
-                .ok()?,
-            author_kind: user_kind,
-            author_association: association,
-            review_state: GitHubReviewStateV1::Unknown,
-            version_digest,
-            body_digest,
-            seed,
-        })
+        Some(DecodedReviewCommentV1::Draft(Box::new(
+            GitHubReviewItemDraftV1 {
+                provider_lifecycle,
+                comment_id,
+                review_id,
+                thread_id: None,
+                reply_to_comment_id,
+                author_kind: user_kind,
+                author_association: association,
+                review_state: GitHubReviewStateV1::Unknown,
+                version_digest,
+                body_digest,
+                seed,
+            },
+        )))
     }
 
     async fn anchored_items(
         &self,
         request: &GitHubReviewReadRequestV1,
-        drafts: Vec<GitHubReviewItemDraftV1>,
+        decoded: Vec<DecodedReviewCommentV1>,
         outcome: GitHubReviewIngressProviderOutcomeV1,
         observed_at: UtcMicros,
-    ) -> Option<Vec<GitHubReviewItemV1>> {
+    ) -> Option<DecodedReviewCommentsV1> {
+        let mut drafts = Vec::with_capacity(decoded.len());
+        let mut quarantined = Vec::new();
+        for comment in decoded {
+            match comment {
+                DecodedReviewCommentV1::Draft(draft) => drafts.push(*draft),
+                DecodedReviewCommentV1::Quarantined(item) => quarantined.push(item),
+            }
+        }
+        quarantined.sort_by(|left, right| left.comment_id.as_str().cmp(right.comment_id.as_str()));
         let seeds = drafts
             .iter()
             .map(|draft| draft.seed.clone())
@@ -403,13 +432,14 @@ where
         if anchors.len() != drafts.len() {
             return None;
         }
-        drafts
+        let items = drafts
             .into_iter()
             .zip(anchors)
             .map(|(draft, anchors)| {
                 self.item_from_draft(request, draft, anchors, outcome, observed_at)
             })
-            .collect()
+            .collect::<Option<Vec<_>>>()?;
+        Some(DecodedReviewCommentsV1 { items, quarantined })
     }
 
     fn item_from_draft(
@@ -473,7 +503,7 @@ where
         body: &[u8],
         outcome: GitHubReviewIngressProviderOutcomeV1,
         observed_at: UtcMicros,
-    ) -> Option<Vec<GitHubReviewItemV1>> {
+    ) -> Option<DecodedReviewCommentsV1> {
         let response = serde_json::from_slice::<GraphQlResponseV1>(body).ok()?;
         if !response.errors.is_empty() {
             return None;
@@ -507,7 +537,7 @@ where
         &self,
         thread: &GraphQlReviewThreadV1,
         comment: GraphQlReviewCommentV1,
-    ) -> Option<GitHubReviewItemDraftV1> {
+    ) -> Option<DecodedReviewCommentV1> {
         let provider_lifecycle = graphql_lifecycle(thread, &comment);
         let comment_id = GitHubReviewCommentIdV1::new(comment.database_id.to_string()).ok()?;
         let review_id = comment
@@ -530,7 +560,7 @@ where
         .ok()?;
         let body = comment.body_text.as_deref()?;
         let body_digest = body_digest(body)?;
-        let retained_body = retained_review_body(body)?;
+        let retained_body = retained_review_body(body);
         let version_digest = review_version_digest(
             &comment_id,
             &comment.updated_at,
@@ -558,9 +588,19 @@ where
             .and_then(|review| review.state.as_deref())
             .and_then(review_state)
             .unwrap_or(GitHubReviewStateV1::Unknown);
+        let author_node_id = comment.author.as_ref()?.login.clone();
+        let thread_id = GitHubReviewThreadIdV1::new(thread.id.clone()).ok()?;
+        let retained_body = match retained_body {
+            Ok(retained_body) => retained_body,
+            Err(reason) => {
+                return Some(DecodedReviewCommentV1::Quarantined(
+                    GitHubReviewQuarantinedItemV1 { comment_id, reason },
+                ));
+            }
+        };
         let seed = GitHubReviewAnchorSeedV1 {
             comment_id: comment_id.clone(),
-            author_node_id: comment.author.as_ref()?.login.clone(),
+            author_node_id,
             body_digest: body_digest.clone(),
             retained_body,
             safe_url: comment.url,
@@ -572,19 +612,21 @@ where
             current_start_line: thread.start_line,
             current_line: thread.line,
         };
-        Some(GitHubReviewItemDraftV1 {
-            provider_lifecycle,
-            comment_id,
-            review_id,
-            thread_id: Some(GitHubReviewThreadIdV1::new(thread.id.clone()).ok()?),
-            reply_to_comment_id,
-            author_kind,
-            author_association: comment.author_association,
-            review_state,
-            version_digest,
-            body_digest,
-            seed,
-        })
+        Some(DecodedReviewCommentV1::Draft(Box::new(
+            GitHubReviewItemDraftV1 {
+                provider_lifecycle,
+                comment_id,
+                review_id,
+                thread_id: Some(thread_id),
+                reply_to_comment_id,
+                author_kind,
+                author_association: comment.author_association,
+                review_state,
+                version_digest,
+                body_digest,
+                seed,
+            },
+        )))
     }
 }
 
@@ -616,12 +658,16 @@ fn body_digest(body: &str) -> Option<ManifestDigest> {
     ManifestDigest::from_sha256_bytes(&Sha256::digest(body.as_bytes())).ok()
 }
 
-fn retained_review_body(body: &str) -> Option<String> {
+fn retained_review_body(body: &str) -> Result<String, GitHubReviewQuarantineReasonV1> {
     if body.is_empty() || body.len() > MAX_GITHUB_REVIEW_BODY_BYTES_V1 {
-        return None;
+        return Err(GitHubReviewQuarantineReasonV1::BodyOutOfBounds);
     }
-    let retained = tracedecay_privacy::sanitize_provider_metadata_text(body)?;
-    (!retained.is_empty() && retained.len() <= MAX_GITHUB_REVIEW_BODY_BYTES_V1).then_some(retained)
+    let retained = tracedecay_privacy::sanitize_provider_metadata_text(body)
+        .ok_or(GitHubReviewQuarantineReasonV1::PrivacySanitizer)?;
+    if retained.is_empty() || retained.len() > MAX_GITHUB_REVIEW_BODY_BYTES_V1 {
+        return Err(GitHubReviewQuarantineReasonV1::BodyOutOfBounds);
+    }
+    Ok(retained)
 }
 
 fn retained_pull_request_title(title: &str) -> Option<String> {

@@ -7628,6 +7628,13 @@
         },
         "provider_head_commit_id": {
           "type": "string"
+        },
+        "quarantined": {
+          "description": "Comments the read observed but withheld from ingest, each with why.",
+          "items": {
+            "$ref": "#/$defs/DeliveryGitHubQuarantinedCommentV1"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -7636,6 +7643,7 @@
         "merge_base_commit_id",
         "outcome",
         "coverage",
+        "quarantined",
         "fetched_at_micros"
       ],
       "type": "object"
@@ -7651,6 +7659,28 @@
         "failed"
       ],
       "type": "string"
+    },
+    "DeliveryGitHubQuarantineReasonV1": {
+      "enum": [
+        "privacy_sanitizer",
+        "body_out_of_bounds"
+      ],
+      "type": "string"
+    },
+    "DeliveryGitHubQuarantinedCommentV1": {
+      "properties": {
+        "comment_id": {
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/$defs/DeliveryGitHubQuarantineReasonV1"
+        }
+      },
+      "required": [
+        "comment_id",
+        "reason"
+      ],
+      "type": "object"
     },
     "DeliveryGitHubReadOperationV1": {
       "enum": [

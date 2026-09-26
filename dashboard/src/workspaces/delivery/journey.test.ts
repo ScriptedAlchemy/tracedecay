@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { DeliveryOverviewV1 } from '../../contracts/generated.ts';
-import { INBOX, OVERVIEW_ALPHA, OVERVIEW_LOCAL_ONLY, T0 } from '../../test/deliveryFixtures.ts';
+import { HEAD_ALPHA, INBOX, OVERVIEW_ALPHA, OVERVIEW_LOCAL_ONLY, T0 } from '../../test/deliveryFixtures.ts';
 import { JOURNEY_LANES, buildJourney, laneServes } from './journey.ts';
 
 const ROW_42 = INBOX.pull_requests[0]!;
@@ -29,6 +29,42 @@ describe('buildJourney', () => {
       grade: 'exact',
       timeKind: 'observed',
     });
+  });
+
+  it('counts a quarantined review comment on its provider read with the reason', () => {
+    const pullRequest = OVERVIEW_ALPHA.pull_requests.state === 'ready' ? OVERVIEW_ALPHA.pull_requests.value.items[0]! : null;
+    const read = pullRequest!.operations[0]!;
+    const threadsRead = {
+      operation: 'review_threads' as const,
+      latest_attempt: null,
+      last_complete: {
+        ...read.last_complete!,
+        quarantined: [{ comment_id: '4069777906', reason: 'privacy_sanitizer' as const }],
+      },
+    };
+    const overview: DeliveryOverviewV1 = {
+      ...OVERVIEW_ALPHA,
+      pull_requests: {
+        state: 'ready',
+        value: {
+          expected_head_commit: HEAD_ALPHA,
+          retained_head_commit: HEAD_ALPHA,
+          total_retained: 1,
+          truncated: false,
+          items: [{ ...pullRequest!, operations: [read, threadsRead] }],
+        },
+      },
+    };
+    const lane = buildJourney(overview, { row: ROW_42, edges: EDGES_42 }).lanes.find(
+      (candidate) => candidate.id === 'pull_request',
+    )!;
+    expect(lane.episodes.slice(1).map((episode) => [episode.label, episode.detail])).toEqual([
+      ['pull request read', `complete · complete · head ${HEAD_ALPHA.slice(0, 12)}`],
+      [
+        'review threads read',
+        `complete · complete · 1 quarantined (privacy sanitizer) · head ${HEAD_ALPHA.slice(0, 12)}`,
+      ],
+    ]);
   });
 
   it('places membership-joined records in the undated gutter with their own grade', () => {

@@ -45,6 +45,23 @@ fn code_source_preserves_match_arms_after_inner_doc_comments() {
 }
 
 #[test]
+fn review_prose_opening_with_a_label_is_retained_as_prose() {
+    let body = "Nit: the job short name is check, the display name is build and we're actually running of the test, probably want to make that consistent.\nView changes since the review";
+
+    let paragraphs = "Note: this reads the cache twice.\n\nSee the second call below.";
+    let sensitive = "X-Vault_Passphrase: ordinary-value\nsee the second call below";
+
+    let scan = sanitize_structured_text(body).expect("prose scan runs");
+    assert_eq!(scan.format(), None);
+    assert_eq!(sanitize_provider_metadata_text(body).as_deref(), Some(body));
+    assert_eq!(
+        sanitize_provider_metadata_text(paragraphs).as_deref(),
+        Some(paragraphs)
+    );
+    assert_eq!(sanitize_provider_metadata_text(sensitive), None);
+}
+
+#[test]
 fn code_shape_probe_retains_established_yaml_dotenv_and_provider_metadata() {
     let yaml = "---\nscript: |\n  fn main() { return; }\nregion: us-east\n";
     let dotenv = "# service configuration\nREGION=us-east\nRUST_LOG=debug\n";

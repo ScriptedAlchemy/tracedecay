@@ -3,6 +3,8 @@ import type {
   DeliveryAgentUsageV1,
   DeliveryCiCheckV1,
   DeliveryCommitV1,
+  DeliveryGitHubQuarantinedCommentV1,
+  DeliveryGitHubQuarantineReasonV1,
   DeliveryInboxPullRequestV1,
   DeliveryMembershipEdgeV1,
   DeliveryOverviewV1,
@@ -264,6 +266,25 @@ function shortSha(sha: string): string {
   return sha.slice(0, 12);
 }
 
+function quarantineReasonLabel(reason: DeliveryGitHubQuarantineReasonV1): string {
+  switch (reason) {
+    case 'privacy_sanitizer':
+      return 'privacy sanitizer';
+    case 'body_out_of_bounds':
+      return 'body out of bounds';
+    default: {
+      const unhandled: never = reason;
+      return unhandled;
+    }
+  }
+}
+
+function quarantinedDetail(quarantined: readonly DeliveryGitHubQuarantinedCommentV1[]): string[] {
+  if (quarantined.length === 0) return [];
+  const reasons = [...new Set(quarantined.map((item) => quarantineReasonLabel(item.reason)))];
+  return [`${quarantined.length} quarantined (${reasons.join(', ')})`];
+}
+
 export interface JourneySelection {
   readonly row: DeliveryInboxPullRequestV1;
   readonly edges: readonly DeliveryMembershipEdgeV1[];
@@ -398,7 +419,12 @@ export function buildJourney(
           id: `pull_request:${item.id}:${operation.operation}`,
           lane: 'pull_request',
           label: `${operation.operation.replaceAll('_', ' ')} read`,
-          detail: `${snapshot.outcome} · ${snapshot.coverage} · head ${shortSha(snapshot.provider_head_commit_id)}`,
+          detail: [
+            snapshot.outcome,
+            snapshot.coverage,
+            ...quarantinedDetail(snapshot.quarantined),
+            `head ${shortSha(snapshot.provider_head_commit_id)}`,
+          ].join(' · '),
           source: 'provider_observation',
           grade: snapshot.outcome === 'stale' ? 'stale' : snapshot.outcome === 'complete' ? 'exact' : 'unavailable',
           at: snapshot.fetched_at_micros,

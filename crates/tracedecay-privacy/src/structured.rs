@@ -885,9 +885,12 @@ fn is_http_start_line(line: &str) -> bool {
             .is_some_and(|(_, rest)| rest.contains("HTTP/"))
 }
 
-/// Parses an HTTP header block. A blank line ends the block; anything after it
-/// makes the input a message with a body rather than a header block, which the
-/// raw scan handles instead.
+/// Parses an HTTP header block. A blank line ends the block.
+///
+/// Without a start line, one leading `Name: value` line is weak evidence:
+/// review prose opens with `Nit: ...` or `Note: ...`. Such a document that
+/// stops being a header block is prose for the raw scan, unless a field the
+/// block already exposed is sensitive, which keeps the ambiguity fail-closed.
 fn parse_http_header_document(
     text: &str,
 ) -> Result<Option<ParsedStructuredTextV1>, StructuredTextParseFailureV1> {
@@ -913,9 +916,20 @@ fn parse_http_header_document(
     }
     let mut map = Map::new();
     let mut header_names = BTreeSet::new();
-    let mut fields = Vec::new();
+    let mut fields: Vec<StructuredTextFieldV1> = Vec::new();
     let mut consumed = 0usize;
     let mut ended = false;
+    let not_a_header_block = |fields: &[StructuredTextFieldV1]| {
+        if has_start_line
+            || fields.iter().any(|field| {
+                is_semantically_sensitive_key(&NormalizedSensitiveKey::new(&field.key))
+            })
+        {
+            Err(StructuredTextParseFailureV1::Malformed)
+        } else {
+            Ok(None)
+        }
+    };
     for (index, line) in text.split_inclusive('\n').enumerate() {
         let line_start = consumed;
         consumed += line.len();
@@ -925,24 +939,16 @@ fn parse_http_header_document(
             continue;
         }
         if ended {
-            return Err(StructuredTextParseFailureV1::Malformed);
+            return not_a_header_block(&fields);
         }
         if index == 0 && has_start_line {
             continue;
         }
         let Some((name, value)) = content.split_once(':') else {
-            return if has_start_line || !fields.is_empty() {
-                Err(StructuredTextParseFailureV1::Malformed)
-            } else {
-                Ok(None)
-            };
+            return not_a_header_block(&fields);
         };
         if !is_http_field_name(name) {
-            return if has_start_line || !fields.is_empty() {
-                Err(StructuredTextParseFailureV1::Malformed)
-            } else {
-                Ok(None)
-            };
+            return not_a_header_block(&fields);
         }
         if !header_names.insert(name.to_ascii_lowercase()) {
             return Err(StructuredTextParseFailureV1::Malformed);
