@@ -25,8 +25,7 @@ fn resolve_ast_grep_bin() -> PathBuf {
 }
 
 /// npm's Windows launcher is a `.cmd` that re-enters node, and `Command`
-/// refuses multi-line arguments to a batch file, so the native binary the
-/// package installs beside that launcher is spawned instead.
+/// refuses multi-line arguments to a batch file.
 fn npm_native_binary(launcher: &Path) -> Option<PathBuf> {
     let is_batch = launcher
         .extension()

@@ -1038,9 +1038,8 @@ fn open_permission_restore_handle(
     fs::File::open(path)
 }
 
-/// Windows flushes only through a handle with write access, and a read-only
-/// file refuses that open, so the attribute is cleared before the handle that
-/// installs the recorded permissions is opened.
+/// Windows flushes only through a writable handle. A read-only file refuses
+/// that open.
 #[cfg(not(unix))]
 fn open_permission_restore_handle(
     path: &Path,
