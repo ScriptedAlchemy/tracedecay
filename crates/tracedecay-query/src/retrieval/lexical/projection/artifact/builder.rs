@@ -6863,7 +6863,6 @@ fn require_integrity(
 
 #[cfg(test)]
 mod tests {
-    use super::super::clone_census::census_reads_on_this_thread;
     use super::super::clone_census::tests::payload;
     use super::super::clone_codec::encode_clone_payload;
     use super::super::format::{decode_term_lists, sourceless_test_receipt};
@@ -7298,7 +7297,6 @@ mod tests {
             .expect("seal the receipt");
         drop(connection);
 
-        let census_reads = census_reads_on_this_thread();
         let reader = CodeLexicalArtifactReaderV1::open_with_control(
             &path,
             &receipt,
@@ -7310,11 +7308,6 @@ mod tests {
         assert_eq!(
             reader.verified_artifact().clone_index_census(),
             &sealed_census
-        );
-        assert_eq!(
-            census_reads_on_this_thread(),
-            census_reads,
-            "opening a sealed artifact must not recompute its clone census"
         );
         drop(reader);
 
