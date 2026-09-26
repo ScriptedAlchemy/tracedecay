@@ -100,6 +100,7 @@ use tracedecay_daemon_service::{
     BoundedHookOrchestratorV1, ConfigurationRuntimeRefreshFuture, ConfigurationRuntimeRefreshPort,
     DaemonAdvisoryCycleInvocationFuture, DaemonAdvisoryCycleInvocationOwner,
     DaemonAdvisoryCycleInvocationPort, DaemonAdvisoryCycleInvocationRequest,
+    DaemonAdvisoryCycleMountFuture, DaemonAdvisoryCycleMountV1,
     DaemonFeedbackProximityInvocationFuture, DaemonFeedbackProximityInvocationRequest,
     HookOrchestrationRequestV1, HookOrchestrationTriggerV1, HookOrchestrationWorkOutcomeV1,
     advisory_cycle_invocation_result, daemon_operation_event_authority,
@@ -2082,6 +2083,28 @@ impl DaemonAdvisoryCycleInvocationPort for ProjectOpenProximityReadOwnerV1 {
                 code: "feedback.advisory-cycle.unavailable".to_owned(),
                 message: "The advisory feedback cycle mounts once the first code-index generation is sealed".to_owned(),
             }))
+        })
+    }
+
+    /// With a ready sealed generation the deferred mount is already upgrading
+    /// this owner, so a request waits for that publication instead of taking
+    /// the retryable warming answer.
+    // ponytail: a deferred mount that fails terminally leaves this owner in
+    // place, so such a request waits out its own deadline before the warming
+    // answer; surfacing the terminal mount failure here would end it early.
+    fn mount(&self) -> DaemonAdvisoryCycleMountFuture<'_> {
+        Box::pin(async move {
+            if code_index_disabled_for_scope(&self.code_index_schedulers, &self.scope) {
+                return DaemonAdvisoryCycleMountV1::Answers;
+            }
+            match self
+                .code_index_schedulers
+                .latest_feedback_generation_for_scope(&self.project_root, &self.scope)
+                .await
+            {
+                Some(_) => DaemonAdvisoryCycleMountV1::Mounting,
+                None => DaemonAdvisoryCycleMountV1::Answers,
+            }
         })
     }
 

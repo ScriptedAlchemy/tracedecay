@@ -105,6 +105,57 @@ async fn typescript_only_checkout_runs_the_pull_request_advisory_cycle() {
     harness.shutdown().await;
 }
 
+/// A reopened project already holds a ready sealed generation, so the first
+/// advisory-cycle call after the reopen answers instead of the retryable
+/// pre-mount state a second call would get past.
+#[tokio::test(flavor = "multi_thread")]
+#[hotpath::skip]
+async fn first_advisory_cycle_after_a_reopen_answers_without_a_retry() {
+    let isolation = tempfile::TempDir::new().expect("production harness isolation");
+    let project = isolation.path().join("project");
+    std::fs::create_dir_all(project.join("src")).expect("project source dir");
+    std::fs::write(
+        project.join("src/lib.rs"),
+        "pub fn reopened_cycle(value: u32) -> u32 {\n    value + 1\n}\n",
+    )
+    .expect("rust source");
+    git(&project, &["init", "--quiet", "-b", "feature/reopen"]);
+    git(&project, &["add", "."]);
+    git(
+        &project,
+        &["commit", "--quiet", "-m", "seed reopened cycle"],
+    );
+
+    let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
+        .await
+        .expect("first production composition");
+    let (refused, settled) = settled_advisory_cycle(&harness, &project, "src/lib.rs").await;
+    assert!(!refused, "the first open must mount the cycle: {settled}");
+    harness.shutdown().await;
+
+    let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
+        .await
+        .expect("reopened production composition");
+    let document_uri = url::Url::from_file_path(project.join("src/lib.rs"))
+        .expect("document uri")
+        .to_string();
+    let response = harness
+        .call_tool(
+            &project,
+            "tracedecay_feedback_advisory_cycle",
+            json!({"document_uri": document_uri, "format": "json"}),
+        )
+        .await
+        .expect("advisory cycle call");
+    let (refused, answer) = tool_answer(&response);
+    assert!(
+        !refused,
+        "the first call after a reopen was refused: {answer}"
+    );
+    assert_eq!(answer["outcome"]["outcome"], json!("evidence"), "{answer}");
+    harness.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[hotpath::skip]
 async fn checkout_without_indexable_source_names_why_the_advisory_cycle_cannot_run() {

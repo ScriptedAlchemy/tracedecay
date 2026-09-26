@@ -108,11 +108,27 @@ pub type DaemonFeedbackProximityInvocationFuture<'a> = Pin<
     >,
 >;
 
+/// Whether an advisory-cycle owner answers for its project now, or stands in
+/// for a full cycle a ready sealed generation is mounting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DaemonAdvisoryCycleMountV1 {
+    Answers,
+    Mounting,
+}
+
+pub type DaemonAdvisoryCycleMountFuture<'a> =
+    Pin<Box<dyn Future<Output = DaemonAdvisoryCycleMountV1> + Send + 'a>>;
+
 pub trait DaemonAdvisoryCycleInvocationPort: Send + Sync {
     fn invoke(
         &self,
         request: DaemonAdvisoryCycleInvocationRequest,
     ) -> DaemonAdvisoryCycleInvocationFuture<'_>;
+
+    /// A mounted cycle answers; only a pre-mount owner reports `Mounting`.
+    fn mount(&self) -> DaemonAdvisoryCycleMountFuture<'_> {
+        Box::pin(async { DaemonAdvisoryCycleMountV1::Answers })
+    }
 
     fn invoke_proximity(
         &self,
@@ -939,6 +955,40 @@ impl DaemonInvocationService {
         self.project_runtimes
             .read::<DaemonAdvisoryCycleInvocationOwner, _, _>(project_root?, Clone::clone)
             .await
+    }
+
+    /// The owner that answers an advisory-cycle request for `project_root`.
+    ///
+    /// A reopened project serves its first requests while project open is
+    /// still publishing owners, and then while a ready sealed generation
+    /// mounts the full cycle behind a placeholder. Those requests wait for the
+    /// publication within their own deadline instead of failing a call a
+    /// retry would answer. A finished publication without an owner, or an
+    /// owner that answers, returns at once.
+    #[hotpath::measure(label = "daemon.service.feedback.advisory_owner_wait", future = true)]
+    pub(super) async fn answering_advisory_cycle_owner(
+        &self,
+        project_root: Option<&Path>,
+        deadline: &Deadline,
+    ) -> Option<DaemonAdvisoryCycleInvocationOwner> {
+        let project_root = project_root?;
+        loop {
+            let (owner, publication, mut changed) =
+                self.project_runtimes.advisory_cycle_view(project_root);
+            let waits = match &owner {
+                Some(owner) => owner.service.mount().await == DaemonAdvisoryCycleMountV1::Mounting,
+                None => publication == Some(ProjectRuntimePublicationStateV1::Warming),
+            };
+            let remaining_micros = deadline.expires_at.0.saturating_sub(now_micros().0);
+            if !waits || remaining_micros <= 0 {
+                return owner;
+            }
+            let remaining = Duration::from_micros(remaining_micros.unsigned_abs());
+            match tokio::time::timeout(remaining, changed.changed()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) | Err(_) => return owner,
+            }
+        }
     }
 
     #[hotpath::skip]

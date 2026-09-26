@@ -74,9 +74,10 @@ use tracedecay_policy::{
 use tracedecay_tool_catalog::{CapabilityId, EffectClass, SortContractId, UseCaseId};
 
 use crate::project_runtime::{
-    FeedbackCyclePublicationError, ProjectRuntimeAlreadyRegistered, ProjectRuntimeRegistryError,
-    ProjectRuntimeRegistryV1, RegisteredObservabilityProducerV1, StoreObservabilityMountErrorV1,
-    StoreObservabilityMountV1, StoreObservabilityRegistryV1,
+    FeedbackCyclePublicationError, ProjectRuntimeAlreadyRegistered,
+    ProjectRuntimePublicationStateV1, ProjectRuntimeRegistryError, ProjectRuntimeRegistryV1,
+    RegisteredObservabilityProducerV1, StoreObservabilityMountErrorV1, StoreObservabilityMountV1,
+    StoreObservabilityRegistryV1,
 };
 use tracedecay_agent_hosts::agents::context_scout::address_registry::{
     AdmittedContextScoutHookV1, ContextScoutLifecycleAddressV1,
@@ -230,9 +231,10 @@ pub use work_routing::DaemonWorkProposalRoutingAuthorityV1;
 pub use feedback::{
     DaemonAdvisoryCycleInvocationFuture, DaemonAdvisoryCycleInvocationOwner,
     DaemonAdvisoryCycleInvocationPort, DaemonAdvisoryCycleInvocationRequest,
-    DaemonFeedbackInvocationOwner, DaemonFeedbackProximityInvocationFuture,
-    DaemonFeedbackProximityInvocationRequest, advisory_cycle_invocation_result,
-    daemon_operation_event_authority, feedback_proximity_invocation_result,
+    DaemonAdvisoryCycleMountFuture, DaemonAdvisoryCycleMountV1, DaemonFeedbackInvocationOwner,
+    DaemonFeedbackProximityInvocationFuture, DaemonFeedbackProximityInvocationRequest,
+    advisory_cycle_invocation_result, daemon_operation_event_authority,
+    feedback_proximity_invocation_result,
 };
 pub use primitive::{
     DaemonContextScoutRuntimeRegistrar, DaemonContextScoutRuntimeRegistrationError,

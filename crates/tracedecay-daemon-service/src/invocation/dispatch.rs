@@ -512,6 +512,18 @@ impl DaemonInvocationService {
                 deadline,
                 cancellation,
             } => {
+                let advisory_cycle = match advisory_cycle {
+                    Some(owner) if owner.service.mount().await == DaemonAdvisoryCycleMountV1::Answers => {
+                        Some(owner)
+                    }
+                    _ => {
+                        self.answering_advisory_cycle_owner(
+                            registered_project_root.as_deref(),
+                            &deadline,
+                        )
+                        .await
+                    }
+                };
                 execute_feedback_advisory_cycle(
                     request_id,
                     advisory_cycle,
