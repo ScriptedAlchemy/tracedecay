@@ -20,9 +20,10 @@ allowBuilds:
 overrides:
   esbuild: ^0.28.1
 
-# `pnpm run` refuses to execute against dependencies that no longer match the
-# lockfile. The CLI build script relies on this instead of installing from
-# inside a Cargo build, which would rewrite the Cargo sources it compiles.
+# `pnpm run` refuses to execute against npm packages that no longer match
+# pnpm-lock.yaml. It does not check Cargo.lock. The CLI build script relies on
+# this instead of installing from inside a Cargo build, which would rewrite
+# the Cargo sources it compiles.
 verifyDepsBeforeRun: error
 
 # Installs the crates of the root and sdks/codegen Cargo workspaces into

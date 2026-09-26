@@ -81,12 +81,25 @@ unauthorized external action after completing independent, authorized work.
   any `pnpm-lock.yaml` or `Cargo.lock` change. The committed
   `.cargo/config.toml` replaces crates.io and the pinned git sources with
   `.pnpm/crates`, so cargo cannot resolve dependencies until that install has
-  run. Add crates with `pnpm add crate:<name>`. Inside the checkout
-  `cargo update` refuses the vendored sources and `cargo add` sees only
-  vendored versions. For a targeted lock bump, run
-  `cargo update -p <crate> --manifest-path <root>/Cargo.toml` from outside the
-  checkout (Cargo reads config from its working directory), then
-  `pnpm install`.
+  run. Two Cargo errors mean "run `pnpm install`": `failed to read root of
+  directory source <repo>/.pnpm/crates/git` before any install, and
+  `no matching package named '<crate>' found` with `location searched:
+  directory source '<repo>/.pnpm/crates/crates-io'` when Cargo.lock names a
+  crate that is not vendored yet. `verifyDepsBeforeRun` guards only the npm
+  packages; pnpm reads Cargo.lock as it is and never rewrites it or fails on
+  a manifest mismatch.
+- To add, remove, or bump a crate (member or `[workspace.dependencies]`),
+  edit the manifests by hand, refresh the lock from outside the checkout with
+  the pinned toolchain, `cd / && cargo +<toolchain> update -w --manifest-path
+  <repo>/Cargo.toml` (`-p <crate>` for a targeted bump), then run
+  `pnpm install`. Inside the checkout `cargo update` refuses the vendored git
+  sources and `cargo add` sees only vendored crates. Do not use
+  `pnpm add crate:`; from a member directory it regenerates the whole
+  Cargo.lock, at the root it fails, and `pnpm remove crate:` is unsupported.
+  `pnpm install` leaves unused `.pnpm/crates` directories in place; they are
+  inert once the lock stops naming them. Cargo reads `.cargo/config.toml`
+  from its working directory, so run `sdks/codegen` cargo commands from
+  `sdks/codegen`.
 - Dashboard: `pnpm run build` (rsbuild), `pnpm run typecheck` (`tsc --noEmit`),
   `pnpm test` (vitest) from `dashboard/`.
 - libtest `--exact` requires the full module path and exits 0 when a filter
