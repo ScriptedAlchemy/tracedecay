@@ -1270,6 +1270,12 @@ pub(super) fn reconcile_session_rows_detailed(
     if actual.provider != expected.provider || actual.session_id != expected.session_id {
         return Err(SessionReconcileConflict("identity"));
     }
+    // `expected` is the projection being applied now. A typed project id that
+    // changed (re-enroll/reset, or a cwd that now resolves to another
+    // registered project) moves this host session onto that current id.
+    // Two different directory identities used *as* the key are not a rebind:
+    // those rows name different roots and stay distinct.
+    let mut adopt_current_project = false;
     let project_key = if actual.project_key == expected.project_key {
         actual.project_key.clone()
     } else if actual.project_key == "user" {
@@ -1284,12 +1290,24 @@ pub(super) fn reconcile_session_rows_detailed(
         && expected.project_path == actual.project_path
     {
         actual.project_key.clone()
-    } else {
+    } else if project_key_is_directory(actual) && project_key_is_directory(expected) {
         return Err(SessionReconcileConflict("project_key"));
+    } else {
+        adopt_current_project = true;
+        expected.project_key.clone()
     };
     let project_path = if actual.project_path == expected.project_path {
         actual.project_path.clone()
-    } else if actual.project_path == actual.project_key {
+    } else if adopt_current_project && expected.project_path != expected.project_key {
+        // The current observation named a real cwd for the new project.
+        expected.project_path.clone()
+    } else if adopt_current_project && actual.project_path != actual.project_key {
+        // The incoming row only carries its project id as a path fallback.
+        // Keep the cwd already stored for this session.
+        actual.project_path.clone()
+    } else if adopt_current_project || actual.project_path == actual.project_key {
+        // A rebind whose paths are both project ids takes the current id.
+        // A stored path-shaped key takes the incoming path.
         expected.project_path.clone()
     } else if expected.project_path == expected.project_key {
         actual.project_path.clone()
@@ -1334,6 +1352,10 @@ pub(super) fn reconcile_session_rows_detailed(
             expected.parent_tool_use_id.as_ref(),
         )?,
     })
+}
+
+fn project_key_is_directory(session: &SessionRecord) -> bool {
+    session.project_key == session.project_path
 }
 
 fn reconcile_optional<T: Clone + Eq>(
@@ -1759,6 +1781,54 @@ mod reconcile_tests {
             from_verbatim.project_path, normalized.project_path,
             "both spellings of one directory must converge on the plain form"
         );
+    }
+
+    #[test]
+    fn changed_typed_project_key_adopts_the_current_project() {
+        let mut stored = record("/work/repo");
+        stored.project_key = "project.alpha".to_owned();
+        stored.project_path = "/work/repo".to_owned();
+        let mut current = stored.clone();
+        current.project_key = "project.beta".to_owned();
+
+        let merged = reconcile_session_rows_detailed(&stored, &current)
+            .expect("a re-enrolled project id must replace the stored key");
+
+        assert_eq!(merged.project_key, "project.beta");
+        assert_eq!(merged.project_path, "/work/repo");
+        assert_eq!(merged.session_id, stored.session_id);
+    }
+
+    #[test]
+    fn cwd_mapped_to_another_project_adopts_the_current_binding() {
+        let mut stored = record("/work/old");
+        stored.project_key = "project.alpha".to_owned();
+        stored.project_path = "/work/old".to_owned();
+        let mut current = stored.clone();
+        current.project_key = "project.beta".to_owned();
+        current.project_path = "/work/new".to_owned();
+
+        let merged = reconcile_session_rows_detailed(&stored, &current)
+            .expect("a cwd that resolves to another project must rebind");
+
+        assert_eq!(merged.project_key, "project.beta");
+        assert_eq!(merged.project_path, "/work/new");
+    }
+
+    #[test]
+    fn project_id_fallback_does_not_erase_a_stored_cwd() {
+        let mut stored = record("/work/repo");
+        stored.project_key = "project.alpha".to_owned();
+        stored.project_path = "/work/repo".to_owned();
+        let mut current = stored.clone();
+        current.project_key = "project.beta".to_owned();
+        current.project_path = "project.beta".to_owned();
+
+        let merged = reconcile_session_rows_detailed(&stored, &current)
+            .expect("a key change without a cwd must keep the stored path");
+
+        assert_eq!(merged.project_key, "project.beta");
+        assert_eq!(merged.project_path, "/work/repo");
     }
 
     #[test]

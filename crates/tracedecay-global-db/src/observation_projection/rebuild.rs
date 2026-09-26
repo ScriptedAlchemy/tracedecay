@@ -1003,6 +1003,24 @@ async fn write_effect_converging_collisions(
             );
             converge_collided_effect(conn, write, sequence, observation, effect).await
         }
+        Err(ProjectionStoreError::SessionOutputCollision {
+            provider,
+            session_id,
+            field,
+        }) => {
+            // One session's field conflict must not stay at the queue head.
+            // The durable skip is consumed with this observation, so later
+            // sessions and hosts keep catching up and the same collision is
+            // not logged again on the next drain.
+            tracing::warn!(
+                %provider,
+                %session_id,
+                field,
+                observation = observation.observation_id().as_str(),
+                "projection session output collided; recording a durable skip disposition"
+            );
+            converge_collided_effect(conn, write, sequence, observation, effect).await
+        }
         Err(error) => Err(error),
     }
 }
