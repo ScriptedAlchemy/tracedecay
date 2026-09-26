@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# This hook formats instead of refusing so nobody has a reason to bypass it
+# with --no-verify or core.hooksPath=/dev/null.
+#
 # Formats staged Rust files before the commit is recorded. Agents merge
 # without waiting for CI, so the Repository gates fmt check only holds if
 # every commit is formatted when it is made.

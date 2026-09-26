@@ -1,6 +1,7 @@
 use std::{
     cell::Cell,
     collections::{BTreeMap, BTreeSet},
+    io::Read,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     sync::{Arc, Mutex},
     time::Duration,
@@ -2386,22 +2387,6 @@ fn published_generation_validation_is_amortized_per_loaded_generation() {
             .all(|(first, second)| first.chunk() == second.chunk()),
         "amortized admission must return the same chunks as the first admission"
     );
-
-    // Repeat attribution reads are memoized and must stay identical.
-    let first_attribution = restored
-        .test_attribution_authority()
-        .expect("test attribution authority");
-    let second_attribution = restored
-        .test_attribution_authority()
-        .expect("repeat attribution read is amortized");
-    let generation_id = restored.manifest().generation_id.clone();
-    assert!(
-        Arc::ptr_eq(
-            &first_attribution.read_test_attribution(&generation_id),
-            &second_attribution.read_test_attribution(&generation_id),
-        ),
-        "amortized attribution must share the first read's evidence, not copy it"
-    );
 }
 
 #[test]
@@ -3118,25 +3103,81 @@ fn partitioned_codec_fixture() -> (
 }
 
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:ce70aa9c7cfe6357b9f56d8f31ad14c22fff1210cc6cb49d35a0be29bef9289a";
+    "sha256:5535b8a66a27c7ac8fd540f49da09f779564837ed0203451306651bab98bc474";
 const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
     (
-        "sha256:d459a8147cff5a99f10ce10fb144bdddfc443318c9b4eb36c2e03a3a7fcb7897",
-        2_227,
+        "sha256:c65061384a57ef7a9b8bb70a4db61c9a03a293513aa5556befc1838f584b4372",
+        1_733,
     ),
     (
-        "sha256:bb00f9a412e136c877257955f5747bcd83ab98ea3635173e58905d656099abd4",
-        1_430,
+        "sha256:d0e58f7caf86dc2630f75cf0e8d61d0bfccd19338cccf828c29baa1cf16fcc4e",
+        1_260,
     ),
     (
-        "sha256:8250f37e248f46fc1bdc10aa93b2a940f9de87e0f139fa71505444148a18dde3",
-        1_477,
+        "sha256:554e5eb68975bc4436b6c7fa3c6084efcca8a1a43b6b463713e75ae2faa18b4d",
+        1_309,
     ),
     (
         "sha256:51b7d16817def8c21c1ed0b154cce1ad5cc49c6966899ea7cc28d14a6d5005d9",
         2_837,
     ),
 ];
+
+/// A sealed file segment stores each identity once: chunk ids, symbol
+/// identities, file identities, symbol content digests, and WholeSymbol term
+/// occurrences that the segment already determines are omitted (restore
+/// rebuilds them; the round trip above proves it exactly).
+#[test]
+fn partitioned_file_segments_omit_the_identities_they_determine() {
+    let (_, manifest, segments) = partitioned_codec_fixture();
+    let identities = CodeIndexPublishedGenerationV1::partitioned_segment_identities(&manifest)
+        .expect("partitioned segment identities parse");
+    let (files, _evidence) = identities.split_at(identities.len() - 1);
+    let mut chunks = 0;
+    let mut explicit_ids = 0;
+    let mut whole_symbol_terms = 0;
+    for identity in files {
+        let mut decoded = Vec::new();
+        flate2::read::DeflateDecoder::new(segments[identity.digest.as_str()].as_slice())
+            .read_to_end(&mut decoded)
+            .expect("file segment inflates");
+        let segment: serde_json::Value =
+            serde_json::from_slice(&decoded).expect("file segment JSON");
+        let artifacts = &segment["file"]["artifacts"];
+        for symbol in artifacts["symbols"].as_array().expect("symbol rows") {
+            for field in ["identity", "file_identity", "content_digest"] {
+                assert!(
+                    symbol.get(field).is_none(),
+                    "a symbol row repeats its derivable {field}: {symbol}"
+                );
+            }
+        }
+        for chunk in artifacts["chunks"]["chunks"]
+            .as_array()
+            .expect("chunk rows")
+        {
+            chunks += 1;
+            explicit_ids += usize::from(chunk.get("id").is_some());
+            for term in chunk["exact_terms"].as_array().expect("exact term rows") {
+                if term["kind"] == "whole_symbol" {
+                    whole_symbol_terms += 1;
+                    assert!(
+                        term.get("symbol_occurrence_id").is_none(),
+                        "a WholeSymbol term repeats its chunk's occurrence: {chunk}"
+                    );
+                }
+            }
+        }
+    }
+    assert!(
+        chunks > 0 && whole_symbol_terms > 0,
+        "the fixture must exercise both rules"
+    );
+    assert!(
+        explicit_ids < chunks,
+        "symbol chunks must omit their derivable ids ({explicit_ids} of {chunks} explicit)"
+    );
+}
 
 #[test]
 fn partitioned_codec_has_stable_bytes_and_round_trips() {

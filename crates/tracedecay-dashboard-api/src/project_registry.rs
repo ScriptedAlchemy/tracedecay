@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use tracedecay_global_db::{
     CodeProjectRecord, ProjectAliasRecord, ProjectRegistryContext, ProjectStoreContext,
 };
+use tracedecay_runtime_core::branch::{CheckoutHead, checkout_head};
 
 pub use tracedecay_contracts::{
     ProjectRegistryEntry, ProjectRegistrySummary, ProjectRegistryView, ProjectRepoGroup,
@@ -15,7 +16,22 @@ pub fn public_code_project_from_record(
     project: &CodeProjectRecord,
     active_project_id: Option<&str>,
 ) -> PublicCodeProject {
-    PublicCodeProject {
+    public_code_project_for_checkout(project, &[], active_project_id, None)
+}
+
+/// Public project row whose branch is the live HEAD of `preferred` when that
+/// path is one of this project's checkouts.
+///
+/// `preferred` is the checkout the caller is asking about: the active
+/// worktree, or the path a context read resolved. A linked worktree does not
+/// inherit the primary checkout's branch.
+pub fn public_code_project_for_checkout(
+    project: &CodeProjectRecord,
+    aliases: &[ProjectAliasRecord],
+    active_project_id: Option<&str>,
+    preferred: Option<&Path>,
+) -> PublicCodeProject {
+    let mut public = PublicCodeProject {
         project_id: project.project_id.clone(),
         label: path_label(&project.display_root),
         project_root: project.display_root.clone(),
@@ -26,7 +42,11 @@ pub fn public_code_project_from_record(
         created_at: project.created_at,
         last_seen_at: project.last_seen_at,
         is_active: active_project_id.map(|id| id == project.project_id),
+    };
+    if let Some(observed) = observe_checkouts(project, aliases, preferred) {
+        public.default_branch = observed.default_branch;
     }
+    public
 }
 
 /// Serialized project-registry context for one project: the public project
@@ -40,8 +60,21 @@ pub struct PublicProjectRegistryContext<'a> {
 
 impl<'a> PublicProjectRegistryContext<'a> {
     pub fn new(context: &'a ProjectRegistryContext, active_project_id: Option<&str>) -> Self {
+        Self::at_checkout(context, active_project_id, None)
+    }
+
+    pub fn at_checkout(
+        context: &'a ProjectRegistryContext,
+        active_project_id: Option<&str>,
+        preferred: Option<&Path>,
+    ) -> Self {
         Self {
-            project: public_code_project_from_record(&context.project, active_project_id),
+            project: public_code_project_for_checkout(
+                &context.project,
+                &context.aliases,
+                active_project_id,
+                preferred,
+            ),
             aliases: &context.aliases,
             stores: &context.stores,
         }
@@ -52,11 +85,12 @@ impl<'a> PublicProjectRegistryContext<'a> {
 pub fn build_project_registry_view(
     contexts: &[ProjectRegistryContext],
     active_project_id: Option<&str>,
+    active_checkout: Option<&Path>,
     truncated: bool,
 ) -> ProjectRegistryView {
     let mut groups: BTreeMap<String, ProjectRepoGroup> = BTreeMap::new();
     for context in contexts {
-        let entry = project_entry(context, active_project_id);
+        let entry = project_entry(context, active_project_id, active_checkout);
         let group_key = context
             .project
             .git_common_dir
@@ -107,20 +141,54 @@ pub fn build_project_registry_view(
     }
 }
 
+/// Copies each registry row's live checkout branch onto the matching public
+/// project. Listing payloads carry both shapes, and they have to name the
+/// same HEAD.
+pub fn align_public_checkout_branches(
+    projects: &mut [PublicCodeProject],
+    view: &ProjectRegistryView,
+) {
+    for project in projects {
+        if let Some(entry) = view
+            .project_tree
+            .iter()
+            .flat_map(|group| group.projects.iter())
+            .find(|entry| entry.project_id == project.project_id)
+        {
+            project.default_branch.clone_from(&entry.default_branch);
+        }
+    }
+}
+
 fn project_entry(
     context: &ProjectRegistryContext,
     active_project_id: Option<&str>,
+    active_checkout: Option<&Path>,
 ) -> ProjectRegistryEntry {
+    let is_active = active_project_id.is_some_and(|id| id == context.project.project_id);
+    let preferred = is_active.then_some(active_checkout).flatten();
+    let observed = observe_checkouts(&context.project, &context.aliases, preferred);
     let mut branches = BTreeSet::new();
-    if let Some(branch) = &context.project.default_branch {
-        branches.insert(branch.clone());
-    }
+    let default_branch = if let Some(observed) = observed {
+        branches = observed.branches;
+        observed.default_branch
+    } else {
+        // No checkout could be read. Keep the enrolled branch names so a
+        // non-git project, or a root that is not on disk in this process,
+        // still renders the registry row it already has.
+        if let Some(branch) = &context.project.default_branch {
+            branches.insert(branch.clone());
+        }
+        for store in &context.stores {
+            for scope in &store.graph_scopes {
+                branches.insert(scope.branch_name.clone());
+            }
+        }
+        context.project.default_branch.clone()
+    };
     let mut artifact_count = 0usize;
     for store in &context.stores {
         artifact_count += store.artifacts.len();
-        for scope in &store.graph_scopes {
-            branches.insert(scope.branch_name.clone());
-        }
     }
 
     ProjectRegistryEntry {
@@ -129,7 +197,7 @@ fn project_entry(
         project_root: context.project.display_root.clone(),
         canonical_root: context.project.canonical_root.clone(),
         kind: project_kind(&context.project),
-        default_branch: context.project.default_branch.clone(),
+        default_branch,
         branches: branches.into_iter().collect(),
         store_count: context.stores.len(),
         artifact_count,
@@ -137,6 +205,93 @@ fn project_entry(
         last_seen_at: context.project.last_seen_at,
         is_active: active_project_id.map(|id| id == context.project.project_id),
     }
+}
+
+struct ObservedCheckouts {
+    default_branch: Option<String>,
+    branches: BTreeSet<String>,
+}
+
+/// Live HEAD of every checkout this project row names.
+///
+/// The enrolled `default_branch` and graph-scope names are the branches
+/// recorded when the project was registered. They do not move when the
+/// checkout switches, detaches, or a linked worktree points somewhere else.
+/// `None` means no checkout was readable, so the caller keeps that record.
+fn observe_checkouts(
+    project: &CodeProjectRecord,
+    aliases: &[ProjectAliasRecord],
+    preferred: Option<&Path>,
+) -> Option<ObservedCheckouts> {
+    let mut roots = Vec::new();
+    push_checkout(&mut roots, PathBuf::from(&project.canonical_root));
+    push_checkout(&mut roots, PathBuf::from(&project.display_root));
+    for alias in aliases {
+        push_checkout(&mut roots, PathBuf::from(&alias.alias_path));
+    }
+    let preferred = preferred.filter(|path| {
+        roots.iter().any(|root| same_checkout(root, path))
+            || shares_repository(path, project.git_common_dir.as_deref())
+    });
+    if let Some(path) = preferred {
+        push_checkout(&mut roots, path.to_path_buf());
+    }
+
+    let mut observations = Vec::new();
+    for root in &roots {
+        if let Some(head) = checkout_head(root) {
+            observations.push((root.as_path(), head));
+        }
+    }
+    if observations.is_empty() {
+        return None;
+    }
+
+    let mut branches = BTreeSet::new();
+    for (_, head) in &observations {
+        if let CheckoutHead::Branch(branch) = head {
+            branches.insert(branch.clone());
+        }
+    }
+    let chosen = preferred
+        .and_then(|path| {
+            observations
+                .iter()
+                .find(|(root, _)| same_checkout(root, path))
+                .map(|(_, head)| head)
+        })
+        .or_else(|| observations.first().map(|(_, head)| head));
+    let default_branch = match chosen {
+        Some(CheckoutHead::Branch(branch)) => Some(branch.clone()),
+        Some(CheckoutHead::Detached) | None => None,
+    };
+    Some(ObservedCheckouts {
+        default_branch,
+        branches,
+    })
+}
+
+fn push_checkout(roots: &mut Vec<PathBuf>, path: PathBuf) {
+    if roots.iter().any(|root| same_checkout(root, &path)) {
+        return;
+    }
+    roots.push(path);
+}
+
+fn same_checkout(left: &Path, right: &Path) -> bool {
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+fn shares_repository(path: &Path, git_common_dir: Option<&str>) -> bool {
+    let Some(stored) = git_common_dir else {
+        return false;
+    };
+    tracedecay_runtime_core::worktree::git_common_dir(path).is_some_and(|live| {
+        live.as_path() == Path::new(stored) || same_checkout(&live, Path::new(stored))
+    })
 }
 
 fn repo_label(project: &CodeProjectRecord) -> String {
@@ -200,6 +355,14 @@ fn path_label(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+    use std::process::Command;
+
+    use tracedecay_contracts::render_project_registry_view;
+    use tracedecay_global_db::{
+        GraphScopeRecord, ProjectAliasRecord, ProjectStoreContext, StoreInstanceRecord,
+    };
+
     use super::*;
 
     fn project_record(
@@ -243,7 +406,7 @@ mod tests {
             Some("/repo/main/.git"),
         ));
 
-        let view = build_project_registry_view(&[primary, worktree], None, false);
+        let view = build_project_registry_view(&[primary, worktree], None, None, false);
 
         assert_eq!(view.summary.project_count, 2);
         assert_eq!(view.summary.repo_count, 1);
@@ -256,5 +419,162 @@ mod tests {
         }
         assert_eq!(kinds.get("main"), Some(&"primary"));
         assert_eq!(kinds.get("wt"), Some(&"worktree"));
+    }
+
+    #[test]
+    fn registry_reports_checkout_head_after_branch_switch() {
+        let tmp = tempfile::tempdir().expect("checkout tempdir");
+        let repo = tmp.path().join("checkout");
+        std::fs::create_dir(&repo).expect("checkout dir");
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("README.md"), "hi").expect("readme");
+        git(&repo, &["add", "README.md"]);
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "-m",
+                "init",
+            ],
+        );
+        let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(&repo)
+            .expect("primary git common dir");
+        let mut context = enrolled_checkout(&repo, &git_common_dir);
+
+        git(&repo, &["checkout", "-q", "-b", "switched-head"]);
+        let (branch, branches, rendered) = reported(&context, Some(repo.as_path()));
+        assert_eq!(branch.as_deref(), Some("switched-head"));
+        assert!(branches.iter().any(|name| name == "switched-head"));
+        assert!(branches.iter().all(|name| {
+            name != "stale-enrollment" && name != "indexed-master" && name != "main"
+        }));
+        assert!(rendered.contains("switched-head"));
+        assert!(!rendered.contains("stale-enrollment"));
+        assert!(!rendered.contains("indexed-master"));
+
+        git(&repo, &["checkout", "-q", "--detach"]);
+        let (branch, branches, rendered) = reported(&context, Some(repo.as_path()));
+        assert_eq!(branch, None);
+        assert!(branches.iter().all(|name| name != "switched-head"));
+        assert!(!rendered.contains("switched-head"));
+        assert!(!rendered.contains("stale-enrollment"));
+
+        let worktree = tmp.path().join("linked");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "linked-feature",
+                worktree.to_str().expect("worktree path"),
+            ],
+        );
+        git(&worktree, &["checkout", "-q", "-b", "worktree-switched"]);
+        context.aliases.push(ProjectAliasRecord {
+            alias_path: worktree.to_string_lossy().into_owned(),
+            project_id: context.project.project_id.clone(),
+            last_seen_at: 0,
+        });
+
+        let (branch, branches, rendered) = reported(&context, Some(worktree.as_path()));
+        assert_eq!(branch.as_deref(), Some("worktree-switched"));
+        assert!(branches.iter().any(|name| name == "worktree-switched"));
+        assert!(branches.iter().all(|name| {
+            name != "linked-feature" && name != "stale-enrollment" && name != "main"
+        }));
+        assert!(rendered.contains("worktree-switched"));
+        assert!(!rendered.contains("linked-feature"));
+
+        let (branch, branches, _) = reported(&context, None);
+        assert_eq!(branch, None);
+        assert!(branches.iter().any(|name| name == "worktree-switched"));
+        assert!(branches.iter().all(|name| name != "stale-enrollment"));
+    }
+
+    fn enrolled_checkout(root: &Path, git_common_dir: &Path) -> ProjectRegistryContext {
+        let mut project = project_record(
+            "project.checkout",
+            root.to_string_lossy().as_ref(),
+            Some(git_common_dir.to_string_lossy().as_ref()),
+        );
+        project.default_branch = Some("stale-enrollment".to_owned());
+        ProjectRegistryContext {
+            project,
+            aliases: Vec::new(),
+            stores: vec![ProjectStoreContext {
+                store: StoreInstanceRecord {
+                    store_id: "store.checkout".to_owned(),
+                    project_id: "project.checkout".to_owned(),
+                    store_kind: "graph".to_owned(),
+                    storage_mode: "project".to_owned(),
+                    store_relpath: "graph.db".to_owned(),
+                    manifest_relpath: None,
+                    created_at: 0,
+                    last_verified_at: None,
+                    last_write_at: None,
+                },
+                graph_scopes: vec![GraphScopeRecord {
+                    graph_scope_id: "scope.checkout".to_owned(),
+                    project_id: "project.checkout".to_owned(),
+                    store_id: "store.checkout".to_owned(),
+                    branch_name: "indexed-master".to_owned(),
+                    db_relpath: "graph.db".to_owned(),
+                    parent_scope_id: None,
+                    last_synced_at: None,
+                    writable: true,
+                }],
+                artifacts: Vec::new(),
+            }],
+        }
+    }
+
+    /// Tree row, aligned listing row, and path context all name the same HEAD.
+    fn reported(
+        context: &ProjectRegistryContext,
+        checkout: Option<&Path>,
+    ) -> (Option<String>, Vec<String>, String) {
+        let active_id = checkout.map(|_| context.project.project_id.as_str());
+        let view =
+            build_project_registry_view(std::slice::from_ref(context), active_id, checkout, false);
+        let entry = view
+            .project_tree
+            .iter()
+            .flat_map(|group| group.projects.iter())
+            .find(|project| project.project_id == context.project.project_id)
+            .expect("enrolled project");
+        let mut rows = vec![public_code_project_from_record(&context.project, active_id)];
+        align_public_checkout_branches(&mut rows, &view);
+        let listed = rows
+            .iter()
+            .find(|project| project.project_id == context.project.project_id)
+            .expect("listed project");
+        assert_eq!(listed.default_branch, entry.default_branch);
+        let context_row = PublicProjectRegistryContext::at_checkout(context, active_id, checkout);
+        assert_eq!(context_row.project.default_branch, entry.default_branch);
+        (
+            entry.default_branch.clone(),
+            entry.branches.clone(),
+            render_project_registry_view("projects", &view),
+        )
+    }
+
+    fn git(cwd: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(["-c", "core.hooksPath=.git/no-hooks"])
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap_or_else(|error| panic!("git {args:?}: {error}"));
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

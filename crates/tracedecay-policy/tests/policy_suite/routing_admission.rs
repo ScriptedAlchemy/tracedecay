@@ -8,16 +8,15 @@ use tracedecay_domain::configuration::{
 use tracedecay_domain::{CapabilityId, UtcMicros};
 use tracedecay_policy::analyzer::{
     AnalyzerAdmissionDispositionV1, AnalyzerAdmissionEvaluator, AnalyzerAdmissionEvaluatorV1,
-    AnalyzerAdmissionInputV1, AnalyzerAdmissionSnapshotV1, AnalyzerAvailabilityV1,
-    AnalyzerCandidateV1, AnalyzerExecutionLocationV1,
+    AnalyzerAdmissionInputV1, AnalyzerAdmissionReasonV1, AnalyzerAdmissionSnapshotV1,
+    AnalyzerAvailabilityV1, AnalyzerCandidateV1, AnalyzerExecutionLocationV1,
 };
-use tracedecay_policy::authorization::PolicyIdentifierV1;
-use tracedecay_policy::authorization::PrivacyConstraintV1;
 use tracedecay_policy::git::{
     GitConflictRiskV1, GitEffectAuthorizationV1, GitEffectClassificationInputV1,
     GitEffectClassifier, GitEffectClassifierV1, GitEffectDispositionV1, GitIndexEffectV1,
     GitPreviewPreconditionV1, GitRepositoryStateFactV1,
 };
+use tracedecay_policy::identity::PolicyIdentifierV1;
 use tracedecay_policy::routing::{
     CapabilityAvailabilityV1, CapabilityEffectClassV1, CapabilityRouteCandidateV1,
     CapabilityRoutingCancellationV1, CapabilityRoutingDispositionV1, CapabilityRoutingEvaluator,
@@ -71,7 +70,6 @@ fn analyzer_input() -> AnalyzerAdmissionInputV1 {
             available_memory_mib: 512,
             catalog_digest: digest('a'),
         }],
-        privacy_constraints: BTreeSet::new(),
         configuration_digest: digest('b'),
         policy_revision: 1,
         policy_digest: digest('c'),
@@ -105,11 +103,15 @@ fn analyzer_admission_requires_configured_available_scoped_local_candidate() {
     );
 
     let mut privacy_restricted = input;
-    privacy_restricted.privacy_constraints = BTreeSet::from([PrivacyConstraintV1::LocalOnly]);
+    privacy_restricted.settings.selections[0].privacy_class = AnalyzerPrivacyClassV1::Restricted;
     privacy_restricted.candidates[0].execution_location = AnalyzerExecutionLocationV1::External;
     let denied = evaluator.evaluate(&privacy_restricted);
 
     assert_eq!(denied.disposition, AnalyzerAdmissionDispositionV1::Deny);
+    assert_eq!(
+        denied.ordered_reason_codes,
+        vec![AnalyzerAdmissionReasonV1::RestrictedPrivacy]
+    );
     assert!(denied.selected_executable_id.is_none());
 }
 

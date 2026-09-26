@@ -1010,3 +1010,134 @@ async fn a_fresh_store_opens_with_the_range_rewrite_already_retired() {
             .unwrap()
     );
 }
+
+async fn parked_queue_store(temp: &tempfile::TempDir, sessions: &[&str]) -> TestConnection {
+    let conn = TestConnection::open(&temp.path().join("sessions.db"));
+    conn.execute_batch(
+        "CREATE TABLE sessions (
+            provider TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            project_key TEXT NOT NULL,
+            project_path TEXT NOT NULL,
+            PRIMARY KEY(provider, session_id)
+         );",
+    )
+    .await
+    .unwrap();
+    schema::ensure_lcm_schema(&conn).await.unwrap();
+    for session_id in sessions {
+        conn.execute(
+            "INSERT INTO sessions(provider, session_id, project_key, project_path)
+             VALUES ('cursor', ?1, 'project', '/p')",
+            params![*session_id],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO lcm_summary_convergence_queue (
+                 provider, session_id, newest_raw_store_id, attempted_raw_store_id,
+                 state, failure_code
+             ) VALUES ('cursor', ?1, 4, 4, 'unavailable', 'cursor_agent_unconfigured')",
+            params![*session_id],
+        )
+        .await
+        .unwrap();
+    }
+    conn
+}
+
+async fn parked_count(conn: &TestConnection) -> i64 {
+    fetch_i64(
+        conn,
+        "SELECT COUNT(*) FROM lcm_summary_convergence_queue WHERE state = 'unavailable'",
+        (),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn parked_sessions_requeue_once_per_summarizer_binding_in_bounded_pages() {
+    let temp = tempfile::tempdir().unwrap();
+    let conn = parked_queue_store(&temp, &["parked-a", "parked-b", "parked-c"]).await;
+    let unconfigured = r#"{"cursor_agent":{"state":"unconfigured"}}"#;
+    let configured = r#"{"cursor_agent":{"state":"configured"}}"#;
+
+    // A store that never drained owes the requeue under whatever binding is
+    // current; each page is keyset-bounded and journals its cursor.
+    assert!(
+        summary_convergence::parked_requeue_has_work(&*conn, unconfigured)
+            .await
+            .unwrap()
+    );
+    let first = summary_convergence::requeue_parked_page(&*conn, unconfigured, 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        first,
+        summary_convergence::LcmParkedRequeuePage {
+            rows_requeued: 2,
+            has_more: true,
+        }
+    );
+    assert_eq!(parked_count(&conn).await, 1);
+    let second = summary_convergence::requeue_parked_page(&*conn, unconfigured, 2)
+        .await
+        .unwrap();
+    assert_eq!(second.rows_requeued, 1);
+    assert!(!second.has_more);
+    assert_eq!(
+        fetch_i64(
+            &conn,
+            "SELECT COUNT(*) FROM lcm_summary_convergence_queue
+             WHERE state = 'pending' AND failure_code IS NULL
+               AND failure_count = 0 AND next_attempt_at_ms = 0",
+            (),
+        )
+        .await,
+        3
+    );
+
+    // Sessions parked again under the binding that was just drained stay
+    // parked: an unchanged binding cannot change their outcome.
+    conn.execute_batch(
+        "UPDATE lcm_summary_convergence_queue
+         SET state = 'unavailable', failure_code = 'cursor_agent_unconfigured'",
+    )
+    .await
+    .unwrap();
+    assert!(
+        !summary_convergence::parked_requeue_has_work(&*conn, unconfigured)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        summary_convergence::requeue_parked_page(&*conn, unconfigured, 2)
+            .await
+            .unwrap(),
+        summary_convergence::LcmParkedRequeuePage::default()
+    );
+    assert_eq!(parked_count(&conn).await, 3);
+
+    // A binding change mid-drain restarts from the first parked row, so no
+    // session parked before the newest binding is skipped.
+    summary_convergence::requeue_parked_page(&*conn, configured, 2)
+        .await
+        .unwrap();
+    conn.execute_batch(
+        "UPDATE lcm_summary_convergence_queue
+         SET state = 'unavailable', failure_code = 'cursor_agent_unavailable'",
+    )
+    .await
+    .unwrap();
+    assert!(
+        summary_convergence::parked_requeue_has_work(&*conn, unconfigured)
+            .await
+            .unwrap()
+    );
+    let restarted = summary_convergence::requeue_parked_page(&*conn, unconfigured, 8)
+        .await
+        .unwrap();
+    assert_eq!(restarted.rows_requeued, 3);
+    assert!(!restarted.has_more);
+    assert_eq!(parked_count(&conn).await, 0);
+}

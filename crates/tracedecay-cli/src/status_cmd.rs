@@ -473,17 +473,7 @@ async fn handle_status_command_within(
             // scripts/render-logo-ansi.sh when the artwork changes.
             print!("{}", include_str!("resources/logo.ansi"));
         }
-        let branch_info = daemon_status
-            .get("serving_branch")
-            .and_then(Value::as_str)
-            .map(|branch| crate::display::BranchInfo {
-                branch: branch.to_string(),
-                parent: daemon_status
-                    .get("parent_branch")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                is_fallback: false,
-            });
+        let branch_info = status_branch_info(&project_path, &daemon_status);
         let cost_info = None;
         if short {
             crate::display::print_status_header(
@@ -553,13 +543,53 @@ async fn handle_status_command_within(
     Ok(())
 }
 
+/// Branch row for the human status banner.
+///
+/// `serving_branch` is the branch the index is publishing. The banner names
+/// the checkout the operator is on, which moves on `git switch` before that
+/// publish does. A detached HEAD is reported as detached so the enrolled or
+/// serving name is not left in its place. When the checkout cannot be read,
+/// the serving branch remains the only name available.
+fn status_branch_info(
+    project_path: &Path,
+    daemon_status: &Value,
+) -> Option<crate::display::BranchInfo> {
+    let serving = daemon_status.get("serving_branch").and_then(Value::as_str);
+    let parent = daemon_status
+        .get("parent_branch")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    match tracedecay_runtime_core::branch::checkout_head(project_path) {
+        Some(tracedecay_runtime_core::branch::CheckoutHead::Branch(branch)) => {
+            let parent = parent.filter(|_| serving.is_some_and(|serving| serving == branch));
+            Some(crate::display::BranchInfo {
+                branch,
+                parent,
+                is_fallback: false,
+            })
+        }
+        Some(tracedecay_runtime_core::branch::CheckoutHead::Detached) => {
+            Some(crate::display::BranchInfo {
+                branch: "detached HEAD".to_owned(),
+                parent: None,
+                is_fallback: false,
+            })
+        }
+        None => serving.map(|branch| crate::display::BranchInfo {
+            branch: branch.to_owned(),
+            parent,
+            is_fallback: false,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         COUNTRY_FLAGS_MAX_AGE_SECS, OnlineRefresh, OnlineRefreshPlan, WORLDWIDE_TOTAL_MAX_AGE_SECS,
         await_daemon_tool_result, await_online_refresh, project_open_line,
-        reject_truncation_envelope, schema_convergence_line, status_command_deadline_from,
-        status_server_request_budget,
+        reject_truncation_envelope, schema_convergence_line, status_branch_info,
+        status_command_deadline_from, status_server_request_budget,
     };
     use serde_json::json;
     use std::time::Duration;
@@ -751,6 +781,55 @@ mod tests {
             project_open_line(&project_open),
             "project open: deferred repository discovery, retry after 250 ms: \
              git probe exceeded its deadline"
+        );
+    }
+
+    #[test]
+    fn status_banner_follows_the_checkout_after_a_branch_switch() {
+        let root = tempfile::tempdir().expect("checkout");
+        git_in(root.path(), &["init", "-q", "-b", "enrolled"]);
+        std::fs::write(root.path().join("README.md"), "hi").expect("readme");
+        git_in(root.path(), &["add", "README.md"]);
+        git_in(
+            root.path(),
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "-m",
+                "init",
+            ],
+        );
+        git_in(root.path(), &["checkout", "-q", "-b", "switched-head"]);
+
+        let serving = json!({
+            "serving_branch": "enrolled",
+            "parent_branch": "enrolled-parent",
+        });
+        let attached = status_branch_info(root.path(), &serving).expect("attached checkout");
+        assert_eq!(attached.branch, "switched-head");
+        assert!(attached.parent.is_none());
+
+        git_in(root.path(), &["checkout", "-q", "--detach"]);
+        let detached = status_branch_info(root.path(), &serving).expect("detached checkout");
+        assert_eq!(detached.branch, "detached HEAD");
+        assert!(detached.parent.is_none());
+    }
+
+    fn git_in(cwd: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(["-c", "core.hooksPath=.git/no-hooks"])
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap_or_else(|error| panic!("git {args:?}: {error}"));
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 }

@@ -4,6 +4,8 @@ use tracedecay_runtime_core::db::engine::{Value, params_from_iter};
 
 use super::scope::LcmScopeSql;
 use super::*;
+use crate::summary_convergence::LcmSummaryConvergenceQueueState;
+use crate::types::LcmSummaryConvergenceReasonCount;
 
 const STORE_STATUS_PAGE_SIZE: i64 = 512;
 const STORE_STATUS_TOKEN_SCAN_MAX_BYTES: i64 = 1024 * 1024;
@@ -45,6 +47,7 @@ struct StatusCounts {
     summary_current_count: i64,
     summary_unavailable_count: i64,
     summary_permanent_count: i64,
+    summary_reasons: Vec<LcmSummaryConvergenceReasonCount>,
 }
 
 pub(super) async fn status_for_provider(
@@ -79,9 +82,7 @@ async fn status_for_provider_with_work(
     work: &mut StatusQueryWork,
 ) -> Result<LcmStatus, LcmError> {
     work.record_query();
-    let schema_version = schema::schema_version(conn)
-        .await
-        .unwrap_or(LCM_SCHEMA_VERSION);
+    let schema_version = schema::schema_version(conn).await?;
     work.record_query();
     let counts = status_counts(conn, provider, session_id).await?;
     work.record_payload_health();
@@ -146,9 +147,7 @@ async fn aggregate_provider_status_with_work(
 ) -> Result<(LcmStatus, StatusQueryWork), LcmError> {
     let mut work = StatusQueryWork::default();
     work.record_query();
-    let schema_version = schema::schema_version(conn)
-        .await
-        .unwrap_or(LCM_SCHEMA_VERSION);
+    let schema_version = schema::schema_version(conn).await?;
     work.record_query();
     let counts = status_counts(conn, "all", session_id).await?;
     if counts.provider_count == 0 {
@@ -243,14 +242,20 @@ fn status_counts_query(provider: &str, session_id: Option<&str>) -> (String, Vec
                WHERE state = 'unavailable'{content_and}),
              (SELECT COUNT(*)
                 FROM lcm_summary_convergence_queue
-               WHERE state = 'permanent'{content_and})"
+               WHERE state = 'permanent'{content_and}),
+             (SELECT json_group_array(json_array(state, failure_code, session_count))
+                FROM (SELECT state, failure_code, COUNT(*) AS session_count
+                        FROM lcm_summary_convergence_queue
+                       WHERE failure_code IS NOT NULL{content_and}
+                       GROUP BY state, failure_code))"
     );
     // Bound in the placeholders' textual order: the four EXISTS probes, the
     // raw/summary counts, the debt join, both lifecycle counts, the lossy
-    // ingest count, and five disjoint summary-convergence states.
-    let scopes_in_sql_order: [&LcmScopeSql; 15] = [
+    // ingest count, five disjoint summary-convergence states, and their
+    // recorded reasons.
+    let scopes_in_sql_order: [&LcmScopeSql; 16] = [
         &content, &content, &content, &lifecycle, &content, &content, &debt, &lifecycle,
-        &lifecycle, &content, &content, &content, &content, &content, &content,
+        &lifecycle, &content, &content, &content, &content, &content, &content, &content,
     ];
     let mut values = Vec::new();
     for scope in scopes_in_sql_order {
@@ -284,7 +289,28 @@ async fn status_counts(
         summary_current_count: row.get(9)?,
         summary_unavailable_count: row.get(10)?,
         summary_permanent_count: row.get(11)?,
+        summary_reasons: summary_convergence_reasons(&row.get::<String>(12)?)?,
     })
+}
+
+fn summary_convergence_reasons(
+    encoded: &str,
+) -> Result<Vec<LcmSummaryConvergenceReasonCount>, LcmError> {
+    let groups: Vec<(String, String, i64)> = serde_json::from_str(encoded).map_err(|error| {
+        LcmError::Db(format!("decode LCM summary convergence reasons: {error}"))
+    })?;
+    let mut reasons = groups
+        .into_iter()
+        .map(|(state, reason, session_count)| {
+            Ok(LcmSummaryConvergenceReasonCount {
+                state: LcmSummaryConvergenceQueueState::parse(&state)?,
+                reason,
+                session_count,
+            })
+        })
+        .collect::<Result<Vec<_>, LcmError>>()?;
+    reasons.sort_by(|left, right| (left.state, &left.reason).cmp(&(right.state, &right.reason)));
+    Ok(reasons)
 }
 
 fn status_from_parts(
@@ -328,6 +354,7 @@ fn status_from_parts(
             current_session_count: counts.summary_current_count,
             unavailable_session_count: counts.summary_unavailable_count,
             permanent_session_count: counts.summary_permanent_count,
+            reasons: counts.summary_reasons,
         },
         redaction: LcmRedactionStatus {
             enabled: lossy_records > 0,
@@ -385,6 +412,21 @@ fn merge_lcm_status(target: &mut LcmStatus, source: LcmStatus) {
         source.summary_convergence.unavailable_session_count;
     target.summary_convergence.permanent_session_count +=
         source.summary_convergence.permanent_session_count;
+    for reason in source.summary_convergence.reasons {
+        match target
+            .summary_convergence
+            .reasons
+            .iter_mut()
+            .find(|existing| existing.state == reason.state && existing.reason == reason.reason)
+        {
+            Some(existing) => existing.session_count += reason.session_count,
+            None => target.summary_convergence.reasons.push(reason),
+        }
+    }
+    target
+        .summary_convergence
+        .reasons
+        .sort_by(|left, right| (left.state, &left.reason).cmp(&(right.state, &right.reason)));
     target.redaction.lossy_records += source.redaction.lossy_records;
 }
 
@@ -913,6 +955,121 @@ mod tests {
         (directory, conn)
     }
 
+    #[tokio::test]
+    async fn status_reports_an_unreadable_schema_version_instead_of_the_compiled_one() {
+        let (_database_dir, conn) = test_lcm_connection().await;
+        let storage = TempDir::new().expect("storage tempdir");
+        let gc_config = LcmGcConfig::default();
+        conn.execute(
+            "UPDATE session_schema_migrations SET version = 'unreadable' WHERE name = 'lcm'",
+            (),
+        )
+        .await
+        .expect("corrupt LCM schema version");
+        for provider in ["all", "cursor"] {
+            let error =
+                super::super::status(&*conn, storage.path(), provider, None, false, &gc_config)
+                    .await
+                    .expect_err("an unreadable schema version must not become a status");
+            assert!(matches!(error, LcmError::Db(_)), "{provider}: {error:?}");
+        }
+
+        conn.execute(
+            "DELETE FROM session_schema_migrations WHERE name = 'lcm'",
+            (),
+        )
+        .await
+        .expect("drop LCM schema version");
+        let error = super::super::status(&*conn, storage.path(), "all", None, false, &gc_config)
+            .await
+            .expect_err("a missing schema version must not become a status");
+        assert_eq!(
+            error,
+            LcmError::ProfileResetRequired {
+                found_version: None,
+                required_version: schema::LCM_SCHEMA_VERSION,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn status_groups_parked_and_failed_sessions_by_recorded_reason() {
+        let (_database_dir, conn) = test_lcm_connection().await;
+        let storage = TempDir::new().expect("storage tempdir");
+        for (session_id, state, reason) in [
+            ("parked-a", "unavailable", Some("cursor_agent_unconfigured")),
+            ("parked-b", "unavailable", Some("cursor_agent_unconfigured")),
+            ("parked-c", "unavailable", Some("cursor_agent_unavailable")),
+            ("failed-a", "permanent", Some("payload_integrity_mismatch")),
+            ("retry-a", "retryable", Some("storage_unavailable")),
+            ("queued-a", "pending", None),
+        ] {
+            conn.execute(
+                "INSERT INTO sessions (provider, session_id, project_key, project_path)
+                 VALUES ('cursor', ?1, 'project', '/tmp/project')",
+                params![session_id],
+            )
+            .await
+            .expect("insert session");
+            conn.execute(
+                "INSERT INTO lcm_summary_convergence_queue (
+                     provider, session_id, newest_raw_store_id, state, failure_code
+                 ) VALUES ('cursor', ?1, 1, ?2, ?3)",
+                params![session_id, state, reason],
+            )
+            .await
+            .expect("insert queue row");
+        }
+
+        let status = super::super::status(
+            &*conn,
+            storage.path(),
+            "cursor",
+            None,
+            false,
+            &LcmGcConfig::default(),
+        )
+        .await
+        .expect("load status");
+        let reason = |state, reason: &str, session_count| LcmSummaryConvergenceReasonCount {
+            state,
+            reason: reason.to_string(),
+            session_count,
+        };
+        assert_eq!(
+            status.summary_convergence,
+            LcmSummaryConvergenceStatus {
+                pending_session_count: 1,
+                retryable_session_count: 1,
+                current_session_count: 0,
+                unavailable_session_count: 3,
+                permanent_session_count: 1,
+                reasons: vec![
+                    reason(
+                        LcmSummaryConvergenceQueueState::Retryable,
+                        "storage_unavailable",
+                        1
+                    ),
+                    reason(
+                        LcmSummaryConvergenceQueueState::Unavailable,
+                        "cursor_agent_unavailable",
+                        1
+                    ),
+                    reason(
+                        LcmSummaryConvergenceQueueState::Unavailable,
+                        "cursor_agent_unconfigured",
+                        2
+                    ),
+                    reason(
+                        LcmSummaryConvergenceQueueState::Permanent,
+                        "payload_integrity_mismatch",
+                        1
+                    ),
+                ],
+            }
+        );
+    }
+
     async fn seed_provider(conn: &Connection, index: usize) {
         let provider = format!("provider-{index:02}");
         let session_id = format!("session-{index:02}");
@@ -1006,7 +1163,7 @@ mod tests {
         let gc_config = LcmGcConfig::default();
         let schema_version = schema::schema_version(conn)
             .await
-            .unwrap_or(LCM_SCHEMA_VERSION);
+            .expect("read LCM schema version");
         let mut aggregate = empty_status(schema_version, &gc_config);
         for provider in providers {
             let status = status_for_provider(conn, storage_root, provider, None, deep, &gc_config)

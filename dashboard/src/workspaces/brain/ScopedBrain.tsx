@@ -118,7 +118,8 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
   // distinguish zero data from a query failure", it can, by status code, and
   // the rule cost a project with an indexed graph and no edges its node count
   // as well.
-  const totals = envelopePayload(overview.data)?.totals ?? null;
+  const overviewRead = envelopePayload(overview.data);
+  const totals = overviewRead?.totals ?? null;
 
   const memoryStatusRead = envelopePayload(memoryStatus.data);
   const memory = memoryStatusRead?.exists === true ? memoryStatusRead.memory : null;
@@ -142,7 +143,7 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
         ? `${name}: the read failed${read.data.detail ? ` (${read.data.detail})` : ''}.`
         : null;
   const unmeasured = [
-    readAbsence('Graph totals', overview),
+    readAbsence('Graph totals and symbol kinds', overview),
     readAbsence('Memory', memoryStatus),
     readAbsence('Analytics', analytics),
     memoryStatusRead?.exists === false
@@ -256,6 +257,9 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
           >
             {(data) => <ProjectHoldings data={data} />}
           </ReadSection>
+          {overviewRead && overviewRead.totals.nodes > 0 ? (
+            <SymbolsByKind kinds={overviewRead.nodes_by_kind} total={overviewRead.totals.nodes} />
+          ) : null}
           {usage && usage.by_category.length > 0 ? (
             <ActivityByCategory categories={usage.by_category} total={usage.event_count} />
           ) : null}
@@ -472,6 +476,58 @@ function ProjectHoldings({ data }: { data: ProjectContextPayloadV1 }) {
         </section>
       ) : null}
     </>
+  );
+}
+
+/** The project's indexed symbols by kind, as the code index counted them for
+ * the overview. `graph_service.rs` tallies a kind only for symbols carrying
+ * metadata while `totals.nodes` counts every symbol, so the difference is
+ * stated rather than left to read as a rounding gap. */
+function SymbolsByKind({
+  kinds,
+  total,
+}: {
+  kinds: ReadonlyArray<{ kind: string; count: number }>;
+  total: number;
+}) {
+  const ranked = [...kinds].sort((a, b) => b.count - a.count || a.kind.localeCompare(b.kind));
+  const ceiling = ranked.reduce((max, row) => Math.max(max, row.count), 0);
+  const unkinded = total - ranked.reduce((sum, row) => sum + row.count, 0);
+  return (
+    <section
+      aria-label="Symbols by kind"
+      className="rounded-[var(--radius-card)] border border-edge-subtle bg-surface-1"
+    >
+      <header className="flex items-center gap-2 border-b border-edge-subtle px-3 py-2">
+        <h2 className="text-xs font-semibold">symbols by kind</h2>
+        <span aria-hidden className="td-rule" />
+        <span className="td-legend shrink-0 text-text-muted" data-cell="numeric">
+          {ranked.length} kinds
+        </span>
+      </header>
+      <ul className="flex flex-col">
+        {ranked.map((row) => (
+          <li
+            key={row.kind}
+            className="flex items-center gap-2 border-b border-edge-subtle px-3 py-1.5 last:border-b-0"
+          >
+            <span className="td-value min-w-0 flex-1 truncate text-2xs text-text-secondary">
+              {row.kind}
+            </span>
+            <FigureRail
+              value={row.count.toLocaleString()}
+              fraction={ceiling > 0 ? row.count / ceiling : null}
+            />
+          </li>
+        ))}
+      </ul>
+      {unkinded > 0 ? (
+        <p className="td-legend border-t border-edge-subtle px-3 py-1.5 text-text-muted">
+          {unkinded.toLocaleString()} of {total.toLocaleString()} symbols carry no kind metadata
+          and are not counted by kind
+        </p>
+      ) : null}
+    </section>
   );
 }
 

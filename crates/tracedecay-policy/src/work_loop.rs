@@ -13,7 +13,7 @@ pub use tracedecay_domain::{
     WorkContentLocationClassV1, WorkEffortClassV1, WorkOrdinalBandV1, WorkRouteCandidateV1,
 };
 
-use crate::authorization::{PolicyIdentifierV1, policy_digest};
+use crate::identity::{PolicyIdentifierV1, policy_digest};
 
 /// Explicit cancellation fact supplied by the caller. Policy never observes a
 /// live token.

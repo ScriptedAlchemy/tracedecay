@@ -171,10 +171,7 @@ async fn request_path_with_headers_at(
     // resets the connection and discards the response the test reads.
     let mut bytes = request.into_bytes();
     bytes.extend_from_slice(body);
-    stream
-        .write_all(&bytes)
-        .await
-        .expect("write HTTP request");
+    stream.write_all(&bytes).await.expect("write HTTP request");
     let mut response = String::new();
     stream
         .read_to_string(&mut response)

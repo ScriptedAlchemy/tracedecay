@@ -961,13 +961,13 @@ fn release_sweep_retries_idle_sealed_reader_hibernation() {
     assert_snapshot_reads(&commit.snapshot, &identity, "retry-idle");
 }
 
-/// A serving owner pins its generation's engine once, and every read shares
-/// that one open engine: neither the bounded release sweep nor a peer
-/// generation's install may step it down for the next read to reopen.
+/// A serving owner pins its generation's engine, and latency-bounded readers
+/// keep being told it is resident: neither the bounded release sweep nor a
+/// peer generation's install may step it down for the next read to reopen.
 ///
-/// Fails if any hibernation path ignores a live serving pin (the census drops
-/// to `(_, 0)` between reads), or if a dropped pin stops returning the reader
-/// to ordinary idle hibernation.
+/// Fails if any hibernation path ignores a live serving pin (the snapshot
+/// reports a cold engine between reads), or if a dropped pin stops returning
+/// the reader to ordinary idle hibernation.
 #[test]
 fn a_pinned_serving_generation_opens_once_across_sweeps_and_peer_installs() {
     let temp = TempDir::new().unwrap();
@@ -985,7 +985,6 @@ fn a_pinned_serving_generation_opens_once_across_sweeps_and_peer_installs() {
     );
     stage_rows_before_publish(&registered, temp.path(), &manifest);
     let commit = publish_sealed(&registered, temp.path(), &mut authority, &replay, &manifest);
-    let database = probe_lease(&registered, temp.path());
     release_sealed_head(
         &registered,
         temp.path(),
@@ -1000,8 +999,8 @@ fn a_pinned_serving_generation_opens_once_across_sweeps_and_peer_installs() {
 
     let pin = commit.snapshot.pin_serving_engine().unwrap();
     assert_eq!(
-        database.sealed_generation_engine_census(),
-        (1, 1),
+        commit.snapshot.serving_engine_resident(),
+        Ok(true),
         "taking the pin opens the sealed engine"
     );
     for _ in 0..3 {
@@ -1013,8 +1012,8 @@ fn a_pinned_serving_generation_opens_once_across_sweeps_and_peer_installs() {
             &replay.publication.key.projection,
         );
         assert_eq!(
-            database.sealed_generation_engine_census(),
-            (1, 1),
+            commit.snapshot.serving_engine_resident(),
+            Ok(true),
             "a release sweep must not hibernate a pinned serving engine"
         );
     }

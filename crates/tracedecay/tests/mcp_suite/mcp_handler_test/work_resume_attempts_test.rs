@@ -8,6 +8,7 @@
 //! settle the child recovery is supposed to find still open, so the live
 //! daemon is a separate process stopped with SIGKILL.
 
+use crate::common::die_with_test_process;
 use crate::common::fixture::git_capture;
 use crate::fixture;
 use crate::support::{
@@ -283,7 +284,9 @@ async fn kill_live_daemon(isolation: &Path) -> LiveDaemonEvidence {
             .strip_prefix("mcp_suite::")
             .unwrap_or(module_path!())
     );
-    let mut child = Command::new(std::env::current_exe().expect("test executable"))
+    let mut command = Command::new(std::env::current_exe().expect("test executable"));
+    die_with_test_process(&mut command);
+    let mut child = command
         .arg(&filter)
         .arg("--exact")
         .arg("--nocapture")

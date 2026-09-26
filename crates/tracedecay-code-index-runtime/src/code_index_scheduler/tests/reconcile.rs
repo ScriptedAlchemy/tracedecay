@@ -8289,9 +8289,61 @@ async fn resident_memory_graph_refusal_seats_text_serving_without_graph() {
             "text serving must not turn the refused graph into strict graph readiness: {other:?}"
         ),
     }
+    // The refused generation never re-attempts its graph in this daemon, so
+    // `indexing` here was indefinite (issue #2057's restart after an
+    // interrupted build). It must read as a typed park naming the way out.
+    assert_eq!(
+        freshness.staleness_state,
+        Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Parked),
+        "a refused graph is parked, not indexing"
+    );
+    let parked = freshness.parked.expect("typed resident-memory park");
+    assert_eq!(
+        parked.blocked_reason,
+        Some(tracedecay_contracts::code_index_freshness::CodeIndexBuildBlockedReasonV1::ResidentMemory)
+    );
+    assert!(
+        parked.remediation.contains("`tracedecay daemon restart`"),
+        "the park must name the operator command: {parked:?}"
+    );
+    assert!(!parked.retries_on_wake);
 
     super::super::graph_activation::set_injected_resident_memory_refusal(&worktree_id, false);
     registry.shutdown().await;
+
+    let restarted = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    restarted
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("remount after memory is available");
+    wait_for_dashboard_ready(&restarted, fixture.path()).await;
+    let freshness = restarted
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("mounted worktree freshness");
+    assert_eq!(
+        freshness.code_graph_serving,
+        Some(tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready)
+    );
+    assert!(freshness.parked.is_none(), "{freshness:?}");
+    let serving = restarted
+        .latest_complete_serving_for_scope(&scope)
+        .await
+        .expect("the restarted daemon serves the generation");
+    assert_eq!(
+        serving
+            .generation()
+            .generation_statistics()
+            .expect("generation statistics")
+            .symbol_count,
+        1,
+        "`alpha` is the fixture's one symbol"
+    );
+    restarted.shutdown().await;
 }
 
 /// A benign Git metadata rewrite after a clean graph-off seal must trigger one

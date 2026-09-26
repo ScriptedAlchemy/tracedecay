@@ -163,8 +163,8 @@ CALLS_DIR="$RUN_DIR/calls"
 
 WORKER_PIDS=()
 
-# Liveness is always asked of the PID, never of the process group: `setsid`
-# only becomes a group leader once its exec completes, so a group probe
+# Liveness is always asked of the PID, never of the process group: a new
+# session only has a group leader once its exec completes, so a group probe
 # immediately after `&` reports "dead" for a process that is very much alive.
 process_alive() { [[ -n "${1:-}" ]] && kill -0 "$1" 2>/dev/null; }
 
@@ -272,7 +272,8 @@ elapsed_since() { awk -v a="$1" -v b="$EPOCHREALTIME" 'BEGIN{printf "%.3f", b - 
 
 log "==> PHASE SERVE: starting a private daemon on $DAEMON_SOCKET"
 serve_start="$EPOCHREALTIME"
-setsid "$BIN" daemon run --socket "$DAEMON_SOCKET" >"$DAEMON_LOG" 2>&1 &
+python3 -S "$REPO_ROOT/scripts/lib/portable_process.py" exec-session --parent-pid "$$" -- \
+  "$BIN" daemon run --socket "$DAEMON_SOCKET" >"$DAEMON_LOG" 2>&1 &
 DAEMON_PID=$!
 
 ready_deadline=$((SECONDS + PERF_DAEMON_READY_TIMEOUT))

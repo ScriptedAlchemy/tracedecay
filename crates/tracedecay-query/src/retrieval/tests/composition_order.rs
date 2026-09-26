@@ -341,9 +341,11 @@ fn comparator_record_retains_the_actual_evidence_tie_break() {
     );
     assert_eq!(
         compare_fused(&left, &right),
-        record
-            .retriever_evidence_anchors
-            .cmp(&fusion.comparator_record(&right, 0).retriever_evidence_anchors)
+        record.retriever_evidence_anchors.cmp(
+            &fusion
+                .comparator_record(&right, 0)
+                .retriever_evidence_anchors
+        )
     );
     let output = compose_corpus(&no_caps());
     for (record, ranked) in output

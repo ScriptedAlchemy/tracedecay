@@ -260,7 +260,12 @@ fn a_caller_anchored_site_outranks_every_exact_hit_that_carries_no_anchor() {
     let anchored = kernel
         .compose_with_anchor_tiers(&input, &no_caps(), &tiers)
         .unwrap();
-    assert_eq!(order(&anchored)[0], "anchor.anchored", "{:?}", order(&anchored));
+    assert_eq!(
+        order(&anchored)[0],
+        "anchor.anchored",
+        "{:?}",
+        order(&anchored)
+    );
     assert_eq!(
         order(&anchored)[1..],
         order(&unanchored)[..3],
@@ -277,8 +282,10 @@ fn a_caller_anchored_site_outranks_every_exact_hit_that_carries_no_anchor() {
             .candidate
             .decisions
             .iter()
-            .any(|decision| decision.kind == RankingDecisionKind::ComparatorProvenance
-                && decision.detail.starts_with("anchor_tier=1;")),
+            .any(
+                |decision| decision.kind == RankingDecisionKind::ComparatorProvenance
+                    && decision.detail.starts_with("anchor_tier=1;")
+            ),
         "the provenance names the leading key"
     );
 }

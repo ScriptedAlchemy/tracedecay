@@ -20,8 +20,22 @@ pub const HOOK_SYNCHRONOUS_BUDGET_MICROS: u64 = 100_000;
 
 /// The same budget as a bounded lock wait: how long one spool writer admission
 /// may wait for a held lease, measured from the lock attempt.
-pub const HOOK_SYNCHRONOUS_BUDGET: std::time::Duration =
-    std::time::Duration::from_micros(HOOK_SYNCHRONOUS_BUDGET_MICROS);
+///
+/// macOS waits three budgets. There `File::sync_all` is `F_FULLFSYNC`, which
+/// flushes the drive cache: about 5 ms per barrier on Apple silicon, against
+/// tens of microseconds for a Linux `fsync`. A native capture holds the writer
+/// lease across roughly six barriers (append intent, frame, checkpoint and
+/// their directory syncs), about 30-45 ms, so four concurrent hooks for one
+/// host serialize past 100 ms and the last would be refused with
+/// `AdmissionTimedOut` although every writer was making progress.
+pub const HOOK_SYNCHRONOUS_BUDGET: std::time::Duration = if cfg!(target_os = "macos") {
+    std::time::Duration::from_micros(HOOK_MACOS_LOCK_WAIT_BUDGETS * HOOK_SYNCHRONOUS_BUDGET_MICROS)
+} else {
+    std::time::Duration::from_micros(HOOK_SYNCHRONOUS_BUDGET_MICROS)
+};
+
+/// Lock-wait budgets granted on macOS; see [`HOOK_SYNCHRONOUS_BUDGET`].
+const HOOK_MACOS_LOCK_WAIT_BUDGETS: u64 = 3;
 
 /// Non-widenable deadline token furnished to admission and replay ports.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

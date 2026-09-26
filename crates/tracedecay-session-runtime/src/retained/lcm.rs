@@ -10,6 +10,7 @@ use tracedecay_contracts::retained_surfaces::{
     LcmLifecycleStatusV1, LcmLoadSessionRequestV1, LcmPayloadCoverageStateV1, LcmPayloadCoverageV1,
     LcmPayloadGcStatusV1, LcmPayloadStatusV1, LcmRedactionStatusV1, LcmStatusRequestV1,
     LcmStatusResultV1, LcmStatusV1, LcmStoreStatusV1, LcmStoreTokenCoverageV1,
+    LcmSummaryConvergenceReasonV1, LcmSummaryConvergenceStateV1, LcmSummaryConvergenceStatusV1,
     MessageRelationshipScopeV1, MessageTypeFilterV1, RetainedOutcomeStatusV1,
     RetainedSurfaceOperation, RetainedSurfaceResultV1, RetainedTimeFilterV1,
     RetrievalWorkerStatusV1,
@@ -21,6 +22,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::SessionId;
 use tracedecay_lcm::LcmStatus;
+use tracedecay_lcm::summary_convergence::LcmSummaryConvergenceQueueState;
 use tracedecay_lcm::types::LcmPayloadCoverageState;
 use tracedecay_session_memory::session::lcm::{
     LcmAuthorityOperation, LcmAuthorityOutcome, LcmAuthorityPayload, LcmAuthorityRequest,
@@ -837,6 +839,39 @@ fn lcm_status(value: LcmStatus) -> LcmStatusV1 {
             current_frontier_store_id: value.lifecycle.current_frontier_store_id,
             last_finalized_session_id: value.lifecycle.last_finalized_session_id,
             last_finalized_frontier_store_id: value.lifecycle.last_finalized_frontier_store_id,
+        },
+        summary_convergence: LcmSummaryConvergenceStatusV1 {
+            pending_session_count: value.summary_convergence.pending_session_count,
+            retryable_session_count: value.summary_convergence.retryable_session_count,
+            current_session_count: value.summary_convergence.current_session_count,
+            unavailable_session_count: value.summary_convergence.unavailable_session_count,
+            permanent_session_count: value.summary_convergence.permanent_session_count,
+            reasons: value
+                .summary_convergence
+                .reasons
+                .into_iter()
+                .map(|reason| LcmSummaryConvergenceReasonV1 {
+                    state: match reason.state {
+                        LcmSummaryConvergenceQueueState::Pending => {
+                            LcmSummaryConvergenceStateV1::Pending
+                        }
+                        LcmSummaryConvergenceQueueState::Retryable => {
+                            LcmSummaryConvergenceStateV1::Retryable
+                        }
+                        LcmSummaryConvergenceQueueState::Current => {
+                            LcmSummaryConvergenceStateV1::Current
+                        }
+                        LcmSummaryConvergenceQueueState::Unavailable => {
+                            LcmSummaryConvergenceStateV1::Unavailable
+                        }
+                        LcmSummaryConvergenceQueueState::Permanent => {
+                            LcmSummaryConvergenceStateV1::Permanent
+                        }
+                    },
+                    reason: reason.reason,
+                    session_count: reason.session_count,
+                })
+                .collect(),
         },
         redaction: LcmRedactionStatusV1 {
             enabled: value.redaction.enabled,
