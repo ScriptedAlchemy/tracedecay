@@ -2218,7 +2218,7 @@ fn compiler_missing_problem(
                 "`{}` owns this scope but no TypeScript compiler (node_modules/.bin/tsc) is \
                  installed in its package or the workspace root. Run `{install_command}` at the \
                  workspace root, then reopen the project and read again.",
-                tsconfig.display()
+                forward_slash_path(tsconfig)
             )),
         )?,
         retry: RetryDirective::AfterRevalidate,
