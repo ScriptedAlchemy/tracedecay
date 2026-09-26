@@ -392,7 +392,7 @@ where
 /// authority and stay unresolved. Bound edges carry the `NameResolved`
 /// authority class, not `SyntaxExact`.
 #[hotpath::measure(label = "code_index.seal.resolve")]
-fn resolve_cross_file_references<T>(
+pub(crate) fn resolve_cross_file_references<T>(
     files: &[T],
 ) -> Result<Vec<CanonicalRelationEdgeV1>, CodeIndexProductionErrorV1>
 where

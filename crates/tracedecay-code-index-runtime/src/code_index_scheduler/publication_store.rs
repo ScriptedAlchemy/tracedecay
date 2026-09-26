@@ -477,6 +477,7 @@ pub(super) struct GenerationDecodeBudgetV1 {
 }
 
 const GENERATION_DECODE_RESIDENT_COMPONENT_V1: &str = "code-index-generation-decode-v1";
+const SEALED_GRAPH_BUILD_RESIDENT_COMPONENT_V1: &str = "code-graph-sealed-build-v1";
 
 /// The resident cost of materializing the active generation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2299,6 +2300,28 @@ impl DaemonCodeIndexPublicationStoreV1 {
     fn admit_active_decode(
         &self,
     ) -> Result<Option<ResidentMemoryReservationV1>, CodeIndexPublicationStoreErrorV1> {
+        self.admit_active_generation_work(GENERATION_DECODE_RESIDENT_COMPONENT_V1, "decoding")
+    }
+
+    /// Charge building the active generation's code graph from its sealed
+    /// segments, the same way and the same bytes as decoding it: the build
+    /// holds the generation's cross-file resolution inputs and then its
+    /// compact graph store, both bounded by the generation it projects. The
+    /// caller holds the reservation for the build.
+    pub(super) fn admit_sealed_graph_build(
+        &self,
+    ) -> Result<Option<ResidentMemoryReservationV1>, CodeIndexPublicationStoreErrorV1> {
+        self.admit_active_generation_work(
+            SEALED_GRAPH_BUILD_RESIDENT_COMPONENT_V1,
+            "building the code graph of",
+        )
+    }
+
+    fn admit_active_generation_work(
+        &self,
+        component: &'static str,
+        work: &str,
+    ) -> Result<Option<ResidentMemoryReservationV1>, CodeIndexPublicationStoreErrorV1> {
         let Some(admission) = self
             .decode_admission
             .lock()
@@ -2339,7 +2362,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 Ok(())
             } else {
                 Err(format!(
-                    "decoding generation {generation_id} needs {} resident bytes; {available} are \
+                    "{work} generation {generation_id} needs {} resident bytes; {available} are \
                      available below the {watermark}-byte admission watermark",
                     requested.get()
                 ))
@@ -2366,8 +2389,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             );
             admissible().map_err(CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused)?;
         }
-        let component = ResidentMemoryComponentIdV1::new(GENERATION_DECODE_RESIDENT_COMPONENT_V1)
-            .map_err(Self::unavailable)?;
+        let component = ResidentMemoryComponentIdV1::new(component).map_err(Self::unavailable)?;
         admission
             .resident_memory
             .reserve(

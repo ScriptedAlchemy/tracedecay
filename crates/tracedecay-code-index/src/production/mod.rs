@@ -21,9 +21,6 @@ use tracedecay_domain::{
     SymbolOccurrenceId, TestAttributionEvidenceClassV1, UtcMicros, ValidatedCodeFileV1, WorktreeId,
     canonical_sha256,
 };
-use tracedecay_graph_db::{
-    GraphGenerationManifest, GraphProjectionIdentity, GraphProjectorRevision,
-};
 
 use super::{
     capabilities::{
@@ -98,11 +95,14 @@ pub use lexical_page_source::{
     VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedLexicalSymbolDisplayV1,
     VerifiedSealedTextGenerationMetadataV1,
 };
+mod graph_inputs;
+pub(crate) use graph_inputs::{CodeGraphFileBatchV1, CodeGraphResolutionV1};
 mod partitioned_codec;
 pub(crate) mod resident_bytes;
 pub use partitioned_codec::{
-    SealedGenerationSegmentIdentityV1, SealedGenerationSegmentPublicationV1,
-    SealedGenerationSegmentReadV1,
+    SealedGenerationFileWindowsV1, SealedGenerationSegmentIdentityV1,
+    SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
+    SealedGenerationSegmentReaderV1,
 };
 mod sealed_codec;
 pub use sealed_codec::{
@@ -797,24 +797,8 @@ pub struct CodeIndexPublishedGenerationV1 {
     /// every chunk on each `active_generation` call re-derived a value that is
     /// a pure function of the immutable generation.
     chunk_policy: OnceLock<ChunkPolicyRevisionSummaryV1>,
-    /// Reclaimable code-graph publication manifest. Concurrent seat retries
-    /// share a complete build while a publication caller owns it, but the
-    /// generation does not pin the full entity/relation projection after the
-    /// durable graph has consumed it. The key remains first-success-wins so a
-    /// foreign projection identity can never replace the canonical memo.
-    graph_manifest: OnceLock<Arc<Mutex<CodeGraphManifestMemoV1>>>,
     /// [`Self::retained_bytes`] of the immutable decode, measured once.
     retained_bytes: OnceLock<u64>,
-}
-
-/// One successfully built code-graph publication manifest, pinned to the
-/// exact projection identity and projector revision it was derived under. A
-/// lookup under any other identity is a memo miss, never an aliased manifest.
-#[derive(Clone, Debug)]
-struct CodeGraphManifestMemoV1 {
-    projection: GraphProjectionIdentity,
-    projector_revision: GraphProjectorRevision,
-    manifest: Weak<GraphGenerationManifest>,
 }
 
 /// The chunk policy-revision census of one immutable generation: no chunks at
@@ -1243,49 +1227,6 @@ impl CodeIndexPublishedGenerationV1 {
             read: Arc::new(read),
             retained_bytes,
         })
-    }
-
-    /// The memoized code-graph publication manifest for exactly this
-    /// projection identity and projector revision, if a prior complete build
-    /// recorded one. A key mismatch is a miss, never a substituted manifest.
-    pub(crate) fn memoized_graph_manifest(
-        &self,
-        projection: &GraphProjectionIdentity,
-        projector_revision: &GraphProjectorRevision,
-    ) -> Option<Arc<GraphGenerationManifest>> {
-        let memo = self.graph_manifest.get()?;
-        let memo = match memo.lock() {
-            Ok(memo) => memo,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        (memo.projection == *projection && memo.projector_revision == *projector_revision)
-            .then(|| memo.manifest.upgrade())
-            .flatten()
-    }
-
-    /// Record one complete, successfully built code-graph publication
-    /// manifest. First success wins; the generation is immutable, so any
-    /// competing build under the same key produced an identical manifest.
-    pub(crate) fn memoize_graph_manifest(
-        &self,
-        projection: GraphProjectionIdentity,
-        projector_revision: GraphProjectorRevision,
-        manifest: Arc<GraphGenerationManifest>,
-    ) {
-        let memo = self.graph_manifest.get_or_init(|| {
-            Arc::new(Mutex::new(CodeGraphManifestMemoV1 {
-                projection: projection.clone(),
-                projector_revision: projector_revision.clone(),
-                manifest: Weak::new(),
-            }))
-        });
-        let mut memo = match memo.lock() {
-            Ok(memo) => memo,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if memo.projection == projection && memo.projector_revision == projector_revision {
-            memo.manifest = Arc::downgrade(&manifest);
-        }
     }
 
     /// Return chunks re-admitted through their parser-backed exact authority.
@@ -2245,7 +2186,6 @@ where
                 admitted: OnceLock::new(),
                 attribution: OnceLock::new(),
                 chunk_policy: OnceLock::new(),
-                graph_manifest: OnceLock::new(),
                 retained_bytes: OnceLock::new(),
             };
             hotpath::measure_block!(

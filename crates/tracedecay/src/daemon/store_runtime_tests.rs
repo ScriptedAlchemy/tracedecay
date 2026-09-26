@@ -1609,7 +1609,6 @@ async fn linked_worktree_generations_share_the_project_graph_runtime() {
                 .expect("primary generation"),
             Arc::clone(&project_database),
             replay_binding(),
-            None,
         )
         .await
         .expect("primary graph runtime");
@@ -1624,7 +1623,6 @@ async fn linked_worktree_generations_share_the_project_graph_runtime() {
                 .expect("linked generation"),
             Arc::clone(&project_database),
             replay_binding(),
-            None,
         )
         .await
         .expect("linked graph runtime");

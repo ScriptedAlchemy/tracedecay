@@ -107,9 +107,65 @@ fn with_publication_context<T>(
     operation(&context)
 }
 
+/// A fresh row spill for a test build, removed with the spill.
+fn test_row_spill(
+    projection: tracedecay_graph_db::GraphProjectionIdentity,
+) -> tracedecay_graph_db::GraphGenerationRowSpill {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    tracedecay_graph_db::GraphGenerationRowSpill::create(
+        std::env::temp_dir().join(format!(
+            "tracedecay-publication-spill-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        )),
+        projection,
+    )
+    .expect("test row spill")
+}
+
+/// The relational key this runtime's sealed generation publishes under,
+/// derived from its identity alone.
+fn publication_key(
+    runtime: &RetainedCodeGraphRuntimeV1,
+) -> (GraphProjectionIdentityV1, GraphPublicationKeyV1) {
+    let projector_revision = GraphProjectorRevision::try_from(
+        tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
+    )
+    .expect("projector revision");
+    let projection = tracedecay_code_index::graph_projection::code_graph_projection_identity(
+        runtime.authority.namespace().clone(),
+    )
+    .expect("code graph projection");
+    let relational_projection = GraphProjectionIdentityV1 {
+        shard_id: runtime.authority.binding().shard_id.clone(),
+        namespace: tracedecay_store::GraphNamespaceV1::new(runtime.authority.namespace().as_str())
+            .expect("relational namespace"),
+        projection: GraphProjectionIdV1::new(projection.projection.as_str())
+            .expect("relational projection"),
+    };
+    let generation = tracedecay_code_index::graph_projection::code_graph_generation_id(
+        &runtime.generation_id,
+        &projector_revision,
+    )
+    .expect("code graph generation");
+    let idempotency_key = tracedecay_code_index::graph_projection::code_graph_idempotency_key(
+        &runtime.generation_id,
+        &projector_revision,
+    )
+    .expect("publication idempotency key");
+    let publication_key = GraphPublicationKeyV1::new(
+        relational_projection.clone(),
+        GraphGenerationIdV1::new(generation.as_str()).expect("relational generation"),
+        GraphPublicationIdempotencyKeyV1::new(idempotency_key.as_str())
+            .expect("relational idempotency key"),
+    );
+    (relational_projection, publication_key)
+}
+
+/// The journaled replay this runtime's publication appends, built from the
+/// sealed segments on disk the way the publisher builds it.
 fn publication_replay(
     runtime: &RetainedCodeGraphRuntimeV1,
-    generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
 ) -> (
     GraphProjectionIdentityV1,
     GraphPublicationKeyV1,
@@ -123,32 +179,26 @@ fn publication_replay(
         runtime.authority.namespace().clone(),
     )
     .expect("code graph projection");
-    let manifest =
-        tracedecay_code_index::graph_projection::build_published_code_graph_manifest_checked(
+    let rows = tracedecay_graph_db::GraphGenerationRows::from(
+        super::super::code_graph_manifest::spill_sealed_generation_graph_from_roots(
+            &runtime.generations_root,
+            &runtime.replay_root,
+            &runtime.sealed_state_digest,
+            &runtime.generation_id,
             projection.clone(),
-            generation,
             &projector_revision,
+            test_row_spill(projection),
             &|| Ok(()),
         )
-        .expect("published graph manifest");
-    let relational_projection = GraphProjectionIdentityV1 {
-        shard_id: runtime.authority.binding().shard_id.clone(),
-        namespace: tracedecay_store::GraphNamespaceV1::new(runtime.authority.namespace().as_str())
-            .expect("relational namespace"),
-        projection: GraphProjectionIdV1::new(projection.projection.as_str())
-            .expect("relational projection"),
-    };
+        .expect("sealed graph rows"),
+    );
+    let identity = rows.identity();
+    let (relational_projection, publication_key) = publication_key(runtime);
     let idempotency_key = tracedecay_code_index::graph_projection::code_graph_idempotency_key(
         &runtime.generation_id,
         &projector_revision,
     )
     .expect("publication idempotency key");
-    let publication_key = GraphPublicationKeyV1::new(
-        relational_projection.clone(),
-        GraphGenerationIdV1::new(manifest.generation.as_str()).expect("relational generation"),
-        GraphPublicationIdempotencyKeyV1::new(idempotency_key.as_str())
-            .expect("relational idempotency key"),
-    );
     let source = SealedCodeGenerationReplay {
         repository: runtime.repository_id.clone(),
         generation: runtime.generation_id.clone(),
@@ -158,12 +208,12 @@ fn publication_replay(
     let input = canonical_sha256(&(
         "tracedecay.code-graph-publication-input.v1",
         &source,
-        &manifest.generation,
-        &manifest.source_generation,
-        &manifest.watermark,
+        &identity.generation,
+        &identity.source_generation,
+        &identity.watermark,
     ))
     .expect("publication input digest");
-    let replay = manifest
+    let replay = rows
         .relational_sealed_replay(
             runtime.authority.binding().shard_id.clone(),
             idempotency_key,
@@ -178,10 +228,9 @@ fn publication_replay(
 
 fn assert_unverified_publication_state(
     runtime: &RetainedCodeGraphRuntimeV1,
-    generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
     expected_replay: bool,
 ) {
-    let (projection, key, _) = publication_replay(runtime, generation);
+    let (projection, key) = publication_key(runtime);
     with_publication_context("inspect-sealed-publication", |context| {
         let mut storage = runtime
             .project_database
@@ -242,11 +291,8 @@ fn resident_memory_trip_is_permanent_for_one_publication_attempt() {
     );
 }
 
-fn journal_publication_without_head(
-    runtime: &RetainedCodeGraphRuntimeV1,
-    generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
-) {
-    let (_, _, replay) = publication_replay(runtime, generation);
+fn journal_publication_without_head(runtime: &RetainedCodeGraphRuntimeV1) {
+    let (_, _, replay) = publication_replay(runtime);
     with_publication_context("journal-sealed-publication", |context| {
         let mut storage = runtime
             .project_database
@@ -344,7 +390,6 @@ async fn unreadable_pending_replay_is_discarded_before_fresh_publication() {
                 sealed_state_digest: SealedGraphStateDigest::try_from(pointer.state_digest)
                     .expect("fresh sealed state digest"),
             },
-            None,
         )
         .await
         .expect("retain fresh code graph runtime");
@@ -376,7 +421,7 @@ async fn unreadable_pending_replay_is_discarded_before_fresh_publication() {
     }
     let historical_repository =
         RepositoryId::new("repository.production").expect("historical repository id");
-    let _historical_route = runtime
+    let _historical_route = registry
         .graph_manifest_provider
         .bind(
             runtime.authority.binding().shard_id.clone(),
@@ -387,7 +432,7 @@ async fn unreadable_pending_replay_is_discarded_before_fresh_publication() {
         )
         .expect("bind historical generation source");
 
-    let (_, fresh_key, fresh_replay) = publication_replay(&runtime, latest.generation());
+    let (_, fresh_key, fresh_replay) = publication_replay(&runtime);
     let historical_generation = CodeGenerationId::new(
         "generation.v1.d7eb9547.00000002.c221a7303ac5f89c1b1a553f26217136fda771a17cc1578d4cb232ef7a5f32c2",
     )
@@ -430,11 +475,17 @@ async fn unreadable_pending_replay_is_discarded_before_fresh_publication() {
     // so the current reader refuses it at the revision gate, before the row
     // evidence it also predates, and before the source-commitment check. The
     // code-index suite pins the same refusal against these bytes.
-    let refused = runtime
+    let refused = registry
         .graph_manifest_provider
         .hydrate_sealed_code_generation(
             &fresh_key.projection,
             &historical_sealed_source,
+            test_row_spill(
+                tracedecay_code_index::graph_projection::code_graph_projection_identity(
+                    runtime.authority.namespace().clone(),
+                )
+                .expect("code graph projection"),
+            ),
             &|| Ok(()),
         )
         .expect_err("historical seal must remain unavailable to current readers");
@@ -473,7 +524,7 @@ async fn unreadable_pending_replay_is_discarded_before_fresh_publication() {
     });
 
     let snapshot = runtime
-        .publish_verified_snapshot(latest.generation(), Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
         .expect("fresh publication discards the permanently incompatible predecessor");
     assert_eq!(snapshot.verified_head().key, fresh_key);
     with_publication_context("inspect-historical-pending-replay", |context| {
@@ -602,27 +653,26 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
             // No decoded-seal offer: this suite asserts the on-disk seal
             // verification contract, so every read must reach the canonical
             // root.
-            None,
         )
         .await
         .expect("retain code graph runtime");
 
     std::fs::write(&canonical_seal, &mutated_seal).expect("mutate sealed generation in place");
     assert!(matches!(
-        runtime.publish_verified_snapshot(latest.generation(), Arc::new(AtomicBool::new(false))),
+        runtime.publish_verified_snapshot(Arc::new(AtomicBool::new(false))),
         Err(GraphDbError::Corrupt { .. })
     ));
-    assert_unverified_publication_state(&runtime, latest.generation(), false);
+    assert_unverified_publication_state(&runtime, false);
     std::fs::write(&canonical_seal, &intact_seal).expect("restore sealed generation bytes");
 
     let retained_seal = canonical_seal.with_extension("retained-test-evidence");
     std::fs::rename(&canonical_seal, &retained_seal).expect("retain original sealed inode");
     std::fs::write(&canonical_seal, &mutated_seal).expect("replace canonical sealed inode");
     assert!(matches!(
-        runtime.publish_verified_snapshot(latest.generation(), Arc::new(AtomicBool::new(false))),
+        runtime.publish_verified_snapshot(Arc::new(AtomicBool::new(false))),
         Err(GraphDbError::Corrupt { .. })
     ));
-    assert_unverified_publication_state(&runtime, latest.generation(), false);
+    assert_unverified_publication_state(&runtime, false);
     std::fs::remove_file(&canonical_seal).expect("remove replacement sealed inode");
     std::fs::rename(&retained_seal, &canonical_seal).expect("restore original sealed inode");
 
@@ -633,24 +683,23 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
         std::fs::rename(&canonical_seal, &retained_seal).expect("retain symlink target evidence");
         symlink(&retained_seal, &canonical_seal).expect("swap canonical seal for symlink");
         assert!(matches!(
-            runtime
-                .publish_verified_snapshot(latest.generation(), Arc::new(AtomicBool::new(false))),
+            runtime.publish_verified_snapshot(Arc::new(AtomicBool::new(false))),
             Err(GraphDbError::Corrupt { .. })
         ));
-        assert_unverified_publication_state(&runtime, latest.generation(), false);
+        assert_unverified_publication_state(&runtime, false);
         std::fs::remove_file(&canonical_seal).expect("remove sealed generation symlink");
         std::fs::rename(&retained_seal, &canonical_seal)
             .expect("restore sealed generation after symlink refusal");
     }
 
-    journal_publication_without_head(&runtime, latest.generation());
+    journal_publication_without_head(&runtime);
     std::fs::write(&canonical_seal, &mutated_seal)
         .expect("mutate source before active replay completion");
     assert!(matches!(
-        runtime.publish_verified_snapshot(latest.generation(), Arc::new(AtomicBool::new(false))),
+        runtime.publish_verified_snapshot(Arc::new(AtomicBool::new(false))),
         Err(GraphDbError::Corrupt { .. })
     ));
-    assert_unverified_publication_state(&runtime, latest.generation(), true);
+    assert_unverified_publication_state(&runtime, true);
     std::fs::write(&canonical_seal, &intact_seal)
         .expect("restore source before active replay completion");
 
@@ -661,7 +710,7 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
     // manufactured stage-boundary `DeadlineExceeded`, no scheduler retry
     // pass, no conflict against its own journal.
     let snapshot = runtime
-        .publish_verified_snapshot(latest.generation(), Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
         .expect("first activation must resume the journaled replay and publish in one call");
     let expected_generation = tracedecay_code_index::graph_projection::code_graph_generation_id(
         &generation_id,
@@ -714,12 +763,11 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
             // No decoded-seal offer: this suite asserts the on-disk seal
             // verification contract, so every read must reach the canonical
             // root.
-            None,
         )
         .await
         .expect("retain code graph runtime again");
     let resumed = retried
-        .publish_verified_snapshot(latest.generation(), Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
         .expect("a repeated activation must resume the exact publication");
     assert_eq!(resumed.generation(), &expected_generation);
     assert_eq!(resumed.verified_head(), &head);
@@ -792,12 +840,11 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
             next.generation().manifest().generation_id.clone(),
             project_database,
             next_binding,
-            None,
         )
         .await
         .expect("retain next code graph runtime");
     let next_snapshot = next_runtime
-        .publish_verified_snapshot(next.generation(), Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
         .expect("a fresh small projection must publish in one call");
     assert_eq!(
         next_snapshot.generation().as_str(),
@@ -821,7 +868,7 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
     let next_head = next_snapshot.verified_head().clone();
     drop(next_snapshot);
     let manifest_provider: Arc<dyn tracedecay_graph_db::GraphGenerationManifestProvider> =
-        next_runtime.graph_manifest_provider.clone();
+        registry.graph_manifest_provider.clone();
     let cold_graph_registry = tracedecay_graph_db::GraphDbRegistry::new_with_manifest_provider(
         tracedecay_graph_db::GraphDbRegistryConfig { max_open: 1 },
         manifest_provider,
@@ -878,7 +925,6 @@ struct SealedGenerationFixture {
     project_database: Arc<tracedecay_runtime_core::db::Database>,
     registry: DaemonSessionRuntimeRegistryV1,
     project_id: ProjectId,
-    latest: tracedecay_code_index_runtime::code_index_scheduler::LatestCompleteCodeIndexV1,
     generation_id: CodeGenerationId,
     scoped_store: PathBuf,
     generations_root: PathBuf,
@@ -971,7 +1017,6 @@ async fn sealed_generation_fixture(project: &str, source: &str) -> SealedGenerat
                 generations_root: generations_root.clone(),
                 sealed_state_digest,
             },
-            None,
         )
         .await
         .expect("retain code graph runtime");
@@ -980,7 +1025,6 @@ async fn sealed_generation_fixture(project: &str, source: &str) -> SealedGenerat
         project_database,
         registry,
         project_id,
-        latest,
         generation_id,
         scoped_store,
         generations_root,
@@ -1006,10 +1050,7 @@ async fn sealing_keeps_symbol_records_only_in_the_graph_store() {
     .await;
     let snapshot = fixture
         .runtime
-        .publish_verified_snapshot(
-            fixture.latest.generation(),
-            Arc::new(AtomicBool::new(false)),
-        )
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
         .expect("seal the code graph");
 
     let file_names = |root: &Path| {
@@ -1109,10 +1150,7 @@ async fn graph_reads_during_engine_warm_up_are_typed_pending_and_warmed_reads_su
     .await;
     let snapshot = fixture
         .runtime
-        .publish_verified_snapshot(
-            fixture.latest.generation(),
-            Arc::new(AtomicBool::new(false)),
-        )
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
         .expect("seal the code graph");
     let store =
         CodeGraphProjectionStore::from_verified_snapshot(snapshot, fixture.generation_id.clone())
@@ -1189,10 +1227,7 @@ async fn a_released_serving_engine_closes_and_rewarms_on_the_next_read() {
     .await;
     let snapshot = fixture
         .runtime
-        .publish_verified_snapshot(
-            fixture.latest.generation(),
-            Arc::new(AtomicBool::new(false)),
-        )
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
         .expect("seal the code graph");
     let store =
         CodeGraphProjectionStore::from_verified_snapshot(snapshot, fixture.generation_id.clone())
@@ -1250,19 +1285,17 @@ async fn a_released_serving_engine_closes_and_rewarms_on_the_next_read() {
     );
 }
 
-/// Stage 1 of `docs/plans/tracedecay-v2/40`: cold activation decodes the sealed
-/// payload once to serve queries, and graph hydration reuses that decode
-/// instead of reading and parsing the identical bytes a second time.
-///
-/// The assertion is falsifiable by construction rather than by timing: BOTH
-/// seal roots handed to the provider are empty, so hydration can only succeed
-/// by consuming the offered decode. The first probe proves the roots really are
-/// unreadable, and the last probe proves a foreign sealed digest is never
-/// answered from the offer.
+/// A pending predecessor owns the projector revision its durable replay
+/// recorded, even after the current reader advanced. The provider rebuilds
+/// that exact historical generation's rows from the seal on disk, and the
+/// rebuilt rows bind the digests the predecessor journaled, which is what
+/// lets an interrupted predecessor finish before the current publication
+/// appends. A foreign sealed digest is refused, and nothing is served once
+/// the seal is gone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn offered_decode_hydrates_without_reading_the_sealed_payload_again() {
+async fn historical_predecessor_rows_rebuild_from_the_seal_at_their_journaled_revision() {
     use tracedecay_graph_db::{
-        GraphGenerationManifest, GraphGenerationManifestProvider, GraphNamespace,
+        GraphGenerationManifestProvider, GraphGenerationRows, GraphNamespace,
         SealedGraphStateDigest,
     };
     use tracedecay_store::{
@@ -1286,12 +1319,12 @@ async fn offered_decode_hydrates_without_reading_the_sealed_payload_again() {
     );
     std::fs::write(
         project_root.join("src/lib.rs"),
-        "pub fn offered_decode_value() -> usize { 7 }\n",
+        "pub fn predecessor_value() -> usize { 7 }\n",
     )
     .expect("project source");
     git(&project_root, &["add", "."]);
-    git(&project_root, &["commit", "-qm", "offered decode fixture"]);
-    let project_id = ProjectId::new("project.offered-decode").expect("project id");
+    git(&project_root, &["commit", "-qm", "predecessor fixture"]);
+    let project_id = ProjectId::new("project.predecessor-rows").expect("project id");
     tracedecay_runtime_core::storage::pin_fixture_repository_identity(
         &project_root,
         project_id.as_str(),
@@ -1299,8 +1332,6 @@ async fn offered_decode_hydrates_without_reading_the_sealed_payload_again() {
     .expect("project enrollment");
     let canonical_project = project_root.canonicalize().expect("canonical project root");
 
-    // Seal one real generation through the production worktree scheduler, then
-    // take the exact handle the code index would serve queries from.
     let store_root = root.join("code-index-store");
     let scoped_store = scoped_code_index_store_root(&store_root, &canonical_project);
     let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
@@ -1312,11 +1343,10 @@ async fn offered_decode_hydrates_without_reading_the_sealed_payload_again() {
     .expect("open worktree scheduler");
     scheduler.reconcile_now().expect("seal the generation");
     let latest = scheduler.latest_complete().expect("complete generation");
-    let decoded = latest.generation_handle();
-    let generation_id = decoded.manifest().generation_id.clone();
-    let repository_id = decoded.snapshot().repository.clone();
+    let generation_id = latest.generation().manifest().generation_id.clone();
+    let repository_id = latest.generation().snapshot().repository.clone();
+    drop(latest);
     drop(scheduler);
-
     let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
         &std::fs::read(scoped_store.join("active-code-generation-v1.json"))
             .expect("active generation pointer"),
@@ -1324,31 +1354,26 @@ async fn offered_decode_hydrates_without_reading_the_sealed_payload_again() {
     .expect("decode active generation pointer");
     let sealed_state_digest = SealedGraphStateDigest::try_from(pointer.state_digest.clone())
         .expect("sealed state digest");
-
-    // Deliberately empty: the provider has nothing it could read from either the
-    // canonical root or the replay pool.
-    let absent_generations_root = root.join("absent-generations");
-    let absent_replay_root = root.join("absent-replay");
-    std::fs::create_dir_all(&absent_generations_root).expect("absent generations root");
-    std::fs::create_dir_all(&absent_replay_root).expect("absent replay root");
+    let generations_root = scoped_store.join("code-generations-v1");
+    let replay_root = root.join("replay-pool");
+    std::fs::create_dir_all(&replay_root).expect("replay root");
 
     let shard = StoreShardIdV1::project(
-        BrainId::new("brain.offered-decode").expect("brain id"),
-        UserProfileId::new("profile.offered-decode").expect("profile id"),
+        BrainId::new("brain.predecessor-rows").expect("brain id"),
+        UserProfileId::new("profile.predecessor-rows").expect("profile id"),
         project_id.clone(),
     );
     let provider = Arc::new(DaemonCodeGraphManifestProviderV1::default());
     let _route = provider
         .bind(
             shard.clone(),
-            project_id.clone(),
+            project_id,
             repository_id.clone(),
-            absent_generations_root,
-            absent_replay_root,
+            generations_root.clone(),
+            replay_root,
         )
         .expect("bind code generation source");
-
-    let namespace = GraphNamespace::new("namespace.offered-decode").expect("graph namespace");
+    let namespace = GraphNamespace::new("namespace.predecessor-rows").expect("graph namespace");
     let projection =
         tracedecay_code_index::graph_projection::code_graph_projection_identity(namespace.clone())
             .expect("code graph projection");
@@ -1358,55 +1383,34 @@ async fn offered_decode_hydrates_without_reading_the_sealed_payload_again() {
         projection: GraphProjectionIdV1::new(projection.projection.as_str())
             .expect("relational projection"),
     };
-    let source = SealedCodeGenerationReplay {
-        repository: repository_id.clone(),
-        generation: generation_id.clone(),
-        sealed_state_digest: sealed_state_digest.clone(),
-        projector_revision: GraphProjectorRevision::try_from(
-            tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
-        )
-        .expect("projector revision"),
-    };
-
-    // The seal really is unreadable from both roots, so any success below is
-    // evidence that the offered decode was consumed.
-    provider
-        .hydrate_sealed_code_generation(&owner, &source, &|| Ok(()))
-        .expect_err("hydration must fail while no seal is readable and nothing is offered");
-
-    provider
-        .offer_decoded_code_generation(
-            shard.clone(),
-            generation_id.clone(),
-            sealed_state_digest.clone(),
-            Arc::clone(&decoded),
-        )
-        .expect("offer the decoded generation");
-    let manifest = provider
-        .hydrate_sealed_code_generation(&owner, &source, &|| Ok(()))
-        .expect("hydration reuses the offered decode without reading the seal");
-    assert_eq!(manifest.projection.namespace.as_str(), namespace.as_str());
-
-    // A pending predecessor owns the projector revision recorded in its
-    // durable replay, even after the current reader has advanced. Rebuild that
-    // exact historical manifest and prove the replay digests accept it; this
-    // is what lets an interrupted predecessor finish before the current
-    // publication appends.
     let legacy_revision = GraphProjectorRevision::try_from("code-graph-projector.v4".to_owned())
         .expect("persisted predecessor revision");
     let legacy_source = SealedCodeGenerationReplay {
+        repository: repository_id,
+        generation: generation_id.clone(),
+        sealed_state_digest,
         projector_revision: legacy_revision.clone(),
-        ..source.clone()
     };
-    let legacy_manifest =
-        tracedecay_code_index::graph_projection::build_published_code_graph_manifest_checked(
-            projection,
-            &decoded,
+
+    let journaled = GraphGenerationRows::from(
+        provider
+            .hydrate_sealed_code_generation(
+                &owner,
+                &legacy_source,
+                test_row_spill(projection.clone()),
+                &|| Ok(()),
+            )
+            .expect("the predecessor's rows rebuild from its seal"),
+    );
+    assert_eq!(
+        journaled.identity().generation,
+        tracedecay_code_index::graph_projection::code_graph_generation_id(
+            &generation_id,
             &legacy_revision,
-            &|| Ok(()),
         )
-        .expect("build the predecessor manifest");
-    let legacy_replay = legacy_manifest
+        .expect("predecessor graph generation")
+    );
+    let legacy_replay = journaled
         .relational_sealed_replay(
             shard,
             tracedecay_code_index::graph_projection::code_graph_idempotency_key(
@@ -1417,82 +1421,46 @@ async fn offered_decode_hydrates_without_reading_the_sealed_payload_again() {
             GraphPublicationInputDigestV1::new(format!("sha256:{}", "c".repeat(64)))
                 .expect("predecessor input digest"),
             None,
-            legacy_source,
+            legacy_source.clone(),
             &|| Ok(()),
         )
         .expect("predecessor relational replay");
-    let reconstructed =
-        GraphGenerationManifest::from_replay(&legacy_replay, provider.as_ref(), &|| Ok(()))
-            .expect("the exact historical predecessor must hydrate and verify");
-    assert_eq!(reconstructed, *legacy_manifest);
+    let rebuilt = provider
+        .hydrate_sealed_code_generation(
+            &owner,
+            &legacy_source,
+            test_row_spill(projection.clone()),
+            &|| Ok(()),
+        )
+        .expect("the predecessor's rows rebuild again");
+    assert_eq!(
+        rebuilt.expected_recovered_digest(),
+        &legacy_replay.expected_recovered_digest
+    );
+    assert_eq!(rebuilt.row_counts(), journaled.row_counts());
 
-    // A different sealed payload must never be answered from this offer.
     let foreign = SealedCodeGenerationReplay {
         sealed_state_digest: SealedGraphStateDigest::try_from(format!("sha256:{}", "b".repeat(64)))
             .expect("foreign sealed digest"),
-        ..source.clone()
+        ..legacy_source.clone()
     };
     provider
-        .hydrate_sealed_code_generation(&owner, &foreign, &|| Ok(()))
-        .expect_err("a foreign sealed digest must never be served from the offer");
-
-    // Both consumers above were served from the one offer, which is exactly why
-    // the offer is not taken on first read. Its lifetime bound is retirement.
-    assert_eq!(
-        provider.retained_decoded_offer_count(),
-        1,
-        "the offer survives its consumers so the predecessor path can reuse it"
-    );
-    let census_bytes = provider.retained_decoded_offer_bytes();
-    assert!(
-        census_bytes > 0,
-        "a retained offer reports the sealed source census it holds"
-    );
-
-    // Retirement releases it. Before this, nothing removed an offer at all.
-    let retirement_shard = owner.shard_id.clone();
-    assert_eq!(
-        provider.release_decoded_offer(&retirement_shard),
-        census_bytes
-    );
-    assert_eq!(provider.retained_decoded_offer_count(), 0);
-    assert_eq!(provider.retained_decoded_offer_bytes(), 0);
-    provider
-        .hydrate_sealed_code_generation(&owner, &source, &|| Ok(()))
-        .expect_err("a released offer falls back to the canonical seal, which is unreadable here");
-
-    // Pressure backstop, driven by an injected measured-RSS series on an
-    // isolated cell: no `/proc` read, and no interference with other cases.
-    let pressure = std::sync::Arc::new(
-        tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1::new(
-            std::num::NonZeroU64::new(1024 * 1024 * 1024).expect("nonzero pressure limit"),
-        ),
-    );
-    let pressured = DaemonCodeGraphManifestProviderV1::with_pressure(&pressure);
-    pressured
-        .offer_decoded_code_generation(
-            retirement_shard.clone(),
-            generation_id.clone(),
-            sealed_state_digest.clone(),
-            Arc::clone(&decoded),
+        .hydrate_sealed_code_generation(
+            &owner,
+            &foreign,
+            test_row_spill(projection.clone()),
+            &|| Ok(()),
         )
-        .expect("offer the decoded generation to the pressured provider");
-    assert_eq!(pressured.retained_decoded_offer_count(), 1);
+        .expect_err("a foreign sealed digest is never served");
 
-    pressure.publish_observed_resident_bytes(pressure.low_watermark_bytes());
-    assert_eq!(
-        pressured.retained_decoded_offer_count(),
-        1,
-        "nominal measured RSS keeps the accelerator"
-    );
-
-    pressure.publish_observed_resident_bytes(pressure.high_watermark_bytes() + 1);
-    assert_eq!(
-        pressured.retained_decoded_offer_count(),
-        0,
-        "measured RSS over the high watermark drops the retained decode"
-    );
-    assert_eq!(pressured.retained_decoded_offer_bytes(), 0);
+    let digest = sha256_hex_suffix(&pointer.state_digest).expect("sha256 digest");
+    std::fs::remove_file(generations_root.join(format!("generation-{digest}.json")))
+        .expect("remove the seal");
+    provider
+        .hydrate_sealed_code_generation(&owner, &legacy_source, test_row_spill(projection), &|| {
+            Ok(())
+        })
+        .expect_err("a removed seal rebuilds nothing");
 }
 
 /// The per-shard publication gate is one shared cell across retained runtime
@@ -1594,7 +1562,6 @@ async fn concurrent_sealed_publishers_share_one_gate_and_converge_on_one_head() 
             generation_id.clone(),
             Arc::clone(&project_database),
             replay_binding(),
-            None,
         )
         .await
         .expect("retain the seat-pass code graph runtime");
@@ -1607,7 +1574,6 @@ async fn concurrent_sealed_publishers_share_one_gate_and_converge_on_one_head() 
             generation_id,
             project_database,
             replay_binding(),
-            None,
         )
         .await
         .expect("retain the reconcile code graph runtime");
@@ -1631,27 +1597,22 @@ async fn concurrent_sealed_publishers_share_one_gate_and_converge_on_one_head() 
         .lock()
         .expect("hold the publication gate");
     let outcome = std::thread::scope(|scope| {
-        let worker = scope.spawn(|| {
-            reconcile.publish_verified_snapshot(latest.generation(), Arc::clone(&cancelled))
-        });
+        let worker = scope.spawn(|| reconcile.publish_verified_snapshot(Arc::clone(&cancelled)));
         cancelled.store(true, Ordering::Release);
         drop(held);
         worker.join().expect("join the cancelled publisher")
     });
     assert!(matches!(outcome, Err(GraphDbError::Cancelled)));
-    assert_unverified_publication_state(&reconcile, latest.generation(), false);
+    assert_unverified_publication_state(&reconcile, false);
 
     // The seat pass and the background reconcile publish the same sealed
     // generation concurrently: the loser waits out the winner, then resumes
     // the winner's exact publication instead of conflicting.
     let (seat_outcome, reconcile_outcome) = std::thread::scope(|scope| {
-        let seat_worker = scope.spawn(|| {
-            seat.publish_verified_snapshot(latest.generation(), Arc::new(AtomicBool::new(false)))
-        });
-        let reconcile_worker = scope.spawn(|| {
-            reconcile
-                .publish_verified_snapshot(latest.generation(), Arc::new(AtomicBool::new(false)))
-        });
+        let seat_worker =
+            scope.spawn(|| seat.publish_verified_snapshot(Arc::new(AtomicBool::new(false))));
+        let reconcile_worker =
+            scope.spawn(|| reconcile.publish_verified_snapshot(Arc::new(AtomicBool::new(false))));
         (
             seat_worker.join().expect("join the seat publisher"),
             reconcile_worker
@@ -1670,7 +1631,7 @@ async fn concurrent_sealed_publishers_share_one_gate_and_converge_on_one_head() 
     // The verified head advanced exactly once and the journal retains exactly
     // the winner's active replay: the loser recovered the published head
     // rather than appending a duplicate or double-advancing the head.
-    let (projection, key, _) = publication_replay(&seat, latest.generation());
+    let (projection, key) = publication_key(&seat);
     with_publication_context("inspect-converged-publication", |context| {
         let mut storage = seat
             .project_database
@@ -1797,7 +1758,6 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
             generation_id,
             project_database,
             replay_binding,
-            None,
         )
         .await
         .expect("retain the code graph runtime")
@@ -1816,9 +1776,8 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
     let _ = take_publication_projection_overlap_peak();
     let not_cancelled = Arc::new(AtomicBool::new(false));
     let refused = std::thread::scope(|scope| {
-        let publisher = scope.spawn(|| {
-            runtime.publish_verified_snapshot(latest.generation(), Arc::clone(&not_cancelled))
-        });
+        let publisher =
+            scope.spawn(|| runtime.publish_verified_snapshot(Arc::clone(&not_cancelled)));
         let projection_deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let build_claimed = runtime.publication_locks.build.try_lock().is_err();
@@ -1854,7 +1813,7 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
     );
     // The refusal is the same abort path a request cancellation takes: no
     // journal append, no verified head, nothing a retry has to repair.
-    assert_unverified_publication_state(&runtime, latest.generation(), false);
+    assert_unverified_publication_state(&runtime, false);
 
     // The scheduler-facing classification names this budget as a graph
     // refusal that keeps text serving, never a retryable activation fault.
@@ -1875,7 +1834,7 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
     // keeps its own identity: the caller cancelled, so it is told so.
     let cancelled = Arc::new(AtomicBool::new(true));
     assert!(matches!(
-        runtime.publish_verified_snapshot(latest.generation(), cancelled),
+        runtime.publish_verified_snapshot(cancelled),
         Err(GraphDbError::Cancelled)
     ));
 
@@ -1883,7 +1842,7 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
     // it just refused; the refusal poisoned nothing.
     pressure.publish_observed_resident_bytes(pressure.low_watermark_bytes());
     let published = runtime
-        .publish_verified_snapshot(latest.generation(), Arc::new(AtomicBool::new(false)))
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
         .expect("nominal measured RSS publishes the sealed generation");
     let projector_revision = GraphProjectorRevision::try_from(
         tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
@@ -1899,7 +1858,7 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
         expected_generation.as_str(),
         "the refused generation publishes unchanged once memory is nominal"
     );
-    let (projection, key, _) = publication_replay(&runtime, latest.generation());
+    let (projection, key) = publication_key(&runtime);
     with_publication_context("inspect-refused-then-published", |context| {
         let mut storage = runtime
             .project_database
@@ -2062,7 +2021,6 @@ async fn worktree_scopes_share_one_project_publication_build_permit() {
                     generation_id.clone(),
                     Arc::clone(&project_database),
                     replay_binding(),
-                    None,
                 )
                 .await
                 .expect("retain a worktree-scoped code graph runtime"),
@@ -2094,7 +2052,6 @@ async fn worktree_scopes_share_one_project_publication_build_permit() {
 
 struct PublicationMeasurementScopeV1 {
     canonical_root: PathBuf,
-    generation: Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>,
     generation_id: CodeGenerationId,
     repository_id: RepositoryId,
     reference: Option<RefId>,
@@ -2288,11 +2245,11 @@ async fn concurrent_worktree_scopes_publish_with_one_corpus_build_and_bounded_rs
         let latest = scheduler
             .latest_complete()
             .expect("complete publication scope generation");
-        let generation = latest.generation_handle();
-        let generation_id = generation.manifest().generation_id.clone();
-        let repository_id = generation.snapshot().repository.clone();
-        let reference = generation.snapshot().reference.clone();
+        let generation_id = latest.generation().manifest().generation_id.clone();
+        let repository_id = latest.generation().snapshot().repository.clone();
+        let reference = latest.generation().snapshot().reference.clone();
         let worktree_id = scheduler.identity().worktree_id().clone();
+        drop(latest);
         drop(scheduler);
         let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
             &std::fs::read(scoped_store.join("active-code-generation-v1.json"))
@@ -2304,7 +2261,6 @@ async fn concurrent_worktree_scopes_publish_with_one_corpus_build_and_bounded_rs
             sha256_hex_suffix(&pointer.state_digest).expect("sha256 publication scope digest");
         measurement_scopes.push(PublicationMeasurementScopeV1 {
             canonical_root,
-            generation,
             generation_id,
             repository_id,
             reference,
@@ -2408,7 +2364,6 @@ async fn concurrent_worktree_scopes_publish_with_one_corpus_build_and_bounded_rs
                         generations_root: publication_generations_root.clone(),
                         sealed_state_digest: scope.sealed_state_digest.clone(),
                     },
-                    Some(Arc::clone(&scope.generation)),
                 )
                 .await
                 .expect("retain publication scope runtime"),
@@ -2449,17 +2404,12 @@ async fn concurrent_worktree_scopes_publish_with_one_corpus_build_and_bounded_rs
     let wall_started = Instant::now();
     let outcomes = std::thread::scope(|thread_scope| {
         let mut workers = Vec::with_capacity(scope_count);
-        for (scope_index, (runtime, measurement_scope)) in
-            runtimes.iter().zip(&measurement_scopes).enumerate()
-        {
+        for (scope_index, runtime) in runtimes.iter().enumerate() {
             let worker_barrier = &barrier;
             workers.push(thread_scope.spawn(move || {
                 worker_barrier.wait();
                 let started = Instant::now();
-                let result = runtime.publish_verified_snapshot(
-                    &measurement_scope.generation,
-                    Arc::new(AtomicBool::new(false)),
-                );
+                let result = runtime.publish_verified_snapshot(Arc::new(AtomicBool::new(false)));
                 let elapsed_ms =
                     u64::try_from(started.elapsed().as_millis()).expect("publish milliseconds");
                 (scope_index, result, elapsed_ms)
@@ -2640,7 +2590,6 @@ fn off_thread_staging_release_retains_its_permit_and_leases_until_terminal_drain
                 generation_id,
                 project_database,
                 replay_binding,
-                None,
             )
             .await
             .expect("retain real code graph runtime");

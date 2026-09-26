@@ -5,8 +5,7 @@ use tracedecay_code_index::{
     chunks::CodeIndexImportEvidenceV1,
     graph_projection::{
         CODE_GRAPH_PROJECTOR_REVISION, CodeGraphProjectionError, CodeGraphProjectionStore,
-        build_published_code_graph_manifest_checked, code_graph_generation_id,
-        code_graph_projection_identity,
+        code_graph_generation_id, code_graph_projection_identity,
     },
     parallelism,
     production::{
@@ -100,17 +99,12 @@ fn projection_manifest(
     generation: &CodeIndexPublishedGenerationV1,
     revision: &GraphProjectorRevision,
 ) -> GraphGenerationManifest {
-    Arc::unwrap_or_clone(
-        build_published_code_graph_manifest_checked(
-            code_graph_projection_identity(
-                GraphNamespace::new("code-graph-import-publication").expect("graph namespace"),
-            )
-            .expect("projection identity"),
-            generation,
-            revision,
-            &|| Ok(()),
+    PartitionedSealV1::of(generation).graph_manifest(
+        code_graph_projection_identity(
+            GraphNamespace::new("code-graph-import-publication").expect("graph namespace"),
         )
-        .expect("published generation projects"),
+        .expect("projection identity"),
+        revision,
     )
 }
 

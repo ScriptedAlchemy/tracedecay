@@ -32,9 +32,10 @@ pub use error::{
 pub use generation::{
     GraphEntityRef, GraphGenerationDependency, GraphGenerationManifest,
     GraphGenerationManifestIdentity, GraphGenerationManifestProvider, GraphGenerationRelation,
-    GraphGenerationReplayMetadata, GraphGenerationReplaySource, GraphProjectionIdentity,
-    GraphProjectorRevision, GraphRelationRef, GraphReplayCollectionOutcome,
-    SealedCodeGenerationReplay, SealedGraphStateDigest, SupersededReplayRetirement,
+    GraphGenerationReplayMetadata, GraphGenerationReplaySource, GraphGenerationRowSpill,
+    GraphGenerationRows, GraphProjectionIdentity, GraphProjectorRevision, GraphRelationRef,
+    GraphReplayCollectionOutcome, SealedCodeGenerationReplay, SealedGraphStateDigest,
+    SpilledGraphGeneration, SupersededReplayRetirement,
 };
 pub use generation_runtime::{SealedStagingRelease, SealedStagingRetentionReason};
 pub use lease::{VerifiedGraphSnapshot, VerifiedTraversalResult, VerifiedTraversalVisit};
