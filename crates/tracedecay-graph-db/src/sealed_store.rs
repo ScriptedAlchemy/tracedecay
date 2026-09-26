@@ -105,6 +105,7 @@ pub(crate) fn open_direct_sealed_generation(
     let receipt: SealedStoreReceiptV1 = serde_json::from_slice(&receipt_bytes)
         .map_err(|error| GraphDbError::unavailable(format!("sealed receipt decode: {error}")))?;
     if receipt.version != SEALED_STORE_RECEIPT_VERSION
+        || receipt.graph_format != GraphFormatVersion::current().get()
         || receipt.recovered_digest != expected.as_str()
         || receipt.physical_namespace != physical_namespace.as_str()
         || receipt.namespace != projection.namespace.as_str()
@@ -203,6 +204,10 @@ struct SealedStoreReceiptV1 {
     recovered_digest: String,
     entities: usize,
     relations: usize,
+    /// The graph format the container was written in. A superseded-format
+    /// rebuild discards every sealed generation that does not name the
+    /// current format and keeps the ones this build already sealed.
+    graph_format: u32,
 }
 
 impl SealedStoreReceiptV1 {
@@ -213,6 +218,7 @@ impl SealedStoreReceiptV1 {
         expected_digest: &str,
     ) -> bool {
         self.version == SEALED_STORE_RECEIPT_VERSION
+            && self.graph_format == GraphFormatVersion::current().get()
             && self.recovered_digest == expected_digest
             && self.physical_namespace == physical_namespace
             && self.namespace == locator.projection.namespace.as_str()
@@ -441,6 +447,50 @@ fn directory_bytes(directory: &Path) -> std::io::Result<u64> {
         }
     }
     Ok(total)
+}
+
+/// Removes every sealed generation beside `database_path` whose receipt does
+/// not name the current graph format: after a superseded-format rebuild those
+/// containers can never serve, while a generation this build already sealed
+/// keeps serving. In-flight `.staging-*` seals are left to their builder.
+pub(crate) fn discard_superseded_sealed_generations(
+    database_path: &Path,
+) -> Result<(), GraphDbError> {
+    let root = sealed_store_root(database_path);
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(sealed_store_io_failure("sealed root read failed", error)),
+    };
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| sealed_store_io_failure("sealed root read failed", error))?;
+        let path = entry.path();
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(".staging-"))
+        {
+            continue;
+        }
+        let current = load_sealed_store_receipt(&path)
+            .ok()
+            .flatten()
+            .is_some_and(|receipt| receipt.graph_format == GraphFormatVersion::current().get());
+        if !current {
+            match std::fs::remove_dir_all(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(sealed_store_io_failure(
+                        "superseded sealed generation removal failed",
+                        error,
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Removes every `.staging-*` directory a seal left behind under the store's
@@ -1399,6 +1449,7 @@ fn build_or_open_sealed_store(
         recovered_digest: expected.as_str().to_owned(),
         entities,
         relations,
+        graph_format: GraphFormatVersion::current().get(),
     };
     let encoded = serde_json::to_vec_pretty(&receipt)
         .map_err(|error| GraphDbError::unavailable(format!("sealed receipt encode: {error}")))?;

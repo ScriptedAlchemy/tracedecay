@@ -38,6 +38,7 @@ use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_private_fs::FileLease;
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_directory};
 
+use crate::sealed_store::discard_superseded_sealed_generations;
 use crate::{GraphDb, GraphDbError};
 
 const CORRUPTION_DECISION_LOCK_SUFFIX: &str = ".corruption-lock";
@@ -89,7 +90,7 @@ pub(crate) fn recover_deterministically_corrupt_container_with<T>(
         });
     }
 
-    delete_container_family(container, &[])?;
+    delete_container_family(container)?;
     tracing::warn!(
         event = "store_corrupt_deleted",
         container = %container.display(),
@@ -105,9 +106,9 @@ pub(crate) fn recover_deterministically_corrupt_container_with<T>(
 ///
 /// Under the same decision lock as corruption, the open is re-run: another
 /// authority may already have replaced the store. A second superseded
-/// verdict deletes the family together with the sealed generation root,
-/// because every artifact under it was written in the superseded format.
-/// The caller reopens the vacant path fresh.
+/// verdict deletes the family and every sealed generation written in a
+/// superseded format; a generation this build already sealed is kept. The
+/// caller reopens the vacant path fresh.
 pub(crate) fn replace_superseded_container<T>(
     container: &Path,
     verification_open: &dyn Fn() -> Result<T, GraphDbError>,
@@ -118,7 +119,8 @@ pub(crate) fn replace_superseded_container<T>(
         Err(GraphDbError::FormatSuperseded { found, expected }) => (found, expected),
         Err(other) => return Err(other),
     };
-    delete_container_family(container, &[container.with_extension("sealed")])?;
+    delete_container_family(container)?;
+    discard_superseded_sealed_generations(container)?;
     tracing::info!(
         event = "store_superseded_format_deleted",
         container = %container.display(),
@@ -180,11 +182,10 @@ fn acquire_corruption_decision_lock(
     }
 }
 
-/// Deletes the container family and any `derived` siblings. The container
-/// goes last: it is the fault authority, so an interruption mid-delete leaves
-/// it in place for the next deciding authority rather than a vacant path
-/// beside stranded sidecars.
-fn delete_container_family(container: &Path, derived: &[PathBuf]) -> Result<(), GraphDbError> {
+/// Deletes the container family. The container goes last: it is the fault
+/// authority, so an interruption mid-delete leaves it in place for the next
+/// deciding authority rather than a vacant path beside stranded sidecars.
+fn delete_container_family(container: &Path) -> Result<(), GraphDbError> {
     match container.symlink_metadata() {
         Ok(metadata) if metadata.is_file() => {}
         Ok(_) => {
@@ -205,11 +206,8 @@ fn delete_container_family(container: &Path, derived: &[PathBuf]) -> Result<(), 
         wal_sidecar_path(container),
         container.with_extension("verified"),
         container.with_extension("spill"),
-    ]
-    .iter()
-    .chain(derived)
-    {
-        remove_family_member(sidecar)?;
+    ] {
+        remove_family_member(&sidecar)?;
     }
     remove_family_member(container)?;
     if let Some(parent) = container.parent() {

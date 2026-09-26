@@ -278,7 +278,8 @@ fn decode(manifest: &[u8], segments: &BTreeMap<String, Vec<u8>>) -> CodeIndexPub
 /// at a time: the most the build ever holds above the sealed input stays
 /// within a fixed budget, below the 22.3 MB decoding this generation alone
 /// leaves live. Decoding the whole generation and projecting it in one piece
-/// peaked at 38,827,295 bytes for the same 4,201 entities and 5,100 relations.
+/// peaked at 38,827,295 bytes when the generation projected 4,201 entities and
+/// 5,100 relations, an edge entity plus two relations per code edge.
 #[test]
 fn a_sealed_graph_build_holds_windows_not_the_decoded_generation() {
     const PEAK_BUDGET_BYTES: usize = 19_000_000;
@@ -317,7 +318,8 @@ fn a_sealed_graph_build_holds_windows_not_the_decoded_generation() {
     tracedecay_code_index::parallelism::clear_forced_indexing_workers_for_test();
     eprintln!("GRAPH ROWS peak {peak}");
 
-    assert_eq!(spilled.row_counts(), (4_201, 5_100));
+    // Each of the fixture's 1,200 code edges is one relation row.
+    assert_eq!(spilled.row_counts(), (3_001, 3_900));
     assert!(
         peak <= PEAK_BUDGET_BYTES,
         "the graph build held {peak} bytes at peak, over its {PEAK_BUDGET_BYTES}-byte budget"

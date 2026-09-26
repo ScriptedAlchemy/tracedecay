@@ -423,7 +423,7 @@ pub(crate) fn relation_properties(
     let edge = i64::try_from(edge.as_u64()).map_err(|_| GraphDbError::Corrupt {
         message: "Grafeo edge identity exceeds the persisted scalar range".to_owned(),
     })?;
-    let mut properties = vec![
+    let properties = vec![
         (
             RELATION_KEY_PROPERTY.to_owned(),
             key_value(namespace, relation.identity.as_str()),
@@ -454,18 +454,13 @@ pub(crate) fn relation_properties(
         ),
         (RELATION_EDGE_PROPERTY.to_owned(), Value::from(edge)),
     ];
-    properties.extend(
-        relation
-            .properties
-            .iter()
-            .map(|(name, property)| encode_graph_property(name, property)),
-    );
     Ok(properties)
 }
 
-/// A native edge carries its owner scalars and payload, never the relation's
-/// identity or endpoints: those are owned by its locator node, which
-/// [`edge_locator`] resolves through the `RELATION_EDGE` index.
+/// A native edge carries its owner scalars and the relation's payload
+/// properties, never its identity or endpoints: those are owned by its
+/// locator node, which [`edge_locator`] resolves through the `RELATION_EDGE`
+/// index. The payload has no second copy on the locator.
 pub(crate) fn edge_properties(
     namespace: &GraphNamespace,
     projection: &GraphProjectionId,
@@ -639,8 +634,7 @@ pub(crate) fn decode_relation(locator: &Node, edge: &Edge) -> Result<GraphRelati
         to,
         kind,
         decode_graph_properties(
-            locator
-                .properties
+            edge.properties
                 .iter()
                 .map(|(key, value)| (key.as_str(), value.clone())),
         )?,

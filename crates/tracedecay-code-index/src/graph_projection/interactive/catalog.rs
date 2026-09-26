@@ -1,6 +1,6 @@
 //! Bounded construction of the generation-pinned interactive catalog.
 
-use std::borrow::{Borrow, Cow};
+use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -19,8 +19,8 @@ use super::super::schema::{
     file_import_relation_id, has_label, import_entity_id,
 };
 use super::super::{
-    CodeGraphProjectionError, EDGE_LABEL, EDGE_RECORD_PROPERTY, SymbolRecordV1, TARGET_EDGE_KIND,
-    source_edge_kind_edge, symbol_entity_id, validate_symbol_record,
+    CodeGraphProjectionError, EDGE_RECORD_PROPERTY, SymbolRecordV1, code_edge_kind_edge,
+    symbol_entity_id, validate_symbol_record,
 };
 use super::models::{CatalogSymbol, CodeGraphFileDependenciesV1, InteractiveCatalog};
 use crate::chunks::CodeIndexImportEvidenceV1;
@@ -106,12 +106,9 @@ struct CatalogScan {
 /// The fields of an edge record the file dependency fold reads, borrowed so
 /// edges of other kinds allocate nothing.
 #[derive(Deserialize)]
-struct DependencyEdgeRecord<'entity> {
-    #[serde(borrow)]
-    from_occurrence: Cow<'entity, str>,
-    #[serde(borrow)]
-    to_occurrence: Cow<'entity, str>,
-    kind: RelationEdgeKindV1,
+struct DependencyEdgeRecord {
+    from_occurrence: String,
+    to_occurrence: String,
 }
 
 impl CatalogScan {
@@ -164,27 +161,12 @@ impl CatalogScan {
         if has_label(entity, IMPORT_LABEL) {
             self.record_import(entity)?;
         }
-        if has_label(entity, EDGE_LABEL) {
-            let edge: DependencyEdgeRecord = deserialize_property(entity, EDGE_RECORD_PROPERTY)?;
-            if matches!(
-                edge.kind,
-                RelationEdgeKindV1::Calls | RelationEdgeKindV1::Uses
-            ) {
-                let endpoint = |occurrence: Cow<'_, str>| {
-                    SymbolOccurrenceId::new(occurrence.into_owned())
-                        .map_err(|error| CodeGraphProjectionError::Corrupt(error.to_string()))
-                };
-                self.dependency_edges.push((
-                    endpoint(edge.from_occurrence)?,
-                    endpoint(edge.to_occurrence)?,
-                ));
-            }
-        }
         Ok(())
     }
 
     fn record_file(&mut self, entity: &GraphEntity) -> Result<(), CodeGraphProjectionError> {
-        let record: SanitizedCodeFileV1 = deserialize_property(entity, FILE_RECORD_PROPERTY)?;
+        let record: SanitizedCodeFileV1 =
+            deserialize_property(&entity.properties, FILE_RECORD_PROPERTY)?;
         record
             .validate()
             .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
@@ -219,7 +201,8 @@ impl CatalogScan {
     }
 
     fn record_symbol(&mut self, entity: &GraphEntity) -> Result<(), CodeGraphProjectionError> {
-        let record: SymbolRecordV1 = deserialize_property(entity, SYMBOL_RECORD_PROPERTY)?;
+        let record: SymbolRecordV1 =
+            deserialize_property(&entity.properties, SYMBOL_RECORD_PROPERTY)?;
         validate_symbol_record(&record)?;
         if symbol_entity_id(&record.occurrence)? != entity.identity {
             return Err(CodeGraphProjectionError::Corrupt(
@@ -246,7 +229,7 @@ impl CatalogScan {
 
     fn record_import(&mut self, entity: &GraphEntity) -> Result<(), CodeGraphProjectionError> {
         let record: CodeIndexImportEvidenceV1 =
-            deserialize_property(entity, IMPORT_RECORD_PROPERTY)?;
+            deserialize_property(&entity.properties, IMPORT_RECORD_PROPERTY)?;
         record.validate().map_err(|error| {
             CodeGraphProjectionError::Corrupt(format!(
                 "code graph import row is not canonical: {error}"
@@ -279,12 +262,34 @@ impl CatalogScan {
             self.count_relation()?;
             match relation.kind.as_str() {
                 FILE_IMPORT_EDGE_KIND => self.record_import_link(relation.clone())?,
-                TARGET_EDGE_KIND => self.degrees.record_incoming(relation.to.clone()),
-                kind if source_edge_kind_edge(kind).is_some() => {
-                    self.degrees.record_outgoing(relation.from.clone());
+                kind => {
+                    if let Some(edge_kind) = code_edge_kind_edge(kind) {
+                        self.record_code_edge(relation, edge_kind)?;
+                    }
                 }
-                _ => {}
             }
+        }
+        Ok(())
+    }
+
+    fn record_code_edge(
+        &mut self,
+        relation: &GraphRelation,
+        kind: RelationEdgeKindV1,
+    ) -> Result<(), CodeGraphProjectionError> {
+        self.degrees.record_outgoing(relation.from.clone());
+        self.degrees.record_incoming(relation.to.clone());
+        if matches!(kind, RelationEdgeKindV1::Calls | RelationEdgeKindV1::Uses) {
+            let edge: DependencyEdgeRecord =
+                deserialize_property(&relation.properties, EDGE_RECORD_PROPERTY)?;
+            let endpoint = |occurrence: String| {
+                SymbolOccurrenceId::new(occurrence)
+                    .map_err(|error| CodeGraphProjectionError::Corrupt(error.to_string()))
+            };
+            self.dependency_edges.push((
+                endpoint(edge.from_occurrence)?,
+                endpoint(edge.to_occurrence)?,
+            ));
         }
         Ok(())
     }
