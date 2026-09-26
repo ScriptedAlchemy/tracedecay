@@ -239,15 +239,18 @@ impl<T> SymbolGraphPage<T> {
 }
 
 impl<T: SymbolGraphItem> SymbolGraphPage<T> {
-    /// Distinct project files the page's symbols live in, in page order.
+    /// Distinct project files the page's symbols live in, sorted by path so
+    /// the envelope does not depend on how rows from different files tie.
     pub fn touched_files(&self) -> Vec<String> {
-        let mut files: Vec<String> = Vec::new();
-        for item in &self.items {
-            let file = &item.symbol().file;
-            if !file.is_empty() && !files.contains(file) {
-                files.push(file.clone());
-            }
-        }
+        let mut files = self
+            .items
+            .iter()
+            .map(|item| item.symbol().file.as_str())
+            .filter(|file| !file.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        files.sort();
+        files.dedup();
         files
     }
 }

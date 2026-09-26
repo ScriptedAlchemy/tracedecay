@@ -368,7 +368,7 @@ async fn callable_code_reads_carry_their_files_and_the_accounting_footer() {
     let payload: Value = serde_json::from_str(&body[0]).unwrap();
     assert_eq!(
         payload["touched_files"],
-        json!(["src/walk.rs", "src/lib.rs"]),
+        json!(["src/lib.rs", "src/walk.rs"]),
         "{payload:#}"
     );
 
