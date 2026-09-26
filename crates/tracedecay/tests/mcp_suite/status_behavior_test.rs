@@ -6,7 +6,7 @@
 
 #![cfg(feature = "test-transport")]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::common::fixture::{git_capture as git_stdout, git_run as git};
@@ -79,10 +79,13 @@ fn tool_text(response: tracedecay_mcp::jsonrpc::JsonRpcResponse) -> String {
         .to_owned()
 }
 
-async fn call_status(project: &StatusProject, arguments: Value) -> String {
-    let response = project
-        .harness
-        .call_tool(&project.project_root, "tracedecay_status", arguments)
+async fn call_status(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project_root: &Path,
+    arguments: Value,
+) -> String {
+    let response = harness
+        .call_tool(project_root, "tracedecay_status", arguments)
         .await
         .expect("production tools/call");
     tool_text(response)
@@ -94,11 +97,15 @@ fn parse_status(text: &str) -> Value {
     })
 }
 
-async fn sealed_json_status(project: &StatusProject) -> Value {
+async fn sealed_json_status(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project_root: &Path,
+) -> Value {
     let started = Instant::now();
     let mut last = Value::Null;
     while started.elapsed() < Duration::from_secs(20) {
-        let payload = parse_status(&call_status(project, json!({ "format": "json" })).await);
+        let payload =
+            parse_status(&call_status(harness, project_root, json!({ "format": "json" })).await);
         let freshness = &payload["code_index_freshness"];
         let graph = &freshness["worktree"]["code_graph_serving"];
         if freshness["status"] == "current" && graph["state"] == "ready" {
@@ -117,8 +124,8 @@ async fn sealed_json_status(project: &StatusProject) -> Value {
 async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_in() {
     let project = open_status_project().await;
     let root = project.project_root.display().to_string();
-    let compact = sealed_json_status(&project).await;
-    let markdown = call_status(&project, json!({})).await;
+    let compact = sealed_json_status(&project.harness, &project.project_root).await;
+    let markdown = call_status(&project.harness, &project.project_root, json!({})).await;
     let detailed = opted_in_status(&project).await;
 
     assert_eq!(compact["project_root"], json!(root));
@@ -180,6 +187,7 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
         memory["shed_order"],
         json!([
             "superseded_generation",
+            "graph_catalog",
             "decoded_generation",
             "graph_engine"
         ])
@@ -284,6 +292,115 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
     );
 }
 
+/// One daemon serving two projects: each project's status lists only its own
+/// resident owners, and the doctor's daemon-wide memory inventory lists both.
+#[tokio::test]
+async fn project_status_lists_only_its_own_memory_owners_and_the_doctor_lists_every_project() {
+    let isolation = test_temp_dir();
+    let roots = ["alpha", "beta"].map(|name| {
+        let root = isolation.path().join(name);
+        std::fs::create_dir_all(&root).expect("project dir");
+        fixture::write_indexed_fixture_sources(&root);
+        git(&root, &["init", "-q", "-b", BRANCH]);
+        git(&root, &["add", "."]);
+        git(
+            &root,
+            &[
+                "-c",
+                "user.name=TraceDecay Test",
+                "-c",
+                "user.email=tracedecay@example.invalid",
+                "commit",
+                "-qm",
+                "status behavior fixture",
+            ],
+        );
+        canonical_existing_identity(&root).expect("canonical project root")
+    });
+    let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
+        isolation.path(),
+        roots.clone(),
+    ))
+    .await
+    .expect("production composition harness");
+
+    let mut worktrees = Vec::new();
+    for root in &roots {
+        let status = sealed_json_status(&harness, root).await;
+        let project_id = harness.project_id(root).await.expect("project id");
+        let owners = status["memory"]["owners"]
+            .as_array()
+            .expect("memory owners");
+        assert_eq!(
+            owners
+                .iter()
+                .map(|owner| (owner["project_id"].clone(), owner["kind"].clone()))
+                .collect::<Vec<_>>(),
+            [
+                (json!(project_id), json!("graph_catalog")),
+                (json!(project_id), json!("decoded_generation")),
+                (json!(project_id), json!("graph_engine")),
+            ],
+            "{status}"
+        );
+        worktrees.push(status["code_index_freshness"]["worktree"]["worktree_id"].clone());
+    }
+    assert_ne!(worktrees[0], worktrees[1]);
+
+    let runtime = harness
+        .call_tool(
+            &roots[0],
+            "tracedecay_runtime",
+            json!({ "format": "json", "doctor_report": true }),
+        )
+        .await
+        .expect("production tools/call");
+    let runtime = parse_status(&stored_body(&harness, &roots[0], tool_text(runtime)).await);
+    let doctor = runtime["doctor_report"].to_string();
+    for worktree in &worktrees {
+        let worktree = worktree.as_str().expect("worktree id");
+        for kind in ["graph_catalog", "decoded_generation", "graph_engine"] {
+            assert!(
+                doctor.contains(&format!("{kind} of worktree {worktree} holds")),
+                "doctor must list {kind} of {worktree}: {doctor}"
+            );
+        }
+    }
+    harness.shutdown().await;
+}
+
+/// The whole body behind a truncated response envelope, read back through
+/// `tracedecay_retrieve` the way a host recovers it; an untruncated body is
+/// returned as is.
+async fn stored_body(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project_root: &Path,
+    text: String,
+) -> String {
+    let envelope = parse_status(&text);
+    if envelope["truncated"] != true {
+        return text;
+    }
+    let mut body = String::new();
+    let mut offset = 0;
+    loop {
+        let response = harness
+            .call_tool(
+                project_root,
+                "tracedecay_retrieve",
+                json!({ "handle": envelope["handle"], "format": "json", "offset": offset }),
+            )
+            .await
+            .expect("production tools/call");
+        let page = parse_status(&tool_text(response));
+        body.push_str(page["content"].as_str().expect("retrieved content"));
+        match page["next_offset"].as_u64() {
+            Some(next) => offset = next,
+            None => return body,
+        }
+    }
+}
+
 /// A resident owner reduced to what identifies it. Every owner on a fresh
 /// profile belongs to the one sealed worktree and generation; `measured`
 /// holds exactly when the owner reported a byte count.
@@ -302,10 +419,12 @@ fn owner_row(owner: &Value, worktree_id: &Value, generation_id: &Value) -> Value
     })
 }
 
-/// The sealed worktree retains its serving decode and its graph engine, both
-/// sized by their owners and protected while the worktree is in use.
+/// The sealed worktree retains its interactive catalog, serving decode, and
+/// graph engine, each sized by its owner and protected while the worktree is
+/// in use.
 fn serving_owner_rows() -> Vec<Value> {
     vec![
+        json!({ "kind": "graph_catalog", "measured": true, "protected": true }),
         json!({ "kind": "decoded_generation", "measured": true, "protected": true }),
         json!({ "kind": "graph_engine", "measured": true, "protected": true }),
     ]
@@ -315,6 +434,8 @@ fn serving_owner_rows() -> Vec<Value> {
 ///
 /// Cursor coverage and the Kimi frontier land on a background sweep, so a
 /// single call during that sweep is not the client-visible settled reading.
+/// The full diagnostic outgrows one response frame, so it is read back from
+/// the retained body.
 async fn opted_in_status(project: &StatusProject) -> Value {
     let arguments = json!({
         "format": "json",
@@ -326,7 +447,9 @@ async fn opted_in_status(project: &StatusProject) -> Value {
     let started = Instant::now();
     let mut last = Value::Null;
     while started.elapsed() < Duration::from_secs(20) {
-        let detailed = parse_status(&call_status(project, arguments.clone()).await);
+        let text = call_status(&project.harness, &project.project_root, arguments.clone()).await;
+        let detailed =
+            parse_status(&stored_body(&project.harness, &project.project_root, text).await);
         if detailed["session_ingest"] == empty_cursor_session_ingest()
             && detailed["session_history_catch_up"] == empty_host_session_history()
         {
