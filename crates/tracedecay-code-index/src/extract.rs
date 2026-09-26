@@ -761,12 +761,13 @@ mod tests {
         // `self` from the enclosing impl or trait; v12 binds a receiver typed
         // by a type parameter with one trait bound to `Trait::method`; v13
         // retains parser-positioned receiver-call evidence; v14 extracts
-        // item-list macro bodies and binds `#[cfg]` variants. The revision is
+        // item-list macro bodies and binds `#[cfg]` variants; v15 qualifies
+        // calls through block-scoped `use` declarations. The revision is
         // part of the batch identity, so the pinned digest moves with it.
-        assert_eq!(descriptor.extractor_revision.as_str(), "extractor.rust.v14");
+        assert_eq!(descriptor.extractor_revision.as_str(), "extractor.rust.v15");
         assert_eq!(
             extraction.batch().rows_digest.as_str(),
-            "sha256:ee93409e76028857423e575422b01262d32c61a001213ca71d4cd06f7bf34162"
+            "sha256:c7f72d389d8521307a60ca4373df3f9551c15e6527b1b5f68b34e80db87b38af"
         );
     }
 

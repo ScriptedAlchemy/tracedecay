@@ -855,7 +855,7 @@ fn retained_stale_rust_extractor_generation_is_refused_and_rebuilt() {
             .iter()
             .find(|(language, _)| language.as_str() == "rust")
             .map(|(_, revision)| revision.as_str()),
-        Some("extractor.rust.v14")
+        Some("extractor.rust.v15")
     );
 }
 

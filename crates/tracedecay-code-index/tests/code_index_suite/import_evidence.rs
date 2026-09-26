@@ -1227,3 +1227,97 @@ fn rust_items_inside_item_list_macros_are_symbols_with_resolved_callers() {
         ]
     );
 }
+
+fn resolved_callers<'a>(
+    generation: &'a CodeIndexPublishedGenerationV1,
+    target: &SymbolOccurrenceId,
+) -> Vec<&'a str> {
+    let mut callers = generation
+        .edges()
+        .iter()
+        .filter(|edge| edge.to_occurrence == *target && edge.kind == RelationEdgeKindV1::Calls)
+        .filter_map(|edge| {
+            generation
+                .symbols()
+                .symbols
+                .iter()
+                .find(|symbol| symbol.occurrence == edge.from_occurrence)
+                .map(|symbol| symbol.qualified_name.as_str())
+        })
+        .collect::<Vec<_>>();
+    callers.sort_unstable();
+    callers
+}
+
+#[test]
+fn rust_calls_bind_through_a_use_declared_in_the_calling_block() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.block-use.lib",
+            "crates/app/src/lib.rs",
+            "mod m;\nmod n;\nmod runtime;\nuse crate::n::g;\n\
+             pub fn f() { use crate::m::g; g(); }\n\
+             pub fn module_scope() { g(); }\n\
+             pub fn spawn_inner() {\n    use crate::runtime::{context, task};\n    context::with_current();\n    task::schedule();\n}\n\
+             pub fn timer() {\n    #[cfg(feature = \"rt\")]\n    {\n        use crate::runtime::context;\n        context::with_current();\n    }\n}\n\
+             mod inner { pub fn x() {} }\n\
+             pub fn same_file() { use self::inner::x; x(); }\n",
+        ),
+        ("file.block-use.m", "crates/app/src/m.rs", "pub fn g() {}\n"),
+        ("file.block-use.n", "crates/app/src/n.rs", "pub fn g() {}\n"),
+        (
+            "file.block-use.runtime",
+            "crates/app/src/runtime/mod.rs",
+            "pub mod context;\npub mod task;\n",
+        ),
+        (
+            "file.block-use.context",
+            "crates/app/src/runtime/context.rs",
+            "mod current;\npub(crate) use current::with_current;\n",
+        ),
+        (
+            "file.block-use.current",
+            "crates/app/src/runtime/context/current.rs",
+            "pub(crate) fn with_current() {}\n",
+        ),
+        (
+            "file.block-use.task",
+            "crates/app/src/runtime/task.rs",
+            "pub fn schedule() {}\n",
+        ),
+    ]);
+    let block_g = symbol_occurrence(&generation, "crates/app/src/m.rs::g");
+    let module_g = symbol_occurrence(&generation, "crates/app/src/n.rs::g");
+    let with_current = symbol_occurrence(
+        &generation,
+        "crates/app/src/runtime/context/current.rs::with_current",
+    );
+    let schedule = symbol_occurrence(&generation, "crates/app/src/runtime/task.rs::schedule");
+    let inner_x = symbol_occurrence(&generation, "crates/app/src/lib.rs::inner::x");
+
+    // The block's `use` shadows the module-scope import only inside `f`.
+    assert_eq!(
+        resolved_callers(&generation, &block_g),
+        ["crates/app/src/lib.rs::f"]
+    );
+    assert_eq!(
+        resolved_callers(&generation, &module_g),
+        ["crates/app/src/lib.rs::module_scope"]
+    );
+    assert_eq!(
+        resolved_callers(&generation, &with_current),
+        [
+            "crates/app/src/lib.rs::spawn_inner",
+            "crates/app/src/lib.rs::timer"
+        ]
+    );
+    assert_eq!(
+        resolved_callers(&generation, &schedule),
+        ["crates/app/src/lib.rs::spawn_inner"]
+    );
+    // A block `use` of this file's own item keeps binding it in-file.
+    assert_eq!(
+        resolved_callers(&generation, &inner_x),
+        ["crates/app/src/lib.rs::same_file"]
+    );
+}
