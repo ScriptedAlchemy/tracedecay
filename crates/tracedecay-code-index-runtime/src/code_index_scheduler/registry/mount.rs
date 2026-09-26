@@ -10,7 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tracedecay_code_index::production::CodeIndexInterruptionV1;
+use tracedecay_code_index::production::{
+    CodeIndexInterruptionV1, CodeIndexPublicationStoreErrorV1,
+};
 use tracedecay_contracts::code_index_freshness::{
     CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexConvergenceParkedV1,
 };
@@ -18,8 +20,8 @@ use tracedecay_domain::ProjectId;
 
 use super::super::{
     CodeIndexCadenceTriggerV1, CodeIndexNoopEvidenceV1, CodeIndexReconcileOutcomeV1,
-    CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1, LatestCodeTextGenerationV1,
-    LatestCompleteCodeIndexV1, RetainedTextGenerationRestoreV1,
+    CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1, DaemonCodeIndexPublicationStoreV1,
+    LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1, RetainedTextGenerationRestoreV1,
     graph_activation::{CodeGraphActivationAuthorityV1, CodeGraphActivationPolicyV1},
     now_micros,
     reconcile_panic_guard::{
@@ -1703,18 +1705,31 @@ impl CodeIndexSchedulerRegistryV1 {
                                          the sealed generation cannot seat"
                                     );
                                 }
-                                let generation = decoder.and_then(|decoder| {
-                                    match decoder.load_active_shared() {
-                                        Ok(generation) => generation,
-                                        Err(error) => {
-                                            tracing::warn!(
-                                                event = "code_index_graph_prepare_load_failed",
-                                                error = %error,
-                                                "active generation decode failed; \
-                                                 the sealed generation cannot seat"
-                                            );
-                                            None
-                                        }
+                                // The seal released the decoded generation for
+                                // the text build. Decoding it again is charged
+                                // against the process budget, and a decode that
+                                // does not fit parks until memory is given back.
+                                let decoded = match decoder
+                                    .as_ref()
+                                    .map(DaemonCodeIndexPublicationStoreV1::load_active_shared)
+                                {
+                                    Some(Err(
+                                        CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(
+                                            detail,
+                                        ),
+                                    )) => return Ok((None, None, false, Some(detail))),
+                                    decoded => decoded,
+                                };
+                                let generation = decoded.and_then(|decoded| match decoded {
+                                    Ok(generation) => generation,
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            event = "code_index_graph_prepare_load_failed",
+                                            error = %error,
+                                            "active generation decode failed; \
+                                             the sealed generation cannot seat"
+                                        );
+                                        None
                                     }
                                 });
                                 let latest = match generation {
@@ -1770,13 +1785,31 @@ impl CodeIndexSchedulerRegistryV1 {
                                 };
                                 replay_binding
                                     .transpose()
-                                    .map(|binding| (latest, binding, roster_refusal_rebuild))
+                                    .map(|binding| (latest, binding, roster_refusal_rebuild, None))
                             }),
                             label = "daemon.code_index.graph_prepare"
                         )
                         .await
                         {
-                            Ok(Ok((latest, replay_binding, roster_refusal_rebuild))) => {
+                            Ok(Ok((_, _, _, Some(detail)))) => {
+                                park_convergence(
+                                    &worker_convergence_park,
+                                    detail.clone(),
+                                    CONVERGENCE_PARK_GRAPH_RESIDENT_MEMORY_REMEDIATION_V1,
+                                    Some(CodeIndexBuildBlockedReasonV1::ResidentMemory),
+                                    true,
+                                );
+                                worker_memory_retry.schedule(&worker_pending_wake, &worker_wake);
+                                tracing::warn!(
+                                    event = "code_index_graph_prepare_decode_refused",
+                                    published_pass,
+                                    detail = %detail,
+                                    "the sealed generation waits to decode until memory is \
+                                     given back; text serving is unaffected"
+                                );
+                                Ok((outcome, None, None))
+                            }
+                            Ok(Ok((latest, replay_binding, roster_refusal_rebuild, None))) => {
                                 if latest.is_none() {
                                     tracing::warn!(
                                         event = "code_index_graph_prepare_no_servable_generation",

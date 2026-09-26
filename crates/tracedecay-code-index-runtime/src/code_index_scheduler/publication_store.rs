@@ -4,6 +4,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs::File,
     io::{Read, Seek, SeekFrom, Write},
+    num::NonZeroU64,
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak,
@@ -25,11 +26,16 @@ use tracedecay_code_index_retention::code_index_generations::{
     try_acquire_code_generation_store_read_lock,
 };
 use tracedecay_domain::{
-    CodeGenerationId, ContentDigest, ManifestDigest, ProjectionBatchRequestV1,
-    ProjectionOperationV1, ProjectionOutcomeV1, SanitizerRevision,
+    CodeGenerationId, ContentDigest, ManifestDigest, ProjectId, ProjectionBatchRequestV1,
+    ProjectionOperationV1, ProjectionOutcomeV1, SanitizerRevision, WorktreeId,
     canonical_text::encode_tagged_lowercase_hex, sha256_hex_suffix,
 };
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, DurableFileBatch};
+use tracedecay_runtime_core::resident_memory::{
+    ProcessResidentMemoryV1, ResidentMemoryComponentIdV1, ResidentMemoryKeyV1,
+    ResidentMemoryReservationV1, ResidentOwnersV1, log_resident_owner_release_v1,
+    release_process_allocator_memory_v1, sampled_process_resident_bytes_v1,
+};
 
 use crate::code_index::{
     chunks::content_digest,
@@ -460,10 +466,40 @@ impl UndecodedActivePublicationExpectationV1 {
     }
 }
 
+/// The process authority and inventory a whole-generation decode is charged
+/// against, bound by the owning scheduler.
+#[derive(Clone)]
+pub(super) struct GenerationDecodeBudgetV1 {
+    pub(super) resident_memory: Arc<ProcessResidentMemoryV1>,
+    pub(super) resident_owners: Arc<ResidentOwnersV1>,
+    pub(super) project_id: ProjectId,
+    pub(super) worktree_id: WorktreeId,
+}
+
+const GENERATION_DECODE_RESIDENT_COMPONENT_V1: &str = "code-index-generation-decode-v1";
+
+/// The resident cost of materializing the active generation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum ActiveGenerationDecodeChargeV1 {
+    /// Already in memory, or no generation is published: nothing to decode.
+    Decoded,
+    /// This process held it before; `bytes` is its measured resident size.
+    Measured {
+        generation_id: CodeGenerationId,
+        bytes: u64,
+    },
+    /// Never held by this process, so its size is not known before decoding.
+    Unmeasured,
+}
+
 #[derive(Clone)]
 pub struct DaemonCodeIndexPublicationStoreV1 {
     cache: Arc<DecodedGenerationCacheV1>,
     active_encoded_bytes: Arc<AtomicU64>,
+    /// Resident bytes of the active generation as last installed, kept
+    /// after the decode is released: what materializing it again costs.
+    active_decode_charge: Arc<Mutex<Option<(CodeGenerationId, u64)>>>,
+    decode_admission: Arc<Mutex<Option<GenerationDecodeBudgetV1>>>,
     pub(super) seal_encoded_segment_bytes: Arc<AtomicU64>,
     pub(super) seal_existing_segment_bytes_read: Arc<AtomicU64>,
     pub(super) seal_evidence_page_count: Arc<AtomicU64>,
@@ -830,6 +866,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
         Ok(Self {
             cache: Arc::new(DecodedGenerationCacheV1::default()),
             active_encoded_bytes: Arc::new(AtomicU64::new(0)),
+            active_decode_charge: Arc::new(Mutex::new(None)),
+            decode_admission: Arc::new(Mutex::new(None)),
             seal_encoded_segment_bytes: Arc::new(AtomicU64::new(0)),
             seal_existing_segment_bytes_read: Arc::new(AtomicU64::new(0)),
             seal_evidence_page_count: Arc::new(AtomicU64::new(0)),
@@ -2132,11 +2170,14 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 epoch,
             };
         };
+        let charge = self.admit_active_decode()?;
         let decoded = self.decode_active_generation();
+        drop(charge);
         if let Ok(Some(generation)) = decoded.as_ref() {
             let mut state = self.cache.lock_state()?;
             if state.active_epoch == lease.epoch {
                 state.forget(&generation.manifest().generation_id);
+                self.record_active_decode_charge(generation);
                 state.active = Some(Arc::clone(generation));
             } else if let Some(active) = state.active.as_ref() {
                 // A publication landed while this decode ran. The newer active
@@ -2241,6 +2282,147 @@ impl DaemonCodeIndexPublicationStoreV1 {
         Ok(Some(Arc::new(generation)))
     }
 
+    pub(super) fn bind_decode_admission(&self, admission: GenerationDecodeBudgetV1) {
+        *self
+            .decode_admission
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(admission);
+    }
+
+    /// Charge a whole-generation decode against the process authority before
+    /// it runs. A generation this process held before is charged its measured
+    /// resident bytes; when they do not fit below the admission watermark,
+    /// retained state is shed and headroom re-measured once, and a decode
+    /// that still does not fit is refused typed instead of grown into the
+    /// kill line. The reservation spans the decode; afterwards the decoded
+    /// generation is measured resident like every other owner.
+    fn admit_active_decode(
+        &self,
+    ) -> Result<Option<ResidentMemoryReservationV1>, CodeIndexPublicationStoreErrorV1> {
+        let Some(admission) = self
+            .decode_admission
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+        else {
+            return Ok(None);
+        };
+        let (generation_id, requested) = match self.active_decode_charge()? {
+            ActiveGenerationDecodeChargeV1::Decoded => return Ok(None),
+            ActiveGenerationDecodeChargeV1::Unmeasured => {
+                tracing::debug!(
+                    event = "code_index_generation_decode_unmeasured",
+                    "this process never held the active generation; its first decode is not charged"
+                );
+                return Ok(None);
+            }
+            ActiveGenerationDecodeChargeV1::Measured {
+                generation_id,
+                bytes,
+            } => match NonZeroU64::new(bytes) {
+                Some(requested) => (generation_id, requested),
+                None => return Ok(None),
+            },
+        };
+        let admissible = || -> Result<(), String> {
+            let snapshot = admission.resident_memory.snapshot();
+            let pressure = admission.resident_memory.pressure();
+            let observed = sampled_process_resident_bytes_v1().map_or(0, |observed| {
+                pressure
+                    .publish_observed_resident_bytes(observed)
+                    .observed_bytes()
+                    .unwrap_or(observed)
+            });
+            let watermark = pressure.high_watermark_bytes().min(snapshot.limit_bytes);
+            let available = watermark.saturating_sub(snapshot.used_bytes.max(observed));
+            if requested.get() <= available {
+                Ok(())
+            } else {
+                Err(format!(
+                    "decoding generation {generation_id} needs {} resident bytes; {available} are \
+                     available below the {watermark}-byte admission watermark",
+                    requested.get()
+                ))
+            }
+        };
+        if let Err(detail) = admissible() {
+            let released = admission
+                .resident_owners
+                .shed(requested.get(), std::time::Instant::now());
+            for release in &released {
+                log_resident_owner_release_v1(release);
+            }
+            if released.is_empty() {
+                return Err(CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(
+                    detail,
+                ));
+            }
+            let trim = release_process_allocator_memory_v1();
+            tracing::info!(
+                event = "code_index_generation_decode_shed_retained_state",
+                released_owners = released.len(),
+                trimmed_bytes = trim.released_bytes(),
+                "generation decode shed retained state before re-measuring headroom"
+            );
+            admissible().map_err(CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused)?;
+        }
+        let component = ResidentMemoryComponentIdV1::new(GENERATION_DECODE_RESIDENT_COMPONENT_V1)
+            .map_err(Self::unavailable)?;
+        admission
+            .resident_memory
+            .reserve(
+                ResidentMemoryKeyV1 {
+                    project_id: admission.project_id,
+                    worktree_id: admission.worktree_id,
+                    generation_id,
+                    component,
+                },
+                requested,
+            )
+            .map(Some)
+            .map_err(|error| {
+                CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(error.to_string())
+            })
+    }
+
+    fn record_active_decode_charge(&self, generation: &CodeIndexPublishedGenerationV1) {
+        *self
+            .active_decode_charge
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some((
+            generation.manifest().generation_id.clone(),
+            generation.retained_bytes(),
+        ));
+    }
+
+    /// What reading the whole active generation into memory costs now:
+    /// nothing when it is already decoded, its measured resident bytes when
+    /// this process has held it before, unmeasured otherwise.
+    pub(super) fn active_decode_charge(
+        &self,
+    ) -> Result<ActiveGenerationDecodeChargeV1, CodeIndexPublicationStoreErrorV1> {
+        if self.cache.lock_state()?.active.is_some() {
+            return Ok(ActiveGenerationDecodeChargeV1::Decoded);
+        }
+        let Some(pointer) = self.read_publication_pointer()? else {
+            return Ok(ActiveGenerationDecodeChargeV1::Decoded);
+        };
+        let charge = self
+            .active_decode_charge
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .filter(|(generation, _)| generation.as_str() == pointer.generation_id)
+            .map(|(generation, bytes)| (generation.clone(), *bytes));
+        Ok(match charge {
+            Some((generation_id, bytes)) => ActiveGenerationDecodeChargeV1::Measured {
+                generation_id,
+                bytes,
+            },
+            None => ActiveGenerationDecodeChargeV1::Unmeasured,
+        })
+    }
+
     pub(super) fn active_encoded_bytes(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.active_encoded_bytes)
     }
@@ -2294,6 +2476,10 @@ impl DaemonCodeIndexPublicationStoreV1 {
             state.decoded.clear();
             state.active_epoch = state.active_epoch.wrapping_add(1);
         }
+        *self
+            .active_decode_charge
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
         self.cache.ready.notify_all();
         *self
             .pointer_memo
@@ -2832,6 +3018,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                 // deadline. Install the built generation in both dispositions.
                 self.active_encoded_bytes
                     .store(generation_size, Ordering::Release);
+                self.record_active_decode_charge(&generation);
                 state.active = Some(generation);
             }
             CodeIndexPublicationDispositionV1::RetainedHistory => {
