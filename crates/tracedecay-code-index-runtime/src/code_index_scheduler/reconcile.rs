@@ -765,12 +765,7 @@ pub struct CodeIndexWorktreeSchedulerV1 {
     /// refused. Standalone opens get a private empty inventory; the registry
     /// rebinds its inventory at mount.
     resident_owners: Arc<ResidentOwnersV1>,
-    /// This scheduler's own worker runtime when no composition root installed
-    /// the process plan. In-process test schedulers are separate owners, so
-    /// none may meter its work against another's plan.
-    #[cfg(any(test, feature = "test-helpers"))]
-    owned_worker_runtime:
-        std::sync::OnceLock<tracedecay_code_index::parallelism::CodeIndexWorkerRuntimeV1>,
+    pub(super) worker_runtime: SchedulerWorkerRuntimeV1,
     pub(super) publication: DaemonCodeIndexPublicationStoreV1,
     pub(super) production_config: CodeIndexProductionConfigV1,
     pub(super) owner: ProductionOwner,
@@ -836,6 +831,7 @@ pub struct HistoricalCodeIndexGenerationOwnerV1 {
     store_root: PathBuf,
     resident_memory: Arc<ProcessResidentMemoryV1>,
     resident_owners: Arc<ResidentOwnersV1>,
+    worker_runtime: SchedulerWorkerRuntimeV1,
     pub(super) project_id: ProjectId,
     worktree_id: WorktreeId,
     shutting_down: Arc<AtomicBool>,
@@ -873,6 +869,7 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
                 &self.publication,
                 &self.resident_memory,
                 &self.resident_owners,
+                &self.worker_runtime,
                 &self.project_id,
                 &self.worktree_id,
             ),
@@ -1091,8 +1088,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 detected_process_resident_memory_limit_v1(),
             )),
             resident_owners: Arc::new(ResidentOwnersV1::new(RESIDENT_OWNER_IDLE_WINDOW_V1)),
-            #[cfg(any(test, feature = "test-helpers"))]
-            owned_worker_runtime: std::sync::OnceLock::new(),
+            worker_runtime: SchedulerWorkerRuntimeV1::default(),
             publication,
             production_config,
             owner,
@@ -1140,7 +1136,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         runtime: tracedecay_code_index::parallelism::CodeIndexWorkerRuntimeV1,
     ) {
         assert!(
-            self.owned_worker_runtime.set(runtime).is_ok(),
+            self.worker_runtime.owned.set(runtime).is_ok(),
             "a scheduler binds one worker runtime"
         );
     }
@@ -1181,6 +1177,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             store_root: self.store_root.clone(),
             resident_memory: Arc::clone(&self.resident_memory),
             resident_owners: Arc::clone(&self.resident_owners),
+            worker_runtime: self.worker_runtime.clone(),
             project_id: self.project_id.clone(),
             worktree_id: self.worktree_id.clone(),
             shutting_down: Arc::clone(&self.shutting_down),
@@ -1311,42 +1308,14 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     /// The worker runtime this scheduler's build runs under, entered on the
-    /// calling thread for the returned guard's lifetime. Production uses the
-    /// composition root's process plan and enters nothing.
+    /// calling thread for the returned guard's lifetime.
     pub(super) fn ensure_worker_plan(
         &self,
     ) -> Result<
         Option<tracedecay_code_index::parallelism::EnteredCodeIndexWorkerRuntimeV1>,
         CodeIndexSchedulerErrorV1,
     > {
-        #[cfg(any(test, feature = "test-helpers"))]
-        {
-            if let Some(runtime) = self.owned_worker_runtime.get() {
-                return Ok(Some(runtime.enter()));
-            }
-        }
-        if tracedecay_code_index::parallelism::installed_worker_status().is_some() {
-            return Ok(None);
-        }
-        // The shared scheduler test sources also compile into the composition
-        // root's test binary, where this crate is a dependency built with
-        // `test-helpers` instead of `cfg(test)`; both spellings are the same
-        // fixture surface, so the owned-runtime fallback must cover both.
-        #[cfg(any(test, feature = "test-helpers"))]
-        {
-            let snapshot = self.resident_memory.snapshot();
-            let runtime = tracedecay_code_index::parallelism::CodeIndexWorkerRuntimeV1::build(
-                tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::Automatic {},
-                snapshot.limit_bytes.saturating_sub(snapshot.used_bytes),
-            )?;
-            Ok(Some(
-                self.owned_worker_runtime.get_or_init(|| runtime).enter(),
-            ))
-        }
-        #[cfg(not(any(test, feature = "test-helpers")))]
-        {
-            Err(CodeIndexSchedulerErrorV1::WorkerPlanNotInstalled)
-        }
+        self.worker_runtime.enter(&self.resident_memory)
     }
 
     #[cfg(test)]
@@ -2373,6 +2342,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             &self.publication,
             &self.resident_memory,
             &self.resident_owners,
+            &self.worker_runtime,
             &self.project_id,
             &self.worktree_id,
         );
@@ -3520,6 +3490,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                     &self.publication,
                     &self.resident_memory,
                     &self.resident_owners,
+                    &self.worker_runtime,
                     &self.project_id,
                     &self.worktree_id,
                 ),
@@ -4138,5 +4109,50 @@ mod retained_empty_seat_tests {
         assert!(!retained_empty_seat_settles_source(true, false));
         assert!(!retained_empty_seat_settles_source(false, false));
         assert!(retained_empty_seat_settles_source(true, true));
+    }
+}
+
+/// The worker runtime one scheduler and every text generation it binds run
+/// under. Production enters nothing: the composition root's process plan
+/// applies. A scheduler without a process plan (in-process test fixtures, each
+/// a separate owner) builds and enters its own runtime, so no owner meters its
+/// work against another's plan.
+#[derive(Clone, Default)]
+pub(super) struct SchedulerWorkerRuntimeV1 {
+    owned: Arc<std::sync::OnceLock<tracedecay_code_index::parallelism::CodeIndexWorkerRuntimeV1>>,
+}
+
+impl SchedulerWorkerRuntimeV1 {
+    pub(super) fn enter(
+        &self,
+        resident_memory: &ProcessResidentMemoryV1,
+    ) -> Result<
+        Option<tracedecay_code_index::parallelism::EnteredCodeIndexWorkerRuntimeV1>,
+        CodeIndexSchedulerErrorV1,
+    > {
+        if let Some(runtime) = self.owned.get() {
+            return Ok(Some(runtime.enter()));
+        }
+        if tracedecay_code_index::parallelism::installed_worker_status().is_some() {
+            return Ok(None);
+        }
+        // The shared scheduler test sources also compile into the composition
+        // root's test binary, where this crate is a dependency built with
+        // `test-helpers` instead of `cfg(test)`; both spellings are the same
+        // fixture surface, so the owned-runtime fallback must cover both.
+        #[cfg(any(test, feature = "test-helpers"))]
+        {
+            let snapshot = resident_memory.snapshot();
+            let runtime = tracedecay_code_index::parallelism::CodeIndexWorkerRuntimeV1::build(
+                tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::Automatic {},
+                snapshot.limit_bytes.saturating_sub(snapshot.used_bytes),
+            )?;
+            Ok(Some(self.owned.get_or_init(|| runtime).enter()))
+        }
+        #[cfg(not(any(test, feature = "test-helpers")))]
+        {
+            let _ = resident_memory;
+            Err(CodeIndexSchedulerErrorV1::WorkerPlanNotInstalled)
+        }
     }
 }

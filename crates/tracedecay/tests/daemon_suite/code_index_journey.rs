@@ -294,6 +294,7 @@ async fn tool_within(
     }
 }
 
+#[cfg(all(unix, feature = "test-transport"))]
 pub async fn status(socket: &Path, handshake: &DaemonHandshake) -> Value {
     tool(
         socket,
