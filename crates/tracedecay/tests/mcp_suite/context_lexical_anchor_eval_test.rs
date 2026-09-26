@@ -396,8 +396,7 @@ fn single_matched_receipt(payload: &Value) -> (u64, u64, Vec<(String, u64)>) {
 
 #[tokio::test]
 async fn context_returns_a_rare_anchor_site_over_an_exact_word_neighborhood() {
-    let production =
-        production_composition_fixture_with_sources(write_update_anchor_project).await;
+    let production = production_composition_fixture_with_sources(write_update_anchor_project).await;
     let server = production
         .harness
         .server(&production.project_root)

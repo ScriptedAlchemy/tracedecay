@@ -615,21 +615,29 @@ impl DeterministicCodeChunker {
         grain: CodeSearchChunkGrainV1,
         split_path: Vec<u32>,
     ) -> Result<CodeSearchChunkId, ChunkingFailureV1> {
-        let identity = ChunkLogicalIdentityV1 {
+        code_chunk_id(ChunkLogicalIdentityV1 {
             repository: self.repository.clone(),
             file_identity: file_identity.clone(),
             symbol_identity: symbol_identity.cloned(),
             grain,
             split_path,
             chunker_revision: self.chunker_revision.clone(),
-        };
-        let digest = canonical_digest(CHUNK_IDENTITY_SEPARATOR, &identity)?;
-        CodeSearchChunkId::new(format!("chunk.v1.{digest}")).map_err(|error| {
-            ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(
-                error,
-            ))
         })
     }
+}
+
+/// The one authority for the logical chunk identity → chunk id binding.
+/// Chunk planning mints ids through it, and sealed segments recompute the
+/// ids they omit here so the recipe cannot fork.
+pub(crate) fn code_chunk_id(
+    identity: ChunkLogicalIdentityV1,
+) -> Result<CodeSearchChunkId, ChunkingFailureV1> {
+    let digest = canonical_digest(CHUNK_IDENTITY_SEPARATOR, &identity)?;
+    CodeSearchChunkId::new(format!("chunk.v1.{digest}")).map_err(|error| {
+        ChunkingFailureV1::NonCanonicalIdentity(crate::noncanonical::noncanonical_from_domain(
+            error,
+        ))
+    })
 }
 
 /// The one authority for the `(repository, logical path)` → file identity
@@ -2186,10 +2194,12 @@ fn resolve_file_references(
             && typescript_imports
                 .get(reference.reference_name.as_str())
                 .is_some_and(|namespaces| {
-                    namespaces.iter().any(|namespace| match reference.reference_kind {
-                        EdgeKind::Calls => *namespace == ImportNamespaceV1::Value,
-                        _ => *namespace != ImportNamespaceV1::SideEffect,
-                    })
+                    namespaces
+                        .iter()
+                        .any(|namespace| match reference.reference_kind {
+                            EdgeKind::Calls => *namespace == ImportNamespaceV1::Value,
+                            _ => *namespace != ImportNamespaceV1::SideEffect,
+                        })
                 });
         let from_span = by_node_id
             .get(reference.from_node_id.as_str())

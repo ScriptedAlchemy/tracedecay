@@ -456,7 +456,7 @@ async fn agent_usage_summary(
     })
 }
 
-fn managed_agent_label_for_session(
+pub(super) fn managed_agent_label_for_session(
     host_io: &HostIo,
     agent_id: &str,
     metadata_json: &str,

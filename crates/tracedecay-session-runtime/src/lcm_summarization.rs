@@ -112,6 +112,22 @@ fn summarizer_executables(
     }
 }
 
+/// The summarizer binding retained convergence currently runs under for this
+/// shard, as the durable identity parked sessions settle against.
+///
+/// An unpublished pin is a binding of its own, so its publication counts as a
+/// change exactly like configuring an executable does.
+pub(super) fn summarizer_binding_identity(
+    database: &RegisteredGlobalDb,
+) -> Result<String, LcmError> {
+    match summarizer_executables(database) {
+        Ok(executables) => serde_json::to_string(&executables)
+            .map_err(|error| LcmError::Db(format!("encode LCM summarizer binding: {error}"))),
+        Err(SummaryResolutionError::Unavailable(reason)) => Ok(reason.to_owned()),
+        Err(SummaryResolutionError::Storage(error)) => Err(error),
+    }
+}
+
 /// Finds evidence that the host itself already produced an authoritative
 /// compaction summary. Required retained pages use the persisted predecessor
 /// range for an exact indexed lookup; an unbound status read inspects only the

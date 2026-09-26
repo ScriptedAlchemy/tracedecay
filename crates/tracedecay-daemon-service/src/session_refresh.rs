@@ -22,8 +22,8 @@ use tracedecay_session_memory::session::{
     SessionRefreshCoverageView, SessionRefreshFrontierView, SessionRefreshHandle,
     SessionRefreshOutcome, SessionRefreshProgressView, SessionRefreshReceiptView,
     SessionRefreshSchedulerError, SessionRefreshService, SessionRefreshServiceOutcome,
-    SessionRefreshServicePort, SessionRequestBinding, SessionScopeAuthorizationRequest,
-    SessionScopeAuthorizer, utc_micros_value,
+    SessionRefreshServicePort, SessionRefreshUnavailable, SessionRequestBinding,
+    SessionScopeAuthorizationRequest, SessionScopeAuthorizer, utc_micros_value,
 };
 use tracedecay_session_temporal_store::SessionTemporalStore;
 
@@ -121,11 +121,16 @@ impl DaemonSessionRefreshService {
         &self,
         command: SessionRefreshCommand,
     ) -> SessionRefreshServiceOutcome {
-        let Ok(configuration) = SessionRefreshConfiguration::new(
+        let configuration = match SessionRefreshConfiguration::new(
             SESSION_REFRESH_PROJECTOR_VERSION,
             SESSION_REFRESH_CONFIG_VERSION,
-        ) else {
-            return SessionRefreshServiceOutcome::Unavailable;
+        ) {
+            Ok(configuration) => configuration,
+            Err(error) => {
+                return SessionRefreshServiceOutcome::Unavailable {
+                    reason: SessionRefreshUnavailable::Configuration(error).to_string(),
+                };
+            }
         };
         let service = SessionRefreshService::new(
             DaemonSessionRefreshAuthorizer {
@@ -233,7 +238,11 @@ impl DaemonSessionRefreshService {
             SessionRefreshOutcome::DeadlineExceeded => {
                 SessionRefreshServiceOutcome::DeadlineExceeded
             }
-            SessionRefreshOutcome::Unavailable => SessionRefreshServiceOutcome::Unavailable,
+            SessionRefreshOutcome::Unavailable(cause) => {
+                SessionRefreshServiceOutcome::Unavailable {
+                    reason: cause.to_string(),
+                }
+            }
         }
     }
 }

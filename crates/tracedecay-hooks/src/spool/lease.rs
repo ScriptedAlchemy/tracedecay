@@ -2,10 +2,8 @@ use std::fs::OpenOptions;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::lock_admission::{LockAdmissionError, lock_until};
-
 use tracedecay_domain::UtcMicros;
-use tracedecay_private_fs::FileLease;
+use tracedecay_private_fs::{FileLease, LockAdmissionError, lock_until};
 
 use super::types::HookSpoolWriterLeaseV1;
 use super::{HookSpoolError, HookSpoolV1, lease_path, next_token, validate_regular_or_missing};
@@ -83,7 +81,7 @@ pub(super) fn acquire_lease_bounded(
         Some(wait_budget) => {
             lock_until(&file, Instant::now() + wait_budget).map_err(|error| match error {
                 LockAdmissionError::TimedOut => HookSpoolError::AdmissionTimedOut,
-                LockAdmissionError::Io => HookSpoolError::Io,
+                LockAdmissionError::Io(_) => HookSpoolError::Io,
             })?;
         }
         None => file.try_lock().map_err(map_try_lock_error)?,

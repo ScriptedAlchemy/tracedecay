@@ -12,7 +12,7 @@ import {
   type EvidenceGrade,
   type SourceClass,
 } from './evidence.ts';
-import { laneServes, type JourneyLaneId, type JourneyModel } from './journey.ts';
+import { laneServes, type JourneyEpisode, type JourneyLaneId, type JourneyModel } from './journey.ts';
 import { attentionSourceLabel, evidenceIdentity } from './PullRequestInspector.tsx';
 import { laneStateDetail } from './ProjectionLedger.tsx';
 import { attentionCode, headJoin, isVerificationSource } from './rendererModel.ts';
@@ -158,8 +158,7 @@ export function buildTransit(
     if (found === null || laneServes(found.state)) return [];
     return [`${label} · ${found.state.kind.replaceAll('_', ' ')} · ${laneStateDetail(found.state) ?? found.state.detail}`];
   };
-  const laneItems = (id: JourneyLaneId): TransitItem[] =>
-    (lane(id)?.episodes ?? []).map((episode) => ({
+  const episodeItem = (episode: JourneyEpisode): TransitItem => ({
       id: episode.id,
       label: episode.label,
       detail: episode.detail,
@@ -169,7 +168,8 @@ export function buildTransit(
       timeKind: episode.timeKind,
       episodeId: episode.id,
       attention: null,
-    }));
+    });
+  const laneItems = (id: JourneyLaneId): TransitItem[] => (lane(id)?.episodes ?? []).map(episodeItem);
 
   // Agent session: only served membership bases; reasoning is never drawn.
   const joined = edges.filter((edge) => membershipLane(edge.basis.kind) !== null);
@@ -184,19 +184,27 @@ export function buildTransit(
     episodeId: episodeId(`${membershipLane(edge.basis.kind)}:${edge.id}`),
     attention: null,
   }));
+  const usageEpisodes = (lane('agents')?.episodes ?? []).filter((episode) => episode.ref.kind === 'agent_usage');
+  sessionItems.push(...usageEpisodes.map(episodeItem));
   const branches: TransitBranch[] = (['objective', 'session', 'agent', 'handoff'] as const).map((kind) => ({
     kind,
     identities: [
-      ...new Set(joined.filter((edge) => branchKind(edge.basis.kind) === kind).map((edge) => membershipIdentity(edge.basis))),
+      ...new Set([
+        ...joined.filter((edge) => branchKind(edge.basis.kind) === kind).map((edge) => membershipIdentity(edge.basis)),
+        ...(kind === 'agent' ? usageEpisodes.map((episode) => episode.label) : []),
+      ]),
     ].sort(),
   }));
   const session = station(
     'session',
     'Agent session',
     sessionItems,
-    sessionItems.length === 0
-      ? ['No session–Git relation, agent attribution, handoff or Work objective is joined to this pull request.', 'Agent reasoning is not reconstructed.']
-      : ['Persisted joins only; private agent reasoning is unavailable.'],
+    [
+      ...(sessionItems.length === 0
+        ? ['No session–Git relation, agent attribution, handoff or Work objective is joined to this pull request.', 'Agent reasoning is not reconstructed.']
+        : ['Persisted joins only; private agent reasoning is unavailable.']),
+      ...laneReason('agents', 'Agent usage'),
+    ],
     'no_evidence',
     branches,
   );

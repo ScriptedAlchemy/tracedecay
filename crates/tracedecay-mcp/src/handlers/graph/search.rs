@@ -12,17 +12,16 @@ use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1}
 use tracedecay_contracts::retrieval::{
     ContextCodeBlockV1, ContextLexicalAnchorV1, ContextModeV1, ContextResultV1,
     ContextSearchMatchV1, ContextSurfaceRequestV1, LexicalAnchorDropReasonV1, RedundancyScopeV1,
-    RedundancySurfaceRequestV1,
-    RenamePreviewNodeV1, RenamePreviewPrimitiveOutcomeV1, RenamePreviewPrimitiveRequestV1,
-    RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1, RenamePreviewTextOnlyMatchV1,
-    SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1, SimilarOccurrenceV1, SimilarResultV1,
-    SimilarSurfaceRequestV1, SimilarTargetV1,
+    RedundancySurfaceRequestV1, RenamePreviewNodeV1, RenamePreviewPrimitiveOutcomeV1,
+    RenamePreviewPrimitiveRequestV1, RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1,
+    RenamePreviewTextOnlyMatchV1, SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1,
+    SimilarOccurrenceV1, SimilarResultV1, SimilarSurfaceRequestV1, SimilarTargetV1,
 };
 use tracedecay_domain::ExactClass;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_query::retrieval::lexical::LexicalAnchorOutcomeV1;
 #[cfg(test)]
 use tracedecay_query::retrieval::lexical::LexicalRoutingV1;
-use tracedecay_query::retrieval::lexical::LexicalAnchorOutcomeV1;
 
 #[cfg(test)]
 use crate::context_headings::CONTEXT_SEEN_NODE_IDS_LABEL;

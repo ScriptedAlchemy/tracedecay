@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{CapabilityId, ManifestDigest, UtcMicros};
 
-use crate::authorization::{PolicyIdentifierV1, policy_digest};
+use crate::identity::{PolicyIdentifierV1, policy_digest};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]

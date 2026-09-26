@@ -24,6 +24,8 @@ mod code_index_ignored_dependencies_test;
 mod code_index_journey;
 #[cfg(unix)]
 mod dirty_worktree_symbol_reads_test;
+#[cfg(target_os = "linux")]
+mod fixture_daemon_lifetime_test;
 #[cfg(feature = "test-transport")]
 mod git_watch_test;
 #[cfg(all(unix, feature = "test-transport"))]

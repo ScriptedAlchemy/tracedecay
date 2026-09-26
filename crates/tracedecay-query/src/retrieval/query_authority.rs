@@ -13,8 +13,8 @@ use tracedecay_domain::{
     CalibrationProfileId, ComponentRevision, DiversityPolicy, EphemeralSanitizedQueryViewV1,
     FusionProfile, PrivacyDomainId, QueryDigest, QueryFallbackSubpayload, RetrievalAnchorId,
     RetrievalContractError, RetrievalCursor, RetrievalCursorKeyId, RetrievalError,
-    RetrievalRequest, RetrieverBatch,
-    RetrieverKind, RetrieverOutcome, ScoreDomainCalibrationV1, ScoreDomainId,
+    RetrievalRequest, RetrieverBatch, RetrieverKind, RetrieverOutcome, ScoreDomainCalibrationV1,
+    ScoreDomainId,
 };
 use tracedecay_temporal_query::ranking::NORMALIZED_SCORE_CEILING_MICROS;
 

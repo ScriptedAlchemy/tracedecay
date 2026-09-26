@@ -35,9 +35,6 @@ fn contract(message: &str) -> CodeIndexProductionErrorV1 {
 pub(super) enum CanonicalArrayOrderV1 {
     /// Emit the elements in their serialized order.
     AsIs,
-    /// Sort by one direct string member; a missing or non-string member sorts
-    /// first, matching `Option<&str>` ordering in the replaced comparator.
-    ByStringMember(&'static str),
     /// Sort by each element's own canonical encoding, matching the replaced
     /// `sort_by_cached_key(Value::to_string)` comparator.
     ByEncodedBytes,
@@ -332,39 +329,6 @@ impl<'a> JsonScanV1<'a> {
     }
 }
 
-/// The direct string member `name` of the object starting at `start`, or
-/// `None` when it is absent or is not a string.
-fn direct_string_member<'a>(
-    input: &'a [u8],
-    start: usize,
-    name: &str,
-) -> Result<Option<Cow<'a, str>>, CodeIndexProductionErrorV1> {
-    let mut scan = JsonScanV1 { input, pos: start };
-    if scan.peek()? != b'{' {
-        return Ok(None);
-    }
-    scan.pos += 1;
-    if scan.peek()? == b'}' {
-        return Ok(None);
-    }
-    loop {
-        let key_raw = scan.read_string_raw()?;
-        scan.expect(b':')?;
-        let matched = unescape_json_string(key_raw)? == name;
-        if matched && scan.peek()? == b'"' {
-            let value_raw = scan.read_string_raw()?;
-            return unescape_json_string(value_raw).map(Some);
-        }
-        if matched {
-            return Ok(None);
-        }
-        scan.skip_value(0)?;
-        if !scan.step_container(b'}')? {
-            return Ok(None);
-        }
-    }
-}
-
 struct ObjectMemberV1<'a> {
     key_text: Cow<'a, str>,
     key_raw: &'a [u8],
@@ -521,29 +485,6 @@ impl<'a, P: CanonicalPolicyV1> CanonicalPassV1<'a, '_, P> {
                         break;
                     }
                 }
-            }
-            CanonicalArrayOrderV1::ByStringMember(name) => {
-                let mut elements: Vec<(Option<Cow<'a, str>>, usize)> = Vec::new();
-                loop {
-                    self.scan.skip_whitespace();
-                    let start = self.scan.pos;
-                    self.scan.skip_value(depth)?;
-                    let key = direct_string_member(self.scan.input, start, name)?;
-                    elements.push((key, start));
-                    if !self.scan.step_container(b']')? {
-                        break;
-                    }
-                }
-                let resume = self.scan.pos;
-                elements.sort_by(|left, right| left.0.cmp(&right.0));
-                for (index, (_, start)) in elements.iter().enumerate() {
-                    if index > 0 {
-                        out.push(b',');
-                    }
-                    self.scan.pos = *start;
-                    self.write_value(field, depth + 1, out)?;
-                }
-                self.scan.pos = resume;
             }
             CanonicalArrayOrderV1::ByEncodedBytes => {
                 let mut scratch = std::mem::take(&mut self.scratch);
@@ -704,23 +645,5 @@ mod tests {
             .expect_err("trailing bytes must be refused");
 
         assert!(error.to_string().contains("trailing bytes"));
-    }
-
-    #[test]
-    fn direct_string_member_reads_only_string_values() {
-        let object = br#"{"identity":"alpha","other":{"identity":"nested"},"number":3}"#;
-
-        assert_eq!(
-            direct_string_member(object, 0, "identity").expect("member"),
-            Some(Cow::Borrowed("alpha"))
-        );
-        assert_eq!(
-            direct_string_member(object, 0, "number").expect("member"),
-            None
-        );
-        assert_eq!(
-            direct_string_member(object, 0, "missing").expect("member"),
-            None
-        );
     }
 }

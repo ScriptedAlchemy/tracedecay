@@ -13,6 +13,7 @@ use crate::response_handles::{
     store_response_handle,
 };
 use tracedecay_daemon_protocol::{RequestedOutputFormat, requested_output_format};
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_mcp_catalog::MAX_RESPONSE_CHARS;
 use tracedecay_runtime_core::text::utf8_prefix_at_or_before;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
@@ -380,6 +381,25 @@ fn run_blocking_handle_store<T>(work: impl FnOnce() -> T) -> T {
     }
 }
 
+/// The adapter records the full typed error in internal telemetry. Public
+/// output must not disclose project-local filesystem paths.
+fn handle_store_failure_status(error: &TraceDecayError) -> Value {
+    if matches!(error, TraceDecayError::SyncLock { .. }) {
+        return serde_json::json!({
+            "reason_code": "handle_store_busy",
+            "message": "The local response-handle cache stayed busy with other writers past its admission deadline, so no retrieval handle is available.",
+            "retryable": true,
+            "retry_instruction": "Re-run the original MCP tool to regenerate the full response and a fresh handle."
+        });
+    }
+    serde_json::json!({
+        "reason_code": "handle_store_failed",
+        "message": "The full response could not be cached locally, so no retrieval handle is available.",
+        "retryable": true,
+        "retry_instruction": "Fix the local project cache path or filesystem error, then re-run the original MCP tool to regenerate the full response and a fresh handle."
+    })
+}
+
 fn prepare_truncated_response_handle(
     response_handle_root: Option<&Path>,
     text: &str,
@@ -393,16 +413,9 @@ fn prepare_truncated_response_handle(
                 record: Some(record),
                 unavailable: None,
             },
-            // The adapter records the full typed error in internal telemetry.
-            // Public output must not disclose project-local filesystem paths.
-            Err(_) => TruncatedResponseHandle {
+            Err(error) => TruncatedResponseHandle {
                 record: None,
-                unavailable: Some(serde_json::json!({
-                    "reason_code": "handle_store_failed",
-                    "message": "The full response could not be cached locally, so no retrieval handle is available.",
-                    "retryable": true,
-                    "retry_instruction": "Fix the local project cache path or filesystem error, then re-run the original MCP tool to regenerate the full response and a fresh handle."
-                })),
+                unavailable: Some(handle_store_failure_status(&error)),
             },
         }
     } else {

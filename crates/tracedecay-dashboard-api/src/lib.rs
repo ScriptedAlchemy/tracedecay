@@ -132,6 +132,7 @@ pub mod code_read_api;
 pub mod config;
 #[doc(hidden)]
 pub mod contract_schema;
+mod delivery_agent_usage;
 mod delivery_api;
 pub use delivery_api::{
     DashboardDeliveryProjectV1, DashboardDeliveryReadFutureV1, DashboardDeliveryReadPortV1,

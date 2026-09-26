@@ -119,7 +119,14 @@ pub(crate) fn spawn_dashboard_server_with_host_runtime(
     project_graphs: tracedecay_dashboard_api::DashboardTestProjectGraphsV1,
     port: u16,
 ) -> DashboardServer {
-    spawn_dashboard_server_with_runner(cg, Some((host_runtime, project_graphs)), false, None, port)
+    spawn_dashboard_server_with_runner(
+        cg,
+        Some((host_runtime, project_graphs)),
+        false,
+        None,
+        None,
+        port,
+    )
 }
 
 pub(crate) fn spawn_dashboard_server_with_configuration_runtime(
@@ -128,7 +135,14 @@ pub(crate) fn spawn_dashboard_server_with_configuration_runtime(
     project_graphs: tracedecay_dashboard_api::DashboardTestProjectGraphsV1,
     port: u16,
 ) -> DashboardServer {
-    spawn_dashboard_server_with_runner(cg, Some((host_runtime, project_graphs)), true, None, port)
+    spawn_dashboard_server_with_runner(
+        cg,
+        Some((host_runtime, project_graphs)),
+        true,
+        None,
+        None,
+        port,
+    )
 }
 
 /// Test-only mount point for a fake `DashboardDeliveryReadPortV1` and a fake
@@ -149,6 +163,9 @@ fn spawn_dashboard_server_with_runner(
     )>,
     mount_configuration_runtime: bool,
     delivery_authority: Option<FakeDeliveryAuthority>,
+    git_correlation_authority: Option<
+        Arc<dyn tracedecay_dashboard_api::DashboardGitCorrelationReadPortV1>,
+    >,
     port: u16,
 ) -> DashboardServer {
     let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -180,6 +197,12 @@ fn spawn_dashboard_server_with_runner(
                 }) => authority
                     .with_delivery_read_authority(delivery_read_authority)
                     .with_code_index_freshness_reader(code_index_freshness_reader),
+                None => authority,
+            };
+            let authority = match git_correlation_authority {
+                Some(git_correlation) => {
+                    authority.with_git_correlation_read_authority(git_correlation)
+                }
                 None => authority,
             };
             let result = dashboard::run_until_shutdown_for_tests_with_host_admission(
@@ -904,8 +927,29 @@ pub(crate) async fn start_dashboard_retained_memory_fixture() -> DashboardFixtur
 pub(crate) async fn start_dashboard_fixture_with_delivery_authority(
     delivery_authority: FakeDeliveryAuthority,
 ) -> DashboardFixture {
-    start_dashboard_fixture_with_options_and_delivery(false, false, false, Some(delivery_authority))
-        .await
+    start_dashboard_fixture_with_options_and_delivery(
+        false,
+        false,
+        false,
+        Some(delivery_authority),
+        None,
+    )
+    .await
+}
+
+/// Starts a session-read fixture whose Loom git-correlation read goes through
+/// `git_correlation_authority` instead of the registered graph adapter.
+pub(crate) async fn start_dashboard_fixture_with_git_correlation_authority(
+    git_correlation_authority: Arc<dyn tracedecay_dashboard_api::DashboardGitCorrelationReadPortV1>,
+) -> DashboardFixture {
+    start_dashboard_fixture_with_options_and_delivery(
+        false,
+        false,
+        false,
+        None,
+        Some(git_correlation_authority),
+    )
+    .await
 }
 
 async fn start_dashboard_fixture_with_options(
@@ -918,6 +962,7 @@ async fn start_dashboard_fixture_with_options(
         seed_memory,
         mount_configuration_runtime,
         None,
+        None,
     )
     .await
 }
@@ -927,6 +972,9 @@ async fn start_dashboard_fixture_with_options_and_delivery(
     seed_memory: bool,
     mount_configuration_runtime: bool,
     delivery_authority: Option<FakeDeliveryAuthority>,
+    git_correlation_authority: Option<
+        Arc<dyn tracedecay_dashboard_api::DashboardGitCorrelationReadPortV1>,
+    >,
 ) -> DashboardFixture {
     let tmp = tempdir_or_panic();
     let tmp_root = tmp
@@ -977,6 +1025,7 @@ async fn start_dashboard_fixture_with_options_and_delivery(
         Some((Arc::clone(&host_runtime), project_graphs.clone())),
         mount_configuration_runtime,
         delivery_authority,
+        git_correlation_authority,
         port,
     );
 

@@ -20,8 +20,8 @@
 //!    them (see [`identity_field`]); the
 //!    classification is reset at every object member and inherited through
 //!    arrays.
-//! 4. **`artifacts.symbols` is stably sorted by its `identity` member**, with
-//!    a missing or non-string member ordering first.
+//! 4. **`artifacts.symbols` is in symbol identity order**, serialized that
+//!    way, which is also the order of the segment's symbol keys.
 //! 5. **`artifacts.edges` and `artifacts.unresolved_references` are sorted by
 //!    each element's own canonical encoding**, byte-wise, the shipped
 //!    comparator was `sort_by_cached_key(Value::to_string)`.
@@ -73,7 +73,7 @@ use super::*;
 /// stored as a raw DEFLATE stream of its canonical JSON. Only generations
 /// of the current manifest revision address segments, so earlier segment
 /// revisions are never read.
-const FILE_SEGMENT_FORMAT_REVISION: u32 = 5;
+const FILE_SEGMENT_FORMAT_REVISION: u32 = 6;
 /// The zlib default. Changing it changes stored bytes and therefore every
 /// segment's content address, which only costs one generation's reuse.
 const FILE_SEGMENT_COMPRESSION_LEVEL: u32 = 6;
@@ -483,9 +483,6 @@ impl CanonicalPolicyV1 for FileSegmentEncodePolicyV1<'_> {
     fn array_order(&self, path: &[&[u8]]) -> CanonicalArrayOrderV1 {
         if path.len() != 2 || path[0] != b"artifacts".as_slice() {
             return CanonicalArrayOrderV1::AsIs;
-        }
-        if path[1] == b"symbols".as_slice() {
-            return CanonicalArrayOrderV1::ByStringMember("identity");
         }
         if path[1] == b"edges".as_slice() || path[1] == b"unresolved_references".as_slice() {
             return CanonicalArrayOrderV1::ByEncodedBytes;
@@ -1253,7 +1250,7 @@ fn decode_verified_file_segment(
         "code_index.restore.segment_typed_deserialize_expand",
         serde_json::from_slice::<PersistedFileGenerationArtifactsV2>(restored)
             .map_err(payload_decoding_failed)
-            .and_then(|file| file.expand(scope))
+            .and_then(|file| file.expand(scope, &symbol_occurrences, &segment.symbol_identities))
     )?;
     hotpath::measure_block!("code_index.restore.segment_artifact_sorts", {
         file.artifacts
@@ -2430,17 +2427,6 @@ mod tests {
                 file_occurrence_id,
                 &symbol_keys,
             );
-            if let Some(symbols) = value
-                .get_mut("artifacts")
-                .and_then(|artifacts| artifacts.get_mut("symbols"))
-                .and_then(Value::as_array_mut)
-            {
-                symbols.sort_by(|left, right| {
-                    left.get("identity")
-                        .and_then(Value::as_str)
-                        .cmp(&right.get("identity").and_then(Value::as_str))
-                });
-            }
             for field in ["edges", "unresolved_references"] {
                 if let Some(rows) = value
                     .get_mut("artifacts")

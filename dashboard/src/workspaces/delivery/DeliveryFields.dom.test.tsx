@@ -102,11 +102,14 @@ describe('Delivery journey · transit', () => {
     renderDelivery(INBOX, { route: `/delivery?mode=journey&pr=${PR_42}`, overview: OVERVIEW_ALPHA });
     const transit = await screen.findByRole('list', { name: 'Delivery transit' });
     expect(within(transit).getByText('feat(ingest): add retry backoff').className).toContain('text-body');
-    const branches = within(transit).getByRole('button', { name: '▸ branches · 1 objective · 1 session' });
+    const branches = within(transit).getByRole('button', {
+      name: '▸ branches · 1 objective · 1 session · 2 agents',
+    });
     expect(branches.getAttribute('aria-expanded')).toBe('false');
     expect(within(transit).queryByText('session · session.alpha.1')).toBeNull();
     await user.click(branches);
     expect(within(transit).getByText('session · session.alpha.1')).toBeTruthy();
+    expect(within(transit).getByText('agent · planner')).toBeTruthy();
     await user.click(within(transit).getByRole('button', { name: /feat\(ingest\): add retry backoff/ }));
     expect(screen.getByTestId('location').textContent).toContain('episode=commits%3A');
   });

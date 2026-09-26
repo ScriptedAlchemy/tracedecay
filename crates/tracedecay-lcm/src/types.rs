@@ -362,6 +362,17 @@ pub struct LcmSummaryConvergenceStatus {
     pub current_session_count: i64,
     pub unavailable_session_count: i64,
     pub permanent_session_count: i64,
+    /// Parked and failed sessions grouped by the reason their queue state
+    /// records, ordered by state then reason.
+    #[serde(default)]
+    pub reasons: Vec<LcmSummaryConvergenceReasonCount>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmSummaryConvergenceReasonCount {
+    pub state: crate::summary_convergence::LcmSummaryConvergenceQueueState,
+    pub reason: String,
+    pub session_count: i64,
 }
 
 /// Default fresh-tail size applied when the host omits `fresh_tail_count`.

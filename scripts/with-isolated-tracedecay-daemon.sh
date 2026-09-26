@@ -164,13 +164,13 @@ trap 'exit 143' TERM
 
 [[ -z "$lifecycle_label" ]] || echo "== starting $lifecycle_label"
 if [[ "$daemon_mode" == "bin" ]]; then
-  python3 -S "$PROCESS_HELPER" exec-session -- \
+  python3 -S "$PROCESS_HELPER" exec-session --parent-pid "$$" -- \
     "$daemon_value" daemon run --socket "$TRACEDECAY_DAEMON_SOCKET" \
     >"$daemon_log" 2>&1 &
 else
   (
     cd "$daemon_value"
-    exec python3 -S "$PROCESS_HELPER" exec-session -- \
+    exec python3 -S "$PROCESS_HELPER" exec-session --parent-pid "$$" -- \
       cargo run -- daemon run --socket "$TRACEDECAY_DAEMON_SOCKET"
   ) >"$daemon_log" 2>&1 &
 fi

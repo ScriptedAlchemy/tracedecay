@@ -1434,6 +1434,129 @@ async fn summary_convergence_keeps_unsupported_provider_typed_pending() {
     assert_eq!(status.summary_convergence.unavailable_session_count, 1);
 }
 
+#[cfg(unix)]
+#[test]
+fn parked_sessions_converge_once_the_summarizer_becomes_available_without_restart() {
+    run_with_test_env_lock(async {
+        // A project id no other test pins, so the shard starts with no
+        // published configuration at all.
+        let root = tempfile::tempdir().unwrap();
+        let project_root = root.path().join("project");
+        let project_id = ProjectId::new("project.lcm-parked-summaries".to_owned()).unwrap();
+        let runtime = RegisteredGlobalDbTestRuntime::project(
+            root.path().join("profile"),
+            &project_root,
+            project_id.clone(),
+        )
+        .await
+        .unwrap();
+        let db = runtime.project_database_arc().unwrap();
+        let storage_root = db.db_path().parent().unwrap();
+        let session_id = "parked-until-configured-session";
+        assert!(db.upsert_session(&session("cursor", session_id)).await);
+        for ordinal in 1..=8 {
+            let mut record = message(session_id, ordinal);
+            record.message_id = format!("{session_id}-message-{ordinal}");
+            db.lcm_ingest_raw_message(storage_root, &record)
+                .await
+                .unwrap();
+        }
+        let parked_reason = |reason: &str| {
+            vec![tracedecay_lcm::LcmSummaryConvergenceReasonCount {
+                state: tracedecay_lcm::summary_convergence::LcmSummaryConvergenceQueueState::Unavailable,
+                reason: reason.to_owned(),
+                session_count: 1,
+            }]
+        };
+
+        // No pin yet: the daemon has not activated any configuration.
+        let unpublished =
+            super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+                .await
+                .unwrap();
+        assert_eq!(
+            unpublished.sessions[0].disposition,
+            super::super::lcm_summary_convergence::LcmSummaryConvergenceDisposition::Pending {
+                reason: "summarizer_configuration_unavailable".to_owned(),
+            }
+        );
+        let status = db.lcm_status("cursor", Some(session_id)).await.unwrap();
+        assert_eq!(status.summary_convergence.unavailable_session_count, 1);
+        assert_eq!(
+            status.summary_convergence.reasons,
+            parked_reason("summarizer_configuration_unavailable")
+        );
+        let idle =
+            super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+                .await
+                .unwrap();
+        assert!(
+            idle.sessions.is_empty(),
+            "an unchanged binding stays parked"
+        );
+
+        // Publishing a pin is a binding change: the parked session is retried
+        // and parks again under the provider's own unconfigured reason.
+        tracedecay_configuration::test_support::pin_lcm_summarizer_executables(
+            project_id.clone(),
+            &project_root,
+            LcmSummarizerExecutablesV1::unconfigured(),
+        )
+        .unwrap();
+        let published =
+            super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+                .await
+                .unwrap();
+        assert_eq!(published.parked_rows_requeued, 1);
+        assert_eq!(
+            published.sessions[0].disposition,
+            super::super::lcm_summary_convergence::LcmSummaryConvergenceDisposition::Pending {
+                reason: "cursor_agent_unconfigured".to_owned(),
+            }
+        );
+        assert_eq!(
+            db.lcm_status("cursor", Some(session_id))
+                .await
+                .unwrap()
+                .summary_convergence
+                .reasons,
+            parked_reason("cursor_agent_unconfigured")
+        );
+
+        // Configuring the executable resumes it in the same process, with no
+        // restart and no new raw message.
+        let temporary = tempfile::tempdir().unwrap();
+        let cursor_bin = temporary.path().join("cursor-agent");
+        std::fs::write(
+            &cursor_bin,
+            "#!/bin/sh\nprintf '%s\\n' 'summary produced after configuration'\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&cursor_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        tracedecay_configuration::test_support::pin_lcm_summarizer_executables(
+            project_id,
+            &project_root,
+            LcmSummarizerExecutablesV1 {
+                cursor_agent: LcmSummarizerExecutableV1::configured_with(cursor_bin, None, Some(5))
+                    .unwrap(),
+                codex: LcmSummarizerExecutableV1::Unconfigured,
+            },
+        )
+        .unwrap();
+        let configured =
+            super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+                .await
+                .unwrap();
+        assert_eq!(configured.parked_rows_requeued, 1);
+        assert!(configured.sessions[0].summary_nodes_created > 0);
+        let status = db.lcm_status("cursor", Some(session_id)).await.unwrap();
+        assert!(status.summary_node_count > 0);
+        assert_eq!(status.summary_convergence.unavailable_session_count, 0);
+        assert!(status.summary_convergence.reasons.is_empty());
+    });
+}
+
 #[tokio::test]
 async fn mounted_schedulers_share_historical_work_admission() {
     let mut stores = Vec::new();

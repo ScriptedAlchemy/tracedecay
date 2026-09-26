@@ -75,10 +75,10 @@ pub(super) fn status_result(
             "refresh_deadline_exceeded",
             "the session refresh request deadline was exceeded",
         ),
-        SessionRefreshServiceOutcome::Unavailable => refresh_problem(
+        SessionRefreshServiceOutcome::Unavailable { reason } => refresh_problem(
             RetainedOutcomeStatusV1::Unavailable,
             "refresh_service_unavailable",
-            "the daemon-owned session refresh service is unavailable",
+            &format!("the daemon-owned session refresh service is unavailable: {reason}"),
         ),
         SessionRefreshServiceOutcome::Busy => refresh_problem(
             RetainedOutcomeStatusV1::Busy,
@@ -245,9 +245,11 @@ fn effect_error(outcome: SessionRefreshServiceOutcome) -> RetainedSurfaceExecuti
             )
         }
         SessionRefreshServiceOutcome::Running(_) => RetainedSurfaceExecutionErrorV1::Conflict,
-        SessionRefreshServiceOutcome::Unavailable => RetainedSurfaceExecutionErrorV1::unavailable(
-            "the session refresh service is unavailable",
-        ),
+        SessionRefreshServiceOutcome::Unavailable { reason } => {
+            RetainedSurfaceExecutionErrorV1::unavailable(format!(
+                "the session refresh service is unavailable: {reason}"
+            ))
+        }
         SessionRefreshServiceOutcome::Complete(_)
         | SessionRefreshServiceOutcome::Failed(_)
         | SessionRefreshServiceOutcome::Cancelled(_)
