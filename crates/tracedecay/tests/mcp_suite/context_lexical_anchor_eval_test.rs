@@ -213,25 +213,15 @@ async fn context_lexical_anchors_admit_every_exact_import_site() {
         );
     }
 
-    let receipt = anchor_receipt(&payload);
     assert_eq!(
-        receipt
-            .iter()
-            .map(|(anchor, outcome, _, _)| (*anchor, *outcome))
-            .collect::<Vec<_>>(),
+        anchor_receipt(&payload),
         [
-            ("hono", "matched"),
-            ("Hono", "matched"),
-            ("MiddlewareHandler", "matched")
+            ("hono", "matched", 12, 9),
+            ("Hono", "matched", 12, 9),
+            ("MiddlewareHandler", "matched", 9, 6),
         ],
-        "{payload}"
+        "every anchor returns its exact sites: {payload}"
     );
-    for (anchor, _, matched, admitted) in &receipt {
-        assert!(
-            *admitted > 0 && *admitted <= *matched,
-            "anchor {anchor} must rank some of its matches: {payload}"
-        );
-    }
 
     let unmatched = context_json(
         &server,
@@ -243,17 +233,12 @@ async fn context_lexical_anchors_admit_every_exact_import_site() {
         }),
     )
     .await;
-    let receipt = anchor_receipt(&unmatched);
-    assert_eq!(receipt.len(), 2, "{unmatched}");
     assert_eq!(
-        (receipt[0].0, receipt[0].1),
-        ("Hono", "matched"),
-        "{unmatched}"
-    );
-    assert!(receipt[0].3 > 0, "{unmatched}");
-    assert_eq!(
-        receipt[1],
-        ("HonoZeroMatchSentinel", "unmatched", 0, 0),
+        anchor_receipt(&unmatched),
+        [
+            ("Hono", "matched", 12, 9),
+            ("HonoZeroMatchSentinel", "unmatched", 0, 0),
+        ],
         "an anchor with no matches must be reported as such: {unmatched}"
     );
     let returned: BTreeSet<&str> = matched_files(&unmatched).into_iter().collect();
