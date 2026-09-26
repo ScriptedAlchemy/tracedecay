@@ -10,7 +10,7 @@ use std::time::Duration;
 use tracedecay_daemon_identity::authority;
 #[cfg(unix)]
 use tracedecay_daemon_identity::client_connection;
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, StoreResetRequiredV1, TraceDecayError};
 
 use super::default_socket_path;
 
@@ -150,7 +150,7 @@ pub(super) fn probe_daemon_process_with_timeout(
 
 fn proof_from_protocol(protocol: DaemonProtocolState) -> DaemonProcessProofV1 {
     match protocol {
-        DaemonProtocolState::Ready => DaemonProcessProofV1::Ready,
+        DaemonProtocolState::Ready { .. } => DaemonProcessProofV1::Ready,
         DaemonProtocolState::IdentityMismatch {
             name,
             version,
@@ -188,7 +188,12 @@ pub(super) enum DaemonSocketState {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum DaemonProtocolState {
     NotRequired,
-    Ready,
+    /// initialize named this build. A ready daemon may still serve some
+    /// registered stores in their typed reset-required state; those are the
+    /// operator's pending reset, not a failed restore.
+    Ready {
+        reset_required_stores: Vec<StoreResetRequiredV1>,
+    },
     Unresponsive(String),
     IdentityMismatch {
         name: Option<String>,
@@ -201,7 +206,16 @@ impl std::fmt::Display for DaemonProtocolState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotRequired => f.write_str("not required"),
-            Self::Ready => f.write_str("ready"),
+            Self::Ready {
+                reset_required_stores,
+            } if reset_required_stores.is_empty() => f.write_str("ready"),
+            Self::Ready {
+                reset_required_stores,
+            } => write!(
+                f,
+                "ready ({} store(s) require reset)",
+                reset_required_stores.len()
+            ),
             Self::Unresponsive(error) => write!(f, "unresponsive ({error})"),
             Self::IdentityMismatch {
                 name,
@@ -231,23 +245,30 @@ pub(super) fn daemon_protocol_state_with_timeout(
 }
 
 fn classify_daemon_protocol_identity(
-    identity: Result<(Option<String>, Option<String>)>,
+    identity: Result<DaemonInitializeIdentity>,
     expected_version: &str,
 ) -> DaemonProtocolState {
     match identity {
-        Ok((name, version))
-            if name.as_deref() == Some("tracedecay")
-                && version.as_deref().is_some_and(|version| {
-                    tracedecay_daemon_protocol::versions_name_same_build(version, expected_version)
-                }) =>
-        {
-            DaemonProtocolState::Ready
-        }
-        Ok((name, version)) => DaemonProtocolState::IdentityMismatch {
+        Ok(DaemonInitializeIdentity {
             name,
             version,
-            expected_version: expected_version.to_owned(),
-        },
+            reset_required_stores,
+        }) if name.as_deref() == Some("tracedecay")
+            && version.as_deref().is_some_and(|version| {
+                tracedecay_daemon_protocol::versions_name_same_build(version, expected_version)
+            }) =>
+        {
+            DaemonProtocolState::Ready {
+                reset_required_stores,
+            }
+        }
+        Ok(DaemonInitializeIdentity { name, version, .. }) => {
+            DaemonProtocolState::IdentityMismatch {
+                name,
+                version,
+                expected_version: expected_version.to_owned(),
+            }
+        }
         Err(error) => DaemonProtocolState::Unresponsive(error.to_string()),
     }
 }
@@ -358,12 +379,20 @@ pub(super) fn daemon_readiness_probe(
     )
 }
 
+/// What a completed initialize exchange reported.
+#[derive(Debug)]
+pub(super) struct DaemonInitializeIdentity {
+    name: Option<String>,
+    version: Option<String>,
+    reset_required_stores: Vec<StoreResetRequiredV1>,
+}
+
 fn query_daemon_identity_stream(
     mut stream: impl ProbeStream,
     auth_token: &str,
     client_version: &str,
     deadline: std::time::Instant,
-) -> Result<(Option<String>, Option<String>)> {
+) -> Result<DaemonInitializeIdentity> {
     const REQUEST_ID: i64 = 1;
     let handshake = crate::handshake_for_current_client(client_version, None, None, false, false)?;
     let request = serde_json::json!({
@@ -412,7 +441,38 @@ fn query_daemon_identity_stream(
             .pointer("/result/serverInfo/version")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string);
-        return Ok((name, version));
+        // A daemon predating the typed reset-required state names none.
+        let reset_required_stores = match response
+            .pointer("/result/_meta")
+            .and_then(|meta| meta.get(tracedecay_daemon_protocol::RESET_REQUIRED_STORES_META_KEY))
+        {
+            Some(stores) => serde_json::from_value(stores.clone())?,
+            None => Vec::new(),
+        };
+        return Ok(DaemonInitializeIdentity {
+            name,
+            version,
+            reset_required_stores,
+        });
+    }
+}
+
+/// The registered stores the default socket's daemon serves in their typed
+/// reset-required state, each naming the command that resets it. A daemon
+/// that does not complete initialize as this build is an error, never an
+/// empty list.
+pub fn daemon_reset_required_stores(expected_version: &str) -> Result<Vec<StoreResetRequiredV1>> {
+    const RESET_REQUIRED_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+    let socket_path = default_socket_path()?;
+    match daemon_readiness_probe(&socket_path, expected_version, RESET_REQUIRED_PROBE_TIMEOUT).1 {
+        DaemonProtocolState::Ready {
+            reset_required_stores,
+        } => Ok(reset_required_stores),
+        protocol => Err(TraceDecayError::Config {
+            message: format!(
+                "could not read the daemon's reset-required stores: protocol readiness is {protocol}"
+            ),
+        }),
     }
 }
 
@@ -655,13 +715,17 @@ fn missing_loopback_authority() -> TraceDecayError {
 
 #[cfg(test)]
 mod identity_classification_tests {
-    use super::{DaemonProtocolState, classify_daemon_protocol_identity};
+    use super::{DaemonInitializeIdentity, DaemonProtocolState, classify_daemon_protocol_identity};
 
     const SHA: &str = "84598a0b9c841b914565f46b20bb6c765706e8e5";
 
     /// The identity a `tracedecay` daemon reporting `version` answers with.
-    fn identity(version: &str) -> (Option<String>, Option<String>) {
-        (Some("tracedecay".to_owned()), Some(version.to_owned()))
+    fn identity(version: &str) -> DaemonInitializeIdentity {
+        DaemonInitializeIdentity {
+            name: Some("tracedecay".to_owned()),
+            version: Some(version.to_owned()),
+            reset_required_stores: Vec::new(),
+        }
     }
 
     /// `tracedecay update` installs a release and then waits for the daemon
@@ -675,7 +739,9 @@ mod identity_classification_tests {
                 Ok(identity(&format!("0.1.0-beta.47+{SHA}"))),
                 "0.1.0-beta.47",
             ),
-            DaemonProtocolState::Ready
+            DaemonProtocolState::Ready {
+                reset_required_stores: Vec::new()
+            }
         );
     }
 

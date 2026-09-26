@@ -1,7 +1,7 @@
 //! Semantic tool-failure classification and JSON-RPC error-response mapping.
 
 use serde_json::{Value, json};
-use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_domain::errors::{PROFILE_RESET_COMMAND, TraceDecayError};
 use tracedecay_sessions::admission::HostAdmissionStatus;
 
 use crate::response_handles::RESPONSE_RETRIEVE_TOOL;
@@ -368,14 +368,13 @@ pub fn reset_required_command(authority: &str, project_root: Option<&std::path::
     } else if is_host_artifact_authority(authority) {
         "delete the block or package directory named in the refusal".to_string()
     } else {
-        "tracedecay wipe --all --yes".to_string()
+        PROFILE_RESET_COMMAND.to_string()
     }
 }
 
 /// Operator rendering of [`reset_required_command`]: the refused authority,
 /// what the reset deletes, the command, and the re-initialization that
-/// follows. `tracedecay update` performs the profile reset itself after
-/// refreshing the binary and daemon.
+/// follows.
 pub fn reset_required_remedy(authority: &str, project_root: Option<&std::path::Path>) -> String {
     let command = reset_required_command(authority, project_root);
     if is_project_store_authority(authority) {
@@ -401,16 +400,14 @@ pub fn reset_required_remedy(authority: &str, project_root: Option<&std::path::P
         "refused authority: {authority}\n\
          this binary does not open or migrate that shape; reset it (its old data is deleted, \
          nothing is backed up):\n  \
-         tracedecay update              refreshes the binary and daemon, then resets every \
-         refused profile authority\n  \
-         {command}    resets the complete profile database state now\n\
+         {command}    resets the complete profile database state\n\
          then re-run `tracedecay init <project-root>` for each project"
     )
 }
 
 /// The refused authority and its reason for both typed reset states: the
-/// generic persisted-shape refusal and the LCM profile schema refusal.
-fn reset_required_context(error: &TraceDecayError) -> Option<(String, String)> {
+/// generic persisted-shape refusal and the versioned profile schema refusal.
+pub fn reset_required_context(error: &TraceDecayError) -> Option<(String, String)> {
     match error {
         TraceDecayError::ResetRequired { authority, reason } => {
             Some((authority.clone(), reason.clone()))
@@ -520,7 +517,7 @@ mod tests {
 
         let profile = super::reset_required_remedy("session temporal", None);
         assert!(profile.contains("refused authority: session temporal"));
-        assert!(profile.contains("\n  tracedecay update "), "{profile}");
+        assert!(!profile.contains("tracedecay update"), "{profile}");
         assert!(
             profile.contains("\n  tracedecay wipe --all --yes"),
             "{profile}"

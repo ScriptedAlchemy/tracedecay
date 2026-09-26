@@ -32,7 +32,9 @@ mod tests;
 #[allow(clippy::expect_used)]
 mod update_restore_tests;
 
-pub use probe::{DaemonProcessProofV1, daemon_reachable, daemon_socket_connectable};
+pub use probe::{
+    DaemonProcessProofV1, daemon_reachable, daemon_reset_required_stores, daemon_socket_connectable,
+};
 pub use unit_file::installed_service_socket_path;
 
 use probe::{
@@ -1539,7 +1541,7 @@ fn restored_service_matches(
     }
     if expected.is_running() {
         matches!(socket_state, DaemonSocketState::Connectable)
-            && matches!(protocol_state, DaemonProtocolState::Ready)
+            && matches!(protocol_state, DaemonProtocolState::Ready { .. })
     } else {
         socket_state.is_proven_quiesced()
     }

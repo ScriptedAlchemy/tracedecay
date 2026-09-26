@@ -205,19 +205,17 @@ fn tool_call_open_refusal_response(
     if !matches!(classify_mcp_method(&request.method), McpMethod::ToolsCall) {
         return None;
     }
-    let TraceDecayError::ResetRequired { authority, reason } = error else {
-        return None;
-    };
+    let (authority, reason) = tracedecay_mcp::reset_required_context(error)?;
     let id = request.id.clone()?;
     let tool_name = request.params.as_ref()?.get("name")?.as_str()?;
     let request_id =
         tracedecay_contracts::request_identity::mcp_connection_request_id(&id, connection_scope)?;
-    let reset_command = tracedecay_mcp::reset_required_command(authority, None);
+    let reset_command = tracedecay_mcp::reset_required_command(&authority, None);
     let envelope = tracedecay_daemon_service::application_surface::mcp_project_open_reset_refusal(
         tool_name,
         request_id,
-        authority,
-        reason,
+        &authority,
+        &reason,
         &reset_command,
     )?;
     let text = serde_json::to_string(&envelope).ok()?;
@@ -290,18 +288,20 @@ pub(crate) fn project_open_error_response(
                 })),
             )
         }
-        TraceDecayError::ResetRequired { authority, reason } => JsonRpcResponse::error_with_data(
-            id,
-            ErrorCode::InternalError,
-            error.to_string(),
-            Some(json!({
-                "kind": "reset_required",
-                "retryable": false,
-                "authority": authority,
-                "reason": reason,
-            })),
-        ),
-        _ => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
+        _ => match tracedecay_mcp::reset_required_context(error) {
+            Some((authority, reason)) => JsonRpcResponse::error_with_data(
+                id,
+                ErrorCode::InternalError,
+                error.to_string(),
+                Some(json!({
+                    "kind": "reset_required",
+                    "retryable": false,
+                    "authority": authority,
+                    "reason": reason,
+                })),
+            ),
+            None => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
+        },
     }
 }
 

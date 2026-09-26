@@ -92,12 +92,21 @@ pub struct AdmittedDoctorNetworkProbes {
     pub fetch_latest_version: fn() -> Option<String>,
 }
 
+/// What a doctor run that found no issue concluded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DoctorCompletion {
+    Healthy,
+    /// The daemon serves a store in its typed reset-required state; the
+    /// operator owes the reset Doctor named.
+    PendingOperatorAction,
+}
+
 /// Runs a comprehensive health check of the tracedecay installation.
 #[hotpath::measure(label = "doctor.run", future = true)]
 pub async fn run_doctor(
     profile_root: &std::path::Path,
     network: AdmittedDoctorNetworkProbes,
-) -> tracedecay_domain::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<DoctorCompletion> {
     let _lifecycle_lease =
         match tracedecay_runtime_core::lifecycle_lease::acquire_shared_or_inherited(
             profile_root,
@@ -116,6 +125,7 @@ pub async fn run_doctor(
 
     check_binary(&mut dc, build_version);
     check_daemon_service(&mut dc, build_version);
+    let mut pending_reset = check_reset_required_stores(&mut dc, build_version);
 
     eprintln!("\n\x1b[1mCurrent project\x1b[0m");
     let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -145,7 +155,19 @@ pub async fn run_doctor(
                 }
             }
         }
-        Err(error) => classify_daemon_status_error(&mut dc, &project_path, error),
+        Err(error) => {
+            if let Some((authority, reason)) = tracedecay_mcp::reset_required_context(error) {
+                pending_reset = true;
+                dc.warn(&format!(
+                    "Current project is not served: {authority} requires reset ({reason}). \
+                     Pending operator action: run `{}`",
+                    tracedecay_mcp::reset_required_command(&authority, Some(&project_path))
+                ));
+                DatabaseHealth::unknown("reset_required")
+            } else {
+                classify_daemon_status_error(&mut dc, &project_path, error)
+            }
+        }
     };
     check_watcher(&mut dc);
     let upload_enabled = configured_upload_enabled(&project_path).await;
@@ -188,7 +210,33 @@ pub async fn run_doctor(
     check_network(&mut dc, upload_enabled.as_ref(), network);
     print_summary(&dc);
 
-    doctor_result(&dc, &storage_health)
+    doctor_result(&dc, &storage_health, pending_reset)
+}
+
+/// Lists every registered store the daemon serves in its typed
+/// reset-required state, each with the exact reset command. Returns whether
+/// any reset is pending.
+fn check_reset_required_stores(dc: &mut DoctorCounters, build_version: &str) -> bool {
+    if !tracedecay_daemon_control::daemon_reachable() {
+        return false;
+    }
+    match tracedecay_daemon_control::daemon_reset_required_stores(build_version) {
+        Ok(stores) => {
+            for store in &stores {
+                dc.warn(&format!(
+                    "Store {} requires reset ({}). Pending operator action: run `{}`",
+                    store.store, store.reason, store.remedy
+                ));
+            }
+            !stores.is_empty()
+        }
+        Err(error) => {
+            dc.warn(&format!(
+                "Daemon reset-required stores could not be read: {error}"
+            ));
+            false
+        }
+    }
 }
 
 fn render_project_open_status(
@@ -392,11 +440,13 @@ fn database_health_from_storage_runtime_findings<'a>(
 ///
 /// Only an observed storage *failure* is fatal. `DatabaseHealth::Unknown`, a
 /// diagnostic that could not run, is reported to the user but never laundered
-/// into a healthy verdict nor turned into a hard failure.
+/// into a healthy verdict nor turned into a hard failure. With no issue, a
+/// pending reset is the operator's action, not health.
 fn doctor_result(
     dc: &DoctorCounters,
     storage_health: &DatabaseHealth,
-) -> tracedecay_domain::errors::Result<()> {
+    pending_reset: bool,
+) -> tracedecay_domain::errors::Result<DoctorCompletion> {
     match storage_health {
         DatabaseHealth::Failed { reason } => {
             Err(tracedecay_domain::errors::TraceDecayError::Config {
@@ -408,7 +458,10 @@ fn doctor_result(
                 message: format!("doctor found {} issue(s)", dc.issues),
             })
         }
-        DatabaseHealth::Healthy | DatabaseHealth::Unknown { .. } => Ok(()),
+        DatabaseHealth::Healthy | DatabaseHealth::Unknown { .. } if pending_reset => {
+            Ok(DoctorCompletion::PendingOperatorAction)
+        }
+        DatabaseHealth::Healthy | DatabaseHealth::Unknown { .. } => Ok(DoctorCompletion::Healthy),
     }
 }
 

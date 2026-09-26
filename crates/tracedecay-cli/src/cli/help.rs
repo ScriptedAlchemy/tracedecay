@@ -364,7 +364,10 @@ Exit status (a completed binary upgrade stays installed in every case):
   75  the refresh waits on an operator step: an interactive host step (Kimi
       Code's `/plugins install`), or a tracked host whose CLI is not
       installed (install it, or `tracedecay uninstall --agent <host>` to
-      stop tracking it); act on the printed step, then rerun
+      stop tracking it); act on the printed step, then rerun. Also 75 when
+      the restored daemon serves a store whose persisted shape this binary
+      does not open: it names the store and the exact reset command
+      (`tracedecay wipe --all --yes`), which nothing runs on your behalf
 
 Related: tracedecay upgrade (refresh only after a real install),
 tracedecay update-plugin (plugins only), tracedecay channel.";
@@ -455,6 +458,12 @@ upgrade behaves unexpectedly.";
 pub(crate) const DOCTOR_AFTER_HELP: &str = "\
 Examples:
   tracedecay doctor                              Check everything
+
+Exit status:
+  0   no issue found (warnings may still be printed)
+  1   an issue was found
+  75  no issue, but the daemon serves a store in its reset-required state;
+      Doctor names the store and the exact reset command to run
 
 Related: tracedecay install (fix missing integration), tracedecay daemon
 status, tracedecay status (index health).";

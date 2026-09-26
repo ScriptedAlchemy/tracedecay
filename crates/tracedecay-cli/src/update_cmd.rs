@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use crate::agent_cmd::{HostLifecycleCompletion, HostLifecycleSummary};
 use crate::upgrade::UpgradeOutcome;
 use tracedecay_daemon_control as daemon_control;
+use tracedecay_domain::errors::StoreResetRequiredV1;
 use tracedecay_session_memory::user_config::UserConfig;
 
 /// Rewrites the installed daemon service while preserving its captured
@@ -311,34 +312,41 @@ impl PluginRefreshOutcome {
 pub(crate) async fn run_update_command(
     no_reinstall: bool,
 ) -> tracedecay_domain::errors::Result<HostLifecycleCompletion> {
-    let refresh = run_update_flow("update", RefreshPolicy::Always, no_reinstall).await?;
-    update_completion(refresh)
+    let outcome = run_update_flow("update", RefreshPolicy::Always, no_reinstall).await?;
+    update_completion(outcome.refresh, &outcome.reset_required)
 }
 
 /// `update` keeps a successful binary upgrade while reporting the refresh as
-/// what it was: a failed refresh fails the command, a pending host step
-/// exits with the pending-operator-action status.
+/// what it was: a failed refresh fails the command, a pending host step or a
+/// store the restored daemon serves reset-required exits with the
+/// pending-operator-action status.
 fn update_completion(
     refresh: Option<PluginRefreshOutcome>,
+    reset_required: &[StoreResetRequiredV1],
 ) -> tracedecay_domain::errors::Result<HostLifecycleCompletion> {
-    match refresh {
-        None | Some(PluginRefreshOutcome::Complete) => Ok(HostLifecycleCompletion::Complete),
-        Some(PluginRefreshOutcome::PendingOperatorAction) => {
-            eprintln!(
-                "\nThe TraceDecay binary is up to date; the plugin refresh is waiting on the \
-                 operator action listed above."
-            );
-            Ok(HostLifecycleCompletion::PendingOperatorAction)
-        }
-        Some(PluginRefreshOutcome::Failed) => {
-            Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: "the TraceDecay binary is up to date, but the plugin and \
-                          agent-integration refresh failed (see above); fix it and run \
-                          `tracedecay update` again"
-                    .to_string(),
-            })
-        }
+    if refresh == Some(PluginRefreshOutcome::Failed) {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
+            message: "the TraceDecay binary is up to date, but the plugin and \
+                      agent-integration refresh failed (see above); fix it and run \
+                      `tracedecay update` again"
+                .to_string(),
+        });
     }
+    if !reset_required.is_empty() {
+        eprintln!(
+            "\nThe TraceDecay binary and daemon are up to date; the daemon serves the stores \
+             listed above in their reset-required state until the operator runs the named reset."
+        );
+        return Ok(HostLifecycleCompletion::PendingOperatorAction);
+    }
+    if refresh == Some(PluginRefreshOutcome::PendingOperatorAction) {
+        eprintln!(
+            "\nThe TraceDecay binary is up to date; the plugin refresh is waiting on the \
+             operator action listed above."
+        );
+        return Ok(HostLifecycleCompletion::PendingOperatorAction);
+    }
+    Ok(HostLifecycleCompletion::Complete)
 }
 
 #[hotpath::measure(label = "cli.upgrade.run", future = true)]
@@ -347,15 +355,22 @@ pub(crate) async fn run_upgrade_command(
 ) -> tracedecay_domain::errors::Result<()> {
     run_update_flow("upgrade", RefreshPolicy::AfterInstall, no_reinstall)
         .await
-        .map(|_| ())
+        .map(drop)
+}
+
+/// What one `update` / `upgrade` run concluded after the daemon restore.
+struct UpdateFlowOutcome {
+    refresh: Option<PluginRefreshOutcome>,
+    /// Stores the restored daemon serves in their typed reset-required state.
+    reset_required: Vec<StoreResetRequiredV1>,
 }
 
 async fn run_update_flow(
     operation: &str,
     refresh_policy: RefreshPolicy,
     no_reinstall: bool,
-) -> tracedecay_domain::errors::Result<Option<PluginRefreshOutcome>> {
-    let refresh = daemon_control::with_exclusive_maintenance_window(
+) -> tracedecay_domain::errors::Result<UpdateFlowOutcome> {
+    let (refresh, installed_version) = daemon_control::with_exclusive_maintenance_window(
         operation,
         crate::product_runtime::PRODUCT_BUILD_VERSION,
         |lease_token| {
@@ -367,84 +382,60 @@ async fn run_update_flow(
             // validates the binary it actually starts, not the one that was
             // running before the upgrade.
             Ok(daemon_control::MaintenanceWindowOutcome {
-                value: outcome.refresh,
+                value: (outcome.refresh, outcome.installed_version.clone()),
                 installed_version: outcome.installed_version,
             })
         },
     )?;
-    reset_refused_profile_authorities(operation).await?;
-    Ok(refresh)
+    let reset_required = restored_daemon_pending_resets(
+        operation,
+        installed_version
+            .as_deref()
+            .unwrap_or(crate::product_runtime::PRODUCT_BUILD_VERSION),
+    );
+    Ok(UpdateFlowOutcome {
+        refresh,
+        reset_required,
+    })
 }
 
-/// What the post-window profile probe decided.
-#[derive(Debug, PartialEq, Eq)]
-enum ProfileResetDecision {
-    /// The restored daemon opens the profile; nothing to reset.
-    Opens,
-    /// The daemon refused the profile with a typed reset state.
-    Reset { authority: String, reason: String },
-    /// The probe could not decide (no reachable daemon, transport failure);
-    /// reported, never acted on.
-    Undecided(String),
-}
-
-fn profile_reset_decision(
-    probe: tracedecay_domain::errors::Result<serde_json::Value>,
-) -> ProfileResetDecision {
-    match probe {
-        Ok(_) => ProfileResetDecision::Opens,
-        Err(error) => match error.reset_required_context() {
-            Some((authority, reason)) => ProfileResetDecision::Reset {
-                authority: authority.to_owned(),
-                reason: reason.to_owned(),
-            },
-            None => ProfileResetDecision::Undecided(error.to_string()),
-        },
-    }
-}
-
-/// The upgrade journey ends with core tools that work, not with a typed
-/// refusal on the first tool call. Once the maintenance window has restored
-/// the daemon on the new binary, a projectless probe asks it to open the
-/// profile registry; a typed reset refusal is acted on here by resetting the
-/// complete profile database state, the one reset authority a profile-scoped
-/// refusal has. Old shapes are deleted, never migrated or backed up.
-async fn reset_refused_profile_authorities(
+/// A restored daemon serves a store it cannot open in that store's typed
+/// reset-required state. The upgrade journey never deletes profile data on
+/// its own: each such store is reported with the exact reset command as the
+/// operator's pending action.
+fn restored_daemon_pending_resets(
     operation: &str,
-) -> tracedecay_domain::errors::Result<()> {
+    expected_version: &str,
+) -> Vec<StoreResetRequiredV1> {
     if !daemon_control::daemon_reachable() {
         eprintln!(
             "No reachable TraceDecay daemon after {operation}; the profile's persisted shape is \
              checked on the daemon's next open."
         );
-        return Ok(());
+        return Vec::new();
     }
-    let probe = crate::commands::daemon_tool_json(
-        None,
-        "tracedecay_project_list",
-        serde_json::json!({ "limit": 1, "format": "json" }),
+    match daemon_control::daemon_reset_required_stores(expected_version) {
+        Ok(stores) => {
+            for store in &stores {
+                eprintln!("{}", pending_reset_line(store));
+            }
+            stores
+        }
+        Err(error) => {
+            eprintln!(
+                "  \x1b[33mwarning:\x1b[0m could not verify that the daemon serves every store \
+                 after {operation}: {error}"
+            );
+            Vec::new()
+        }
+    }
+}
+
+fn pending_reset_line(store: &StoreResetRequiredV1) -> String {
+    format!(
+        "  \x1b[33mpending operator action:\x1b[0m {} requires reset ({}); run `{}`",
+        store.store, store.reason, store.remedy
     )
-    .await;
-    match profile_reset_decision(probe) {
-        ProfileResetDecision::Opens => Ok(()),
-        ProfileResetDecision::Reset { authority, reason } => {
-            eprintln!(
-                "\n\x1b[33mThe upgraded daemon refuses the persisted {authority} shape: \
-                 {reason}\x1b[0m\n\
-                 Resetting the complete profile database state so core tools work on this \
-                 binary; refused authorities are never migrated or backed up. Re-run \
-                 `tracedecay init <project-root>` for each project afterwards."
-            );
-            crate::commands::handle_wipe(true, true).await
-        }
-        ProfileResetDecision::Undecided(detail) => {
-            eprintln!(
-                "  \x1b[33mwarning:\x1b[0m could not verify that the profile opens after \
-                 {operation}: {detail}"
-            );
-            Ok(())
-        }
-    }
 }
 
 fn combine_operation_and_restore<T>(
@@ -755,45 +746,54 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        InstallThenRefresh, PluginRefreshOutcome, ProfileResetDecision, RefreshPolicy,
-        current_tracedecay_exe_from, install_pass_covers_tracked_agents, post_update_binary,
-        post_update_binary_from, prepare_post_update_lease, profile_reset_decision,
-        restart_daemon_service_with, run_install_then_refresh, update_completion,
+        InstallThenRefresh, PluginRefreshOutcome, RefreshPolicy, current_tracedecay_exe_from,
+        install_pass_covers_tracked_agents, pending_reset_line, post_update_binary,
+        post_update_binary_from, prepare_post_update_lease, restart_daemon_service_with,
+        run_install_then_refresh, update_completion,
     };
     use crate::agent_cmd::HostLifecycleCompletion;
     use crate::upgrade::UpgradeOutcome;
     use tempfile::TempDir;
     use tracedecay_daemon_control as daemon_control;
 
-    /// Only the typed reset state authorizes deleting profile data after an
-    /// update; an opening profile is left alone and every other failure is
-    /// reported without acting.
+    fn git_correlation_reset() -> tracedecay_domain::errors::StoreResetRequiredV1 {
+        tracedecay_domain::errors::TraceDecayError::ProfileResetRequired {
+            component: "git correlation",
+            found_version: Some(5),
+            required_version: 6,
+        }
+        .store_reset_required("profile sessions")
+        .expect("a versioned profile refusal is a reset-required store")
+    }
+
+    /// A restored daemon serving a reset-required store completes the update
+    /// with the pending-operator-action status and names the exact reset;
+    /// nothing deletes the store on the operator's behalf.
     #[test]
-    fn post_update_profile_reset_acts_only_on_the_typed_reset_state() {
+    fn update_with_a_reset_required_store_is_pending_on_the_named_reset() {
+        let reset = git_correlation_reset();
         assert_eq!(
-            profile_reset_decision(Ok(serde_json::json!({ "projects": [] }))),
-            ProfileResetDecision::Opens
-        );
-        assert_eq!(
-            profile_reset_decision(Err(
-                tracedecay_domain::errors::TraceDecayError::reset_required(
-                    "session temporal",
-                    "published v3 shape",
-                )
-            )),
-            ProfileResetDecision::Reset {
-                authority: "session temporal".to_owned(),
-                reason: "published v3 shape".to_owned(),
-            }
-        );
-        assert_eq!(
-            profile_reset_decision(Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: "daemon tool call failed: storage unavailable".to_owned(),
-            })),
-            ProfileResetDecision::Undecided(
-                "config error: daemon tool call failed: storage unavailable".to_owned()
+            update_completion(
+                Some(PluginRefreshOutcome::Complete),
+                std::slice::from_ref(&reset)
             )
+            .unwrap(),
+            HostLifecycleCompletion::PendingOperatorAction
         );
+        assert_eq!(
+            update_completion(None, std::slice::from_ref(&reset)).unwrap(),
+            HostLifecycleCompletion::PendingOperatorAction
+        );
+        assert_eq!(
+            pending_reset_line(&reset),
+            "  \x1b[33mpending operator action:\x1b[0m profile sessions requires reset \
+             (git correlation profile schema 5 is incompatible with required schema 6; reset \
+             the profile); run `tracedecay wipe --all --yes`"
+        );
+        let failed = update_completion(Some(PluginRefreshOutcome::Failed), &[reset])
+            .expect_err("a failed refresh still fails `update`")
+            .to_string();
+        assert!(failed.contains("refresh failed"), "{failed}");
     }
 
     #[test]
@@ -1160,7 +1160,7 @@ mod tests {
             }
         );
         assert_eq!(calls.into_inner(), vec!["upgrade", "post-update"]);
-        let failed = update_completion(outcome.refresh)
+        let failed = update_completion(outcome.refresh, &[])
             .expect_err("`update` still fails the refresh it could not run")
             .to_string();
         assert_eq!(
@@ -1173,18 +1173,18 @@ mod tests {
     #[test]
     fn update_exit_reports_the_refresh_truthfully() {
         assert_eq!(
-            update_completion(None).unwrap(),
+            update_completion(None, &[]).unwrap(),
             HostLifecycleCompletion::Complete
         );
         assert_eq!(
-            update_completion(Some(PluginRefreshOutcome::Complete)).unwrap(),
+            update_completion(Some(PluginRefreshOutcome::Complete), &[]).unwrap(),
             HostLifecycleCompletion::Complete
         );
         assert_eq!(
-            update_completion(Some(PluginRefreshOutcome::PendingOperatorAction)).unwrap(),
+            update_completion(Some(PluginRefreshOutcome::PendingOperatorAction), &[]).unwrap(),
             HostLifecycleCompletion::PendingOperatorAction
         );
-        let failed = update_completion(Some(PluginRefreshOutcome::Failed))
+        let failed = update_completion(Some(PluginRefreshOutcome::Failed), &[])
             .expect_err("a failed refresh must fail `update`")
             .to_string();
         assert!(failed.contains("binary is up to date"), "{failed}");

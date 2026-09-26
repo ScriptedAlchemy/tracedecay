@@ -342,7 +342,9 @@ fn strict_restoration_requires_readiness_only_for_running_state() {
         DaemonServiceState::RunningEnabled,
         DaemonServiceState::RunningEnabled,
         super::probe::DaemonSocketState::Connectable,
-        &super::probe::DaemonProtocolState::Ready,
+        &super::probe::DaemonProtocolState::Ready {
+            reset_required_stores: Vec::new(),
+        },
     ));
     assert!(!super::restored_service_matches(
         DaemonServiceState::RunningEnabled,
@@ -360,7 +362,9 @@ fn strict_restoration_requires_readiness_only_for_running_state() {
         DaemonServiceState::StoppedEnabled,
         DaemonServiceState::RunningEnabled,
         super::probe::DaemonSocketState::Connectable,
-        &super::probe::DaemonProtocolState::Ready,
+        &super::probe::DaemonProtocolState::Ready {
+            reset_required_stores: Vec::new(),
+        },
     ));
     assert!(!super::restored_service_matches(
         DaemonServiceState::RunningEnabled,
@@ -434,6 +438,21 @@ pub(super) fn serve_probe_response(
     version: &'static str,
     expected_auth_token: String,
 ) -> std::thread::JoinHandle<()> {
+    serve_probe_result(
+        listener,
+        serde_json::json!({ "serverInfo": {"name": name, "version": version} }),
+        expected_auth_token,
+    )
+}
+
+/// Answers one authenticated readiness probe with `result` as the
+/// initialize result.
+#[cfg(unix)]
+pub(super) fn serve_probe_result(
+    listener: UnixListener,
+    result: serde_json::Value,
+    expected_auth_token: String,
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut stream = accept_readiness_probe(&listener);
         let mut reader =
@@ -448,9 +467,7 @@ pub(super) fn serve_probe_response(
         let response = serde_json::json!({
             "jsonrpc": "2.0",
             "id": request["id"],
-            "result": {
-                "serverInfo": {"name": name, "version": version}
-            }
+            "result": result,
         });
         writeln!(stream, "{response}").expect("write initialize response");
     })
@@ -595,7 +612,9 @@ fn daemon_protocol_probe_requires_current_tracedecay_identity() {
             std::time::Duration::from_secs(10),
         )
         .1,
-        super::probe::DaemonProtocolState::Ready
+        super::probe::DaemonProtocolState::Ready {
+            reset_required_stores: Vec::new(),
+        }
     );
     ready_server.join().expect("join ready server");
 
@@ -1004,7 +1023,12 @@ fn running_service_snapshot_uses_one_authenticated_connection() {
 
     assert_eq!(snapshot.0, DaemonServiceState::RunningEnabled);
     assert_eq!(snapshot.2, super::probe::DaemonSocketState::Connectable);
-    assert_eq!(snapshot.3, super::probe::DaemonProtocolState::Ready);
+    assert_eq!(
+        snapshot.3,
+        super::probe::DaemonProtocolState::Ready {
+            reset_required_stores: Vec::new(),
+        }
+    );
     assert_eq!(accepts.load(Ordering::SeqCst), 1);
 }
 

@@ -148,6 +148,17 @@ fn spawn_query_authority_when_generation_ready(inputs: QueryAuthorityWaitInputs)
             let mut seats = authority_invocation
                 .code_index_schedulers
                 .subscribe_serving_seats();
+            // A restored generation seats its graph only for a reader that
+            // demands the complete generation. The query authority is that
+            // reader: a route whose full upgrade is refused (a reset-required
+            // session store) has no advisory owner to make the demand.
+            tokio::select! {
+                biased;
+                () = authority_cancellation.cancelled() => return,
+                latest = authority_invocation
+                    .code_index_schedulers
+                    .latest_complete_ready_for_scope(&authority_scope) => drop(latest),
+            }
             let generation_ready = loop {
                 if authority_invocation
                     .code_index_schedulers

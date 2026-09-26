@@ -1590,7 +1590,18 @@ impl ProjectOpenInputs<'_> {
         )
         .await;
         full_server.publish_doctor_report();
-        let code_index_status = match core.code_index_activation.automatic_admission() {
+        let code_index_status = self.activate_code_index(core);
+        self.log_phase(
+            "full_published",
+            Some(("code_index", code_index_status.to_owned())),
+            self.started,
+        );
+        Ok(())
+    }
+
+    /// Start this route's code indexing under its automatic admission.
+    fn activate_code_index(&self, core: &ComposedCoreServer) -> &'static str {
+        match core.code_index_activation.automatic_admission() {
             code_index_scheduler::CodeIndexAutomaticAdmissionV1::Admitted => {
                 if core.code_index_activation.activate() {
                     "warming"
@@ -1608,13 +1619,7 @@ impl ProjectOpenInputs<'_> {
                 );
                 "linked_worktree_disabled"
             }
-        };
-        self.log_phase(
-            "full_published",
-            Some(("code_index", code_index_status.to_owned())),
-            self.started,
-        );
-        Ok(())
+        }
     }
 
     /// A failed upgrade either degrades the route to the still-published core
@@ -1667,6 +1672,17 @@ impl ProjectOpenInputs<'_> {
                     None,
                 )
                 .await;
+            }
+            // A session store in its typed reset-required state keeps the
+            // full upgrade refused until the operator resets it, so the
+            // retained core serves the code index meanwhile.
+            if tracedecay_mcp::reset_required_context(&error).is_some() {
+                let code_index_status = self.activate_code_index(core);
+                self.log_phase(
+                    "full_upgrade_reset_required",
+                    Some(("code_index", code_index_status.to_owned())),
+                    self.started,
+                );
             }
             self.log_phase(
                 "full_upgrade_degraded",

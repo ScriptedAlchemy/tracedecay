@@ -242,8 +242,8 @@ pub fn error_is_read_deadline(error: &TraceDecayError) -> bool {
 mod bootstrap;
 mod bootstrap_route;
 use bootstrap_route::{
-    apply_daemon_initialize_route, attach_initialize_route_metadata, cached_project_node_count,
-    daemon_bootstrap_response, prewarm_daemon_bootstrap_catalog,
+    apply_daemon_initialize_route, attach_initialize_route_metadata, attach_reset_required_stores,
+    cached_project_node_count, daemon_bootstrap_response, prewarm_daemon_bootstrap_catalog,
 };
 mod branch_add;
 mod branch_admin;

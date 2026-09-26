@@ -149,24 +149,34 @@ async fn projectless_response(
 ) -> Option<tracedecay_mcp::JsonRpcResponse> {
     let id = request.id.clone()?;
     match request.method.as_str() {
-        "initialize" => Some(match tracedecay_project::version::build_version() {
-            Ok(version) => JsonRpcResponse::success(
-                id,
-                json!({
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {
-                        "tools": {
-                            "listChanged": true
+        "initialize" => {
+            let mut response = match tracedecay_project::version::build_version() {
+                Ok(version) => JsonRpcResponse::success(
+                    id,
+                    json!({
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {
+                            "tools": {
+                                "listChanged": true
+                            }
+                        },
+                        "serverInfo": {
+                            "name": "tracedecay",
+                            "version": version
                         }
-                    },
-                    "serverInfo": {
-                        "name": "tracedecay",
-                        "version": version
-                    }
-                }),
-            ),
-            Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
-        }),
+                    }),
+                ),
+                Err(error) => {
+                    JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string())
+                }
+            };
+            boxed_projectless_phase(attach_reset_required_stores(
+                &mut response,
+                store_administration,
+            ))
+            .await;
+            Some(response)
+        }
         "tools/list" => Some(projectless_tools_list_response(id)),
         "tools/call" => {
             let started = timings_enabled.then(std::time::Instant::now);
@@ -316,6 +326,9 @@ async fn projectless_tools_call_response_with_connection(
     }
     if let Err(error) = boxed_projectless_phase(store_administration.ensure_account_active()).await
     {
+        if error.store_reset_required("profile authority").is_some() {
+            return tool_error_response(id, tool_name, &error);
+        }
         return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
     }
     // Keep unrelated tool families out of one generated poll frame. Some handlers

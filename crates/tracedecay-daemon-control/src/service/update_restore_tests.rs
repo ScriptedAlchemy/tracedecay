@@ -266,6 +266,66 @@ fn maintenance_window_waits_out_the_lease_of_the_daemon_it_just_stopped() {
     fixture.assert_daemon_running_after("a completed maintenance window");
 }
 
+/// A restored daemon that serves a registered store in its typed
+/// reset-required state is restored: the restore check sees the unit
+/// `RunningEnabled`, a connectable socket and initialize from this build, and
+/// hands back the operator's pending reset instead of failing the update.
+#[cfg(target_os = "linux")]
+#[test]
+fn restore_check_accepts_a_reset_required_daemon_and_returns_its_pending_reset() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let fixture = DrainingDaemonFixture::new();
+    let authority = super::tests::seed_socket_authority(&fixture.socket_path);
+    let listener = UnixListener::bind(&fixture.socket_path).expect("bind restored daemon");
+    let server = super::tests::serve_probe_result(
+        listener,
+        serde_json::json!({
+            "serverInfo": {"name": "tracedecay", "version": super::tests::TEST_BUILD_VERSION},
+            "_meta": {
+                "tracedecay/reset_required_stores": [{
+                    "store": "profile sessions",
+                    "authority": "git correlation",
+                    "found_version": 5,
+                    "required_version": 6,
+                    "reason": "git correlation profile schema 5 is incompatible with required schema 6; reset the profile",
+                    "remedy": "tracedecay wipe --all --yes",
+                }],
+            },
+        }),
+        authority.auth_token().to_owned(),
+    );
+
+    let (state, _, socket, protocol) =
+        super::installed_service_status_snapshot(&fixture.runner, super::tests::TEST_BUILD_VERSION)
+            .expect("restored service snapshot");
+    server.join().expect("join restored daemon");
+
+    assert!(
+        super::restored_service_matches(
+            DaemonServiceState::RunningEnabled,
+            state,
+            socket,
+            &protocol
+        ),
+        "a reset-required daemon is restored: service {state:?}, socket {socket}, protocol {protocol}"
+    );
+    assert_eq!(
+        protocol,
+        super::probe::DaemonProtocolState::Ready {
+            reset_required_stores: vec![tracedecay_domain::errors::StoreResetRequiredV1 {
+                store: "profile sessions".to_owned(),
+                authority: "git correlation".to_owned(),
+                found_version: Some(5),
+                required_version: Some(6),
+                reason: "git correlation profile schema 5 is incompatible with required schema 6; \
+                         reset the profile"
+                    .to_owned(),
+                remedy: "tracedecay wipe --all --yes".to_owned(),
+            }],
+        }
+    );
+}
+
 /// A holder that outlives the bound is contention, reported typed, and the
 /// failure path still restores the daemon it stopped: contention must never
 /// leave a previously healthy daemon stopped.

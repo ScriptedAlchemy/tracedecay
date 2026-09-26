@@ -1461,6 +1461,17 @@ fn serve_broker_socket_client_inner(
                                     .id
                                     .clone()
                                     .map(|id| project_open_error_response(id, &error));
+                            } else if let Some(response) = response.as_mut()
+                                && matches!(
+                                    classify_mcp_method(&request.method),
+                                    McpMethod::Initialize
+                                )
+                            {
+                                Box::pin(attach_reset_required_stores(
+                                    response,
+                                    &engine.store_administration,
+                                ))
+                                .await;
                             }
                             // Keep catalog-refresh bookkeeping consistent with the regular MCP
                             // server path. Only a warming `tools/list` (no published node count)

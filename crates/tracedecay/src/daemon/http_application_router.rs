@@ -4,6 +4,7 @@
 //! resolver the registry uses to mount it on demand.
 
 use super::*;
+use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 #[hotpath::measure(label = "daemon.http.application.router_build")]
@@ -102,7 +103,24 @@ pub(super) async fn install_remote_http_application_router(
     store_administration: &StoreAdministration,
     invocation: &DaemonInvocationState,
 ) -> Result<()> {
-    let runtime = store_administration.registered_runtime_registry().await?;
+    let runtime = match store_administration.registered_runtime_registry().await {
+        Ok(runtime) => runtime,
+        // The account-active guard reads the profile authority. While that
+        // store is reset-required no remote request can be admitted, so the
+        // remote protocol stays unmounted until the operator's reset restarts
+        // the daemon on a fresh profile.
+        Err(error) if error.store_reset_required("profile authority").is_some() => {
+            log_daemon_event(
+                "remote_protocol_router_unmounted",
+                &[
+                    ("reason", "profile_authority_reset_required".to_owned()),
+                    ("error", error.to_string()),
+                ],
+            );
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
     let credentials = runtime.remote_credential_authority();
     let router = tracedecay_daemon_service::build_daemon_remote_protocol_router(
         Arc::clone(&credentials),

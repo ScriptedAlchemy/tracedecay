@@ -91,6 +91,9 @@ pub const DAEMON_INVOCATION_REVISION: u16 = 1;
 /// Request method a control client sends over the closed protocol to ask the
 /// daemon to shut down.
 pub const DAEMON_SHUTDOWN_METHOD: &str = "tracedecay/daemon/shutdown";
+/// `initialize` result `_meta` key listing every registered store the daemon
+/// serves in a typed reset-required state.
+pub const RESET_REQUIRED_STORES_META_KEY: &str = "tracedecay/reset_required_stores";
 const DAEMON_INVOCATION_CANCEL_OPERATION: &str = "invocation_cancel";
 const DAEMON_INVOCATION_DELIVERY_ACK_OPERATION: &str = "invocation_delivery_ack";
 

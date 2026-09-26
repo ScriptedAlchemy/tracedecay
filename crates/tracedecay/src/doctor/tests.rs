@@ -489,6 +489,7 @@ fn unavailable_canonical_report_is_an_issue_that_fails_the_doctor_exit() {
     let error = super::doctor_result(
         &counters,
         &DatabaseHealth::unknown("canonical_doctor_report_unavailable"),
+        true,
     )
     .unwrap_err();
     assert_eq!(error.to_string(), "config error: doctor found 1 issue(s)");
@@ -497,13 +498,28 @@ fn unavailable_canonical_report_is_an_issue_that_fails_the_doctor_exit() {
 #[test]
 fn doctor_result_treats_unavailable_canonical_report_as_unknown() {
     let counters = DoctorCounters::new();
-    super::doctor_result(
-        &counters,
-        &DatabaseHealth::Unknown {
-            reason: "canonical_doctor_report_unavailable".to_string(),
-        },
-    )
-    .unwrap();
+    assert_eq!(
+        super::doctor_result(
+            &counters,
+            &DatabaseHealth::Unknown {
+                reason: "canonical_doctor_report_unavailable".to_string(),
+            },
+            false,
+        )
+        .unwrap(),
+        super::DoctorCompletion::Healthy
+    );
+}
+
+/// A store the daemon serves reset-required is the operator's pending
+/// action: with no issue, Doctor completes pending rather than healthy.
+#[test]
+fn doctor_result_reports_a_pending_reset_without_issues_as_pending() {
+    let counters = DoctorCounters::new();
+    assert_eq!(
+        super::doctor_result(&counters, &DatabaseHealth::unknown("reset_required"), true).unwrap(),
+        super::DoctorCompletion::PendingOperatorAction
+    );
 }
 
 #[test]
