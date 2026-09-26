@@ -119,6 +119,7 @@ assert_required_assets() {
     "tests/fixtures/packaged_host_events/kimi/post-tool-use-edit.json"
     "tests/fixtures/packaged_host_events/opencode/baseline.json"
     "tests/fixtures/packaged_host_events/pi.json"
+    "tests/fixtures/packaged_host_events/droid.json"
     "tests/fixtures/provider_normalization/codex/session_meta.input.json"
     "tests/fixtures/provider_normalization/codex/agent_message.input.json"
     "tests/fixtures/analytics/codex_skill_prose.txt"
@@ -269,7 +270,8 @@ for fixture in \
   kimi-code.json \
   kimi/post-tool-use-edit.json \
   opencode/baseline.json \
-  pi.json; do
+  pi.json \
+  droid.json; do
   cmp -s \
     "$repo/crates/tracedecay-hooks/fixtures/host_events/$fixture" \
     "$repo/tests/fixtures/packaged_host_events/$fixture" ||

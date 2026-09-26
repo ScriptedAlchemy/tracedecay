@@ -726,7 +726,7 @@ fn native_feedback(case: HostCase) -> Vec<(&'static str, &'static str, Vec<u8>)>
 
 /// Hosts whose install/uninstall lifecycle drives a *host-owned* binary
 /// (`claude plugin`, `codex mcp`, `kiro-cli mcp`, `gemini extensions`,
-/// `copilot mcp`) or defers activation to an interactive host flow (Kimi).
+/// `copilot mcp`, `droid mcp`) or defers activation to an interactive host flow (Kimi).
 ///
 /// This suite runs the production CLI against an isolated `HOME` that contains
 /// no host binaries at all, so for these hosts the lifecycle correctly refuses
@@ -742,6 +742,7 @@ fn lifecycle_requires_absent_host_binary(host: HostKindV1) -> bool {
             | HostKindV1::Kiro
             | HostKindV1::Gemini
             | HostKindV1::Copilot
+            | HostKindV1::FactoryDroid
     )
 }
 

@@ -14,6 +14,7 @@ pub mod copilot;
 pub mod cursor;
 pub(crate) mod cursor_diagnostics;
 pub mod devin;
+pub mod droid;
 pub mod gemini;
 mod git_post_commit_hook;
 pub mod hermes;
@@ -56,6 +57,7 @@ pub use codex::CodexIntegration;
 pub use copilot::CopilotIntegration;
 pub use cursor::CursorIntegration;
 pub use devin::DevinIntegration;
+pub use droid::DroidIntegration;
 pub use gemini::GeminiIntegration;
 pub use hermes::HermesIntegration;
 pub use kilo::KiloIntegration;
@@ -641,6 +643,7 @@ pub fn get_integration(id: &str) -> Result<Box<dyn AgentIntegration>> {
         "kimi" => Ok(Box::new(KimiIntegration)),
         "vibe" => Ok(Box::new(VibeIntegration)),
         "pi" => Ok(Box::new(PiIntegration)),
+        "droid" => Ok(Box::new(DroidIntegration)),
         _ => Err(TraceDecayError::Config {
             message: format!(
                 "unknown agent: \"{id}\". Available agents: {}",
@@ -670,6 +673,7 @@ pub fn all_integrations() -> Vec<Box<dyn AgentIntegration>> {
         Box::new(KimiIntegration),
         Box::new(VibeIntegration),
         Box::new(PiIntegration),
+        Box::new(DroidIntegration),
     ]
 }
 
@@ -693,6 +697,7 @@ pub fn available_integrations() -> Vec<&'static str> {
         "kimi",
         "vibe",
         "pi",
+        "droid",
     ]
 }
 
@@ -716,6 +721,7 @@ pub fn integration_id_for_host(host: host_bundle::HostKindV1) -> &'static str {
         host_bundle::HostKindV1::Gemini => "gemini",
         host_bundle::HostKindV1::Copilot => "copilot",
         host_bundle::HostKindV1::Pi => "pi",
+        host_bundle::HostKindV1::FactoryDroid => "droid",
     }
 }
 
