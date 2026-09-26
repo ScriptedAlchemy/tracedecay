@@ -96,19 +96,18 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
             &["fact_id", "superseded_by"][..],
             "missing field `fact_id`",
         ),
-        // Hand-written git schemas, parsed with the `require_*_arg` helpers.
+        // Generated schemas, decoded straight into a typed request struct, so
+        // the parser error is serde's rather than a hand-written message.
         (
             "tracedecay_diff_context",
             &["files"][..],
-            "missing required parameter: files",
+            "missing field `files`",
         ),
         (
             "tracedecay_changelog",
             &["from_ref", "to_ref"][..],
-            "missing required parameter: from_ref",
+            "missing field `from_ref`",
         ),
-        // Generated schemas, decoded straight into a typed request struct, so
-        // the parser error is serde's rather than a hand-written message.
         (
             "tracedecay_port_status",
             &["source_dir", "target_dir"][..],

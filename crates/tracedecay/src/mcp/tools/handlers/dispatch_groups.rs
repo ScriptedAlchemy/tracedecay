@@ -11,7 +11,6 @@ use tracedecay_contracts::code_index_freshness::{
     CodeIndexFreshnessReader, CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitV1,
 };
 use tracedecay_dashboard_api::AdmittedDoctorReportV1;
-use tracedecay_mcp::handlers::git;
 use tracedecay_mcp::handlers::graph as portable_graph;
 use tracedecay_mcp::handlers::info as portable_info;
 use tracedecay_mcp::handlers::{
@@ -515,34 +514,6 @@ pub(crate) fn compute_graph_tool_for_owner<'a>(
         };
         completion.code_graph = options.served_code_graph.served();
         Ok(completion)
-    })
-}
-
-/// Dispatch git-aware tools (`tracedecay_affected`, `tracedecay_changelog`,
-/// branch and PR context helpers).
-#[hotpath::measure(future = true, label = "mcp.dispatch.git")]
-pub(super) async fn dispatch_git_tools(
-    tool_name: &str,
-    cg: &TraceDecay,
-    args: Value,
-    options: ToolCallRegistryOptions<'_>,
-) -> Result<ToolResult> {
-    dispatch_git_tools_inner(tool_name, cg, args, options).await
-}
-
-fn dispatch_git_tools_inner<'a>(
-    tool_name: &'a str,
-    cg: &'a TraceDecay,
-    args: Value,
-    options: ToolCallRegistryOptions<'a>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
-    // Erase the portable dispatch future before it reaches the measured
-    // wrapper so every profiling feature can compute its layout.
-    Box::pin(async move {
-        let project = admitted_project_authorities(cg, &options)?;
-        let snapshots = AdmittedRequestSnapshotsV1::default();
-        let ctx = admitted_tool_context(&options, &project, &snapshots, None)?;
-        git::dispatch_tool(&ctx, &verified_graph_open(&options), tool_name, args).await
     })
 }
 

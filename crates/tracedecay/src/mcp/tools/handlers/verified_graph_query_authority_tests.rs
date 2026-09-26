@@ -192,11 +192,13 @@ fn init_committed_git_fixture(root: &std::path::Path) {
 
 /// The minimal arguments that carry each handler past its request-shape
 /// validation, which by contract precedes graph admission: `run_affected_tests`
-/// requires an explicit caller-scoped manifest, and every other awaiting
-/// handler reaches the graph wait with empty arguments.
+/// requires an explicit caller-scoped manifest, the file-seeded git-context
+/// reads require their changed files, and every other awaiting handler reaches
+/// the graph wait with empty arguments.
 fn query_authority_probe_args(tool_name: &str) -> serde_json::Value {
     match tool_name {
         "tracedecay_run_affected_tests" => json!({ "changed_paths": ["src/lib.rs"] }),
+        "tracedecay_affected" | "tracedecay_diff_context" => json!({ "files": ["src/lib.rs"] }),
         _ => json!({}),
     }
 }
@@ -267,13 +269,11 @@ async fn changelog_reports_absent_query_port_as_typed_coverage() {
     .await
     .expect("registered fixture");
 
-    let result = handle_tool_call_with_registry_options(
+    let result = dispatch_on_graph_authority(
         &cg,
         "tracedecay_changelog",
         // JSON so the coverage section is asserted as fields, not Markdown.
         json!({ "from_ref": "HEAD", "to_ref": "HEAD", "format": "json" }),
-        None,
-        None,
         lower_level_ports_without_query(&cg),
     )
     .await

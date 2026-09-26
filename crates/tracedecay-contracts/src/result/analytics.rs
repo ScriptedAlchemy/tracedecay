@@ -6,11 +6,15 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::retrieval::PrSymbolPageV1;
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct InvocationAnalyticsV1 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_memory: Option<ContextMemoryAnalyticsV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_context: Option<PrContextAnalyticsV1>,
 }
 
 impl InvocationAnalyticsV1 {
@@ -19,6 +23,10 @@ impl InvocationAnalyticsV1 {
         let mut value = json!({});
         if let Some(context_memory) = &self.context_memory {
             value["context_memory"] = context_memory.ledger_value();
+        }
+        if let Some(pr_context) = &self.pr_context {
+            value["stage_timings_us"] = json!(pr_context.stage_timings_us);
+            value["symbol_coverage"] = json!(pr_context.symbol_coverage);
         }
         value
     }
@@ -47,4 +55,33 @@ impl ContextMemoryAnalyticsV1 {
             "error": self.error,
         })
     }
+}
+
+/// Where a PR-context call spent its time and how much of the changed
+/// symbol set its page covered.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PrContextAnalyticsV1 {
+    pub stage_timings_us: PrContextStageTimingsV1,
+    pub symbol_coverage: PrSymbolPageV1,
+}
+
+/// Microseconds per PR-context stage. The graph-enrichment stages are absent
+/// when the verified graph was still warming and only git evidence answered.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PrContextStageTimingsV1 {
+    pub git: u64,
+    pub graph: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_diff: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_annotations: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_page: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impact: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assemble: Option<u64>,
+    pub total: u64,
 }

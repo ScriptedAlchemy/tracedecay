@@ -249,10 +249,12 @@ fn hotpath_tool_identity_preserves_catalog_names_and_bounds_unknown_values() {
     assert_eq!(mcp_tool_hotpath_identity("another-unknown-name"), "unknown");
 }
 
-/// The MCP deadline horizon asks this predicate which reads walk git, so it
-/// must stay in step with the git dispatch family rather than a name list.
+/// The git-context reads are application operations the graph-tool owner
+/// answers; only the internal branch-add tool stays in the git dispatch
+/// family the MCP deadline horizon asks about.
 #[test]
-fn git_dispatch_family_is_visible_to_the_server_horizon() {
+fn git_dispatch_family_holds_only_the_internal_branch_add_tool() {
+    assert!(tool_dispatches_git_reads("tracedecay_admin_branch_add"));
     for tool_name in [
         "tracedecay_pr_context",
         "tracedecay_diff_context",
@@ -261,8 +263,13 @@ fn git_dispatch_family_is_visible_to_the_server_horizon() {
         "tracedecay_affected",
     ] {
         assert!(
-            tool_dispatches_git_reads(tool_name),
-            "{tool_name} dispatches through the git family",
+            !tool_dispatches_git_reads(tool_name),
+            "{tool_name} is answered by the graph-tool owner",
+        );
+        assert!(
+            ApplicationSurfaceOperation::from_tool_name(tool_name)
+                .is_some_and(ApplicationSurfaceOperation::is_graph_tool),
+            "{tool_name} is a graph-tool operation",
         );
     }
     assert!(!tool_dispatches_git_reads("tracedecay_files"));
@@ -1354,10 +1361,9 @@ fn deadline_from_now(offset_micros: i64) -> tracedecay_contracts::Deadline {
 }
 
 /// An already-elapsed deadline must short-circuit *before* the expensive body
-/// runs, so neither the `pr_context` walk nor the `admin_branch_add` index
-/// build can proceed once the horizon is gone.
+/// runs, so the `pr_context` walk cannot proceed once the horizon is gone.
 #[tokio::test]
-async fn git_dispatch_rejects_an_already_elapsed_deadline_without_running_the_handler() {
+async fn pr_context_rejects_an_already_elapsed_deadline_without_running_the_walk() {
     let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
     let _env = SelectorEnv::new(dir.path());
@@ -1371,42 +1377,36 @@ async fn git_dispatch_rejects_an_already_elapsed_deadline_without_running_the_ha
     .await
     .unwrap();
 
-    for tool_name in ["tracedecay_pr_context", "tracedecay_admin_branch_add"] {
-        let options = ToolCallRegistryOptions {
-            application_deadline: Some(
-                tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(1)).unwrap(),
-            ),
-            ..ToolCallRegistryOptions::default()
-        }
-        .admit_opened_project(&cg)
-        .expect("opened fixture admits");
-        let started = std::time::Instant::now();
-        let result = dispatch_git_tools(
-            tool_name,
-            &cg,
-            json!({ "base_ref": "main", "head_ref": "HEAD", "branch": "feature" }),
-            options,
-        )
-        .await
-        .expect("an elapsed-deadline dispatch returns a typed result, not a hard error");
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(5),
-            "{tool_name} elapsed-deadline path must return fast, took {:?}",
-            started.elapsed()
-        );
-        assert_eq!(
-            result.semantic_error(),
-            Some(true),
-            "{tool_name} must surface the exhausted deadline as a semantic error",
-        );
-        assert!(
-            result
-                .failure_message()
-                .is_some_and(|message| message.contains("dispatch deadline")),
-            "{tool_name} must report the dispatch deadline, got {:?}",
-            result.failure_message(),
-        );
+    let options = ToolCallRegistryOptions {
+        application_deadline: Some(
+            tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(1)).unwrap(),
+        ),
+        ..ToolCallRegistryOptions::default()
     }
+    .admit_opened_project(&cg)
+    .expect("opened fixture admits");
+    let started = std::time::Instant::now();
+    let error = super::compute_graph_tool_for_owner(
+        &cg,
+        ApplicationSurfaceOperation::PrContext,
+        json!({ "base_ref": "main", "head_ref": "HEAD" }),
+        None,
+        options,
+    )
+    .await
+    .expect_err("an elapsed deadline refuses the PR context walk");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "elapsed-deadline path must return fast, took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        error
+            .project_route_context()
+            .map(|(reason, retryable, _)| (reason, retryable)),
+        Some(("tool_dispatch_deadline_exceeded", true)),
+        "the exhausted deadline is the typed dispatch-deadline refusal, got {error}",
+    );
 
     cg.close();
 }
@@ -1439,9 +1439,9 @@ async fn pr_context_unresolvable_ref_fails_fast_within_deadline() {
         },
     );
     let started = std::time::Instant::now();
-    let result = dispatch_git_tools(
-        "tracedecay_pr_context",
+    let result = dispatch_on_graph_authority(
         &cg,
+        "tracedecay_pr_context",
         json!({ "base_ref": "does-not-exist-ref", "head_ref": "HEAD" }),
         options,
     )
@@ -1510,9 +1510,9 @@ async fn pr_context_returns_git_evidence_while_verified_graph_is_unavailable() {
             "code-graph-stale",
         ),
     ] {
-        let result = dispatch_git_tools(
-            "tracedecay_pr_context",
+        let result = dispatch_on_graph_authority(
             &cg,
+            "tracedecay_pr_context",
             json!({
                 "base_ref": "main",
                 "head_ref": "HEAD",
