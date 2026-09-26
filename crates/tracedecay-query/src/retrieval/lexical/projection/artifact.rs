@@ -39,8 +39,7 @@ pub use fingerprints::{
 };
 pub use format::{
     CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactSectionDigestV1,
-    CodeLexicalImportMembershipWitnessV1, VerifiedCodeLexicalArtifactV1,
-    code_lexical_artifact_content_key,
+    VerifiedCodeLexicalArtifactV1, code_lexical_artifact_content_key,
 };
 pub use prepared::PreparedCodeLexicalArtifactPageV1;
 pub use reader::{
@@ -269,14 +268,23 @@ fn with_memory_statement_journals<T>(
     connection: &mut rusqlite::Connection,
     append: impl FnOnce(&mut rusqlite::Connection) -> Result<T, CodeLexicalArtifactErrorV1>,
 ) -> Result<T, CodeLexicalArtifactErrorV1> {
-    connection
-        .pragma_update(None, "temp_store", "MEMORY")
-        .map_err(sqlite_error)?;
+    select_temp_store(connection, true)?;
     let appended = append(connection);
-    connection
-        .pragma_update(None, "temp_store", "FILE")
-        .map_err(sqlite_error)?;
+    select_temp_store(connection, false)?;
     appended
+}
+
+/// SQLite latches in-memory statement journals when a write transaction
+/// begins and in-memory sorting when a statement starts, so this runs before
+/// the transaction it governs. Memory storage also disables the sorter's
+/// spill and helper threads: an `ORDER BY` then holds its whole input.
+fn select_temp_store(
+    connection: &rusqlite::Connection,
+    memory: bool,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    connection
+        .pragma_update(None, "temp_store", if memory { "MEMORY" } else { "FILE" })
+        .map_err(sqlite_error)
 }
 
 /// CPU units one builder statement occupies: the builder thread plus every

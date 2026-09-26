@@ -76,8 +76,8 @@ pub struct CodeGraphFileSymbolCountV1 {
     pub symbols: u64,
 }
 
-/// Generation-wide aggregates, derived once while the catalog is built (at
-/// seal for bundled generations), so reading them never walks the census.
+/// Generation-wide aggregates, derived once while the catalog is built, so
+/// reading them never walks the census.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CodeGraphCensusV1 {
     pub symbols: u64,

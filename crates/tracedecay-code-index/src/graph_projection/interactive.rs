@@ -38,12 +38,10 @@ use super::{
 };
 use crate::lineage::LineageSymbolRecordV1;
 
-mod artifact;
 mod catalog;
 mod imports;
 mod models;
 
-pub use self::artifact::{INTERACTIVE_CATALOG_ARTIFACT_NAME, write_interactive_catalog_artifact};
 use self::models::CatalogSymbol;
 pub(super) use self::models::InteractiveCatalog;
 pub use self::models::{
@@ -76,8 +74,8 @@ pub(super) struct InteractiveCatalogCache {
     state: RwLock<InteractiveCatalogState>,
     build: Mutex<()>,
     /// Count of full projection warm scans run against this store, so tests
-    /// can prove a bundled generation opened without any warm work. The scan
-    /// may run on a background thread, hence an atomic.
+    /// can prove concurrent readers share one scan. The scan may run on a
+    /// background thread, hence an atomic.
     scan_builds: std::sync::atomic::AtomicUsize,
 }
 
@@ -158,49 +156,7 @@ impl CodeGraphProjectionStore {
         }
     }
 
-    /// Installs a digest-verified sealed-read-bundle catalog artifact as this
-    /// store's ready interactive catalog, so no projection warm scan ever
-    /// runs for this generation. The bundle envelope has already proven the
-    /// bytes against the generation identity; this decodes them, revalidates
-    /// structure, and publishes the catalog into the shared slot.
-    ///
-    /// Idempotent over an already-ready catalog. Refused while a warm build
-    /// owns the slot: the owner's outcome wins, so a loaded artifact can
-    /// never half-replace an in-flight scan.
-    pub fn install_interactive_catalog_artifact(
-        &self,
-        bytes: &[u8],
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<(), CodeGraphProjectionError> {
-        if cancellation.is_cancelled() {
-            return Err(CodeGraphProjectionError::Cancelled);
-        }
-        let catalog = hotpath::measure_block!(
-            "code_graph.catalog.bundle_install",
-            artifact::decode_interactive_catalog_artifact(bytes, cancellation.as_ref())
-        )?;
-        let mut state = self
-            .interactive_catalog
-            .state
-            .write()
-            .map_err(|_| catalog_lock_poisoned())?;
-        match &*state {
-            InteractiveCatalogState::Cold | InteractiveCatalogState::Warming { owner: None } => {
-                *state = InteractiveCatalogState::Ready(Arc::new(catalog));
-                Ok(())
-            }
-            InteractiveCatalogState::Ready(_) => Ok(()),
-            InteractiveCatalogState::Warming { owner: Some(_) } => {
-                Err(CodeGraphProjectionError::Unavailable(
-                    "code graph interactive catalog warm already has an owner".to_owned(),
-                ))
-            }
-            InteractiveCatalogState::Failed(error) => Err(error.clone()),
-        }
-    }
-
-    /// Number of full projection warm scans this store has run. A bundled
-    /// generation must open with this still at zero.
+    /// Number of full projection warm scans this store has run.
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn interactive_catalog_scan_builds(&self) -> usize {
         self.interactive_catalog

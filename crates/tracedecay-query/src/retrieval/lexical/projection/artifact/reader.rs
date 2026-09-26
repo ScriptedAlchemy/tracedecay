@@ -16,7 +16,6 @@ use roaring::RoaringBitmap;
 use rusqlite::StatementStatus;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params_from_iter, types::Value};
 use sha2::{Digest, Sha256};
-use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::clones::{
     CloneBodyOccurrenceV1, CloneBodyPayloadV1, CloneExactKeyV1, CloneSelectedBlockV1,
     CodeIndexCloneBodyV1,
@@ -40,11 +39,10 @@ use super::fingerprints::{
     read_clone_fingerprint_page,
 };
 use super::format::{
-    ArtifactRowV1, CodeLexicalArtifactOccurrenceV1, CodeLexicalImportMembershipWitnessV1,
-    PostingListDecoderV1, VerifiedCodeLexicalArtifactV1, content_metadata_bytes,
-    decode_document_set, decode_ngram_bitmap, decode_padded_receipt, decode_term_lists,
-    receipt_artifact_digest, stored_metadata_digest as stored_metadata_digest_of,
-    verify_artifact_table_layout,
+    ArtifactRowV1, CodeLexicalArtifactOccurrenceV1, PostingListDecoderV1,
+    VerifiedCodeLexicalArtifactV1, content_metadata_bytes, decode_document_set,
+    decode_ngram_bitmap, decode_padded_receipt, decode_term_lists, receipt_artifact_digest,
+    stored_metadata_digest as stored_metadata_digest_of, verify_artifact_table_layout,
 };
 use super::postings::{NGRAM_NORMALIZED, query_ngrams, raw_override_query_ngrams};
 use super::row_codec::{
@@ -618,38 +616,6 @@ impl CodeLexicalArtifactReaderV1 {
             ));
         }
         Ok(occurrence)
-    }
-
-    pub fn import_membership(
-        &self,
-        evidence: &CodeIndexImportEvidenceV1,
-    ) -> Result<Option<CodeLexicalImportMembershipWitnessV1>, CodeLexicalArtifactErrorV1> {
-        let canonical = serde_json::to_vec(evidence)
-            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
-        let connection = self.lock_connection()?;
-        let stored: Option<Vec<u8>> = connection
-            .query_row(
-                "SELECT canonical FROM import_evidence WHERE canonical = ?1",
-                [canonical],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(sqlite_error)?;
-        let Some(stored) = stored else {
-            return Ok(None);
-        };
-        let stored: CodeIndexImportEvidenceV1 = serde_json::from_slice(&stored)
-            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-        if &stored != evidence {
-            return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                "import dictionary key does not match its evidence".to_owned(),
-            ));
-        }
-        Ok(Some(CodeLexicalImportMembershipWitnessV1 {
-            artifact_digest: self.receipt.artifact_digest().clone(),
-            import_dictionary_digest: self.receipt.import_dictionary_digest().clone(),
-            evidence: stored,
-        }))
     }
 
     pub fn exact_adapter<A>(&self, authority: A) -> CodeExactLexicalArtifactReaderV1<A>

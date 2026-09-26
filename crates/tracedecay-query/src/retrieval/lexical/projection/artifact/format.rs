@@ -5,7 +5,6 @@ use roaring::RoaringBitmap;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{
     BoundedSanitizedText, CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkId,
@@ -45,11 +44,9 @@ pub(super) use super::schema::{SERVING_INDEX_STEP_COUNT_V11, STATISTICS_STEP_COU
 // Revision 15 adds independently digested clone payload, occurrence, and
 // exact-posting sections without changing lexical document integrity.
 pub(super) const RECEIPT_RESERVATION_BYTES: usize = 16 * 1024;
-pub(super) const SECTION_NAMES: [&str; 14] = [
+pub(super) const SECTION_NAMES: [&str; 12] = [
     "source_pages",
     "document_integrity",
-    "import_integrity",
-    "import_evidence",
     "rows",
     "term_postings",
     "exact_postings",
@@ -61,10 +58,8 @@ pub(super) const SECTION_NAMES: [&str; 14] = [
     "clone_body_payloads",
     "clone_fingerprint_postings",
 ];
-pub(super) const BASE_SECTION_NAMES: [&str; 7] = [
+pub(super) const BASE_SECTION_NAMES: [&str; 5] = [
     "document_integrity",
-    "import_integrity",
-    "import_evidence",
     "rows",
     "term_postings",
     "exact_postings",
@@ -319,7 +314,7 @@ type ColumnShapeV1 = (&'static str, &'static str, i64, i64);
 /// `(table, WITHOUT ROWID, columns)` for every table a staging or sealed
 /// artifact always carries. Staging-only append tables are dropped by
 /// finalization and carry no serving contract.
-const ARTIFACT_TABLE_LAYOUT: [(&str, bool, &[ColumnShapeV1]); 13] = [
+const ARTIFACT_TABLE_LAYOUT: [(&str, bool, &[ColumnShapeV1]); 12] = [
     (
         "source_pages",
         false,
@@ -333,7 +328,6 @@ const ARTIFACT_TABLE_LAYOUT: [(&str, bool, &[ColumnShapeV1]); 13] = [
             ("base_sections_receipt", "BLOB", 1, 0),
         ],
     ),
-    ("import_evidence", true, &[("canonical", "BLOB", 1, 1)]),
     (
         "row_blocks",
         false,
@@ -1152,13 +1146,6 @@ pub struct CodeLexicalArtifactOccurrenceV1 {
     pub simple_name: Option<String>,
     pub qualified_name: Option<String>,
     pub kind: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CodeLexicalImportMembershipWitnessV1 {
-    pub artifact_digest: ManifestDigest,
-    pub import_dictionary_digest: ManifestDigest,
-    pub evidence: CodeIndexImportEvidenceV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
