@@ -310,6 +310,7 @@ mod reset_problem_tests {
             diagnostic,
             retry,
             legal_actions,
+            ..
         } = problem
         else {
             panic!("workflow reset must remain a typed reset-required problem");

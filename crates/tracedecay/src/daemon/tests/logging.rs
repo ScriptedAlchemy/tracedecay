@@ -5,9 +5,8 @@ use tracedecay_runtime_core::logging::format_daemon_log_line;
 fn scheduler_application_problem_log_excludes_hostile_payload() {
     use tracedecay_contracts::retained_surfaces::AutomationRunProblemV1;
     use tracedecay_contracts::{
-        ApplicationProblem, ApplicationProblemEnvelope, LegalAction, RequestId, ResolvedScope,
-        RetainedSurfaceOperation, RetryDirective, SafeDiagnostic,
-        retained_surface_application_operation,
+        ApplicationProblem, ApplicationProblemEnvelope, RequestId, ResolvedScope,
+        RetainedSurfaceOperation, SafeDiagnostic, retained_surface_application_operation,
     };
     use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
 
@@ -18,15 +17,13 @@ fn scheduler_application_problem_log_excludes_hostile_payload() {
     let envelope = ApplicationProblemEnvelope::new(
         operation.result_contract().clone(),
         request_id.clone(),
-        ApplicationProblem::ResetRequired {
-            diagnostic: SafeDiagnostic::new(
+        ApplicationProblem::reset_required(
+            SafeDiagnostic::new(
                 "application.memory-automation-run.reset-required",
                 format!("hostile automatic fact content api_key={SECRET}"),
             )
             .unwrap(),
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::Reset],
-        },
+        ),
     )
     .unwrap();
     let scope = ResolvedScope::new(

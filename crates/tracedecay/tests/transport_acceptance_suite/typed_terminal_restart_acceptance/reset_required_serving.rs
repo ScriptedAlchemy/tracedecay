@@ -152,12 +152,22 @@ fn reset_required_profile_session_store_is_served_typed_until_its_named_reset() 
             "remedy": "tracedecay wipe --all --yes",
         }])
     );
-    super::assert_reset_required(
-        &super::cli_problem_envelope(
-            &profile_session_read(&home_path, &project_path),
-            "profile session read over a reset-required store",
-        ),
+    let refused = super::cli_problem_envelope(
+        &profile_session_read(&home_path, &project_path),
         "profile session read over a reset-required store",
+    );
+    super::assert_reset_required(&refused, "profile session read over a reset-required store");
+    assert_eq!(
+        refused["problem"]["detail"],
+        json!({
+            "kind": "reset_required",
+            "authority": "git correlation",
+            "found_version": 5,
+            "required_version": 6,
+            "reason": "git correlation profile schema 5 is incompatible with required schema 6; \
+                       reset the profile",
+            "remedy": "tracedecay wipe --all --yes",
+        })
     );
     wait_for_code_index_hit(&home_path, &project_path, "probe");
 

@@ -4,8 +4,8 @@ use tracedecay_automation::backend::AgentTaskFailureClass;
 use tracedecay_contracts::retained_surfaces::{AutomationRunProblemV1, AutomationRunRequestV1};
 use tracedecay_contracts::{
     ApplicationExecutionFailureClassV1, ApplicationProblem, ApplicationProblemEnvelope,
-    ApplicationUnavailableClassV1, CancellationSignal, CancellationStage, LegalAction,
-    ProblemOwningLayer, RequestAdmission, RequestContext, RetryDirective, SafeDiagnostic,
+    ApplicationUnavailableClassV1, CancellationSignal, CancellationStage, ProblemOwningLayer,
+    RequestAdmission, RequestContext, SafeDiagnostic,
 };
 
 use crate::automation::run_ledger::AutomationRunLedgerRecord;
@@ -23,15 +23,13 @@ pub fn reset_required_problem(
         operation,
         context,
         request,
-        ApplicationProblem::ResetRequired {
-            diagnostic: SafeDiagnostic::new(
+        ApplicationProblem::reset_required(
+            SafeDiagnostic::new(
                 "application.automation-run.reset-required",
                 "The interrupted automation run has no reconcilable terminal; preserve its exact run identity and reset it explicitly before reuse.",
             )
             .map_err(contract_error)?,
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::Reset],
-        },
+        ),
     )
 }
 
@@ -44,15 +42,13 @@ pub fn indeterminate_external_effect_problem(
         operation,
         context,
         request,
-        ApplicationProblem::ResetRequired {
-            diagnostic: SafeDiagnostic::new(
+        ApplicationProblem::reset_required(
+            SafeDiagnostic::new(
                 "application.automation-run.external-effect-indeterminate",
                 "An external automation effect may have committed before its terminal was published; the effect will not be replayed and its exact run identity requires explicit reconciliation or reset.",
             )
             .map_err(contract_error)?,
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::Reset],
-        },
+        ),
     )
 }
 
@@ -116,15 +112,13 @@ pub fn runtime_problem(
         return Ok(problem);
     }
     if error.reset_required_context().is_some() {
-        return Ok(ApplicationProblem::ResetRequired {
-            diagnostic: SafeDiagnostic::new(
+        return Ok(ApplicationProblem::reset_required(
+            SafeDiagnostic::new(
                 "application.automation-run.reset-required",
                 "The admitted automation authority requires an explicit reset before reuse.",
             )
             .map_err(contract_error)?,
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::Reset],
-        });
+        ));
     }
     ApplicationProblem::execution_failed(
         ApplicationExecutionFailureClassV1::Permanent,
