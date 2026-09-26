@@ -34,7 +34,10 @@ pub use convergence::{
     SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStageV1,
     SchemaConvergenceStateV1,
 };
-pub use debris::{IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1};
+pub use debris::{
+    IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1,
+    RETIRED_BRANCH_STORE_DIRECTORY, is_retired_branch_store_path,
+};
 pub use findings::{
     code_generation_retention_finding, incident_debris_finding, orphan_store_finding,
     over_budget_finding, pending_schema_migration_finding, retention_backlog_finding,
