@@ -100,6 +100,7 @@ fn effect_reply(operation: RetainedSurfaceOperation, result: RetainedSurfaceResu
         touched_files: Vec::new(),
         code_graph: None,
         analytics: None,
+        cost: None,
     })
     .unwrap()
 }
@@ -146,6 +147,7 @@ fn evidence_reply(result: RetainedSurfaceResultV1) -> Value {
         finished_at: UtcMicros(3),
         budget: Default::default(),
         cancellation: None,
+        cost: None,
     };
     let packet = EvidencePacket::from_retrieval(evidence, authority, receipt).unwrap();
     serde_json::to_value(ApplicationEnvelope::evidence(

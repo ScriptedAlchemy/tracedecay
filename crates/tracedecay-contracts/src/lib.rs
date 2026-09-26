@@ -342,10 +342,11 @@ pub use result::{
     IdempotencyKey, InvocationAnalyticsV1, LegalAction, Omission, OmissionReason, OpaqueCursor,
     OperationBudgetUsage, OperationReceipt, OperationTermination, PageCursor, PageState,
     PolicyDecisionRef, PreviewId, PreviewResult, ProblemOwningLayer, ProblemTerminality,
-    RUNTIME_MOUNTING_REASON_CODE, ReconciliationState, ResultContractRef, ResumeToken,
-    RetrievalEvidence, RetrieverContribution, RetrieverContributionState, RetryDirective,
-    RetryScope, SafeDiagnostic, ScoreId, StreamEvent, StreamEventKind, StreamFrontier, StreamGap,
-    StreamTermination, StreamValidationError, TemporalState, validate_stream,
+    RUNTIME_MOUNTING_REASON_CODE, ReconciliationState, RequestCostReceiptV1, ResultContractRef,
+    ResumeToken, RetrievalEvidence, RetrieverContribution, RetrieverContributionState,
+    RetryDirective, RetryScope, SafeDiagnostic, ScoreId, StorePointReadsV1, StreamEvent,
+    StreamEventKind, StreamFrontier, StreamGap, StreamTermination, StreamValidationError,
+    TemporalState, validate_stream,
 };
 pub use retained_receipts::{
     PreparedRetainedEffect, authority_receipt, effective_memory_deadline, evidence_outcome,

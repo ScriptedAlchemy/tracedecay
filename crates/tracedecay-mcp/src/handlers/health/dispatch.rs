@@ -15,6 +15,7 @@ use super::{
 use crate::ToolResult;
 use crate::handlers::support::unknown_tool_error;
 use crate::handlers::verified_read::{VerifiedGraphOpen, verified_read_operation as read};
+use crate::tools::response_trailers::append_request_cost;
 
 /// Dispatches one code-health tool (`tracedecay_health`,
 /// `tracedecay_test_risk`, ...) onto its handler over the verified graph
@@ -26,61 +27,28 @@ pub async fn dispatch_tool(
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
-    match tool_name {
-        "tracedecay_test_map" => {
-            handle_test_map(
-                response_handle_root,
-                &open(read("health_read")?).await?,
-                args,
-                scope_prefix,
-            )
-            .await
-        }
-        "tracedecay_gini" => {
-            handle_gini(
-                response_handle_root,
-                &open(read("health_read")?).await?,
-                args,
-                scope_prefix,
-            )
-            .await
-        }
+    let operation = match tool_name {
+        "tracedecay_health" => "health_delta",
+        "tracedecay_test_map"
+        | "tracedecay_gini"
+        | "tracedecay_dependency_depth"
+        | "tracedecay_dsm"
+        | "tracedecay_test_risk" => "health_read",
+        _ => return Err(unknown_tool_error(tool_name)),
+    };
+    let graph = open(read(operation)?).await?;
+    let root = response_handle_root;
+    let mut result = match tool_name {
+        "tracedecay_test_map" => handle_test_map(root, &graph, args, scope_prefix).await,
+        "tracedecay_gini" => handle_gini(root, &graph, args, scope_prefix).await,
         "tracedecay_dependency_depth" => {
-            handle_dependency_depth(
-                response_handle_root,
-                &open(read("health_read")?).await?,
-                args,
-                scope_prefix,
-            )
-            .await
+            handle_dependency_depth(root, &graph, args, scope_prefix).await
         }
-        "tracedecay_health" => {
-            handle_health(
-                response_handle_root,
-                &open(read("health_delta")?).await?,
-                args,
-                scope_prefix,
-            )
-            .await
-        }
-        "tracedecay_dsm" => {
-            handle_dsm(
-                response_handle_root,
-                &open(read("health_read")?).await?,
-                args,
-                scope_prefix,
-            )
-            .await
-        }
-        "tracedecay_test_risk" => {
-            handle_test_risk(
-                response_handle_root,
-                &open(read("health_read")?).await?,
-                args,
-                scope_prefix,
-            )
-            .await
-        }
+        "tracedecay_health" => handle_health(root, &graph, args, scope_prefix).await,
+        "tracedecay_dsm" => handle_dsm(root, &graph, args, scope_prefix).await,
+        "tracedecay_test_risk" => handle_test_risk(root, &graph, args, scope_prefix).await,
         _ => Err(unknown_tool_error(tool_name)),
-    }
+    }?;
+    append_request_cost(&mut result, &graph.read_cost());
+    Ok(result)
 }

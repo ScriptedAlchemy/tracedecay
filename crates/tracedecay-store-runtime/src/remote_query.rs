@@ -280,6 +280,7 @@ impl RemoteExactObservationQueryReadPortV1 for DaemonRemoteExactObservationQuery
             finished_at: ended_at,
             budget,
             cancellation: None,
+            cost: None,
         };
         let execution = OperationReceipt::completed(
             command.observed_at,

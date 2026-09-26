@@ -17,6 +17,7 @@ use tracedecay_store::runtime::{
 };
 
 use crate::generation::physical_namespace;
+use crate::read_meter::{GraphReadMeter, GraphReadStore, property_bytes};
 use crate::{
     GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef,
     GraphGenerationDependency, GraphGenerationId, GraphGenerationManifestIdentity,
@@ -181,6 +182,7 @@ pub struct VerifiedGraphSnapshot {
     head: Arc<VerifiedGenerationLease>,
     closure: BTreeMap<GraphProjectionIdentity, Arc<VerifiedGenerationLease>>,
     direct_sealed: bool,
+    meter: Option<Arc<GraphReadMeter>>,
 }
 
 impl fmt::Debug for VerifiedGraphSnapshot {
@@ -269,6 +271,7 @@ impl VerifiedGraphSnapshot {
             head,
             closure,
             direct_sealed: false,
+            meter: None,
         }
     }
 
@@ -282,6 +285,17 @@ impl VerifiedGraphSnapshot {
             head: Arc::clone(&head),
             closure: BTreeMap::from([(projection, head)]),
             direct_sealed: true,
+            meter: None,
+        }
+    }
+
+    /// This snapshot with every read it serves counted on `meter`. The copy
+    /// shares the lease; only the accounting is per request.
+    #[must_use]
+    pub fn metered(&self, meter: Arc<GraphReadMeter>) -> Self {
+        Self {
+            meter: Some(meter),
+            ..self.clone()
         }
     }
 
@@ -333,25 +347,42 @@ impl VerifiedGraphSnapshot {
         reference: &GraphEntityRef,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<GraphEntity>, GraphDbError> {
-        self.with_operation(|| {
+        let (store, entity) = self.with_operation(|| {
             let lease = self.lease_for_projection(&reference.projection)?;
             let namespace = lease.locator.physical_namespace()?;
             if self.direct_sealed {
-                return self
-                    .database
-                    .entity(&namespace, &reference.identity, cancellation);
+                return Ok((
+                    GraphReadStore::Sealed,
+                    self.database
+                        .entity(&namespace, &reference.identity, cancellation)?,
+                ));
             }
             // A sealed generation's point reads serve from its compacted
             // per-generation store; the digest proved the exact row set, so
             // a miss there is authoritative and never re-read from staging.
             if let Some(sealed) = self.database.sealed_generation_reader(&lease.locator) {
-                return sealed
-                    .database()
-                    .entity(&namespace, &reference.identity, cancellation);
+                return Ok((
+                    GraphReadStore::Sealed,
+                    sealed
+                        .database()
+                        .entity(&namespace, &reference.identity, cancellation)?,
+                ));
             }
-            self.database
-                .entity(&namespace, &reference.identity, cancellation)
-        })
+            Ok((
+                GraphReadStore::Staging,
+                self.database
+                    .entity(&namespace, &reference.identity, cancellation)?,
+            ))
+        })?;
+        if let Some(meter) = &self.meter {
+            meter.record_point_read(
+                store,
+                entity
+                    .as_ref()
+                    .map_or(0, |entity| property_bytes(&entity.properties)),
+            );
+        }
+        Ok(entity)
     }
 
     pub fn relation(
@@ -359,19 +390,34 @@ impl VerifiedGraphSnapshot {
         reference: &GraphRelationRef,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<GraphGenerationRelation>, GraphDbError> {
-        self.with_operation(|| {
+        let (store, relation) = self.with_operation(|| {
             let lease = self.lease_for_projection(&reference.projection)?;
             // The owning generation's sealed store holds the relation, its
             // edge, and full copies of any dependency-generation endpoints,
             // so the endpoint decode below stays inside one store.
             if let Some(sealed) = self.database.sealed_generation_reader(&lease.locator) {
-                return sealed
-                    .database()
-                    .generation_relation(self, reference, cancellation);
+                return Ok((
+                    GraphReadStore::Sealed,
+                    sealed
+                        .database()
+                        .generation_relation(self, reference, cancellation)?,
+                ));
             }
-            self.database
-                .generation_relation(self, reference, cancellation)
-        })
+            Ok((
+                GraphReadStore::Staging,
+                self.database
+                    .generation_relation(self, reference, cancellation)?,
+            ))
+        })?;
+        if let Some(meter) = &self.meter {
+            meter.record_point_read(
+                store,
+                relation
+                    .as_ref()
+                    .map_or(0, |relation| property_bytes(&relation.properties)),
+            );
+        }
+        Ok(relation)
     }
 
     #[hotpath::measure(
@@ -421,7 +467,7 @@ impl VerifiedGraphSnapshot {
         if request.namespace != self.head.locator.projection.namespace {
             return Err(GraphDbError::conflict("lease.traverse"));
         }
-        self.with_operation(|| {
+        let result = self.with_operation(|| {
             // A dependency-free snapshot's whole closure is one generation,
             // so its sealed store holds every node and edge a traversal can
             // reach and the walk runs on the compacted CSR adjacency. A
@@ -433,7 +479,11 @@ impl VerifiedGraphSnapshot {
                 return sealed.database().traverse_generation(self, request);
             }
             self.database.traverse_generation(self, request)
-        })
+        })?;
+        if let Some(meter) = &self.meter {
+            meter.record_fanout(result.visits.len() as u64, 0);
+        }
+        Ok(result)
     }
 
     #[hotpath::measure(
@@ -614,15 +664,26 @@ impl VerifiedGraphSnapshot {
         cancellation: Arc<dyn GraphCancellation>,
         visitor: &mut dyn FnMut(crate::GraphRelationTarget),
     ) -> Result<usize, GraphDbError> {
-        self.head_fanout(|database, namespace| {
-            database.visit_outgoing_relation_targets(
-                &namespace,
-                start,
-                relation_kinds,
-                cancellation,
-                visitor,
-            )
-        })
+        let mut bytes = 0_u64;
+        let mut counted = |target: crate::GraphRelationTarget| {
+            bytes += target.rows_and_bytes().1;
+            visitor(target);
+        };
+        let visited = self.with_operation(|| {
+            self.with_head_database(|database| {
+                database.visit_outgoing_relation_targets(
+                    &self.head.locator.physical_namespace()?,
+                    start,
+                    relation_kinds,
+                    cancellation,
+                    &mut counted,
+                )
+            })
+        })?;
+        if let Some(meter) = &self.meter {
+            meter.record_fanout(visited as u64, bytes);
+        }
+        Ok(visited)
     }
 
     /// Bulk incoming relation rows over this verified generation.
@@ -706,15 +767,20 @@ impl VerifiedGraphSnapshot {
         Ok(())
     }
 
-    fn head_fanout<T>(
+    fn head_fanout<T: FanoutRows>(
         &self,
         operation: impl FnOnce(&crate::GraphDb, GraphNamespace) -> Result<T, GraphDbError>,
     ) -> Result<T, GraphDbError> {
-        self.with_operation(|| {
+        let rows = self.with_operation(|| {
             self.with_head_database(|database| {
                 operation(database, self.head.locator.physical_namespace()?)
             })
-        })
+        })?;
+        if let Some(meter) = &self.meter {
+            let (count, bytes) = rows.rows_and_bytes();
+            meter.record_fanout(count, bytes);
+        }
+        Ok(rows)
     }
 
     fn with_operation<T>(
@@ -752,6 +818,43 @@ impl VerifiedGraphSnapshot {
                 ))
             })
             .collect()
+    }
+}
+
+/// Rows and decoded payload bytes one fan-out returned.
+trait FanoutRows {
+    fn rows_and_bytes(&self) -> (u64, u64);
+}
+
+impl FanoutRows for GraphRelationId {
+    fn rows_and_bytes(&self) -> (u64, u64) {
+        (1, 0)
+    }
+}
+
+impl FanoutRows for GraphRelation {
+    fn rows_and_bytes(&self) -> (u64, u64) {
+        (1, property_bytes(&self.properties))
+    }
+}
+
+impl FanoutRows for crate::GraphRelationTarget {
+    fn rows_and_bytes(&self) -> (u64, u64) {
+        (
+            1,
+            property_bytes(&self.relation.properties) + property_bytes(&self.target.properties),
+        )
+    }
+}
+
+impl<T: FanoutRows> FanoutRows for Vec<Vec<T>> {
+    fn rows_and_bytes(&self) -> (u64, u64) {
+        self.iter()
+            .flatten()
+            .map(FanoutRows::rows_and_bytes)
+            .fold((0, 0), |(rows, bytes), (row, row_bytes)| {
+                (rows + row, bytes + row_bytes)
+            })
     }
 }
 

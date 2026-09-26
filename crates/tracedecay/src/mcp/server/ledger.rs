@@ -406,6 +406,7 @@ impl McpServer {
             client_name: connection_client_name,
             mcp_instance_id: connection_instance_id,
             failure_reason: Some(&failure_reason),
+            cost: None,
         });
         self.spawn_observed_ledger_write(async move {
             if let Err(e) = gdb.append_analytics_event(&event).await {

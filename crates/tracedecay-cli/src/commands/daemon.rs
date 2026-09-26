@@ -420,6 +420,7 @@ mod tests {
             finished_at: UtcMicros(3),
             budget: Default::default(),
             cancellation: None,
+            cost: None,
         };
         let packet = EvidencePacket::from_retrieval(evidence, authority, receipt).unwrap();
         serde_json::to_value(tracedecay_contracts::ApplicationEnvelope::evidence(

@@ -1,5 +1,6 @@
 //! Blocks every surface appends beside a rendered tool result: the stale
-//! code-graph trailer and the token-accounting footer.
+//! code-graph trailer, the request cost receipt, and the token-accounting
+//! footer.
 //!
 //! MCP and the `tracedecay tool` CLI render through the same functions, so
 //! both print the same trailer and footer for the same typed result.
@@ -7,12 +8,14 @@
 use std::path::{Component, Path};
 
 use serde_json::json;
+use tracedecay_contracts::RequestCostReceiptV1;
 use tracedecay_contracts::retrieval::{CodeGraphReadFreshnessV1, ServedCodeGraphGenerationV1};
 
 use super::ToolResult;
 
 pub const TOKEN_ACCOUNTING_FOOTER_PREFIX: &str = "tracedecay_metrics:";
 pub const CODE_GRAPH_FRESHNESS_TRAILER_PREFIX: &str = "code_graph_freshness:";
+pub const REQUEST_COST_TRAILER_PREFIX: &str = "tracedecay_cost:";
 
 /// Token estimate for one rendered result: reading its touched files raw
 /// versus the response it actually delivered.
@@ -39,6 +42,8 @@ pub struct ResponseTrailer<'a> {
     /// The generation a code-graph read served; a stale seat adds the
     /// `code_graph_freshness` trailer.
     pub code_graph: Option<&'a ServedCodeGraphGenerationV1>,
+    /// What the read cost its stores; adds the `tracedecay_cost` trailer.
+    pub cost: Option<&'a RequestCostReceiptV1>,
 }
 
 impl ResponseTrailer<'_> {
@@ -47,7 +52,35 @@ impl ResponseTrailer<'_> {
         if let Some(served) = self.code_graph {
             append_code_graph_freshness(result, served);
         }
+        if let Some(cost) = self.cost {
+            append_request_cost(result, cost);
+        }
     }
+}
+
+/// Records `cost` on the result and appends its `tracedecay_cost` trailer.
+pub fn append_request_cost(result: &mut ToolResult, cost: &RequestCostReceiptV1) {
+    result.cost = Some(*cost);
+    let Some(content) = result
+        .value
+        .get_mut("content")
+        .and_then(|content| content.as_array_mut())
+    else {
+        return;
+    };
+    let RequestCostReceiptV1 {
+        wall_micros,
+        point_reads,
+        adjacency_queries,
+        adjacency_rows,
+        bytes_hydrated,
+    } = cost;
+    content.push(json!({"type": "text", "text": format!(
+        "\n{REQUEST_COST_TRAILER_PREFIX} wall_us={wall_micros} graph_sealed_reads={} \
+         graph_staging_reads={} adjacency_queries={adjacency_queries} \
+         adjacency_rows={adjacency_rows} bytes_hydrated={bytes_hydrated}",
+        point_reads.graph_sealed, point_reads.graph_staging,
+    )}));
 }
 
 /// Appends the `code_graph_freshness` trailer when `served` is a stale seat.
@@ -222,6 +255,45 @@ mod tests {
             },
         );
         assert_eq!(current.value["content"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn a_metered_read_renders_its_cost_trailer_and_an_unmetered_one_does_not() {
+        let cost = RequestCostReceiptV1 {
+            wall_micros: 1_250,
+            point_reads: tracedecay_contracts::StorePointReadsV1 {
+                graph_sealed: 21,
+                graph_staging: 3,
+            },
+            adjacency_queries: 1,
+            adjacency_rows: 107,
+            bytes_hydrated: 9_876,
+        };
+        let mut metered = text_result("{}", Vec::new());
+        ResponseTrailer {
+            touched_files: &[],
+            code_graph: None,
+            cost: Some(&cost),
+        }
+        .attach(&mut metered);
+        assert_eq!(
+            block(&metered, 1),
+            Some(
+                "\ntracedecay_cost: wall_us=1250 graph_sealed_reads=21 graph_staging_reads=3 \
+                 adjacency_queries=1 adjacency_rows=107 bytes_hydrated=9876"
+            )
+        );
+        assert_eq!(metered.cost(), Some(cost));
+
+        let mut unmetered = text_result("{}", Vec::new());
+        ResponseTrailer {
+            touched_files: &[],
+            code_graph: None,
+            cost: None,
+        }
+        .attach(&mut unmetered);
+        assert_eq!(unmetered.value["content"].as_array().map(Vec::len), Some(1));
+        assert_eq!(unmetered.cost(), None);
     }
 
     #[test]

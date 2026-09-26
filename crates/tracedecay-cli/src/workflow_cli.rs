@@ -239,6 +239,7 @@ pub async fn invoke_workflow_cli(
                 touched_files: Vec::new(),
                 code_graph: None,
                 analytics: None,
+                cost: None,
             }))
         }
         DaemonInvocationOutcome::ApplicationProblem { problem } => Ok(Err(

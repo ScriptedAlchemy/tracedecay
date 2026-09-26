@@ -48,6 +48,41 @@ pub struct OperationBudgetUsage {
     pub elapsed_micros: u64,
 }
 
+/// What one request cost the stores that answered it, counted on its read
+/// lease, so an operator can see why a call was slow.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RequestCostReceiptV1 {
+    /// Wall time of the metered read, from opening its lease to the last
+    /// row it hydrated.
+    pub wall_micros: u64,
+    /// Entity and relation point reads, by the store that served them.
+    pub point_reads: StorePointReadsV1,
+    /// Adjacency fan-outs issued; one batched call over many seeds is one.
+    pub adjacency_queries: u64,
+    /// Relation rows those fan-outs returned.
+    pub adjacency_rows: u64,
+    /// Property payload bytes decoded from every row read.
+    pub bytes_hydrated: u64,
+}
+
+impl RequestCostReceiptV1 {
+    pub fn total_point_reads(&self) -> u64 {
+        self.point_reads.graph_sealed + self.point_reads.graph_staging
+    }
+}
+
+/// Point reads per graph store kind.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StorePointReadsV1 {
+    /// A sealed generation's compacted per-generation store.
+    pub graph_sealed: u64,
+    /// The shared staging database, which serves a generation until its
+    /// sealed store is installed.
+    pub graph_staging: u64,
+}
+
 /// Terminal state after an operation has been admitted.
 #[derive(
     Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,

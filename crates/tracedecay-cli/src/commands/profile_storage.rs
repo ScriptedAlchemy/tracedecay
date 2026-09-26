@@ -66,7 +66,7 @@ fn reset_project_store(
             })?;
             (
                 project_id,
-                tracedecay_runtime_core::storage::retired_checkout_layout_dir(&profile_root, &root),
+                tracedecay_runtime_core::storage::retired_checkout_layout_dir(profile_root, &root),
             )
         }
         (None, Some(project_id)) => {

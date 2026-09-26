@@ -8,11 +8,13 @@ use std::sync::Arc;
 
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::graph_projection::{
-    CodeGraphImpactBatchV1, CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1,
-    CodeGraphSymbolPageV1, CodeGraphSymbolPredicate, CodeGraphSymbolSummaryV1,
+    CodeGraphImpactBatchV1, CodeGraphInteractiveReader, CodeGraphReadCostMeter,
+    CodeGraphSemanticEdgeV1, CodeGraphSymbolPageV1, CodeGraphSymbolPredicate,
+    CodeGraphSymbolSummaryV1,
 };
 use tracedecay_contracts::{
-    ApplicationOperation, CancellationSignal, Deadline, RequestContext, RequestId,
+    ApplicationOperation, CancellationSignal, Deadline, RequestContext, RequestCostReceiptV1,
+    RequestId,
 };
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -127,7 +129,9 @@ pub fn admitted_verified_graph_query_port_with_source(
 
 /// Generation-pinned analytical queries over the verified Grafeo projection.
 pub struct VerifiedGraphQuery {
+    /// Counts every store read on [`Self::cost`].
     reader: CodeGraphInteractiveReader,
+    cost: CodeGraphReadCostMeter,
     cancellation: Arc<dyn GraphCancellation>,
     request_context: RequestContext,
     source: Option<AdmittedSourceAuthority>,
@@ -172,8 +176,10 @@ impl VerifiedGraphQuery {
         live_cancellation: CancellationSignal,
         freshness: super::CodeGraphReadFreshnessV1,
     ) -> Self {
+        let cost = CodeGraphReadCostMeter::start();
         Self {
-            reader,
+            reader: reader.metered(&cost),
+            cost,
             cancellation,
             request_context,
             source,
@@ -184,6 +190,11 @@ impl VerifiedGraphQuery {
 
     pub fn request_context(&self) -> &RequestContext {
         &self.request_context
+    }
+
+    /// What this query has cost its stores since it was opened.
+    pub fn read_cost(&self) -> RequestCostReceiptV1 {
+        self.cost.receipt()
     }
 
     /// Freshness of the generation this query answers from, as proven by the

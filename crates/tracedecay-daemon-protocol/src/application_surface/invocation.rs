@@ -501,9 +501,10 @@ pub fn application_response(
         | DaemonInvocationOutcome::Primitive { scope, result }
         | DaemonInvocationOutcome::CallableCode { scope, result }
         | DaemonInvocationOutcome::ObservatoryRead { scope, result } => {
-            let (packet, touched_files) = result.into_application();
+            let (packet, touched_files, cost) = result.into_application();
             ApplicationEnvelope {
                 touched_files,
+                cost,
                 ..ApplicationEnvelope::evidence(result_contract, request_id, scope, packet)
             }
         }
@@ -534,6 +535,7 @@ pub fn application_response(
             touched_files: Vec::new(),
             code_graph: None,
             analytics: None,
+            cost: None,
         },
         DaemonInvocationOutcome::SourceEdit { scope, result } => ApplicationEnvelope {
             contract: result_contract,
@@ -545,6 +547,7 @@ pub fn application_response(
             touched_files: Vec::new(),
             code_graph: None,
             analytics: None,
+            cost: None,
         },
         DaemonInvocationOutcome::GraphTool { scope, completion } => ApplicationEnvelope {
             contract: result_contract,
@@ -559,6 +562,7 @@ pub fn application_response(
             touched_files: completion.touched_files,
             code_graph: completion.code_graph,
             analytics: completion.analytics,
+            cost: None,
         },
         // The daemon already resolved this invocation to a typed problem
         // (e.g. `configuration.conflict`); carry it whole so surface adapters
@@ -643,6 +647,7 @@ fn retained_application_response(
                 touched_files: Vec::new(),
                 code_graph: None,
                 analytics: None,
+                cost: None,
             }))
         }
         DaemonInvocationOutcome::RetainedApplicationProblem { scope, problem }

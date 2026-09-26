@@ -5,8 +5,10 @@ import { MeterRow, ReadoutBar } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';
 import type {
   AnalyticsDiagnosticsPayloadV1,
+  AnalyticsRecentEventV1,
   AnalyticsUnderusedPayloadV1,
   AnalyticsUsageSummaryV1,
+  RequestCostReceiptV1,
 } from '../../contracts/generated.ts';
 import type { UseQueryResult } from '@tanstack/react-query';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
@@ -396,13 +398,14 @@ function ToolRanking({ rows }: { rows: ReadonlyArray<Record<string, unknown>> })
  * The rows carry a clock time only. Twenty repetitions of the same calendar
  * date down a strip that spans four minutes is twenty copies of one fact; the
  * date is stated once, in the caption, where it belongs. */
-function RecentTape({ rows }: { rows: ReadonlyArray<Record<string, unknown>> }) {
+function RecentTape({ rows }: { rows: ReadonlyArray<AnalyticsRecentEventV1> }) {
   const events = rows
     .map((row) => ({
-      timestamp: Number(row['timestamp'] ?? 0),
-      kind: String(row['event_kind'] ?? ''),
-      tool: String(row['tool_name'] ?? ''),
-      outcome: String(row['outcome'] ?? ''),
+      timestamp: row.timestamp ?? 0,
+      kind: row.event_kind,
+      tool: row.tool_name,
+      outcome: row.outcome,
+      cost: row.cost ?? null,
     }))
     .filter((row) => Number.isFinite(row.timestamp) && row.timestamp > 0);
   if (events.length === 0) {
@@ -429,8 +432,20 @@ function RecentTape({ rows }: { rows: ReadonlyArray<Record<string, unknown>> }) 
             <span className="td-value shrink-0 text-3xs text-text-muted" data-cell="numeric">
               {formatClock(event.timestamp)}
             </span>
-            <span className="min-w-0 flex-1 truncate text-text-primary" title={event.tool}>
-              {event.tool || event.kind || '—'}
+            <span className="flex min-w-0 flex-1 flex-col">
+              <span className="truncate text-text-primary" title={event.tool}>
+                {event.tool || event.kind || '—'}
+              </span>
+              {event.cost ? (
+                <span
+                  className="td-value truncate text-3xs text-text-muted"
+                  data-cell="numeric"
+                  data-request-cost
+                  title={costDetail(event.cost)}
+                >
+                  {costSummary(event.cost)}
+                </span>
+              ) : null}
             </span>
             <span
               // The state word is the signal, not its hue: `--raw-state-stale`
@@ -452,6 +467,23 @@ function RecentTape({ rows }: { rows: ReadonlyArray<Record<string, unknown>> }) 
         per-interval counts, so nothing here is drawn as a series.
       </figcaption>
     </figure>
+  );
+}
+
+/** A metered call's receipt at tape width: store point reads, adjacency rows,
+ * and wall time. */
+function costSummary(cost: RequestCostReceiptV1): string {
+  const reads = cost.point_reads.graph_sealed + cost.point_reads.graph_staging;
+  return `${reads} reads · ${cost.adjacency_rows} rows · ${(cost.wall_micros / 1000).toFixed(1)} ms`;
+}
+
+/** Every receipt field, for the row's hover. */
+function costDetail(cost: RequestCostReceiptV1): string {
+  return (
+    `${cost.point_reads.graph_sealed} sealed-store and ${cost.point_reads.graph_staging} ` +
+    `staging-store point reads, ${cost.adjacency_queries} adjacency queries returning ` +
+    `${cost.adjacency_rows} rows, ${cost.bytes_hydrated} bytes hydrated, ` +
+    `${cost.wall_micros} µs wall`
   );
 }
 

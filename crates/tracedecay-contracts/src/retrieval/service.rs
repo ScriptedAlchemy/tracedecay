@@ -160,6 +160,7 @@ fn finish_evidence_envelope<T>(
         budget: evidence.budget,
         termination,
     };
+    let cost = evidence.cost;
     let packet = match EvidencePacket::from_retrieval(evidence, authority, execution) {
         Ok(packet) => packet,
         Err(_) => {
@@ -173,12 +174,15 @@ fn finish_evidence_envelope<T>(
             );
         }
     };
-    Ok(Ok(ApplicationEnvelope::evidence(
-        operation.result_contract().clone(),
-        context.request_id().clone(),
-        context.scope().clone(),
-        packet,
-    )))
+    Ok(Ok(ApplicationEnvelope {
+        cost,
+        ..ApplicationEnvelope::evidence(
+            operation.result_contract().clone(),
+            context.request_id().clone(),
+            context.scope().clone(),
+            packet,
+        )
+    }))
 }
 
 fn suppress_unpublished_evidence<T>(

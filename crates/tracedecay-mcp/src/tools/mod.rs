@@ -39,6 +39,9 @@ pub struct ToolResult {
     /// Set once the shared renderer accounted this result, so the transport
     /// persists those figures instead of appending a second footer.
     token_accounting: Option<response_trailers::ToolTokenAccounting>,
+    /// What the read cost its stores, recorded by
+    /// [`response_trailers::append_request_cost`] beside its trailer.
+    cost: Option<tracedecay_contracts::RequestCostReceiptV1>,
 }
 
 impl ToolResult {
@@ -50,7 +53,13 @@ impl ToolResult {
             semantic_error: None,
             failure_message: None,
             token_accounting: None,
+            cost: None,
         }
+    }
+
+    /// What the read cost its stores, when the call was metered.
+    pub fn cost(&self) -> Option<tracedecay_contracts::RequestCostReceiptV1> {
+        self.cost
     }
 
     #[must_use]
