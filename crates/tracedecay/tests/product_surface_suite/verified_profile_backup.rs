@@ -200,15 +200,7 @@ fn seed_profile(temp: &TempDir) -> (PathBuf, PathBuf) {
         fs::set_permissions(&profile, fs::Permissions::from_mode(0o700)).unwrap();
     }
     crate::profile_backup_rehearsal_test::write_profile_identity(&profile, BRAIN_ID, PROFILE_ID);
-    for (name, value) in [("enrollment.json", "{}"), ("config.toml", "[profile]\n")] {
-        fs::write(profile.join(name), value).unwrap();
-    }
-    fs::create_dir(profile.join("migration-inventory")).unwrap();
-    fs::write(
-        profile.join("migration-inventory/current.json"),
-        br#"{"schema":"final"}"#,
-    )
-    .unwrap();
+    fs::write(profile.join("config.toml"), "[profile]\n").unwrap();
 
     let global = Connection::open(profile.join("global.db")).unwrap();
     global

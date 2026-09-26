@@ -1761,9 +1761,8 @@ impl StoreAdministration {
         // configuration store. Resolve the pinned snapshot on demand when this
         // process has not yet opened the project (first operation, or the first
         // after a daemon restart) instead of failing closed. The resolver reads
-        // only durable authority; it never consults legacy config input and a
-        // genuinely unresolvable store still fails before any destructive store
-        // action.
+        // only durable authority; a genuinely unresolvable store still fails
+        // before any destructive store action.
         let config =
             tracedecay_project::config::resolve_runtime_configuration_for_registered_database(
                 project_root,

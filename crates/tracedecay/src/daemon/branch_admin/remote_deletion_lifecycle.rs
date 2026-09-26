@@ -784,7 +784,7 @@ impl StoreAdministration {
             })?;
         super::retire_registered_context_scout_owner(
             &typed_project_id,
-            &data_root.join(tracedecay_project::config::db_filename(&data_root)),
+            &data_root.join(tracedecay_runtime_core::config::DB_FILENAME),
         );
         self.git_index_transaction_services
             .retire_project_database(&typed_project_id, &project_sessions_path)
@@ -933,7 +933,7 @@ impl StoreAdministration {
                 ));
             }
             let database_paths = [
-                data_root.join(tracedecay_project::config::db_filename(&data_root)),
+                data_root.join(tracedecay_runtime_core::config::DB_FILENAME),
                 project_sessions_path.clone(),
             ]
             .into_iter()

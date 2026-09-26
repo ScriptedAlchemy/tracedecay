@@ -2460,10 +2460,7 @@ mod authority_tests {
             let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
                 &project_root,
                 &profile_root,
-                &tracedecay_runtime_core::storage::EnrollmentMarker {
-                    project_id: project_id.to_owned(),
-                    storage_mode: StorageMode::ProfileSharded,
-                },
+                project_id,
             )
             .expect("dashboard store layout");
             std::fs::create_dir_all(

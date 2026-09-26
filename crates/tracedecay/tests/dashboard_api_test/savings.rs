@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay::dashboard;
 use tracedecay_global_db::ParseOffset;
-use tracedecay_project::config::USER_DATA_DIR_ENV;
+use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::SessionRecord;
 

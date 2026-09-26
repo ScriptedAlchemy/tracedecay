@@ -49,7 +49,6 @@ fn released_profile(root: &Path) {
         "user-memory.db",
         "user-memory.db-wal",
         "user-memory.db-shm",
-        "enrollment.json",
         "config.toml",
     ] {
         let path = root.join(name);
@@ -60,12 +59,6 @@ fn released_profile(root: &Path) {
     fs::write(
         root.join("projects/project.release.db"),
         b"project schema 18",
-    )
-    .unwrap();
-    fs::create_dir(root.join("migration-inventory")).unwrap();
-    fs::write(
-        root.join("migration-inventory/migration.release.json"),
-        b"migration inventory",
     )
     .unwrap();
 }
@@ -274,32 +267,38 @@ fn rehearsal_rejects_identity_tampered_backup_material() {
     assert!(!restore.exists());
 }
 
+/// Schema 2 listed the retired profile `enrollment.json` and
+/// `migration-inventory` layout; it is refused like every older schema.
 #[test]
-fn rehearsal_rejects_an_older_manifest_schema_as_reset_required() {
-    let temp = tempfile::tempdir().unwrap();
-    let profile = temp.path().join("profile");
-    let backups = temp.path().join("backups");
-    fs::create_dir(&profile).unwrap();
-    released_profile(&profile);
-    let lease = exclusive_lease(&profile);
-    let backup =
-        create_complete_profile_backup(&profile, &backups, "backup.release", 100, &lease).unwrap();
-    let manifest_path = backup.join("backup-manifest.json");
-    let mut manifest: serde_json::Value =
-        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
-    manifest["schema_version"] = serde_json::Value::from(1);
-    fs::write(
-        &manifest_path,
-        serde_json::to_vec_pretty(&manifest).unwrap(),
-    )
-    .unwrap();
+fn rehearsal_rejects_older_manifest_schemas_as_reset_required() {
+    for older_schema in [1, 2] {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        let backups = temp.path().join("backups");
+        fs::create_dir(&profile).unwrap();
+        released_profile(&profile);
+        let lease = exclusive_lease(&profile);
+        let backup =
+            create_complete_profile_backup(&profile, &backups, "backup.release", 100, &lease)
+                .unwrap();
+        drop(lease);
+        let manifest_path = backup.join("backup-manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["schema_version"] = serde_json::Value::from(older_schema);
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
 
-    let error =
-        rehearse_complete_profile_backup(&backup, &temp.path().join("restored")).unwrap_err();
-    assert!(
-        matches!(error, ProfileBackupError::ResetRequired { .. }),
-        "unexpected error: {error}"
-    );
+        let error =
+            rehearse_complete_profile_backup(&backup, &temp.path().join("restored")).unwrap_err();
+        assert!(
+            matches!(error, ProfileBackupError::ResetRequired { .. }),
+            "schema {older_schema}: unexpected error: {error}"
+        );
+    }
 }
 
 #[test]

@@ -695,7 +695,10 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
         // Pin its profile before Tokio starts worker threads so every canonical
         // configuration authority observes the Task Scheduler argument.
         unsafe {
-            std::env::set_var(tracedecay_project::config::USER_DATA_DIR_ENV, profile_root);
+            std::env::set_var(
+                tracedecay_runtime_core::config::USER_DATA_DIR_ENV,
+                profile_root,
+            );
         }
     }
     // Route tracing events (degradation causes, ingest warnings) to stderr.

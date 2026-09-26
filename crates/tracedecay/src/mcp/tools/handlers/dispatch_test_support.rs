@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::*;
-use tracedecay_project::config::USER_DATA_DIR_ENV;
+use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
 
 #[derive(Clone)]
 struct FixtureCodeGraphProjection {

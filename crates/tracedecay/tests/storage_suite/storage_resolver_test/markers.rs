@@ -64,12 +64,7 @@ fn profile_sharded_layout_rejects_dot_and_hidden_project_ids() {
     fs::create_dir_all(&project).unwrap();
 
     for project_id in [".", ".hidden"] {
-        let marker = EnrollmentMarker {
-            project_id: project_id.to_string(),
-            storage_mode: StorageMode::ProfileSharded,
-        };
-
-        let err = profile_sharded_layout(&project, &profile, &marker).unwrap_err();
+        let err = profile_sharded_layout(&project, &profile, project_id).unwrap_err();
 
         assert!(
             err.to_string().contains("single safe path segment"),
@@ -84,12 +79,8 @@ fn profile_sharded_layout_maps_marker_to_profile_store_paths() {
     let project = dir.path().join("repo");
     let profile = dir.path().join("profile");
     fs::create_dir_all(&project).unwrap();
-    let marker = EnrollmentMarker {
-        project_id: "proj_123".to_string(),
-        storage_mode: StorageMode::ProfileSharded,
-    };
 
-    let layout = profile_sharded_layout(&project, &profile, &marker).unwrap();
+    let layout = profile_sharded_layout(&project, &profile, "proj_123").unwrap();
 
     let data_root = profile.join("projects/proj_123");
     assert_eq!(layout.project_root, project);

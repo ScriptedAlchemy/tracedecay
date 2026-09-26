@@ -122,7 +122,7 @@ async fn detached_linked_worktree_uses_repository_identity_and_exact_route() {
 }
 
 #[tokio::test]
-async fn linked_worktree_ignores_local_enrollment_that_would_shard_shared_store() {
+async fn linked_worktree_refuses_retired_local_enrollment_until_reset() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("repo");
@@ -155,9 +155,8 @@ async fn linked_worktree_ignores_local_enrollment_that_would_shard_shared_store(
         ],
     );
 
-    // A user leftover from before the working-tree cutover: a stale legacy
-    // enrollment file inside the linked worktree that would shard the shared
-    // store if anything honored it.
+    // A leftover from before the working-tree cutover: a retired enrollment
+    // file inside the linked worktree. It is refused, never honored.
     let stale_project_id = "proj_local_linked_worktree";
     let stale_data_root = profile_root.join(format!("projects/{stale_project_id}"));
     fs::create_dir_all(&stale_data_root).unwrap();
@@ -167,16 +166,28 @@ async fn linked_worktree_ignores_local_enrollment_that_would_shard_shared_store(
         format!("{{\"project_id\":\"{stale_project_id}\",\"storage_mode\":\"profile_sharded\"}}"),
     )
     .unwrap();
+    let options = TraceDecayOpenOptions {
+        profile_root: Some(profile_root.clone()),
+        global_db_path: Some(profile_root.join("global.db")),
+    };
 
-    let layout = TraceDecay::resolve_store_layout_for_identity_with_options(
-        &worktree,
-        &TraceDecayOpenOptions {
-            profile_root: Some(profile_root.clone()),
-            global_db_path: Some(profile_root.join("global.db")),
-        },
-    )
-    .await
-    .expect("linked worktree must resolve its repository's store");
+    let refused = TraceDecay::resolve_store_layout_for_identity_with_options(&worktree, &options)
+        .await
+        .expect_err("a retired worktree-local layout is a typed reset");
+    assert_eq!(
+        refused
+            .reset_required_context()
+            .map(|(authority, _)| authority),
+        Some("project store"),
+        "{refused:?}"
+    );
+
+    let retired = tracedecay_runtime_core::storage::retired_checkout_layout_dir(&worktree)
+        .expect("the refused layout is the one the reset deletes");
+    fs::remove_dir_all(retired).unwrap();
+    let layout = TraceDecay::resolve_store_layout_for_identity_with_options(&worktree, &options)
+        .await
+        .expect("linked worktree must resolve its repository's store");
 
     assert_eq!(
         layout.identity.project_id.as_deref(),
@@ -229,8 +240,7 @@ async fn registered_exact_root_ignores_sibling_worktree_manifests() {
         fs::create_dir_all(&data_root).unwrap();
         fs::write(data_root.join("tracedecay.db"), project_id).unwrap();
         fs::write(data_root.join("sessions.db"), b"sessions").unwrap();
-        branch_meta::save_branch_meta(&data_root, &BranchMeta::new_for_dir(&data_root, "main"))
-            .unwrap();
+        branch_meta::save_branch_meta(&data_root, &BranchMeta::new("main")).unwrap();
         write_store_manifest_to_path(
             &data_root.join(STORE_MANIFEST_FILENAME),
             &StoreManifest {

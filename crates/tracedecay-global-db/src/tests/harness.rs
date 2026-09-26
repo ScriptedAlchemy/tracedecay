@@ -275,14 +275,10 @@ impl RegisteredGlobalDbTestRuntime {
         bind_test_session_relation_graph_with_registry(&profile_registered, &graph_registry)?;
         let (project_registered, project_owner) = match project {
             Some((project_root, project_id)) => {
-                let marker = tracedecay_runtime_core::storage::EnrollmentMarker {
-                    project_id: project_id.to_string(),
-                    storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
-                };
                 let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
                     project_root,
                     profile_root,
-                    &marker,
+                    project_id.as_str(),
                 )?;
                 let (registered, owner) = open_registered_test_database_with_identity(
                     &layout.sessions_db_path,
@@ -745,14 +741,10 @@ impl HostAdmissionTestRuntimeV1 {
         bind_test_session_relation_graph(&profile_registered)?;
         let (project_registered, project_registered_owner) = match project {
             Some((project_root, project_id)) => {
-                let marker = tracedecay_runtime_core::storage::EnrollmentMarker {
-                    project_id: project_id.to_string(),
-                    storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
-                };
                 let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
                     project_root,
                     profile_root,
-                    &marker,
+                    project_id.as_str(),
                 )?;
                 let (registered, owner) = open_registered_test_database_with(
                     &layout.sessions_db_path,

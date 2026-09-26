@@ -61,7 +61,7 @@ async fn server_with_authorities() -> (
     git(dir.path(), &["add", "."]);
     git(dir.path(), &["commit", "-q", "-m", "initial"]);
     let runtime = HostAdmissionTestRuntimeV1::project(
-        tracedecay_project::config::user_data_dir().expect("isolated profile root"),
+        tracedecay_runtime_core::config::user_data_dir().expect("isolated profile root"),
         dir.path(),
         ProjectId::new(PROJECT_ID).expect("typed project identity"),
     )

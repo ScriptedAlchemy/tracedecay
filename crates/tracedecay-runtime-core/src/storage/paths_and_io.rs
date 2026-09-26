@@ -896,7 +896,7 @@ impl StoreLayout {
         data_root: PathBuf,
         manifest_filename: Option<&str>,
     ) -> Self {
-        let graph_db_path = data_root.join(config::db_filename(&data_root));
+        let graph_db_path = data_root.join(config::DB_FILENAME);
         let branch_meta_path = data_root.join(BRANCH_META_FILENAME);
         let sessions_db_path = data_root.join(SESSIONS_DB_FILENAME);
         let response_handle_root = data_root.join(RESPONSE_HANDLES_DIRECTORY);

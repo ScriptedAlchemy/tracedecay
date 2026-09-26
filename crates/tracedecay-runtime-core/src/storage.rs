@@ -162,12 +162,6 @@ pub enum StoreKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EnrollmentMarker {
-    pub project_id: String,
-    pub storage_mode: StorageMode,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepositoryIdentityMarker {
     pub schema_version: u32,
     pub project_id: String,
@@ -210,7 +204,6 @@ pub enum ProjectStorageStatus {
 pub struct ProjectStorageLocation {
     pub project_root: PathBuf,
     pub data_root: PathBuf,
-    pub marker_root: Option<PathBuf>,
     pub status: ProjectStorageStatus,
 }
 
@@ -228,15 +221,52 @@ impl ProjectStorageStatus {
     }
 }
 
-pub fn classify_project_storage(project_root: &Path) -> ProjectStorageLocation {
-    match resolve_layout_for_current_profile(project_root) {
-        Ok(layout) => classify_layout_storage(project_root, layout),
-        Err(_) => ProjectStorageLocation {
-            project_root: project_root.to_path_buf(),
-            data_root: config::get_tracedecay_dir(project_root),
-            marker_root: None,
-            status: ProjectStorageStatus::Stale,
-        },
+pub fn classify_project_storage(
+    project_root: &Path,
+) -> tracedecay_domain::errors::Result<ProjectStorageLocation> {
+    resolve_layout_for_current_profile(project_root)
+        .map(|layout| classify_layout_storage(project_root, layout))
+}
+
+/// Files only a retired binary wrote into a checkout's `.tracedecay/`
+/// directory: the working-tree enrollment marker and the repo-local config and
+/// graph store. Current identity lives under `.git/` and every store lives in
+/// the profile, so nothing reads these.
+const RETIRED_CHECKOUT_LAYOUT_FILES: [&str; 3] =
+    ["enrollment.json", "config.json", config::DB_FILENAME];
+
+/// The checkout-local `.tracedecay/` directory when it still carries the
+/// retired layout. The profile root is never a checkout layout, even when a
+/// project root is the directory that hosts it.
+pub fn retired_checkout_layout_dir(project_root: &Path) -> Option<PathBuf> {
+    let dir = config::get_tracedecay_dir(project_root);
+    if config::user_data_dir()
+        .is_some_and(|profile| profile == dir || dir.canonicalize().is_ok_and(|dir| dir == profile))
+    {
+        return None;
+    }
+    RETIRED_CHECKOUT_LAYOUT_FILES
+        .iter()
+        .any(|name| dir.join(name).exists())
+        .then_some(dir)
+}
+
+/// Typed reset refusal for a checkout still carrying the retired
+/// checkout-local layout. It is never read or migrated; the scoped project
+/// store reset deletes the directory.
+pub fn refuse_retired_checkout_layout(
+    project_root: &Path,
+) -> tracedecay_domain::errors::Result<()> {
+    match retired_checkout_layout_dir(project_root) {
+        None => Ok(()),
+        Some(dir) => Err(tracedecay_domain::errors::TraceDecayError::reset_required(
+            "project store",
+            format!(
+                "{} is the retired checkout-local layout; this binary never reads it and \
+                 the reset deletes it",
+                dir.display()
+            ),
+        )),
     }
 }
 
@@ -256,7 +286,6 @@ fn classify_layout_storage(project_root: &Path, layout: StoreLayout) -> ProjectS
     ProjectStorageLocation {
         project_root: project_root.to_path_buf(),
         data_root: layout.data_root,
-        marker_root: Some(project_root.join(config::TRACEDECAY_DIR)),
         status,
     }
 }
@@ -308,7 +337,7 @@ pub fn classify_registry_storage_fields(
                 })
             },
         );
-        let status = if data_root.join(config::db_filename(&data_root)).exists() {
+        let status = if data_root.join(config::DB_FILENAME).exists() {
             ProjectStorageStatus::ProfileSharded
         } else if manifest_exists {
             ProjectStorageStatus::ManifestReconstructable
@@ -318,7 +347,6 @@ pub fn classify_registry_storage_fields(
         let location = ProjectStorageLocation {
             project_root: project_root.to_path_buf(),
             data_root,
-            marker_root: Some(project_root.join(config::TRACEDECAY_DIR)),
             status,
         };
         match location.status {

@@ -2,16 +2,9 @@ use tracedecay_session_memory::user_config::UserConfig;
 
 #[test]
 fn missing_fields_use_defaults() {
-    let toml_str = "upload_enabled = false\n";
+    let toml_str = "pending_upload = 5\n";
     let parsed: UserConfig = toml::from_str(toml_str).unwrap();
-    assert!(!parsed.upload_enabled);
-    assert_eq!(parsed.pending_upload, 0);
+    assert_eq!(parsed.pending_upload, 5);
     assert_eq!(parsed.last_upload_at, 0);
-}
-
-#[test]
-fn unknown_fields_ignored() {
-    let toml_str = "upload_enabled = true\nsome_future_field = 42\n";
-    let parsed: UserConfig = toml::from_str(toml_str).unwrap();
-    assert!(parsed.upload_enabled);
+    assert!(parsed.installed_agents.is_empty());
 }

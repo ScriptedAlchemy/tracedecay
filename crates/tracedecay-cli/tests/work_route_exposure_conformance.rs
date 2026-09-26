@@ -64,7 +64,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_daemon_service::application_surface::http_application_router;
 use tracedecay_domain::ProjectId;
-use tracedecay_project::config::USER_DATA_DIR_ENV;
+use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_tool_catalog::RouteExposureV1;
 

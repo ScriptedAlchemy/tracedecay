@@ -25,22 +25,6 @@ use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 
 pub use tracedecay_global_db::configuration::{registry, resolver};
 
-/// Kernel-owned path primitives. The definitions live in
-/// `tracedecay_runtime_core::config` because the storage layout, database,
-/// branch-metadata, and store layers depend on them and moved into that crate;
-/// re-exporting here keeps every `crate::config::<item>` path intact.
-pub use tracedecay_runtime_core::config::{
-    DB_FILENAME, TRACEDECAY_DIR, USER_DATA_DIR_ENV, active_data_dir_name, db_filename,
-    discover_project_root, get_tracedecay_dir, is_ambient_project_root, user_data_dir,
-};
-
-/// The shared generated/vendored segment list and its membership test moved
-/// into `tracedecay_runtime_core::config`: the extracted migration inventory
-/// scanner consults them and cannot reach back into the root crate.
-/// Re-exported so every historical `crate::config::<item>` path keeps
-/// resolving.
-pub use tracedecay_runtime_core::config::{GENERATED_DIR_SEGMENTS, is_generated_dir_segment};
-
 /// Typed project route for the configuration daemon boundary. The path is
 /// display/routing context only; [`ProjectId`] remains the authority key.
 pub use tracedecay_configuration::config::RuntimeConfigurationTarget;
@@ -190,10 +174,10 @@ pub fn runtime_configuration_for_layout(
 /// paths that must never invent authority, this is the daemon authority path:
 /// the daemon owns the durable configuration store, so a registered project that
 /// simply has not been opened in this process (a first operation, or the first
-/// after a daemon restart) is resolved and pinned rather than rejected. It never
-/// consults legacy `config.json` input. A cold cache adopts the durable current
-/// revision through the same canonical open path as project open, so a fresh
-/// store mints the sole canonical initial revision instead of failing; an
+/// after a daemon restart) is resolved and pinned rather than rejected. A cold
+/// cache adopts the durable current revision through the same canonical open
+/// path as project open, so a fresh store mints the sole canonical initial
+/// revision instead of failing; an
 /// initialized-but-unreadable store still yields a typed authority error rather
 /// than a fabricated default authority.
 pub async fn resolve_runtime_configuration_for_registered_database(
@@ -629,7 +613,7 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
 
 #[hotpath::measure(label = "daemon.config.discover", future = true)]
 pub async fn discover_project_root_with_identity(start: &Path) -> Option<PathBuf> {
-    if let Some(root) = discover_project_root(start) {
+    if let Some(root) = tracedecay_runtime_core::config::discover_project_root(start) {
         return Some(root);
     }
     let candidate = tracedecay_runtime_core::worktree::git_worktree_root(start)

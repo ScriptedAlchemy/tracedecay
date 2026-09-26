@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::cli::ProfileStorageAction;
+use tracedecay_global_db::profile_registry_maintenance::remove_store_directory;
 use tracedecay_runtime_core::text::format_bytes;
 
 #[hotpath::measure(label = "cli.profile_storage.dispatch", future = true)]
@@ -36,25 +37,31 @@ pub(crate) async fn handle_profile_storage_action(
 /// next daemon open recreates the graph at the canonical schema and re-ingests
 /// from those durable inputs. A store already at the canonical schema is
 /// refused untouched, this command cannot be used to wipe a healthy store.
+/// With `--project-root`, the checkout's retired `.tracedecay/` layout is
+/// deleted too, after the store verification succeeds.
 fn handle_reset_project_store(
     project_root: Option<String>,
     project_id: Option<String>,
     assume_yes: bool,
 ) -> tracedecay_domain::errors::Result<()> {
     let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
-    let project_id = match (project_root, project_id) {
+    let (project_id, retired_checkout) = match (project_root, project_id) {
         (Some(root), None) => {
             let root = PathBuf::from(root);
             let layout =
                 tracedecay_runtime_core::storage::resolve_layout_for_current_profile(&root)?;
-            layout.identity.project_id.ok_or_else(|| {
+            let project_id = layout.identity.project_id.ok_or_else(|| {
                 tracedecay_domain::errors::TraceDecayError::Config {
                     message: format!(
                         "project root '{}' resolves no authoritative project identity",
                         root.display()
                     ),
                 }
-            })?
+            })?;
+            (
+                project_id,
+                tracedecay_runtime_core::storage::retired_checkout_layout_dir(&root),
+            )
         }
         (None, Some(project_id)) => {
             tracedecay_runtime_core::storage::validate_project_id(&project_id).map_err(
@@ -62,7 +69,7 @@ fn handle_reset_project_store(
                     message: format!("invalid --project-id: {message}"),
                 },
             )?;
-            project_id
+            (project_id, None)
         }
         _ => {
             return Err(tracedecay_domain::errors::TraceDecayError::Config {
@@ -88,17 +95,27 @@ fn handle_reset_project_store(
         &profile_root,
         "reset-project-store",
     )?;
-    let outcome = reset_refused_project_graph_store(&profile_root, &project_id)?;
-    println!(
-        "reset the refused graph database in the project store for '{project_id}' \
-         (fresh v{} at the next open)",
-        outcome.canonical_schema_version
-    );
-    println!(
-        "  removed {} (was schema v{})",
-        outcome.reset_graph_db.path.display(),
-        outcome.reset_graph_db.previous_schema_version
-    );
+    let outcome =
+        reset_refused_project_graph_store(&profile_root, &project_id, retired_checkout.is_some())?;
+    if let Some(dir) = &retired_checkout {
+        remove_store_directory(dir)?;
+        println!(
+            "removed the retired checkout-local layout {}",
+            dir.display()
+        );
+    }
+    if let Some(reset_graph_db) = &outcome.reset_graph_db {
+        println!(
+            "reset the refused graph database in the project store for '{project_id}' \
+             (fresh v{} at the next open)",
+            outcome.canonical_schema_version
+        );
+        println!(
+            "  removed {} (was schema v{})",
+            reset_graph_db.path.display(),
+            reset_graph_db.previous_schema_version
+        );
+    }
     println!(
         "  preserved the store directory, session archive, and provider transcripts \
          under {}",
@@ -115,7 +132,7 @@ fn handle_reset_project_store(
 #[derive(Debug)]
 struct ResetProjectGraphStoreOutcome {
     data_root: PathBuf,
-    reset_graph_db: ResetGraphDb,
+    reset_graph_db: Option<ResetGraphDb>,
     canonical_schema_version: u32,
 }
 
@@ -184,14 +201,25 @@ fn verified_graph_db_schema(
 /// with its WAL/SHM sidecars only when refused (a real SQLite database whose
 /// version or exact relational shape this binary does not accept). A database
 /// already at the canonical schema and exact shape is a typed error, so this
-/// cannot wipe a healthy store.
+/// cannot wipe a healthy store. When `other_reset_pending` names another
+/// refused shape the caller resets, nothing refused here is not an error.
 fn reset_refused_project_graph_store(
     profile_root: &Path,
     project_id: &str,
+    other_reset_pending: bool,
 ) -> tracedecay_domain::errors::Result<ResetProjectGraphStoreOutcome> {
     let data_root =
         tracedecay_runtime_core::storage::profile_sharded_data_root(profile_root, project_id);
-    let graph_db_path = data_root.join(tracedecay_project::config::db_filename(&data_root));
+    let graph_db_path = data_root.join(tracedecay_runtime_core::config::DB_FILENAME);
+    let canonical_schema_version = tracedecay_runtime_core::db::migrations::SCHEMA_VERSION;
+    let nothing_refused = ResetProjectGraphStoreOutcome {
+        data_root: data_root.clone(),
+        reset_graph_db: None,
+        canonical_schema_version,
+    };
+    if !graph_db_path.is_file() && other_reset_pending {
+        return Ok(nothing_refused);
+    }
     if !graph_db_path.is_file() {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(
@@ -200,8 +228,10 @@ fn reset_refused_project_graph_store(
             ),
         });
     }
-    let canonical_schema_version = tracedecay_runtime_core::db::migrations::SCHEMA_VERSION;
     let (previous_schema_version, exact_final_shape) = verified_graph_db_schema(&graph_db_path)?;
+    if exact_final_shape && other_reset_pending {
+        return Ok(nothing_refused);
+    }
     if exact_final_shape {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(
@@ -228,10 +258,10 @@ fn reset_refused_project_graph_store(
     }
     Ok(ResetProjectGraphStoreOutcome {
         data_root,
-        reset_graph_db: ResetGraphDb {
+        reset_graph_db: Some(ResetGraphDb {
             path: graph_db_path,
             previous_schema_version,
-        },
+        }),
         canonical_schema_version,
     })
 }
@@ -551,7 +581,7 @@ mod reset_project_store_tests {
     ) -> PathBuf {
         let data_root =
             tracedecay_runtime_core::storage::profile_sharded_data_root(profile_root, project_id);
-        let db_path = data_root.join(tracedecay_project::config::db_filename(&data_root));
+        let db_path = data_root.join(tracedecay_runtime_core::config::DB_FILENAME);
         write_graph_db_with_user_version(&db_path, version);
         db_path
     }
@@ -568,10 +598,18 @@ mod reset_project_store_tests {
         let sessions_path = data_root.join("sessions.db");
         std::fs::write(&sessions_path, b"session archive").unwrap();
 
-        let outcome = reset_refused_project_graph_store(&profile_root, "proj_refused_v18").unwrap();
+        let outcome =
+            reset_refused_project_graph_store(&profile_root, "proj_refused_v18", false).unwrap();
 
-        assert_eq!(outcome.reset_graph_db.previous_schema_version, 18);
-        assert_eq!(outcome.reset_graph_db.path, db_path);
+        assert_eq!(
+            outcome
+                .reset_graph_db
+                .as_ref()
+                .unwrap()
+                .previous_schema_version,
+            18
+        );
+        assert_eq!(outcome.reset_graph_db.as_ref().unwrap().path, db_path);
         assert!(!db_path.exists(), "refused graph database must be removed");
         assert!(!wal_path.exists(), "WAL sidecar must be removed");
         assert!(
@@ -629,8 +667,7 @@ mod reset_project_store_tests {
             incompatible_project_id,
         );
         std::fs::create_dir_all(&incompatible_root).unwrap();
-        let incompatible_db =
-            incompatible_root.join(tracedecay_project::config::db_filename(&incompatible_root));
+        let incompatible_db = incompatible_root.join(tracedecay_runtime_core::config::DB_FILENAME);
         let source = rusqlite::Connection::open_with_flags(
             &healthy_db,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -657,15 +694,19 @@ mod reset_project_store_tests {
         drop(connection);
 
         let outcome =
-            reset_refused_project_graph_store(&profile_root, incompatible_project_id).unwrap();
-        assert_eq!(outcome.reset_graph_db.path, incompatible_db);
+            reset_refused_project_graph_store(&profile_root, incompatible_project_id, false)
+                .unwrap();
+        assert_eq!(
+            outcome.reset_graph_db.as_ref().unwrap().path,
+            incompatible_db
+        );
         assert!(
             !incompatible_db.exists(),
             "same-version store missing a required table must be reset"
         );
 
-        let error =
-            reset_refused_project_graph_store(&profile_root, &healthy_project_id).unwrap_err();
+        let error = reset_refused_project_graph_store(&profile_root, &healthy_project_id, false)
+            .unwrap_err();
 
         assert!(
             error
@@ -685,11 +726,11 @@ mod reset_project_store_tests {
             "proj_not_sqlite",
         );
         std::fs::create_dir_all(&data_root).unwrap();
-        let db_path = data_root.join(tracedecay_project::config::db_filename(&data_root));
+        let db_path = data_root.join(tracedecay_runtime_core::config::DB_FILENAME);
         std::fs::write(&db_path, b"not a database").unwrap();
 
         let error =
-            reset_refused_project_graph_store(&profile_root, "proj_not_sqlite").unwrap_err();
+            reset_refused_project_graph_store(&profile_root, "proj_not_sqlite", false).unwrap_err();
 
         assert!(
             error.to_string().contains("is not a SQLite database"),
@@ -706,11 +747,25 @@ mod reset_project_store_tests {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
 
-        let error = reset_refused_project_graph_store(&profile_root, "proj_absent").unwrap_err();
+        let error =
+            reset_refused_project_graph_store(&profile_root, "proj_absent", false).unwrap_err();
 
         assert!(
             error.to_string().contains("nothing to reset"),
             "unexpected refusal: {error}"
         );
+    }
+
+    /// A retired checkout layout is itself a refused shape, so a project with
+    /// no graph store yet still resets instead of reporting nothing to do.
+    #[test]
+    fn pending_retired_checkout_reset_admits_a_store_with_nothing_refused() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("profile");
+
+        let outcome =
+            reset_refused_project_graph_store(&profile_root, "proj_absent", true).unwrap();
+
+        assert!(outcome.reset_graph_db.is_none());
     }
 }

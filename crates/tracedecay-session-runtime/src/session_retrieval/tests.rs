@@ -1597,10 +1597,7 @@ async fn project_retrieval_mounts_each_branch_of_a_shared_graph_store() {
     let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
         &project,
         &profile,
-        &tracedecay_runtime_core::storage::EnrollmentMarker {
-            project_id: project_id.to_string(),
-            storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
-        },
+        project_id.as_str(),
     )
     .unwrap();
     let mut branches = tracedecay_runtime_core::branch_meta::BranchMeta::new("master");

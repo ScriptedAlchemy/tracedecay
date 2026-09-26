@@ -535,7 +535,7 @@ impl ProductionProjectCompositionHarnessV1 {
         project_roots: impl IntoIterator<Item = PathBuf>,
     ) -> ProductionHarnessOpenFuture {
         let live_profile_root =
-            tracedecay_project::config::user_data_dir().filter(|path| path.exists());
+            tracedecay_runtime_core::config::user_data_dir().filter(|path| path.exists());
         Self::open_with_live_profile_root(
             isolation_root.as_ref().to_path_buf(),
             project_roots.into_iter().collect(),
@@ -554,7 +554,7 @@ impl ProductionProjectCompositionHarnessV1 {
         project_roots: impl IntoIterator<Item = PathBuf>,
     ) -> ProductionHarnessOpenFuture {
         let live_profile_root =
-            tracedecay_project::config::user_data_dir().filter(|path| path.exists());
+            tracedecay_runtime_core::config::user_data_dir().filter(|path| path.exists());
         Self::open_with_live_profile_root(
             isolation_root.as_ref().to_path_buf(),
             project_roots.into_iter().collect(),
@@ -571,7 +571,7 @@ impl ProductionProjectCompositionHarnessV1 {
         scope_prefix: impl Into<String>,
     ) -> ProductionHarnessOpenFuture {
         let live_profile_root =
-            tracedecay_project::config::user_data_dir().filter(|path| path.exists());
+            tracedecay_runtime_core::config::user_data_dir().filter(|path| path.exists());
         Self::open_with_live_profile_root(
             isolation_root.as_ref().to_path_buf(),
             project_roots.into_iter().collect(),

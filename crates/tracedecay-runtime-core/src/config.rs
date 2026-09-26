@@ -1,10 +1,4 @@
 //! Kernel-owned configuration primitives.
-//!
-//! These items used to live in the root crate's `config` module, but the
-//! storage layout, database, branch-metadata, and store layers all need them
-//! and those layers moved into this crate. The root `config` module re-exports
-//! every item declared here, so `crate::config::<item>` keeps resolving on
-//! both sides of the split.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -17,11 +11,6 @@ pub const USER_DATA_DIR_ENV: &str = "TRACEDECAY_DATA_DIR";
 
 /// Environment variable that pins the user-level global database path.
 pub const GLOBAL_DB_PATH_ENV: &str = "TRACEDECAY_GLOBAL_DB";
-
-/// Reads the `TRACEDECAY_<suffix>` environment variable.
-pub fn brand_env(suffix: &str) -> Option<String> {
-    std::env::var(format!("TRACEDECAY_{suffix}")).ok()
-}
 
 /// Project graph database filename inside a `.tracedecay/` data dir.
 pub const DB_FILENAME: &str = "tracedecay.db";
@@ -44,20 +33,11 @@ pub fn holds_cargo_profile_dir(target_dir: &Path) -> bool {
         .any(|profile| target_dir.join(profile).is_dir())
 }
 
-/// New runtime storage lives in the user-level profile shard. The project root
-/// only carries lightweight marker/config files under `.tracedecay/`.
+/// A root's `.tracedecay/` directory. Runtime storage lives in the profile
+/// shard; a checkout's copy only holds the retired layout that
+/// [`crate::storage::refuse_retired_checkout_layout`] refuses.
 pub fn get_tracedecay_dir(project_root: &Path) -> PathBuf {
     project_root.join(TRACEDECAY_DIR)
-}
-
-pub fn active_data_dir_name(project_root: &Path) -> &'static str {
-    let _ = project_root;
-    TRACEDECAY_DIR
-}
-
-pub fn db_filename(data_dir: &Path) -> &'static str {
-    let _ = data_dir;
-    DB_FILENAME
 }
 
 /// User-level data directory. Runtime storage is always rooted at

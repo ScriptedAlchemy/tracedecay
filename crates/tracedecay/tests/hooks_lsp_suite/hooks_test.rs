@@ -9,7 +9,7 @@ use tracedecay_agent_hosts::hooks::{
     evaluate_hook_decision, evaluate_kiro_pre_tool_use, kiro_post_tool_use_rel_paths,
     record_codex_subagent_start,
 };
-use tracedecay_project::config::USER_DATA_DIR_ENV;
+use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
 use tracedecay_runtime_core::storage::{
     pin_fixture_repository_identity, resolve_layout_for_current_profile,
 };

@@ -1,7 +1,8 @@
 //! User-level configuration stored in the `TraceDecay` user data directory.
 //!
 //! All fields have defaults so a missing file or missing fields are handled
-//! gracefully. Unknown fields are preserved for forward compatibility.
+//! gracefully. Keys other profile readers own (e.g. GitHub repositories) are
+//! preserved; retired keys are dropped at load and erased by the next write.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
@@ -18,13 +19,17 @@ use tracedecay_runtime_core::storage::{append_lock_path, retry_transient_file_op
 
 const USER_CONFIG_REVISION_DOMAIN: &str = "tracedecay.user-config-revision.v1";
 
+/// Keys canonical `user.*` configuration settings own. They are never read
+/// from this file.
+const RETIRED_KEYS: [&str; 3] = [
+    "upload_enabled",
+    "watcher_debounce",
+    "extraction_timeout_secs",
+];
+
 /// User-level tracedecay configuration.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserConfig {
-    /// Whether to upload pending tokens to the optional worldwide counter.
-    #[serde(default)]
-    pub upload_enabled: bool,
-
     /// Tokens accumulated locally, not yet uploaded.
     #[serde(default)]
     pub pending_upload: u64,
@@ -66,10 +71,6 @@ pub struct UserConfig {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub agent_dashboard_enabled: BTreeMap<String, bool>,
 
-    /// Debounce duration for the embedded MCP file watcher (e.g. "2s", "15s", "1m").
-    #[serde(default = "default_watcher_debounce")]
-    pub watcher_debounce: String,
-
     /// Cached country flags from the worldwide counter.
     #[serde(default)]
     pub cached_country_flags: Vec<String>,
@@ -92,13 +93,6 @@ pub struct UserConfig {
     #[serde(default)]
     pub previous_version: String,
 
-    /// Per-file extraction timeout in seconds. The worker is killed and
-    /// the file is recorded in `SyncResult.skipped_paths` if a single
-    /// file's extraction takes longer. Bounds the worst case from any
-    /// pathological grammar / input combo.
-    #[serde(default = "default_extraction_timeout_secs")]
-    pub extraction_timeout_secs: u64,
-
     /// Global defaults for self-improvement automation. Project/profile
     /// dashboard sidecars may override these values.
     #[serde(default, skip_serializing_if = "AutomationConfig::is_default")]
@@ -110,23 +104,14 @@ pub struct UserConfig {
     #[serde(default = "default_true")]
     pub memory_injection_enabled: bool,
 
-    /// Unknown user config keys preserved for forward compatibility.
+    /// Keys other profile readers own, preserved across saves.
     #[serde(default, flatten)]
     pub extra: BTreeMap<String, toml::Value>,
-}
-
-fn default_watcher_debounce() -> String {
-    "2s".to_string()
-}
-
-fn default_extraction_timeout_secs() -> u64 {
-    60
 }
 
 impl Default for UserConfig {
     fn default() -> Self {
         Self {
-            upload_enabled: false,
             pending_upload: 0,
             last_upload_at: 0,
             last_worldwide_total: 0,
@@ -137,12 +122,10 @@ impl Default for UserConfig {
             last_version_warning_at: 0,
             installed_agents: Vec::new(),
             agent_dashboard_enabled: BTreeMap::new(),
-            watcher_debounce: default_watcher_debounce(),
             cached_country_flags: Vec::new(),
             last_flags_fetch_at: 0,
             last_installed_version: String::new(),
             previous_version: String::new(),
-            extraction_timeout_secs: default_extraction_timeout_secs(),
             automation: AutomationConfig::default(),
             memory_injection_enabled: true,
             extra: BTreeMap::new(),
@@ -375,7 +358,14 @@ impl UserConfig {
         let Ok(contents) = std::fs::read_to_string(&path) else {
             return Self::default();
         };
-        parse_or_warn_default(&path, &contents)
+        parse_or_warn_default::<Self>(&path, &contents).without_retired_keys()
+    }
+
+    fn without_retired_keys(mut self) -> Self {
+        for key in RETIRED_KEYS {
+            self.extra.remove(key);
+        }
+        self
     }
 
     /// Loads configuration without substituting defaults for an unreadable or
@@ -393,11 +383,13 @@ impl UserConfig {
                 return Err(ConfigSaveError::ExistingUnreadable { path, source });
             }
         };
-        toml::from_str(&contents).map_err(|error| ConfigSaveError::CorruptExisting {
-            path,
-            line: parse_error_line(&contents, &error),
-            message: error.to_string(),
-        })
+        toml::from_str::<Self>(&contents)
+            .map(Self::without_retired_keys)
+            .map_err(|error| ConfigSaveError::CorruptExisting {
+                path,
+                line: parse_error_line(&contents, &error),
+                message: error.to_string(),
+            })
     }
 
     /// Canonical content revision for compare-and-swap callers.
@@ -475,7 +467,9 @@ impl UserConfig {
             })?;
         let result = (|| {
             let mut config = match fs::read_to_string(&path) {
-                Ok(contents) => toml::from_str::<Self>(&contents).unwrap_or_default(),
+                Ok(contents) => toml::from_str::<Self>(&contents)
+                    .unwrap_or_default()
+                    .without_retired_keys(),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => Self::default(),
                 Err(source) => {
                     return Err(ConfigSaveError::ExistingUnreadable {
@@ -716,7 +710,7 @@ mod tests {
         std::fs::write(&path, original).unwrap();
 
         let mut config = UserConfig::load();
-        config.upload_enabled = false;
+        config.pending_upload = 1;
 
         let err = config
             .save()
@@ -737,7 +731,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         // Reproduce the exact torn-write seen in the wild: a valid line followed
         // by a bare " true" orphan with no key.
-        let torn = "upload_enabled = false\n true";
+        let torn = "pending_upload = 0\n true";
         std::fs::write(&path, torn).unwrap();
 
         let config = UserConfig::load();
@@ -765,11 +759,11 @@ mod tests {
         let _env = EnvRestore::set(USER_DATA_DIR_ENV, temp.path());
         let path = config_path().expect("config path should resolve");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let torn = "upload_enabled = false\n true";
+        let torn = "pending_upload = 0\n true";
         std::fs::write(&path, torn).unwrap();
 
         let mut config = UserConfig::load();
-        config.upload_enabled = true;
+        config.pending_upload = 7;
         let backup = config
             .save_with_recovery()
             .expect("recovery save should succeed")
@@ -788,7 +782,7 @@ mod tests {
         // The regenerated file parses and reflects the in-memory value.
         let saved = std::fs::read_to_string(&path).unwrap();
         let reparsed: UserConfig = toml::from_str(&saved).expect("regenerated config parses");
-        assert!(reparsed.upload_enabled);
+        assert_eq!(reparsed.pending_upload, 7);
 
         // A subsequent ordinary save now succeeds (no longer bricked).
         config.save().expect("save after recovery should succeed");
@@ -857,7 +851,7 @@ mod tests {
             std::thread::spawn(move || {
                 barrier.wait();
                 UserConfig::mutate_with_recovery_if_revision(&expected_revision, |config| {
-                    config.upload_enabled = true;
+                    config.pending_upload = 1;
                 })
             })
         };
@@ -866,7 +860,7 @@ mod tests {
             std::thread::spawn(move || {
                 barrier.wait();
                 UserConfig::mutate_with_recovery_if_revision(&expected_revision, |config| {
-                    config.watcher_debounce = "15s".to_owned();
+                    config.cached_latest_version = "9.9.9".to_owned();
                 })
             })
         };
@@ -886,8 +880,8 @@ mod tests {
         );
         let saved = UserConfig::load();
         assert_ne!(
-            (saved.upload_enabled, saved.watcher_debounce.as_str()),
-            (true, "15s"),
+            (saved.pending_upload, saved.cached_latest_version.as_str()),
+            (1, "9.9.9"),
             "the stale writer must not overwrite the winning mutation"
         );
     }
@@ -957,7 +951,7 @@ mod tests {
     }
 
     #[test]
-    fn save_preserves_unknown_config_keys() {
+    fn save_erases_retired_keys_and_preserves_other_readers_keys() {
         let _lock = lock_user_data_dir_test_env();
         let temp = TempDir::new().unwrap();
         let _env = EnvRestore::set(USER_DATA_DIR_ENV, temp.path());
@@ -965,12 +959,13 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "upload_enabled = true\nfuture_key = \"keep-me\"\n[future_table]\nflag = true\n",
+            "upload_enabled = true\nwatcher_debounce = \"9s\"\nextraction_timeout_secs = 5\n\
+             future_key = \"keep-me\"\n[future_table]\nflag = true\n",
         )
         .unwrap();
 
         let mut config = UserConfig::load();
-        config.upload_enabled = false;
+        config.pending_upload = 3;
 
         config
             .save()
@@ -979,7 +974,13 @@ mod tests {
         assert!(saved.contains("future_key = \"keep-me\""));
         assert!(saved.contains("[future_table]"));
         assert!(saved.contains("flag = true"));
-        assert!(saved.contains("upload_enabled = false"));
+        assert!(saved.contains("pending_upload = 3"));
+        for retired in RETIRED_KEYS {
+            assert!(
+                !saved.contains(retired),
+                "{retired} survived a write:\n{saved}"
+            );
+        }
     }
 
     #[test]
