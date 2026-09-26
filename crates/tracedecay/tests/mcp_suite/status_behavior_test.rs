@@ -285,22 +285,24 @@ fn empty_cursor_session_ingest() -> Value {
 
 /// Historical catch-up after every empty-home sweep has reported.
 ///
-/// Kimi publishes a discovery frontier even when `~/.kimi-code` is absent, so
-/// it is the only observed provider. OpenCode has no database, so its coverage
-/// stays unavailable. The other admitted hosts finish with nothing pending.
+/// Kimi and Pi publish a discovery frontier even when `~/.kimi-code` and
+/// `~/.pi` are absent, so they are the only observed providers. OpenCode has
+/// no database, so its coverage stays unavailable. The other admitted hosts
+/// finish with nothing pending.
 fn empty_host_session_history() -> Value {
     json!({
         "status": "warming",
         "coverage": "partial",
         "authority": "daemon",
         "reason": "historical_provider_coverage_incomplete",
-        "providers": ["kimi"],
+        "providers": ["kimi", "pi"],
         "provider_coverage": [
             { "provider": "claude", "state": "complete", "deferred_units": 0 },
             { "provider": "codex", "state": "complete", "deferred_units": 0 },
             { "provider": "cursor", "state": "complete", "deferred_units": 0 },
             { "provider": "kimi", "state": "complete", "deferred_units": 0 },
             { "provider": "opencode", "state": "unavailable", "deferred_units": 1 },
+            { "provider": "pi", "state": "complete", "deferred_units": 0 },
         ],
         "unobserved_providers": ["claude", "codex", "cursor", "opencode"],
         "max_transcript_pending_bytes": 0,
