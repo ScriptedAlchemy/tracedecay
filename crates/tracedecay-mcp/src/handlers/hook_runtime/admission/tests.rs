@@ -264,10 +264,18 @@ fn hook_v2_catchup_response_propagates_transport_disposition() {
     assert_eq!(response["disposition"], "catchup_required");
 }
 
+/// A private profile root under `dir`, as profile identity requires.
+fn private_profile_root(dir: &std::path::Path) -> std::path::PathBuf {
+    let profile_root = dir.join(".tracedecay");
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile_root)
+        .expect("private profile root");
+    profile_root
+}
+
 #[test]
 fn profile_scoped_native_admission_is_idempotent_in_the_authenticated_profile() {
-    let _profile = tracedecay_project::config::PinnedUserDataDir::new();
-    let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
+    let profile = tempfile::tempdir().unwrap();
+    let profile_root = private_profile_root(profile.path());
     let identity =
         tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root).unwrap();
     let decoded = tracedecay_hooks::decode_native_hook_event(
@@ -313,8 +321,8 @@ fn profile_scoped_native_admission_is_idempotent_in_the_authenticated_profile() 
 #[test]
 fn concurrent_profile_scoped_admissions_are_all_recorded() {
     const WRITERS: u8 = 16;
-    let _profile = tracedecay_project::config::PinnedUserDataDir::new();
-    let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
+    let profile = tempfile::tempdir().unwrap();
+    let profile_root = private_profile_root(profile.path());
     let identity =
         tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root).unwrap();
     let admission = |event: u8| {

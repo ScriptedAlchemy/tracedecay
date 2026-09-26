@@ -157,7 +157,6 @@ pub use api_types::{
 };
 pub use support::{
     AccountingMode, env_flag, env_value_truthy, global_accounting_enabled, global_accounting_mode,
-    global_db_path, global_db_path_is_overridden,
 };
 use support::{
     analytics_scope_query, ensure_code_project_primary_root_columns, ensure_parse_offset_columns,

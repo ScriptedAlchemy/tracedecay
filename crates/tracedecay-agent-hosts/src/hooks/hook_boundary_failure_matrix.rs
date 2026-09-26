@@ -12,15 +12,15 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::analytics::{HOOK_ANALYTICS_FILENAME, record_hook_invoked};
-use super::{EnvGuard, TestDaemonHookActionGuard, daemon_hook_action, lock_test_env};
+use super::{TestDaemonHookActionGuard, daemon_hook_action};
 use tracedecay_domain::HostIntegrationIdV1;
-use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
+use tracedecay_runtime_core::config::ProfileRoot;
 
-fn enroll_project(project_root: &Path, project_id: &str) -> PathBuf {
+fn enroll_project(project_root: &Path, profile_root: &Path, project_id: &str) -> PathBuf {
     tracedecay_runtime_core::storage::pin_fixture_repository_identity(project_root, project_id)
         .unwrap();
     let layout =
-        tracedecay_runtime_core::storage::resolve_layout_for_current_profile(project_root).unwrap();
+        tracedecay_runtime_core::storage::resolve_layout(project_root, profile_root).unwrap();
     std::fs::create_dir_all(&layout.data_root).unwrap();
     layout.data_root
 }
@@ -42,17 +42,16 @@ fn completed_row<'a>(rows: &'a [Value], hook_name: &str) -> &'a Value {
 
 #[test]
 fn matrix_rejects_default_success_when_disposition_absent() {
-    let _lock = lock_test_env();
     let project = tempfile::tempdir().unwrap();
-    let profile = tempfile::tempdir().unwrap();
+    let profile_dir = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
-    let profile_root = profile.path().canonicalize().unwrap();
-    let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
-    let data_root = enroll_project(&project_root, "proj_hook_matrix_default");
+    let profile_root = profile_dir.path().canonicalize().unwrap();
+    let profile = ProfileRoot::new(&profile_root);
+    let data_root = enroll_project(&project_root, &profile_root, "proj_hook_matrix_default");
 
     {
         let _span = record_hook_invoked(
-            &crate::ports::hook_runtime::crate_test_runtime(),
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
             HostIntegrationIdV1::Claude,
             "noDisposition",
@@ -70,13 +69,12 @@ fn matrix_rejects_default_success_when_disposition_absent() {
 
 #[test]
 fn matrix_sticky_failure_survives_later_success_for_unavailable_cancel_backpressure_timeout() {
-    let _lock = lock_test_env();
     let project = tempfile::tempdir().unwrap();
-    let profile = tempfile::tempdir().unwrap();
+    let profile_dir = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
-    let profile_root = profile.path().canonicalize().unwrap();
-    let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
-    let data_root = enroll_project(&project_root, "proj_hook_matrix_sticky");
+    let profile_root = profile_dir.path().canonicalize().unwrap();
+    let profile = ProfileRoot::new(&profile_root);
+    let data_root = enroll_project(&project_root, &profile_root, "proj_hook_matrix_sticky");
 
     let success = Ok(serde_json::json!({
         "admission": { "status": "supported", "retryable": false }
@@ -105,7 +103,7 @@ fn matrix_sticky_failure_survives_later_success_for_unavailable_cancel_backpress
 
     {
         let span = record_hook_invoked(
-            &crate::ports::hook_runtime::crate_test_runtime(),
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
             HostIntegrationIdV1::Claude,
             "unavailableThenSuccess",
@@ -116,7 +114,7 @@ fn matrix_sticky_failure_survives_later_success_for_unavailable_cancel_backpress
     }
     {
         let span = record_hook_invoked(
-            &crate::ports::hook_runtime::crate_test_runtime(),
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
             HostIntegrationIdV1::Kiro,
             "cancelThenSuccess",
@@ -127,7 +125,7 @@ fn matrix_sticky_failure_survives_later_success_for_unavailable_cancel_backpress
     }
     {
         let span = record_hook_invoked(
-            &crate::ports::hook_runtime::crate_test_runtime(),
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
             HostIntegrationIdV1::Codex,
             "backpressureThenSuccess",
@@ -138,7 +136,7 @@ fn matrix_sticky_failure_survives_later_success_for_unavailable_cancel_backpress
     }
     {
         let span = record_hook_invoked(
-            &crate::ports::hook_runtime::crate_test_runtime(),
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
             HostIntegrationIdV1::Cursor,
             "timeoutThenSuccess",
@@ -174,27 +172,27 @@ fn matrix_sticky_failure_survives_later_success_for_unavailable_cancel_backpress
 
 #[test]
 fn matrix_daemon_unavailable_transport_does_not_invent_success() {
-    super::run_with_test_env_lock(async {
+    super::block_on_hook_test_runtime(async {
         let project = tempfile::tempdir().unwrap();
-        let profile = tempfile::tempdir().unwrap();
+        let profile_dir = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();
-        let profile_root = profile.path().canonicalize().unwrap();
-        let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
-        let data_root = enroll_project(&project_root, "proj_hook_matrix_transport");
+        let profile_root = profile_dir.path().canonicalize().unwrap();
+        let profile = ProfileRoot::new(&profile_root);
+        let data_root = enroll_project(&project_root, &profile_root, "proj_hook_matrix_transport");
 
         // An installed empty responder deterministically returns Config/error from
         // daemon_hook_action. It cannot fall through to a live daemon socket.
         {
             let guard = TestDaemonHookActionGuard::install(std::iter::empty());
             let span = record_hook_invoked(
-                &crate::ports::hook_runtime::crate_test_runtime(),
+                &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
                 Some(&project_root),
                 HostIntegrationIdV1::Cursor,
                 "daemonDown",
                 "{}",
             );
             let result = daemon_hook_action(
-                &crate::ports::hook_runtime::crate_test_runtime(),
+                &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
                 Some(&project_root),
                 serde_json::json!({ "action": "reset_counter" }),
                 Some(&span),

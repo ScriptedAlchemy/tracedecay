@@ -1585,7 +1585,7 @@ async fn test_run_returns_transport_read_errors() {
 // the migration-running path) before the status reads.
 #[tokio::test]
 async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
-    let profile = crate::common::fixture::TestProfile::acquire().await;
+    let profile = crate::common::fixture::TestProfile::isolated();
     let repository =
         crate::common::fixture::GitFixture::primary(profile.path("lcm-migration-project"));
     fs::create_dir_all(repository.root().join("src")).unwrap();
@@ -1659,8 +1659,9 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     // store file was recreated" (created/length drift on one path) from "a
     // different store file answered" (the seeded file left untouched).
     let sessions_db =
-        tracedecay_runtime_core::storage::resolve_project_session_db_path(&project_root)
-            .expect("resolve the project's sessions db path");
+        tracedecay_runtime_core::storage::resolve_layout(&project_root, profile.root())
+            .expect("resolve the project's sessions db path")
+            .sessions_db_path;
     let stat_sessions_db = |label: &str| match std::fs::metadata(&sessions_db) {
         Ok(meta) => format!(
             "{label}: path={} len={} created={:?} modified={:?}",

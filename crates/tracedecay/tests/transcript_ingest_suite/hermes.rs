@@ -14,17 +14,19 @@ use tracedecay_domain::{
 };
 use tracedecay_lcm::{LcmCompressionRequest, LcmSummarizerMode};
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::hosts::hermes::{
     ProjectIngestDestination, ingest_for_project as ingest_for_project_with_id,
     ingest_homes as ingest_homes_with_id, ingest_homes_for_projects, ingest_user_homes,
 };
 use tracedecay_sessions::runtime::source::TranscriptIngestStats;
-use tracedecay_sessions::runtime::{SessionProvider, SessionRecord};
+use tracedecay_sessions::runtime::{
+    SessionProvider, SessionRecord, with_transcript_source_profile,
+};
 
 use crate::common::{
-    EnvVarGuard, GLOBAL_DB_ENV_LOCK, canonical_existing_path, spawn_tracedecay_daemon,
-    tracedecay_command_with_home,
+    canonical_existing_path, spawn_tracedecay_daemon, tracedecay_command_with_home,
 };
 use crate::restart_atomicity::{
     ProjectSessionTestRuntime, assert_secret_absent_from_observation_sinks, durable_table_count,
@@ -39,13 +41,17 @@ use crate::support::{
 const SESSION_ID: &str = "20260101_000000_abc123";
 
 async fn ingest_for_project(
+    user_home: &Path,
     runtime: &ProjectSessionTestRuntime,
     project_root: &Path,
 ) -> TranscriptIngestStats {
     let admission = runtime.runtime().facade();
-    ingest_for_project_with_id(&admission, project_root, runtime.project_id().clone())
-        .await
-        .expect("hermes home")
+    with_transcript_source_profile(
+        ProfileRoot::under_home(user_home),
+        ingest_for_project_with_id(&admission, project_root, runtime.project_id().clone()),
+    )
+    .await
+    .expect("hermes home")
 }
 
 async fn ingest_homes(
@@ -64,14 +70,18 @@ async fn ingest_homes(
 }
 
 async fn ingest_registered_project_provider(
+    user_home: &Path,
     runtime: &ProjectSessionTestRuntime,
     project_root: &Path,
 ) -> TranscriptIngestStats {
-    runtime
-        .runtime()
-        .ingest_project_provider_for_test(project_root, Some(SessionProvider::Hermes))
-        .await
-        .unwrap()
+    with_transcript_source_profile(
+        ProfileRoot::under_home(user_home),
+        runtime
+            .runtime()
+            .ingest_project_provider_for_test(project_root, Some(SessionProvider::Hermes)),
+    )
+    .await
+    .unwrap()
 }
 
 fn named_project_id(name: &str) -> ProjectId {
@@ -79,25 +89,26 @@ fn named_project_id(name: &str) -> ProjectId {
 }
 
 #[tokio::test]
-// Intentional: this test changes HOME/USERPROFILE/HERMES_HOME while storage
-// discovery is running, so it must share the profile-environment lock used by
-// Cursor's transcript tests.
-#[allow(clippy::await_holding_lock)]
 async fn hermes_home_env_cannot_redirect_runtime_session_discovery() {
-    let _lock = crate::common::GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
+    // The redirect is a process variable, so discovery runs in a child test
+    // process whose `HERMES_HOME` names a populated tree outside the home.
+    if !crate::common::in_child_test() {
+        let redirect_root = TempDir::new().unwrap();
+        let redirected = redirect_root.path().join("redirected-hermes");
+        crate::common::rerun_test_in_child(
+            "hermes::hermes_home_env_cannot_redirect_runtime_session_discovery",
+            &[("HERMES_HOME", Some(redirected.as_os_str()))],
+        );
+        return;
+    }
+    let redirected = PathBuf::from(std::env::var_os("HERMES_HOME").expect("child HERMES_HOME"));
     let tmp = TempDir::new().unwrap();
     let (standard_hermes_home, project) = setup(&tmp);
     let user_home = standard_hermes_home.parent().unwrap();
-    let redirected = tmp.path().join("redirected-hermes");
     write_hermes_profile(&redirected, "work", Some(&project)).await;
-    let _home = crate::common::EnvVarGuard::set("HOME", user_home);
-    let _userprofile = crate::common::EnvVarGuard::set("USERPROFILE", user_home);
-    let _hermes_home = crate::common::EnvVarGuard::set("HERMES_HOME", &redirected);
     let db = open_project_session_db(&project).await.unwrap();
 
-    let stats = ingest_for_project(&db, &project).await;
+    let stats = ingest_for_project(user_home, &db, &project).await;
 
     assert_eq!(stats.messages_upserted, 0);
     assert_eq!(stats.sessions_upserted, 0);
@@ -1127,21 +1138,16 @@ async fn user_sweep_keeps_canonical_turns_routed_to_registered_projects() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn hermes_projection_failure_commits_row_frontier_and_replays_once() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (hermes_home, project) = setup(&tmp);
     let state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
     let user_home = hermes_home.parent().unwrap();
-    let _home = EnvVarGuard::set("HOME", user_home);
     init_git_repo(&project);
     mark_test_project(&project);
 
     let db = open_project_session_db(&project).await.unwrap();
-    let _ = ingest_registered_project_provider(&db, &project).await;
+    let _ = ingest_registered_project_provider(user_home, &db, &project).await;
     let before = db.session_message_count().await.unwrap();
     assert_eq!(before, 4);
     let prefix_cursor = observation_source_cursor(&db, "hermes", SESSION_ID, &project)
@@ -1161,7 +1167,7 @@ async fn hermes_projection_failure_commits_row_frontier_and_replays_once() {
 
     let rejected = open_project_session_db(&project).await.unwrap();
     set_projection_failure(&rejected, true).await;
-    let _ = ingest_registered_project_provider(&rejected, &project).await;
+    let _ = ingest_registered_project_provider(user_home, &rejected, &project).await;
     let committed_cursor = observation_source_cursor(&rejected, "hermes", SESSION_ID, &project)
         .await
         .expect("committed Hermes observation cursor");
@@ -1178,7 +1184,7 @@ async fn hermes_projection_failure_commits_row_frontier_and_replays_once() {
 
     let recovered = open_project_session_db(&project).await.unwrap();
     set_projection_failure(&recovered, false).await;
-    let _ = ingest_registered_project_provider(&recovered, &project).await;
+    let _ = ingest_registered_project_provider(user_home, &recovered, &project).await;
     assert_eq!(recovered.session_message_count().await.unwrap(), before + 1);
     assert_eq!(
         recovered
@@ -1188,7 +1194,7 @@ async fn hermes_projection_failure_commits_row_frontier_and_replays_once() {
         1
     );
     assert_eq!(
-        ingest_registered_project_provider(&recovered, &project)
+        ingest_registered_project_provider(user_home, &recovered, &project)
             .await
             .messages_upserted,
         0
@@ -1200,21 +1206,16 @@ async fn hermes_projection_failure_commits_row_frontier_and_replays_once() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn hermes_malformed_row_is_covered_and_valid_suffix_resumes_once() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (hermes_home, project) = setup(&tmp);
     let state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
     let user_home = hermes_home.parent().unwrap();
-    let _home = EnvVarGuard::set("HOME", user_home);
     init_git_repo(&project);
     mark_test_project(&project);
 
     let db = open_project_session_db(&project).await.unwrap();
-    let _ = ingest_registered_project_provider(&db, &project).await;
+    let _ = ingest_registered_project_provider(user_home, &db, &project).await;
     let before = db.session_message_count().await.unwrap();
     assert_eq!(before, 4);
     let prefix_cursor = observation_source_cursor(&db, "hermes", SESSION_ID, &project)
@@ -1232,7 +1233,7 @@ async fn hermes_malformed_row_is_covered_and_valid_suffix_resumes_once() {
     .unwrap();
     drop(conn);
 
-    let covered = ingest_registered_project_provider(&db, &project).await;
+    let covered = ingest_registered_project_provider(user_home, &db, &project).await;
     assert_eq!(covered.messages_upserted, 0);
     assert_eq!(db.session_message_count().await.unwrap(), before);
     let malformed_cursor = observation_source_cursor(&db, "hermes", SESSION_ID, &project)
@@ -1258,7 +1259,7 @@ async fn hermes_malformed_row_is_covered_and_valid_suffix_resumes_once() {
     drop(conn);
 
     assert_eq!(
-        ingest_registered_project_provider(&db, &project)
+        ingest_registered_project_provider(user_home, &db, &project)
             .await
             .messages_upserted,
         1
@@ -1283,7 +1284,7 @@ async fn hermes_malformed_row_is_covered_and_valid_suffix_resumes_once() {
         1
     );
     assert_eq!(
-        ingest_registered_project_provider(&db, &project)
+        ingest_registered_project_provider(user_home, &db, &project)
             .await
             .messages_upserted,
         0
@@ -1298,26 +1299,21 @@ async fn hermes_malformed_row_is_covered_and_valid_suffix_resumes_once() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn hermes_conflicting_identity_does_not_overwrite_committed_observation() {
     // Hermes derives native_record_id from immutable message evidence (content/
     // role/timestamp/tool fields), while the canonical envelope still embeds the
     // generation-local SQLite row range. A later row that reuses that evidence
     // therefore collides on observation identity with a different payload range
     // and must fail closed without overwriting the earlier projection.
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (hermes_home, project) = setup(&tmp);
     let state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
     let user_home = hermes_home.parent().unwrap();
-    let _home = EnvVarGuard::set("HOME", user_home);
     init_git_repo(&project);
     mark_test_project(&project);
 
     let db = open_project_session_db(&project).await.unwrap();
-    let _ = ingest_registered_project_provider(&db, &project).await;
+    let _ = ingest_registered_project_provider(user_home, &db, &project).await;
     let before = db.session_message_count().await.unwrap();
     assert_eq!(before, 4);
     assert_eq!(
@@ -1340,7 +1336,7 @@ async fn hermes_conflicting_identity_does_not_overwrite_committed_observation() 
     .unwrap();
     drop(conn);
 
-    let _ = ingest_registered_project_provider(&db, &project).await;
+    let _ = ingest_registered_project_provider(user_home, &db, &project).await;
     assert_eq!(db.session_message_count().await.unwrap(), before);
     assert_eq!(
         db.search_session_messages("hermes", None, "fixed", 10)
@@ -1365,22 +1361,17 @@ async fn hermes_conflicting_identity_does_not_overwrite_committed_observation() 
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn hermes_observation_commit_before_ack_survives_reopen() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (hermes_home, project) = setup(&tmp);
     let _state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
     let user_home = hermes_home.parent().unwrap();
-    let _home = EnvVarGuard::set("HOME", user_home);
     init_git_repo(&project);
     mark_test_project(&project);
 
     let rejected = open_project_session_db(&project).await.unwrap();
     set_projection_failure(&rejected, true).await;
-    let _ = ingest_registered_project_provider(&rejected, &project).await;
+    let _ = ingest_registered_project_provider(user_home, &rejected, &project).await;
     assert_eq!(rejected.session_message_count().await.unwrap(), 0);
     assert!(
         rejected
@@ -1417,7 +1408,7 @@ async fn hermes_observation_commit_before_ack_survives_reopen() {
     // Reopen drains the already-committed projection queue before source
     // discovery runs, so the source replay itself is a no-op.
     assert_eq!(
-        ingest_registered_project_provider(&recovered, &project)
+        ingest_registered_project_provider(user_home, &recovered, &project)
             .await
             .messages_upserted,
         0
@@ -1440,7 +1431,7 @@ async fn hermes_observation_commit_before_ack_survives_reopen() {
     );
     assert_eq!(durable_table_count(&recovered, "projection_queue").await, 0);
     assert_eq!(
-        ingest_registered_project_provider(&recovered, &project)
+        ingest_registered_project_provider(user_home, &recovered, &project)
             .await
             .messages_upserted,
         0
@@ -1448,21 +1439,16 @@ async fn hermes_observation_commit_before_ack_survives_reopen() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn hermes_zeroblob_content_is_covered_without_payload_leak() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (hermes_home, project) = setup(&tmp);
     let state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
     let user_home = hermes_home.parent().unwrap();
-    let _home = EnvVarGuard::set("HOME", user_home);
     init_git_repo(&project);
     mark_test_project(&project);
 
     let db = open_project_session_db(&project).await.unwrap();
-    let _ = ingest_registered_project_provider(&db, &project).await;
+    let _ = ingest_registered_project_provider(user_home, &db, &project).await;
     let before = db.session_message_count().await.unwrap();
     let prefix_cursor = observation_source_cursor(&db, "hermes", SESSION_ID, &project)
         .await
@@ -1487,7 +1473,7 @@ async fn hermes_zeroblob_content_is_covered_without_payload_leak() {
     .unwrap();
     drop(conn);
 
-    let covered = ingest_registered_project_provider(&db, &project).await;
+    let covered = ingest_registered_project_provider(user_home, &db, &project).await;
     let after_count = db.session_message_count().await.unwrap();
     assert_eq!(
         after_count,

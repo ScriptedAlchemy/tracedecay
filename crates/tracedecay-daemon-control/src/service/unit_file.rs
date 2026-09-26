@@ -7,9 +7,10 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::runner::ServicePlatform;
 use super::{
-    DaemonServiceSpec, LAUNCHD_PLIST_NAME, SERVICE_TEMP_SEQUENCE, home_for_service_env,
-    windows_task, xml_escape, xml_unescape,
+    DaemonServiceSpec, LAUNCHD_PLIST_NAME, SERVICE_TEMP_SEQUENCE, windows_task, xml_escape,
+    xml_unescape,
 };
+use tracedecay_runtime_core::config::ProfileRoot;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AtomicServiceWriteStep {
@@ -116,7 +117,7 @@ pub(super) fn atomic_replace_service_unit_with(
 }
 
 pub(super) fn write_service_unit(spec: &DaemonServiceSpec) -> Result<PathBuf> {
-    let service_path = service_unit_path()?;
+    let service_path = service_unit_path(&spec.profile)?;
     let unit = spec.render_unit()?;
     match ServicePlatform::current()? {
         ServicePlatform::WindowsTask => windows_task::register_task_xml(&unit)?,
@@ -127,8 +128,8 @@ pub(super) fn write_service_unit(spec: &DaemonServiceSpec) -> Result<PathBuf> {
     Ok(service_path)
 }
 
-pub fn installed_service_socket_path() -> Result<Option<PathBuf>> {
-    let service_path = service_unit_path()?;
+pub fn installed_service_socket_path(profile: &ProfileRoot) -> Result<Option<PathBuf>> {
+    let service_path = service_unit_path(profile)?;
     if !service_unit_exists(&service_path)? {
         return Ok(None);
     }
@@ -413,25 +414,24 @@ pub(super) fn remote_tls_from_unit_text(unit: &str) -> Result<Option<crate::Remo
     }
 }
 
-pub(super) fn service_unit_path() -> Result<PathBuf> {
+pub(super) fn service_unit_path(profile: &ProfileRoot) -> Result<PathBuf> {
     match ServicePlatform::current()? {
-        ServicePlatform::Systemd => systemd_user_service_path(),
-        ServicePlatform::Launchd => launchd_user_service_path(),
+        ServicePlatform::Systemd => systemd_user_service_path(profile),
+        ServicePlatform::Launchd => launchd_user_service_path(profile),
         ServicePlatform::WindowsTask => windows_task::task_path(),
     }
 }
 
-fn systemd_user_service_path() -> Result<PathBuf> {
-    let config_home = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".config")))
+fn systemd_user_service_path(profile: &ProfileRoot) -> Result<PathBuf> {
+    let config_home = profile
+        .config_home()
         .ok_or_else(|| TraceDecayError::Config {
             message: "could not determine XDG config directory".to_string(),
         })?;
     Ok(config_home.join("systemd/user").join(crate::SERVICE_NAME))
 }
 
-fn launchd_user_service_path() -> Result<PathBuf> {
-    let home = home_for_service_env()?;
+fn launchd_user_service_path(profile: &ProfileRoot) -> Result<PathBuf> {
+    let home = profile.require_home("launchd daemon service")?;
     Ok(home.join("Library/LaunchAgents").join(LAUNCHD_PLIST_NAME))
 }

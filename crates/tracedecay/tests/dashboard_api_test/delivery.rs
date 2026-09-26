@@ -359,9 +359,6 @@ fn delivery_http_admission_freshness_reader() -> CodeIndexFreshnessReader {
 
 #[test]
 fn delivery_inbox_admits_only_indexed_pull_requests_over_http() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         // Production adapter first; the advisory-cycle owner is published
@@ -499,9 +496,6 @@ fn delivery_inbox_admits_only_indexed_pull_requests_over_http() {
 
 #[test]
 fn delivery_overview_serves_real_git_reads_and_typed_unmounted_authority() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         // The fixture root is already a registered git repository carrying
@@ -665,9 +659,6 @@ fn agent_usage_session(
 
 #[test]
 fn delivery_overview_counts_agent_tool_calls_for_sessions_on_the_live_branch() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture_without_memory().await;

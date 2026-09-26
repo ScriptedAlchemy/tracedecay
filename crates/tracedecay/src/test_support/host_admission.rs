@@ -45,13 +45,26 @@ pub async fn call_mcp_tool_for_test(
             registered_project_session_db: runtime
                 .registered_database_arc(HostAdmissionScope::Project),
             registered_savings_db: Some(profile_database.clone()),
-            profile_root: Some(runtime.profile_root_for_test()),
+            profile: Some(&test_runtime_profile(runtime)),
             session_authorities: mcp_session_authorities(runtime),
             ..Default::default()
         }
         .admit_opened_project(cg)?,
     )
     .await
+}
+
+/// The owner a test runtime serves: its profile, with the profile's parent as
+/// the home its host transcripts live under.
+fn test_runtime_profile(
+    runtime: &HostAdmissionTestRuntimeV1,
+) -> tracedecay_runtime_core::config::ProfileRoot {
+    let profile_root = runtime.profile_root_for_test();
+    let profile = tracedecay_runtime_core::config::ProfileRoot::new(profile_root);
+    match profile_root.parent() {
+        Some(home) => profile.with_home(home),
+        None => profile,
+    }
 }
 
 /// A direct MCP server construction context bound to this runtime's
@@ -85,7 +98,7 @@ pub(crate) fn mcp_server_context_for_test(
             Some(project_sessions),
             Some(profile_sessions),
         );
-    context.profile_root = Some(profile_root);
+    context.profile = Some(test_runtime_profile(&runtime));
     context.profile_identity = Some(Arc::new(profile_identity));
     context.background_cpu = Some(runtime.background_cpu());
     context.host_admission_test_runtime = Some(runtime);

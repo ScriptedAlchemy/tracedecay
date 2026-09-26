@@ -43,6 +43,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
@@ -68,7 +69,6 @@ use tracedecay_mcp::{
     RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions, internal_daemon_tool_definition,
     render_tool_cli_help, short_tool_name,
 };
-use tracedecay_runtime_core::storage::resolve_enrolled_layout_for_current_profile;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use crate::cli::dispatch::resolve_cli_application_surface;
@@ -167,21 +167,25 @@ fn reject_tool_result_truncation(result_value: &Value, tool_name: &str) -> Resul
 /// Entry point for `tracedecay tool ...`.
 #[hotpath::measure(label = "cli.tool.dispatch", future = true)]
 pub(crate) async fn run(
+    profile: &ProfileRoot,
     project: Option<String>,
     name: Option<String>,
     args: Vec<String>,
 ) -> Result<()> {
-    run_inner(project, name, args).await
+    run_inner(profile, project, name, args).await
 }
 
 fn run_inner(
+    profile: &ProfileRoot,
     project: Option<String>,
     name: Option<String>,
     args: Vec<String>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'static>> {
     // Erase the deeply nested tool-dispatch future before it reaches the
     // measured wrapper so every profiling feature can compute its layout.
+    let profile = profile.clone();
     Box::pin(async move {
+        let profile = &profile;
         #[cfg(feature = "hotpath")]
         {
             let requested_name = name.as_deref().map(canonical_tool_name);
@@ -208,15 +212,23 @@ fn run_inner(
             let tool_name = operation.mcp_tool_name();
             if RetainedSurfaceOperation::from_application(operation).is_some() {
                 let mut tool_args = tool_args;
-                let dispatch =
-                    DaemonToolDispatch::for_tool(explicit_project, tool_name, &mut tool_args);
-                return dispatch_cli_retained(operation, tool_args, dispatch, raw_json, deadline)
-                    .await;
+                let dispatch = DaemonToolDispatch::for_tool(
+                    profile,
+                    explicit_project,
+                    tool_name,
+                    &mut tool_args,
+                );
+                return dispatch_cli_retained(
+                    profile, operation, tool_args, dispatch, raw_json, deadline,
+                )
+                .await;
             }
             if operation.is_graph_tool() {
                 let project_path =
-                    DaemonToolDispatch::project_scoped(explicit_project, tool_name).project_path;
+                    DaemonToolDispatch::project_scoped(profile, explicit_project, tool_name)
+                        .project_path;
                 return dispatch_cli_graph_tool(
+                    profile,
                     operation,
                     tool_args,
                     project_path,
@@ -227,8 +239,10 @@ fn run_inner(
             }
             if tracedecay_daemon_protocol::is_source_edit_operation(operation) {
                 let project_path =
-                    DaemonToolDispatch::project_scoped(explicit_project, tool_name).project_path;
+                    DaemonToolDispatch::project_scoped(profile, explicit_project, tool_name)
+                        .project_path;
                 return dispatch_cli_source_edit(
+                    profile,
                     operation,
                     tool_args,
                     project_path,
@@ -244,9 +258,11 @@ fn run_inner(
                     }
                 })?;
             return dispatch_cli_application_surface(
+                profile,
                 operation,
                 request,
-                DaemonToolDispatch::project_scoped(explicit_project, tool_name).project_path,
+                DaemonToolDispatch::project_scoped(profile, explicit_project, tool_name)
+                    .project_path,
                 requested_format,
                 deadline,
             )
@@ -318,23 +334,36 @@ fn run_inner(
             && RetainedSurfaceOperation::from_application(operation).is_some()
         {
             let dispatch =
-                DaemonToolDispatch::for_tool(explicit_project, &def.name, &mut tool_args);
-            return dispatch_cli_retained(operation, tool_args, dispatch, raw_json, deadline).await;
+                DaemonToolDispatch::for_tool(profile, explicit_project, &def.name, &mut tool_args);
+            return dispatch_cli_retained(
+                profile, operation, tool_args, dispatch, raw_json, deadline,
+            )
+            .await;
         }
         if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(&def.name)
             && operation.is_graph_tool()
         {
             let project_path =
-                DaemonToolDispatch::project_scoped(explicit_project, &def.name).project_path;
-            return dispatch_cli_graph_tool(operation, tool_args, project_path, raw_json, deadline)
-                .await;
+                DaemonToolDispatch::project_scoped(profile, explicit_project, &def.name)
+                    .project_path;
+            return dispatch_cli_graph_tool(
+                profile,
+                operation,
+                tool_args,
+                project_path,
+                raw_json,
+                deadline,
+            )
+            .await;
         }
         if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(&def.name)
             && tracedecay_daemon_protocol::is_source_edit_operation(operation)
         {
             let project_path =
-                DaemonToolDispatch::project_scoped(explicit_project, &def.name).project_path;
+                DaemonToolDispatch::project_scoped(profile, explicit_project, &def.name)
+                    .project_path;
             return dispatch_cli_source_edit(
+                profile,
                 operation,
                 tool_args,
                 project_path,
@@ -353,9 +382,11 @@ fn run_inner(
                     }
                 })?;
             return dispatch_cli_application_surface(
+                profile,
                 operation,
                 request,
-                DaemonToolDispatch::project_scoped(explicit_project, &def.name).project_path,
+                DaemonToolDispatch::project_scoped(profile, explicit_project, &def.name)
+                    .project_path,
                 requested_format,
                 deadline,
             )
@@ -363,8 +394,10 @@ fn run_inner(
         }
         if let Some(tool) = FamilyTool::from_tool_name(&def.name) {
             let project_path =
-                DaemonToolDispatch::project_scoped(explicit_project, &def.name).project_path;
+                DaemonToolDispatch::project_scoped(profile, explicit_project, &def.name)
+                    .project_path;
             return dispatch_cli_family_tool(
+                profile,
                 tool,
                 &def.name,
                 tool_args,
@@ -380,8 +413,10 @@ fn run_inner(
         // the application catalog again can only return `None`; rebuilding a
         // second advertised-name set likewise repeats the exact membership
         // check that selected `def`.
-        let dispatch = DaemonToolDispatch::for_tool(explicit_project, &def.name, &mut tool_args);
-        dispatch_compatibility_tool(dispatch, &def.name, tool_args, raw_json, deadline).await
+        let dispatch =
+            DaemonToolDispatch::for_tool(profile, explicit_project, &def.name, &mut tool_args);
+        dispatch_compatibility_tool(profile, dispatch, &def.name, tool_args, raw_json, deadline)
+            .await
     })
 }
 
@@ -393,6 +428,7 @@ fn run_inner(
 /// the typed surface's transport behavior.
 #[hotpath::measure(label = "cli.tool.catalog", future = true)]
 pub(crate) async fn dispatch_catalogued_cli_operation(
+    profile: &ProfileRoot,
     operation: ApplicationSurfaceOperation,
     tool_args: Value,
     project: Option<PathBuf>,
@@ -407,7 +443,15 @@ pub(crate) async fn dispatch_catalogued_cli_operation(
                 message: error.to_string(),
             },
         )?;
-    dispatch_cli_application_surface(operation, request, project, requested_format, deadline).await
+    dispatch_cli_application_surface(
+        profile,
+        operation,
+        request,
+        project,
+        requested_format,
+        deadline,
+    )
+    .await
 }
 
 /// Splits a CLI `--args` object into the reviewed application request body and
@@ -435,6 +479,7 @@ fn cli_surface_invocation(
 /// `not_found_or_not_authorized`.
 #[hotpath::measure(label = "cli.tool.application", future = true)]
 async fn dispatch_cli_application_surface(
+    profile: &ProfileRoot,
     operation: ApplicationSurfaceOperation,
     tool_args: Value,
     project: Option<PathBuf>,
@@ -442,6 +487,7 @@ async fn dispatch_cli_application_surface(
     deadline: Instant,
 ) -> Result<()> {
     dispatch_cli_application_surface_inner(
+        profile,
         operation,
         tool_args,
         project,
@@ -452,6 +498,7 @@ async fn dispatch_cli_application_surface(
 }
 
 fn dispatch_cli_application_surface_inner(
+    profile: &ProfileRoot,
     operation: ApplicationSurfaceOperation,
     tool_args: Value,
     project: Option<PathBuf>,
@@ -460,7 +507,9 @@ fn dispatch_cli_application_surface_inner(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'static>> {
     // Erase the deeply nested application-surface future before it reaches
     // the measured wrapper so every profiling feature can compute its layout.
+    let profile = profile.clone();
     Box::pin(async move {
+        let profile = &profile;
         #[cfg(feature = "hotpath")]
         hotpath::val!("cli.application.operation").set(&operation.as_str());
         let request_id = mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| {
@@ -471,7 +520,8 @@ fn dispatch_cli_application_surface_inner(
         let request = match parse_application_surface_request(operation, tool_args.clone()) {
             Ok(request) => request,
             Err(error) => {
-                if let Ok(handshake) = crate::commands::client_handshake(project.as_deref())
+                if let Ok(handshake) =
+                    crate::commands::client_handshake(profile, project.as_deref())
                     && let Ok(client) =
                         tracedecay_daemon_identity::invocation_client_for_current(handshake)
                 {
@@ -489,8 +539,13 @@ fn dispatch_cli_application_surface_inner(
                 });
             }
         };
-        let handshake =
-            tracedecay::daemon::handshake_for_current_client(project.clone(), None, false, false)?;
+        let handshake = tracedecay::daemon::handshake_for_current_client(
+            profile,
+            project.clone(),
+            None,
+            false,
+            false,
+        )?;
         let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
         // A cold daemon answers the mounting refusal while the project open
         // still warms in the background. The compatibility tool path rides
@@ -554,6 +609,7 @@ fn dispatch_cli_application_surface_inner(
             tokio::time::sleep(delay).await;
         };
         print_cli_application_surface(
+            profile,
             project.as_deref(),
             result,
             requested_format == RequestedOutputFormat::Json,
@@ -590,6 +646,7 @@ fn cli_request_controls(
 /// surface and print the same tool result its MCP call returns.
 #[hotpath::measure(label = "cli.tool.retained", future = true)]
 async fn dispatch_cli_retained(
+    profile: &ProfileRoot,
     operation: ApplicationSurfaceOperation,
     tool_args: Value,
     dispatch: DaemonToolDispatch,
@@ -601,7 +658,8 @@ async fn dispatch_cli_retained(
         mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
             message: "could not allocate an application surface request id".to_owned(),
         })?;
-    let client = tracedecay_daemon_identity::invocation_client_for_current(dispatch.handshake()?)?;
+    let client =
+        tracedecay_daemon_identity::invocation_client_for_current(dispatch.handshake(profile)?)?;
     // The mounting refusal precedes admission; re-send it until the deadline.
     let execution = loop {
         let (request_deadline, cancellation) = cli_request_controls(&request_id, deadline)?;
@@ -628,7 +686,7 @@ async fn dispatch_cli_retained(
         }
         tokio::time::sleep(delay).await;
     };
-    let response_handle_root = cli_response_handle_root(dispatch.project_path.as_deref())?;
+    let response_handle_root = cli_response_handle_root(profile, dispatch.project_path.as_deref())?;
     let mut result = tracedecay::mcp::tools::render_retained_execution(
         response_handle_root.as_deref(),
         &execution,
@@ -643,6 +701,7 @@ async fn dispatch_cli_retained(
 /// same tool result its MCP call returns.
 #[hotpath::measure(label = "cli.tool.source_edit", future = true)]
 async fn dispatch_cli_source_edit(
+    profile: &ProfileRoot,
     operation: ApplicationSurfaceOperation,
     tool_args: Value,
     project: Option<PathBuf>,
@@ -654,8 +713,13 @@ async fn dispatch_cli_source_edit(
         mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
             message: "could not allocate an application surface request id".to_owned(),
         })?;
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(project.clone(), None, false, false)?;
+    let handshake = tracedecay::daemon::handshake_for_current_client(
+        profile,
+        project.clone(),
+        None,
+        false,
+        false,
+    )?;
     let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
     // A cold daemon refuses with the mounting problem while the project open
     // warms; that refusal precedes admission, so it is re-sent until the CLI
@@ -687,7 +751,7 @@ async fn dispatch_cli_source_edit(
         }
         tokio::time::sleep(delay).await;
     };
-    let response_handle_root = cli_response_handle_root(project.as_deref())?;
+    let response_handle_root = cli_response_handle_root(profile, project.as_deref())?;
     let mut result = tracedecay_mcp::handlers::edit::render_source_edit_outcome(
         response_handle_root.as_deref(),
         operation,
@@ -704,6 +768,7 @@ async fn dispatch_cli_source_edit(
 /// tool result its MCP call returns.
 #[hotpath::measure(label = "cli.tool.graph_tool", future = true)]
 async fn dispatch_cli_graph_tool(
+    profile: &ProfileRoot,
     operation: ApplicationSurfaceOperation,
     tool_args: Value,
     project: Option<PathBuf>,
@@ -728,8 +793,13 @@ async fn dispatch_cli_graph_tool(
         mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
             message: "could not allocate an application surface request id".to_owned(),
         })?;
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(project.clone(), None, false, false)?;
+    let handshake = tracedecay::daemon::handshake_for_current_client(
+        profile,
+        project.clone(),
+        None,
+        false,
+        false,
+    )?;
     let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
     // A cold daemon refuses with the mounting problem while the project open
     // warms; that refusal precedes admission, so it is re-sent until the CLI
@@ -758,7 +828,7 @@ async fn dispatch_cli_graph_tool(
         }
         tokio::time::sleep(OWNER_MOUNT_RESEND_DELAY).await;
     };
-    let response_handle_root = cli_response_handle_root(project.as_deref())?;
+    let response_handle_root = cli_response_handle_root(profile, project.as_deref())?;
     let mut result = tracedecay_mcp::handlers::graph_tool::render_graph_tool(
         response_handle_root.as_deref(),
         &tool_args,
@@ -771,12 +841,17 @@ async fn dispatch_cli_graph_tool(
 }
 
 /// Enrolled project's handle root, or none when that path has no store.
-fn cli_response_handle_root(project: Option<&Path>) -> Result<Option<PathBuf>> {
+fn cli_response_handle_root(
+    profile: &ProfileRoot,
+    project: Option<&Path>,
+) -> Result<Option<PathBuf>> {
     let Some(project) = project else {
         return Ok(None);
     };
-    Ok(resolve_enrolled_layout_for_current_profile(project)?
-        .map(|layout| layout.response_handle_root))
+    Ok(
+        tracedecay_runtime_core::storage::resolve_persisted_layout(project, profile.data_dir())?
+            .map(|layout| layout.response_handle_root),
+    )
 }
 
 const OWNER_MOUNT_RESEND_DELAY: Duration = Duration::from_millis(250);
@@ -785,6 +860,7 @@ const OWNER_MOUNT_RESEND_DELAY: Duration = Duration::from_millis(250);
 /// call uses. `--json` keeps the whole canonical envelope on stdout; the
 /// beside-result trailer and footer go to stderr on every format.
 fn print_cli_application_surface(
+    profile: &ProfileRoot,
     project: Option<&Path>,
     result: ApplicationSurfaceInvocationResult,
     raw_json: bool,
@@ -794,7 +870,7 @@ fn print_cli_application_surface(
         .as_ref()
         .err()
         .map(|problem| format!("{}: {}", problem.problem.code, problem.problem.message));
-    let response_handle_root = cli_response_handle_root(project)?;
+    let response_handle_root = cli_response_handle_root(profile, project)?;
     let mut rendered = tracedecay::mcp::tools::render_application_surface_result(
         response_handle_root.as_deref(),
         &result,
@@ -823,7 +899,12 @@ struct DaemonToolDispatch {
 impl DaemonToolDispatch {
     /// `tool_args` may be seeded: a registry read that names an uninitialised
     /// `--project` but no `path` inherits that project as its `path`.
-    fn for_tool(explicit_project: Option<String>, tool_name: &str, tool_args: &mut Value) -> Self {
+    fn for_tool(
+        profile: &ProfileRoot,
+        explicit_project: Option<String>,
+        tool_name: &str,
+        tool_args: &mut Value,
+    ) -> Self {
         // Profile-targeted calls (Hermes user LCM/memory) must never invent a
         // project from cwd. Hermes intentionally runs those calls with cwd=/ so
         // Hermes home is never mistaken for a TraceDecay project.
@@ -834,13 +915,13 @@ impl DaemonToolDispatch {
             };
         }
         if PROFILE_REGISTRY_TOOLS.contains(&tool_name) {
-            return Self::registry_scoped(explicit_project, tool_name, tool_args);
+            return Self::registry_scoped(profile, explicit_project, tool_name, tool_args);
         }
-        Self::project_scoped(explicit_project, tool_name)
+        Self::project_scoped(profile, explicit_project, tool_name)
     }
 
     /// Registry reads never initialise anything, and follow the canonical
-    /// resolution order (`tracedecay_runtime_core::config::discover_project_root`):
+    /// resolution order (`ProfileRoot::discover_project_root`):
     ///
     /// * An explicit `--project` is honoured verbatim, with no discovery and
     ///   no ambient-root filter. An initialised root becomes the project
@@ -855,6 +936,7 @@ impl DaemonToolDispatch {
     /// * Without `--project`, cwd walks up to the nearest initialised
     ///   ancestor, and stays projectless when there is none.
     fn registry_scoped(
+        profile: &ProfileRoot,
         explicit_project: Option<String>,
         tool_name: &str,
         tool_args: &mut Value,
@@ -862,9 +944,7 @@ impl DaemonToolDispatch {
         let project_path = match explicit_project {
             Some(path) => {
                 let explicit = tracedecay_configuration::resolve_path(Some(path));
-                if explicit.is_dir()
-                    && !tracedecay_runtime_core::config::is_initialized_project_root(&explicit)
-                {
+                if explicit.is_dir() && !profile.is_initialized_project_root(&explicit) {
                     if tool_name == "tracedecay_project_context" {
                         seed_registry_context_path(tool_args, &explicit);
                     }
@@ -875,7 +955,7 @@ impl DaemonToolDispatch {
             }
             None => std::env::current_dir()
                 .ok()
-                .and_then(|cwd| implicit_tool_project_path(&cwd)),
+                .and_then(|cwd| implicit_tool_project_path(profile, &cwd)),
         };
         Self {
             project_path,
@@ -883,7 +963,11 @@ impl DaemonToolDispatch {
         }
     }
 
-    fn project_scoped(explicit_project: Option<String>, tool_name: &str) -> Self {
+    fn project_scoped(
+        profile: &ProfileRoot,
+        explicit_project: Option<String>,
+        tool_name: &str,
+    ) -> Self {
         // An explicit --project wins. Otherwise only route to the nearest
         // initialised ancestor. Keeping an unscoped invocation projectless is
         // important: falling back to cwd can turn a broad directory such as
@@ -893,7 +977,7 @@ impl DaemonToolDispatch {
             Some(path) => Some(tracedecay_configuration::resolve_path(Some(path))),
             None => std::env::current_dir()
                 .ok()
-                .and_then(|cwd| implicit_tool_project_path(&cwd)),
+                .and_then(|cwd| implicit_tool_project_path(profile, &cwd)),
         };
         let allow_init = explicitly_targeted && FIRST_TOUCH_STORE_TOOLS.contains(&tool_name);
 
@@ -903,8 +987,9 @@ impl DaemonToolDispatch {
         }
     }
 
-    fn handshake(&self) -> Result<DaemonHandshake> {
+    fn handshake(&self, profile: &ProfileRoot) -> Result<DaemonHandshake> {
         tracedecay::daemon::handshake_for_current_client(
+            profile,
             self.project_path.clone(),
             None,
             false,
@@ -915,8 +1000,14 @@ impl DaemonToolDispatch {
     /// `deadline` is the caller's request deadline. It is sent to the daemon and
     /// enforced there; the transport reads for a bounded grace beyond it.
     #[hotpath::skip]
-    async fn call(&self, tool_name: &str, tool_args: Value, deadline: Instant) -> Result<Value> {
-        let handshake = self.handshake()?;
+    async fn call(
+        &self,
+        profile: &ProfileRoot,
+        tool_name: &str,
+        tool_args: Value,
+        deadline: Instant,
+    ) -> Result<Value> {
+        let handshake = self.handshake(profile)?;
         // The interactive CLI wants the tool's answer, not the daemon's typed
         // warming state: ride out a cold project open until the CLI deadline,
         // the same transport behavior as the typed application-surface path.
@@ -935,8 +1026,8 @@ fn targets_profile(tool_name: &str, tool_args: &Value) -> bool {
     })
 }
 
-fn implicit_tool_project_path(cwd: &Path) -> Option<PathBuf> {
-    tracedecay_runtime_core::config::discover_project_root(cwd)
+fn implicit_tool_project_path(profile: &ProfileRoot, cwd: &Path) -> Option<PathBuf> {
+    profile.discover_project_root(cwd)
 }
 
 /// `project_context` with an explicit uninitialised `--project` and no
@@ -973,6 +1064,7 @@ fn map_tool_deadline_error(tool_name: &str, error: TraceDecayError) -> TraceDeca
 /// definition admission and, when declared, catalog binding resolution.
 #[hotpath::measure(label = "cli.tool.compatibility", future = true)]
 async fn dispatch_compatibility_tool(
+    profile: &ProfileRoot,
     dispatch: DaemonToolDispatch,
     tool_name: &str,
     tool_args: Value,
@@ -993,7 +1085,7 @@ async fn dispatch_compatibility_tool(
     let response_bound = tracedecay::daemon::daemon_tool_response_bound(deadline)?;
     let result_value = match timeout_at(
         response_bound,
-        dispatch.call(tool_name, tool_args, deadline),
+        dispatch.call(profile, tool_name, tool_args, deadline),
     )
     .await
     {

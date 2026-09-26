@@ -978,6 +978,27 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn work_app_server_child_receives_only_admitted_environment() {
+        const AMBIENT_CHILD: &str = "TRACEDECAY_TEST_WORK_APP_SERVER_ENVIRONMENT_CHILD";
+        let admitted_key = "TRACEDECAY_WORK_ADMITTED".to_owned();
+        let ambient_secret = "TRACEDECAY_WORK_SECRET".to_owned();
+        if std::env::var_os(AMBIENT_CHILD).is_none() {
+            // The ambient values are process environment; a child isolates
+            // them from concurrently running tests.
+            let status = std::process::Command::new(
+                std::env::current_exe().expect("current test executable"),
+            )
+            .args([
+                "--exact",
+                "runtime::hosts::codex_app_server::tests::work_app_server_child_receives_only_admitted_environment",
+            ])
+            .env(AMBIENT_CHILD, "1")
+            .env(&admitted_key, "ambient-replacement")
+            .env(&ambient_secret, "ambient-secret")
+            .status()
+            .expect("run ambient environment child");
+            assert!(status.success(), "the ambient environment child failed");
+            return;
+        }
         let _process_guard = APP_SERVER_PROCESS_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -985,8 +1006,6 @@ mod tests {
         let marker = temporary.path().join("environment");
         let requests = temporary.path().join("requests.jsonl");
         let executable = temporary.path().join("fake-codex");
-        let admitted_key = format!("TRACEDECAY_WORK_ADMITTED_{}", std::process::id());
-        let ambient_secret = format!("TRACEDECAY_WORK_SECRET_{}", std::process::id());
         let script = format!(
             "#!/bin/sh\nprintf '%s|%s|%s' \"${{{admitted_key}:-missing}}\" \"${{{ambient_secret}:-missing}}\" \"${{{child_marker}:-missing}}\" > {marker}\nwhile IFS= read -r line; do\n  printf '%s\\n' \"$line\" >> {requests}\n  case \"$line\" in\n    *'\"id\":0'*) printf '%s\\n' '{{\"id\":0,\"result\":{{}}}}' ;;\n    *'\"id\":1'*) printf '%s\\n' '{{\"id\":1,\"result\":{{\"thread\":{{\"id\":\"work-thread\"}}}}}}' ;;\n    *'\"id\":2'*) printf '%s\\n' '{{\"method\":\"item/completed\",\"params\":{{\"item\":{{\"content\":[{{\"type\":\"output_text\",\"text\":\"work result\"}}]}}}}}}'; printf '%s\\n' '{{\"method\":\"turn/completed\",\"params\":{{\"turn\":{{\"id\":\"work-turn\"}}}}}}'; exit 0 ;;\n  esac\ndone\n",
             marker = marker.display(),
@@ -1001,14 +1020,6 @@ mod tests {
         std::fs::set_permissions(&executable, permissions)
             .expect("make fake app-server executable");
 
-        let prior_admitted = std::env::var_os(&admitted_key);
-        let prior_secret = std::env::var_os(&ambient_secret);
-        // SAFETY: both process-wide test keys are unique to this process and
-        // restored before the assertion below.
-        unsafe {
-            std::env::set_var(&admitted_key, "ambient-replacement");
-            std::env::set_var(&ambient_secret, "ambient-secret");
-        }
         let admitted_environment = std::collections::BTreeMap::from([
             (
                 admitted_key.clone(),
@@ -1040,17 +1051,6 @@ mod tests {
                 egress: WorkEgressPolicy::Deny,
             },
         );
-        // SAFETY: return the process environment to the state this test found.
-        unsafe {
-            match prior_admitted {
-                Some(value) => std::env::set_var(&admitted_key, value),
-                None => std::env::remove_var(&admitted_key),
-            }
-            match prior_secret {
-                Some(value) => std::env::set_var(&ambient_secret, value),
-                None => std::env::remove_var(&ambient_secret),
-            }
-        }
 
         let summary = result.expect("work app-server protocol should complete");
         assert_eq!(summary.text, "work result");

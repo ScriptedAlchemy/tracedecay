@@ -2,9 +2,6 @@ use crate::dashboard_api_support::*;
 
 #[test]
 fn dashboard_three_request_chain_cannot_enable_and_run_a_shell_command() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let tmp = tempdir_or_panic();
@@ -14,18 +11,17 @@ fn dashboard_three_request_chain_cannot_enable_and_run_a_shell_command() {
         let global_db_path = tmp_root.join("global").join("global.db");
         let profile_root = tmp_root.join("profile").join(".tracedecay");
         let marker = tmp_root.join("dashboard-command-ran");
-        let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
-        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+        let profile = ProfileRoot::new(&profile_root).with_global_db_override(&global_db_path);
 
         let mut global_config = tracedecay_session_memory::user_config::UserConfig::default();
         global_config.automation.enabled = true;
         global_config.automation.backend =
             tracedecay_automation_runtime::automation::config::AutomationBackend::CodexAppServer;
         global_config
-            .save()
+            .save(&profile_root)
             .expect("global user config should save");
 
-        let (cg, host_runtime) = setup_project(&project_root).await;
+        let (cg, host_runtime) = setup_project(&profile, &project_root).await;
         let agent = http_agent();
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
@@ -90,9 +86,6 @@ fn dashboard_three_request_chain_cannot_enable_and_run_a_shell_command() {
 
 #[test]
 fn automation_jobs_crud_and_manual_run_are_dashboard_controllable() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let tmp = tempdir_or_panic();
@@ -101,10 +94,9 @@ fn automation_jobs_crud_and_manual_run_are_dashboard_controllable() {
         let project_root = tmp_root.join("project");
         let global_db_path = tmp_root.join("global").join("global.db");
         let profile_root = tmp_root.join("profile").join(".tracedecay");
-        let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
-        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+        let profile = ProfileRoot::new(&profile_root).with_global_db_override(&global_db_path);
 
-        let (cg, host_runtime) = setup_project(&project_root).await;
+        let (cg, host_runtime) = setup_project(&profile, &project_root).await;
         let dashboard_root = cg.store_layout().dashboard_root.clone();
         let agent = http_agent();
         let port = pick_free_port();
@@ -199,9 +191,6 @@ fn automation_jobs_crud_and_manual_run_are_dashboard_controllable() {
 
 #[test]
 fn dashboard_user_job_history_appears_only_after_retained_settlement() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let tmp = tempdir_or_panic();
@@ -212,8 +201,8 @@ fn dashboard_user_job_history_appears_only_after_retained_settlement() {
         let profile_root = tmp_root.join("profile").join(".tracedecay");
         let backend_started = tmp_root.join("user-job-backend-started");
         let release_backend = tmp_root.join("release-user-job-backend");
-        let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
-        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+        let profile = ProfileRoot::new(&profile_root)
+            .with_global_db_override(&global_db_path);
 
         let fake_codex_root = tmp_root.join("fake-codex");
         let fake_codex_script = fake_codex_root.join("codex.py");
@@ -266,7 +255,7 @@ for line in sys.stdin:
         write_file(&fake_codex_script, &script);
         install_fake_codex_launcher(&fake_codex_script, &fake_codex_bin);
 
-        let (cg, host_runtime) = setup_project(&project_root).await;
+        let (cg, host_runtime) = setup_project(&profile, &project_root).await;
         let dashboard_root = cg.store_layout().dashboard_root.clone();
         let project_id = cg
             .configuration_runtime()

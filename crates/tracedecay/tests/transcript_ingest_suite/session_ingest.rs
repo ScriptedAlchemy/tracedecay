@@ -5,6 +5,7 @@ use tracedecay_domain::{BrainId, ProjectId};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 use tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority;
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_sessions::runtime::ingest::test_support::{
     IngestPassBounds, PROJECT_INGEST_PROVIDER_FRONTIER_KEY, USER_INGEST_PROVIDER_FRONTIER_KEY,
@@ -18,7 +19,7 @@ use tracedecay_sessions::runtime::ingest::{
     IngestPassCoverage, ingest_project_sources_for_provider,
     ingest_user_global_sources_for_startup_with_db, registered_project_roots_from,
 };
-use tracedecay_sessions::runtime::{TranscriptIngestOutcome, with_transcript_source_home};
+use tracedecay_sessions::runtime::{TranscriptIngestOutcome, with_transcript_source_profile};
 use tracedecay_sessions::{SessionProvider, TranscriptIngestStats};
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
@@ -662,7 +663,7 @@ async fn run_bounded_project_pass(
         bounds,
         &cancellation,
     );
-    with_transcript_source_home(home.to_path_buf(), pass).await
+    with_transcript_source_profile(ProfileRoot::under_home(home), pass).await
 }
 
 async fn project_rotation_frontier(runtime: &IngestTestRuntime) -> Option<u64> {

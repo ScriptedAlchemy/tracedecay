@@ -8,6 +8,7 @@ use tracedecay_domain::{
     SessionId,
 };
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_runtime_core::storage::{
     read_repository_identity_marker, write_repository_identity_marker,
 };
@@ -25,12 +26,13 @@ use tracedecay_sessions::runtime::hosts::cursor::{
 };
 use tracedecay_sessions::runtime::shared::TranscriptIngestStats;
 use tracedecay_sessions::runtime::source::{TranscriptIngestError, TranscriptSource};
-use tracedecay_sessions::runtime::{SessionMessageSearchResult, SessionProvider};
+use tracedecay_sessions::runtime::{
+    SessionMessageSearchResult, SessionProvider, with_transcript_source_profile,
+};
 use tracedecay_store::ObservationReplayRequest;
 
 use crate::claude::write_claude_transcript;
 use crate::cline_like::{vscode_storage_root, write_task};
-use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::support::{init_git_repo, init_project, setup};
 
 const TEST_PROJECT_ID: &str = "tracedecay-transcript-ingest-fixture";
@@ -67,6 +69,17 @@ pub(super) struct ProjectSessionTestRuntime {
 impl ProjectSessionTestRuntime {
     pub(super) fn runtime(&self) -> &HostAdmissionTestRuntimeV1 {
         &self.runtime
+    }
+
+    /// The transcript source profile of this fixture: its registered profile
+    /// with the `setup` home (`<fixture root>/home`) beside it.
+    pub(super) fn transcript_source_profile(&self) -> ProfileRoot {
+        let profile_root = self.runtime.profile_root_for_test();
+        let home = profile_root
+            .parent()
+            .expect("fixture profile has a fixture root")
+            .join("home");
+        ProfileRoot::new(profile_root).with_home(home)
     }
 
     pub(super) fn project_id(&self) -> &ProjectId {
@@ -267,16 +280,23 @@ async fn try_ingest_cursor_transcript_event(
         .await
 }
 
+/// Runs the production provider sweep with `home` as the transcript source
+/// profile's user home, the way the daemon scopes its ingest passes.
 pub(super) async fn ingest_global_sources_for_provider(
+    home: &Path,
     runtime: &ProjectSessionTestRuntime,
     project_root: &Path,
     provider: Option<SessionProvider>,
 ) -> tracedecay_sessions::runtime::shared::TranscriptIngestStats {
-    runtime
-        .runtime
-        .ingest_project_provider_for_test(project_root, provider)
-        .await
-        .unwrap()
+    let profile = ProfileRoot::new(runtime.runtime.profile_root_for_test()).with_home(home);
+    with_transcript_source_profile(
+        profile,
+        runtime
+            .runtime
+            .ingest_project_provider_for_test(project_root, provider),
+    )
+    .await
+    .unwrap()
 }
 
 async fn parse_offset_for_task_history(
@@ -1821,14 +1841,9 @@ async fn cursor_jsonl_rotation_rename_rescans_replacement_without_gap() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn claude_observation_commit_before_ack_replays_after_reopen() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
     let path = write_claude_transcript(&home, &project, "claude-commit-before-ack");
@@ -1836,8 +1851,13 @@ async fn claude_observation_commit_before_ack_replays_after_reopen() {
     let rejected = open_project_session_db(&project).await.unwrap();
     assert_no_transcript_adjacent_fallback_writer(&rejected, &path);
     set_projection_failure(&rejected, true).await;
-    let _ = ingest_global_sources_for_provider(&rejected, &project, Some(SessionProvider::Claude))
-        .await;
+    let _ = ingest_global_sources_for_provider(
+        &home,
+        &rejected,
+        &project,
+        Some(SessionProvider::Claude),
+    )
+    .await;
     assert_eq!(rejected.session_message_count().await.unwrap(), 0);
     assert!(
         rejected
@@ -1865,9 +1885,14 @@ async fn claude_observation_commit_before_ack_replays_after_reopen() {
 
     let recovered = open_project_session_db(&project).await.unwrap();
     assert_eq!(
-        ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Claude))
-            .await
-            .messages_upserted,
+        ingest_global_sources_for_provider(
+            &home,
+            &recovered,
+            &project,
+            Some(SessionProvider::Claude)
+        )
+        .await
+        .messages_upserted,
         2
     );
     assert_eq!(
@@ -1887,9 +1912,14 @@ async fn claude_observation_commit_before_ack_replays_after_reopen() {
     );
     assert_eq!(durable_table_count(&recovered, "projection_queue").await, 0);
     assert_eq!(
-        ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Claude))
-            .await
-            .messages_upserted,
+        ingest_global_sources_for_provider(
+            &home,
+            &recovered,
+            &project,
+            Some(SessionProvider::Claude)
+        )
+        .await
+        .messages_upserted,
         0
     );
 }

@@ -155,7 +155,6 @@ mod work_dispatch_tests;
 )]
 mod workflow_dispatch_tests;
 
-use std::path::Path;
 use std::sync::Arc;
 pub(crate) use tool_call_support::resolve_registered_project_route_for_tool;
 pub(super) use tool_call_support::text_tool_result;
@@ -306,7 +305,8 @@ pub struct ToolCallRegistryOptions<'a> {
     /// that authority mounts behind the core project-open publication and is
     /// absent on the core server that answers the first tool calls.
     pub(crate) daemon_user_profile_id: Option<tracedecay_domain::configuration::UserProfileId>,
-    pub profile_root: Option<&'a Path>,
+    /// The daemon owner profile the tool call runs for, when daemon-owned.
+    pub profile: Option<&'a tracedecay_runtime_core::config::ProfileRoot>,
     pub(crate) resolved_project_route: Option<&'a crate::mcp::project_route::ResolvedProjectRoute>,
     pub automation_scheduler_reconciler:
         Option<tracedecay_dashboard_api::AutomationSchedulerReconciler>,
@@ -394,7 +394,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             dashboard_session_retrieval_service: None,
             dashboard_session_retrieval_identity: None,
             daemon_user_profile_id: None,
-            profile_root: None,
+            profile: None,
             resolved_project_route: None,
             automation_scheduler_reconciler: None,
             automation_writer: tracedecay_dashboard_api::standalone_dashboard_automation_writer(),

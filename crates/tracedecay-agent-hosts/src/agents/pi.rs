@@ -23,6 +23,7 @@
 //! OpenCode uses for `$XDG_CONFIG_HOME`.
 
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 pub(crate) use tracedecay_sessions::runtime::hosts::pi::PI_AGENT_RELATIVE;
@@ -224,26 +225,27 @@ impl AgentIntegration for PiIntegration {
         pi_agent_dir(home).is_dir()
     }
 
-    fn detected_host_surface(&self, home: &Path) -> Option<PathBuf> {
+    fn detected_host_surface(&self, home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         let dir = pi_agent_dir(home);
         dir.is_dir().then_some(dir)
     }
 
-    fn has_tracedecay(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
         let loaded = pi_agent_dir(home);
         component_relative_paths(&[HostComponentV1::Core, HostComponentV1::Agent])
             .into_iter()
             .any(|relative| loaded.join(relative).exists())
     }
 
-    fn primary_config_path(&self, home: &Path) -> Option<PathBuf> {
+    fn primary_config_path(&self, home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         Some(pi_agent_dir(home).join(PI_EXTENSION_RELATIVE))
     }
 
-    fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
+    fn host_registration_paths(&self, home: &Path, profile: &ProfileRoot) -> Vec<PathBuf> {
         self.host_component_registration_paths(
             &[HostComponentV1::Core, HostComponentV1::Agent],
             home,
+            profile,
         )
     }
 
@@ -255,6 +257,7 @@ impl AgentIntegration for PiIntegration {
         &self,
         components: &[HostComponentV1],
         home: &Path,
+        _profile: &ProfileRoot,
     ) -> Vec<PathBuf> {
         relocated_assets(home, &pi_agent_dir(home), components)
             .into_iter()
@@ -311,7 +314,10 @@ mod tests {
     fn a_foreign_home_never_resolves_outside_itself() {
         let home = tempfile::tempdir().unwrap();
         assert_eq!(pi_agent_dir(home.path()), home.path().join(".pi/agent"));
-        let paths = PiIntegration.host_registration_paths(home.path());
+        let paths = PiIntegration.host_registration_paths(
+            home.path(),
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
+        );
         assert!(paths.is_empty(), "{paths:?}");
     }
 

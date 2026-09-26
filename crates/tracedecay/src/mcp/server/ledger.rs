@@ -205,6 +205,9 @@ impl McpServer {
                 )
             });
         let monitor_project_root = monitor_project_root.to_path_buf();
+        let monitor_dir = self
+            .owner_profile()
+            .map(|profile| profile.data_dir().to_path_buf());
         let tool_name = tool_name.to_owned();
         self.spawn_observed_ledger_write(async move {
             if let Some((cg_lock, sink, new_total)) = persist {
@@ -223,8 +226,13 @@ impl McpServer {
             }
             // The monitor entry opens, locks, and mmaps a file; keep that
             // off the async workers.
+            // A server without an owning profile has no monitor ring.
+            let Some(monitor_dir) = monitor_dir else {
+                return;
+            };
             let monitor_write = tokio::task::spawn_blocking(move || {
-                tracedecay_session_memory::monitor_ring::write_entry(
+                tracedecay_session_memory::monitor_ring::write_entry_to(
+                    &monitor_dir,
                     &monitor_project_root,
                     "tracedecay",
                     &tool_name,
@@ -337,6 +345,13 @@ impl McpServer {
         if !self.ledger_sink_is_mounted() {
             return;
         }
+        let Some(profile_root) = self
+            .owner_profile()
+            .map(|profile| profile.data_dir().to_path_buf())
+        else {
+            tracing::warn!("worldwide counter flush skipped: server has no owning profile");
+            return;
+        };
 
         let server = Arc::clone(self);
         self.spawn_observed_ledger_write(async move {
@@ -351,7 +366,7 @@ impl McpServer {
                 }
             };
             let saved = tokio::task::spawn_blocking(move || {
-                persist_worldwide_delta(delta, upload_enabled)
+                persist_worldwide_delta(&profile_root, delta, upload_enabled)
             })
             .await
             .unwrap_or_else(|error| {
@@ -584,8 +599,8 @@ impl McpServer {
     }
 }
 
-fn persist_worldwide_delta(delta: u64, upload_enabled: bool) -> bool {
-    let mut config = tracedecay_session_memory::user_config::UserConfig::load();
+fn persist_worldwide_delta(profile_root: &Path, delta: u64, upload_enabled: bool) -> bool {
+    let mut config = tracedecay_session_memory::user_config::UserConfig::load(profile_root);
     config.pending_upload = config.pending_upload.saturating_add(delta);
     if upload_enabled
         && tracedecay_dashboard_api::cloud::flush_pending(config.pending_upload).is_some()
@@ -593,7 +608,7 @@ fn persist_worldwide_delta(delta: u64, upload_enabled: bool) -> bool {
         config.pending_upload = 0;
         config.last_upload_at = tracedecay_runtime_core::tracedecay::current_timestamp();
     }
-    match config.save() {
+    match config.save(profile_root) {
         Ok(()) => true,
         Err(error) => {
             tracing::warn!(error = %error, "could not save upload config");
@@ -696,37 +711,44 @@ mod tests {
 
     #[test]
     fn disabled_upload_records_each_delta_once_after_durable_save() {
-        let _profile = tracedecay_project::config::PinnedUserDataDir::new();
-        let mut config = tracedecay_session_memory::user_config::UserConfig::load();
+        let profile = tempfile::tempdir().expect("profile");
+        let profile = profile.path();
+        let mut config = tracedecay_session_memory::user_config::UserConfig::load(profile);
         config.pending_upload = 0;
-        config.save().expect("initialize isolated user config");
+        config
+            .save(profile)
+            .expect("initialize isolated user config");
         let current = 37_u64;
         let last_flushed = AtomicU64::new(0);
 
         for _ in 0..2 {
             let previous = last_flushed.load(Ordering::Acquire);
             if current > previous {
-                let saved = persist_worldwide_delta(current - previous, false);
+                let saved = persist_worldwide_delta(profile, current - previous, false);
                 if saved {
                     last_flushed.store(current, Ordering::Release);
                 }
             }
         }
 
-        let persisted = tracedecay_session_memory::user_config::UserConfig::load();
+        let persisted = tracedecay_session_memory::user_config::UserConfig::load(profile);
         assert_eq!(persisted.pending_upload, current);
         assert_eq!(last_flushed.load(Ordering::Acquire), current);
     }
 
     #[tokio::test]
     async fn concurrent_response_boundary_admits_one_observed_background_flush() {
-        let (cg, _project, _pin) = super::super::writer_test_support::init_indexed_repo().await;
+        let (cg, _project, authority) =
+            super::super::writer_test_support::init_indexed_repo().await;
         let database = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
             "ledger-worldwide-single-flight",
         )
         .await;
-        let context = super::super::McpServerConstructionContext::direct(cg, None)
+        let mut context = super::super::McpServerConstructionContext::direct(cg, None)
             .with_direct_databases(Some(database.registered.clone()), None, None, None);
+        context.profile = Some(tracedecay_runtime_core::config::ProfileRoot::new(
+            authority.profile_root(),
+        ));
         let server = super::super::McpServer::new_with_context(context).await;
         let tokens_saved = server.tokens_saved.as_ref().expect("fixture token counter");
         let last_flushed = server

@@ -1,13 +1,16 @@
 use crate::cli::Commands;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 #[hotpath::measure(label = "cli.hook.dispatch", future = true)]
 pub(crate) async fn handle_hook_command(
+    profile: ProfileRoot,
     command: Commands,
 ) -> tracedecay_domain::errors::Result<i32> {
-    handle_hook_command_inner(command).await
+    handle_hook_command_inner(profile, command).await
 }
 
 fn handle_hook_command_inner(
+    profile: ProfileRoot,
     command: Commands,
 ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = tracedecay_domain::errors::Result<i32>> + Send + 'static>,
@@ -15,7 +18,7 @@ fn handle_hook_command_inner(
     // Erase the deeply nested hook-dispatch future before it reaches the
     // measured wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
-        let runtime = tracedecay::hook_runtime();
+        let runtime = tracedecay::hook_runtime(profile.clone());
         // Claude PostCompact is a daemon-owned pressure probe, not a native
         // capture source: Claude exposes no machine-verifiable compacted payload,
         // so the daemon records the boundary and reports typed unavailable.
@@ -80,7 +83,9 @@ fn handle_hook_command_inner(
             return Ok(code);
         }
         if let Some(source) = crate::hook_capture_cmd::capture_source_for_command(&command) {
-            return Ok(crate::hook_capture_cmd::run_native_capture(source));
+            return Ok(crate::hook_capture_cmd::run_native_capture(
+                &profile, source,
+            ));
         }
         if matches!(command, Commands::HookPreToolUse) {
             return Ok(0);

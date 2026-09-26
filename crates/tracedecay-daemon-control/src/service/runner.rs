@@ -6,7 +6,8 @@ use std::process::Command;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::probe::{DaemonSocketState, daemon_socket_state};
-use super::{DaemonServiceState, LAUNCHD_LABEL, tracedecay_data_dir, windows_task};
+use super::{DaemonServiceState, LAUNCHD_LABEL, windows_task};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 /// All variants exist on every platform so that dispatch stays exhaustive.
 #[derive(Clone, Debug)]
@@ -86,6 +87,7 @@ impl ServiceRunner {
     #[hotpath::measure(label = "daemon.service.runner.install")]
     pub(super) fn install(
         &self,
+        profile: &ProfileRoot,
         service_path: &Path,
         start: bool,
         socket_path: &Path,
@@ -99,7 +101,7 @@ impl ServiceRunner {
                 Ok(())
             }
             Self::Launchd { launchctl, id } => {
-                launchd_install(launchctl, id, service_path, start, socket_path)
+                launchd_install(profile, launchctl, id, service_path, start, socket_path)
             }
             Self::WindowsTask => windows_task::apply_state(
                 if start {
@@ -115,6 +117,7 @@ impl ServiceRunner {
     #[hotpath::measure(label = "daemon.service.runner.refresh")]
     pub(super) fn refresh(
         &self,
+        profile: &ProfileRoot,
         service_path: &Path,
         socket_path: &Path,
         previous_state: DaemonServiceState,
@@ -129,7 +132,7 @@ impl ServiceRunner {
                 Ok(())
             }
             Self::Launchd { launchctl, id } if previous_state.is_running() => {
-                launchd_refresh(launchctl, id, service_path, socket_path)?;
+                launchd_refresh(profile, launchctl, id, service_path, socket_path)?;
                 if !previous_state.is_enabled() {
                     run_launchctl(launchctl, &["disable", &launchd_service_target(id)?])?;
                 }
@@ -239,6 +242,7 @@ impl ServiceRunner {
 
     pub(super) fn restore_after_update(
         &self,
+        profile: &ProfileRoot,
         service_path: &Path,
         socket_path: &Path,
         previous_state: DaemonServiceState,
@@ -260,13 +264,14 @@ impl ServiceRunner {
                 // Restore success must mean an authenticated daemon at the
                 // expected version answering from the installed unit's socket.
                 super::wait_for_installed_service_state_with_runner(
+                    profile,
                     self,
                     previous_state,
                     expected_version,
                 )
             }
             Self::Launchd { launchctl, id } => {
-                launchd_refresh(launchctl, id, service_path, socket_path)?;
+                launchd_refresh(profile, launchctl, id, service_path, socket_path)?;
                 if !previous_state.is_enabled() {
                     run_launchctl(launchctl, &["disable", &launchd_service_target(id)?])?;
                 }
@@ -274,6 +279,7 @@ impl ServiceRunner {
                 // connection; hold launchd restores to the same authenticated
                 // identity bar as systemd.
                 super::wait_for_installed_service_state_with_runner(
+                    profile,
                     self,
                     previous_state,
                     expected_version,
@@ -296,14 +302,14 @@ impl ServiceRunner {
         }
     }
 
-    pub(super) fn log_hint(&self) -> String {
+    pub(super) fn log_hint(&self, profile: &ProfileRoot) -> String {
         match self {
             Self::Systemd { .. } => {
                 format!("journalctl --user -u {} -f", crate::SERVICE_NAME)
             }
-            Self::Launchd { .. } => tracedecay_runtime_core::config::user_data_dir().map_or_else(
-                || "tail -f <tracedecay-data-dir>/daemon.err.log".to_string(),
-                |dir| format!("tail -f \"{}\"", dir.join("daemon.err.log").display()),
+            Self::Launchd { .. } => format!(
+                "tail -f \"{}\"",
+                profile.data_dir().join("daemon.err.log").display()
             ),
             Self::WindowsTask => {
                 "Event Viewer: Applications and Services Logs/Microsoft/Windows/TaskScheduler/Operational"
@@ -768,9 +774,9 @@ pub(super) fn launchd_disabled_output_contains_label(output: &str, label: &str) 
     })
 }
 
-fn ensure_launchd_runtime_dirs() -> Result<()> {
-    let data_dir = tracedecay_data_dir()?;
-    std::fs::create_dir_all(&data_dir).map_err(|e| TraceDecayError::Config {
+fn ensure_launchd_runtime_dirs(profile: &ProfileRoot) -> Result<()> {
+    let data_dir = profile.data_dir();
+    std::fs::create_dir_all(data_dir).map_err(|e| TraceDecayError::Config {
         message: format!(
             "failed to create daemon data directory '{}': {e}",
             data_dir.display()
@@ -779,13 +785,14 @@ fn ensure_launchd_runtime_dirs() -> Result<()> {
 }
 
 fn launchd_install(
+    profile: &ProfileRoot,
     launchctl: &Path,
     id: &Path,
     service_path: &Path,
     start: bool,
     socket_path: &Path,
 ) -> Result<()> {
-    ensure_launchd_runtime_dirs()?;
+    ensure_launchd_runtime_dirs(profile)?;
     let target = launchd_service_target(id)?;
     if !start {
         // launchd bootstraps every plist in ~/Library/LaunchAgents at login,
@@ -797,12 +804,13 @@ fn launchd_install(
 }
 
 fn launchd_refresh(
+    profile: &ProfileRoot,
     launchctl: &Path,
     id: &Path,
     service_path: &Path,
     socket_path: &Path,
 ) -> Result<()> {
-    ensure_launchd_runtime_dirs()?;
+    ensure_launchd_runtime_dirs(profile)?;
     let target = launchd_service_target(id)?;
     launchd_start(launchctl, id, &target, service_path, socket_path)
 }

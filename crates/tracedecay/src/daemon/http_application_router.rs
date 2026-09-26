@@ -7,13 +7,18 @@ use super::*;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 #[hotpath::measure(label = "daemon.http.application.router_build")]
-fn build_http_application_router(project_id: &str, project_path: &Path) -> Result<axum::Router> {
+fn build_http_application_router(
+    owner: &tracedecay_runtime_core::config::ProfileRoot,
+    project_id: &str,
+    project_path: &Path,
+) -> Result<axum::Router> {
     let project_id = tracedecay_domain::ProjectId::new(project_id.to_owned()).map_err(|error| {
         TraceDecayError::Config {
             message: format!("daemon HTTP project identity is invalid: {error}"),
         }
     })?;
     let handshake = crate::daemon::handshake_for_current_client(
+        owner,
         Some(project_path.to_path_buf()),
         None,
         false,
@@ -89,7 +94,12 @@ pub(super) fn install_http_application_cold_resolver(
                         message: "daemon HTTP registered project root is not canonical".to_owned(),
                     });
                 }
-                build_http_application_router(project_id.as_str(), &canonical_root).map(Some)
+                build_http_application_router(
+                    store_administration.owner_profile()?,
+                    project_id.as_str(),
+                    &canonical_root,
+                )
+                .map(Some)
             },
             label = "daemon.http.application.router_cold_resolve"
         )
@@ -115,12 +125,13 @@ pub(super) async fn install_remote_http_application_router(
 #[hotpath::measure(future = true, label = "daemon.http.application.router_mount")]
 pub(super) async fn mount_http_application_router(
     registry: &http_application::DaemonHttpApplicationRegistry,
+    owner: &tracedecay_runtime_core::config::ProfileRoot,
     project_id: &str,
     project_path: &Path,
 ) -> Result<()> {
     if !registry.is_active() {
         return Ok(());
     }
-    let router = build_http_application_router(project_id, project_path)?;
+    let router = build_http_application_router(owner, project_id, project_path)?;
     registry.mount(project_id, router).await
 }

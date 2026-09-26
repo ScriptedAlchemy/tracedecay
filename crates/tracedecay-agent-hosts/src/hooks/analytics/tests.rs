@@ -1,14 +1,12 @@
 use super::*;
 use std::time::Duration;
-use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
+use tracedecay_runtime_core::config::ProfileRoot;
 
-use super::super::EnvGuard;
-
-fn enroll_project(project_root: &Path, project_id: &str) -> PathBuf {
+fn enroll_project(project_root: &Path, profile_root: &Path, project_id: &str) -> PathBuf {
     tracedecay_runtime_core::storage::pin_fixture_repository_identity(project_root, project_id)
         .unwrap();
     let layout =
-        tracedecay_runtime_core::storage::resolve_layout_for_current_profile(project_root).unwrap();
+        tracedecay_runtime_core::storage::resolve_layout(project_root, profile_root).unwrap();
     std::fs::create_dir_all(&layout.data_root).unwrap();
     layout.data_root
 }
@@ -24,16 +22,15 @@ fn read_analytics_rows(path: &Path) -> Vec<Value> {
 
 #[test]
 fn unbound_hook_analytics_do_not_create_a_missing_profile() {
-    let _lock = crate::hooks::lock_test_env();
     let home = tempfile::tempdir().unwrap();
     let profile_root = home.path().join(".tracedecay");
-    let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
+    let profile = ProfileRoot::new(&profile_root);
     assert!(!profile_root.exists());
 
     let event = r#"{"hook_event_name":"Stop","session_id":"s1"}"#;
     let parsed = serde_json::from_str(event).unwrap();
     drop(record_hook_invoked_parsed(
-        &crate::ports::hook_runtime::crate_test_runtime(),
+        &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
         None,
         HostIntegrationIdV1::Claude,
         "Stop",
@@ -111,8 +108,10 @@ fn native_dispatch_dispositions_remain_distinct_in_telemetry() {
 fn timing_span_defaults_to_recording_without_a_registered_authority() {
     let project = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
+    let profile_home = tempfile::tempdir().unwrap();
+    let profile = ProfileRoot::under_home(profile_home.path());
     let span = HookTimingSpan::new(
-        &crate::ports::hook_runtime::crate_test_runtime(),
+        &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
         Some(&project_root),
         HostIntegrationIdV1::Claude,
         "missingConfiguration",
@@ -139,20 +138,19 @@ fn payload_bytes_are_length_only_and_omit_forbidden_content() {
     let measured = measure_host_event_payload_bytes(&event).unwrap();
     assert_eq!(measured, event.len() as u64);
 
-    let _lock = crate::hooks::lock_test_env();
     let project = tempfile::Builder::new()
         .prefix("benchmark-secret-project-path-")
         .tempdir()
         .unwrap();
-    let profile = tempfile::tempdir().unwrap();
+    let profile_dir = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
-    let profile_root = profile.path().canonicalize().unwrap();
-    let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
-    let data_root = enroll_project(&project_root, "proj_hook_privacy");
+    let profile_root = profile_dir.path().canonicalize().unwrap();
+    let profile = ProfileRoot::new(&profile_root);
+    let data_root = enroll_project(&project_root, &profile_root, "proj_hook_privacy");
 
     {
         let span = record_hook_invoked(
-            &crate::ports::hook_runtime::crate_test_runtime(),
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
             HostIntegrationIdV1::Claude,
             "Stop",
@@ -223,13 +221,13 @@ fn payload_bytes_are_length_only_and_omit_forbidden_content() {
 
 #[test]
 fn daemon_hook_action_records_completed_rtt_and_wire_length() {
-    crate::hooks::run_with_test_env_lock(async {
+    crate::hooks::block_on_hook_test_runtime(async {
         let project = tempfile::tempdir().unwrap();
-        let profile = tempfile::tempdir().unwrap();
+        let profile_dir = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();
-        let profile_root = profile.path().canonicalize().unwrap();
-        let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
-        let data_root = enroll_project(&project_root, "proj_hook_daemon_boundary");
+        let profile_root = profile_dir.path().canonicalize().unwrap();
+        let profile = ProfileRoot::new(&profile_root);
+        let data_root = enroll_project(&project_root, &profile_root, "proj_hook_daemon_boundary");
 
         {
             let _guard = crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
@@ -237,14 +235,14 @@ fn daemon_hook_action_records_completed_rtt_and_wire_length() {
                 "reset": true,
             })]);
             let span = record_hook_invoked(
-                &crate::ports::hook_runtime::crate_test_runtime(),
+                &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
                 Some(&project_root),
                 HostIntegrationIdV1::Cursor,
                 "daemonBoundary",
                 r#"{"hook_event_name":"daemonBoundary"}"#,
             );
             let result = crate::hooks::daemon_hook_action(
-                &crate::ports::hook_runtime::crate_test_runtime(),
+                &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
                 Some(&project_root),
                 serde_json::json!({ "action": "reset_counter" }),
                 Some(&span),
@@ -268,17 +266,20 @@ fn daemon_hook_action_records_completed_rtt_and_wire_length() {
 
 #[test]
 fn one_way_notification_does_not_claim_round_trip_time() {
-    let _lock = crate::hooks::lock_test_env();
     let project = tempfile::tempdir().unwrap();
-    let profile = tempfile::tempdir().unwrap();
+    let profile_dir = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
-    let profile_root = profile.path().canonicalize().unwrap();
-    let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
-    let data_root = enroll_project(&project_root, "proj_hook_notification_boundary");
+    let profile_root = profile_dir.path().canonicalize().unwrap();
+    let profile = ProfileRoot::new(&profile_root);
+    let data_root = enroll_project(
+        &project_root,
+        &profile_root,
+        "proj_hook_notification_boundary",
+    );
 
     {
         let span = record_hook_invoked(
-            &crate::ports::hook_runtime::crate_test_runtime(),
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
             HostIntegrationIdV1::Cursor,
             "notificationBoundary",
@@ -304,13 +305,12 @@ fn one_way_notification_does_not_claim_round_trip_time() {
 
 #[test]
 fn hook_disposition_aggregation_preserves_failures_and_sticky_timeout() {
-    let _lock = crate::hooks::lock_test_env();
     let project = tempfile::tempdir().unwrap();
-    let profile = tempfile::tempdir().unwrap();
+    let profile_dir = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
-    let profile_root = profile.path().canonicalize().unwrap();
-    let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
-    let data_root = enroll_project(&project_root, "proj_hook_aggregation");
+    let profile_root = profile_dir.path().canonicalize().unwrap();
+    let profile = ProfileRoot::new(&profile_root);
+    let data_root = enroll_project(&project_root, &profile_root, "proj_hook_aggregation");
     let success = Ok(serde_json::json!({
         "admission": { "status": "supported", "retryable": false }
     }));
@@ -331,7 +331,7 @@ fn hook_disposition_aggregation_preserves_failures_and_sticky_timeout() {
 
     {
         let span = record_hook_invoked(
-            &crate::ports::hook_runtime::crate_test_runtime(),
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
             HostIntegrationIdV1::Claude,
             "failureThenSuccess",
@@ -342,7 +342,7 @@ fn hook_disposition_aggregation_preserves_failures_and_sticky_timeout() {
     }
     {
         let span = record_hook_invoked(
-            &crate::ports::hook_runtime::crate_test_runtime(),
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
             HostIntegrationIdV1::Codex,
             "successThenFailure",
@@ -353,7 +353,7 @@ fn hook_disposition_aggregation_preserves_failures_and_sticky_timeout() {
     }
     {
         let span = record_hook_invoked(
-            &crate::ports::hook_runtime::crate_test_runtime(),
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
             HostIntegrationIdV1::Kiro,
             "backpressureThenSuccess",
@@ -364,7 +364,7 @@ fn hook_disposition_aggregation_preserves_failures_and_sticky_timeout() {
     }
     {
         let span = record_hook_invoked(
-            &crate::ports::hook_runtime::crate_test_runtime(),
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
             HostIntegrationIdV1::Cursor,
             "stickyTimeout",
@@ -406,13 +406,12 @@ fn hook_disposition_aggregation_preserves_failures_and_sticky_timeout() {
 
 #[test]
 fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
-    let _lock = crate::hooks::lock_test_env();
     let project = tempfile::tempdir().unwrap();
-    let profile = tempfile::tempdir().unwrap();
+    let profile_dir = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
-    let profile_root = profile.path().canonicalize().unwrap();
-    let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
-    let data_root = enroll_project(&project_root, "proj_hook_unknown_order");
+    let profile_root = profile_dir.path().canonicalize().unwrap();
+    let profile = ProfileRoot::new(&profile_root);
+    let data_root = enroll_project(&project_root, &profile_root, "proj_hook_unknown_order");
     let success = Ok(serde_json::json!({
         "admission": { "status": "supported", "retryable": false }
     }));
@@ -433,7 +432,7 @@ fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
 
     {
         let span = record_hook_invoked(
-            &crate::ports::hook_runtime::crate_test_runtime(),
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
             HostIntegrationIdV1::Claude,
             "unknownThenSuccess",
@@ -444,7 +443,7 @@ fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
     }
     {
         let span = record_hook_invoked(
-            &crate::ports::hook_runtime::crate_test_runtime(),
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
             HostIntegrationIdV1::Codex,
             "unknownThenFailure",
@@ -455,7 +454,7 @@ fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
     }
     {
         let span = record_hook_invoked(
-            &crate::ports::hook_runtime::crate_test_runtime(),
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
             HostIntegrationIdV1::Kiro,
             "successThenUnknown",
@@ -466,7 +465,7 @@ fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
     }
     {
         let span = record_hook_invoked(
-            &crate::ports::hook_runtime::crate_test_runtime(),
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
             HostIntegrationIdV1::Cursor,
             "failureThenUnknown",
@@ -477,7 +476,7 @@ fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
     }
     {
         let span = record_hook_invoked(
-            &crate::ports::hook_runtime::crate_test_runtime(),
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
             HostIntegrationIdV1::Claude,
             "unknownThenTimeout",
@@ -488,7 +487,7 @@ fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
     }
     {
         let span = record_hook_invoked(
-            &crate::ports::hook_runtime::crate_test_runtime(),
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
             HostIntegrationIdV1::Codex,
             "timeoutThenUnknown",
@@ -499,7 +498,7 @@ fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
     }
     {
         let span = record_hook_invoked(
-            &crate::ports::hook_runtime::crate_test_runtime(),
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
             HostIntegrationIdV1::Kiro,
             "unknownThenCancel",
@@ -510,7 +509,7 @@ fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
     }
     {
         let span = record_hook_invoked(
-            &crate::ports::hook_runtime::crate_test_runtime(),
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
             HostIntegrationIdV1::Cursor,
             "cancelThenUnknown",
@@ -581,22 +580,22 @@ fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
 
 #[test]
 fn concurrent_spans_keep_rtt_payload_and_disposition_isolated() {
-    crate::hooks::run_with_test_env_lock(async {
+    crate::hooks::block_on_hook_test_runtime(async {
         let project = tempfile::tempdir().unwrap();
-        let profile = tempfile::tempdir().unwrap();
+        let profile_dir = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();
-        let profile_root = profile.path().canonicalize().unwrap();
-        let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
-        let data_root = enroll_project(&project_root, "proj_hook_concurrent");
+        let profile_root = profile_dir.path().canonicalize().unwrap();
+        let profile = ProfileRoot::new(&profile_root);
+        let data_root = enroll_project(&project_root, &profile_root, "proj_hook_concurrent");
         let first = record_hook_invoked(
-            &crate::ports::hook_runtime::crate_test_runtime(),
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
             HostIntegrationIdV1::Cursor,
             "firstHook",
             r#"{"hook_event_name":"firstHook"}"#,
         );
         let second = record_hook_invoked(
-            &crate::ports::hook_runtime::crate_test_runtime(),
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
             HostIntegrationIdV1::Kiro,
             "secondHook",
@@ -652,17 +651,16 @@ fn concurrent_spans_keep_rtt_payload_and_disposition_isolated() {
 
 #[test]
 fn untyped_ok_daemon_output_emits_unknown_not_default_success() {
-    let _lock = crate::hooks::lock_test_env();
     let project = tempfile::tempdir().unwrap();
-    let profile = tempfile::tempdir().unwrap();
+    let profile_dir = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
-    let profile_root = profile.path().canonicalize().unwrap();
-    let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
-    let data_root = enroll_project(&project_root, "proj_untyped_ok_disposition");
+    let profile_root = profile_dir.path().canonicalize().unwrap();
+    let profile = ProfileRoot::new(&profile_root);
+    let data_root = enroll_project(&project_root, &profile_root, "proj_untyped_ok_disposition");
 
     {
         let span = record_hook_invoked(
-            &crate::ports::hook_runtime::crate_test_runtime(),
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
             HostIntegrationIdV1::Claude,
             "untypedOk",
@@ -1209,5 +1207,61 @@ fn readiness_aggregate_bounds_untrusted_hook_dimensions() {
             !encoded.contains(forbidden),
             "readiness must not leak {forbidden}: {encoded}"
         );
+    }
+}
+
+/// Two owners in one process, each with its own profile, record hook analytics
+/// for the same checkout at the same time. Each owner's rows land only in its
+/// own profile's store for that checkout.
+#[test]
+fn two_owner_profiles_record_hook_analytics_into_their_own_stores() {
+    const ROWS_PER_OWNER: usize = 25;
+    let checkout = tempfile::tempdir().unwrap();
+    let owners: Vec<(tempfile::TempDir, ProfileRoot, PathBuf, &str)> = ["owner-a", "owner-b"]
+        .into_iter()
+        .map(|hook_name| {
+            let home = tempfile::tempdir().unwrap();
+            let profile = ProfileRoot::under_home(home.path());
+            let data_root =
+                enroll_project(checkout.path(), profile.data_dir(), "proj_two_owner_hooks");
+            (home, profile, data_root, hook_name)
+        })
+        .collect();
+    assert_ne!(owners[0].2, owners[1].2);
+
+    let start = std::sync::Barrier::new(owners.len());
+    std::thread::scope(|scope| {
+        for (_, profile, _, hook_name) in &owners {
+            let start = &start;
+            let checkout = checkout.path();
+            scope.spawn(move || {
+                let runtime = crate::ports::hook_runtime::crate_test_runtime(profile.clone());
+                start.wait();
+                for _ in 0..ROWS_PER_OWNER {
+                    drop(record_other_hook_invoked(
+                        &runtime,
+                        Some(checkout),
+                        hook_name,
+                        r#"{"hook_event_name":"Stop"}"#,
+                    ));
+                }
+            });
+        }
+    });
+
+    for (_, profile, data_root, hook_name) in &owners {
+        assert!(data_root.starts_with(profile.data_dir()));
+        let rows = read_analytics_rows(&data_root.join(HOOK_ANALYTICS_FILENAME));
+        let foreign: Vec<&Value> = rows
+            .iter()
+            .filter(|row| row["hook_name"] != *hook_name)
+            .collect();
+        assert_eq!(foreign, Vec::<&Value>::new());
+        let invoked = rows
+            .iter()
+            .filter(|row| row["event"] == "hook_invoked")
+            .count();
+        assert_eq!(invoked, ROWS_PER_OWNER);
+        assert!(!profile.data_dir().join(HOOK_ANALYTICS_FILENAME).exists());
     }
 }

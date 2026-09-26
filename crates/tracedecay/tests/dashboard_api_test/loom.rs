@@ -17,9 +17,6 @@ use tracedecay_sessions::runtime::git_correlation::{
 /// session store is admitted, without being restarted.
 #[test]
 fn dashboard_started_during_project_open_serves_sessions_once_open_completes() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let project_open = Arc::new(AtomicBool::new(false));
@@ -87,9 +84,6 @@ fn first_event_frame(agent: &ureq::Agent, url: &str) -> (String, serde_json::Val
 
 #[test]
 fn loom_temporal_endpoint_reads_recorded_ends_and_causal_authorities() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(true).await;
@@ -228,14 +222,16 @@ fn write_rollout(path: &std::path::Path, records: &[serde_json::Value]) {
 /// spawning call keeps its parent and is counted as omitted coverage.
 #[test]
 fn loom_forks_bind_to_the_spawning_call_recorded_by_the_parent_transcript() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(true).await;
-        let home = std::env::var_os("HOME").expect("fixture HOME");
-        let dir = std::path::Path::new(&home).join(".codex/sessions/2026/09/02");
+        let home = fixture
+            .host_runtime
+            .profile()
+            .home()
+            .expect("fixture profile names its home")
+            .to_path_buf();
+        let dir = home.join(".codex/sessions/2026/09/02");
         std::fs::create_dir_all(&dir).unwrap();
         let cwd = fixture.project_root.to_string_lossy().into_owned();
         let parent = "01a05f21-0000-7000-8000-00000000a001";
@@ -404,9 +400,6 @@ fn large_history_messages(session: &SessionRecord) -> Vec<SessionMessageRecord> 
 
 #[test]
 fn loom_temporal_serves_one_bounded_page_of_a_large_history() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(false).await;
@@ -480,9 +473,6 @@ impl DashboardGitCorrelationReadPortV1 for StalledGitCorrelationRead {
 
 #[test]
 fn loom_temporal_read_past_its_deadline_answers_the_typed_timeout() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture_with_git_correlation_authority(Arc::new(

@@ -53,14 +53,17 @@ pub(crate) struct DaemonInvocationState {
 
 impl Default for DaemonInvocationState {
     fn default() -> Self {
-        Self::with_progress_producer_incarnation(1)
+        Self::with_progress_producer_incarnation(1, None)
     }
 }
 
 impl DaemonInvocationState {
     /// Construct one daemon-generation invocation state whose dashboard
     /// progress is ordered by the existing durable daemon-authority epoch.
-    pub(super) fn with_progress_producer_incarnation(producer_incarnation: u64) -> Self {
+    pub(super) fn with_progress_producer_incarnation(
+        producer_incarnation: u64,
+        owner_home: Option<&std::path::Path>,
+    ) -> Self {
         let resident_memory = Arc::new(ProcessResidentMemoryV1::new(
             detected_process_resident_memory_limit_v1(),
         ));
@@ -70,7 +73,8 @@ impl DaemonInvocationState {
             producer_incarnation,
         );
         let service =
-            DaemonInvocationService::with_code_index_schedulers(code_index_schedulers.clone());
+            DaemonInvocationService::with_code_index_schedulers(code_index_schedulers.clone())
+                .with_owner_home(owner_home.map(std::path::Path::to_path_buf));
         let work_federated_query_authority = Arc::new(DaemonWorkFederatedQueryAuthorityV1 {
             schedulers: code_index_schedulers.clone(),
         });

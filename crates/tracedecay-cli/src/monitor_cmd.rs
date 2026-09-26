@@ -1,6 +1,7 @@
 //! `tracedecay monitor`: the live token-savings TUI over the global mmap ring.
 
 use std::io::Write;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_runtime_core::text::format_number;
 use tracedecay_session_memory::monitor_ring::{
@@ -12,18 +13,13 @@ mod cost;
 use cost::{CostCache, CostCacheState};
 
 /// Run the monitor TUI. Blocks until Ctrl+C.
-pub fn run() -> std::io::Result<()> {
+pub fn run(profile: &ProfileRoot) -> std::io::Result<()> {
     use crossterm::{
         cursor, execute, terminal,
         terminal::{EnterAlternateScreen, LeaveAlternateScreen},
     };
-    let dir = tracedecay_runtime_core::config::user_data_dir().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "cannot resolve home directory",
-        )
-    })?;
-    std::fs::create_dir_all(&dir)?;
+    let dir = profile.data_dir();
+    std::fs::create_dir_all(dir)?;
 
     // Single-instance lock, held for the lifetime of `run` (shared sidecar
     // helper; see the sidecar-lock module note in runtime-core `storage`).
@@ -40,7 +36,7 @@ pub fn run() -> std::io::Result<()> {
         f.set_len(FILE_SIZE as u64)?;
     }
 
-    let mut reader = MmapReader::open()?;
+    let mut reader = MmapReader::open_at(profile.data_dir())?;
     let mut last_idx = reader.write_idx();
     let mut entries: Vec<MonitorEntry> = Vec::new();
     let mut recent_updates: Vec<(String, String)> = Vec::new();
@@ -69,6 +65,7 @@ pub fn run() -> std::io::Result<()> {
     execute!(stdout, EnterAlternateScreen, cursor::Hide)?;
 
     let result = monitor_loop(
+        profile,
         &mut reader,
         &mut entries,
         &mut recent_updates,
@@ -86,6 +83,7 @@ pub fn run() -> std::io::Result<()> {
 }
 
 fn monitor_loop(
+    profile: &ProfileRoot,
     reader: &mut MmapReader,
     entries: &mut Vec<MonitorEntry>,
     recent_updates: &mut Vec<(String, String)>,
@@ -148,7 +146,7 @@ fn monitor_loop(
 
         cost_cache.poll_refresh();
         if cost_cache.is_stale() {
-            cost_cache.begin_refresh();
+            cost_cache.begin_refresh(profile);
         }
 
         let (width, height) = terminal::size().unwrap_or((80, 24));

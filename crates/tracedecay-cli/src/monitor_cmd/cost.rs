@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_session_memory::provider_usage::ProviderUsageCoverageV1;
@@ -62,8 +63,9 @@ impl CostCache {
         self.refresh.is_none() && self.last_refresh.elapsed() > REFRESH_INTERVAL
     }
 
-    pub(super) fn begin_refresh(&mut self) {
-        self.begin_refresh_with(fetch_cost_snapshot_blocking);
+    pub(super) fn begin_refresh(&mut self, profile: &ProfileRoot) {
+        let profile = profile.clone();
+        self.begin_refresh_with(move || fetch_cost_snapshot_blocking(&profile));
     }
 
     fn begin_refresh_with<F>(&mut self, fetch: F)
@@ -193,17 +195,19 @@ fn map_cost_payloads(
 }
 
 #[hotpath::measure(label = "cli.monitor.cost_fetch", future = true)]
-async fn fetch_cost_snapshot() -> Result<Option<CostSnapshot>> {
+async fn fetch_cost_snapshot(profile: &ProfileRoot) -> Result<Option<CostSnapshot>> {
     let cwd = std::env::current_dir()?;
-    let project_root = tracedecay_runtime_core::config::discover_project_root(&cwd);
+    let project_root = profile.discover_project_root(&cwd);
     let fetch = async {
         let (week, today) = tokio::try_join!(
             daemon_tool_json(
+                profile,
                 project_root.as_deref(),
                 "tracedecay_admin_cli",
                 serde_json::json!({ "action": "cost_summary", "range": "7d" })
             ),
             daemon_tool_json(
+                profile,
                 project_root.as_deref(),
                 "tracedecay_admin_cli",
                 serde_json::json!({ "action": "cost_summary", "range": "today" })
@@ -218,13 +222,13 @@ async fn fetch_cost_snapshot() -> Result<Option<CostSnapshot>> {
         })?
 }
 
-fn fetch_cost_snapshot_blocking() -> RefreshResult {
+fn fetch_cost_snapshot_blocking(profile: &ProfileRoot) -> RefreshResult {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| format!("could not start cost refresh runtime: {error}"))?;
     runtime
-        .block_on(fetch_cost_snapshot())
+        .block_on(fetch_cost_snapshot(profile))
         .map_err(|error| error.to_string())
 }
 

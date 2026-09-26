@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use futures_util::StreamExt;
 use serde_json::Value;
@@ -17,10 +18,13 @@ use crate::cli::LspAction;
 static LSP_BRIDGE_CONTROL_SEQUENCE: ProcessLocalRequestSequence =
     ProcessLocalRequestSequence::starting_at(1);
 
-pub(crate) async fn handle_lsp_action(action: LspAction) -> tracedecay_domain::errors::Result<()> {
+pub(crate) async fn handle_lsp_action(
+    profile: &ProfileRoot,
+    action: LspAction,
+) -> tracedecay_domain::errors::Result<()> {
     match action {
         LspAction::Servers { json } => {
-            hotpath::future!(print_lsp_servers(json), label = "cli.lsp.servers").await?;
+            hotpath::future!(print_lsp_servers(profile, json), label = "cli.lsp.servers").await?;
         }
         LspAction::Bridge { stdio, project } => {
             if !stdio {
@@ -29,7 +33,7 @@ pub(crate) async fn handle_lsp_action(action: LspAction) -> tracedecay_domain::e
                 });
             }
             hotpath::future!(
-                run_stdio_bridge(project.map(PathBuf::from)),
+                run_stdio_bridge(profile, project.map(PathBuf::from)),
                 label = "cli.lsp.bridge"
             )
             .await?;
@@ -45,7 +49,10 @@ pub(crate) async fn handle_lsp_action(action: LspAction) -> tracedecay_domain::e
 /// `initialize` frame to bind canonical local workspace roots; it never
 /// opens a project store, starts an analyzer, or connects the host to an
 /// arbitrary daemon socket.
-async fn run_stdio_bridge(project_root: Option<PathBuf>) -> tracedecay_domain::errors::Result<()> {
+async fn run_stdio_bridge(
+    profile: &ProfileRoot,
+    project_root: Option<PathBuf>,
+) -> tracedecay_domain::errors::Result<()> {
     let mut stdin = FramedRead::new(tokio::io::stdin(), ContentLengthCodec::new());
     let initialize = if project_root.is_none() {
         Some(read_initialize_binding(&mut stdin).await?)
@@ -59,7 +66,7 @@ async fn run_stdio_bridge(project_root: Option<PathBuf>) -> tracedecay_domain::e
                 .map(|binding| binding.project_root.clone())
         })
         .ok_or_else(|| bridge_config_error("LSP initialize did not identify a workspace root"))?;
-    let handshake = crate::commands::client_handshake(Some(&project_root))?;
+    let handshake = crate::commands::client_handshake(profile, Some(&project_root))?;
     let invocation = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
     let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
     let mut session = DaemonLspSessionClient::open(
@@ -475,8 +482,11 @@ struct LspServersInventory {
     rows: Vec<Value>,
 }
 
-async fn print_lsp_servers(json: bool) -> tracedecay_domain::errors::Result<()> {
-    let inventory = lsp_servers_inventory().await;
+async fn print_lsp_servers(
+    profile: &ProfileRoot,
+    json: bool,
+) -> tracedecay_domain::errors::Result<()> {
+    let inventory = lsp_servers_inventory(profile).await;
     if json {
         println!(
             "{}",
@@ -530,12 +540,12 @@ async fn print_lsp_servers(json: bool) -> tracedecay_domain::errors::Result<()> 
 
 /// The compiled-in adapter catalogue, with availability and project activity
 /// merged from the daemon's resolved read when one is reachable.
-async fn lsp_servers_inventory() -> LspServersInventory {
+async fn lsp_servers_inventory(profile: &ProfileRoot) -> LspServersInventory {
     use tracedecay_contracts::doctor::LanguageServerReadV1;
 
     let adapters = lsp_adapters::builtin_adapters();
     let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let daemon_read = tracedecay::doctor::daemon_language_server_read(&project_path).await;
+    let daemon_read = tracedecay::doctor::daemon_language_server_read(profile, &project_path).await;
     let (analyzers, daemon_unavailable) = match daemon_read {
         Ok(Some(
             LanguageServerReadV1::Observed { analyzers, .. }

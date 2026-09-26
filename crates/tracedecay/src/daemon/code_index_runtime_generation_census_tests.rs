@@ -14,7 +14,6 @@ use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegis
 use tracedecay_code_index_runtime::project_reads::project_code_index_generation_census_reader;
 use tracedecay_code_index_runtime::resolved_scope_for_project;
 use tracedecay_project::project::TraceDecay;
-use tracedecay_runtime_core::config::PinnedUserDataDir;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use tracedecay_runtime_core::runtime_telemetry::{
     GenerationCensusSnapshot, GenerationCensusUnavailableReason,
@@ -22,7 +21,7 @@ use tracedecay_runtime_core::runtime_telemetry::{
 
 #[tokio::test]
 async fn runtime_mcp_refuses_counts_until_the_mounted_graph_can_serve_queries() {
-    let _profile = PinnedUserDataDir::new();
+    let profile = TempDir::new().expect("isolated profile");
     let dir = TempDir::new().expect("fixture root");
     let project = dir.path().join("runtime-generation-census-observed");
     let source = "fn alpha() {}\nfn beta() { alpha(); }\n";
@@ -33,10 +32,13 @@ async fn runtime_mcp_refuses_counts_until_the_mounted_graph_can_serve_queries() 
     run_git_in(&project, &["commit", "-qm", "sealed generation fixture"]);
     let project_id = tracedecay_domain::ProjectId::new("project.mcp-runtime-generation-census")
         .expect("fixture project identity");
-    let (cg, _runtime) =
-        TraceDecay::init_test_fixture_with_registered_runtime(&project, project_id.as_str())
-            .await
-            .expect("open v32 mounted runtime fixture");
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.path(),
+        &project,
+        project_id.as_str(),
+    )
+    .await
+    .expect("open v32 mounted runtime fixture");
     let schedulers = CodeIndexSchedulerRegistryV1::new(1);
     let mut publications = schedulers.subscribe_generation_publications();
     let sealed_store = dir.path().join("sealed-code-index");

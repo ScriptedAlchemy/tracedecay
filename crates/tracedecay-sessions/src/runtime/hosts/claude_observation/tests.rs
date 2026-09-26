@@ -349,8 +349,8 @@ async fn native_observation_id_survives_identical_transcript_relocation() {
 async fn registered_claude_ingest_api_routes_through_observation_authority() {
     let fixture = Fixture::new("legacy-api-session");
     fixture.write_record("legacy API searchable", "legacy-api-secret");
-    let stats = crate::runtime::with_transcript_source_home(
-        fixture.home.clone(),
+    let stats = crate::runtime::with_transcript_source_profile(
+        tracedecay_runtime_core::config::ProfileRoot::under_home(fixture.home.clone()),
         crate::runtime::hosts::claude::ingest_user_sessions_with_admission(
             &fixture.profile,
             Some("legacy-api-session".to_string()),

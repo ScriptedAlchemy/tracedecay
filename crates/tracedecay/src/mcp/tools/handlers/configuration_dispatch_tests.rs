@@ -10,7 +10,6 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use super::dispatch_test_support::*;
 use super::*;
-use tracedecay_project::config::lock_user_data_dir_test_env;
 use tracedecay_project::project::TraceDecay;
 
 #[derive(Default)]
@@ -103,13 +102,13 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for UnavailableEffectE
 
 #[tokio::test]
 async fn available_configuration_effect_reaches_canonical_executor() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("unavailable-application-effect");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.mcp-unavailable-application-effect",
     )
@@ -172,13 +171,13 @@ async fn available_configuration_effect_reaches_canonical_executor() {
 
 #[tokio::test]
 async fn every_other_configuration_effect_reaches_the_authoritative_daemon_executor() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("configuration-effect-dispatch");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.mcp-configuration-effect-dispatch",
     )
@@ -298,13 +297,13 @@ async fn every_other_configuration_effect_reaches_the_authoritative_daemon_execu
 
 #[tokio::test]
 async fn every_configuration_read_and_preview_reaches_its_canonical_daemon_handler() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("configuration-read-dispatch");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.mcp-configuration-read-dispatch",
     )

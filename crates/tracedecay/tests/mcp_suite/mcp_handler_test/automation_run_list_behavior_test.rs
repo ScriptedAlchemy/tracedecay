@@ -18,7 +18,6 @@ use tracedecay_automation_runtime::automation::run_ledger::{
     append_run_record,
 };
 
-use crate::fixture;
 use crate::mcp_server_test::run_client_connection_with_messages;
 use crate::mcp_server_test::support::{jsonrpc_request, response_with_id};
 use crate::support::{
@@ -478,7 +477,7 @@ async fn automation_run_list_reads_only_the_active_project_ledger() {
     fs::create_dir_all(foreign_root.join("src")).unwrap();
     fs::write(foreign_root.join("src/lib.rs"), "pub fn foreign() {}\n").unwrap();
     let foreign = TestTraceDecay::new(
-        fixture::init_project_from_template(&foreign_root)
+        Box::pin(tracedecay_project::project::TraceDecay::init(&foreign_root))
             .await
             .expect("foreign project"),
     );

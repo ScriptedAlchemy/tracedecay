@@ -18,7 +18,7 @@ use crate::code_index_journey::{
     commit_all, deliver_save, exact_identity, exact_symbol, git, initialize_tracedecay,
     stop_daemon_gracefully, tool, wait_for_terminal_generation,
 };
-use crate::common::{EnvVarGuard, IsolatedEnv, daemon_socket_path, spawn_tracedecay_daemon_with};
+use crate::common::{IsolatedHome, daemon_socket_path, spawn_tracedecay_daemon_logged};
 
 const DIRTY_PROBE_COUNT: usize = 12;
 
@@ -116,19 +116,23 @@ fn symbol_search_names(payload: &Value) -> Vec<&str> {
 
 #[tokio::test]
 async fn dirty_worktree_serves_exact_and_typed_symbol_reads_without_a_source_revision() {
-    let (environment, project) = IsolatedEnv::acquire().await;
+    let (environment, project) = IsolatedHome::new();
     let project = project.canonicalize().expect("canonical fixture project");
     let revision = initialize_repository(&project);
     let socket = daemon_socket_path(environment.home());
     let log_path = environment.scratch().join("dirty-worktree-daemon.log");
-    let _daemon_log = EnvVarGuard::set("TRACEDECAY_TEST_DAEMON_LOG", &log_path);
-    let mut daemon = spawn_tracedecay_daemon_with(environment.home(), |_| {});
+    let mut daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |_| {});
     let project_id = initialize_tracedecay(environment.home(), &project);
     let identity = exact_identity(&project, project_id);
     tracedecay_project::product_runtime::register_fixture_product_runtime();
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
-            .expect("production daemon handshake");
+    let handshake = tracedecay::daemon::handshake_for_current_client(
+        environment.profile(),
+        Some(project.clone()),
+        None,
+        false,
+        false,
+    )
+    .expect("production daemon handshake");
 
     // Clean HEAD: the sealed generation is exact-commit evidence.
     let committed = wait_for_terminal_generation(
@@ -153,7 +157,7 @@ async fn dirty_worktree_serves_exact_and_typed_symbol_reads_without_a_source_rev
         dirty_source(&committed_source, "dirty_tracked_symbol"),
     )
     .expect("edit tracked source file");
-    deliver_save(&project, &["src/lib.rs"]).await;
+    deliver_save(environment.profile(), &project, &["src/lib.rs"]).await;
     let dirty = wait_for_terminal_generation(
         &socket,
         &handshake,
@@ -229,7 +233,7 @@ async fn dirty_worktree_serves_exact_and_typed_symbol_reads_without_a_source_rev
         dirty_source(&committed_source, "dirty_rebound_symbol"),
     )
     .expect("rename dirty symbol");
-    deliver_save(&project, &["src/lib.rs"]).await;
+    deliver_save(environment.profile(), &project, &["src/lib.rs"]).await;
     let rebound = wait_for_terminal_generation(
         &socket,
         &handshake,

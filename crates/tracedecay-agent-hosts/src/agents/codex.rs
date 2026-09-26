@@ -31,6 +31,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::json;
 use tracedecay_domain::canonical_sha256;
@@ -82,16 +83,17 @@ impl AgentIntegration for CodexIntegration {
         ] {
             super::ensure_project_local_safe_path(project_path, &path)?;
         }
-        install_codex_repo_plugin(&ctx.home, project_path, &ctx.tracedecay_bin)
+        install_codex_repo_plugin(ctx.profile.data_dir(), project_path, &ctx.tracedecay_bin)
     }
 
     fn project_host_component_registration_paths(
         &self,
         _components: &[super::host_bundle::HostComponentV1],
-        home: &Path,
+        _home: &Path,
+        profile_root: &Path,
         project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
-        codex_project_registration_paths(home, project_path)
+        codex_project_registration_paths(profile_root, project_path)
     }
 
     fn deactivate_project_host_component_registration(
@@ -102,6 +104,7 @@ impl AgentIntegration for CodexIntegration {
     ) -> Result<()> {
         let local = InstallContext {
             home: ctx.home.clone(),
+            profile: ctx.profile.clone(),
             tracedecay_bin: ctx.tracedecay_bin.clone(),
             project_root: Some(project_path.to_path_buf()),
             dashboard: ctx.dashboard,
@@ -112,9 +115,10 @@ impl AgentIntegration for CodexIntegration {
     fn export_managed_skills(
         &self,
         home: &Path,
-        profile_root: &Path,
+        profile: &ProfileRoot,
     ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
     {
+        let profile_root = profile.data_dir();
         let mut plugin_dirs = codex_plugin_cached_install_dirs(home);
         if codex_plugin_manifest_path(home).exists() {
             plugin_dirs.push(codex_plugin_install_dir(home));
@@ -189,9 +193,9 @@ impl AgentIntegration for CodexIntegration {
                 );
             }
         } else {
-            doctor_check_plugin(dc, &ctx.home);
+            doctor_check_plugin(dc, ctx.profile.data_dir(), &ctx.home);
         }
-        doctor_suggest_native_memories_off(dc, &ctx.home);
+        doctor_suggest_native_memories_off(dc, ctx.profile.data_dir(), &ctx.home);
     }
 
     fn host_component_registration(
@@ -214,7 +218,7 @@ impl AgentIntegration for CodexIntegration {
         // readback for "this plugin is installed and enabled" is its native
         // cache plus `enabled = true` in `config.toml`; TraceDecay reads this
         // state but leaves cache materialisation to the Codex CLI.
-        match codex_plugin_activation_state(&ctx.home, None) {
+        match codex_plugin_activation_state(&ctx.profile, &ctx.home, None) {
             Ok(true) => State::Current,
             Ok(false) => State::Repairable,
             Err(()) => State::Corrupt,
@@ -231,7 +235,11 @@ impl AgentIntegration for CodexIntegration {
 
         match self.host_component_registration(component, ctx) {
             State::Current => {
-                match codex_plugin_activation_state(&ctx.home, Some(&install.tracedecay_bin)) {
+                match codex_plugin_activation_state(
+                    &ctx.profile,
+                    &ctx.home,
+                    Some(&install.tracedecay_bin),
+                ) {
                     Ok(true) => State::Current,
                     Ok(false) => State::Repairable,
                     Err(()) => State::Corrupt,
@@ -245,11 +253,12 @@ impl AgentIntegration for CodexIntegration {
         &self,
         components: &[super::host_bundle::HostComponentV1],
         home: &Path,
+        profile_root: &Path,
     ) -> Result<Vec<PathBuf>> {
         if !components.contains(&super::host_bundle::HostComponentV1::Core) {
             return Ok(Vec::new());
         }
-        codex_foreign_bundle_entrypoints(home)
+        codex_foreign_bundle_entrypoints(profile_root, home)
     }
 
     fn is_detected(&self, home: &Path) -> bool {
@@ -258,7 +267,7 @@ impl AgentIntegration for CodexIntegration {
             || codex_plugin_manifest_path(home).exists()
     }
 
-    fn detected_host_surface(&self, home: &Path) -> Option<PathBuf> {
+    fn detected_host_surface(&self, home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         let config_dir = home.join(".codex");
         if config_dir.is_dir() {
             return Some(config_dir);
@@ -270,7 +279,11 @@ impl AgentIntegration for CodexIntegration {
         manifest.exists().then_some(manifest)
     }
 
-    fn primary_config_path(&self, home: &Path) -> Option<std::path::PathBuf> {
+    fn primary_config_path(
+        &self,
+        home: &Path,
+        _profile: &ProfileRoot,
+    ) -> Option<std::path::PathBuf> {
         let current_cache =
             codex_plugin_current_cached_install_dir(home).join(".codex-plugin/plugin.json");
         Some(if current_cache.is_file() {
@@ -280,7 +293,7 @@ impl AgentIntegration for CodexIntegration {
         })
     }
 
-    fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
+    fn host_registration_paths(&self, home: &Path, _profile: &ProfileRoot) -> Vec<PathBuf> {
         let mut paths = vec![
             codex_config_path(home),
             codex_personal_marketplace_path(home),
@@ -296,8 +309,9 @@ impl AgentIntegration for CodexIntegration {
         &self,
         components: &[super::host_bundle::HostComponentV1],
         home: &Path,
+        profile: &ProfileRoot,
     ) -> Vec<PathBuf> {
-        let mut paths = self.host_registration_paths(home);
+        let mut paths = self.host_registration_paths(home, profile);
         // `~/.codex/agents` is Core registration surface: current exports plus
         // the ownership manifest (and prior-manifest direct children) so a
         // transaction that retires stale exports can still roll them back.
@@ -331,7 +345,7 @@ impl AgentIntegration for CodexIntegration {
         // retired skill left there would keep the loaded plugin from ever
         // matching the rendered bundle.
         remove_codex_retired_bundle_files(&codex_plugin_install_dir(&ctx.home))?;
-        if !codex_plugin_is_natively_active(&ctx.home, Some(&ctx.tracedecay_bin))? {
+        if !codex_plugin_is_natively_active(&ctx.profile, &ctx.home, Some(&ctx.tracedecay_bin))? {
             let codex_cli = plugin_registry::require_codex_plugin_cli()?;
             // `codex plugin add` resolves the catalog-deployed source through
             // this entry; it is a registration path, so rollback restores it.
@@ -360,7 +374,7 @@ impl AgentIntegration for CodexIntegration {
     }
 
     fn deactivate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
-        if codex_plugin_is_natively_active(&ctx.home, Some(&ctx.tracedecay_bin))?
+        if codex_plugin_is_natively_active(&ctx.profile, &ctx.home, Some(&ctx.tracedecay_bin))?
             || codex_plugin_enabled(&ctx.home).map_err(|()| TraceDecayError::Config {
                 message: format!(
                     "could not read Codex native plugin activation state at {}",
@@ -435,7 +449,7 @@ impl AgentIntegration for CodexIntegration {
         Ok(())
     }
 
-    fn has_tracedecay(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
         !codex_plugin_cached_install_dirs(home).is_empty()
             || codex_plugin_manifest_path(home).exists()
     }
@@ -567,13 +581,17 @@ fn codex_update_project_path(ctx: &InstallContext) -> Option<PathBuf> {
 }
 
 #[hotpath::measure(label = "hosts.agent.codex.repo_plugin_install")]
-fn install_codex_repo_plugin(home: &Path, project_path: &Path, tracedecay_bin: &str) -> Result<()> {
+fn install_codex_repo_plugin(
+    profile_root: &Path,
+    project_path: &Path,
+    tracedecay_bin: &str,
+) -> Result<()> {
     let install_dir = codex_repo_plugin_install_dir(project_path);
     install_codex_plugin_bundle(
         &install_dir,
         tracedecay_bin,
         InstallScope::ProjectLocal,
-        home,
+        profile_root,
     )?;
     install_codex_marketplace_entry(
         &codex_repo_marketplace_path(project_path),
@@ -588,7 +606,10 @@ fn install_codex_repo_plugin(home: &Path, project_path: &Path, tracedecay_bin: &
     Ok(())
 }
 
-fn codex_project_registration_paths(home: &Path, project_path: &Path) -> Result<Vec<PathBuf>> {
+fn codex_project_registration_paths(
+    profile_root: &Path,
+    project_path: &Path,
+) -> Result<Vec<PathBuf>> {
     let install_dir = codex_repo_plugin_install_dir(project_path);
     super::ensure_project_local_safe_path(project_path, &install_dir)?;
 
@@ -628,10 +649,8 @@ fn codex_project_registration_paths(home: &Path, project_path: &Path) -> Result<
         }
     }
 
-    let profile_root =
-        tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(home);
     let active_skills = tracedecay_automation_runtime::automation::skill_targets::load_active_managed_skills_for_target(
-        &profile_root,
+        profile_root,
         tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Codex,
     )?;
     let overlay_root = install_dir.join("skills/agent-managed");
@@ -719,11 +738,11 @@ fn install_codex_plugin_bundle(
     install_dir: &Path,
     tracedecay_bin: &str,
     scope: InstallScope,
-    profile_home: &Path,
+    profile_root: &Path,
 ) -> Result<()> {
     let policy = CodexBundlePolicy::for_scope(scope);
     write_codex_plugin_bundle_base(install_dir, tracedecay_bin, policy)?;
-    install_codex_managed_skill_overlay(profile_home, install_dir)?;
+    install_codex_managed_skill_overlay(profile_root, install_dir)?;
     Ok(())
 }
 
@@ -761,16 +780,12 @@ fn write_codex_plugin_bundle_base(
 }
 
 fn install_codex_managed_skill_overlay(
-    profile_home: &Path,
+    profile_root: &Path,
     install_dir: &Path,
 ) -> Result<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary> {
-    let profile_root =
-        tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(
-            profile_home,
-        );
     tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
         &crate::host_io(),
-        &profile_root,
+        profile_root,
         tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Codex,
         install_dir,
     )
@@ -1428,12 +1443,13 @@ fn codex_registration_residue(home: &Path) -> std::result::Result<bool, ()> {
 /// `Err(())` marks a config TraceDecay cannot read, which the caller reports as
 /// a corrupt registration rather than a merely repairable one.
 fn codex_plugin_activation_state(
+    profile: &ProfileRoot,
     home: &Path,
     tracedecay_bin: Option<&str>,
 ) -> std::result::Result<bool, ()> {
     Ok(codex_source_manifest_matches_catalog_version(home)?
         && codex_plugin_enabled(home)?
-        && codex_loaded_cache_matches_rendered_bundle(home, tracedecay_bin)?)
+        && codex_loaded_cache_matches_rendered_bundle(profile, home, tracedecay_bin)?)
 }
 
 fn codex_plugin_enabled(home: &Path) -> std::result::Result<bool, ()> {
@@ -1459,6 +1475,7 @@ fn codex_plugin_enabled(home: &Path) -> std::result::Result<bool, ()> {
 }
 
 fn codex_loaded_cache_matches_rendered_bundle(
+    profile: &ProfileRoot,
     home: &Path,
     tracedecay_bin: Option<&str>,
 ) -> std::result::Result<bool, ()> {
@@ -1498,7 +1515,7 @@ fn codex_loaded_cache_matches_rendered_bundle(
     super::observed_bundle_discovery_matches(
         &source_root,
         &cache_root,
-        &codex_expected_discovery_relatives(home, relatives)?,
+        &codex_expected_discovery_relatives(profile.data_dir(), home, relatives)?,
         CODEX_DISCOVERY_ROOTS,
     )
     .map_err(|_| ())
@@ -1510,14 +1527,13 @@ const CODEX_DISCOVERY_ROOTS: &[&str] = &[".codex-plugin", "agents", "commands", 
 /// The bundle `relatives` plus the active managed-skill overlay: every
 /// entrypoint the personal source may carry.
 fn codex_expected_discovery_relatives(
+    profile_root: &Path,
     home: &Path,
     mut relatives: Vec<String>,
 ) -> std::result::Result<Vec<String>, ()> {
     let source_root = codex_plugin_install_dir(home);
-    let profile_root =
-        tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(home);
     let overlay = tracedecay_automation_runtime::automation::skill_targets::rendered_native_skill_overlay_files(
-        &profile_root,
+        profile_root,
         tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Codex,
         &source_root,
     )
@@ -1533,20 +1549,21 @@ fn codex_expected_discovery_relatives(
 /// Entrypoints in the personal source that neither the current bundle nor a
 /// retired release file accounts for. Codex would copy them into its cache,
 /// so the loaded plugin could never match the rendered bundle.
-fn codex_foreign_bundle_entrypoints(home: &Path) -> Result<Vec<PathBuf>> {
+fn codex_foreign_bundle_entrypoints(profile_root: &Path, home: &Path) -> Result<Vec<PathBuf>> {
     let source_root = codex_plugin_install_dir(home);
     let relatives = codex_embedded_plugin_files()
         .into_iter()
         .map(|(relative, _)| relative.to_string())
         .collect();
-    let expected = codex_expected_discovery_relatives(home, relatives).map_err(|()| {
-        TraceDecayError::Config {
-            message: format!(
-                "could not read the managed Codex skill overlay for {}",
-                source_root.display()
-            ),
-        }
-    })?;
+    let expected =
+        codex_expected_discovery_relatives(profile_root, home, relatives).map_err(|()| {
+            TraceDecayError::Config {
+                message: format!(
+                    "could not read the managed Codex skill overlay for {}",
+                    source_root.display()
+                ),
+            }
+        })?;
     let mut foreign = Vec::new();
     for relative in
         super::unexpected_bundle_entrypoints(&source_root, &expected, CODEX_DISCOVERY_ROOTS)?
@@ -1611,12 +1628,18 @@ fn codex_exact_personal_marketplace_name(home: &Path) -> std::result::Result<Opt
     Ok(source_matches.then(|| name.to_string()))
 }
 
-fn codex_plugin_is_natively_active(home: &Path, tracedecay_bin: Option<&str>) -> Result<bool> {
-    codex_plugin_activation_state(home, tracedecay_bin).map_err(|()| TraceDecayError::Config {
-        message: format!(
-            "could not read Codex native plugin activation state at {}",
-            codex_config_path(home).display()
-        ),
+fn codex_plugin_is_natively_active(
+    profile: &ProfileRoot,
+    home: &Path,
+    tracedecay_bin: Option<&str>,
+) -> Result<bool> {
+    codex_plugin_activation_state(profile, home, tracedecay_bin).map_err(|()| {
+        TraceDecayError::Config {
+            message: format!(
+                "could not read Codex native plugin activation state at {}",
+                codex_config_path(home).display()
+            ),
+        }
     })
 }
 
@@ -2040,8 +2063,8 @@ fn group_has_subcommand(group: &serde_json::Value, subcommand: &str) -> bool {
 // Healthcheck helpers
 // ---------------------------------------------------------------------------
 
-fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
-    match codex_foreign_bundle_entrypoints(home) {
+fn doctor_check_plugin(dc: &mut DoctorCounters, profile_root: &Path, home: &Path) {
+    match codex_foreign_bundle_entrypoints(profile_root, home) {
         Ok(foreign) if foreign.is_empty() => {}
         Ok(foreign) => dc.fail(&format!(
             "{} not shipped by any TraceDecay release, but Codex loads it as part of the \
@@ -2328,8 +2351,8 @@ fn doctor_check_hooks(
 /// user's `config.toml` is never edited, and tracedecay never writes into
 /// `~/.codex/memories/`, the holographic fact store stays the single source
 /// of truth and delivery is rendered prompt context only.
-fn doctor_suggest_native_memories_off(dc: &mut DoctorCounters, home: &Path) {
-    if !crate::hooks::memory_inject::memory_injection_enabled() {
+fn doctor_suggest_native_memories_off(dc: &mut DoctorCounters, profile_root: &Path, home: &Path) {
+    if !crate::hooks::memory_inject::memory_injection_enabled(profile_root) {
         return;
     }
     let config_path = codex_config_path(home);

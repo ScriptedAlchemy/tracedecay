@@ -1,5 +1,6 @@
-#[cfg(unix)]
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use crate::Spinner;
 use crate::cli::BranchAction;
@@ -18,29 +19,35 @@ fn branch_list_rpc_args() -> serde_json::Value {
 
 #[hotpath::measure(label = "cli.branch.dispatch", future = true)]
 pub(crate) async fn handle_branch_action(
+    profile: &ProfileRoot,
     action: BranchAction,
 ) -> tracedecay_domain::errors::Result<()> {
-    handle_branch_action_inner(action).await
+    handle_branch_action_inner(profile, action).await
 }
 
 fn handle_branch_action_inner(
+    profile: &ProfileRoot,
     action: BranchAction,
 ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = tracedecay_domain::errors::Result<()>> + Send + 'static>,
 > {
     // Erase the deeply nested branch-dispatch future before it reaches the
     // measured wrapper so every profiling feature can compute its layout.
+    let profile = profile.clone();
     Box::pin(async move {
+        let profile = &profile;
         use tracedecay_runtime_core::branch;
         use tracedecay_runtime_core::branch_meta;
 
         match action {
             BranchAction::List { path } => {
                 let resolved = super::scope::resolve_project_scope(
+                    profile,
                     tracedecay_configuration::resolve_path(path),
                 )
                 .await?;
                 let status = daemon_tool_json(
+                    profile,
                     Some(&resolved.project_path),
                     "tracedecay_status",
                     branch_list_rpc_args(),
@@ -200,6 +207,7 @@ fn handle_branch_action_inner(
             }
             BranchAction::Add { name, path } => {
                 let resolved = super::scope::resolve_project_scope(
+                    profile,
                     tracedecay_configuration::resolve_path(path),
                 )
                 .await?;
@@ -217,6 +225,7 @@ fn handle_branch_action_inner(
                 let spinner = Spinner::new();
                 spinner.set_message("admitting branch");
                 let response = daemon_tool_json(
+                    profile,
                     Some(&resolved.project_path),
                     "tracedecay_admin_branch_add",
                     serde_json::json!({ "branch": branch_name }),
@@ -241,10 +250,12 @@ fn handle_branch_action_inner(
             }
             BranchAction::Remove { name, path } => {
                 let resolved = super::scope::resolve_project_scope(
+                    profile,
                     tracedecay_configuration::resolve_path(path),
                 )
                 .await?;
                 let response = daemon_tool_json(
+                    profile,
                     Some(&resolved.project_path),
                     "tracedecay_admin_branch",
                     serde_json::json!({ "action": "remove", "branch": name }),
@@ -270,10 +281,12 @@ fn handle_branch_action_inner(
             }
             BranchAction::Removeall { path } => {
                 let resolved = super::scope::resolve_project_scope(
+                    profile,
                     tracedecay_configuration::resolve_path(path),
                 )
                 .await?;
                 let response = daemon_tool_json(
+                    profile,
                     Some(&resolved.project_path),
                     "tracedecay_admin_branch",
                     serde_json::json!({ "action": "remove_all" }),
@@ -306,10 +319,12 @@ fn handle_branch_action_inner(
             }
             BranchAction::Gc { path } => {
                 let resolved = super::scope::resolve_project_scope(
+                    profile,
                     tracedecay_configuration::resolve_path(path),
                 )
                 .await?;
                 let response = daemon_tool_json(
+                    profile,
                     Some(&resolved.project_path),
                     "tracedecay_admin_branch",
                     serde_json::json!({ "action": "gc" }),
@@ -329,7 +344,7 @@ fn handle_branch_action_inner(
                 }
             }
             BranchAction::Autotrack { action } => {
-                handle_branch_autotrack_action(action).await?;
+                handle_branch_autotrack_action(profile, action).await?;
             }
         }
         Ok(())
@@ -368,6 +383,7 @@ fn parse_daemon_branch_add_outcome(
 /// Reads or mutates the project-scoped `sync.auto_track_pr_branches` setting and
 /// reports the daemon's PR-autotrack status for a project.
 async fn handle_branch_autotrack_action(
+    profile: &ProfileRoot,
     action: crate::cli::BranchAutotrackAction,
 ) -> tracedecay_domain::errors::Result<()> {
     use crate::cli::BranchAutotrackAction;
@@ -375,15 +391,19 @@ async fn handle_branch_autotrack_action(
 
     match action {
         BranchAutotrackAction::Status { path } => {
-            let resolved =
-                super::scope::resolve_project_scope(tracedecay_configuration::resolve_path(path))
-                    .await?;
+            let resolved = super::scope::resolve_project_scope(
+                profile,
+                tracedecay_configuration::resolve_path(path),
+            )
+            .await?;
             let enabled = super::settings::current_project_setting(
+                profile,
                 &resolved.project_path,
                 tracedecay_domain::configuration::SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
             )
             .await?;
             let poll_secs = super::settings::current_project_setting(
+                profile,
                 &resolved.project_path,
                 tracedecay_domain::configuration::SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
             )
@@ -412,7 +432,7 @@ async fn handle_branch_autotrack_action(
             );
             #[cfg(unix)]
             {
-                let data_root = resolve_branch_data_root(&resolved.project_path).await?;
+                let data_root = resolve_branch_data_root(profile, &resolved.project_path).await?;
                 let managed = tracedecay_application::pr_tracking::managed_summary(&data_root)?;
                 if managed.is_empty() {
                     eprintln!("Tracked PR branches: none");
@@ -431,17 +451,22 @@ async fn handle_branch_autotrack_action(
             }
         }
         BranchAutotrackAction::Enable { poll_secs, path } => {
-            let resolved =
-                super::scope::resolve_project_scope(tracedecay_configuration::resolve_path(path))
-                    .await?;
+            let resolved = super::scope::resolve_project_scope(
+                profile,
+                tracedecay_configuration::resolve_path(path),
+            )
+            .await?;
             let expected_revision =
-                super::settings::current_configuration_revision(&resolved.project_path).await?;
+                super::settings::current_configuration_revision(profile, &resolved.project_path)
+                    .await?;
             let current_enabled = super::settings::current_project_setting(
+                profile,
                 &resolved.project_path,
                 tracedecay_domain::configuration::SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
             )
             .await?;
             let current_poll_secs = super::settings::current_project_setting(
+                profile,
                 &resolved.project_path,
                 tracedecay_domain::configuration::SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
             )
@@ -481,6 +506,7 @@ async fn handle_branch_autotrack_action(
                 )?);
             }
             let receipt = super::settings::mutate_project_configuration(
+                profile,
                 &resolved.project_path,
                 &resolved.project_id,
                 expected_revision,
@@ -494,12 +520,16 @@ async fn handle_branch_autotrack_action(
             super::settings::report_configuration_receipt(receipt.as_ref());
         }
         BranchAutotrackAction::Disable { path } => {
-            let resolved =
-                super::scope::resolve_project_scope(tracedecay_configuration::resolve_path(path))
-                    .await?;
+            let resolved = super::scope::resolve_project_scope(
+                profile,
+                tracedecay_configuration::resolve_path(path),
+            )
+            .await?;
             let expected_revision =
-                super::settings::current_configuration_revision(&resolved.project_path).await?;
+                super::settings::current_configuration_revision(profile, &resolved.project_path)
+                    .await?;
             let current = super::settings::current_project_setting(
+                profile,
                 &resolved.project_path,
                 tracedecay_domain::configuration::SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
             )
@@ -522,6 +552,7 @@ async fn handle_branch_autotrack_action(
                 .into_iter()
                 .collect();
             let receipt = super::settings::mutate_project_configuration(
+                profile,
                 &resolved.project_path,
                 &resolved.project_id,
                 expected_revision,
@@ -539,12 +570,16 @@ async fn handle_branch_autotrack_action(
 
 #[cfg(unix)]
 async fn resolve_branch_data_root(
+    profile: &ProfileRoot,
     project_path: &Path,
 ) -> tracedecay_domain::errors::Result<PathBuf> {
     Ok(
-        tracedecay_project::project::TraceDecay::resolve_store_layout_for_identity(project_path)
-            .await?
-            .data_root,
+        tracedecay_project::project::TraceDecay::resolve_store_layout_for_identity_with_options(
+            project_path,
+            &tracedecay_project::project::TraceDecayOpenOptions::for_profile(profile),
+        )
+        .await?
+        .data_root,
     )
 }
 

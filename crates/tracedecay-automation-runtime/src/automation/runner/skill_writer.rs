@@ -203,6 +203,7 @@ async fn run_skill_writer_with_backend_and_retrieval_publication(
     run_skill_writer_for_store_with_publication(
         SkillWriterStoreRuntime {
             host_io: cg.host_io,
+            host_home: cg.host_home.clone(),
             dashboard_root: cg.dashboard_root.clone(),
             sessions_db,
             analytics_project_root: Some(&cg.project_root),
@@ -221,6 +222,7 @@ async fn run_skill_writer_with_backend_and_retrieval_publication(
 
 pub(super) struct SkillWriterStoreRuntime<'a> {
     pub(super) host_io: HostIo,
+    pub(super) host_home: Option<PathBuf>,
     pub(super) dashboard_root: PathBuf,
     pub(super) sessions_db: RegisteredGlobalDbLeaseV1,
     pub(super) analytics_project_root: Option<&'a Path>,
@@ -276,6 +278,7 @@ fn run_skill_writer_for_store_with_publication_inner<'a>(
         } = publication;
         let SkillWriterStoreRuntime {
             host_io,
+            host_home,
             dashboard_root,
             sessions_db,
             analytics_project_root,
@@ -478,6 +481,7 @@ fn run_skill_writer_for_store_with_publication_inner<'a>(
         }
         let (report, record, committed_receipt) = match finalize_skill_writer_success(
             &host_io,
+            host_home.as_deref(),
             &finalizer,
             &profile_root,
             analytics_project_root,
@@ -569,6 +573,7 @@ fn skill_validation_repairs_summary(validation_repairs: &[Value]) -> Result<Valu
 
 pub(super) async fn finalize_skill_writer_success(
     host_io: &HostIo,
+    host_home: Option<&std::path::Path>,
     finalizer: &AgentRunFinalizer<'_>,
     profile_root: &std::path::Path,
     project_root: Option<&std::path::Path>,
@@ -596,6 +601,7 @@ pub(super) async fn finalize_skill_writer_success(
     let proposal_outcome = validate_and_apply_skill_proposals(
         host_io,
         profile_root,
+        host_home,
         project_root,
         run_id,
         proposals,

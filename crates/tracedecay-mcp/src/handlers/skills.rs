@@ -101,25 +101,32 @@ fn json_by_skill<T: Serialize>(
         .collect()
 }
 
+fn require_skill_profile_root(profile_root: Option<&Path>) -> Result<&Path> {
+    profile_root.ok_or_else(|| TraceDecayError::Config {
+        message: "managed skills require the daemon's profile root".to_string(),
+    })
+}
+
 #[hotpath::measure(label = "mcp.automation.skill_list.total")]
 pub async fn handle_skill_list(
     cg: &TraceDecay,
     args: Value,
     analytics_db: Option<&RegisteredGlobalDb>,
+    profile_root: Option<&Path>,
 ) -> Result<ToolResult> {
-    let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
-    sync_project_skill_analytics(cg, &profile_root, analytics_db).await?;
+    let profile_root = require_skill_profile_root(profile_root)?;
+    sync_project_skill_analytics(cg, profile_root, analytics_db).await?;
     let state = parse_state(&args)?;
     let include_body = optional_bool(&args, "include_body", false);
     let mut skills = hotpath::future!(
-        list_managed_skills(&profile_root),
+        list_managed_skills(profile_root),
         label = "mcp.automation.skill_list.load"
     )
     .await?;
     if let Some(state) = state {
         skills.retain(|skill| skill.metadata.state == state);
     }
-    let usage_summaries = summarize_skill_usage(&profile_root, &skills).await?;
+    let usage_summaries = summarize_skill_usage(profile_root, &skills).await?;
     let recommendations = stale_skill_recommendations(
         &usage_summaries,
         tracedecay_runtime_core::tracedecay::current_timestamp(),
@@ -172,15 +179,16 @@ pub async fn handle_skill_view(
     cg: &TraceDecay,
     args: Value,
     analytics_db: Option<&RegisteredGlobalDb>,
+    profile_root: Option<&Path>,
 ) -> Result<ToolResult> {
-    let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
-    sync_project_skill_analytics(cg, &profile_root, analytics_db).await?;
+    let profile_root = require_skill_profile_root(profile_root)?;
+    sync_project_skill_analytics(cg, profile_root, analytics_db).await?;
     // Path summaries stay in the response either way. Byte payloads are a
     // separate read the caller opts into, so a view does not inline unused
     // support files into the context window.
     let include_support_files = optional_bool(&args, "include_support_files", false);
     let mut skill = hotpath::future!(
-        load_managed_skill(&profile_root, required_str(&args, "id")?),
+        load_managed_skill(profile_root, required_str(&args, "id")?),
         label = "mcp.automation.skill_view.load"
     )
     .await?;
@@ -191,7 +199,7 @@ pub async fn handle_skill_view(
         .map(|target| target.prompt_label().to_string())
         .collect::<Vec<_>>();
     record_skill_usage(
-        &profile_root,
+        profile_root,
         &skill,
         SkillUsageAction::View,
         "mcp",
@@ -215,7 +223,7 @@ pub async fn handle_skill_view(
         })),
     )
     .await?;
-    let usage_summary = summarize_skill_usage_for(&profile_root, &skill).await?;
+    let usage_summary = summarize_skill_usage_for(profile_root, &skill).await?;
     let stale_recommendation = stale_skill_recommendations(
         std::slice::from_ref(&usage_summary),
         tracedecay_runtime_core::tracedecay::current_timestamp(),
@@ -307,11 +315,18 @@ async fn sync_project_skill_analytics(
 }
 
 #[hotpath::measure(label = "mcp.automation.hermes_bridge.total")]
-pub fn handle_hermes_skill_bridge(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
-    let snapshot = load_standard_hermes_skill_bridge(HermesSkillBridgeOptions {
-        include_skill_bodies: optional_bool(args, "include_skill_bodies", false),
-        include_pending_payloads: optional_bool(args, "include_pending_payloads", false),
-    })?;
+pub fn handle_hermes_skill_bridge(
+    cg: &TraceDecay,
+    args: &Value,
+    user_home: Option<&Path>,
+) -> Result<ToolResult> {
+    let snapshot = load_standard_hermes_skill_bridge(
+        user_home,
+        HermesSkillBridgeOptions {
+            include_skill_bodies: optional_bool(args, "include_skill_bodies", false),
+            include_pending_payloads: optional_bool(args, "include_pending_payloads", false),
+        },
+    )?;
     let payload = json!({
         "status": "ok",
         "bridge": snapshot,

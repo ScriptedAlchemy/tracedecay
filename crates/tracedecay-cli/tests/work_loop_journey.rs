@@ -44,7 +44,6 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -54,13 +53,7 @@ use tracedecay_domain::{
     CommitId, ManifestDigest, ProposalId, RefId, TaskId, WorkEffectStateV1, WorkGraphVersionV1,
     WorkRelationReplanProposalV1, WorkflowOperationRef,
 };
-use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
-
-/// Pins the global database away from the operator's profile. The production
-/// constant is crate-private, so the name is repeated here for the same reason
-/// the shared test harness repeats it.
-const GLOBAL_DB_ENV: &str = "TRACEDECAY_GLOBAL_DB";
 
 /// The one Work task this journey drives from creation to acceptance.
 const TASK_ID: &str = "task.work-loop-journey";
@@ -88,18 +81,9 @@ const CANCELLATION_INSTRUCTIONS: &str = "Execute the admitted Work-loop cancella
 /// runtime mount, code index generation, background attempt settlement).
 const POLL_BUDGET: Duration = Duration::from_secs(180);
 
-/// Serializes the process-wide environment this binary pins. One test lives
-/// here today; the lock keeps that from being a latent assumption.
-fn lock_env() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
 #[path = "../../../tests/support/isolated_profile.rs"]
 mod isolated_profile;
-use isolated_profile::{EnvVarGuard, apply_isolated_profile_env, run_ok};
+use isolated_profile::{apply_isolated_profile_env, run_ok};
 
 /// A live daemon over a registered project under a throwaway profile, plus the
 /// credentials it published for its own HTTP application endpoint.
@@ -114,13 +98,10 @@ struct ProductionDaemon {
     agent: ureq::Agent,
     retired_project: Option<PathBuf>,
     _home: TempDir,
-    _guards: Vec<EnvVarGuard>,
-    _env_lock: MutexGuard<'static, ()>,
 }
 
 impl ProductionDaemon {
     fn start() -> Self {
-        let env_lock = lock_env();
         let home = tempfile::tempdir().expect("isolated home");
         let root = home.path().to_path_buf();
         let profile = root.join(".tracedecay");
@@ -140,15 +121,6 @@ impl ProductionDaemon {
             format!("pub fn {ANCHOR_SYMBOL}(seed: u32) -> u32 {{\n    seed.wrapping_add(1)\n}}\n"),
         )
         .expect("fixture source");
-
-        let guards = vec![
-            EnvVarGuard::set("HOME", &root),
-            EnvVarGuard::set("USERPROFILE", &root),
-            EnvVarGuard::set("XDG_CONFIG_HOME", root.join(".config")),
-            EnvVarGuard::set(USER_DATA_DIR_ENV, &profile),
-            EnvVarGuard::set(GLOBAL_DB_ENV, profile.join("global.db")),
-            EnvVarGuard::set("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1"),
-        ];
 
         run_ok(
             Command::new("git")
@@ -235,8 +207,6 @@ impl ProductionDaemon {
                 .into(),
             retired_project: None,
             _home: home,
-            _guards: guards,
-            _env_lock: env_lock,
         }
     }
 

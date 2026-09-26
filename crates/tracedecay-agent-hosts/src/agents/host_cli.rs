@@ -617,44 +617,26 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn child_receives_only_the_admitted_profile_and_working_directory() {
-        struct AmbientKiroHomeGuard {
-            previous: Option<std::ffi::OsString>,
-            _lock: std::sync::MutexGuard<'static, ()>,
-        }
-
-        impl AmbientKiroHomeGuard {
-            fn set(value: &Path) -> Self {
-                let lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
-                let previous = std::env::var_os("KIRO_HOME");
-                // SAFETY: the shared profile-discovery lock is held for the
-                // guard's lifetime, so no sibling profile test observes this
-                // temporary ambient value.
-                unsafe {
-                    std::env::set_var("KIRO_HOME", value);
-                }
-                Self {
-                    previous,
-                    _lock: lock,
-                }
-            }
-        }
-
-        impl Drop for AmbientKiroHomeGuard {
-            fn drop(&mut self) {
-                // SAFETY: see `AmbientKiroHomeGuard::set`.
-                unsafe {
-                    match self.previous.take() {
-                        Some(previous) => std::env::set_var("KIRO_HOME", previous),
-                        None => std::env::remove_var("KIRO_HOME"),
-                    }
-                }
-            }
+        const AMBIENT_CHILD: &str = "TRACEDECAY_TEST_AMBIENT_KIRO_HOME_CHILD";
+        if std::env::var_os(AMBIENT_CHILD).is_none() {
+            // The ambient `KIRO_HOME` is process environment; a child
+            // isolates it from concurrently running tests.
+            let ambient = tempfile::tempdir().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "agents::host_cli::tests::child_receives_only_the_admitted_profile_and_working_directory",
+                ])
+                .env(AMBIENT_CHILD, "1")
+                .env("KIRO_HOME", ambient.path())
+                .status()
+                .unwrap();
+            assert!(status.success(), "the ambient KIRO_HOME child failed");
+            return;
         }
 
         let home = tempfile::tempdir().unwrap();
         let bin = home.path().join("faux");
-        let ambient = tempfile::tempdir().unwrap();
-        let _ambient = AmbientKiroHomeGuard::set(ambient.path());
         write_fake_cli(
             &bin,
             r#"

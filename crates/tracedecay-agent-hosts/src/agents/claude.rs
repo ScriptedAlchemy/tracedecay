@@ -14,6 +14,7 @@
 //!    commands against that source, inside the same rollback boundary.
 
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::json;
 
@@ -58,7 +59,7 @@ impl AgentIntegration for ClaudeIntegration {
         ensure_claude_dir(&project_path.join(".claude"))?;
         install_claude_md_rules(&claude_md_path)?;
         super::install_managed_skill_prompt_index(
-            &ctx.home,
+            ctx.profile.data_dir(),
             &claude_md_path,
             tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Claude,
         )
@@ -68,6 +69,7 @@ impl AgentIntegration for ClaudeIntegration {
         &self,
         _components: &[super::host_bundle::HostComponentV1],
         _home: &Path,
+        _profile_root: &Path,
         project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
         Ok(vec![project_path.join(".claude/CLAUDE.md")])
@@ -117,7 +119,7 @@ impl AgentIntegration for ClaudeIntegration {
         doctor_check_permissions_json(dc, &ctx.home);
         super::doctor_check_managed_skill_prompt_indexes(
             dc,
-            &ctx.home,
+            ctx.profile.data_dir(),
             &[
                 ctx.home.join(".claude").join("CLAUDE.md"),
                 ctx.project_path.join(".claude/CLAUDE.md"),
@@ -182,11 +184,12 @@ impl AgentIntegration for ClaudeIntegration {
     fn export_managed_skills(
         &self,
         home: &Path,
-        profile_root: &Path,
+        profile: &ProfileRoot,
     ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
     {
+        let profile_root = profile.data_dir();
         let claude_md_path = home.join(".claude").join("CLAUDE.md");
-        if !self.has_tracedecay(home) || !claude_md_path.exists() {
+        if !self.has_tracedecay(home, profile) || !claude_md_path.exists() {
             return Ok(Vec::new());
         }
         Ok(vec![
@@ -234,16 +237,20 @@ impl AgentIntegration for ClaudeIntegration {
         home.join(".claude").is_dir()
     }
 
-    fn detected_host_surface(&self, home: &Path) -> Option<PathBuf> {
+    fn detected_host_surface(&self, home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         let surface = home.join(".claude");
         surface.is_dir().then_some(surface)
     }
 
-    fn primary_config_path(&self, home: &Path) -> Option<std::path::PathBuf> {
+    fn primary_config_path(
+        &self,
+        home: &Path,
+        _profile: &ProfileRoot,
+    ) -> Option<std::path::PathBuf> {
         Some(plugin_marketplace_manifest_path(home))
     }
 
-    fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
+    fn host_registration_paths(&self, home: &Path, _profile: &ProfileRoot) -> Vec<PathBuf> {
         let mut paths = vec![
             plugin_marketplace_manifest_path(home),
             known_marketplaces_path(home),
@@ -253,7 +260,7 @@ impl AgentIntegration for ClaudeIntegration {
         paths
     }
 
-    fn has_tracedecay(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
         plugin_marketplace_manifest_path(home).exists()
     }
 }
@@ -1161,11 +1168,7 @@ fn doctor_check_local_config(dc: &mut DoctorCounters, project_path: &Path) {
 ///
 /// Claude's host-owned registration stays native; TraceDecay only manages its
 /// one plugin-namespace permission entry in the shared settings document.
-pub fn check_install_stale() {
-    let Some(home) = super::home_dir() else {
-        return;
-    };
-
+pub fn check_install_stale(home: &Path) {
     let user_settings_path = home.join(".claude").join("settings.json");
     if let Ok(contents) = std::fs::read_to_string(&user_settings_path)
         && let Ok(settings) = serde_json::from_str::<serde_json::Value>(&contents)

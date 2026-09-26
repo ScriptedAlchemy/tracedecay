@@ -144,12 +144,10 @@ fn combined_output_fixture() -> Value {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let _global_db = isolate_global_db(&cg);
     let config = scheduler_config(Some(3600), None);
     let backend = CombinedJsonBackend::new(combined_no_skill_needed_output());
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
@@ -251,12 +249,10 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn retained_combined_review_defers_both_ledgers_and_holds_both_task_locks() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let _global_db = isolate_global_db(&cg);
     let config = scheduler_config(Some(3600), None);
     let backend = CombinedJsonBackend::new(combined_no_skill_needed_output());
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
@@ -312,12 +308,10 @@ async fn retained_combined_review_defers_both_ledgers_and_holds_both_task_locks(
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn retained_combined_review_defers_recorded_failures_until_settlement() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let _global_db = isolate_global_db(&cg);
     let config = scheduler_config(Some(3600), None);
     let backend = CombinedJsonBackend::new(json!({"facts": []}));
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
@@ -352,11 +346,9 @@ async fn retained_combined_review_defers_recorded_failures_until_settlement() {
 
 #[tokio::test]
 async fn combined_review_commits_atomic_terminal_effects() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
-    let _global_db = isolate_global_db(&cg);
     seed_project_session_activity(&cg).await;
     let config = scheduler_config(Some(3600), None);
     let backend = CombinedJsonBackend::new(combined_output_fixture());
@@ -418,7 +410,6 @@ async fn combined_review_commits_atomic_terminal_effects() {
 
 #[tokio::test]
 async fn combined_review_not_dispatched_when_only_one_task_is_due() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
@@ -463,7 +454,6 @@ async fn combined_review_not_dispatched_when_only_one_task_is_due() {
 
 #[tokio::test]
 async fn combined_review_task_configuration_skips_before_retrieval_or_backend() {
-    let _env_lock = ENV_LOCK.lock().await;
     for (disabled_task, expected_reason) in [
         (AgentTaskKind::SessionReflector, "session_reflector_not_due"),
         (AgentTaskKind::SkillWriter, "skill_writer_not_due"),
@@ -512,7 +502,6 @@ async fn combined_review_task_configuration_skips_before_retrieval_or_backend() 
 
 #[tokio::test]
 async fn combined_review_active_task_locks_skip_before_retrieval_or_backend() {
-    let _env_lock = ENV_LOCK.lock().await;
     for (locked_task, expected_reason) in [
         (AgentTaskKind::SessionReflector, "session_reflector_not_due"),
         (AgentTaskKind::SkillWriter, "skill_writer_not_due"),
@@ -566,7 +555,6 @@ async fn combined_review_active_task_locks_skip_before_retrieval_or_backend() {
 
 #[tokio::test]
 async fn combined_review_respects_escape_hatch_flag() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
@@ -682,7 +670,6 @@ async fn combined_review_terminal_evidence_matrix_has_zero_effects() {
 
 #[tokio::test]
 async fn combined_review_preserves_reflector_budget_stage_for_fallback() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
@@ -726,7 +713,6 @@ async fn combined_review_preserves_reflector_budget_stage_for_fallback() {
 
 #[tokio::test]
 async fn combined_review_preserves_skill_budget_stage_for_fallback() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
@@ -771,12 +757,10 @@ async fn combined_review_preserves_skill_budget_stage_for_fallback() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn combined_review_records_failures_for_both_tasks_when_an_array_is_missing() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let _global_db = isolate_global_db(&cg);
     let config = scheduler_config(Some(3600), None);
     let backend = CombinedJsonBackend::new(json!({ "facts": [] }));
 
@@ -832,12 +816,10 @@ async fn combined_review_records_failures_for_both_tasks_when_an_array_is_missin
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn combined_skill_validation_exhaustion_preserves_atomic_no_write() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let _global_db = isolate_global_db(&cg);
     let backend = CombinedJsonBackend::new(json!({
         "outcome": "skills_proposed",
         "decision": null,
@@ -888,12 +870,10 @@ async fn combined_skill_validation_exhaustion_preserves_atomic_no_write() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn combined_review_records_noop_fallbacks_for_both_tasks_when_backend_fails() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let _global_db = isolate_global_db(&cg);
     let config = AutomationConfig {
         timeout_secs: 1,
         ..scheduler_config(Some(3600), None)
@@ -951,12 +931,10 @@ async fn combined_review_records_noop_fallbacks_for_both_tasks_when_backend_fail
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn combined_review_interruption_reaches_validation_before_any_automatic_write() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let _global_db = isolate_global_db(&cg);
     let backend = CombinedJsonBackend::new(combined_output_fixture());
     let interrupted = Arc::new(AtomicBool::new(true));
     let run_control = test_automation_run_control(Arc::clone(&interrupted));

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_runtime_core::config::{discover_project_root, is_generated_dir_segment};
+use tracedecay_runtime_core::config::{ProfileRoot, is_generated_dir_segment};
 
 /// Returns `true` if any component of `path` is a generated/vendored
 /// directory segment, or `path` itself carries a minified-asset suffix
@@ -238,12 +238,13 @@ fn absolutize_path(path: PathBuf) -> PathBuf {
 /// An explicit path is anchored to this process's working directory before it
 /// leaves the CLI: the daemon that receives it runs from its own directory
 /// (`/` under launchd), where a bare `.` would name the filesystem root.
-pub fn resolve_path_with_discovery(path: Option<String>) -> PathBuf {
+pub fn resolve_path_with_discovery(profile: &ProfileRoot, path: Option<String>) -> PathBuf {
     if let Some(p) = path {
         absolutize_path(PathBuf::from(p))
     } else {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        discover_project_root(&cwd)
+        profile
+            .discover_project_root(&cwd)
             .or_else(|| tracedecay_runtime_core::worktree::git_worktree_root(&cwd))
             .unwrap_or(cwd)
     }

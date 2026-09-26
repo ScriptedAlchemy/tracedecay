@@ -6,6 +6,7 @@
 //! transports cannot obtain a write capability for it.
 
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -77,16 +78,19 @@ pub trait UserSettingsDaemonClient: Send + Sync {
 pub struct ProductionUserSettingsDaemonClient {
     configuration: Option<Arc<ProductionConfigurationDaemonClient>>,
     profile_id: Option<UserProfileId>,
+    profile_root: Option<PathBuf>,
 }
 
 impl ProductionUserSettingsDaemonClient {
     pub fn new(
         configuration: Arc<ProductionConfigurationDaemonClient>,
         profile_id: UserProfileId,
+        profile_root: PathBuf,
     ) -> Self {
         Self {
             configuration: Some(configuration),
             profile_id: Some(profile_id),
+            profile_root: Some(profile_root),
         }
     }
 }
@@ -95,6 +99,7 @@ impl UserSettingsDaemonClient for ProductionUserSettingsDaemonClient {
     fn read(&self) -> UserSettingsFuture<'_, UserSettingsSnapshotV1> {
         let configuration = self.configuration.clone();
         let profile_id = self.profile_id.clone();
+        let profile_root = self.profile_root.clone();
         Box::pin(async move {
             let configuration =
                 configuration.ok_or_else(|| unavailable("configuration runtime"))?;
@@ -103,7 +108,8 @@ impl UserSettingsDaemonClient for ProductionUserSettingsDaemonClient {
                 .current()
                 .await
                 .map_err(|error| unavailable(format!("resolved configuration: {error}")))?;
-            let metadata = tokio::task::spawn_blocking(read_user_metadata)
+            let profile_root = profile_root.ok_or_else(|| unavailable("user profile root"))?;
+            let metadata = tokio::task::spawn_blocking(move || read_user_metadata(&profile_root))
                 .await
                 .map_err(|error| unavailable(format!("user settings metadata task: {error}")))??;
             user_settings_snapshot(&current, &profile_id, metadata)
@@ -117,8 +123,8 @@ struct UserMetadata {
     automation: AutomationConfig,
 }
 
-fn read_user_metadata() -> Result<UserMetadata, UserSettingsAuthorityError> {
-    let config = UserConfig::load_strict()
+fn read_user_metadata(profile_root: &Path) -> Result<UserMetadata, UserSettingsAuthorityError> {
+    let config = UserConfig::load_strict(profile_root)
         .map_err(|error| unavailable(format!("user configuration metadata: {error}")))?;
     Ok(UserMetadata {
         installed_agents: config.installed_agents,

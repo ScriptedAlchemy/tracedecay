@@ -9,9 +9,9 @@ use tracedecay_store::ObservationProjectionStore;
 use tracedecay_store::ObservationReplayRequest;
 
 use crate::codex::write_jsonl;
-use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::{
-    ProjectSessionTestRuntime, mark_test_project, open_project_session_db,
+    ProjectSessionTestRuntime, ingest_global_sources_for_provider, mark_test_project,
+    open_project_session_db,
 };
 use crate::support::{init_git_repo, setup};
 
@@ -257,25 +257,18 @@ async fn codex_thread_goal_events_ingested_as_goal_rows_with_dedupe() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn codex_workflow_lifecycle_goal_plan_task_persist_on_production_observation_path() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
 
     write_codex_rollout_with_workflow_lifecycle(&home, &project, "codex-wf-lifecycle");
 
     let runtime = open_project_session_db(&project).await.unwrap();
-    let _ = runtime
-        .runtime()
-        .ingest_project_provider_for_test(&project, Some(SessionProvider::Codex))
-        .await
-        .unwrap();
+    let _ =
+        ingest_global_sources_for_provider(&home, &runtime, &project, Some(SessionProvider::Codex))
+            .await;
 
     let blobs = codex_observation_json_blobs(&runtime).await;
     assert!(
@@ -375,11 +368,9 @@ async fn codex_workflow_lifecycle_goal_plan_task_persist_on_production_observati
         .project_observation_table_count_for_test("observation_workflow_facts")
         .await
         .unwrap();
-    let _ = runtime
-        .runtime()
-        .ingest_project_provider_for_test(&project, Some(SessionProvider::Codex))
-        .await
-        .unwrap();
+    let _ =
+        ingest_global_sources_for_provider(&home, &runtime, &project, Some(SessionProvider::Codex))
+            .await;
     assert_eq!(codex_observation_count(&runtime).await, observations_before);
     assert_eq!(
         runtime
@@ -392,14 +383,9 @@ async fn codex_workflow_lifecycle_goal_plan_task_persist_on_production_observati
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn codex_goal_token_ticks_retain_raw_observations_and_dedupe_projected_goal_state() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
 
@@ -408,11 +394,9 @@ async fn codex_goal_token_ticks_retain_raw_observations_and_dedupe_projected_goa
     write_codex_rollout_with_goal_events(&home, &project, "codex-goal-dedupe");
 
     let runtime = open_project_session_db(&project).await.unwrap();
-    let _ = runtime
-        .runtime()
-        .ingest_project_provider_for_test(&project, Some(SessionProvider::Codex))
-        .await
-        .unwrap();
+    let _ =
+        ingest_global_sources_for_provider(&home, &runtime, &project, Some(SessionProvider::Codex))
+            .await;
 
     let blobs = codex_observation_json_blobs(&runtime).await;
     let goal_observations = blobs
@@ -504,14 +488,9 @@ async fn codex_goal_token_ticks_retain_raw_observations_and_dedupe_projected_goa
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn codex_workflow_lifecycle_secret_content_is_sanitized_before_persistence() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
 
@@ -552,11 +531,9 @@ async fn codex_workflow_lifecycle_secret_content_is_sanitized_before_persistence
     );
 
     let runtime = open_project_session_db(&project).await.unwrap();
-    let _ = runtime
-        .runtime()
-        .ingest_project_provider_for_test(&project, Some(SessionProvider::Codex))
-        .await
-        .unwrap();
+    let _ =
+        ingest_global_sources_for_provider(&home, &runtime, &project, Some(SessionProvider::Codex))
+            .await;
 
     let blobs = codex_observation_json_blobs(&runtime).await;
     let joined = blobs.join("\n");

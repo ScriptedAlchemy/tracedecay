@@ -358,7 +358,7 @@ use projectless::projectless_tools_call_response;
 use projectless::{projectless_first_request, projectless_tool_call, serve_projectless_client};
 mod project_composition;
 mod project_delivery_mount;
-pub(crate) use project_composition::daemon_transcript_source_home;
+pub(crate) use project_composition::daemon_transcript_source_profile;
 use project_composition::{ProductionProjectCompositionRuntime, production_project_server};
 mod project_open_admission;
 #[cfg(test)]

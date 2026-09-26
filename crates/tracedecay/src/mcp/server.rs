@@ -35,6 +35,7 @@ use tracedecay_query::code_search::{
     CodeIndexBranchDiffExecutor, CodeIndexRedundancyExecutor, CodeIndexSearchAuthorityV1,
     CodeIndexSearchExecutor, CodeIndexSimilarExecutor,
 };
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_session_runtime::lcm_authority::{
     MountedLcmAuthorityPort, mount_registered_lcm_authority,
 };
@@ -324,7 +325,7 @@ pub struct McpServer {
     /// `Arc` so spawned savings-recording tasks can hold a cheap clone of
     /// the handle instead of opening a new connection per call.
     global_db: Option<RegisteredGlobalDbLeaseV1>,
-    profile_root: Option<PathBuf>,
+    profile: Option<ProfileRoot>,
     profile_identity: Option<Arc<dyn tracedecay_contracts::ProfileIdentityReadPort>>,
     accounting_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
     /// Registered project session store. Startup recovery, ingestion,
@@ -613,13 +614,10 @@ impl McpServer {
         scope_prefix: Option<String>,
         global_db: Option<RegisteredGlobalDbLeaseV1>,
         registry_db: Option<RegisteredGlobalDbLeaseV1>,
-        use_default_profile_root: bool,
+        profile: Option<ProfileRoot>,
     ) -> Arc<Self> {
-        let profile_root = use_default_profile_root
-            .then(tracedecay_runtime_core::storage::default_profile_root)
-            .and_then(std::result::Result::ok);
         let context =
-            Self::direct_context_with_dbs(cg, scope_prefix, profile_root, global_db, registry_db);
+            Self::direct_context_with_dbs(cg, scope_prefix, profile, global_db, registry_db);
         Self::new_with_context(context).await
     }
 
@@ -790,13 +788,13 @@ impl McpServer {
     fn direct_context_with_dbs(
         cg: TraceDecay,
         scope_prefix: Option<String>,
-        profile_root: Option<PathBuf>,
+        profile: Option<ProfileRoot>,
         global_db: Option<RegisteredGlobalDbLeaseV1>,
         registry_db: Option<RegisteredGlobalDbLeaseV1>,
     ) -> McpServerConstructionContext {
         let mut context = McpServerConstructionContext::direct(cg, scope_prefix)
             .with_direct_databases(global_db, registry_db, None, None);
-        context.profile_root = profile_root;
+        context.profile = profile;
         context
     }
 
@@ -812,7 +810,7 @@ impl McpServer {
         let McpServerConstructionContext {
             cg,
             scope_prefix,
-            profile_root,
+            profile,
             profile_identity,
             global_db,
             accounting_db,
@@ -932,6 +930,7 @@ impl McpServer {
             Some(diagnostics_lsp) => diagnostics_lsp,
             None => {
                 tracedecay_application::dashboard_diagnostics::open_diagnostic_broker(
+                    profile.as_ref(),
                     cg.project_root().to_path_buf(),
                     &cg.store_layout().dashboard_root,
                 )
@@ -1034,7 +1033,7 @@ impl McpServer {
             last_flush_at: AtomicI64::new(0),
             global_db,
             accounting_db,
-            profile_root,
+            profile,
             profile_identity,
             project_session_db,
             registry_db,
@@ -1211,6 +1210,11 @@ impl McpServer {
     #[hotpath::skip]
     pub async fn cg(&self) -> Arc<TraceDecay> {
         self.cg_snapshot().await
+    }
+
+    /// The daemon owner profile this server serves, when daemon-owned.
+    pub(crate) fn owner_profile(&self) -> Option<&ProfileRoot> {
+        self.profile.as_ref()
     }
 
     pub(crate) fn profile_identity(

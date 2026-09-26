@@ -8,6 +8,7 @@
 //! config entries are migrated by Devin itself.
 
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::json;
 
@@ -106,7 +107,7 @@ impl AgentIntegration for DevinIntegration {
         devin_config_dir(home).is_dir()
     }
 
-    fn primary_config_path(&self, home: &Path) -> Option<PathBuf> {
+    fn primary_config_path(&self, home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         Some(devin_mcp_config_path(home))
     }
 
@@ -114,6 +115,7 @@ impl AgentIntegration for DevinIntegration {
         &self,
         components: &[super::host_bundle::HostComponentV1],
         home: &Path,
+        _profile: &ProfileRoot,
     ) -> Vec<PathBuf> {
         if components == [super::host_bundle::HostComponentV1::ContextMcp] {
             vec![devin_mcp_config_path(home)]
@@ -126,6 +128,7 @@ impl AgentIntegration for DevinIntegration {
         &self,
         components: &[super::host_bundle::HostComponentV1],
         _home: &Path,
+        _profile_root: &Path,
         project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
         if components == [super::host_bundle::HostComponentV1::ContextMcp] {
@@ -178,7 +181,7 @@ impl AgentIntegration for DevinIntegration {
         true
     }
 
-    fn has_tracedecay(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
         super::mcp_config_has_tracedecay(&devin_mcp_config_path(home), "mcpServers", load_json_file)
     }
 }
@@ -370,10 +373,12 @@ mod tests {
         )
         .unwrap();
         let health = HealthcheckContext {
+            profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             home: home.path().to_path_buf(),
             project_path: project.path().to_path_buf(),
         };
         let install = InstallContext {
+            profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             home: home.path().to_path_buf(),
             tracedecay_bin: "/tmp/tracedecay".to_string(),
             project_root: None,
@@ -406,6 +411,7 @@ mod tests {
         DevinIntegration.healthcheck(
             &mut counters,
             &HealthcheckContext {
+                profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
                 home: home.path().to_path_buf(),
                 project_path: project.path().to_path_buf(),
             },
@@ -430,6 +436,7 @@ mod tests {
         .unwrap();
         symlink(external.path(), project.path().join(".devin")).unwrap();
         let install = InstallContext {
+            profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             home: home.path().to_path_buf(),
             tracedecay_bin: "/tmp/tracedecay".to_string(),
             project_root: Some(project.path().to_path_buf()),
@@ -460,6 +467,7 @@ mod tests {
         std::fs::write(&config, original).unwrap();
         let components = [super::super::host_bundle::HostComponentV1::ContextMcp];
         let install = InstallContext {
+            profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             home: home.path().to_path_buf(),
             tracedecay_bin: "/tmp/tracedecay-a".to_string(),
             project_root: Some(project.path().to_path_buf()),

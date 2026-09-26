@@ -118,11 +118,11 @@ fn drift(
 /// receipt per exact drift interval through the bounded producer.
 #[tokio::test]
 async fn review_owner_observability_lane_records_capability_and_drift_receipts() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let profile_dir = tempfile::tempdir().expect("profile");
     let project = tempfile::tempdir().expect("project");
     let scope = resolved_scope("owner-lane");
     let runtime = RegisteredGlobalDbTestRuntime::project(
-        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+        profile_dir.path().to_path_buf(),
         project.path(),
         scope.project_id.clone(),
     )
@@ -204,11 +204,11 @@ async fn review_owner_observability_lane_records_capability_and_drift_receipts()
 
 #[tokio::test]
 async fn coordinator_drift_is_durable_closed_monotone_and_scope_denial_writes_nothing() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let profile_dir = tempfile::tempdir().expect("profile");
     let project = tempfile::tempdir().expect("project");
     let scope = resolved_scope("durable");
     let runtime = RegisteredGlobalDbTestRuntime::project(
-        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+        profile_dir.path().to_path_buf(),
         project.path(),
         scope.project_id.clone(),
     )
@@ -357,7 +357,7 @@ async fn coordinator_drift_is_durable_closed_monotone_and_scope_denial_writes_no
     drop(database);
     drop(runtime);
     let restarted_runtime = RegisteredGlobalDbTestRuntime::project(
-        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+        profile_dir.path().to_path_buf(),
         project.path(),
         scope.project_id.clone(),
     )

@@ -47,12 +47,6 @@ fn common_tool_paths(tool: &str) -> Vec<PathBuf> {
         candidates.push(parent.join(tool));
     }
 
-    if let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) {
-        let home = PathBuf::from(home);
-        candidates.push(home.join(".local/bin").join(tool));
-        candidates.push(home.join(".cargo/bin").join(tool));
-    }
-
     candidates.push(PathBuf::from("/usr/local/bin").join(tool));
     candidates.push(PathBuf::from("/opt/homebrew/bin").join(tool));
     candidates.push(PathBuf::from("/usr/bin").join(tool));

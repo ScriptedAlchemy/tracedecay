@@ -1,4 +1,3 @@
-use crate::common::{EnvVarGuard, lock_global_db_env};
 use std::path::Path;
 use tracedecay_agent_hosts::hooks::{
     HookWorkspaceStatus, additional_context_json, build_cursor_session_context,
@@ -9,10 +8,8 @@ use tracedecay_agent_hosts::hooks::{
     evaluate_hook_decision, evaluate_kiro_pre_tool_use, kiro_post_tool_use_rel_paths,
     record_codex_subagent_start,
 };
-use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
-use tracedecay_runtime_core::storage::{
-    pin_fixture_repository_identity, resolve_layout_for_current_profile,
-};
+use tracedecay_runtime_core::config::ProfileRoot;
+use tracedecay_runtime_core::storage::{pin_fixture_repository_identity, resolve_layout};
 
 fn is_blocked(json: &str) -> bool {
     let v: serde_json::Value = serde_json::from_str(json).unwrap();
@@ -40,12 +37,20 @@ fn enroll_profile_project(project_root: &Path, project_id: &str) {
     pin_fixture_repository_identity(project_root, project_id).unwrap();
 }
 
-/// The composition root's hook runtime handle, built explicitly for each
-/// fixture. Hook and host behavior lives in `tracedecay-agent-hosts`, which
-/// reaches registered project identity and the canonical store layout only
-/// through this handle; no slot exists for a test binary to leave empty.
-fn hook_runtime() -> tracedecay_agent_hosts::ports::hook_runtime::HookRuntimeV1 {
-    tracedecay::hook_runtime()
+/// The composition root's hook runtime handle for `profile`, built explicitly
+/// for each fixture. Hook and host behavior lives in `tracedecay-agent-hosts`,
+/// which reaches registered project identity and the canonical store layout
+/// only through this handle; no slot exists for a test binary to leave empty.
+fn hook_runtime(
+    profile: &ProfileRoot,
+) -> tracedecay_agent_hosts::ports::hook_runtime::HookRuntimeV1 {
+    tracedecay::hook_runtime(profile.clone())
+}
+
+/// A profile for marker-enrolled fixtures whose home sits beside, never at,
+/// the fixture checkout.
+fn fixture_profile(dir: &Path) -> ProfileRoot {
+    ProfileRoot::under_home(dir.join("home"))
 }
 
 #[test]
@@ -183,7 +188,7 @@ fn test_cursor_project_root_uses_workspace_roots() {
     );
 
     assert_eq!(
-        cursor_project_root_from_event(&input),
+        cursor_project_root_from_event(&fixture_profile(dir.path()), &input),
         Some(dir.path().to_path_buf())
     );
 }
@@ -204,7 +209,7 @@ fn test_cursor_project_root_uses_file_path_parent() {
     );
 
     assert_eq!(
-        cursor_project_root_from_event(&input),
+        cursor_project_root_from_event(&fixture_profile(dir.path()), &input),
         Some(dir.path().to_path_buf())
     );
 }
@@ -234,7 +239,10 @@ fn test_cursor_project_root_prefers_cwd_in_multi_root_workspace() {
         serde_json::to_string(root_b.join("agent-transcripts/s1.jsonl").to_str().unwrap()).unwrap()
     );
 
-    assert_eq!(cursor_project_root_from_event(&input), Some(root_b));
+    assert_eq!(
+        cursor_project_root_from_event(&fixture_profile(dir.path()), &input),
+        Some(root_b)
+    );
 }
 
 #[test]
@@ -365,19 +373,15 @@ fn test_build_codex_session_context_for_generic_workspace_uses_session_guidance(
 }
 
 #[tokio::test]
-// Intentional: this test pins process-wide TraceDecay profile env while awaited
-// hook context generation resolves profile storage and records analytics.
-#[allow(clippy::await_holding_lock)]
 async fn test_codex_user_prompt_submit_records_workspace_status_and_missing_session_hint() {
-    let _lock = lock_global_db_env();
     let project = tempfile::tempdir().unwrap();
     let generic = tempfile::tempdir().unwrap();
-    let profile = tempfile::tempdir().unwrap();
+    let profile_dir = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
-    let profile_root = profile.path().canonicalize().unwrap();
-    let _profile_env = EnvVarGuard::set(USER_DATA_DIR_ENV, profile_root.to_str().unwrap());
+    let profile_root = profile_dir.path().canonicalize().unwrap();
+    let profile = ProfileRoot::new(&profile_root);
     enroll_profile_project(&project_root, "codex_prompt_analytics");
-    let layout = resolve_layout_for_current_profile(&project_root).unwrap();
+    let layout = resolve_layout(&project_root, profile.data_dir()).unwrap();
     std::fs::create_dir_all(&layout.data_root).unwrap();
 
     let generic_event = serde_json::json!({
@@ -387,7 +391,7 @@ async fn test_codex_user_prompt_submit_records_workspace_status_and_missing_sess
     })
     .to_string();
     let generic_context =
-        codex_user_prompt_submit_context_for_event(&hook_runtime(), &generic_event).await;
+        codex_user_prompt_submit_context_for_event(&hook_runtime(&profile), &generic_event).await;
     // Turn-local steering: a generic workspace still records its workspace
     // status but emits no prompt context.
     assert!(
@@ -401,7 +405,7 @@ async fn test_codex_user_prompt_submit_records_workspace_status_and_missing_sess
     })
     .to_string();
     let prompt_context =
-        codex_user_prompt_submit_context_for_event(&hook_runtime(), &prompt_event).await;
+        codex_user_prompt_submit_context_for_event(&hook_runtime(&profile), &prompt_event).await;
     assert!(prompt_context.contains("tracedecay hint:"));
 
     let profile_events = read_hook_analytics_events(&profile_root);
@@ -424,13 +428,15 @@ async fn test_codex_user_prompt_submit_records_workspace_status_and_missing_sess
 
 #[test]
 fn test_codex_workspace_status_distinguishes_generic_and_project_like_dirs() {
+    let profile_dir = tempfile::tempdir().unwrap();
+    let profile = ProfileRoot::new(profile_dir.path());
     // Markers under the process temp root are refused so ephemeral agent
     // worktrees are not enrolled as projects. Keep the generic case in TMPDIR
     // (must stay Generic) and place project-like fixtures outside it.
     let generic = tempfile::tempdir().unwrap();
     let generic_event = serde_json::json!({ "cwd": generic.path() }).to_string();
     assert_eq!(
-        codex_workspace_status_from_event(&generic_event),
+        codex_workspace_status_from_event(&profile, &generic_event),
         HookWorkspaceStatus::Generic
     );
 
@@ -447,7 +453,7 @@ fn test_codex_workspace_status_distinguishes_generic_and_project_like_dirs() {
     std::fs::write(project_like.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
     let project_event = serde_json::json!({ "cwd": project_like }).to_string();
     assert_eq!(
-        codex_workspace_status_from_event(&project_event),
+        codex_workspace_status_from_event(&profile, &project_event),
         HookWorkspaceStatus::UnindexedProject
     );
 
@@ -458,26 +464,25 @@ fn test_codex_workspace_status_distinguishes_generic_and_project_like_dirs() {
     std::fs::create_dir(&nested).unwrap();
     let git_event = serde_json::json!({ "cwd": nested }).to_string();
     assert_eq!(
-        codex_workspace_status_from_event(&git_event),
+        codex_workspace_status_from_event(&profile, &git_event),
         HookWorkspaceStatus::UnindexedProject
     );
 }
 
 #[test]
 fn test_codex_workspace_status_detects_initialized_trace_decay_project() {
-    let _lock = lock_global_db_env();
     let project = tempfile::tempdir().unwrap();
-    let profile = tempfile::tempdir().unwrap();
+    let profile_dir = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
-    let profile_root = profile.path().canonicalize().unwrap();
-    let _profile_env = EnvVarGuard::set(USER_DATA_DIR_ENV, profile_root.to_str().unwrap());
+    let profile_root = profile_dir.path().canonicalize().unwrap();
+    let profile = ProfileRoot::new(&profile_root);
     enroll_profile_project(&project_root, "codex_workspace_status_initialized");
 
     let nested = project_root.join("nested");
     std::fs::create_dir(&nested).unwrap();
     let event = serde_json::json!({ "cwd": nested }).to_string();
     assert_eq!(
-        codex_workspace_status_from_event(&event),
+        codex_workspace_status_from_event(&profile, &event),
         HookWorkspaceStatus::Initialized
     );
 }
@@ -553,6 +558,8 @@ fn test_codex_additional_context_json_uses_codex_schema() {
 
 #[test]
 fn test_codex_subagent_start_redirects_explore_research_agent() {
+    let profile_dir = tempfile::tempdir().unwrap();
+    let profile = ProfileRoot::new(profile_dir.path());
     // Codex SubagentStart cannot hard-stop a subagent (`continue: false` is
     // ignored), so the handler steers it via hookSpecificOutput.additionalContext.
     let input = r#"{
@@ -561,7 +568,8 @@ fn test_codex_subagent_start_redirects_explore_research_agent() {
         "cwd": "/tmp/x"
     }"#;
 
-    let output = evaluate_codex_subagent_start(input).expect("should redirect research subagent");
+    let output =
+        evaluate_codex_subagent_start(&profile, input).expect("should redirect research subagent");
     let v: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     assert_eq!(
@@ -583,24 +591,27 @@ fn test_codex_subagent_start_redirects_explore_research_agent() {
 
 #[test]
 fn test_codex_subagent_start_allows_execution_agent() {
+    let profile_dir = tempfile::tempdir().unwrap();
+    let profile = ProfileRoot::new(profile_dir.path());
     let input = r#"{
         "hook_event_name": "SubagentStart",
         "agent_type": "generalPurpose",
         "prompt": "Run the test suite and summarize failures"
     }"#;
-    assert!(evaluate_codex_subagent_start(input).is_none());
+    assert!(evaluate_codex_subagent_start(&profile, input).is_none());
 }
 
 #[test]
 fn test_codex_subagent_start_allows_invalid_json() {
-    assert!(evaluate_codex_subagent_start("not json").is_none());
+    let profile_dir = tempfile::tempdir().unwrap();
+    let profile = ProfileRoot::new(profile_dir.path());
+    assert!(evaluate_codex_subagent_start(&profile, "not json").is_none());
 }
 
 #[test]
 fn test_codex_subagent_start_injects_context_for_new_no_history_agent() {
-    let _lock = lock_global_db_env();
-    let profile = tempfile::tempdir().unwrap();
-    let _profile_env = EnvVarGuard::set(USER_DATA_DIR_ENV, profile.path().to_str().unwrap());
+    let profile_dir = tempfile::tempdir().unwrap();
+    let profile = ProfileRoot::new(profile_dir.path());
     let input = r#"{
         "hook_event_name": "SubagentStart",
         "agent_type": "generalPurpose",
@@ -610,7 +621,8 @@ fn test_codex_subagent_start_injects_context_for_new_no_history_agent() {
         "prompt": "Implement the fix in the relevant files"
     }"#;
 
-    let output = evaluate_codex_subagent_start(input).expect("new subagent should get context");
+    let output =
+        evaluate_codex_subagent_start(&profile, input).expect("new subagent should get context");
     let v: serde_json::Value = serde_json::from_str(&output).unwrap();
     let context = v["hookSpecificOutput"]["additionalContext"]
         .as_str()
@@ -633,14 +645,13 @@ fn test_codex_subagent_start_injects_context_for_new_no_history_agent() {
 
 #[test]
 fn test_codex_subagent_start_dedupes_context_per_session() {
-    let _lock = lock_global_db_env();
     let project = tempfile::tempdir().unwrap();
-    let profile = tempfile::tempdir().unwrap();
+    let profile_dir = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
-    let profile_root = profile.path().canonicalize().unwrap();
-    let _profile_env = EnvVarGuard::set(USER_DATA_DIR_ENV, profile_root.to_str().unwrap());
+    let profile_root = profile_dir.path().canonicalize().unwrap();
+    let profile = ProfileRoot::new(&profile_root);
     enroll_profile_project(&project_root, "codex_subagent_dedupe");
-    let layout = resolve_layout_for_current_profile(&project_root).unwrap();
+    let layout = resolve_layout(&project_root, profile.data_dir()).unwrap();
     std::fs::create_dir_all(&layout.data_root).unwrap();
     let input = serde_json::json!({
         "hook_event_name": "SubagentStart",
@@ -652,23 +663,22 @@ fn test_codex_subagent_start_dedupes_context_per_session() {
     })
     .to_string();
 
-    assert!(evaluate_codex_subagent_start(&input).is_some());
+    assert!(evaluate_codex_subagent_start(&profile, &input).is_some());
     assert!(
-        evaluate_codex_subagent_start(&input).is_none(),
+        evaluate_codex_subagent_start(&profile, &input).is_none(),
         "repeated SubagentStart context should be suppressed per session"
     );
 }
 
 #[test]
 fn test_codex_subagent_start_no_history_does_not_suppress_later_research_context() {
-    let _lock = lock_global_db_env();
     let project = tempfile::tempdir().unwrap();
-    let profile = tempfile::tempdir().unwrap();
+    let profile_dir = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
-    let profile_root = profile.path().canonicalize().unwrap();
-    let _profile_env = EnvVarGuard::set(USER_DATA_DIR_ENV, profile_root.to_str().unwrap());
+    let profile_root = profile_dir.path().canonicalize().unwrap();
+    let profile = ProfileRoot::new(&profile_root);
     enroll_profile_project(&project_root, "codex_subagent_research_after_no_history");
-    let layout = resolve_layout_for_current_profile(&project_root).unwrap();
+    let layout = resolve_layout(&project_root, profile.data_dir()).unwrap();
     std::fs::create_dir_all(&layout.data_root).unwrap();
     let no_history_input = serde_json::json!({
         "hook_event_name": "SubagentStart",
@@ -689,9 +699,9 @@ fn test_codex_subagent_start_no_history_does_not_suppress_later_research_context
     })
     .to_string();
 
-    assert!(evaluate_codex_subagent_start(&no_history_input).is_some());
+    assert!(evaluate_codex_subagent_start(&profile, &no_history_input).is_some());
 
-    let output = evaluate_codex_subagent_start(&research_input)
+    let output = evaluate_codex_subagent_start(&profile, &research_input)
         .expect("later research/explore subagent should still get context");
     let v: serde_json::Value = serde_json::from_str(&output).unwrap();
     let context = v["hookSpecificOutput"]["additionalContext"]
@@ -704,12 +714,11 @@ fn test_codex_subagent_start_no_history_does_not_suppress_later_research_context
 
 #[test]
 fn test_codex_subagent_start_counts_and_formats_log_line() {
-    let _lock = lock_global_db_env();
     let project = tempfile::tempdir().unwrap();
-    let profile = tempfile::tempdir().unwrap();
+    let profile_dir = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
-    let profile_root = profile.path().canonicalize().unwrap();
-    let _profile_env = EnvVarGuard::set(USER_DATA_DIR_ENV, profile_root.to_str().unwrap());
+    let profile_root = profile_dir.path().canonicalize().unwrap();
+    let profile = ProfileRoot::new(&profile_root);
     enroll_profile_project(&project_root, "codex_subagent_count");
     let input = serde_json::json!({
         "hook_event_name": "SubagentStart",
@@ -724,11 +733,11 @@ fn test_codex_subagent_start_counts_and_formats_log_line() {
         .build()
         .unwrap_or_else(|err| panic!("failed to build tokio runtime: {err}"));
     assert_eq!(
-        runtime.block_on(record_codex_subagent_start(&hook_runtime(), &input)),
+        runtime.block_on(record_codex_subagent_start(&hook_runtime(&profile), &input)),
         Some(1)
     );
     assert_eq!(
-        runtime.block_on(record_codex_subagent_start(&hook_runtime(), &input)),
+        runtime.block_on(record_codex_subagent_start(&hook_runtime(&profile), &input)),
         Some(2)
     );
 
@@ -737,7 +746,7 @@ fn test_codex_subagent_start_counts_and_formats_log_line() {
     assert!(line.contains("agent_type=generalPurpose"));
     assert!(line.contains("additional_context=true"));
 
-    let layout = resolve_layout_for_current_profile(&project_root).unwrap();
+    let layout = resolve_layout(&project_root, profile.data_dir()).unwrap();
     let events = read_hook_analytics_events(&layout.data_root);
     assert!(events.iter().any(|item| {
         item["event"].as_str() == Some("codex_subagent_start")
@@ -814,7 +823,7 @@ fn test_codex_project_root_uses_cwd() {
     );
 
     assert_eq!(
-        codex_project_root_from_event(&input),
+        codex_project_root_from_event(&fixture_profile(dir.path()), &input),
         Some(dir.path().to_path_buf())
     );
 }

@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use tracedecay_policy::CurationApplyDecisionV1;
 
 use super::artifacts::sha256_bytes;
-use super::host_io::{HostIo, ManagedSkillExportReport, home_dir};
+use super::host_io::{HostIo, ManagedSkillExportReport};
 use super::managed_skills::{
     ManagedSkill, ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource,
     ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget, apply_managed_skill_update,
@@ -116,6 +116,7 @@ pub(crate) async fn validate_skill_proposals(
 pub(crate) async fn validate_and_apply_skill_proposals(
     host_io: &HostIo,
     profile_root: &Path,
+    host_home: Option<&Path>,
     project_root: Option<&Path>,
     run_id: &str,
     proposals: &[Value],
@@ -254,7 +255,8 @@ pub(crate) async fn validate_and_apply_skill_proposals(
         }
     }
     let mutated = !created.is_empty() || !updated.is_empty() || !consolidations.is_empty();
-    let deployment = mutated.then(|| deploy_managed_skills(host_io, profile_root, project_root));
+    let deployment =
+        mutated.then(|| deploy_managed_skills(host_io, host_home, profile_root, project_root));
     Ok(SkillProposalOutcome {
         created,
         updated,
@@ -326,10 +328,11 @@ fn ensure_skill_not_referenced_by_scheduled_job(
 
 pub fn deploy_managed_skills_to_project(
     host_io: &HostIo,
+    host_home: Option<&Path>,
     profile_root: &Path,
     project_root: &Path,
 ) -> ManagedSkillDeploymentReceipt {
-    deploy_managed_skills(host_io, profile_root, Some(project_root))
+    deploy_managed_skills(host_io, host_home, profile_root, Some(project_root))
 }
 
 /// Deploys managed skills for an explicitly resolved `home`.
@@ -353,10 +356,11 @@ pub fn deploy_managed_skills_at(
 #[hotpath::measure(label = "hosts.automation.managed_skill.deploy")]
 fn deploy_managed_skills(
     host_io: &HostIo,
+    host_home: Option<&Path>,
     profile_root: &Path,
     project_root: Option<&Path>,
 ) -> ManagedSkillDeploymentReceipt {
-    let Some(home) = home_dir() else {
+    let Some(home) = host_home else {
         return ManagedSkillDeploymentReceipt {
             status: ManagedSkillDeploymentStatus::Unavailable,
             exports: Vec::new(),
@@ -366,7 +370,7 @@ fn deploy_managed_skills(
             retry_required: true,
         };
     };
-    deploy_managed_skills_with_home(host_io, &home, profile_root, project_root)
+    deploy_managed_skills_with_home(host_io, home, profile_root, project_root)
 }
 
 fn deploy_managed_skills_with_home(

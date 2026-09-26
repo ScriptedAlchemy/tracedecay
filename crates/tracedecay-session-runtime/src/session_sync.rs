@@ -90,7 +90,8 @@ pub struct DaemonSessionSyncConfig {
     pub project_id: ProjectId,
     pub profile_root: std::path::PathBuf,
     pub project_root: std::path::PathBuf,
-    pub transcript_source_home: Option<std::path::PathBuf>,
+    /// The owner whose agent-host transcripts this sync ingests.
+    pub transcript_source_profile: tracedecay_runtime_core::config::ProfileRoot,
     pub project_sessions: RegisteredGlobalDbLeaseV1,
     pub user_sessions: RegisteredGlobalDbLeaseV1,
     pub registry: RegisteredGlobalDbLeaseV1,

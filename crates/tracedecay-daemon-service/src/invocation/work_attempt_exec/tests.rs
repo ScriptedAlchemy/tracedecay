@@ -947,19 +947,29 @@ async fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream(
 #[cfg(unix)]
 #[tokio::test]
 async fn initial_provider_child_uses_values_captured_for_that_spawn() {
+    const AMBIENT_CHILD: &str = "TRACEDECAY_TEST_WORK_PROVIDER_ENVIRONMENT_CHILD";
+    let sentinel = "TRACEDECAY_WORK_ADMITTED_SENTINEL".to_owned();
+    let ambient_secret = "TRACEDECAY_WORK_AMBIENT_SECRET".to_owned();
+    if std::env::var_os(AMBIENT_CHILD).is_none() {
+        // The ambient provider environment is process state, and this test
+        // mutates it mid-run; a child isolates that from concurrent tests.
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "invocation::work_attempt_exec::tests::initial_provider_child_uses_values_captured_for_that_spawn",
+            ])
+            .env(AMBIENT_CHILD, "1")
+            .env(&sentinel, "admitted-sentinel")
+            .env_remove(&ambient_secret)
+            .status()
+            .unwrap();
+        assert!(status.success(), "the provider environment child failed");
+        return;
+    }
     let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
     let directory = tempfile::TempDir::new().unwrap();
     let root = directory.path();
     let environment_marker = root.join("environment");
-    let sentinel = format!("TRACEDECAY_WORK_ADMITTED_SENTINEL_{}", std::process::id());
-    let ambient_secret = format!("TRACEDECAY_WORK_AMBIENT_SECRET_{}", std::process::id());
-    let prior_sentinel = std::env::var_os(&sentinel);
-    let prior_secret = std::env::var_os(&ambient_secret);
-    // SAFETY: these unique test keys are restored before the test returns.
-    unsafe {
-        std::env::set_var(&sentinel, "admitted-sentinel");
-        std::env::remove_var(&ambient_secret);
-    }
     let executable = fake_executable(
         root,
         "environment-provider",
@@ -982,7 +992,8 @@ async fn initial_provider_child_uses_values_captured_for_that_spawn() {
     // unadmitted secret must never cross the boundary. Recovery resolves the
     // same snapshot allowlist again at its later spawn; it does not persist
     // these plaintext values in the attempt row.
-    // SAFETY: these unique test keys are restored below.
+    // SAFETY: this child process runs only this test, so no other thread
+    // reads the environment concurrently.
     unsafe {
         std::env::set_var(&sentinel, "ambient-replacement");
         std::env::set_var(&ambient_secret, "ambient-secret");
@@ -1007,17 +1018,6 @@ async fn initial_provider_child_uses_values_captured_for_that_spawn() {
     )
     .await;
     let observed = std::fs::read_to_string(&environment_marker).unwrap();
-    // SAFETY: return the process environment to the state this test found.
-    unsafe {
-        match prior_sentinel {
-            Some(value) => std::env::set_var(&sentinel, value),
-            None => std::env::remove_var(&sentinel),
-        }
-        match prior_secret {
-            Some(value) => std::env::set_var(&ambient_secret, value),
-            None => std::env::remove_var(&ambient_secret),
-        }
-    }
     assert_eq!(observed, "admitted-sentinel|missing");
     assert_eq!(fixture.state(), WorkAttemptStateV1::Succeeded);
 }
@@ -1298,11 +1298,11 @@ async fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record(
 #[tokio::test]
 async fn a_wall_exhausted_provider_seals_timed_out_and_emits_the_no_progress_terminal() {
     let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let profile = tempfile::TempDir::new().unwrap();
     let directory = tempfile::TempDir::new().unwrap();
     let root = directory.path();
     let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+        profile.path(),
         root,
         id::<ProjectId>(PROJECT),
     )

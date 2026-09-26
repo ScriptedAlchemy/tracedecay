@@ -5,7 +5,6 @@ use tracedecay_sessions::runtime::hosts::kiro::KiroSource;
 use tracedecay_sessions::runtime::source::{StoredCursor, TranscriptIngestError, TranscriptSource};
 use tracedecay_store::ObservationProjectionStore;
 
-use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::{
     assert_secret_absent_from_observation_sinks, durable_table_count,
     ingest_global_sources_for_provider, mark_test_project, observation_source_cursor,
@@ -285,14 +284,9 @@ async fn kiro_workspace_sessions_json_is_ingested() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn kiro_secret_is_sanitized_before_observation_and_projection() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
     let path = write_workspace_session_json(&home, &project, "kiro-secret");
@@ -313,7 +307,7 @@ async fn kiro_secret_is_sanitized_before_observation_and_projection() {
     let db = open_project_session_db(&project).await.unwrap();
 
     assert_eq!(
-        ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Kiro))
+        ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Kiro))
             .await
             .messages_upserted,
         1
@@ -507,14 +501,9 @@ async fn kiro_user_scope_includes_only_unregistered_sessions() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn kiro_delimiter_ambiguous_native_ids_survive_restart_and_rebuild() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
     let left_path = write_workspace_session_json(&home, &project, "delimiter-left");
@@ -547,7 +536,8 @@ async fn kiro_delimiter_ambiguous_native_ids_survive_restart_and_rebuild() {
     .unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Kiro)).await;
+    let _ =
+        ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Kiro)).await;
     let hits = db
         .search_session_messages("kiro", None, "delimiter collision fixture", 10)
         .await;
@@ -564,7 +554,7 @@ async fn kiro_delimiter_ambiguous_native_ids_survive_restart_and_rebuild() {
 
     let reopened = open_project_session_db(&project).await.unwrap();
     assert_eq!(
-        ingest_global_sources_for_provider(&reopened, &project, Some(SessionProvider::Kiro))
+        ingest_global_sources_for_provider(&home, &reopened, &project, Some(SessionProvider::Kiro))
             .await
             .messages_upserted,
         0
@@ -592,20 +582,16 @@ async fn kiro_delimiter_ambiguous_native_ids_survive_restart_and_rebuild() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn kiro_projection_failure_commits_frontier_and_replays_once() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
     let path = write_workspace_session_json(&home, &project, "sess-crash");
 
     let db = open_project_session_db(&project).await.unwrap();
-    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Kiro)).await;
+    let _ =
+        ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Kiro)).await;
     assert_eq!(db.session_message_count().await.unwrap(), 2);
     let prefix_cursor = observation_source_cursor(&db, "kiro", "sess-crash", &project)
         .await
@@ -633,7 +619,8 @@ async fn kiro_projection_failure_commits_frontier_and_replays_once() {
     drop(failure_runtime);
     let rejected = open_project_session_db(&project).await.unwrap();
     let _ =
-        ingest_global_sources_for_provider(&rejected, &project, Some(SessionProvider::Kiro)).await;
+        ingest_global_sources_for_provider(&home, &rejected, &project, Some(SessionProvider::Kiro))
+            .await;
     let committed_cursor = observation_source_cursor(&rejected, "kiro", "sess-crash", &project)
         .await
         .expect("committed Kiro observation cursor");
@@ -652,8 +639,13 @@ async fn kiro_projection_failure_commits_frontier_and_replays_once() {
     set_projection_failure(&recovery_runtime, false).await;
     drop(recovery_runtime);
     let recovered = open_project_session_db(&project).await.unwrap();
-    let _ =
-        ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Kiro)).await;
+    let _ = ingest_global_sources_for_provider(
+        &home,
+        &recovered,
+        &project,
+        Some(SessionProvider::Kiro),
+    )
+    .await;
     assert_eq!(recovered.session_message_count().await.unwrap(), 3);
     assert_eq!(
         recovered
@@ -667,22 +659,22 @@ async fn kiro_projection_failure_commits_frontier_and_replays_once() {
         Some(committed_cursor)
     );
     assert_eq!(
-        ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Kiro))
-            .await
-            .messages_upserted,
+        ingest_global_sources_for_provider(
+            &home,
+            &recovered,
+            &project,
+            Some(SessionProvider::Kiro)
+        )
+        .await
+        .messages_upserted,
         0
     );
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn kiro_conflicting_native_message_id_does_not_overwrite() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
 
@@ -719,7 +711,8 @@ async fn kiro_conflicting_native_message_id_does_not_overwrite() {
     .unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Kiro)).await;
+    let _ =
+        ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Kiro)).await;
     assert_eq!(db.session_message_count().await.unwrap(), 2);
     let prefix_cursor = observation_source_cursor(&db, "kiro", "sess-conflict", &project)
         .await
@@ -736,7 +729,8 @@ async fn kiro_conflicting_native_message_id_does_not_overwrite() {
     .unwrap();
     let rejected = open_project_session_db(&project).await.unwrap();
     let _ =
-        ingest_global_sources_for_provider(&rejected, &project, Some(SessionProvider::Kiro)).await;
+        ingest_global_sources_for_provider(&home, &rejected, &project, Some(SessionProvider::Kiro))
+            .await;
     assert_eq!(rejected.session_message_count().await.unwrap(), 2);
     assert_eq!(
         rejected
@@ -761,7 +755,7 @@ async fn kiro_conflicting_native_message_id_does_not_overwrite() {
     assert_ne!(after_conflict.generation(), prefix_cursor.generation());
     assert_eq!(after_conflict.position(), prefix_cursor.position());
     assert_eq!(
-        ingest_global_sources_for_provider(&rejected, &project, Some(SessionProvider::Kiro))
+        ingest_global_sources_for_provider(&home, &rejected, &project, Some(SessionProvider::Kiro))
             .await
             .messages_upserted,
         0
@@ -769,14 +763,9 @@ async fn kiro_conflicting_native_message_id_does_not_overwrite() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn kiro_observation_commit_before_ack_survives_reopen() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
     let _path = write_workspace_session_json(&home, &project, "sess-commit-before-ack");
@@ -787,7 +776,8 @@ async fn kiro_observation_commit_before_ack_survives_reopen() {
 
     let rejected = open_project_session_db(&project).await.unwrap();
     let _ =
-        ingest_global_sources_for_provider(&rejected, &project, Some(SessionProvider::Kiro)).await;
+        ingest_global_sources_for_provider(&home, &rejected, &project, Some(SessionProvider::Kiro))
+            .await;
     assert_eq!(rejected.session_message_count().await.unwrap(), 0);
     assert!(
         rejected
@@ -823,9 +813,14 @@ async fn kiro_observation_commit_before_ack_survives_reopen() {
     drop(durable_runtime);
     let recovered = open_project_session_db(&project).await.unwrap();
     assert_eq!(
-        ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Kiro))
-            .await
-            .messages_upserted,
+        ingest_global_sources_for_provider(
+            &home,
+            &recovered,
+            &project,
+            Some(SessionProvider::Kiro)
+        )
+        .await
+        .messages_upserted,
         2
     );
     assert_eq!(
@@ -845,9 +840,14 @@ async fn kiro_observation_commit_before_ack_survives_reopen() {
     );
     assert_eq!(durable_table_count(&recovered, "projection_queue").await, 0);
     assert_eq!(
-        ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Kiro))
-            .await
-            .messages_upserted,
+        ingest_global_sources_for_provider(
+            &home,
+            &recovered,
+            &project,
+            Some(SessionProvider::Kiro)
+        )
+        .await
+        .messages_upserted,
         0
     );
 }

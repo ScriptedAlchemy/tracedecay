@@ -123,15 +123,17 @@ pub async fn hook_kiro_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
     let started = Instant::now();
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let profile = tracedecay_runtime_core::storage::default_profile_root().and_then(|root| {
-        tracedecay_runtime_core::storage::read_existing_profile_identity_record(
-            &root.join(tracedecay_runtime_core::storage::PROFILE_IDENTITY_FILENAME),
-        )
-    });
+    let profile = tracedecay_runtime_core::storage::read_existing_profile_identity_record(
+        &runtime
+            .profile
+            .data_dir()
+            .join(tracedecay_runtime_core::storage::PROFILE_IDENTITY_FILENAME),
+    );
     match profile {
         Ok(None) => {
             return i32::from(
                 !super::write_hook_output(
+                    &runtime.profile,
                     None,
                     tracedecay_domain::NativeHostIdentityV1::Kiro,
                     &event,
@@ -146,7 +148,7 @@ pub async fn hook_kiro_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
         }
         Ok(Some(_)) => {}
     }
-    let root = event_project_root_or_process_cwd(&parsed);
+    let root = event_project_root_or_process_cwd(&runtime.profile, &parsed);
     let hook_telemetry = record_hook_invoked_parsed(
         runtime,
         root.as_deref(),
@@ -192,6 +194,7 @@ pub async fn hook_kiro_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
         .flatten()
         .unwrap_or_else(|| serde_json::json!({}).to_string());
     if !super::write_hook_output(
+        &runtime.profile,
         root.as_deref(),
         tracedecay_domain::NativeHostIdentityV1::Kiro,
         &event,

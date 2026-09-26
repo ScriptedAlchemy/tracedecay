@@ -3,7 +3,6 @@
 //! the injectable writer boundaries they carry.
 
 use std::future::Future;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -16,6 +15,7 @@ use tracedecay_dashboard_api::project_graph::RetainedProjectGraphRequest;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_project::project::TraceDecay;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_sessions::serving::{SessionProjectionServingStatusPort, SessionRefreshWorkerPort};
 
 use super::hook_writes::{BackgroundRefreshWriter, direct_background_refresh_writer};
@@ -96,11 +96,16 @@ pub(crate) fn dashboard_retained_project_graph_resolver(
                             "retained dashboard project belongs to another profile",
                         ));
                     }
-                    Some(server.cg_snapshot().await)
+                    Some((server.cg_snapshot().await, server.owner_profile().cloned()))
                 }
                 None => None,
             };
-            Ok(graph.map(|graph| Arc::new(crate::dashboard::dashboard_project_context(&graph))))
+            graph
+                .map(|(graph, profile)| {
+                    crate::dashboard::dashboard_project_context(&graph, profile.as_ref())
+                        .map(Arc::new)
+                })
+                .transpose()
         })
     })
 }
@@ -109,7 +114,9 @@ pub(crate) fn dashboard_retained_project_graph_resolver(
 pub(crate) struct McpServerConstructionContext {
     pub(crate) cg: Arc<TraceDecay>,
     pub(crate) scope_prefix: Option<String>,
-    pub(crate) profile_root: Option<PathBuf>,
+    /// The owner whose data directory, home, and transcripts this server
+    /// serves; absent for a direct (non-daemon) server.
+    pub(crate) profile: Option<ProfileRoot>,
     pub(crate) profile_identity: Option<Arc<dyn ProfileIdentityReadPort>>,
     pub(crate) global_db: Option<RegisteredGlobalDbLeaseV1>,
     pub(crate) accounting_db: Option<RegisteredGlobalDbLeaseV1>,
@@ -207,6 +214,7 @@ pub(crate) struct McpServerDaemonDatabases {
 }
 
 pub(crate) struct McpServerDaemonAuthority {
+    pub(crate) profile: ProfileRoot,
     pub(crate) profile_identity: LocalProfileIdentityAuthorityV1,
     pub(crate) databases: McpServerDaemonDatabases,
     pub(crate) host_admission_broker: Option<tracedecay_host_admission::SharedHostAdmissionBroker>,
@@ -227,6 +235,7 @@ pub(crate) struct McpServerDaemonAuthority {
 }
 
 pub(crate) struct McpServerDaemonCoreAuthority {
+    pub(crate) profile: ProfileRoot,
     pub(crate) profile_identity: LocalProfileIdentityAuthorityV1,
     pub(crate) accounting: Option<RegisteredGlobalDbLeaseV1>,
     pub(crate) registry: RegisteredGlobalDbLeaseV1,
@@ -259,7 +268,7 @@ impl McpServerConstructionContext {
         Self {
             cg,
             scope_prefix,
-            profile_root: None,
+            profile: None,
             profile_identity: None,
             global_db: None,
             accounting_db: None,
@@ -332,7 +341,7 @@ impl McpServerConstructionContext {
         mut self,
         profile_identity: LocalProfileIdentityAuthorityV1,
     ) -> Self {
-        self.profile_root = Some(profile_identity.profile_root().to_path_buf());
+        self.profile = Some(ProfileRoot::new(profile_identity.profile_root()));
         self.profile_identity = Some(wrap_profile_identity(profile_identity));
         self
     }
@@ -344,6 +353,7 @@ impl McpServerConstructionContext {
         authority: McpServerDaemonAuthority,
     ) -> Self {
         let McpServerDaemonAuthority {
+            profile,
             profile_identity,
             databases,
             host_admission_broker,
@@ -357,14 +367,13 @@ impl McpServerConstructionContext {
             delivery_settlement_authority,
             delivery_settlement_recorder,
         } = authority;
-        let profile_root = profile_identity.profile_root().to_path_buf();
         let registry = databases.registry;
         let project_session_refresh_wake = share_refresh_wake(project_session_refresh_wake);
         let user_session_refresh_wake = share_refresh_wake(user_session_refresh_wake);
         Self {
             cg: cg.into(),
             scope_prefix,
-            profile_root: Some(profile_root),
+            profile: Some(profile),
             profile_identity: Some(wrap_profile_identity(profile_identity)),
             global_db: Some(registry.clone()),
             accounting_db: databases.accounting,
@@ -421,6 +430,7 @@ impl McpServerConstructionContext {
         authority: McpServerDaemonCoreAuthority,
     ) -> Self {
         let McpServerDaemonCoreAuthority {
+            profile,
             profile_identity,
             accounting,
             registry,
@@ -428,11 +438,10 @@ impl McpServerConstructionContext {
             project_routes,
             writers,
         } = authority;
-        let profile_root = profile_identity.profile_root().to_path_buf();
         Self {
             cg: cg.into(),
             scope_prefix,
-            profile_root: Some(profile_root),
+            profile: Some(profile),
             profile_identity: Some(wrap_profile_identity(profile_identity)),
             global_db: Some(registry.clone()),
             accounting_db: accounting,
@@ -730,7 +739,7 @@ mod tests {
 
     #[tokio::test]
     async fn direct_context_installs_only_explicit_code_index_executors() {
-        let _pin = tracedecay_project::config::PinnedUserDataDir::new();
+        let profile = tempfile::tempdir().expect("profile");
         let project = tempfile::tempdir().expect("project");
         let git_init = Command::new("git")
             .args(["init", "--quiet"])
@@ -743,6 +752,7 @@ mod tests {
             String::from_utf8_lossy(&git_init.stderr)
         );
         let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            profile.path(),
             project.path(),
             "project.mcp-construction",
         )

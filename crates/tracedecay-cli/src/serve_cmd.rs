@@ -2,6 +2,7 @@
 
 use std::io::Write;
 use std::path::Path;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_domain::errors::Result;
 use tracedecay_project::project::TraceDecay;
@@ -65,15 +66,20 @@ pub fn sanitize_serve_path_arg(path: Option<String>) -> Option<String> {
 
 /// Runs the `serve` command as a database-free proxy to the managed daemon.
 #[hotpath::measure(label = "cli.serve.proxy", future = true)]
-pub async fn run_serve(path_arg: Option<String>, timings: bool) -> Result<()> {
+pub async fn run_serve(
+    profile: &ProfileRoot,
+    path_arg: Option<String>,
+    timings: bool,
+) -> Result<()> {
     let original_cwd = std::env::current_dir().ok();
-    let socket_path = tracedecay_daemon_control::default_socket_path()?;
-    if !tracedecay::daemon::should_proxy_serve_to_daemon(&socket_path).await {
+    let socket_path = tracedecay_daemon_control::default_socket_path(profile.data_dir())?;
+    if !tracedecay::daemon::should_proxy_serve_to_daemon(profile, &socket_path).await {
         return Err(tracedecay_daemon_service::logging::unavailable_error(
+            profile,
             &socket_path,
         ));
     }
-    let handshake = proxy_serve_handshake(path_arg, original_cwd.as_deref(), timings)?;
+    let handshake = proxy_serve_handshake(profile, path_arg, original_cwd.as_deref(), timings)?;
     tracedecay::daemon::proxy_stdio_to_daemon(&socket_path, &handshake, None).await
 }
 
@@ -82,6 +88,7 @@ pub async fn run_serve(path_arg: Option<String>, timings: bool) -> Result<()> {
 /// process; it performs the open (and the same config-gated git auto-init)
 /// after receiving the handshake.
 fn proxy_serve_handshake(
+    profile: &ProfileRoot,
     path_arg: Option<String>,
     original_cwd: Option<&Path>,
     timings: bool,
@@ -95,12 +102,12 @@ fn proxy_serve_handshake(
     let mut resolved_path = if explicit_path {
         tracedecay_configuration::resolve_path(path)
     } else {
-        tracedecay_configuration::resolve_path_with_discovery(None)
+        tracedecay_configuration::resolve_path_with_discovery(profile, None)
     };
 
-    let ambient_discovery =
-        !explicit_path && tracedecay_runtime_core::config::is_ambient_project_root(&resolved_path);
-    let initialized = !ambient_discovery && TraceDecay::is_initialized(&resolved_path);
+    let ambient_discovery = !explicit_path && profile.is_ambient_project_root(&resolved_path);
+    let initialized =
+        !ambient_discovery && TraceDecay::is_initialized_in_profile(profile, &resolved_path);
     // `serve` is a database-free proxy. It may consult only an already-pinned
     // in-memory snapshot.
     // A never-opened project has no pinned snapshot, so `cached_sync_config`
@@ -117,7 +124,7 @@ fn proxy_serve_handshake(
         ))
     .then(|| tracedecay_runtime_core::worktree::git_worktree_root(&resolved_path))
     .flatten()
-    .filter(|root| !tracedecay_runtime_core::config::is_ambient_project_root(root));
+    .filter(|root| !profile.is_ambient_project_root(root));
     if let Some(root) = auto_init_root.as_ref() {
         resolved_path.clone_from(root);
     }
@@ -132,6 +139,7 @@ fn proxy_serve_handshake(
                 .is_ok_and(|telemetry| telemetry.timings)
         });
     let mut handshake = tracedecay::daemon::handshake_for_current_client(
+        profile,
         project_path,
         scope_prefix,
         telemetry_timings,

@@ -5,6 +5,7 @@
 //! owns no workflow state, scheduling, retry, provider, or persistence logic.
 
 use std::path::PathBuf;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::Value;
 use tracedecay_api::WorkflowOperation;
@@ -177,6 +178,7 @@ fn workflow_outcome_matches(
 
 #[hotpath::measure(label = "workflow_cli.invoke", future = true)]
 pub async fn invoke_workflow_cli(
+    profile: &ProfileRoot,
     project_root: PathBuf,
     operation: WorkflowOperation,
     body: Value,
@@ -208,7 +210,7 @@ pub async fn invoke_workflow_cli(
         deadline.clone(),
         cancellation.context(),
     );
-    let handshake = crate::commands::client_handshake(Some(&project_root))?;
+    let handshake = crate::commands::client_handshake(profile, Some(&project_root))?;
     let response = match tracedecay_daemon_identity::invocation_client_for_current(handshake)?
         .invoke_controlled(
             request,

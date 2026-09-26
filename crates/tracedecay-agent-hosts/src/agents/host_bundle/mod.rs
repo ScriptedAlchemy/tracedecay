@@ -12,7 +12,7 @@
 //! verifier and storage authorities. Every public item is re-exported here so
 //! callers address one module.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub use tracedecay_host_integration::{
     ClineFamilyAdmissionV1, ClineFamilyEvidenceV1, ClineFamilyProviderV1,
@@ -76,11 +76,11 @@ pub use runtime::{
 };
 pub use writer::HostBundleWriterV1;
 
-/// Resolve the lifecycle authority from the active `TraceDecay` user profile.
-/// Host homes contain deployed artifacts only; receipts and locks are owned by
-/// this profile-scoped root.
-pub fn resolved_host_bundle_lifecycle_root() -> tracedecay_domain::errors::Result<PathBuf> {
-    Ok(tracedecay_runtime_core::storage::default_profile_root()?.join("host-components"))
+/// The lifecycle authority of the `TraceDecay` profile whose data directory
+/// is `profile_root`. Host homes contain deployed artifacts only; receipts and
+/// locks are owned by this profile-scoped root.
+pub fn resolved_host_bundle_lifecycle_root(profile_root: &Path) -> PathBuf {
+    profile_root.join("host-components")
 }
 
 /// Canonical stock-host enumeration shared by packaging, delivery, and

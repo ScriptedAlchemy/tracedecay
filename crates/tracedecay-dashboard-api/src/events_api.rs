@@ -1020,6 +1020,7 @@ pub(crate) async fn dashboard_state_fixture(
         "fixture project root must accept a repository identity marker"
     );
     let project_root = project.path().to_path_buf();
+    let profile_root = project_root.join("profile");
     let store_root = project_root.join("store");
     let dashboard_root = store_root.join("dashboard");
     std::fs::create_dir_all(&dashboard_root).expect("fixture dashboard root");
@@ -1061,6 +1062,7 @@ pub(crate) async fn dashboard_state_fixture(
         feedback_status_reader: None,
         pr_autotrack_reader: None,
         storage_mode: "profile_sharded".to_owned(),
+        profile_root,
         store_root,
         dashboard_root,
         retention_config: tracedecay_configuration::RetentionConfig::default(),
@@ -1486,7 +1488,6 @@ mod tests {
 
     #[tokio::test]
     async fn poll_sources_reads_real_state_and_primes_baseline() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (project, mut dash) = dashboard_state_fixture("project.dashboard-events").await;
         let registry = registered_database_for_test(&project.path().join("registry.db")).await;
         dash.savings_db_path = registry.db_path().display().to_string();

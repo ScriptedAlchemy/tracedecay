@@ -946,7 +946,7 @@ pub fn production_doctor_report_reader(
     profile_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     project_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     profile_root: PathBuf,
-    host_home: Option<PathBuf>,
+    host_profile: tracedecay_runtime_core::config::ProfileRoot,
     remote_operational: Arc<dyn Fn() -> RemoteOperationalReadV1 + Send + Sync>,
     schema_convergence: Arc<dyn Fn() -> SchemaConvergenceDoctorReadV1 + Send + Sync>,
     retention: tracedecay_configuration::RetentionConfig,
@@ -964,7 +964,7 @@ pub fn production_doctor_report_reader(
         let profile_sessions = profile_sessions.clone();
         let project_sessions = project_sessions.clone();
         let profile_root = profile_root.clone();
-        let host_home = host_home.clone();
+        let host_profile = host_profile.clone();
         let remote_operational = Arc::clone(&remote_operational);
         let schema_convergence = Arc::clone(&schema_convergence);
         let retention = retention.clone();
@@ -1060,11 +1060,12 @@ pub fn production_doctor_report_reader(
                 .full_sha;
             let host_scan = tokio::task::spawn_blocking(move || {
                 hotpath::measure_block!("daemon.doctor.host_scan", {
-                    host_home
-                        .as_ref()
+                    host_profile
+                        .home()
                         .map_or(HostIntegrationReadV1::Unsupported, |home| {
                             let context = tracedecay_agent_hosts::agents::HealthcheckContext {
-                                home: home.clone(),
+                                home: home.to_path_buf(),
+                                profile: host_profile.clone(),
                                 project_path: host_project_root,
                             };
                             tracedecay_agent_hosts::agents::inspect_receipt_backed_host_components(

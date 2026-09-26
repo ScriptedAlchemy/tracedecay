@@ -1,9 +1,11 @@
 //! CLI presentation for the closed Workflow application binding.
 
 use crate::cli::WorkflowInvocationArgs;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 #[hotpath::measure(label = "cli.workflow.invoke", future = true)]
 pub(crate) async fn run(
+    profile: &ProfileRoot,
     invocation: WorkflowInvocationArgs,
 ) -> tracedecay_domain::errors::Result<()> {
     #[cfg(feature = "hotpath")]
@@ -12,10 +14,12 @@ pub(crate) async fn run(
         &invocation.request_file,
         crate::application_cli::WORKFLOW,
     )?;
-    let project_root = tracedecay_configuration::resolve_path_with_discovery(invocation.project);
+    let project_root =
+        tracedecay_configuration::resolve_path_with_discovery(profile, invocation.project);
     let operation = invocation.operation;
     let outcome =
-        crate::workflow_cli::invoke_workflow_cli(project_root.clone(), operation, body).await?;
+        crate::workflow_cli::invoke_workflow_cli(profile, project_root.clone(), operation, body)
+            .await?;
     print!(
         "{}",
         crate::application_cli::render(

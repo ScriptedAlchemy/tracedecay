@@ -163,6 +163,8 @@ pub struct GitWatcherInner {
     /// Whether watching is enabled at all (`auto_watch`). When false every
     /// method is a no-op so the daemon runs exactly as before this feature.
     enabled: bool,
+    /// Home of the owning profile's user, never implicitly watched.
+    ambient_home: Option<PathBuf>,
     admission: ProfiledStdMutex<()>,
     /// Canonical git common directory → repository-scoped watch state.
     projects: ProfiledTokioMutex<HashMap<PathBuf, Arc<WatchState>>>,
@@ -202,6 +204,7 @@ impl GitWatcher {
         Self::from_parts(
             SyncConfig::default(),
             false,
+            None,
             MaintenanceCoordinator::default(),
             None,
         )
@@ -210,6 +213,7 @@ impl GitWatcher {
     fn from_parts(
         _config: SyncConfig,
         enabled: bool,
+        ambient_home: Option<PathBuf>,
         maintenance: MaintenanceCoordinator,
         code_index_schedulers: Option<super::code_index_scheduler::CodeIndexSchedulerRegistryV1>,
     ) -> Self {
@@ -221,6 +225,7 @@ impl GitWatcher {
                 code_index_schedulers,
                 cancellation: tracedecay_runtime_core::cancellation::CancellationToken::new(),
                 enabled,
+                ambient_home,
                 admission: hotpath::mutex!(
                     std::sync::Mutex::new(()),
                     label = "daemon.git.watch.admission"
@@ -269,6 +274,7 @@ impl GitWatcher {
         Self::from_parts(
             config,
             enabled,
+            None,
             MaintenanceCoordinator::default(),
             Some(super::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(32)),
         )
@@ -276,6 +282,7 @@ impl GitWatcher {
 
     /// Builds a watcher bound to the daemon's canonical code-index scheduler.
     pub fn new_with_canonical_scheduler(
+        ambient_home: Option<PathBuf>,
         maintenance: MaintenanceCoordinator,
         code_index_schedulers: super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     ) -> Self {
@@ -285,6 +292,7 @@ impl GitWatcher {
         Self::from_parts(
             SyncConfig::default(),
             true,
+            ambient_home,
             maintenance,
             Some(code_index_schedulers),
         )
@@ -300,7 +308,7 @@ impl GitWatcher {
         // daemon owner itself remains available so a project that explicitly
         // enables watching can activate even though the legacy process
         // default is off.
-        Self::from_parts(config, true, maintenance, Some(code_index_schedulers))
+        Self::from_parts(config, true, None, maintenance, Some(code_index_schedulers))
     }
 
     /// Starts synchronous shutdown fencing without waiting for retained tasks.

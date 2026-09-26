@@ -1,4 +1,5 @@
 use serde_json::Value;
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_session_memory::provider_usage::{
     ProviderUsageCostSummaryV1, ProviderUsageCoverageV1,
 };
@@ -10,13 +11,15 @@ use crate::{
 
 #[hotpath::measure(label = "cli.cost.read", future = true)]
 pub(crate) async fn handle_cost(
+    profile: &ProfileRoot,
     range: String,
     by_model: bool,
     export: Option<String>,
 ) -> tracedecay_domain::errors::Result<()> {
     let cwd = std::env::current_dir()?;
-    let project_root = tracedecay_runtime_core::config::discover_project_root(&cwd);
+    let project_root = profile.discover_project_root(&cwd);
     let payload = daemon_tool_json(
+        profile,
         project_root.as_deref(),
         "tracedecay_admin_cli",
         serde_json::json!({ "action": "cost_summary", "range": &range }),

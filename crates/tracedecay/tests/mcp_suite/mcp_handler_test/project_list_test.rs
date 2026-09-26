@@ -210,7 +210,7 @@ async fn project_list_returns_the_registry_page_the_caller_asked_for() {
     );
 
     let server = McpServer::new_with_host_admission_test_runtime_for_test(
-        TraceDecay::open(cg.project_root())
+        TraceDecay::open_with_options(cg.project_root(), crate::support::graph_open_options(&cg))
             .await
             .expect("reopen calling project"),
         None,
@@ -288,7 +288,7 @@ async fn project_list_reports_an_empty_registry_as_an_empty_listing() {
         .display()
         .to_string();
     let server = McpServer::new_with_host_admission_test_runtime_for_test(
-        TraceDecay::open(cg.project_root())
+        TraceDecay::open_with_options(cg.project_root(), crate::support::graph_open_options(&cg))
             .await
             .expect("reopen calling project"),
         None,
@@ -354,7 +354,7 @@ async fn project_list_reports_a_broken_registry_as_a_tool_error() {
         .execute_batch("DROP TABLE project_aliases")
         .expect("drop project aliases");
     let server = McpServer::new_with_host_admission_test_runtime_for_test(
-        TraceDecay::open(cg.project_root())
+        TraceDecay::open_with_options(cg.project_root(), crate::support::graph_open_options(&cg))
             .await
             .expect("reopen calling project"),
         None,

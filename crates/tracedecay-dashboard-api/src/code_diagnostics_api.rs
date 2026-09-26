@@ -307,7 +307,6 @@ mod tests {
 
     #[tokio::test]
     async fn settings_patch_rejects_a_revision_the_authority_no_longer_holds() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, mut state) = state_for_test().await;
         state.code_diagnostics_authority = Some(authority_with_settings(
             &state,
@@ -332,7 +331,6 @@ mod tests {
 
     #[tokio::test]
     async fn settings_patch_without_a_revision_is_rejected_before_any_write() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, mut state) = state_for_test().await;
         state.code_diagnostics_authority = Some(authority_with_settings(
             &state,
@@ -358,7 +356,6 @@ mod tests {
 
     #[tokio::test]
     async fn overview_returns_service_unavailable_without_mounted_authority() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, state) = state_for_test().await;
 
         let (status, Json(body)) = overview(State(state), RequestControl(request_control()))

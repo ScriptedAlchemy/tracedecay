@@ -13,6 +13,7 @@
 //! See <https://github.com/zed-industries/zed/discussions/58417>.
 
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::json;
 
@@ -99,7 +100,7 @@ impl AgentIntegration for ZedIntegration {
         zed_config_dir(home).is_dir()
     }
 
-    fn primary_config_path(&self, home: &Path) -> Option<PathBuf> {
+    fn primary_config_path(&self, home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         Some(zed_settings_path(home))
     }
 
@@ -107,6 +108,7 @@ impl AgentIntegration for ZedIntegration {
         &self,
         components: &[HostComponentV1],
         home: &Path,
+        _profile: &ProfileRoot,
     ) -> Vec<PathBuf> {
         if components != [HostComponentV1::ContextMcp] {
             return Vec::new();
@@ -118,6 +120,7 @@ impl AgentIntegration for ZedIntegration {
         &self,
         components: &[HostComponentV1],
         _home: &Path,
+        _profile_root: &Path,
         project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
         if components != [HostComponentV1::ContextMcp] {
@@ -169,7 +172,7 @@ impl AgentIntegration for ZedIntegration {
         true
     }
 
-    fn has_tracedecay(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
         super::mcp_config_has_tracedecay(
             &zed_settings_path(home),
             "context_servers",
@@ -330,6 +333,7 @@ mod tests {
 
     fn install_context(home: &Path, binary: &str) -> InstallContext {
         InstallContext {
+            profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home),
             home: home.to_path_buf(),
             tracedecay_bin: binary.to_string(),
             project_root: None,

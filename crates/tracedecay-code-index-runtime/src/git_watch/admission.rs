@@ -50,7 +50,8 @@ impl GitWatcher {
         if self.inner.shutting_down.load(Ordering::Acquire) {
             return GitWatcherAdmission::ShuttingDown;
         }
-        if crate::config::is_ambient_project_root(project_root) {
+        if crate::config::is_ambient_project_root(self.inner.ambient_home.as_deref(), project_root)
+        {
             log_daemon_event(
                 "git_watch_skipped",
                 &[

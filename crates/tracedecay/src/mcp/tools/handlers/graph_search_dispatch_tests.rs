@@ -113,25 +113,23 @@ fn search_test_options<'a>(
     )
 }
 
-fn run_with_locked_user_data_dir(test: impl Future<Output = ()>) {
-    let _env_lock = tracedecay_project::config::lock_user_data_dir_test_env();
+fn run_on_current_thread(test: impl Future<Output = ()>) {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .expect("locked user data test runtime")
+        .expect("search test runtime")
         .block_on(test);
 }
 
 #[test]
 fn completed_primary_search_is_not_retried_after_graph_admission() {
-    run_with_locked_user_data_dir(
-        completed_primary_search_is_not_retried_after_graph_admission_case(),
-    );
+    run_on_current_thread(completed_primary_search_is_not_retried_after_graph_admission_case());
 }
 
 async fn completed_primary_search_is_not_retried_after_graph_admission_case() {
     let dir = tempfile::TempDir::new().expect("single search attempt isolation");
-    let _env = crate::mcp::tools::handlers::dispatch_test_support::SelectorEnv::new(dir.path());
+    let profile =
+        crate::mcp::tools::handlers::dispatch_test_support::SelectorProfile::new(dir.path());
     let project = dir.path().join("single-search-attempt");
     std::fs::create_dir_all(project.join("src")).expect("create search attempt sources");
     std::fs::write(
@@ -140,6 +138,7 @@ async fn completed_primary_search_is_not_retried_after_graph_admission_case() {
     )
     .expect("write search attempt fixture");
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.single-search-attempt",
     )
@@ -194,14 +193,13 @@ async fn completed_primary_search_is_not_retried_after_graph_admission_case() {
 
 #[test]
 fn generation_mismatch_retry_cannot_erase_a_complete_sparse_search() {
-    run_with_locked_user_data_dir(
-        generation_mismatch_retry_cannot_erase_a_complete_sparse_search_case(),
-    );
+    run_on_current_thread(generation_mismatch_retry_cannot_erase_a_complete_sparse_search_case());
 }
 
 async fn generation_mismatch_retry_cannot_erase_a_complete_sparse_search_case() {
     let dir = tempfile::TempDir::new().expect("generation mismatch isolation");
-    let _env = crate::mcp::tools::handlers::dispatch_test_support::SelectorEnv::new(dir.path());
+    let profile =
+        crate::mcp::tools::handlers::dispatch_test_support::SelectorProfile::new(dir.path());
     let project = dir.path().join("generation-mismatch-search");
     std::fs::create_dir_all(project.join("src")).expect("create mismatch search sources");
     std::fs::write(
@@ -210,6 +208,7 @@ async fn generation_mismatch_retry_cannot_erase_a_complete_sparse_search_case() 
     )
     .expect("write mismatch search fixture");
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.generation-mismatch-search",
     )
@@ -334,12 +333,13 @@ fn response_text(result: &ToolResult) -> String {
 
 #[test]
 fn search_opens_with_a_freshness_verdict_from_typed_state() {
-    run_with_locked_user_data_dir(search_opens_with_a_freshness_verdict_from_typed_state_case());
+    run_on_current_thread(search_opens_with_a_freshness_verdict_from_typed_state_case());
 }
 
 async fn search_opens_with_a_freshness_verdict_from_typed_state_case() {
     let dir = tempfile::TempDir::new().expect("freshness verdict isolation");
-    let _env = crate::mcp::tools::handlers::dispatch_test_support::SelectorEnv::new(dir.path());
+    let profile =
+        crate::mcp::tools::handlers::dispatch_test_support::SelectorProfile::new(dir.path());
     let project = dir.path().join("freshness-verdict-search");
     std::fs::create_dir_all(project.join("src")).expect("create freshness sources");
     std::fs::write(
@@ -348,6 +348,7 @@ async fn search_opens_with_a_freshness_verdict_from_typed_state_case() {
     )
     .expect("write freshness fixture");
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.freshness-verdict-search",
     )
@@ -440,14 +441,13 @@ async fn search_opens_with_a_freshness_verdict_from_typed_state_case() {
 
 #[test]
 fn search_forwards_lexical_routing_and_renders_route_evidence() {
-    run_with_locked_user_data_dir(
-        search_forwards_lexical_routing_and_renders_route_evidence_case(),
-    );
+    run_on_current_thread(search_forwards_lexical_routing_and_renders_route_evidence_case());
 }
 
 async fn search_forwards_lexical_routing_and_renders_route_evidence_case() {
     let dir = tempfile::TempDir::new().expect("lexical routing isolation");
-    let _env = crate::mcp::tools::handlers::dispatch_test_support::SelectorEnv::new(dir.path());
+    let profile =
+        crate::mcp::tools::handlers::dispatch_test_support::SelectorProfile::new(dir.path());
     let project = dir.path().join("lexical-routing-search");
     std::fs::create_dir_all(project.join("src")).expect("create routing sources");
     std::fs::write(
@@ -456,6 +456,7 @@ async fn search_forwards_lexical_routing_and_renders_route_evidence_case() {
     )
     .expect("write routing fixture");
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.lexical-routing-search",
     )

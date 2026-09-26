@@ -130,9 +130,10 @@ impl Default for UserConfig {
     }
 }
 
-/// Returns the path to the user-level config file.
-pub fn config_path() -> Option<PathBuf> {
-    tracedecay_runtime_core::config::user_data_dir().map(|dir| dir.join("config.toml"))
+/// The user-level config file of the profile whose data directory is
+/// `profile_root`.
+pub fn config_path(profile_root: &Path) -> PathBuf {
+    profile_root.join("config.toml")
 }
 
 /// Errors returned by strict loads and configuration saves.
@@ -143,9 +144,6 @@ pub fn config_path() -> Option<PathBuf> {
 /// so a user can find and fix, or delete, the offending file.
 #[derive(Debug)]
 pub enum ConfigSaveError {
-    /// The user data directory could not be resolved, so there is no path to
-    /// write to.
-    PathUnavailable,
     /// The existing config file is present but could not be read.
     ExistingUnreadable { path: PathBuf, source: io::Error },
     /// The existing config file is present but is not valid TOML. It is left
@@ -171,10 +169,6 @@ pub enum ConfigSaveError {
 impl std::fmt::Display for ConfigSaveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::PathUnavailable => write!(
-                f,
-                "cannot resolve the tracedecay user config path (no user data directory)"
-            ),
             Self::ExistingUnreadable { path, source } => {
                 write!(
                     f,
@@ -305,10 +299,8 @@ impl UserConfig {
     /// Returns defaults if the file is missing or unreadable. A present but
     /// unparseable file prints a one-time warning to stderr (see
     /// [`parse_or_warn_default`]) instead of silently defaulting.
-    pub fn load() -> Self {
-        let Some(path) = config_path() else {
-            return Self::default();
-        };
+    pub fn load(profile_root: &Path) -> Self {
+        let path = config_path(profile_root);
         let Ok(contents) = std::fs::read_to_string(&path) else {
             return Self::default();
         };
@@ -328,8 +320,8 @@ impl UserConfig {
     /// Lifecycle callers use this when a missing policy would enable host
     /// behavior: corruption must stop the operation rather than silently turn
     /// an opt-out back on. A genuinely missing file still means defaults.
-    pub fn load_strict() -> std::result::Result<Self, ConfigSaveError> {
-        let path = config_path().ok_or(ConfigSaveError::PathUnavailable)?;
+    pub fn load_strict(profile_root: &Path) -> std::result::Result<Self, ConfigSaveError> {
+        let path = config_path(profile_root);
         let contents = match fs::read_to_string(&path) {
             Ok(contents) => contents,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
@@ -361,10 +353,8 @@ impl UserConfig {
     /// [`ConfigSaveError::CorruptExisting`] is returned (carrying the path and
     /// the parse error's line) before anything is created or written: the
     /// corrupt file stays in place for the operator and nothing is copied.
-    pub fn save(&self) -> std::result::Result<(), ConfigSaveError> {
-        let Some(path) = config_path() else {
-            return Err(ConfigSaveError::PathUnavailable);
-        };
+    pub fn save(&self, profile_root: &Path) -> std::result::Result<(), ConfigSaveError> {
+        let path = config_path(profile_root);
 
         // Serialize first: a serialize failure must never mutate the filesystem
         // or truncate the existing config.
@@ -447,16 +437,16 @@ impl UserConfig {
     /// creating one as an incidental side effect. A missing file is a no-op and
     /// returns `Ok(())`; a present-but-corrupt file surfaces the same
     /// [`ConfigSaveError::CorruptExisting`] as [`UserConfig::save`].
-    pub fn save_if_exists(&self) -> std::result::Result<(), ConfigSaveError> {
-        if !Self::exists() {
+    pub fn save_if_exists(&self, profile_root: &Path) -> std::result::Result<(), ConfigSaveError> {
+        if !Self::exists(profile_root) {
             return Ok(());
         }
-        self.save()
+        self.save(profile_root)
     }
 
     /// Returns true when the user-level config file already exists.
-    pub fn exists() -> bool {
-        config_path().is_some_and(|p| p.exists())
+    pub fn exists(profile_root: &Path) -> bool {
+        config_path(profile_root).exists()
     }
 
     /// Marks `running` as fully installed by advancing both version markers,
@@ -500,40 +490,12 @@ pub fn parse_duration(s: &str) -> Option<std::time::Duration> {
     clippy::duration_suboptimal_units
 )]
 mod tests {
-    use std::ffi::OsString;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     use tempfile::TempDir;
-    use tracedecay_runtime_core::config::{USER_DATA_DIR_ENV, lock_user_data_dir_test_env};
 
     use super::*;
-
-    struct EnvRestore {
-        key: &'static str,
-        previous: Option<OsString>,
-    }
-
-    impl EnvRestore {
-        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-            let previous = std::env::var_os(key);
-            unsafe {
-                std::env::set_var(key, value);
-            }
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvRestore {
-        fn drop(&mut self) {
-            unsafe {
-                match self.previous.take() {
-                    Some(previous) => std::env::set_var(self.key, previous),
-                    None => std::env::remove_var(self.key),
-                }
-            }
-        }
-    }
 
     #[test]
     fn parse_duration_invalid() {
@@ -544,10 +506,9 @@ mod tests {
 
     #[test]
     fn corrupt_config_is_a_typed_error_left_in_place_with_nothing_copied() {
-        let _lock = lock_user_data_dir_test_env();
         let temp = TempDir::new().unwrap();
-        let _env = EnvRestore::set(USER_DATA_DIR_ENV, temp.path());
-        let path = config_path().expect("config path should resolve");
+        let profile = temp.path();
+        let path = config_path(profile);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         // The torn write seen in the wild: a valid line followed by a bare
         // " true" orphan with no key.
@@ -566,7 +527,9 @@ mod tests {
             ..UserConfig::default()
         };
 
-        let save_error = config.save().expect_err("a corrupt config must not save");
+        let save_error = config
+            .save(profile)
+            .expect_err("a corrupt config must not save");
 
         assert_eq!(entries(), vec!["config.toml".to_owned()]);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), torn);
@@ -575,25 +538,27 @@ mod tests {
             path.display()
         );
         assert_eq!(save_error.to_string(), expected);
-        let load_error = UserConfig::load_strict().expect_err("a corrupt config must not load");
+        let load_error =
+            UserConfig::load_strict(profile).expect_err("a corrupt config must not load");
         assert_eq!(load_error.to_string(), expected);
         assert_eq!(entries(), vec!["config.toml".to_owned()]);
 
         std::fs::write(&path, "pending_upload = 0\n").unwrap();
-        config.save().expect("a parseable config saves");
-        assert_eq!(UserConfig::load_strict().unwrap().pending_upload, 7);
+        config.save(profile).expect("a parseable config saves");
+        assert_eq!(UserConfig::load_strict(profile).unwrap().pending_upload, 7);
     }
 
     #[test]
     fn save_regenerates_when_no_file_exists() {
-        let _lock = lock_user_data_dir_test_env();
         let temp = TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
-        let _env = EnvRestore::set(USER_DATA_DIR_ENV, &profile_root);
-        let path = config_path().expect("config path should resolve");
+        let profile = profile_root.as_path();
+        let path = config_path(profile);
 
         let config = UserConfig::default();
-        config.save().expect("save should create a fresh file");
+        config
+            .save(profile)
+            .expect("save should create a fresh file");
         let saved = std::fs::read_to_string(&path).unwrap();
         toml::from_str::<UserConfig>(&saved).expect("fresh config parses");
         #[cfg(unix)]
@@ -611,10 +576,9 @@ mod tests {
 
     #[test]
     fn save_reports_unreadable_existing_file() {
-        let _lock = lock_user_data_dir_test_env();
         let temp = TempDir::new().unwrap();
-        let _env = EnvRestore::set(USER_DATA_DIR_ENV, temp.path());
-        let path = config_path().expect("config path should resolve");
+        let profile = temp.path();
+        let path = config_path(profile);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         // A directory where the config file should be: exists(), but reading it
         // yields an I/O error rather than a parse error.
@@ -622,7 +586,7 @@ mod tests {
 
         let config = UserConfig::default();
         let err = config
-            .save()
+            .save(profile)
             .expect_err("an unreadable existing path must not save");
         assert!(
             matches!(err, ConfigSaveError::ExistingUnreadable { .. }),
@@ -632,14 +596,14 @@ mod tests {
 
     #[test]
     fn concurrent_saves_always_leave_a_parseable_file() {
-        let _lock = lock_user_data_dir_test_env();
         let temp = TempDir::new().unwrap();
-        let _env = EnvRestore::set(USER_DATA_DIR_ENV, temp.path());
-        let path = config_path().expect("config path should resolve");
+        let profile = temp.path();
+        let path = config_path(profile);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
 
         let handles: Vec<_> = (0..8u64)
             .map(|thread_idx| {
+                let profile = profile.to_path_buf();
                 std::thread::spawn(move || {
                     for i in 0..20u64 {
                         let config = UserConfig {
@@ -647,7 +611,9 @@ mod tests {
                             ..UserConfig::default()
                         };
                         // Every write must succeed and leave a parseable file.
-                        config.save().expect("concurrent save should succeed");
+                        config
+                            .save(&profile)
+                            .expect("concurrent save should succeed");
                     }
                 })
             })
@@ -663,13 +629,12 @@ mod tests {
 
     #[test]
     fn concurrent_reader_never_observes_a_torn_write() {
-        let _lock = lock_user_data_dir_test_env();
         let temp = TempDir::new().unwrap();
-        let _env = EnvRestore::set(USER_DATA_DIR_ENV, temp.path());
-        let path = config_path().expect("config path should resolve");
+        let profile = temp.path();
+        let path = config_path(profile);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         // Seed a valid file so the reader always has something to read.
-        UserConfig::default().save().expect("seed save");
+        UserConfig::default().save(profile).expect("seed save");
 
         let reader_path = path.clone();
         let reader = std::thread::spawn(move || {
@@ -689,17 +654,16 @@ mod tests {
                 pending_upload: i,
                 ..UserConfig::default()
             };
-            config.save().expect("writer save should succeed");
+            config.save(profile).expect("writer save should succeed");
         }
         reader.join().expect("reader thread should not panic");
     }
 
     #[test]
     fn save_erases_retired_keys_and_preserves_other_readers_keys() {
-        let _lock = lock_user_data_dir_test_env();
         let temp = TempDir::new().unwrap();
-        let _env = EnvRestore::set(USER_DATA_DIR_ENV, temp.path());
-        let path = config_path().expect("config path should resolve");
+        let profile = temp.path();
+        let path = config_path(profile);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
@@ -708,11 +672,11 @@ mod tests {
         )
         .unwrap();
 
-        let mut config = UserConfig::load();
+        let mut config = UserConfig::load(profile);
         config.pending_upload = 3;
 
         config
-            .save()
+            .save(profile)
             .expect("save should succeed with a valid existing file");
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.contains("future_key = \"keep-me\""));
@@ -729,10 +693,9 @@ mod tests {
 
     #[test]
     fn strict_load_rejects_corrupt_dashboard_policy_instead_of_enabling_it() {
-        let _lock = lock_user_data_dir_test_env();
         let temp = TempDir::new().unwrap();
-        let _env = EnvRestore::set(USER_DATA_DIR_ENV, temp.path());
-        let path = config_path().unwrap();
+        let profile = temp.path();
+        let path = config_path(profile);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
@@ -741,7 +704,7 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            UserConfig::load_strict(),
+            UserConfig::load_strict(profile),
             Err(ConfigSaveError::CorruptExisting { .. })
         ));
     }

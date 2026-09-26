@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tracedecay_runtime_core::config::{USER_DATA_DIR_ENV, user_data_dir};
+use tracedecay_runtime_core::config::{ProfileRoot, USER_DATA_DIR_ENV};
 
 fn canonical(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
@@ -16,7 +16,10 @@ fn canonical(path: &Path) -> PathBuf {
 
 #[test]
 fn resolved_data_dir_is_not_the_real_user_profile() {
-    let resolved = user_data_dir().expect("user_data_dir should resolve in tests");
+    let resolved = ProfileRoot::from_env()
+        .expect("the test process profile should resolve")
+        .data_dir()
+        .to_path_buf();
     let Some(real_profile) = dirs::home_dir().map(|home| home.join(".tracedecay")) else {
         return;
     };

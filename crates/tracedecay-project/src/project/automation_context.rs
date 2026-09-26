@@ -9,7 +9,12 @@ impl TraceDecay {
     ///
     /// Read-only graphs are rejected because every project automation task may
     /// publish memory, ledger, or managed-skill effects.
-    pub fn automation_project_context(&self) -> Result<AutomationProjectContext> {
+    /// `host_home` is the home of the owning profile's user, where the run's
+    /// managed skills deploy.
+    pub fn automation_project_context(
+        &self,
+        host_home: Option<std::path::PathBuf>,
+    ) -> Result<AutomationProjectContext> {
         if self.is_read_only() {
             return Err(TraceDecayError::Config {
                 message:
@@ -26,6 +31,7 @@ impl TraceDecay {
             project_root: self.project_root().to_path_buf(),
             dashboard_root: self.store_layout().dashboard_root.clone(),
             host_io: tracedecay_agent_hosts::host_io(),
+            host_home,
             project_id,
             profile_id: self.project_store_runtime().profile_id().clone(),
             profile_database: self.profile_database().clone(),

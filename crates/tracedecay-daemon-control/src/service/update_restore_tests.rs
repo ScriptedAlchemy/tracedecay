@@ -12,8 +12,7 @@ use std::os::unix::net::UnixListener;
 
 #[cfg(unix)]
 use tempfile::TempDir;
-#[cfg(unix)]
-use tracedecay_runtime_core::config::{USER_DATA_DIR_ENV, lock_user_data_dir_test_env};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use super::runner::ServiceRunner;
 use super::{
@@ -27,8 +26,9 @@ const INSTALLED_VERSION: &str = "0.2.0-test+installed";
 /// ran: lease released or consumed elsewhere, restore not yet attempted.
 /// `RestoreSettlement::Complete` keeps `Drop` from touching the real service
 /// manager or lease file.
-fn quiesced_guard() -> QuiescedDaemonLifecycle {
+fn quiesced_guard(profile: &ProfileRoot) -> QuiescedDaemonLifecycle {
     QuiescedDaemonLifecycle {
+        profile: profile.clone(),
         previous_state: DaemonServiceState::RunningEnabled,
         lifecycle_lease: None,
         expected_version: QUIESCED_VERSION.to_owned(),
@@ -37,9 +37,6 @@ fn quiesced_guard() -> QuiescedDaemonLifecycle {
     }
 }
 
-#[cfg(unix)]
-use super::isolated_profile::EnvVarGuard;
-
 /// Version skew must keep failing closed: when the daemon that answers after
 /// an upgrade is still the OLD binary (restart raced or was lost), readiness
 /// against the installed version reports a typed identity mismatch instead of
@@ -47,17 +44,16 @@ use super::isolated_profile::EnvVarGuard;
 #[cfg(unix)]
 #[test]
 fn restore_readiness_rejects_a_stale_daemon_after_an_upgrade() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let profile = TempDir::new().expect("profile temp dir");
-    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, profile.path());
+    let profile_dir = TempDir::new().expect("profile temp dir");
+    let profile = ProfileRoot::new(profile_dir.path());
 
-    let mut guard = quiesced_guard();
+    let mut guard = quiesced_guard(&profile);
     guard.adopt_maintenance_outcome(MaintenanceWindowOutcome {
         value: (),
         installed_version: Some(INSTALLED_VERSION.to_owned()),
     });
 
-    let socket_path = profile.path().join("stale.sock");
+    let socket_path = profile_dir.path().join("stale.sock");
     let authority = super::tests::seed_socket_authority(&socket_path);
     let listener = UnixListener::bind(&socket_path).expect("bind stale daemon socket");
     let server = super::tests::serve_probe_response(
@@ -69,6 +65,7 @@ fn restore_readiness_rejects_a_stale_daemon_after_an_upgrade() {
 
     assert_eq!(
         super::probe::daemon_protocol_state_with_timeout(
+            &profile,
             &socket_path,
             &guard.expected_version,
             std::time::Duration::from_secs(5),
@@ -90,12 +87,11 @@ fn restore_readiness_rejects_a_stale_daemon_after_an_upgrade() {
 #[cfg(target_os = "linux")]
 struct DrainingDaemonFixture {
     _dir: TempDir,
-    _env: Vec<EnvVarGuard>,
     runner: ServiceRunner,
     socket_path: std::path::PathBuf,
     log: std::path::PathBuf,
     stopped_marker: std::path::PathBuf,
-    profile: std::path::PathBuf,
+    profile: ProfileRoot,
 }
 
 /// The simulated daemon process; dropping it releases a lease held with
@@ -115,28 +111,30 @@ impl DrainingDaemonFixture {
         let config_home = dir.path().join("config");
         let fake_bin = dir.path().join("bin");
         let home = dir.path().join("home");
-        let profile = dir.path().join("profile");
+        let profile_dir = dir.path().join("profile");
         std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
         std::fs::create_dir_all(&home).expect("home dir");
-        std::fs::create_dir_all(&profile).expect("profile dir");
+        std::fs::create_dir_all(&profile_dir).expect("profile dir");
+        let profile = ProfileRoot::new(&profile_dir)
+            .with_home(&home)
+            .with_xdg_config_home(&config_home);
         let systemctl = fake_bin.join("systemctl");
         let log = dir.path().join("systemctl.log");
         let stopped_marker = dir.path().join("systemctl.stopped");
         std::fs::write(
             &systemctl,
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && [ -f \"$TRACEDECAY_SYSTEMCTL_STOPPED\" ] && { echo inactive; exit 3; }\n[ \"$2\" = stop ] && touch \"$TRACEDECAY_SYSTEMCTL_STOPPED\"\n[ \"$2\" = start ] && rm -f \"$TRACEDECAY_SYSTEMCTL_STOPPED\"\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
+            super::tests::bake_script_paths(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && [ -f \"$TRACEDECAY_SYSTEMCTL_STOPPED\" ] && { echo inactive; exit 3; }\n[ \"$2\" = stop ] && touch \"$TRACEDECAY_SYSTEMCTL_STOPPED\"\n[ \"$2\" = start ] && rm -f \"$TRACEDECAY_SYSTEMCTL_STOPPED\"\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
+                &[
+                    ("TRACEDECAY_SYSTEMCTL_LOG", &log),
+                    ("TRACEDECAY_SYSTEMCTL_STOPPED", &stopped_marker),
+                ],
+            ),
         )
         .expect("fake systemctl");
         std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
             .expect("systemctl permissions");
         let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
-        let env = vec![
-            EnvVarGuard::set("XDG_CONFIG_HOME", &config_home),
-            EnvVarGuard::set("HOME", &home),
-            EnvVarGuard::set(USER_DATA_DIR_ENV, &profile),
-            EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log),
-            EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_STOPPED", &stopped_marker),
-        ];
         let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
         std::fs::create_dir_all(service_path.parent().expect("service parent"))
             .expect("service dir");
@@ -151,7 +149,6 @@ impl DrainingDaemonFixture {
         .expect("existing service unit");
         Self {
             _dir: dir,
-            _env: env,
             runner,
             socket_path,
             log,
@@ -164,7 +161,7 @@ impl DrainingDaemonFixture {
     /// moment the fake supervisor records the stop; `None` holds it until the
     /// returned holder is dropped.
     fn hold_daemon_lease(&self, release_after_stop: Option<std::time::Duration>) -> LeaseHolder {
-        let profile = self.profile.clone();
+        let profile = self.profile.data_dir().to_path_buf();
         let stopped_marker = self.stopped_marker.clone();
         let (held_tx, held_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
@@ -237,11 +234,11 @@ impl DrainingDaemonFixture {
 #[cfg(target_os = "linux")]
 #[test]
 fn maintenance_window_waits_out_the_lease_of_the_daemon_it_just_stopped() {
-    let _env_lock = lock_user_data_dir_test_env();
     let fixture = DrainingDaemonFixture::new();
     let holder = fixture.hold_daemon_lease(Some(std::time::Duration::from_millis(400)));
 
     let guard = QuiescedDaemonLifecycle::acquire_with_runner_and_timeout(
+        &fixture.profile,
         "update",
         super::tests::TEST_BUILD_VERSION,
         fixture.runner.clone(),
@@ -272,12 +269,12 @@ fn maintenance_window_waits_out_the_lease_of_the_daemon_it_just_stopped() {
 #[cfg(target_os = "linux")]
 #[test]
 fn failed_lease_acquisition_restores_the_stopped_daemon_before_reporting() {
-    let _env_lock = lock_user_data_dir_test_env();
     let fixture = DrainingDaemonFixture::new();
     let _holder = fixture.hold_daemon_lease(None);
     let _authority = fixture.serve_restarted_daemon();
 
     let error = QuiescedDaemonLifecycle::acquire_with_runner_and_timeout(
+        &fixture.profile,
         "update",
         super::tests::TEST_BUILD_VERSION,
         fixture.runner.clone(),

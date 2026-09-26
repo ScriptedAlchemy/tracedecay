@@ -666,11 +666,11 @@ mod tests {
 
     #[tokio::test]
     async fn receipt_survives_restart_between_sse_frame_and_browser_ack() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let profile_dir = tempfile::tempdir().expect("profile");
         let project = tempfile::tempdir().expect("project directory");
         let project_id = ProjectId::new("project.dashboard.delivery").expect("project id");
         let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+            profile_dir.path().to_path_buf(),
             project.path(),
             project_id.clone(),
         )
@@ -728,11 +728,11 @@ mod tests {
 
     #[tokio::test]
     async fn restarted_deadline_reaper_drops_durable_receipt_without_browser_ack() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let profile_dir = tempfile::tempdir().expect("profile");
         let project = tempfile::tempdir().expect("project directory");
         let project_id = ProjectId::new("project.dashboard.deadline").expect("project id");
         let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+            profile_dir.path().to_path_buf(),
             project.path(),
             project_id.clone(),
         )

@@ -116,7 +116,8 @@ pub struct UserJobRunOptions {
     pub trigger: AutomationTrigger,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
-    /// Managed-skill profile root; defaults to the user profile directory.
+    /// Managed-skill profile root of the owning profile; a run without one is
+    /// refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_root: Option<PathBuf>,
     /// Project root used as cwd for optional pre-run commands.
@@ -604,10 +605,9 @@ async fn run_user_job_with_backend_publication(
             .map_err(Into::into);
     }
 
-    let profile_root = match profile_root {
-        Some(path) => path,
-        None => tracedecay_runtime_core::storage::default_profile_root()?,
-    };
+    let profile_root = profile_root.ok_or_else(|| TraceDecayError::Config {
+        message: "automation job run requires the owning profile root".to_string(),
+    })?;
     let (skill_sections, attached_skills, missing_skills) =
         attached_skill_sections(&profile_root, &job.skill_ids).await;
 

@@ -1,5 +1,6 @@
 use super::daemon::daemon_tool_json;
 use serde::Deserialize;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 #[derive(Deserialize)]
 struct SavingsDayPayload {
@@ -31,25 +32,29 @@ pub(crate) fn estimate_dollars_saved(saved_tokens: u64) -> Option<f64> {
 
 #[hotpath::measure(label = "cli.gain.read", future = true)]
 pub async fn handle_gain(
+    profile: &ProfileRoot,
     all: bool,
     history: bool,
     range: &str,
     json_output: bool,
 ) -> tracedecay_domain::errors::Result<()> {
-    handle_gain_inner(all, history, range, json_output).await
+    handle_gain_inner(profile, all, history, range, json_output).await
 }
 
-fn handle_gain_inner(
+fn handle_gain_inner<'a>(
+    profile: &ProfileRoot,
     all: bool,
     history: bool,
-    range: &str,
+    range: &'a str,
     json_output: bool,
 ) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = tracedecay_domain::errors::Result<()>> + Send + '_>,
+    Box<dyn std::future::Future<Output = tracedecay_domain::errors::Result<()>> + Send + 'a>,
 > {
     // Erase the deeply nested gain-read future before it reaches the measured
     // wrapper so every profiling feature can compute its layout.
+    let profile = profile.clone();
     Box::pin(async move {
+        let profile = &profile;
         let since = tracedecay_session_memory::provider_usage::provider_usage_range_start(range)
             .map_err(|message| tracedecay_domain::errors::TraceDecayError::Config { message })?;
         let since = i64::try_from(since).map_err(|_| {
@@ -66,6 +71,7 @@ fn handle_gain_inner(
         };
 
         let result = daemon_tool_json(
+            profile,
             None,
             "tracedecay_admin_cli",
             serde_json::json!({

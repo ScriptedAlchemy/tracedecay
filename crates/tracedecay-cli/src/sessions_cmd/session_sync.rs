@@ -1,4 +1,5 @@
 use std::path::Path;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::{Value, json};
 
@@ -8,15 +9,17 @@ use super::{call_daemon_tool, resolve_cli_project_root};
 const GIT_SYNC_DEFAULT_WINDOW_SECS: i64 = 90 * 24 * 60 * 60;
 
 pub(super) async fn run_git_sync(
+    profile: &ProfileRoot,
     project_id: Option<String>,
     project_path: Option<String>,
     since: Option<String>,
     limit_sessions: usize,
     dry_run: bool,
 ) -> tracedecay_domain::errors::Result<()> {
-    let project_root = resolve_cli_project_root(None, project_id, project_path).await?;
+    let project_root = resolve_cli_project_root(profile, None, project_id, project_path).await?;
     let since_ts = resolve_git_sync_since(since.as_deref())?;
     let outcome = call_daemon_tool(
+        profile,
         &project_root,
         "tracedecay_admin_cli",
         json!({
@@ -28,7 +31,7 @@ pub(super) async fn run_git_sync(
     )
     .await?;
 
-    await_session_sync_completion(&project_root, "session git sync", outcome).await?;
+    await_session_sync_completion(profile, &project_root, "session git sync", outcome).await?;
     if dry_run {
         println!("git-sync (dry-run): no rows were written");
     }
@@ -36,12 +39,14 @@ pub(super) async fn run_git_sync(
 }
 
 pub(super) async fn run_sync_status(
+    profile: &ProfileRoot,
     project_id: Option<String>,
     project_path: Option<String>,
     idempotency_key: String,
 ) -> tracedecay_domain::errors::Result<()> {
-    let project_root = resolve_cli_project_root(None, project_id, project_path).await?;
+    let project_root = resolve_cli_project_root(profile, None, project_id, project_path).await?;
     let outcome = call_daemon_tool(
+        profile,
         &project_root,
         "tracedecay_admin_cli",
         json!({
@@ -191,6 +196,7 @@ fn session_sync_remaining_work(outcome: &Value) -> Option<u64> {
 }
 
 pub(super) async fn await_session_sync_completion(
+    profile: &ProfileRoot,
     project_root: &Path,
     label: &str,
     mut outcome: Value,
@@ -220,6 +226,7 @@ pub(super) async fn await_session_sync_completion(
                 tokio::time::sleep(poll_interval).await;
                 poll_interval = (poll_interval * 2).min(MAX_POLL_INTERVAL);
                 outcome = call_daemon_tool(
+                    profile,
                     project_root,
                     "tracedecay_admin_cli",
                     json!({

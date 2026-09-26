@@ -23,6 +23,7 @@
 //! TraceDecay-owned readback cannot drift apart.
 
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
@@ -84,7 +85,7 @@ impl AgentIntegration for CopilotIntegration {
         doctor_check_cli_settings(dc, &ctx.home);
         super::doctor_check_managed_skill_prompt_indexes(
             dc,
-            &ctx.home,
+            ctx.profile.data_dir(),
             &[
                 super::vscode_data_dir(&ctx.home).join("User/prompts/copilot-instructions.md"),
                 super::vscode_insiders_data_dir(&ctx.home)
@@ -102,7 +103,7 @@ impl AgentIntegration for CopilotIntegration {
             || super::copilot_cli_dir(home).is_dir()
     }
 
-    fn primary_config_path(&self, home: &Path) -> Option<PathBuf> {
+    fn primary_config_path(&self, home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         Some(vscode_settings_path(home))
     }
 
@@ -131,11 +132,12 @@ impl AgentIntegration for CopilotIntegration {
         &self,
         components: &[super::host_bundle::HostComponentV1],
         home: &Path,
+        profile: &ProfileRoot,
     ) -> Vec<PathBuf> {
         if components == [super::host_bundle::HostComponentV1::ContextMcp] {
             vec![copilot_cli_mcp_config_path(home)]
         } else {
-            self.host_registration_paths(home)
+            self.host_registration_paths(home, profile)
         }
     }
 
@@ -171,7 +173,7 @@ impl AgentIntegration for CopilotIntegration {
         Ok(())
     }
 
-    fn has_tracedecay(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
         vscode_mcp_servers_has_tracedecay(&vscode_settings_path(home))
             || vscode_mcp_servers_has_tracedecay(&vscode_insiders_settings_path(home))
             || super::mcp_config_has_tracedecay(
@@ -184,10 +186,11 @@ impl AgentIntegration for CopilotIntegration {
     fn export_managed_skills(
         &self,
         home: &Path,
-        profile_root: &Path,
+        profile: &ProfileRoot,
     ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
     {
-        if !self.has_tracedecay(home) {
+        let profile_root = profile.data_dir();
+        if !self.has_tracedecay(home, profile) {
             return Ok(Vec::new());
         }
         let prompt_paths = [

@@ -14,6 +14,7 @@
 //! path (`tracedecay_session_memory::context::RegisteredScopeResolver`).
 
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::Value;
 
@@ -32,9 +33,11 @@ pub(crate) struct ResolvedCliScope {
 /// registry's canonical root and exact application scope. This helper never
 /// discovers or substitutes a path from the process CWD.
 pub(crate) async fn resolve_project_scope(
+    profile: &ProfileRoot,
     project_path: PathBuf,
 ) -> tracedecay_domain::errors::Result<ResolvedCliScope> {
     let payload = daemon_tool_json(
+        profile,
         None,
         "tracedecay_admin_cli",
         serde_json::json!({

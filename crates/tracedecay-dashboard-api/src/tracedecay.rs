@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use tracedecay_automation_runtime::automation::host_io::HostIo;
 use tracedecay_configuration::UserSettingsDaemonClient;
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::storage::StoreLayout;
 
@@ -14,6 +15,9 @@ use tracedecay_configuration::RetentionConfig;
 /// state construction.
 #[derive(Clone)]
 pub struct DashboardProjectContext {
+    /// The profile that owns the dashboard's daemon: its data directory,
+    /// home, and global database.
+    pub profile: ProfileRoot,
     pub store_layout: StoreLayout,
     pub dashboard_db_path: PathBuf,
     pub dashboard_database: Arc<Database>,

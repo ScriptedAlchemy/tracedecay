@@ -6,9 +6,9 @@ pub(crate) use std::sync::atomic::{AtomicBool, Ordering};
 pub(crate) use std::thread;
 
 pub(crate) use crate::common::{
-    EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK, MessageRecordBuilder, create_runtime,
-    fake_codex_bin, get_json, http_agent, http_agent_with_timeout, install_fake_codex_launcher,
-    pick_free_port, response_to_json, tempdir_or_panic, wait_for_dashboard,
+    MessageRecordBuilder, create_runtime, fake_codex_bin, get_json, http_agent,
+    http_agent_with_timeout, install_fake_codex_launcher, pick_free_port, response_to_json,
+    tempdir_or_panic, wait_for_dashboard,
 };
 pub(crate) use crate::runtime::DashboardTestRuntimeV1;
 pub(crate) use serde_json::Value;
@@ -19,7 +19,7 @@ pub(crate) use tracedecay_domain::{
 };
 pub(crate) use tracedecay_lcm::{LcmSourceRef, LcmSummaryNodeDraft};
 pub(crate) use tracedecay_project::project::TraceDecay;
-pub(crate) use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
+pub(crate) use tracedecay_runtime_core::config::ProfileRoot;
 pub(crate) use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 pub(crate) use tracedecay_sessions::admission::HostAdmissionScope;
 pub(crate) use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
@@ -75,10 +75,7 @@ otherwise assume the integration is broken when the store simply has no rows yet
 
 pub(crate) struct DashboardFixture {
     pub(crate) _tmp: TempDir,
-    pub(crate) _env_guard: EnvVarGuard,
-    pub(crate) _data_dir_guard: EnvVarGuard,
-    pub(crate) _home_guard: EnvVarGuard,
-    pub(crate) _userprofile_guard: EnvVarGuard,
+    pub(crate) project_id: String,
     pub(crate) global_db_path: std::path::PathBuf,
     pub(crate) base_url: String,
     pub(crate) project_root: std::path::PathBuf,
@@ -228,6 +225,7 @@ fn spawn_dashboard_server_with_runner(
             };
             let result = dashboard::run_until_shutdown_for_tests_with_host_admission(
                 cg.clone(),
+                host_runtime.profile(),
                 authority,
                 project_graphs,
                 tracedecay_dashboard_api::DashboardTestEndpointV1 {
@@ -266,6 +264,7 @@ pub(crate) fn write_file(path: &Path, content: &str) {
 }
 
 pub(crate) async fn setup_project(
+    profile: &ProfileRoot,
     project_root: &Path,
 ) -> (TraceDecay, Arc<DashboardTestRuntimeV1>) {
     write_file(
@@ -285,14 +284,9 @@ pub(crate) async fn setup_project(
                 ProjectId::new(format!("dashboard_fixture_{suffix}"))
                     .unwrap_or_else(|error| panic!("mint dashboard fixture identity: {error}"))
             });
-    let profile_root = tracedecay_runtime_core::storage::default_profile_root()
-        .unwrap_or_else(|error| panic!("resolve dashboard fixture profile root: {error}"));
-    let open_options = tracedecay_project::project::TraceDecayOpenOptions {
-        profile_root: Some(profile_root.clone()),
-        global_db_path: None,
-    };
+    let open_options = tracedecay_project::project::TraceDecayOpenOptions::for_profile(profile);
     let runtime = Arc::new(
-        DashboardTestRuntimeV1::project(&profile_root, project_root, project_id)
+        DashboardTestRuntimeV1::project(profile, project_root, project_id)
             .await
             .unwrap_or_else(|error| panic!("open dashboard fixture authority: {error}")),
     );
@@ -312,15 +306,14 @@ pub(crate) async fn open_dashboard_host_runtime(cg: &TraceDecay) -> Arc<Dashboar
         .and_then(|project_id| ProjectId::new(project_id.to_owned()).ok())
         .unwrap_or_else(|| panic!("dashboard fixture requires an authoritative project id"));
     let project_id_text = project_id.as_str().to_owned();
+    let profile = ProfileRoot::new(
+        cg.profile_root()
+            .unwrap_or_else(|error| panic!("resolve dashboard test profile root: {error}")),
+    );
     let runtime = Arc::new(
-        DashboardTestRuntimeV1::project(
-            tracedecay_runtime_core::storage::default_profile_root()
-                .unwrap_or_else(|error| panic!("resolve dashboard test profile root: {error}")),
-            cg.project_root(),
-            project_id,
-        )
-        .await
-        .unwrap_or_else(|error| panic!("open dashboard host-admission runtime: {error}")),
+        DashboardTestRuntimeV1::project(&profile, cg.project_root(), project_id)
+            .await
+            .unwrap_or_else(|error| panic!("open dashboard host-admission runtime: {error}")),
     );
     runtime
         .upsert_code_project(&project_id_text, cg.project_root(), None, None, None)
@@ -1025,27 +1018,33 @@ async fn start_dashboard_fixture_with_options_and_delivery(
     let profile_root = tmp_root.join("profile").join(".tracedecay");
     let requested_global_db_path = profile_root.join("global.db");
     // Skill lifecycle endpoints re-export managed skills into agent configs
-    // under the process home; point HOME at the fixture so tests never touch
+    // under the profile's home; the fixture's own home keeps tests away from
     // the developer's real agent installations.
     let home = tmp_root.join("home");
     std::fs::create_dir_all(&home)
         .unwrap_or_else(|err| panic!("failed to create fixture home: {err}"));
-    let env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &requested_global_db_path);
-    let data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
-    let home_guard = EnvVarGuard::set("HOME", &home);
-    let userprofile_guard = EnvVarGuard::set("USERPROFILE", &home);
+    let profile = ProfileRoot::new(&profile_root)
+        .with_home(&home)
+        .with_global_db_override(&requested_global_db_path);
     std::fs::create_dir_all(&project_root)
         .unwrap_or_else(|err| panic!("failed to create fixture project root: {err}"));
+    // Fixtures run concurrently in one process; each owns its project
+    // identity so process-wide project registries never alias two fixtures.
+    static FIXTURE_ORDINAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let project_id = format!(
+        "dashboard_fixture_project_{}",
+        FIXTURE_ORDINAL.fetch_add(1, Ordering::Relaxed)
+    );
     if let Err(err) = tracedecay_runtime_core::storage::pin_fixture_repository_identity(
         &project_root,
-        "dashboard_fixture_project",
+        &project_id,
     ) {
         panic!("failed to enroll dashboard fixture in profile storage: {err}");
     }
 
     // Root composition retains the exact graph and registered database
     // authorities for the server lifetime.
-    let (cg, host_runtime) = setup_project(&project_root).await;
+    let (cg, host_runtime) = setup_project(&profile, &project_root).await;
     let global_db_path = host_runtime
         .database_path(HostAdmissionScope::Profile)
         .expect("dashboard fixture profile database path")
@@ -1075,10 +1074,7 @@ async fn start_dashboard_fixture_with_options_and_delivery(
 
     DashboardFixture {
         _tmp: tmp,
-        _env_guard: env_guard,
-        _data_dir_guard: data_dir_guard,
-        _home_guard: home_guard,
-        _userprofile_guard: userprofile_guard,
+        project_id,
         global_db_path,
         base_url,
         project_root,

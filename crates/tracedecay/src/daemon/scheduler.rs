@@ -1732,7 +1732,6 @@ mod global_retention_tests {
 
     #[tokio::test]
     async fn retention_defers_while_daemon_writer_is_held_and_prunes_once_after_release() {
-        let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = RegisteredGlobalDbHarness::open("global-retention-writer-admission").await;
         let database = harness.registered.clone();
         seed_eligible_projected_message(database.as_ref()).await;
@@ -1800,7 +1799,6 @@ mod global_retention_tests {
 
     #[tokio::test]
     async fn cancelled_admitted_retention_releases_writer_and_cadence_for_retry() {
-        let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = RegisteredGlobalDbHarness::open("global-retention-cancelled-admission").await;
         let database = harness.registered.clone();
         seed_eligible_projected_message(database.as_ref()).await;
@@ -1862,7 +1860,6 @@ mod global_retention_tests {
 
     #[tokio::test]
     async fn failed_retention_releases_writer_and_cadence_for_retry() {
-        let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = RegisteredGlobalDbHarness::open("global-retention-prune-failure").await;
         let database = harness.registered.clone();
         seed_eligible_projected_message(database.as_ref()).await;

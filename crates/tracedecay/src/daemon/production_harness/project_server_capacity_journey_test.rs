@@ -35,7 +35,8 @@ async fn open_project_composition(
         catalog_version: String::new(),
         moved_store_adoption: tracedecay_project::project::MovedStoreAdoption::Never,
     };
-    let (canonical_project_path, _) = project_route_for_handshake(&handshake)?;
+    let (canonical_project_path, _) =
+        project_route_for_handshake(&handshake, resources.store_administration.owner_home()?)?;
     resources
         .store_administration
         .with_writer(|| async {

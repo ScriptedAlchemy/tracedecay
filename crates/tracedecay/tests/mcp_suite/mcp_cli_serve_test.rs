@@ -31,8 +31,6 @@ use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 #[cfg(unix)]
-use tokio::sync::Mutex;
-#[cfg(unix)]
 use tracedecay::mcp::handle_tool_call;
 use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
@@ -48,9 +46,6 @@ use tracedecay_project::project::TraceDecayOpenOptions;
 use tracedecay_runtime_core::storage::default_profile_sharded_layout;
 #[cfg(unix)]
 use tracedecay_runtime_core::storage::{PrivateStoreIo, pin_fixture_repository_identity};
-
-#[cfg(unix)]
-static READ_ONLY_SERVE_ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
 fn json_rpc_tool_payload(stdout: &[u8], id: i64) -> Value {
     let stdout_text = String::from_utf8(stdout.to_vec()).unwrap();
@@ -896,7 +891,6 @@ async fn serve_daemon_proxy_reports_daemon_disconnect_as_json_rpc_error() {
 #[cfg(unix)]
 #[tokio::test]
 async fn explicit_read_only_open_reports_and_guards_read_only_store() {
-    let _env_guard = READ_ONLY_SERVE_ENV_LOCK.lock().await;
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let open_options = TraceDecayOpenOptions {

@@ -10,14 +10,16 @@ use std::path::PathBuf;
 use tracedecay_daemon_protocol::DaemonHandshake;
 use tracedecay_domain::errors::Result;
 
-/// Handshake for this process's current client identity and binary version.
+/// Handshake for `profile`'s client identity and this binary's version.
 pub fn handshake_for_current_client(
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
     project_path: Option<PathBuf>,
     scope_prefix: Option<String>,
     timings: bool,
     allow_init: bool,
 ) -> Result<DaemonHandshake> {
     tracedecay_daemon_control::handshake_for_current_client(
+        profile,
         binary_version()?,
         project_path,
         scope_prefix,

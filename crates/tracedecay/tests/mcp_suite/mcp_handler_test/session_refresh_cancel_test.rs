@@ -11,7 +11,7 @@
 use crate::common::fixture::git_run as git;
 #[cfg(feature = "test-transport")]
 use crate::fixture;
-use crate::support::{GlobalDbEnvGuard, HomeEnvGuard, extract_text, lock_process_env};
+use crate::support::extract_text;
 use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::Arc;
@@ -28,7 +28,6 @@ use tracedecay_daemon_identity::profile_identity;
 use tracedecay_daemon_service::DaemonSessionRefreshService;
 use tracedecay_domain::UtcMicros;
 use tracedecay_project::project::TraceDecay;
-use tracedecay_runtime_core::storage::default_profile_root;
 
 const CANCEL_RESULT_SCHEMA: &str = "schema.application.retained.session-refresh-cancel.result";
 const SESSION_ID: &str = "session.cancel-proof";
@@ -269,11 +268,8 @@ async fn production_call(
 #[cfg(feature = "test-transport")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn production_mcp_cancel_refuses_bad_handles_and_keeps_a_finished_receipt() {
-    let env_lock = lock_process_env().await;
     let root = crate::support::test_temp_dir();
     let isolation = root.path().join("composition");
-    let home = root.path().join("home");
-    let _home_guard = HomeEnvGuard::set(&env_lock, &home);
     let project = isolation.join("project");
     std::fs::create_dir_all(project.join("src")).expect("project source directory");
     fixture::write_indexed_fixture_sources(&project);
@@ -501,21 +497,19 @@ async fn production_mcp_cancel_refuses_bad_handles_and_keeps_a_finished_receipt(
 /// the cancelled receipt and a repeat returns that same receipt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancel_of_an_unfinished_refresh_stores_a_cancelled_receipt() {
-    let env_lock = lock_process_env().await;
     let root = crate::support::test_temp_dir();
-    let home = root.path().join("home");
-    let _home_guard = HomeEnvGuard::set(&env_lock, &home);
-    let _global_db = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
+    let profile = crate::common::isolated_profile_under_home(&root.path().join("home"));
     let project = root.path().join("project");
     std::fs::create_dir_all(project.join("src")).expect("project source directory");
     std::fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").expect("probe source");
     let (graph, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.session-refresh-cancel",
     )
     .await
     .expect("registered fixture");
-    let profile_root = default_profile_root().expect("fixture profile root");
+    let profile_root = profile.data_dir().to_path_buf();
     let profile_identity =
         profile_identity::load_or_create(&profile_root).expect("fixture profile identity");
     let profile_id = profile_identity.profile_id().as_str().to_owned();

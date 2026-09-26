@@ -9,7 +9,6 @@ use tempfile::TempDir;
 use super::super::get_tool_definitions;
 use super::dispatch_test_support::*;
 use super::*;
-use tracedecay_project::config::lock_user_data_dir_test_env;
 
 /// Records the daemon operation every multi-root tool routes to, then refuses
 /// it. The refusal is the point: it proves the MCP name reached the closed
@@ -83,13 +82,12 @@ async fn retired_file_metadata_is_absent_and_refused_by_public_dispatch() {
             .contract(retired)
             .is_none()
     );
-
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("temporary project");
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("retired-file-metadata");
     fs::create_dir_all(&project).expect("project root");
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.retired-file-metadata",
     )
@@ -114,16 +112,18 @@ async fn retired_file_metadata_is_absent_and_refused_by_public_dispatch() {
 
 #[tokio::test]
 async fn multi_root_tools_invoke_the_closed_daemon_routes() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("multi-root-mcp");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn mcp_multi_root() {}\n").unwrap();
-    let (cg, _runtime) =
-        TraceDecay::init_test_fixture_with_registered_runtime(&project, "project.mcp-multi-root")
-            .await
-            .unwrap();
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
+        &project,
+        "project.mcp-multi-root",
+    )
+    .await
+    .unwrap();
     let executor = RecordingMultiRootExecutor::default();
     let requests = [
         (
@@ -183,9 +183,8 @@ async fn multi_root_tools_invoke_the_closed_daemon_routes() {
 
 #[tokio::test]
 async fn unmounted_files_graph_tool_owner_reports_a_real_orphaned_rust_source() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("unmounted-files-root-dispatch");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
@@ -200,6 +199,7 @@ async fn unmounted_files_graph_tool_owner_reports_a_real_orphaned_rust_source() 
     )
     .unwrap();
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.mcp-unmounted-files-root-dispatch",
     )
@@ -278,13 +278,13 @@ fn git_dispatch_family_holds_only_the_internal_branch_add_tool() {
 
 #[tokio::test]
 async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("dispatch-registry");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn dispatch_probe() {}\n").unwrap();
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.mcp-dispatch-registry",
     )
@@ -428,12 +428,12 @@ fn registered_project_selector_dispatch_policy_matches_tool_schemas() {
 
 #[tokio::test]
 async fn status_and_runtime_share_cursor_session_ingest_authority() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("active");
     fs::create_dir_all(&project).unwrap();
     let (cg, runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.mcp-session-ingest-authority",
     )
@@ -564,9 +564,8 @@ async fn status_and_runtime_share_cursor_session_ingest_authority() {
 /// state.
 #[tokio::test]
 async fn status_serving_branch_reports_the_lane_serving_truth() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("status-serving-truth");
     fs::create_dir_all(project.join("src")).unwrap();
     run_git_in(&project, &["init", "-b", "main"]);
@@ -574,6 +573,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     run_git_in(&project, &["add", "."]);
     run_git_in(&project, &["commit", "-m", "initial"]);
     let (cg, runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.mcp-status-serving-truth",
     )
@@ -590,7 +590,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     let cg = runtime
         .open_project_graph_for_test(
             &project,
-            tracedecay_project::project::TraceDecayOpenOptions::default(),
+            tracedecay_project::project::TraceDecayOpenOptions::for_profile(profile.profile()),
         )
         .await
         .unwrap();
@@ -1005,13 +1005,13 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
 
 #[tokio::test]
 async fn unsupported_selector_tool_rejects_explicit_project_selector() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("active");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn active_symbol() {}\n").unwrap();
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.mcp-unsupported-selector",
     )
@@ -1043,13 +1043,13 @@ async fn unsupported_selector_tool_rejects_explicit_project_selector() {
 
 #[tokio::test]
 async fn query_search_rejects_cross_project_selector() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("active");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn active_symbol() {}\n").unwrap();
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.mcp-cross-selector",
     )
@@ -1082,10 +1082,8 @@ async fn query_search_rejects_cross_project_selector() {
 async fn selected_project_retrieve_finds_selected_project_response_handle() {
     const LARGE_RESPONSE_MARKER_COUNT: usize = 200;
     const LAST_RETURNED_RESPONSE_MARKER: usize = 19;
-
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let active_project = dir.path().join("active");
     let target_project = dir.path().join("target");
     fs::create_dir_all(active_project.join("src")).unwrap();
@@ -1107,6 +1105,7 @@ async fn selected_project_retrieve_finds_selected_project_response_handle() {
     fs::write(target_project.join("src/lib.rs"), target_source).unwrap();
 
     let (active, active_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &active_project,
         "project.mcp-active-retrieval",
     )
@@ -1364,13 +1363,13 @@ fn deadline_from_now(offset_micros: i64) -> tracedecay_contracts::Deadline {
 /// runs, so the `pr_context` walk cannot proceed once the horizon is gone.
 #[tokio::test]
 async fn pr_context_rejects_an_already_elapsed_deadline_without_running_the_walk() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("git-deadline-elapsed");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.mcp-git-deadline-elapsed",
     )
@@ -1415,9 +1414,8 @@ async fn pr_context_rejects_an_already_elapsed_deadline_without_running_the_walk
 /// carried deadline, never spinning until the horizon.
 #[tokio::test]
 async fn pr_context_unresolvable_ref_fails_fast_within_deadline() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("git-pr-context-badref");
     fs::create_dir_all(project.join("src")).unwrap();
     run_git_in(&project, &["init", "-b", "main"]);
@@ -1426,6 +1424,7 @@ async fn pr_context_unresolvable_ref_fails_fast_within_deadline() {
     run_git_in(&project, &["commit", "-m", "initial"]);
 
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.mcp-git-pr-context-badref",
     )
@@ -1469,9 +1468,8 @@ async fn pr_context_unresolvable_ref_fails_fast_within_deadline() {
 
 #[tokio::test]
 async fn pr_context_returns_git_evidence_while_verified_graph_is_unavailable() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("git-pr-context-cold-graph");
     fs::create_dir_all(project.join("src")).unwrap();
     run_git_in(&project, &["init", "-b", "main"]);
@@ -1488,6 +1486,7 @@ async fn pr_context_returns_git_evidence_while_verified_graph_is_unavailable() {
     run_git_in(&project, &["commit", "-m", "change source"]);
 
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.mcp-git-pr-context-cold-graph",
     )
@@ -1552,9 +1551,8 @@ async fn pr_context_returns_git_evidence_while_verified_graph_is_unavailable() {
 
 #[tokio::test]
 async fn graph_tools_reject_blank_node_ids_and_zero_depth_with_typed_errors() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("blank-node-id");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
@@ -1562,10 +1560,13 @@ async fn graph_tools_reject_blank_node_ids_and_zero_depth_with_typed_errors() {
         "pub fn blank_probe_callee() {}\npub fn blank_probe() { blank_probe_callee(); }\n",
     )
     .unwrap();
-    let (cg, _runtime) =
-        TraceDecay::init_test_fixture_with_registered_runtime(&project, "project.blank-node-id")
-            .await
-            .unwrap();
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
+        &project,
+        "project.blank-node-id",
+    )
+    .await
+    .unwrap();
     for (tool_name, operation) in [
         ("tracedecay_impact", ApplicationSurfaceOperation::Impact),
         ("tracedecay_node", ApplicationSurfaceOperation::Node),
@@ -1754,13 +1755,13 @@ fn the_ceiling_reports_a_typed_retryable_problem() {
 /// by it, the bound changes failure, not work.
 #[tokio::test]
 async fn a_warm_call_is_unaffected_by_the_ceiling() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("dispatch-ceiling-warm");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.mcp-dispatch-ceiling-warm",
     )
@@ -1791,13 +1792,13 @@ async fn a_warm_call_is_unaffected_by_the_ceiling() {
 /// serving generation; a proven-current open leaves the response untouched.
 #[tokio::test]
 async fn a_stale_served_graph_read_carries_the_typed_freshness_trailer() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("stale-graph-trailer");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.mcp-stale-graph-trailer",
     )
@@ -1872,13 +1873,13 @@ async fn a_stale_served_graph_read_carries_the_typed_freshness_trailer() {
 /// trailer from it.
 #[tokio::test]
 async fn graph_tool_owner_reports_the_served_generation_for_the_trailer() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("graph-tool-trailer");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.graph-tool-trailer",
     )
@@ -1958,20 +1959,22 @@ fn uncataloged_tool_fails_before_handler_dispatch() {
 
 #[tokio::test]
 async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("retired-user-lcm-effect");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.mcp-retired-user-lcm-effect",
     )
     .await
     .unwrap();
-    let profile_root = dir.path().join("retired-user-lcm-profile");
-    let sessions_db = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+    let lcm_profile = tracedecay_runtime_core::config::ProfileRoot::new(
+        dir.path().join("retired-user-lcm-profile"),
+    );
+    let sessions_db = tracedecay_sessions::runtime::user_sessions_db_path(lcm_profile.data_dir());
 
     let error = handle_tool_call_with_registry_options(
         &cg,
@@ -1984,7 +1987,7 @@ async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
         None,
         None,
         ToolCallRegistryOptions {
-            profile_root: Some(&profile_root),
+            profile: Some(&lcm_profile),
             ..Default::default()
         },
     )
@@ -2007,13 +2010,13 @@ async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
 
 #[tokio::test]
 async fn admin_sync_reports_terminal_publication_corruption_without_queueing() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("temporary project");
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("terminal-code-index-sync");
     fs::create_dir_all(project.join("src")).expect("project source");
     fs::write(project.join("src/lib.rs"), "pub fn terminal_sync() {}\n").expect("project source");
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.terminal-code-index-sync",
     )

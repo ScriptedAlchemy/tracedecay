@@ -11,16 +11,13 @@ use tracedecay_automation_runtime::automation::managed_skills::{
     create_managed_skill, default_managed_skill_targets,
 };
 use tracedecay_automation_runtime::automation::skill_usage::load_skill_usage_record;
-use tracedecay_runtime_core::storage::default_profile_root;
+use tracedecay_project::project::TraceDecayOpenOptions;
 
 use crate::fixture;
 use crate::mcp_server_test::support::{
     jsonrpc_request, response_with_id, run_client_connection_with_messages,
 };
-use crate::support::{
-    GlobalDbEnvGuard, HomeEnvGuard, ProcessEnvGuard, TestTraceDecay, lock_process_env,
-    open_active_project_scoped_runtime,
-};
+use crate::support::{TestTraceDecay, open_active_project_scoped_runtime};
 
 const PROBE_ID: &str = "probe-skill";
 const OTHER_ID: &str = "other-skill";
@@ -53,26 +50,23 @@ struct SkillViewServer {
     server: Arc<McpServer>,
     profile_root: PathBuf,
     _dir: TempDir,
-    _home_guard: HomeEnvGuard,
-    _global_db_guard: GlobalDbEnvGuard,
-    _env_lock: ProcessEnvGuard,
 }
 
 async fn open_skill_view_server() -> SkillViewServer {
-    let env_lock = lock_process_env().await;
     let dir = TempDir::new().expect("skill view temp dir");
     let project = dir.path().join("repo");
     std::fs::create_dir_all(project.join("src")).expect("fixture source dir");
     std::fs::write(project.join("src/lib.rs"), "pub fn fixture() {}\n").expect("fixture source");
-    let home = dir.path().join("home");
-    let home_guard = HomeEnvGuard::set(&env_lock, &home);
-    let global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
+    let profile = crate::common::isolated_profile_under_home(&dir.path().join("home"));
     let graph = TestTraceDecay::new(
-        fixture::init_project_from_template(&project)
-            .await
-            .expect("initialized skill-view project"),
+        fixture::init_project_from_template_with_options(
+            &project,
+            TraceDecayOpenOptions::for_profile(&profile),
+        )
+        .await
+        .expect("initialized skill-view project"),
     );
-    let profile_root = default_profile_root().expect("isolated profile root");
+    let profile_root = profile.data_dir().to_path_buf();
     let runtime = open_active_project_scoped_runtime(&graph).await;
     let server =
         McpServer::new_with_host_admission_test_runtime_for_test(graph.into_inner(), None, runtime)
@@ -82,9 +76,6 @@ async fn open_skill_view_server() -> SkillViewServer {
         server,
         profile_root,
         _dir: dir,
-        _home_guard: home_guard,
-        _global_db_guard: global_db_guard,
-        _env_lock: env_lock,
     }
 }
 

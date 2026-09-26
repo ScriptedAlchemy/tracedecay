@@ -18,9 +18,10 @@ pub(crate) async fn setup_target_project(fixture: &DashboardFixture) -> (PathBuf
         .await
         .expect("initialize retained target project");
     let target_cg = Arc::new(target_cg);
-    fixture
-        .project_graphs
-        .register(Arc::new(dashboard::dashboard_project_context(&target_cg)));
+    fixture.project_graphs.register(Arc::new(
+        dashboard::dashboard_project_context(&target_cg, Some(fixture.host_runtime.profile()))
+            .expect("target dashboard project context"),
+    ));
     (target_root, target_cg)
 }
 
@@ -34,9 +35,6 @@ fn project_id(cg: &TraceDecay) -> String {
 
 #[test]
 fn dashboard_projects_endpoint_lists_registered_projects_and_active_project() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture_without_memory().await;
@@ -136,9 +134,6 @@ fn dashboard_projects_endpoint_lists_registered_projects_and_active_project() {
 
 #[test]
 fn dashboard_projects_endpoint_does_not_launder_registry_read_failure() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture_without_memory().await;
@@ -181,9 +176,6 @@ fn dashboard_projects_endpoint_does_not_launder_registry_read_failure() {
 
 #[test]
 fn project_scoped_plugin_routes_read_selected_project_store() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture_without_memory().await;
@@ -270,9 +262,6 @@ fn project_scoped_plugin_routes_read_selected_project_store() {
 
 #[test]
 fn project_scoped_gateway_refuses_profile_owned_automation_skills() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(false).await;
@@ -314,9 +303,6 @@ fn project_scoped_gateway_refuses_profile_owned_automation_skills() {
 
 #[test]
 fn project_scoped_gateway_reports_registry_read_failures_as_unavailable() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture_without_memory().await;

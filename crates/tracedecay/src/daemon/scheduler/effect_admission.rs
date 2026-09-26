@@ -383,7 +383,13 @@ fn run_automation_scheduler_tick_inner<'a>(
             );
             return Ok(());
         }
-        let automation_context = cg.automation_project_context()?;
+        let automation_context = cg.automation_project_context(
+            engine
+                .invocation
+                .invocation_service()
+                .owner_home()
+                .map(std::path::Path::to_path_buf),
+        )?;
         if let Ok(profile_database) = engine
             .store_administration
             .registered_profile_database()

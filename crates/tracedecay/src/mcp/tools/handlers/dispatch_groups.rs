@@ -1,6 +1,7 @@
 use serde_json::Value;
 use tracedecay_contracts::{ApplicationOperation, RetainedSurfaceOperation};
 use tracedecay_graph_query::VerifiedGraphQueryRequest;
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -307,7 +308,7 @@ fn dispatch_admin_tools_inner<'a>(
                     args,
                     options.global_db,
                     options.accounting_db,
-                    options.profile_root,
+                    options.profile.map(ProfileRoot::data_dir),
                     options.session_authorities,
                     options.session_sync_service,
                     options.application_request_id.clone(),
@@ -790,12 +791,28 @@ fn dispatch_memory_tools_inner<'a>(
                 dispatch_controls::dispatch_analytics(cg, args, options).await
             }
             "tracedecay_skill_list" => {
-                skills::handle_skill_list(cg, args, options.accounting_db).await
+                skills::handle_skill_list(
+                    cg,
+                    args,
+                    options.accounting_db,
+                    options.profile.map(ProfileRoot::data_dir),
+                )
+                .await
             }
             "tracedecay_skill_view" => {
-                skills::handle_skill_view(cg, args, options.accounting_db).await
+                skills::handle_skill_view(
+                    cg,
+                    args,
+                    options.accounting_db,
+                    options.profile.map(ProfileRoot::data_dir),
+                )
+                .await
             }
-            "tracedecay_hermes_skill_bridge" => skills::handle_hermes_skill_bridge(cg, &args),
+            "tracedecay_hermes_skill_bridge" => skills::handle_hermes_skill_bridge(
+                cg,
+                &args,
+                options.profile.and_then(ProfileRoot::home),
+            ),
             _ => Err(unknown_tool_error(tool_name)),
         }
     })
@@ -842,7 +859,7 @@ fn dispatch_session_workflow_tools_inner<'a>(
                     options.registered_project_session_db.clone(),
                     options.registered_profile_session_db.clone(),
                     options.daemon_user_profile_id.clone(),
-                    options.profile_root.map(std::path::Path::to_path_buf),
+                    options.profile.cloned(),
                     options.dashboard_session_retrieval_service.clone(),
                     options.dashboard_session_retrieval_identity.clone(),
                     options.registered_savings_db.clone(),

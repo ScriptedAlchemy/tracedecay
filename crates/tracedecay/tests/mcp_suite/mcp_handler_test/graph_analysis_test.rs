@@ -10,8 +10,8 @@ use std::time::Duration;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay_domain::errors::{Result as TraceDecayResult, TraceDecayError};
 use tracedecay_mcp::ToolResult;
-use tracedecay_project::project::TraceDecay;
-use tracedecay_runtime_core::storage::resolve_layout_for_current_profile;
+use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_runtime_core::storage::resolve_layout;
 
 struct MountedProductionProject {
     harness: ProductionProjectCompositionHarnessV1,
@@ -476,10 +476,7 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
     let project_root = dir.path().join("project");
     fs::create_dir_all(&project_root).unwrap();
     let project = project_root.as_path();
-    let env_lock = lock_process_env().await;
-    let home = project.join("home");
-    let _home_guard = HomeEnvGuard::set(&env_lock, &home);
-    let _global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
+    let profile = crate::common::isolated_profile_under_home(&project.join("home"));
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn f() -> u32 { 1 }\n").unwrap();
     git_run(project, &["init"]);
@@ -489,8 +486,12 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
     git_run(project, &["commit", "-m", "initial"]);
     git_run(project, &["branch", "-M", "main"]);
 
-    let _initialized = TestTraceDecay::new(TraceDecay::init(project).await.unwrap());
-    let tracedecay_dir = resolve_layout_for_current_profile(project)
+    let _initialized = TestTraceDecay::new(
+        TraceDecay::init_with_options(project, TraceDecayOpenOptions::for_profile(&profile))
+            .await
+            .unwrap(),
+    );
+    let tracedecay_dir = resolve_layout(project, profile.data_dir())
         .unwrap()
         .data_root;
     tracedecay_runtime_core::branch_meta::save_branch_meta(
@@ -499,7 +500,11 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
     )
     .unwrap();
 
-    let cg = TestTraceDecay::new(TraceDecay::open(project).await.unwrap());
+    let cg = TestTraceDecay::new(
+        TraceDecay::open_with_options(project, TraceDecayOpenOptions::for_profile(&profile))
+            .await
+            .unwrap(),
+    );
     git_run(project, &["checkout", "-b", "feature"]);
 
     // Branch drift diagnostics moved off `tracedecay_branch_list` (now the

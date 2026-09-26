@@ -8,7 +8,6 @@
 #![allow(clippy::too_many_lines)]
 #[path = "../common/mod.rs"]
 mod common;
-mod home_env_lock;
 mod support;
 
 mod fact_merge_hydration_test;

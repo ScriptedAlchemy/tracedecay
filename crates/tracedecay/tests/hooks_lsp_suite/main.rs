@@ -2,12 +2,10 @@
 //! diagnostics tests.
 //!
 //! These tests spawn subprocesses (fake LSP servers, git, the tracedecay
-//! binary) or mutate process-wide environment variables, so they live in a
-//! separate binary from the pure in-process `graph_suite`. Merging the
-//! formerly separate binaries cuts Windows CI link time.
-//!
-//! Env-mutating tests across all modules must serialize on
-//! `common::GLOBAL_DB_ENV_LOCK` because they now share one process.
+//! binary), so they live in a separate binary from the pure in-process
+//! `graph_suite`. Merging the formerly separate binaries cuts Windows CI link
+//! time. Every fixture hands its profile explicitly; none mutates the process
+//! environment.
 
 #![allow(clippy::too_many_lines)]
 #[path = "../common/mod.rs"]

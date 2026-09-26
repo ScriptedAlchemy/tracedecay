@@ -33,7 +33,6 @@ use tracedecay_domain::{
 use tracedecay_query::code_search::CodeIndexSearchAuthorityV1;
 use tracedecay_query::retrieval::QueryAuthorityV1;
 use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
-use tracedecay_runtime_core::config::PinnedUserDataDir;
 
 use super::McpServer;
 use super::construction::McpServerConstructionContext;
@@ -167,7 +166,6 @@ struct MountedCorpus {
 
 #[tokio::test(flavor = "current_thread")]
 async fn cancelled_large_candidate_search_stops_before_the_next_batch() {
-    let _profile = PinnedUserDataDir::new();
     tracedecay_project::product_runtime::register_fixture_product_runtime();
     let corpus = mount_candidate_corpus().await;
     let authority = CodeIndexSearchAuthorityV1 {
@@ -200,6 +198,7 @@ async fn cancelled_large_candidate_search_stops_before_the_next_batch() {
 
 struct HeldServer {
     server: Arc<McpServer>,
+    _profile: tempfile::TempDir,
     _project: tempfile::TempDir,
     _runtime: Arc<HostAdmissionTestRuntimeV1>,
 }
@@ -286,6 +285,7 @@ async fn open_search_server(
     executor: tracedecay_query::code_search::CodeIndexSearchExecutor,
     authority: CodeIndexSearchAuthorityV1,
 ) -> HeldServer {
+    let profile = tempfile::TempDir::new().expect("mcp profile");
     let project = tempfile::TempDir::new().expect("mcp project");
     std::fs::create_dir_all(project.path().join("src")).expect("mcp source dir");
     std::fs::write(
@@ -302,6 +302,7 @@ async fn open_search_server(
     git(project.path(), &["add", "."]);
     git(project.path(), &["commit", "-q", "-m", "mcp host"]);
     let (cg, runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.path(),
         project.path(),
         "project.cancel-journey-host",
     )
@@ -315,6 +316,7 @@ async fn open_search_server(
     .await;
     HeldServer {
         server,
+        _profile: profile,
         _project: project,
         _runtime: runtime,
     }

@@ -1,24 +1,34 @@
 //! CLI presentation for the closed Work application binding.
 
 use std::io::Write;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use crate::cli::WorkInvocationArgs;
 
 #[hotpath::measure(label = "cli.work.invoke", future = true)]
-pub(crate) async fn run(invocation: WorkInvocationArgs) -> tracedecay_domain::errors::Result<()> {
+pub(crate) async fn run(
+    profile: &ProfileRoot,
+    invocation: WorkInvocationArgs,
+) -> tracedecay_domain::errors::Result<()> {
     #[cfg(feature = "hotpath")]
     hotpath::val!("cli.work.operation").set(&invocation.operation.operation_key());
     let body = crate::application_cli::read_request(
         &invocation.request_file,
         crate::application_cli::WORK,
     )?;
-    let project_root = tracedecay_configuration::resolve_path_with_discovery(invocation.project);
+    let project_root =
+        tracedecay_configuration::resolve_path_with_discovery(profile, invocation.project);
     let operation = invocation.operation;
     // The application round-trip timed apart from `cli.work.invoke` so daemon
     // latency is separable from request parsing, render, and delivery
     // settlement.
     let mut response = hotpath::future!(
-        crate::work_cli::invoke_work_cli_with_delivery(project_root.clone(), operation, body),
+        crate::work_cli::invoke_work_cli_with_delivery(
+            profile,
+            project_root.clone(),
+            operation,
+            body
+        ),
         label = "cli.work.request"
     )
     .await?;
