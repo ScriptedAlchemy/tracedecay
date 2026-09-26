@@ -177,21 +177,21 @@ async fn automation_run_reads_refuse_arguments_outside_their_typed_request() {
         refusal(
             &fixture,
             "tracedecay_automation_run_artifact_view",
+            json!({"run_id": run_id, "kind": "trace"})
+        )
+        .await,
+        "tool execution failed: config error: invalid arguments for tracedecay_automation_run_artifact_view: unknown variant `trace`, expected one of `traces`, `feedback`, `generated_evals`, `validation_gate`, `optimizer_diagnosis`, `codex_handoff`"
+    );
+    assert_eq!(
+        refusal(
+            &fixture,
+            "tracedecay_automation_run_artifact_view",
             json!({"run_id": run_id, "kind": "traces"})
         )
         .await,
         format!(
             "tool execution failed: config error: automation run artifact not found: {run_id}/traces"
         )
-    );
-    assert_eq!(
-        refusal(
-            &fixture,
-            "tracedecay_automation_run_artifact_view",
-            json!({"run_id": run_id, "kind": "trace"})
-        )
-        .await,
-        "tool execution failed: config error: invalid arguments for tracedecay_automation_run_artifact_view: unknown variant `trace`, expected one of `traces`, `feedback`, `generated_evals`, `validation_gate`, `optimizer_diagnosis`, `codex_handoff`"
     );
 
     let analytics = call_json(
