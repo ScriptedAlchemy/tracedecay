@@ -43,8 +43,9 @@ use tracedecay_dashboard_api::{
     DashboardCodeIndexWorkerSettingsFuture, DashboardConfigurationApplyError,
     DashboardConfigurationApplyFuture, DashboardDaemonReadUnavailableV1,
     DashboardHttpRequestControlV1, DashboardProfileCodeIndexWorkerSettingsPort,
-    DashboardScopeSetReadFuture, DashboardStateCompositionV1, bind_dashboard,
-    build_state_with_automation_reconciler, router, validate_dashboard_host,
+    DashboardScopeSetReadFuture, DashboardSessionAuthoritiesV1, DashboardSessionMountV1,
+    DashboardSessionResolutionV1, DashboardSessionResolverV1, DashboardStateCompositionV1,
+    bind_dashboard, build_state_with_automation_reconciler, router, validate_dashboard_host,
 };
 
 #[derive(Clone)]
@@ -659,6 +660,61 @@ fn dashboard_tool_result(cg: &TraceDecay, args: &Value, payload: &Value) -> Tool
     )
 }
 
+/// The session authorities a project server admits; `None` for the core
+/// server of a project whose session store is not admitted yet.
+fn dashboard_session_authorities(
+    project_sessions: Option<RegisteredGlobalDbLeaseV1>,
+    retrieval: Option<(
+        Arc<dyn tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalPortV1>,
+        tracedecay_session_memory::context::ResolvedSessionIdentity,
+    )>,
+) -> Option<DashboardSessionAuthoritiesV1> {
+    let project_sessions = project_sessions?;
+    let lcm_read_authority = retrieval
+        .and_then(|(retrieval, identity)| DashboardLcmReadAdapter::new(retrieval, identity))
+        .map(|adapter| {
+            Arc::new(adapter) as Arc<dyn tracedecay_dashboard_api::DashboardLcmReadPortV1>
+        });
+    // Loom's git sources read the session Git evidence rows of the same
+    // registered store.
+    let git_correlation_read_authority = Arc::new(
+        tracedecay_mcp::handlers::dashboard_git_correlation::DashboardGitCorrelationReadAdapter::new(
+            project_sessions.clone(),
+        ),
+    ) as Arc<dyn tracedecay_dashboard_api::DashboardGitCorrelationReadPortV1>;
+    Some(DashboardSessionAuthoritiesV1 {
+        project_sessions,
+        lcm_read_authority,
+        git_correlation_read_authority: Some(git_correlation_read_authority),
+    })
+}
+
+fn opening_project_sessions(
+    resolver: crate::mcp::server::RetainedProjectServerResolver,
+    project_root: PathBuf,
+) -> DashboardSessionResolverV1 {
+    Arc::new(move || {
+        let resolver = Arc::clone(&resolver);
+        let project_root = project_root.clone();
+        Box::pin(async move {
+            let request =
+                tracedecay_dashboard_api::project_graph::RetainedProjectGraphRequest::for_mounted_root(
+                    project_root,
+                );
+            match resolver(request).await {
+                Ok(Some(server)) => match dashboard_session_authorities(
+                    server.project_session_db(),
+                    server.project_session_retrieval(),
+                ) {
+                    Some(authorities) => DashboardSessionResolutionV1::Ready(authorities),
+                    None => DashboardSessionResolutionV1::Opening,
+                },
+                Ok(None) | Err(_) => DashboardSessionResolutionV1::Unavailable,
+            }
+        })
+    })
+}
+
 #[hotpath::measure(label = "mcp.dashboard.open.total")]
 #[allow(
     clippy::too_many_arguments,
@@ -909,24 +965,19 @@ pub(super) async fn handle_dashboard(
                         .map(|adapter| Arc::new(adapter) as Arc<dyn DashboardApplicationRuntime>)
                 })
                 .transpose()?;
-            let lcm_read_authority = session_retrieval
-                .zip(session_identity)
-                .and_then(|(retrieval, identity)| DashboardLcmReadAdapter::new(retrieval, identity))
-                .map(|adapter| {
-                    Arc::new(adapter) as Arc<dyn tracedecay_dashboard_api::DashboardLcmReadPortV1>
-                });
-            // Loom's git sources read the session Git evidence rows of the
-            // same registered store; a state composed without it reports
-            // those sources unavailable.
-            let git_correlation_read_authority =
-                registered_project_session_db.as_ref().map(|database| {
-                    Arc::new(
-                        tracedecay_mcp::handlers::dashboard_git_correlation::DashboardGitCorrelationReadAdapter::new(
-                            database.clone(),
-                        ),
-                    )
-                        as Arc<dyn tracedecay_dashboard_api::DashboardGitCorrelationReadPortV1>
-                });
+            // A request answered by the core server of a project that is still
+            // opening carries no session store; the dashboard then re-asks
+            // the retained server until the full server publishes it.
+            let project_sessions = match dashboard_session_authorities(
+                registered_project_session_db,
+                session_retrieval.zip(session_identity),
+            ) {
+                Some(authorities) => DashboardSessionMountV1::Ready(authorities),
+                None => DashboardSessionMountV1::Opening(opening_project_sessions(
+                    Arc::clone(retained_server_resolver),
+                    requested_root.clone(),
+                )),
+            };
             let code_read_authority = retained_server
                 .admitted_project_scope()
                 .zip(retained_server.code_index_search_authority())
@@ -963,10 +1014,8 @@ pub(super) async fn handle_dashboard(
                     code_graph_read_admission,
                     code_graph_projection_read_port,
                     code_read_authority,
-                    registered_project_session_db,
+                    project_sessions,
                     profile_code_index_worker_settings,
-                    lcm_read_authority,
-                    git_correlation_read_authority,
                     delivery_read_authority,
                     registered_savings_db,
                     automation_scheduler_reconciler,

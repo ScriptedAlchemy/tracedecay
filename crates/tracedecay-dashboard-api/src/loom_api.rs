@@ -26,7 +26,7 @@ use super::read_model::{
     DashboardLegalActionKindV1, DashboardLegalActionRefV1, DashboardWatermarkV1, scope_from_state,
 };
 use super::util::{JsonQuery, collect_rows};
-use super::{DashboardState, RequestControl};
+use super::{DashboardSessionAuthorityStateV1, DashboardState, RequestControl};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::db::engine::{
     Error as EngineError, IntoParams, QueryExecutor, params,
@@ -338,14 +338,23 @@ pub async fn temporal(
             let limit = params.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
             let offset = params.offset.unwrap_or(0).max(0);
             let Some(database) = state.lcm_db.as_deref() else {
-                let payload =
-                    unavailable_payload("the resolved project session authority is unavailable");
+                let (domain_state, reason) = match state.session_authority {
+                    DashboardSessionAuthorityStateV1::Opening => (
+                        DashboardDomainStateV1::Loading,
+                        "the project session authority is still opening",
+                    ),
+                    DashboardSessionAuthorityStateV1::Ready
+                    | DashboardSessionAuthorityStateV1::Unavailable => (
+                        DashboardDomainStateV1::Unknown,
+                        "the resolved project session authority is unavailable",
+                    ),
+                };
                 return Json(DashboardEnvelopeV1::new(
                     scope_from_state(&state),
-                    DashboardDomainStateV1::Unknown,
+                    domain_state,
                     DashboardCoverageV1::unknown(),
                     DashboardFreshnessV1::unknown(),
-                    payload,
+                    unavailable_payload(reason),
                 ))
                 .into_response();
             };
