@@ -256,10 +256,14 @@ requirement is the binary's cdhash, so an Allow does not survive the next
 rebuild; the linker default identifier (`tracedecay-<hash>`) changes every
 build as well, and the daemon blocks in `open()` until the prompt is
 answered. A release build strips after linking, which mints that identifier
-again from the deps filename; the workspace rustc wrapper signs the product
-once rustc has finished, so `cargo build --release` and
+again from the deps filename. Export
+`CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="$PWD/scripts/macos-rustc-wrapper.sh"`
+from the checkout root (the macOS CI and release jobs do) and the wrapper
+signs the product once rustc has finished, so `cargo build --release` and
 `cargo install --path crates/tracedecay-cli` keep the stable identity on
-the binary cargo copies into place. `install.sh` and `tracedecay update`
+the binary cargo copies into place. The committed Cargo config cannot set
+it, because Cargo has no per-target wrapper and Windows cannot run the
+script. `install.sh` and `tracedecay update`
 apply the same identity to the installed file after the archive checksum
 check when the binary is unsigned or ad-hoc signed, including an ad-hoc
 signature whose identifier already matches but whose requirement is still
