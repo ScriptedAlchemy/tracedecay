@@ -9,7 +9,7 @@ use tracedecay_contracts::feedback::{
 use tracedecay_contracts::retained_surfaces::{
     AutomationRunProblemV1, AutomationRunResultV1, FactStoreCurateRequestV1,
 };
-use tracedecay_contracts::retrieval::SimilarResultV1;
+use tracedecay_contracts::retrieval::{AnalyticsHintsPayloadV1, SimilarResultV1};
 use tracedecay_contracts::{
     AcceptWorkProposalRequestV1, AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1,
     AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, AdmittedWorkExecutionV1,
@@ -40,9 +40,8 @@ use tracedecay_domain::{
 };
 
 use super::analytics_api::{
-    AnalyticsAgentsPayloadV1, AnalyticsDiagnosticsPayloadV1, AnalyticsHintsPayloadV1,
-    AnalyticsOverviewPayloadV1, AnalyticsSubagentTreePayloadV1, AnalyticsUnderusedPayloadV1,
-    AnalyticsUsageSummaryV1,
+    AnalyticsAgentsPayloadV1, AnalyticsDiagnosticsPayloadV1, AnalyticsOverviewPayloadV1,
+    AnalyticsSubagentTreePayloadV1, AnalyticsUnderusedPayloadV1, AnalyticsUsageSummaryV1,
 };
 use super::automation_fact_receipts_api::AutomaticFactReceiptsPayloadV1;
 use super::automation_jobs_api::AutomationJobsPayloadV1;

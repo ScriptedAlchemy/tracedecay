@@ -400,9 +400,6 @@ pub(super) async fn concrete_dispatch_group_accepts(
         McpToolDispatchGroup::Health => {
             owned(dispatch_health_tools(tool_name, cg, invalid_args, options).await)
         }
-        McpToolDispatchGroup::Memory => {
-            owned(dispatch_memory_tools(tool_name, cg, invalid_args, options).await)
-        }
         McpToolDispatchGroup::SessionWorkflow => {
             owned(dispatch_session_workflow_tools(tool_name, cg, invalid_args, options).await)
         }

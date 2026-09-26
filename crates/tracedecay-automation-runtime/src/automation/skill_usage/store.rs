@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use super::{SkillUsageLedger, SkillUsageRecord, config_error};
+use super::{SkillUsageLedger, SkillUsageRecord, config_error, new_usage_record};
 use crate::automation::managed_skills::MANAGED_SKILL_STORE_AUTHORITY;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_private_fs::FileLease;
@@ -183,7 +183,7 @@ fn with_skill_lock(
     let existing = read_record_if_present(&path)?;
     let mut record = existing
         .clone()
-        .unwrap_or_else(|| SkillUsageRecord::new(skill_id.to_string(), seed_timestamp));
+        .unwrap_or_else(|| new_usage_record(skill_id.to_string(), seed_timestamp));
     record.skill_id = skill_id.to_string();
     if mutate(&mut record)? {
         write_json(&path, &record)?;

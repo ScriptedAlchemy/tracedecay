@@ -2,8 +2,8 @@ use tracedecay_domain::errors::TraceDecayError;
 
 use super::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
-    SkillInstallTarget, create_managed_skill, list_managed_skills, load_managed_skill,
-    managed_skill_dir,
+    ManagedSupportFileExt, SkillInstallTarget, create_managed_skill, list_managed_skills,
+    load_managed_skill, managed_skill_dir,
 };
 
 fn routing_draft() -> ManagedSkillDraft {

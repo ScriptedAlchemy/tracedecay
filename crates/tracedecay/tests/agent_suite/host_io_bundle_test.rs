@@ -16,8 +16,8 @@ use tracedecay_automation_runtime::automation::host_io::{
     HostIo, ManagedSkillExportReport, PluginFile,
 };
 use tracedecay_automation_runtime::automation::managed_skills::{
-    ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, create_managed_skill,
-    default_managed_skill_targets,
+    ManagedSkillDraft, ManagedSkillExt, ManagedSkillProvenance, ManagedSkillSource,
+    create_managed_skill, default_managed_skill_targets,
 };
 use tracedecay_automation_runtime::automation::skill_materialization::{
     MaterializationHost, MaterializationScope, materialize_skill,

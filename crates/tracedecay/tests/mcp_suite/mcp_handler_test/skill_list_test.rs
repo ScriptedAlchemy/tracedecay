@@ -9,7 +9,8 @@
 use serde_json::{Value, json};
 use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
-    ManagedSupportFile, SkillInstallTarget, create_managed_skill, set_managed_skill_state,
+    ManagedSupportFile, ManagedSupportFileExt, SkillInstallTarget, create_managed_skill,
+    set_managed_skill_state,
 };
 
 use crate::support::{ProductionCompositionFixture, production_composition_fixture};

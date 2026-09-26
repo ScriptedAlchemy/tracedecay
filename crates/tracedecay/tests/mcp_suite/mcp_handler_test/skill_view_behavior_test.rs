@@ -8,7 +8,7 @@ use tempfile::TempDir;
 use tracedecay::mcp::McpServer;
 use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
-    create_managed_skill, default_managed_skill_targets,
+    ManagedSupportFileExt, create_managed_skill, default_managed_skill_targets,
 };
 use tracedecay_automation_runtime::automation::skill_usage::load_skill_usage_record;
 use tracedecay_project::project::TraceDecayOpenOptions;

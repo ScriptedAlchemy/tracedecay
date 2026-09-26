@@ -54,12 +54,6 @@ impl McpServer {
             }
             None => None,
         };
-        if tracedecay_automation::analytics::is_skill_view_tool(tool_name)
-            && let Some(request_id) = json_rpc_request_id_string(id)
-            && let Some(map) = handler_arguments.as_object_mut()
-        {
-            map.insert("__mcp_request_id".to_string(), json!(request_id));
-        }
         if tool_supports_live_cancellation(tool_name)
             && let Some(map) = handler_arguments.as_object_mut()
         {
@@ -67,6 +61,14 @@ impl McpServer {
             if let Some(request_id) = application_surface_request_id(id, memory_request_scope) {
                 map.insert("__mcp_request_id".to_owned(), json!(request_id));
             }
+        }
+        // A skill view keys its usage record by the JSON-RPC id its analytics
+        // event records, so importing that event later cannot count it twice.
+        if tracedecay_automation::analytics::is_skill_view_tool(tool_name)
+            && let Some(request_id) = json_rpc_request_id_string(id)
+            && let Some(map) = handler_arguments.as_object_mut()
+        {
+            map.insert("__mcp_request_id".to_string(), json!(request_id));
         }
         let selected_project = match routed_project {
             Some(project) => Some(project),

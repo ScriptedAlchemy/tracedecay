@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use super::config_error;
 use super::host_io::HostIo;
 use crate::automation::managed_skills::{
-    ManagedSkill, load_active_managed_skills_snapshot, validate_managed_support_files,
+    ManagedSkill, ManagedSkillExt, load_active_managed_skills_snapshot,
+    validate_managed_support_files,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 

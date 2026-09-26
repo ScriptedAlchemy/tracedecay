@@ -11,8 +11,9 @@ use axum::extract::State;
 use axum::response::Json;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use tracedecay_contracts::ObservatoryReadModelV1;
+use tracedecay_contracts::retrieval::{AnalyticsHintCategoryV1, AnalyticsHintsPayloadV1};
 use tracedecay_domain::{CoverageStateV1, ObservationScopeV1};
 
 use tracedecay_automation::analytics::{
@@ -76,24 +77,6 @@ pub struct AnalyticsUsageSummaryV1 {
     #[serde(default)]
     pub event_count: Option<i64>,
     pub by_category: Vec<AnalyticsUsageCategoryV1>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-pub struct AnalyticsHintCategoryV1 {
-    pub category: String,
-    pub emitted: i64,
-    pub followed: i64,
-    pub ignored: i64,
-    pub suppressed: i64,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-pub struct AnalyticsHintsPayloadV1 {
-    pub available: bool,
-    pub source: String,
-    #[serde(default)]
-    pub error: Option<String>,
-    pub by_category: Vec<AnalyticsHintCategoryV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -1140,17 +1123,6 @@ pub fn hint_summary_from_events(events: &[AnalyticsEventRecord]) -> AnalyticsHin
     }
 }
 
-pub fn hint_summary_from_counts(counts: &[AnalyticsHintCounts]) -> Value {
-    let summary = typed_hint_summary_from_counts(counts);
-    // MCP callers omit `error`. The typed payload keeps it for dashboard
-    // envelopes, including the explicit null when the read succeeded.
-    json!({
-        "available": summary.available,
-        "source": summary.source,
-        "by_category": summary.by_category,
-    })
-}
-
 fn zero_hint_counts() -> BTreeMap<String, HintCounts> {
     HINT_CATEGORIES
         .iter()
@@ -1158,7 +1130,7 @@ fn zero_hint_counts() -> BTreeMap<String, HintCounts> {
         .collect()
 }
 
-fn typed_hint_summary_from_counts(counts: &[AnalyticsHintCounts]) -> AnalyticsHintsPayloadV1 {
+pub fn hint_summary_from_counts(counts: &[AnalyticsHintCounts]) -> AnalyticsHintsPayloadV1 {
     let mut by_category = zero_hint_counts();
     for row in counts {
         by_category.insert(
@@ -1201,7 +1173,7 @@ async fn hint_summary(
         && let Ok(counts) = db.query_analytics_hint_counts(Some(project_id), 0).await
         && !counts.is_empty()
     {
-        return typed_hint_summary_from_counts(&counts);
+        return hint_summary_from_counts(&counts);
     }
     if let Some(events) = durable_events {
         return hint_summary_from_events(events);

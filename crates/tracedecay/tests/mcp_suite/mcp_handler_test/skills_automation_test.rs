@@ -9,7 +9,7 @@ use tracedecay::mcp::McpServer;
 #[cfg(feature = "test-transport")]
 use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
-    create_managed_skill,
+    ManagedSupportFileExt, create_managed_skill,
 };
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,

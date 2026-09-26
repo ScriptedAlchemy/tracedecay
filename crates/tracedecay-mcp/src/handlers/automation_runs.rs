@@ -1,19 +1,23 @@
-//! Read-only MCP inspection over the active project's durable automation ledger.
+//! Read-only inspection over the active project's durable automation ledger.
 
-use serde_json::{Value, json};
+use std::path::Path;
+
+use serde_json::Value;
 use tracedecay_automation_runtime::automation::run_ledger::{
-    AutomationRunLedgerRecord, find_run_record, load_run_records_page,
+    find_run_record, load_run_records_page, read_run_artifact_payload,
 };
-
-use crate::ToolResult;
+use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
+use tracedecay_contracts::retrieval::{
+    AUTOMATION_RUN_LIST_DEFAULT_LIMIT, AUTOMATION_RUN_LIST_MAX_LIMIT, AutomationReadStatusV1,
+    AutomationRunArtifactViewResultV1, AutomationRunArtifactViewSurfaceRequestV1,
+    AutomationRunListResultV1, AutomationRunListSurfaceRequestV1, AutomationRunPageCompletenessV1,
+    AutomationRunScopeV1, AutomationRunSummaryV1, AutomationRunViewResultV1,
+    AutomationRunViewSurfaceRequestV1,
+};
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_project::project::TraceDecay;
 
-use crate::handlers::tool_json_with_md;
-use crate::tools::renderers;
-
-const DEFAULT_RUN_LIMIT: usize = 50;
-const MAX_RUN_LIMIT: usize = 200;
+use crate::handlers::graph::graph_tool_completion;
+use crate::handlers::support::decode_primitive_request;
 
 /// A reset refusal is terminal and keeps its authority; only a transient
 /// read failure becomes the retryable route state.
@@ -28,104 +32,123 @@ fn ledger_unavailable(operation: &str, error: TraceDecayError) -> TraceDecayErro
     )
 }
 
-fn run_not_found(run_id: &str) -> TraceDecayError {
+fn config_error(message: impl Into<String>) -> TraceDecayError {
     TraceDecayError::Config {
-        message: format!("automation run not found: {run_id}"),
+        message: message.into(),
     }
 }
 
-fn parse_limit(args: &Value) -> usize {
-    args.get("limit")
-        .and_then(Value::as_u64)
-        .map_or(DEFAULT_RUN_LIMIT, |limit| {
-            usize::try_from(limit)
-                .unwrap_or(MAX_RUN_LIMIT)
-                .clamp(1, MAX_RUN_LIMIT)
-        })
-}
-
-fn required_run_id(args: &Value) -> Result<&str> {
-    args.get("run_id")
-        .and_then(Value::as_str)
-        .filter(|run_id| !run_id.is_empty())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "missing required parameter: run_id".to_owned(),
-        })
-}
-
-fn run_summary(record: &AutomationRunLedgerRecord) -> Value {
-    json!({
-        "run_id": record.run_id,
-        "task": record.task,
-        "task_key": record.task_key,
-        "trigger": record.trigger,
-        "backend": record.backend,
-        "model": record.model,
-        "status": record.status,
-        "reviewed_count": record.reviewed_count,
-        "accepted_count": record.accepted_count,
-        "rejected_count": record.rejected_count,
-        "skipped_count": record.skipped_count,
-        "error": record.error,
-        "started_at": record.started_at,
-        "completed_at": record.completed_at,
-        "artifact_kinds": record.artifacts.iter().map(|artifact| &artifact.kind).collect::<Vec<_>>(),
-    })
-}
-
 #[hotpath::measure(label = "mcp.automation.run_list.total")]
-pub async fn handle_list(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    let limit = parse_limit(&args);
+pub async fn compute_run_list(
+    dashboard_root: &Path,
+    args: &Value,
+) -> Result<GraphToolCompletionV1> {
+    let request: AutomationRunListSurfaceRequestV1 =
+        decode_primitive_request(args, "tracedecay_automation_run_list")?;
+    let limit = request.limit.unwrap_or(AUTOMATION_RUN_LIST_DEFAULT_LIMIT);
+    if !(1..=AUTOMATION_RUN_LIST_MAX_LIMIT).contains(&limit) {
+        return Err(config_error(format!(
+            "invalid arguments for tracedecay_automation_run_list: limit must be between 1 and {AUTOMATION_RUN_LIST_MAX_LIMIT}"
+        )));
+    }
     let page = hotpath::future!(
-        load_run_records_page(&cg.store_layout().dashboard_root, limit),
+        load_run_records_page(dashboard_root, limit as usize),
         label = "mcp.automation.run_list.load"
     )
     .await
     .map_err(|error| ledger_unavailable("list", error))?;
     let completeness = if page.is_complete() {
-        "known"
+        AutomationRunPageCompletenessV1::Known
     } else {
-        "partial"
+        AutomationRunPageCompletenessV1::Partial
     };
-    let runs = page.records.iter().map(run_summary).collect::<Vec<_>>();
-    let payload = json!({
-        "status": "ok",
-        "scope": "active_project",
-        "runs": runs,
-        "count": runs.len(),
-        "limit": limit,
-        "has_more": page.has_more,
-        "malformed_row_count": page.malformed_row_count,
-        "completeness": completeness,
-    });
-    Ok(tool_json_with_md(
-        Some(&cg.store_layout().response_handle_root),
-        &args,
-        &payload,
-        || renderers::automation_run_list_md(&payload),
+    let runs = page
+        .records
+        .iter()
+        .map(AutomationRunSummaryV1::of)
+        .collect::<Vec<_>>();
+    Ok(graph_tool_completion(
+        GraphToolResultV1::AutomationRunList(AutomationRunListResultV1 {
+            status: AutomationReadStatusV1::Ok,
+            scope: AutomationRunScopeV1::ActiveProject,
+            count: runs.len(),
+            runs,
+            limit,
+            has_more: page.has_more,
+            malformed_row_count: page.malformed_row_count,
+            completeness,
+        }),
+        Vec::new(),
     ))
 }
 
 #[hotpath::measure(label = "mcp.automation.run_view.total")]
-pub async fn handle_view(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    let run_id = required_run_id(&args)?;
-    let record = hotpath::future!(
-        find_run_record(&cg.store_layout().dashboard_root, run_id),
+pub async fn compute_run_view(
+    dashboard_root: &Path,
+    args: &Value,
+) -> Result<GraphToolCompletionV1> {
+    let request: AutomationRunViewSurfaceRequestV1 =
+        decode_primitive_request(args, "tracedecay_automation_run_view")?;
+    if request.run_id.is_empty() {
+        return Err(config_error(
+            "invalid arguments for tracedecay_automation_run_view: run_id must not be empty",
+        ));
+    }
+    let run = hotpath::future!(
+        find_run_record(dashboard_root, &request.run_id),
         label = "mcp.automation.run_view.load"
     )
     .await
     .map_err(|error| ledger_unavailable("view", error))?
-    .ok_or_else(|| run_not_found(run_id))?;
-    let payload = json!({
-        "status": "ok",
-        "scope": "active_project",
-        "run": record,
-    });
-    Ok(tool_json_with_md(
-        Some(&cg.store_layout().response_handle_root),
-        &args,
-        &payload,
-        || renderers::automation_run_view_md(&payload),
+    .ok_or_else(|| config_error(format!("automation run not found: {}", request.run_id)))?;
+    Ok(graph_tool_completion(
+        GraphToolResultV1::AutomationRunView(Box::new(AutomationRunViewResultV1 {
+            status: AutomationReadStatusV1::Ok,
+            scope: AutomationRunScopeV1::ActiveProject,
+            run,
+        })),
+        Vec::new(),
+    ))
+}
+
+#[hotpath::measure(label = "mcp.automation.artifact_view.total")]
+pub async fn compute_run_artifact_view(
+    dashboard_root: &Path,
+    args: &Value,
+) -> Result<GraphToolCompletionV1> {
+    let request: AutomationRunArtifactViewSurfaceRequestV1 =
+        decode_primitive_request(args, "tracedecay_automation_run_artifact_view")?;
+    let run_id = request.run_id.as_str();
+    let kind = request.kind.as_str();
+    let record = hotpath::future!(
+        find_run_record(dashboard_root, run_id),
+        label = "mcp.automation.artifact_view.load"
+    )
+    .await?
+    .ok_or_else(|| config_error(format!("automation run not found: {run_id}")))?;
+    let artifact = record
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == kind)
+        .cloned()
+        .ok_or_else(|| {
+            config_error(format!(
+                "automation run artifact not found: {run_id}/{kind}"
+            ))
+        })?;
+    let payload = hotpath::future!(
+        read_run_artifact_payload(dashboard_root, &record.run_id, &artifact),
+        label = "mcp.automation.artifact_view.read"
+    )
+    .await?;
+    Ok(graph_tool_completion(
+        GraphToolResultV1::AutomationRunArtifactView(Box::new(AutomationRunArtifactViewResultV1 {
+            status: AutomationReadStatusV1::Ok,
+            run_id: record.run_id,
+            artifact,
+            payload,
+        })),
+        Vec::new(),
     ))
 }
 

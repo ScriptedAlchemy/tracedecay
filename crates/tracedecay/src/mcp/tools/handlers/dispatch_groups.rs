@@ -28,9 +28,7 @@ use tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot;
 use super::ToolCallRegistryOptions;
 use super::tool_call_support::handle_retrieve;
 use super::{application_surface, dashboard, dispatch_controls, info};
-use tracedecay_mcp::handlers::{
-    admin_cli, admin_project, automation_runs, edit, hook_runtime, skills, workflow,
-};
+use tracedecay_mcp::handlers::{admin_cli, admin_project, edit, hook_runtime, workflow};
 
 mod health_dispatch;
 pub(super) use health_dispatch::dispatch_health_tools;
@@ -458,6 +456,17 @@ pub(crate) fn compute_graph_tool_for_owner<'a>(
                 std::time::Duration::ZERO,
             ));
         };
+        if dispatch_controls::is_automation_read(operation) {
+            return match tokio::time::timeout(
+                budget,
+                dispatch_controls::compute_automation_read(cg, operation, &args, &options),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_elapsed) => Err(tool_dispatch_deadline_error(tool_name, budget)),
+            };
+        }
         let project = admitted_project_authorities(cg, &options)?;
         let snapshots = AdmittedRequestSnapshotsV1::default();
         let freshness = graph_freshness_reader(tool_name, &options);
@@ -733,64 +742,6 @@ fn admitted_tool_context<'a>(
         },
     };
     Ok(McpToolContext::bind(McpToolBinding { project, request })?)
-}
-
-/// Dispatch memory, skill, and analytics tools (`tracedecay_fact_store_add`,
-/// `tracedecay_skill_list`, `tracedecay_analytics`, ...).
-#[hotpath::measure(future = true, label = "mcp.dispatch.memory")]
-pub(super) async fn dispatch_memory_tools(
-    tool_name: &str,
-    cg: &TraceDecay,
-    args: Value,
-    options: ToolCallRegistryOptions<'_>,
-) -> Result<ToolResult> {
-    dispatch_memory_tools_inner(tool_name, cg, args, options).await
-}
-
-fn dispatch_memory_tools_inner<'a>(
-    tool_name: &'a str,
-    cg: &'a TraceDecay,
-    args: Value,
-    options: ToolCallRegistryOptions<'a>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
-    // Erase the deeply nested match-arm futures before they reach the
-    // measured wrapper so every profiling feature can compute its layout.
-    Box::pin(async move {
-        match tool_name {
-            "tracedecay_automation_run_list" => automation_runs::handle_list(cg, args).await,
-            "tracedecay_automation_run_view" => automation_runs::handle_view(cg, args).await,
-            "tracedecay_automation_run_artifact_view" => {
-                skills::handle_automation_run_artifact_view(cg, args).await
-            }
-            "tracedecay_analytics" => {
-                dispatch_controls::dispatch_analytics(cg, args, options).await
-            }
-            "tracedecay_skill_list" => {
-                skills::handle_skill_list(
-                    cg,
-                    args,
-                    options.accounting_db,
-                    options.profile.map(ProfileRoot::data_dir),
-                )
-                .await
-            }
-            "tracedecay_skill_view" => {
-                skills::handle_skill_view(
-                    cg,
-                    args,
-                    options.accounting_db,
-                    options.profile.map(ProfileRoot::data_dir),
-                )
-                .await
-            }
-            "tracedecay_hermes_skill_bridge" => skills::handle_hermes_skill_bridge(
-                cg,
-                &args,
-                options.profile.and_then(ProfileRoot::home),
-            ),
-            _ => Err(unknown_tool_error(tool_name)),
-        }
-    })
 }
 
 /// Dispatch dashboard and workflow tools that have not moved to a dedicated

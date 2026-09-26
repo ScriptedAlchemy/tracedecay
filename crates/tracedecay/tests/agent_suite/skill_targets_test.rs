@@ -4,8 +4,8 @@ use tracedecay_agent_hosts::agents::{
 };
 use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
-    create_managed_skill, default_managed_skill_targets, disable_managed_skill, load_managed_skill,
-    managed_skill_dir,
+    ManagedSupportFileExt, create_managed_skill, default_managed_skill_targets,
+    disable_managed_skill, load_managed_skill, managed_skill_dir,
 };
 use tracedecay_automation_runtime::automation::skill_targets::{
     SkillInstallTarget, export_native_skill_overlay, export_prompt_skill_index,

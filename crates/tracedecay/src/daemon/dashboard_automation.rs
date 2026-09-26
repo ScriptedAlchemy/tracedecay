@@ -13,9 +13,9 @@ use tracedecay_automation_runtime::automation::config::{
 };
 use tracedecay_automation_runtime::automation::host_io::HostIo;
 use tracedecay_automation_runtime::automation::managed_skills::{
-    ManagedSkill, apply_managed_skill_update, archive_managed_skill, disable_managed_skill,
-    load_managed_skill, managed_skill_dir, preview_managed_skill_update, restore_managed_skill,
-    save_managed_skill,
+    ManagedSkill, ManagedSkillExt, apply_managed_skill_update, archive_managed_skill,
+    disable_managed_skill, load_managed_skill, managed_skill_dir, preview_managed_skill_update,
+    restore_managed_skill, save_managed_skill,
 };
 use tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger;
 use tracedecay_automation_runtime::automation::skill_writer::deploy_managed_skills_to_project;

@@ -304,8 +304,8 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::managed_skill_model::{
-        ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
-        SkillInstallTarget,
+        ManagedSkillDraft, ManagedSkillExt, ManagedSkillProvenance, ManagedSkillSource,
+        ManagedSupportFile, SkillInstallTarget,
     };
 
     use super::*;
