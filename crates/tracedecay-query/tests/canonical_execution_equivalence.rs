@@ -21,9 +21,9 @@ use tracedecay_query::retrieval::ports::{CodeCandidateBindingV1, CodeOccurrenceR
 use tracedecay_query::retrieval::{
     AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeGraphRecordV1,
     NativeLaneOutcomeV1, NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1,
-    NativeSymbolRecordV1, PreparedQueryBindingsV1, PreparedQueryRoutingBindingsV1, PreparedQueryV1,
-    QUERY_RANKING_REVISION_V1, QueryAuthorityV1, authenticate_prepared_query_cursor_for_routing,
-    route_authenticated_prepared_query_cursor,
+    NativeSymbolRecordV1, PreparedQueryBindingsV1, PreparedQueryErrorV1,
+    PreparedQueryRoutingBindingsV1, PreparedQueryV1, QUERY_RANKING_REVISION_V1, QueryAuthorityV1,
+    authenticate_prepared_query_cursor_for_routing, route_authenticated_prepared_query_cursor,
 };
 
 use tracedecay_domain::test_fixtures::id;
@@ -425,6 +425,10 @@ fn query_authority() -> Arc<QueryAuthorityV1> {
 }
 
 fn query_authority_with_secret(secret: u8) -> Arc<QueryAuthorityV1> {
+    query_authority_with_key("cursor-key.canonical-equivalence.v1", secret)
+}
+
+fn query_authority_with_key(key_id: &str, secret: u8) -> Arc<QueryAuthorityV1> {
     let evaluation = RetrievalAnchorId::new("evaluation.canonical-equivalence")
         .expect("valid evaluation anchor");
     let calibrations = RetrieverKind::QUERY_FALLBACK_LANES
@@ -487,7 +491,7 @@ fn query_authority_with_secret(secret: u8) -> Arc<QueryAuthorityV1> {
     };
     let keyring = RetrievalCursorKeyringV1::new(
         id("privacy.canonical-equivalence"),
-        id::<RetrievalCursorKeyId>("cursor-key.canonical-equivalence.v1"),
+        id::<RetrievalCursorKeyId>(key_id),
         7,
         vec![secret; 32],
         15 * 60 * 1_000_000,
@@ -672,5 +676,77 @@ fn equivalent_prepared_queries_emit_identical_stable_cursor_bytes() {
         .expect("authenticated resumed cursor routing")
         .expires_at,
         UtcMicros(900_000_010)
+    );
+}
+
+#[test]
+fn unredeemable_prepared_cursors_reject_with_their_typed_state() {
+    let authority = query_authority();
+    let request = retrieval_request();
+    let bindings = PreparedQueryBindingsV1::new(
+        "code_canonical_query",
+        digest::<ManifestDigest>('8'),
+        generation(),
+        digest::<ManifestDigest>('9'),
+    )
+    .expect("valid prepared-query bindings");
+    let cursor = PreparedQueryV1::prepare(authority.clone(), request.clone(), None)
+        .expect("prepared query")
+        .paginate(&bindings, vec!["first", "second"], 1, UtcMicros(10))
+        .expect("first page")
+        .next_cursor
+        .expect("continuation cursor");
+    let routing = PreparedQueryRoutingBindingsV1 {
+        operation: "code_canonical_query".to_owned(),
+        scope_digest: digest::<ManifestDigest>('8'),
+        principal: request.principal.clone(),
+        root: request.scope.root.clone(),
+        temporal_mode: request.temporal_mode,
+        query_binding_digest: digest::<ManifestDigest>('9'),
+        page_size: 1,
+        authorization_revision: request.snapshot.authorization_revision.clone(),
+    };
+    let route = |authority: &QueryAuthorityV1, routing: &PreparedQueryRoutingBindingsV1, now| {
+        authenticate_prepared_query_cursor_for_routing(authority, routing, &cursor, now)
+            .map(|routed| routed.generation)
+    };
+
+    assert_eq!(
+        route(&authority, &routing, UtcMicros(100)),
+        Ok(generation())
+    );
+    let mut other_scope = routing.clone();
+    other_scope.scope_digest = digest::<ManifestDigest>('7');
+    assert_eq!(
+        route(&authority, &other_scope, UtcMicros(100)),
+        Err(PreparedQueryErrorV1::Foreign)
+    );
+    assert_eq!(
+        route(&authority, &routing, UtcMicros(900_000_010)),
+        Err(PreparedQueryErrorV1::Stale)
+    );
+    let rekeyed = query_authority_with_key("cursor-key.canonical-equivalence.v2", 0x5a);
+    assert_eq!(
+        route(&rekeyed, &routing, UtcMicros(100)),
+        Err(PreparedQueryErrorV1::Stale)
+    );
+
+    let other_scope_bindings = PreparedQueryBindingsV1::new(
+        "code_canonical_query",
+        digest::<ManifestDigest>('7'),
+        generation(),
+        digest::<ManifestDigest>('9'),
+    )
+    .expect("valid prepared-query bindings");
+    assert_eq!(
+        PreparedQueryV1::prepare(authority, request, Some(&cursor))
+            .expect("authenticated continuation")
+            .paginate(
+                &other_scope_bindings,
+                vec!["first", "second"],
+                1,
+                UtcMicros(100)
+            ),
+        Err(PreparedQueryErrorV1::Foreign)
     );
 }

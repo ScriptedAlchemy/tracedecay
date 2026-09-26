@@ -364,7 +364,7 @@ fn prepared_error_reason(
     error: PreparedQueryErrorV1,
 ) -> code_search::CodeIndexSearchUnavailableReasonV1 {
     match error {
-        PreparedQueryErrorV1::Invalid => {
+        PreparedQueryErrorV1::Invalid | PreparedQueryErrorV1::Foreign => {
             code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest
         }
         PreparedQueryErrorV1::Stale => {
