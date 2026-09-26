@@ -151,6 +151,22 @@ impl GitFixture {
     }
 }
 
+/// Move `.git/HEAD`'s mtime without changing a source byte: the Git metadata
+/// evidence a checkout or commit leaves, which a read observes without
+/// walking the worktree.
+pub(super) fn move_git_metadata(root: &Path) {
+    let head = root.join(".git/HEAD");
+    let modified = std::fs::metadata(&head)
+        .and_then(|metadata| metadata.modified())
+        .expect("HEAD mtime");
+    std::fs::File::options()
+        .write(true)
+        .open(&head)
+        .expect("open HEAD")
+        .set_modified(modified + Duration::from_secs(2))
+        .expect("move HEAD mtime");
+}
+
 fn alpha_lib_v1_template() -> &'static Path {
     static TEMPLATE: OnceLock<TempDir> = OnceLock::new();
     TEMPLATE

@@ -503,7 +503,6 @@ pub(super) struct SourceFreshnessFenceStateV1 {
     /// The stat signature (negative cache) and sealed file digests (proof)
     /// the last completed reconcile established; `None` until one has.
     source_witness: Option<ReconciledSourceWitnessV1>,
-    pub(super) staleness_threshold: Duration,
     verified_against_source: bool,
     freshness_unknown: bool,
     reconciled_without_generation: bool,
@@ -511,13 +510,12 @@ pub(super) struct SourceFreshnessFenceStateV1 {
 }
 
 impl SourceFreshnessFenceV1 {
-    fn unverified(staleness_threshold: Duration, source_epoch: Arc<AtomicU64>) -> Self {
+    fn unverified(source_epoch: Arc<AtomicU64>) -> Self {
         Self {
             state: Arc::new(Mutex::new(SourceFreshnessFenceStateV1 {
                 git_metadata: identity::GitMetadataFingerprintV1::default(),
                 last_reconciled_at: Instant::now(),
                 source_witness: None,
-                staleness_threshold,
                 verified_against_source: false,
                 freshness_unknown: true,
                 reconciled_without_generation: false,
@@ -578,7 +576,7 @@ impl SourceFreshnessFenceV1 {
     }
 
     /// Whether canonical source input has advanced beyond the last completed
-    /// proof. An expired proof alone leaves the epochs equal: its background
+    /// proof. Moved Git metadata alone leaves the epochs equal: its background
     /// pass is verification, not evidence that a replacement is being built.
     pub(super) fn source_change_pending(&self) -> bool {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -601,10 +599,19 @@ impl SourceFreshnessFenceV1 {
         shutting_down: &AtomicBool,
     ) -> bool {
         let state = self.snapshot();
-        self.snapshot_is_recently_verified(&state, project_root, shutting_down)
+        self.proof_is_unmoved(&state, project_root, shutting_down)
     }
 
-    fn snapshot_is_recently_verified(
+    /// Whether no source evidence has arrived since the last completed proof.
+    ///
+    /// Age is deliberately not evidence. The proof holds until a hook hint or
+    /// observed change advances the source epoch, or Git metadata moves.
+    /// Unhinted raw writes are the watcher backstop's and the read-refresh
+    /// probe's to find ([`CodeIndexWorktreeSchedulerV1::freshness_probe_verdict`]
+    /// sweeps the sealed digests and posts a wake only on proven movement).
+    /// Expiring the proof on a clock made every read after the window
+    /// schedule a verification pass of an unchanged tree.
+    fn proof_is_unmoved(
         &self,
         state: &SourceFreshnessFenceStateV1,
         project_root: &Path,
@@ -617,7 +624,6 @@ impl SourceFreshnessFenceV1 {
             && self.source_epoch.load(Ordering::Acquire) == state.reconciled_source_epoch
             && !identity::GitMetadataFingerprintV1::capture(project_root)
                 .differs_from(&state.git_metadata)
-            && state.last_reconciled_at.elapsed() < state.staleness_threshold
     }
 
     pub(super) fn source_currency_witness_for(
@@ -640,10 +646,10 @@ impl SourceFreshnessFenceV1 {
         })
     }
 
-    /// Whether the last bounded source proof still admits this exact sealed
-    /// snapshot without walking the worktree. Once that proof ages out, reads
-    /// report the retained owner stale and let the canonical worker renew it.
-    pub(super) fn serves_recently_verified_source(
+    /// Whether the last source proof still admits this exact sealed snapshot
+    /// without walking the worktree. Once source evidence moves, reads report
+    /// the retained owner stale and let the canonical worker renew it.
+    pub(super) fn serves_verified_source(
         &self,
         snapshot_content_identity: &ContentDigest,
         project_root: &Path,
@@ -656,7 +662,7 @@ impl SourceFreshnessFenceV1 {
                     .content_manifest
                     .describes_snapshot(snapshot_content_identity)
             })
-            && self.snapshot_is_recently_verified(&state, project_root, shutting_down)
+            && self.proof_is_unmoved(&state, project_root, shutting_down)
     }
 
     /// Whether the last completed proof was sealed from exactly this snapshot.
@@ -674,6 +680,15 @@ impl SourceFreshnessFenceV1 {
                     .content_manifest
                     .describes_snapshot(snapshot_content_identity)
             })
+    }
+
+    /// Age the probe clock past `threshold` without touching source.
+    #[cfg(test)]
+    pub(super) fn age_probe_clock_past_for_test(&self, threshold: Duration) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.last_reconciled_at = Instant::now()
+            .checked_sub(threshold + Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
     }
 
     /// Refresh the admission clock and the git-metadata sample after the
@@ -1041,8 +1056,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         let hints = Arc::new(Mutex::new(PendingHintsV1::default()));
         let wake = Arc::new(tokio::sync::Notify::new());
         let epoch = Arc::new(AtomicU64::new(0));
-        let freshness_fence =
-            SourceFreshnessFenceV1::unverified(policy.staleness_threshold, Arc::clone(&epoch));
+        let freshness_fence = SourceFreshnessFenceV1::unverified(Arc::clone(&epoch));
         // Nothing is decoded or served until the retained owner proves the
         // durable generation belongs to this exact identity and its freshness
         // frontier still matches the worktree.
@@ -2991,10 +3005,10 @@ impl CodeIndexWorktreeSchedulerV1 {
             .source_currency_witness_for(generation_id, snapshot_content_identity)
     }
 
-    /// Bind a sealed snapshot to the source proof, renewing an expired clock
-    /// when the sealed digests still match.
+    /// Bind a sealed snapshot to the source proof, rebinding a moved Git
+    /// metadata sample when the sealed digests still match.
     ///
-    /// The admission window is 30s. This only stops an expired clock, or a
+    /// This only stops a Git metadata sample the seal itself moved, or a
     /// predecessor disk witness, from clearing the generation those digests
     /// already name. A hook epoch or a digest mismatch still refuses.
     pub(super) fn currency_witness_for_sealed_snapshot(
@@ -3005,7 +3019,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         if self.shutting_down.load(Ordering::Acquire) {
             return None;
         }
-        if self.freshness_fence.serves_recently_verified_source(
+        if self.freshness_fence.serves_verified_source(
             snapshot_content_identity,
             &self.project_root,
             &self.shutting_down,
@@ -3497,17 +3511,11 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.publication.sealed_decode_count()
     }
 
-    /// Age the admission clock past its own threshold without touching source.
+    /// Age the probe clock past its own threshold without touching source.
     #[cfg(test)]
     pub(super) fn expire_source_proof_for_test(&self) {
-        let mut state = self
-            .freshness_fence
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        state.last_reconciled_at = Instant::now()
-            .checked_sub(state.staleness_threshold + Duration::from_secs(1))
-            .unwrap_or_else(Instant::now);
+        self.freshness_fence
+            .age_probe_clock_past_for_test(self.policy.staleness_threshold);
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
