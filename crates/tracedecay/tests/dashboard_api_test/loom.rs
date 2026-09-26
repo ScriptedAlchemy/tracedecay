@@ -167,21 +167,30 @@ fn loom_forks_bind_to_the_spawning_call_recorded_by_the_parent_transcript() {
         let parent = "01a05f21-0000-7000-8000-00000000a001";
         let spawned = "01a05f21-0000-7000-8000-00000000c001";
         let unspawned = "01a05f21-0000-7000-8000-00000000c002";
+        // More transcript records than a ranked search would keep from one
+        // source, so the page must serve the whole window for the spawn call
+        // to be loaded at all.
+        let mut parent_records = vec![serde_json::json!({
+            "timestamp": "2026-09-02T00:00:00.000Z", "type": "session_meta",
+            "payload": {"id": parent, "cwd": cwd, "model_provider": "openai"}})];
+        parent_records.extend((0..6).map(|step| {
+            serde_json::json!({"timestamp": format!("2026-09-02T00:00:0{step}.500Z"), "type": "event_msg",
+                "payload": {"type": "agent_message", "message": format!("Planning step {step}.")}})
+        }));
+        parent_records.extend([
+            serde_json::json!({"timestamp": "2026-09-02T00:00:10.000Z", "type": "response_item",
+                "payload": {"type": "function_call", "name": "spawn_agent", "call_id": "call_loom_spawn",
+                    "arguments": "{\"agent_type\":\"explorer\"}"}}),
+            serde_json::json!({"timestamp": "2026-09-02T00:00:11.000Z", "type": "event_msg",
+                "payload": {"type": "item_completed", "thread_id": parent, "item": {
+                    "type": "SubAgentActivity", "id": "call_loom_spawn", "kind": "started",
+                    "agent_thread_id": spawned, "agent_path": "/root/explorer"}}}),
+            serde_json::json!({"timestamp": "2026-09-02T00:01:00.000Z", "type": "event_msg",
+                "payload": {"type": "agent_message", "message": "Explorer finished."}}),
+        ]);
         write_rollout(
             &dir.join(format!("rollout-2026-09-02T00-00-00-{parent}.jsonl")),
-            &[
-                serde_json::json!({"timestamp": "2026-09-02T00:00:00.000Z", "type": "session_meta",
-                    "payload": {"id": parent, "cwd": cwd, "model_provider": "openai"}}),
-                serde_json::json!({"timestamp": "2026-09-02T00:00:10.000Z", "type": "response_item",
-                    "payload": {"type": "function_call", "name": "spawn_agent", "call_id": "call_loom_spawn",
-                        "arguments": "{\"agent_type\":\"explorer\"}"}}),
-                serde_json::json!({"timestamp": "2026-09-02T00:00:11.000Z", "type": "event_msg",
-                    "payload": {"type": "item_completed", "thread_id": parent, "item": {
-                        "type": "SubAgentActivity", "id": "call_loom_spawn", "kind": "started",
-                        "agent_thread_id": spawned, "agent_path": "/root/explorer"}}}),
-                serde_json::json!({"timestamp": "2026-09-02T00:01:00.000Z", "type": "event_msg",
-                    "payload": {"type": "agent_message", "message": "Explorer finished."}}),
-            ],
+            &parent_records,
         );
         for (child, start) in [(spawned, "00-00-11"), (unspawned, "00-00-20")] {
             let at = format!("2026-09-02T{}.500Z", start.replace('-', ":"));
@@ -205,6 +214,11 @@ fn loom_forks_bind_to_the_spawning_call_recorded_by_the_parent_transcript() {
             )
             .await
             .expect("ingest the Codex session tree");
+        fixture
+            .host_runtime
+            .materialize_session_temporal_refresh_for_test(parent)
+            .await
+            .expect("materialize the parent transcript's temporal refresh");
 
         let agent = http_agent();
         let (status, envelope) = get_json(
@@ -250,6 +264,11 @@ fn loom_forks_bind_to_the_spawning_call_recorded_by_the_parent_transcript() {
         let messages = page["payload"]["messages"]
             .as_array()
             .unwrap_or_else(|| panic!("parent transcript page: {page}"));
+        assert_eq!(
+            Some(messages.len() as u64),
+            page["payload"]["counts"]["message_count"].as_u64(),
+            "the transcript page serves every recorded message: {page}"
+        );
         let spawn_calls: Vec<&serde_json::Value> = messages
             .iter()
             .filter(|message| message["tool_use_id"] == "call_loom_spawn")
