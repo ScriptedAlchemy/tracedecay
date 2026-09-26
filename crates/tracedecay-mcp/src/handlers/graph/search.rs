@@ -7,7 +7,6 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
-use tracedecay_contracts::InvocationAnalyticsV1;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
     ContextCodeBlockV1, ContextLexicalAnchorV1, ContextModeV1, ContextResultV1,
@@ -19,6 +18,7 @@ use tracedecay_contracts::retrieval::{
     SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1, SimilarOccurrenceV1, SimilarResultV1,
     SimilarSurfaceRequestV1, SimilarTargetV1,
 };
+use tracedecay_contracts::{ApplicationProblemDetailV1, InvocationAnalyticsV1};
 use tracedecay_domain::ExactClass;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_query::retrieval::lexical::LexicalAnchorOutcomeV1;
@@ -379,17 +379,22 @@ where
             if let Some(unavailable_graph) = graph_evidence.unavailable() {
                 output["verified_graph_evidence"] = unavailable_graph.clone();
             }
-            let failure = match freshness
+            let parked = freshness
                 .indexing
                 .as_ref()
                 .and_then(|indexing| indexing.parked.as_ref())
-            {
-                Some(parked) => format!(
-                    "code-index search unavailable: parked: {}; remedy: {}",
-                    parked.reason, parked.remediation
-                ),
+                .map(|parked| ApplicationProblemDetailV1::Parked {
+                    cause: parked.reason.clone(),
+                    remedy: parked.remediation.clone(),
+                    retries_on_wake: parked.retries_on_wake,
+                });
+            let failure = match &parked {
+                Some(detail) => detail.message(),
                 None => format!("code-index search unavailable: {reason}"),
             };
+            if let Some(detail) = parked {
+                output["detail"] = serde_json::to_value(detail)?;
+            }
             Ok(rendered_tool_result(ctx, &args, &output, Vec::new(), || {
                 format!(
                     "{}{}",

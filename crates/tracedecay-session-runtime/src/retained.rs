@@ -8,8 +8,8 @@ use std::future::Future;
 use std::time::Duration;
 
 use tracedecay_contracts::{
-    RequestAdmission, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
-    now_micros,
+    ApplicationProblem, ApplicationProblemDetailV1, RequestAdmission,
+    RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1, now_micros,
 };
 use tracedecay_domain::errors::TraceDecayError;
 
@@ -115,6 +115,15 @@ pub fn map_execution_error(error: TraceDecayError) -> RetainedSurfaceExecutionEr
         TraceDecayError::ResetRequired { .. } => {
             RetainedSurfaceExecutionErrorV1::ProjectResetRequired
         }
+        TraceDecayError::LockDeadline {
+            resource,
+            deadline_ms,
+        } => RetainedSurfaceExecutionErrorV1::ApplicationProblem(ApplicationProblem::from_detail(
+            ApplicationProblemDetailV1::LockDeadline {
+                resource: resource.to_owned(),
+                deadline_ms,
+            },
+        )),
         error @ (TraceDecayError::SyncLock { .. }
         | TraceDecayError::ProjectRoute { .. }
         | TraceDecayError::Database { .. }

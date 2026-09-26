@@ -734,6 +734,7 @@ fn assert_not_found(payload: &Value) {
             "code": "not_found_or_not_authorized",
             "message": NOT_FOUND,
             "diagnostic": null,
+            "detail": null,
             "committed_receipt": null,
             "owning_layer": "application",
             "terminality": "pre_admission",

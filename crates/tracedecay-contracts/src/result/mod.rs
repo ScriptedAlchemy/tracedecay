@@ -2,6 +2,7 @@ mod analytics;
 mod envelope;
 mod evidence;
 mod problem;
+mod problem_detail;
 mod receipt;
 mod stream;
 
@@ -25,6 +26,7 @@ pub use problem::{
     ApplicationUnavailableClassV1, LegalAction, ProblemOwningLayer, ProblemTerminality,
     RUNTIME_MOUNTING_REASON_CODE, RetryDirective, RetryScope, SafeDiagnostic,
 };
+pub use problem_detail::ApplicationProblemDetailV1;
 pub use receipt::{
     CancellationObservation, CancellationStage, EffectId, EffectReceipt, EffectResult,
     EffectTermination, IdempotencyKey, OperationBudgetUsage, OperationReceipt,

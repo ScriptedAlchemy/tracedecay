@@ -431,6 +431,7 @@ fn curate_rejects_a_problem_bound_to_a_foreign_replay_handle() {
                 "problem": {
                     "revision": 1, "kind": "conflict", "code": "retained.request_already_active",
                     "message": "conflict", "diagnostic": {"code": "retained.request_already_active", "message": "conflict"},
+                    "detail": null,
                     "committed_receipt": null, "owning_layer": "adapter", "terminality": "pre_admission",
                     "retryable": true, "retry": "same_request", "retry_scope": "same_request",
                     "retry_after_millis": null, "cancellation_stage": null,

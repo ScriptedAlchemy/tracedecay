@@ -664,6 +664,7 @@ function automaticProblem(kind: "partial_effect" | "reset_required") {
           ? "curation committed before projection failed"
           : "the retained memory store must be reset",
         diagnostic: null,
+        detail: null,
         committed_receipt: effectReceipt,
         owning_layer: "runtime",
         terminality: "admitted_terminal",

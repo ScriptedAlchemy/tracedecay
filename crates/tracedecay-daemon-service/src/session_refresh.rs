@@ -234,9 +234,13 @@ impl DaemonSessionRefreshService {
             SessionRefreshOutcome::WrongScope => SessionRefreshServiceOutcome::WrongScope,
             SessionRefreshOutcome::Stale => SessionRefreshServiceOutcome::Stale,
             SessionRefreshOutcome::StaleFrontier {
-                active_projection_frontier,
+                requested,
+                committed,
+                active,
             } => SessionRefreshServiceOutcome::StaleFrontier {
-                active_projection_frontier,
+                requested,
+                committed,
+                active,
             },
             SessionRefreshOutcome::NotFound => SessionRefreshServiceOutcome::NotFound,
             SessionRefreshOutcome::Aborted => SessionRefreshServiceOutcome::Aborted,

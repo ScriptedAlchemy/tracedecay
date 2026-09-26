@@ -11,9 +11,9 @@ use crate::context::{RequestId, ResolvedScope};
 use crate::error::ApplicationContractError;
 
 use super::{
-    ApplicationExecutionFailureClassV1, ApplicationProblem, ApplicationProblemKind,
-    ApplicationUnavailableClassV1, CancellationStage, EffectReceipt, EffectResult,
-    EvidenceCoverage, EvidencePacket, LegalAction, PreviewResult, ProblemOwningLayer,
+    ApplicationExecutionFailureClassV1, ApplicationProblem, ApplicationProblemDetailV1,
+    ApplicationProblemKind, ApplicationUnavailableClassV1, CancellationStage, EffectReceipt,
+    EffectResult, EvidenceCoverage, EvidencePacket, LegalAction, PreviewResult, ProblemOwningLayer,
     ProblemTerminality, RUNTIME_MOUNTING_REASON_CODE, RetryDirective, RetryScope, SafeDiagnostic,
 };
 
@@ -196,6 +196,11 @@ pub struct ApplicationProblemRecord {
     pub code: String,
     pub message: String,
     pub diagnostic: Option<SafeDiagnostic>,
+    /// The structured facts `message` is rendered from, when the problem has
+    /// any. Always serialized so a client never mistakes an omitted detail
+    /// for a problem without one.
+    #[schemars(with = "RequiredNullable<ApplicationProblemDetailV1>")]
+    pub detail: Option<ApplicationProblemDetailV1>,
     /// A committed effect is present only for an admitted partial effect.
     /// The nullable field is always serialized: omitting it would create a
     /// compatibility/default path that could hide a missing receipt.
@@ -243,6 +248,7 @@ impl<'de> Deserialize<'de> for ApplicationProblemRecord {
             code: String,
             message: String,
             diagnostic: Option<SafeDiagnostic>,
+            detail: RequiredNullable<ApplicationProblemDetailV1>,
             committed_receipt: RequiredNullable<EffectReceipt>,
             owning_layer: ProblemOwningLayer,
             terminality: ProblemTerminality,
@@ -262,6 +268,18 @@ impl<'de> Deserialize<'de> for ApplicationProblemRecord {
 
         let wire = Wire::deserialize(deserializer)?;
         let legal_actions = wire.legal_actions;
+        let detail = wire.detail.0;
+        let detailed_kind = matches!(
+            wire.kind,
+            ApplicationProblemKind::Stale
+                | ApplicationProblemKind::Unavailable
+                | ApplicationProblemKind::Saturated
+        );
+        if detail.is_some() && !detailed_kind {
+            return Err(serde::de::Error::custom(
+                "application problem kind carries no detail",
+            ));
+        }
         let source = match (
             wire.kind,
             wire.diagnostic.clone(),
@@ -299,6 +317,7 @@ impl<'de> Deserialize<'de> for ApplicationProblemRecord {
                 diagnostic,
                 retry: wire.retry,
                 legal_actions: legal_actions.clone(),
+                detail: detail.clone().map(Box::new),
             },
             (ApplicationProblemKind::Unsupported, Some(diagnostic), None) => {
                 ApplicationProblem::Unsupported {
@@ -317,6 +336,7 @@ impl<'de> Deserialize<'de> for ApplicationProblemRecord {
                     diagnostic,
                     retry: wire.retry,
                     legal_actions: legal_actions.clone(),
+                    detail: detail.clone().map(Box::new),
                 }
             }
             (ApplicationProblemKind::ExecutionFailed, Some(diagnostic), None) => {
@@ -343,6 +363,7 @@ impl<'de> Deserialize<'de> for ApplicationProblemRecord {
                     diagnostic,
                     retry: wire.retry,
                     legal_actions: legal_actions.clone(),
+                    detail: detail.clone().map(Box::new),
                 }
             }
             (ApplicationProblemKind::Cancelled, None, None) => ApplicationProblem::Cancelled {
@@ -371,6 +392,7 @@ impl<'de> Deserialize<'de> for ApplicationProblemRecord {
             code: wire.code,
             message: wire.message,
             diagnostic: wire.diagnostic,
+            detail,
             committed_receipt: wire.committed_receipt.0,
             owning_layer: wire.owning_layer,
             terminality: wire.terminality,
@@ -492,6 +514,7 @@ impl ApplicationProblemRecord {
             RetryDirective::AfterReconcile => Some(RetryScope::SameOperation),
         };
         let diagnostic = source.diagnostic().cloned();
+        let detail = source.detail().cloned();
         let committed_receipt = source.committed_receipt().cloned();
         let code = diagnostic
             .as_ref()
@@ -503,6 +526,7 @@ impl ApplicationProblemRecord {
             code,
             message: source.safe_message().to_owned(),
             diagnostic,
+            detail,
             committed_receipt,
             owning_layer: ProblemOwningLayer::Application,
             terminality: source.terminality(),
@@ -560,6 +584,7 @@ impl ApplicationProblemRecord {
                 .unwrap_or_else(|| self.source.canonical_code())
             || self.message != self.source.safe_message()
             || self.diagnostic.as_ref() != self.source.diagnostic()
+            || self.detail.as_ref() != self.source.detail()
             || self.committed_receipt.as_ref() != self.source.committed_receipt()
         {
             return Err(ApplicationContractError::Inconsistent {
@@ -1061,6 +1086,79 @@ mod tests {
         assert_eq!(
             envelope_schema["required"],
             serde_json::json!(["contract", "request_id", "problem"])
+        );
+    }
+
+    #[test]
+    fn a_detailed_problem_carries_its_facts_beside_the_rendered_message() {
+        let envelope = ApplicationProblemEnvelope::new(
+            contract(),
+            RequestId::new("request.detail.fixture").expect("request"),
+            ApplicationProblem::from_detail(ApplicationProblemDetailV1::Parked {
+                cause: "source unreadable".to_owned(),
+                remedy: "restore the mode, then run `tracedecay sync`".to_owned(),
+                retries_on_wake: false,
+            }),
+        )
+        .expect("parked envelope");
+        let wire = serde_json::to_value(&envelope).expect("envelope serializes");
+        assert_eq!(
+            wire["problem"]["detail"],
+            serde_json::json!({
+                "kind": "parked",
+                "cause": "source unreadable",
+                "remedy": "restore the mode, then run `tracedecay sync`",
+                "retries_on_wake": false,
+            })
+        );
+        assert_eq!(
+            (
+                &wire["problem"]["code"],
+                &wire["problem"]["message"],
+                &wire["problem"]["retry"],
+                &wire["problem"]["legal_actions"],
+            ),
+            (
+                &serde_json::json!("application.code-index.parked"),
+                &serde_json::json!(
+                    "The code index for this worktree is parked; remedy: restore the mode, then \
+                     run `tracedecay sync`; cause: source unreadable"
+                ),
+                &serde_json::json!("never"),
+                &serde_json::json!(["reconcile"]),
+            )
+        );
+        assert_eq!(
+            serde_json::from_value::<ApplicationProblemEnvelope>(wire.clone())
+                .expect("detailed envelope decodes"),
+            envelope
+        );
+
+        let mut restated = wire.clone();
+        restated["problem"]["detail"]["cause"] = serde_json::json!("another cause");
+        assert!(
+            serde_json::from_value::<ApplicationProblemEnvelope>(restated).is_err(),
+            "a message that no longer renders its detail must be refused"
+        );
+        let mut omitted = wire.clone();
+        omitted["problem"]
+            .as_object_mut()
+            .expect("problem object")
+            .remove("detail");
+        assert!(serde_json::from_value::<ApplicationProblemEnvelope>(omitted).is_err());
+
+        let plain = ApplicationProblemEnvelope::new(
+            contract(),
+            RequestId::new("request.detail.plain").expect("request"),
+            ApplicationProblem::invalid_request("result.invalid", "The request is invalid."),
+        )
+        .expect("plain envelope");
+        let mut grafted = serde_json::to_value(&plain).expect("plain envelope serializes");
+        assert_eq!(grafted["problem"]["detail"], Value::Null);
+        grafted["problem"]["detail"] = wire["problem"]["detail"].clone();
+        assert!(
+            serde_json::from_value::<ApplicationProblemEnvelope>(grafted).is_err(),
+            "a kind that carries no detail must not accept one"
         );
     }
 

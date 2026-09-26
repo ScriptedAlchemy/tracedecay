@@ -182,10 +182,13 @@ pub enum SessionRefreshOutcome {
     Denied,
     WrongScope,
     Stale,
-    /// The requested window no longer contains the committed projection
-    /// frontier; the caller rebuilds the request from that frontier.
+    /// The requested window (observed through `requested`, committed
+    /// through `committed`) no longer contains the committed projection
+    /// frontier `active`; the caller rebuilds the request from `active`.
     StaleFrontier {
-        active_projection_frontier: u64,
+        requested: u64,
+        committed: u64,
+        active: u64,
     },
     NotFound,
     Aborted,
@@ -353,11 +356,14 @@ where
                 return SessionRefreshOutcome::Busy;
             }
             Ok(Err(SessionStoreError::StaleRefreshFrontier {
+                observed_through,
+                committed_through,
                 active_projection_frontier,
-                ..
             })) => {
                 return SessionRefreshOutcome::StaleFrontier {
-                    active_projection_frontier,
+                    requested: observed_through,
+                    committed: committed_through,
+                    active: active_projection_frontier,
                 };
             }
             Ok(Err(error)) => {

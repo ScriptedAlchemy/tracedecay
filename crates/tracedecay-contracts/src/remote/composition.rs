@@ -330,6 +330,7 @@ fn remote_unavailable(code: &str, message: &str) -> ApplicationProblem {
             .expect("static remote problem diagnostic is valid"),
         retry: RetryDirective::AfterRevalidate,
         legal_actions: vec![LegalAction::Refresh, LegalAction::Reconcile],
+        detail: None,
     }
 }
 

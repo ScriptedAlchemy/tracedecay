@@ -212,11 +212,10 @@ impl SourceEditDurability {
     pub(super) async fn lock(&self) -> Result<SourceEditLease> {
         let deadline = Instant::now() + SOURCE_EDIT_ADMISSION_DEADLINE;
         let lock_path = self.root.join("source-edit.lock");
-        let deadline_error = || TraceDecayError::SyncLock {
-            message: format!(
-                "source edit writer lock at {} stayed busy past its admission deadline; retry the edit",
-                lock_path.display()
-            ),
+        let deadline_error = || TraceDecayError::LockDeadline {
+            resource: "source-edit writer lock",
+            deadline_ms: u64::try_from(SOURCE_EDIT_ADMISSION_DEADLINE.as_millis())
+                .unwrap_or(u64::MAX),
         };
         let queued =
             tokio::time::timeout_at(deadline.into(), source_edit_owner(&self.root).lock_owned())

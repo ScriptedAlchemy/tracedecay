@@ -65,6 +65,7 @@ fn saturated_retries_after_delay() {
             diagnostic,
             retry: RetryDirective::AfterDelay,
             legal_actions: vec![LegalAction::Retry],
+            detail: None,
         }
     );
     assert_eq!(

@@ -96,6 +96,7 @@ fn expected_conflict(code: &str, message: &str) -> Value {
             "code": code,
             "message": message
         },
+        "detail": null,
         "committed_receipt": null,
         "owning_layer": "application",
         "terminality": "pre_admission",
@@ -220,6 +221,7 @@ async fn release_placement_publishes_the_observed_state_without_deleting_bytes()
             "code": "not_found_or_not_authorized",
             "message": "The requested resource was not found or is not authorized",
             "diagnostic": null,
+            "detail": null,
             "committed_receipt": null,
             "owning_layer": "application",
             "terminality": "pre_admission",

@@ -788,6 +788,7 @@ async fn generate_proposal_allows_a_ready_task_on_the_configured_route_and_refus
             "code": "not_found_or_not_authorized",
             "message": "The requested resource was not found or is not authorized",
             "diagnostic": null,
+            "detail": null,
             "committed_receipt": null,
             "owning_layer": "application",
             "terminality": "pre_admission",

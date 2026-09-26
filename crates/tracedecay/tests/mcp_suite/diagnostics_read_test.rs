@@ -507,6 +507,7 @@ fn absent_producer_problem(request_id: &str, message: &str) -> Value {
             "code": ABSENT_PRODUCER_CODE,
             "message": message
         },
+        "detail": null,
         "committed_receipt": null,
         "owning_layer": "application",
         "terminality": "pre_admission",

@@ -120,6 +120,7 @@ fn authority_problem(error: &TraceDecayError) -> ApplicationProblem {
         diagnostic,
         retry: tracedecay_contracts::RetryDirective::Never,
         legal_actions: Vec::new(),
+        detail: None,
     }
 }
 

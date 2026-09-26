@@ -544,6 +544,7 @@ fn invalid_request_problem() -> Value {
             "code": "application.retained.invalid-request",
             "message": "The retained operation request is invalid."
         },
+        "detail": null,
         "committed_receipt": null,
         "owning_layer": "application",
         "terminality": "pre_admission",
@@ -572,6 +573,7 @@ fn unbuilt_index_problem() -> Value {
             "code": "application.retained.authority-unavailable",
             "message": "The retained operation authority is unavailable: workflow_index_not_built: the workflow index has not been built for this project yet"
         },
+        "detail": null,
         "committed_receipt": null,
         "owning_layer": "application",
         "terminality": "pre_admission",
