@@ -526,18 +526,9 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
     let requested = parse_last_event_id(&headers);
     let activity_db = state.lcm_db.clone();
     let activity_project_id = state.project_id.clone();
-    let initial_replay = match (activity_db.as_deref(), activity_project_id.as_deref()) {
-        (Some(db), Some(project_id)) => {
-            tracedecay_session_memory::event_lane::replay_after(
-                db,
-                project_id,
-                requested.as_ref().map(|resume| resume.sequence),
-            )
-            .await
-        }
-        _ => Ok(None),
-    };
 
+    // The response returns before any store is read, so the stream opens
+    // even while the session store is busy.
     tokio::spawn(async move {
         let delivery_settlements = Arc::clone(&state.delivery_settlements);
         let connection_ref = crate::events_delivery::connection_ref(&run_id, &scope);
@@ -545,6 +536,31 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
         async {
         let activity_run_id = run_id.clone();
         let mut stream_state = EventStreamState::new(run_id);
+        // The first frame proves the stream is live before the activity
+        // replay or the source baselines read a store.
+        let connected = stream_state.heartbeat(&scope);
+        if send_event(
+            &tx,
+            delivery_settlements.as_ref(),
+            connection_ref_for_stream.as_deref(),
+            connected,
+        )
+        .await
+        .is_err()
+        {
+            return;
+        }
+        let initial_replay = match (activity_db.as_deref(), activity_project_id.as_deref()) {
+            (Some(db), Some(project_id)) => {
+                tracedecay_session_memory::event_lane::replay_after(
+                    db,
+                    project_id,
+                    requested.as_ref().map(|resume| resume.sequence),
+                )
+                .await
+            }
+            _ => Ok(None),
+        };
         let mut interval = tokio::time::interval(POLL_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut flush = tokio::time::interval(ACTIVITY_FLUSH_INTERVAL);
@@ -1033,6 +1049,8 @@ pub(crate) async fn dashboard_state_fixture(
         lcm_db: None,
         lcm_db_path: String::new(),
         lcm_scope: "unavailable".to_owned(),
+        session_authority: crate::DashboardSessionAuthorityStateV1::Unavailable,
+        session_resolver: None,
         lcm_read_authority: None,
         git_correlation_read_authority: None,
         delivery_read_authority: None,

@@ -2,6 +2,7 @@ pub(crate) use std::fs;
 pub(crate) use std::path::{Path, PathBuf};
 pub(crate) use std::process::Command;
 pub(crate) use std::sync::Arc;
+pub(crate) use std::sync::atomic::{AtomicBool, Ordering};
 pub(crate) use std::thread;
 
 pub(crate) use crate::common::{
@@ -126,6 +127,7 @@ pub(crate) fn spawn_dashboard_server_with_host_runtime(
         false,
         None,
         None,
+        None,
         port,
     )
 }
@@ -140,6 +142,7 @@ pub(crate) fn spawn_dashboard_server_with_configuration_runtime(
         cg,
         Some((host_runtime, project_graphs)),
         true,
+        None,
         None,
         None,
         port,
@@ -167,6 +170,7 @@ fn spawn_dashboard_server_with_runner(
     git_correlation_authority: Option<
         Arc<dyn tracedecay_dashboard_api::DashboardGitCorrelationReadPortV1>,
     >,
+    project_open: Option<Arc<AtomicBool>>,
     port: u16,
 ) -> DashboardServer {
     let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -203,6 +207,22 @@ fn spawn_dashboard_server_with_runner(
             let authority = match git_correlation_authority {
                 Some(git_correlation) => {
                     authority.with_git_correlation_read_authority(git_correlation)
+                }
+                None => authority,
+            };
+            let authority = match project_open {
+                Some(project_open) => {
+                    let admitted = authority.project_session_authorities();
+                    authority.with_opening_project_sessions(Arc::new(move || {
+                        let resolution = if project_open.load(Ordering::SeqCst) {
+                            tracedecay_dashboard_api::DashboardSessionResolutionV1::Ready(
+                                admitted.clone(),
+                            )
+                        } else {
+                            tracedecay_dashboard_api::DashboardSessionResolutionV1::Opening
+                        };
+                        Box::pin(async move { resolution })
+                    }))
                 }
                 None => authority,
             };
@@ -934,6 +954,24 @@ pub(crate) async fn start_dashboard_fixture_with_delivery_authority(
         false,
         Some(delivery_authority),
         None,
+        None,
+    )
+    .await
+}
+
+/// Starts a session-read fixture over seeded sessions, composed the way the
+/// daemon composes a dashboard whose project is still opening: its session
+/// authorities mount once `project_open` is set.
+pub(crate) async fn start_dashboard_fixture_while_opening(
+    project_open: Arc<AtomicBool>,
+) -> DashboardFixture {
+    start_dashboard_fixture_with_options_and_delivery(
+        true,
+        false,
+        false,
+        None,
+        None,
+        Some(project_open),
     )
     .await
 }
@@ -949,6 +987,7 @@ pub(crate) async fn start_dashboard_fixture_with_git_correlation_authority(
         false,
         None,
         Some(git_correlation_authority),
+        None,
     )
     .await
 }
@@ -964,6 +1003,7 @@ async fn start_dashboard_fixture_with_options(
         mount_configuration_runtime,
         None,
         None,
+        None,
     )
     .await
 }
@@ -976,6 +1016,7 @@ async fn start_dashboard_fixture_with_options_and_delivery(
     git_correlation_authority: Option<
         Arc<dyn tracedecay_dashboard_api::DashboardGitCorrelationReadPortV1>,
     >,
+    project_open: Option<Arc<AtomicBool>>,
 ) -> DashboardFixture {
     let tmp = tempdir_or_panic();
     let tmp_root = canonical_existing_identity(tmp.path())
@@ -1025,6 +1066,7 @@ async fn start_dashboard_fixture_with_options_and_delivery(
         mount_configuration_runtime,
         delivery_authority,
         git_correlation_authority,
+        project_open,
         port,
     );
 

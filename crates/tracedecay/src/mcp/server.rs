@@ -1245,6 +1245,18 @@ impl McpServer {
         self.project_session_db.clone()
     }
 
+    /// The mounted project session retrieval service and its identity.
+    pub(crate) fn project_session_retrieval(
+        &self,
+    ) -> Option<(
+        Arc<dyn SessionApplicationRetrievalPortV1>,
+        tracedecay_session_memory::context::ResolvedSessionIdentity,
+    )> {
+        self.project_application_retrieval
+            .as_ref()
+            .map(|mounted| (Arc::clone(&mounted.service), mounted.identity.clone()))
+    }
+
     pub(crate) fn background_cpu_authority(
         &self,
     ) -> Option<Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>> {

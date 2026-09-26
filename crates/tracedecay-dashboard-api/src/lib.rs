@@ -171,6 +171,11 @@ mod projects;
 mod read_model;
 mod request_deadline;
 mod savings_api;
+mod session_authority;
+pub use session_authority::{
+    DashboardSessionAuthoritiesV1, DashboardSessionAuthorityStateV1, DashboardSessionMountV1,
+    DashboardSessionResolutionV1, DashboardSessionResolveFuture, DashboardSessionResolverV1,
+};
 mod snapshot_cache;
 use tracedecay_session_memory::provider_pricing as savings_pricing;
 pub mod scope;
@@ -321,16 +326,15 @@ pub struct DashboardStateCompositionV1 {
     /// Exact-project shared-family and revision-pair reads composed from the
     /// daemon's verified code-index authorities.
     pub code_read_authority: Option<code_read_api::DashboardCodeReadAuthorityV1>,
-    pub registered_project_session_db: Option<RegisteredGlobalDbLeaseV1>,
+    /// The project's session store with its LCM and Git-correlation reads,
+    /// or the resolver that mounts them once a still-opening project admits
+    /// its session store.
+    pub project_sessions: DashboardSessionMountV1,
     /// Exact ProfileSessions read/mutation capability for the daemon-wide
     /// code-index worker preference. This never aliases the project settings
     /// control plane: it has its own profile revision and CAS boundary.
     pub profile_code_index_worker_settings:
         Option<Arc<dyn DashboardProfileCodeIndexWorkerSettingsPort>>,
-    pub lcm_read_authority: Option<Arc<dyn DashboardLcmReadPortV1>>,
-    /// Daemon-owned typed read over the session Git evidence rows. Loom's git
-    /// sources report unavailable without it.
-    pub git_correlation_read_authority: Option<Arc<dyn DashboardGitCorrelationReadPortV1>>,
     /// Daemon-wide Delivery projection over exact registered project targets.
     /// The adapter owns application admission and provider/store access; HTTP
     /// receives only bounded typed source outcomes.
@@ -459,6 +463,12 @@ pub struct DashboardState {
     pub lcm_db_path: String,
     /// Storage scope of the retained legacy session store.
     pub lcm_scope: String,
+    /// Whether the session authorities above are mounted, still opening, or
+    /// unavailable for this state.
+    pub session_authority: DashboardSessionAuthorityStateV1,
+    /// Present only while [`Self::session_authority`] is opening; the
+    /// active-project gateway re-asks it until the authorities mount.
+    pub(crate) session_resolver: Option<DashboardSessionResolverV1>,
     /// Daemon-owned canonical session retrieval authority used by LCM browse
     /// routes. Those routes never retain or open a session database.
     pub lcm_read_authority: Option<Arc<dyn DashboardLcmReadPortV1>>,
@@ -553,6 +563,7 @@ pub struct DashboardHostAdmissionTestAuthorityV1 {
         Option<Arc<dyn DashboardProfileCodeIndexWorkerSettingsPort>>,
     application_invocation_executor: Option<Arc<dyn DashboardApplicationRuntime>>,
     pr_autotrack_reader: Option<PrAutoTrackManagedSummaryReader>,
+    opening_project_sessions: Option<DashboardSessionResolverV1>,
 }
 
 #[cfg(feature = "test-transport")]
@@ -581,6 +592,26 @@ impl DashboardHostAdmissionTestAuthorityV1 {
             profile_code_index_worker_settings: None,
             application_invocation_executor: None,
             pr_autotrack_reader: None,
+            opening_project_sessions: None,
+        }
+    }
+
+    /// Composes the dashboard as the daemon does for a project that is still
+    /// opening: the session authorities mount only once `resolver` answers
+    /// ready.
+    #[must_use]
+    pub fn with_opening_project_sessions(mut self, resolver: DashboardSessionResolverV1) -> Self {
+        self.opening_project_sessions = Some(resolver);
+        self
+    }
+
+    /// The session authorities this runtime admits, as the resolver of an
+    /// opening project hands them over.
+    pub fn project_session_authorities(&self) -> DashboardSessionAuthoritiesV1 {
+        DashboardSessionAuthoritiesV1 {
+            project_sessions: self.project_sessions.clone(),
+            lcm_read_authority: self.lcm_read_authority.clone(),
+            git_correlation_read_authority: self.git_correlation_read_authority.clone(),
         }
     }
 
@@ -747,6 +778,16 @@ impl DashboardState {
         self.doctor_report_reader = doctor_report_reader;
         self.remote_operational_status_reader = remote_operational_status_reader;
     }
+
+    fn mount_session_authorities(&mut self, authorities: DashboardSessionAuthoritiesV1) {
+        self.lcm_db_path = authorities.project_sessions.db_path().display().to_string();
+        self.lcm_db = Some(authorities.project_sessions);
+        self.lcm_scope.clone_from(&self.storage_mode);
+        self.lcm_read_authority = authorities.lcm_read_authority;
+        self.git_correlation_read_authority = authorities.git_correlation_read_authority;
+        self.session_authority = DashboardSessionAuthorityStateV1::Ready;
+        self.session_resolver = None;
+    }
 }
 
 /// The retained session store for legacy dashboard routes.
@@ -826,10 +867,8 @@ async fn build_state_inner(
         code_graph_read_admission,
         code_graph_projection_read_port,
         code_read_authority,
-        registered_project_session_db,
+        project_sessions,
         profile_code_index_worker_settings,
-        lcm_read_authority,
-        git_correlation_read_authority,
         delivery_read_authority,
         registered_savings_db,
         automation_authority,
@@ -847,7 +886,35 @@ async fn build_state_inner(
     } = composition;
     let (mem_db_path, mem_db) = resolve_project_memory_store(cg);
     let memory_owner = project_memory_owner(cg)?;
-    let lcm = resolve_lcm_store(cg, registered_project_session_db).await;
+    let (session_authorities, session_authority, session_resolver) = match project_sessions {
+        DashboardSessionMountV1::Ready(authorities) => (
+            Some(authorities),
+            DashboardSessionAuthorityStateV1::Ready,
+            None,
+        ),
+        DashboardSessionMountV1::Opening(resolver) => (
+            None,
+            DashboardSessionAuthorityStateV1::Opening,
+            Some(resolver),
+        ),
+        DashboardSessionMountV1::Unavailable => {
+            (None, DashboardSessionAuthorityStateV1::Unavailable, None)
+        }
+    };
+    let (lcm_read_authority, git_correlation_read_authority) =
+        session_authorities
+            .as_ref()
+            .map_or((None, None), |authorities| {
+                (
+                    authorities.lcm_read_authority.clone(),
+                    authorities.git_correlation_read_authority.clone(),
+                )
+            });
+    let lcm = resolve_lcm_store(
+        cg,
+        session_authorities.map(|authorities| authorities.project_sessions),
+    )
+    .await;
     let dashboard_root = cg.store_layout.dashboard_root.clone();
     let store_root = cg.store_layout.data_root.clone();
     let storage_mode = storage_mode_label(&cg.store_layout.storage_mode).to_string();
@@ -901,6 +968,8 @@ async fn build_state_inner(
         lcm_db: lcm.lcm_db,
         lcm_db_path: lcm.path,
         lcm_scope: lcm.scope,
+        session_authority,
+        session_resolver,
         lcm_read_authority,
         git_correlation_read_authority,
         delivery_read_authority,
@@ -968,13 +1037,11 @@ pub async fn build_selected_project_state(
             code_graph_read_admission: None,
             code_graph_projection_read_port: None,
             code_read_authority: None,
-            registered_project_session_db: None,
+            project_sessions: DashboardSessionMountV1::Unavailable,
             // This capability is profile-global and its route is deliberately
             // unscoped, so selected projects reuse the active dashboard's
             // exact ProfileSessions authority. It is not a project write.
             profile_code_index_worker_settings: active.profile_code_index_worker_settings.clone(),
-            lcm_read_authority: None,
-            git_correlation_read_authority: None,
             delivery_read_authority: active.delivery_read_authority.clone(),
             registered_savings_db: active.savings_db.clone(),
             automation_authority: active.automation_authority.clone(),
@@ -1115,14 +1182,15 @@ where
                 .and_then(|authority| authority.code_graph_projection_read_port.clone()),
             code_read_authority: test_authority
                 .and_then(|authority| authority.code_read_authority.clone()),
-            registered_project_session_db: test_authority
-                .map(|authority| authority.project_sessions.clone()),
+            project_sessions: match test_authority {
+                Some(authority) => match &authority.opening_project_sessions {
+                    Some(resolver) => DashboardSessionMountV1::Opening(Arc::clone(resolver)),
+                    None => DashboardSessionMountV1::Ready(authority.project_session_authorities()),
+                },
+                None => DashboardSessionMountV1::Unavailable,
+            },
             profile_code_index_worker_settings: test_authority
                 .and_then(|authority| authority.profile_code_index_worker_settings.clone()),
-            lcm_read_authority: test_authority
-                .and_then(|authority| authority.lcm_read_authority.clone()),
-            git_correlation_read_authority: test_authority
-                .and_then(|authority| authority.git_correlation_read_authority.clone()),
             delivery_read_authority: test_authority
                 .and_then(|authority| authority.delivery_read_authority.clone()),
             registered_savings_db: test_authority
@@ -1851,7 +1919,12 @@ async fn active_api_gateway(
     State(runtime): State<projects::DashboardRuntime>,
     req: Request<Body>,
 ) -> Response {
-    forward_project_request(runtime.project_api_router(), runtime.active_state(), req).await
+    forward_project_request(
+        runtime.project_api_router(),
+        runtime.active_state().await,
+        req,
+    )
+    .await
 }
 
 async fn project_scoped_api_gateway(
@@ -1872,7 +1945,7 @@ async fn project_scoped_api_gateway(
     }
     let application_read = selected_project_application_read(req.method(), &tail);
     let event_delivery_ack = is_selected_project_event_delivery_ack(req.method(), &tail);
-    if runtime.active_project_id() != Some(project_id.as_str())
+    if runtime.active_project_id().as_deref() != Some(project_id.as_str())
         && !matches!(req.method(), &Method::GET | &Method::HEAD)
         && application_read.is_none()
         && !event_delivery_ack
@@ -1891,7 +1964,7 @@ async fn project_scoped_api_gateway(
     let selected = match runtime.selected_project_state(&project_id).await {
         Ok(selected) => selected,
         Err(err) if projects::is_registry_unavailable_error(&err) => {
-            return projects::registry_unavailable_response(&runtime.active_state(), &err)
+            return projects::registry_unavailable_response(&runtime.active_state().await, &err)
                 .into_response();
         }
         Err(err) => {
@@ -1924,32 +1997,34 @@ async fn project_scoped_api_gateway(
             )
                 .into_response();
         };
-        let application_runtime = if runtime.active_project_id() == Some(project_id.as_str()) {
-            selected.state.application_invocation_executor.clone()
-        } else {
-            match selected_project_application_runtime(
-                runtime
-                    .active_state()
-                    .application_invocation_executor
-                    .as_ref(),
-                &project_graph.store_layout.project_root,
-            ) {
-                Ok(application_runtime) => application_runtime,
-                Err(err) => {
-                    return (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        Json(json!({
-                            "status": "unavailable",
-                            "detail": format!(
-                                "selected project {read} authority is unavailable: {err}"
-                            ),
-                            "project_id": project_id,
-                        })),
-                    )
-                        .into_response();
+        let application_runtime =
+            if runtime.active_project_id().as_deref() == Some(project_id.as_str()) {
+                selected.state.application_invocation_executor.clone()
+            } else {
+                match selected_project_application_runtime(
+                    runtime
+                        .active_state()
+                        .await
+                        .application_invocation_executor
+                        .as_ref(),
+                    &project_graph.store_layout.project_root,
+                ) {
+                    Ok(application_runtime) => application_runtime,
+                    Err(err) => {
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(json!({
+                                "status": "unavailable",
+                                "detail": format!(
+                                    "selected project {read} authority is unavailable: {err}"
+                                ),
+                                "project_id": project_id,
+                            })),
+                        )
+                            .into_response();
+                    }
                 }
-            }
-        };
+            };
         let application = match ActiveProjectApplicationRoutes::for_active_project(
             project_graph,
             application_runtime,
@@ -2189,6 +2264,7 @@ async fn capabilities(
         "graph_db": state.graph_db_path,
         "lcm_db": state.lcm_db_path,
         "lcm_scope": state.lcm_scope,
+        "session_authority": state.session_authority.as_str(),
         "multi_root": multi_root,
         "features": {
             "memory": true,
@@ -2509,6 +2585,8 @@ mod authority_tests {
                 lcm_db: None,
                 lcm_db_path: layout.sessions_db_path.display().to_string(),
                 lcm_scope: "unavailable".to_owned(),
+                session_authority: crate::DashboardSessionAuthorityStateV1::Unavailable,
+                session_resolver: None,
                 lcm_read_authority: None,
                 git_correlation_read_authority: None,
                 delivery_read_authority: None,

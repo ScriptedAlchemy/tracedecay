@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::io::{BufRead, BufReader};
 use std::time::Duration;
 
 use crate::dashboard_api_support::*;
@@ -10,6 +11,79 @@ use tracedecay_global_db::ParseOffset;
 use tracedecay_sessions::runtime::git_correlation::{
     DEFAULT_SPAN_MERGE_GAP_SECS, SpanObservation, SpanSource,
 };
+
+/// A dashboard started while its project is still opening reports the session
+/// authority as opening, then serves the seeded sessions once the project's
+/// session store is admitted, without being restarted.
+#[test]
+fn dashboard_started_during_project_open_serves_sessions_once_open_completes() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let project_open = Arc::new(AtomicBool::new(false));
+        let fixture = start_dashboard_fixture_while_opening(Arc::clone(&project_open)).await;
+        let agent = http_agent();
+        let capabilities_url = format!("{}/api/capabilities", fixture.base_url);
+        let temporal_url = format!("{}/api/loom/temporal?limit=25", fixture.base_url);
+
+        let (status, capabilities) = get_json(&agent, &capabilities_url);
+        assert_eq!(status, 200, "{capabilities}");
+        assert_eq!(capabilities["session_authority"], "opening");
+        assert_eq!(capabilities["features"]["lcm"], false);
+        let (event, frame) = first_event_frame(&agent, &format!("{}/api/events", fixture.base_url));
+        assert_eq!(event, "heartbeat", "{frame}");
+        assert_eq!(frame["kind"]["family"], "heartbeat");
+        assert_eq!(frame["event_revision"], 1);
+        let (status, opening) = get_json(&agent, &temporal_url);
+        assert_eq!(status, 200, "{opening}");
+        assert_eq!(opening["domain_state"], "loading");
+        assert_eq!(opening["payload"]["available"], false);
+        assert_eq!(opening["payload"]["total"], 0);
+
+        project_open.store(true, Ordering::SeqCst);
+
+        let (status, capabilities) = get_json(&agent, &capabilities_url);
+        assert_eq!(status, 200, "{capabilities}");
+        assert_eq!(capabilities["session_authority"], "ready");
+        assert_eq!(capabilities["features"]["lcm"], true);
+        let (status, ready) = get_json(&agent, &temporal_url);
+        assert_eq!(status, 200, "{ready}");
+        assert_eq!(ready["domain_state"], "partial");
+        assert_eq!(ready["payload"]["available"], true);
+        assert_eq!(ready["payload"]["total"], 1);
+        assert_eq!(
+            ready["payload"]["sessions"][0]["session_id"],
+            "sess-dashboard-1"
+        );
+    });
+}
+
+/// Reads the first SSE frame the stream at `url` delivers within the agent's
+/// request timeout.
+fn first_event_frame(agent: &ureq::Agent, url: &str) -> (String, serde_json::Value) {
+    let response = agent
+        .get(url)
+        .call()
+        .unwrap_or_else(|error| panic!("GET {url}: {error}"));
+    assert_eq!(response.status().as_u16(), 200);
+    let mut lines = BufReader::new(response.into_body().into_reader()).lines();
+    let mut event = None;
+    loop {
+        let line = lines
+            .next()
+            .unwrap_or_else(|| panic!("{url} closed before its first frame"))
+            .unwrap_or_else(|error| panic!("{url} delivered no frame in time: {error}"));
+        if let Some(name) = line.strip_prefix("event: ") {
+            event = Some(name.to_owned());
+        } else if let Some(data) = line.strip_prefix("data: ") {
+            let frame = serde_json::from_str(data)
+                .unwrap_or_else(|error| panic!("{url} frame is not JSON: {error}: {data}"));
+            return (event.unwrap_or_default(), frame);
+        }
+    }
+}
 
 #[test]
 fn loom_temporal_endpoint_reads_recorded_ends_and_causal_authorities() {
