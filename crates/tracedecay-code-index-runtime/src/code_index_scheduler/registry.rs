@@ -1232,6 +1232,7 @@ pub(super) fn serving_seat_matches_advertised_generation(
 /// status advertises.
 pub(super) fn dashboard_terminal_status(
     latest: Option<&LatestCompleteCodeIndexV1>,
+    released_seat: Option<&str>,
     text: Option<&LatestCodeTextGenerationV1>,
     text_ready: bool,
     graph_activation_enabled: bool,
@@ -1244,7 +1245,9 @@ pub(super) fn dashboard_terminal_status(
         code_graph_serving,
     ) && serving_seat_matches_advertised_generation(
         graph_activation_enabled,
-        latest.map(|latest| latest.generation().manifest().generation_id.as_str()),
+        latest
+            .map(|latest| latest.generation().manifest().generation_id.as_str())
+            .or(released_seat),
         text.map(|text| text.metadata().manifest().generation_id.as_str()),
     )
 }

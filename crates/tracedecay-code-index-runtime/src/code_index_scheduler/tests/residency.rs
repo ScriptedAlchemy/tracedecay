@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
+use tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1;
 use tracedecay_runtime_core::resident_memory::{
     ResidentOwnerKindV1, ResidentOwnerReleaseCauseV1, ResidentOwnersReportV1, ResidentOwnersV1,
 };
@@ -76,6 +77,17 @@ async fn an_idle_worktree_gives_back_its_decode_and_search_still_answers_fresh()
     assert_eq!(rows(&idle), []);
     assert_eq!(idle.measured_bytes, 0);
 
+    let staleness = registry
+        .dashboard_freshness_read(fixture.path())
+        .await
+        .expect("freshness reads")
+        .expect("mounted worktree")
+        .staleness_state;
+    assert_eq!(
+        staleness,
+        Some(CodeIndexStalenessStateV1::Fresh),
+        "status keeps reporting the released generation as the fresh seat"
+    );
     let after = registry
         .execute_query_search(&scope, core_search_request("main"))
         .await
