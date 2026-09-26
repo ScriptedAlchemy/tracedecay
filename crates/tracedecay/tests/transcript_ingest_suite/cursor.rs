@@ -1342,20 +1342,21 @@ async fn cursor_sweep_skips_toplevel_duplicate_whose_subagent_copy_is_past_the_w
         .join("projects")
         .join(cursor_project_slug(&project).unwrap())
         .join("agent-transcripts");
-    // More sessions than the sweep's discovery file cap, so the bounded walk
-    // must stop before the last directory it enumerates.
+    // More sessions than one sweep page holds, so the first page must stop
+    // before the last session in id order.
     for index in 0..4100 {
         let session = format!("filler-{index:04}");
         let dir = transcripts_dir.join(&session);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(format!("{session}.jsonl")), b"").unwrap();
     }
-    let walk_order: Vec<String> = std::fs::read_dir(&transcripts_dir)
+    let mut session_order: Vec<String> = std::fs::read_dir(&transcripts_dir)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
         .collect();
-    let worker = walk_order.first().unwrap().clone();
-    let parent = walk_order.last().unwrap().clone();
+    session_order.sort();
+    let worker = session_order.first().unwrap().clone();
+    let parent = session_order.last().unwrap().clone();
 
     // The subagent copy repeats one byte-identical line (a repeated tool
     // call), so its second occurrence takes the positional identity. The
@@ -1399,12 +1400,12 @@ async fn cursor_sweep_skips_toplevel_duplicate_whose_subagent_copy_is_past_the_w
     let sweep = CursorSweepSource::with_home(&home);
     let paths = sweep.transcript_paths(&project);
     assert!(
-        paths.len() < walk_order.len(),
-        "the fixture must truncate the bounded walk"
+        paths.len() < session_order.len(),
+        "the fixture must span more than one sweep page"
     );
     assert!(
         !paths.iter().any(|path| path.starts_with(&parent_dir)),
-        "the parent directory must fall past the walk cap"
+        "the parent directory must fall past the first sweep page"
     );
     try_ingest_source(&db, &sweep, &project, None)
         .await
@@ -1426,8 +1427,8 @@ async fn cursor_sweep_skips_toplevel_duplicate_whose_subagent_copy_is_past_the_w
         !paths
             .iter()
             .any(|path| path.file_stem().and_then(std::ffi::OsStr::to_str) == Some(&worker)),
-        "the top-level copy of a subagent session is a duplicate even when the walk \
-         did not retain its subagent copy"
+        "the top-level copy of a subagent session is a duplicate even when its \
+         subagent copy is on a later sweep page"
     );
     let child = db
         .get_session("cursor", &worker)

@@ -81,9 +81,9 @@ fn merge_cursor_sweep_outcome(
     outcome.bytes_consumed = outcome
         .bytes_consumed
         .saturating_add(sweep.stats.bytes_consumed);
-    outcome.add_deferred_units(u64::from(
+    outcome.add_deferred_units(sweep.coverage.deferred_sessions().max(u64::from(
         sweep.stats.source_deferred || sweep.stats.bytes_consumed > remaining,
-    ));
+    )));
 }
 
 fn claude_provider_run_outcome(
@@ -883,7 +883,9 @@ mod tests {
     use crate::runtime::hosts::claude_observation::{
         ClaudeObservationIngestError, ClaudeObservationIngestStats,
     };
-    use crate::runtime::hosts::cursor::{CursorSweepIngestOutcome, CursorTranscriptIngestStats};
+    use crate::runtime::hosts::cursor::{
+        CursorSweepCoverage, CursorSweepIngestOutcome, CursorTranscriptIngestStats,
+    };
     use crate::runtime::hosts::cursor_composer::CursorComposerSweepOutcome;
     use crate::runtime::shared::TranscriptIngestStats;
     use crate::runtime::source::TranscriptIngestError;
@@ -994,6 +996,7 @@ mod tests {
                 exact_duplicate: false,
             },
             session_ids: BTreeSet::from(["shared-session".to_string()]),
+            coverage: CursorSweepCoverage::Complete,
         };
 
         merge_cursor_sweep_outcome(&mut outcome, &mut session_ids, sweep, 10);
@@ -1002,6 +1005,26 @@ mod tests {
         assert_eq!(outcome.stats.messages_upserted, 5);
         assert_eq!(outcome.bytes_consumed, 14);
         assert_eq!(outcome.deferred_units, 1);
+    }
+
+    #[test]
+    fn project_cursor_run_defers_every_session_the_sweep_lap_has_not_reached() {
+        let mut outcome = ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
+        let sweep = CursorSweepIngestOutcome {
+            stats: CursorTranscriptIngestStats {
+                source_deferred: true,
+                ..CursorTranscriptIngestStats::default()
+            },
+            session_ids: BTreeSet::new(),
+            coverage: CursorSweepCoverage::Continuing {
+                resume_at: 4096,
+                total: 8553,
+            },
+        };
+
+        merge_cursor_sweep_outcome(&mut outcome, &mut BTreeSet::new(), sweep, 10);
+
+        assert_eq!(outcome.deferred_units, 8553 - 4096);
     }
 
     #[test]
