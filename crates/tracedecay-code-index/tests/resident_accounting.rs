@@ -1,21 +1,26 @@
 //! `CodeIndexPublishedGenerationV1::retained_bytes` is what admission charges
 //! for decoding a sealed generation and what the resident-memory inventory
 //! reports for the decode it holds. This binary counts every allocation, so
-//! the bytes a real decode leaves live are the reference it is held to.
+//! the bytes a real decode leaves live are the reference it is held to, and
+//! the bytes a sealed generation's graph build holds are bounded against it.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::content_digest;
+use tracedecay_code_index::graph_projection::{
+    CODE_GRAPH_PROJECTOR_REVISION, build_sealed_code_graph_rows, code_graph_projection_identity,
+};
 use tracedecay_code_index::production::{
     CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
     CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1,
     CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1,
     CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
-    SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
+    SealedGenerationFileWindowsV1, SealedGenerationSegmentPublicationV1,
+    SealedGenerationSegmentReadV1,
 };
 use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -29,6 +34,7 @@ use tracedecay_domain::{
     RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
     SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1, UtcMicros,
 };
+use tracedecay_graph_db::{GraphGenerationRowSpill, GraphNamespace, GraphProjectorRevision};
 
 struct CountingAllocator;
 
@@ -61,6 +67,9 @@ unsafe impl GlobalAlloc for CountingAllocator {
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+/// The counters are process-wide, so measurements run one at a time.
+static MEASUREMENT: Mutex<()> = Mutex::new(());
 
 #[derive(Default)]
 struct Publication;
@@ -234,31 +243,90 @@ fn seal(generation: &CodeIndexPublishedGenerationV1) -> (Vec<u8>, BTreeMap<Strin
     (manifest, segments)
 }
 
+fn read_segment(
+    segments: &BTreeMap<String, Vec<u8>>,
+    request: SealedGenerationSegmentReadV1<'_>,
+    buffer: &mut Vec<u8>,
+) -> Result<(), CodeIndexProductionErrorV1> {
+    let (digest, offset, length) = match request {
+        SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => (digest, 0, size_bytes),
+        SealedGenerationSegmentReadV1::Range {
+            digest,
+            offset,
+            length,
+            ..
+        } => (digest, offset, length),
+    };
+    let bytes = segments
+        .get(digest.as_str())
+        .ok_or_else(|| CodeIndexProductionErrorV1::Contract("segment missing".to_owned()))?;
+    let start = usize::try_from(offset).expect("offset");
+    let end = start + usize::try_from(length).expect("length");
+    buffer.clear();
+    buffer.extend_from_slice(&bytes[start..end]);
+    Ok(())
+}
+
 fn decode(manifest: &[u8], segments: &BTreeMap<String, Vec<u8>>) -> CodeIndexPublishedGenerationV1 {
     CodeIndexPublishedGenerationV1::decode_partitioned_sealed(manifest, |request, buffer| {
-        let (digest, offset, length) = match request {
-            SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => (digest, 0, size_bytes),
-            SealedGenerationSegmentReadV1::Range {
-                digest,
-                offset,
-                length,
-                ..
-            } => (digest, offset, length),
-        };
-        let bytes = segments
-            .get(digest.as_str())
-            .ok_or_else(|| CodeIndexProductionErrorV1::Contract("segment missing".to_owned()))?;
-        let start = usize::try_from(offset).expect("offset");
-        let end = start + usize::try_from(length).expect("length");
-        buffer.clear();
-        buffer.extend_from_slice(&bytes[start..end]);
-        Ok(())
+        read_segment(segments, request, buffer)
     })
     .expect("decode")
 }
 
+/// Publishing a sealed generation's code graph reads its segments one window
+/// at a time: the most the build ever holds above the sealed input stays
+/// within a fixed budget, less than decoding the generation alone leaves
+/// live. Graph publication used to decode the whole generation and project
+/// it in one piece, 17,968,317 bytes at peak for this fixture.
+#[test]
+fn a_sealed_graph_build_holds_windows_not_the_decoded_generation() {
+    const PEAK_BUDGET_BYTES: usize = 19_000_000;
+    let _measurement = MEASUREMENT.lock().unwrap_or_else(PoisonError::into_inner);
+    let built = CodeIndexProductionOwnerV1::new(config(), Publication, Projection)
+        .expect("owner")
+        .build_and_publish(request(300), &Active)
+        .expect("build");
+    let (manifest, segments) = seal(&built);
+    drop(built);
+    let scratch = tempfile::tempdir().expect("scratch");
+    let projection =
+        code_graph_projection_identity(GraphNamespace::new("code-graph-resident").expect("ns"))
+            .expect("projection");
+    let revision =
+        GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned()).expect("rev");
+    let spill = GraphGenerationRowSpill::create(scratch.path().join("rows"), projection.clone())
+        .expect("spill");
+
+    // One worker reads four files per window, so the 300-file fixture spans
+    // 75 windows the way a production corpus spans its windows.
+    tracedecay_code_index::parallelism::force_indexing_workers_for_test(1);
+    let before = LIVE.load(Ordering::Relaxed);
+    PEAK.store(before, Ordering::Relaxed);
+    let source = SealedGenerationFileWindowsV1::open(&manifest).expect("sealed manifest");
+    let spilled = build_sealed_code_graph_rows(
+        projection,
+        &source,
+        &mut |request, buffer| read_segment(&segments, request, buffer),
+        &revision,
+        spill,
+        &|| Ok(()),
+    )
+    .expect("sealed graph builds");
+    let peak = PEAK.load(Ordering::Relaxed) - before;
+    tracedecay_code_index::parallelism::clear_forced_indexing_workers_for_test();
+    eprintln!("GRAPH ROWS peak {peak}");
+
+    assert_eq!(spilled.row_counts(), (4_201, 5_100));
+    assert!(
+        peak <= PEAK_BUDGET_BYTES,
+        "the graph build held {peak} bytes at peak, over its {PEAK_BUDGET_BYTES}-byte budget"
+    );
+}
+
 #[test]
 fn retained_bytes_account_for_what_a_decode_leaves_live() {
+    let _measurement = MEASUREMENT.lock().unwrap_or_else(PoisonError::into_inner);
     let built = CodeIndexProductionOwnerV1::new(config(), Publication, Projection)
         .expect("owner")
         .build_and_publish(request(300), &Active)

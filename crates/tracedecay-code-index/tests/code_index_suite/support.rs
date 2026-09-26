@@ -9,10 +9,13 @@ use flate2::write::DeflateEncoder;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::content_digest;
+use tracedecay_code_index::graph_projection::{
+    SealedCodeGraphRowsError, build_sealed_code_graph_rows,
+};
 use tracedecay_code_index::intake::{CodeIndexIntake, ReceiptBoundCodeFileV1, SanitizedCodeIntake};
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use tracedecay_code_index::production::{
-    CodeIndexProductionErrorV1, CodeIndexPublishedGenerationV1,
+    CodeIndexProductionErrorV1, CodeIndexPublishedGenerationV1, SealedGenerationFileWindowsV1,
     SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
     VerifiedSealedLexicalPageSourceV1,
 };
@@ -20,6 +23,10 @@ use tracedecay_domain::{
     CodeGenerationId, FileOccurrenceId, LanguageDescriptorV1, LanguageId, ManifestDigest,
     ProjectId, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
     SanitizerRevision, SnapshotFileDispositionV1, UtcMicros, ValidatedCodeFileV1,
+};
+use tracedecay_graph_db::{
+    GraphDbError, GraphGenerationManifest, GraphGenerationRowSpill, GraphProjectionIdentity,
+    GraphProjectorRevision,
 };
 
 pub const RUST_SOURCE: &str = "//! Module documentation.\n\nuse std::collections::HashMap;\n\n/// Increment a value.\npub fn alpha(value: u32) -> u32 {\n    value + 1\n}\n\npub struct Holder {\n    map: HashMap<u32, u32>,\n}\n\nimpl Holder {\n    pub fn get(&self, key: u32) -> Option<u32> {\n        self.map.get(&key).copied()\n    }\n}\n\n// trailing window text\n";
@@ -124,26 +131,65 @@ impl PartitionedSealV1 {
         manifest: &[u8],
     ) -> Result<CodeIndexPublishedGenerationV1, CodeIndexProductionErrorV1> {
         CodeIndexPublishedGenerationV1::decode_partitioned_sealed(manifest, |request, buffer| {
-            let (digest, offset, length) = match request {
-                SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
-                    (digest, 0, size_bytes)
-                }
-                SealedGenerationSegmentReadV1::Range {
-                    digest,
-                    offset,
-                    length,
-                    ..
-                } => (digest, offset, length),
-            };
-            let bytes = self.segments.get(digest.as_str()).ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract("fixture segment is missing".to_owned())
-            })?;
-            let start = usize::try_from(offset).expect("segment offset fits usize");
-            let end = start + usize::try_from(length).expect("segment length fits usize");
-            buffer.clear();
-            buffer.extend_from_slice(&bytes[start..end]);
-            Ok(())
+            self.read_segment(request, buffer)
         })
+    }
+
+    fn read_segment(
+        &self,
+        request: SealedGenerationSegmentReadV1<'_>,
+        buffer: &mut Vec<u8>,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
+        let (digest, offset, length) = match request {
+            SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => (digest, 0, size_bytes),
+            SealedGenerationSegmentReadV1::Range {
+                digest,
+                offset,
+                length,
+                ..
+            } => (digest, offset, length),
+        };
+        let bytes = self.segments.get(digest.as_str()).ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract("fixture segment is missing".to_owned())
+        })?;
+        let start = usize::try_from(offset).expect("segment offset fits usize");
+        let end = start + usize::try_from(length).expect("segment length fits usize");
+        buffer.clear();
+        buffer.extend_from_slice(&bytes[start..end]);
+        Ok(())
+    }
+
+    /// The code graph this seal projects, built the way publication builds
+    /// it, from the segments one window of files at a time, then read back
+    /// as one manifest.
+    pub fn graph_manifest(
+        &self,
+        projection: GraphProjectionIdentity,
+        revision: &GraphProjectorRevision,
+    ) -> GraphGenerationManifest {
+        self.graph_manifest_checked(projection, revision, &|| Ok(()))
+            .expect("sealed generation projects")
+    }
+
+    pub fn graph_manifest_checked(
+        &self,
+        projection: GraphProjectionIdentity,
+        revision: &GraphProjectorRevision,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<GraphGenerationManifest, SealedCodeGraphRowsError> {
+        let scratch = tempfile::tempdir().expect("graph row scratch directory");
+        let spill =
+            GraphGenerationRowSpill::create(scratch.path().join("rows"), projection.clone())?;
+        let source = SealedGenerationFileWindowsV1::open(&self.manifest)?;
+        let spilled = build_sealed_code_graph_rows(
+            projection,
+            &source,
+            &mut |request, buffer| self.read_segment(request, buffer),
+            revision,
+            spill,
+            check,
+        )?;
+        Ok(spilled.materialize(&|| Ok(()))?)
     }
 
     pub fn restored(&self) -> CodeIndexPublishedGenerationV1 {

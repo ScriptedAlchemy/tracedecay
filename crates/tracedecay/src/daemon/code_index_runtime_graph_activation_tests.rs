@@ -813,15 +813,11 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
             latest.generation().manifest().generation_id.clone(),
             Arc::clone(&project_database),
             replay_binding,
-            Some(latest.generation_handle()),
         )
         .await
         .expect("retain seeded graph runtime");
     let seeded_graph = retained
-        .publish_verified_snapshot(
-            latest.generation(),
-            Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        )
+        .publish_verified_snapshot(Arc::new(std::sync::atomic::AtomicBool::new(false)))
         .expect("publish graph head before restart");
     drop(seeded_graph);
     drop(retained);
@@ -1323,16 +1319,12 @@ async fn restart_seats_the_retained_graph_while_its_text_owner_still_projects() 
             latest.generation().manifest().generation_id.clone(),
             Arc::clone(&project_database),
             replay_binding,
-            Some(latest.generation_handle()),
         )
         .await
         .expect("retain seeded graph runtime");
     drop(
         retained
-            .publish_verified_snapshot(
-                latest.generation(),
-                Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            )
+            .publish_verified_snapshot(Arc::new(std::sync::atomic::AtomicBool::new(false)))
             .expect("publish graph head before restart"),
     );
     drop(retained);

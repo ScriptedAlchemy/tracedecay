@@ -188,6 +188,7 @@ impl GraphDb {
         let opened = open_validated_graph(&validated, GraphEngineOpenSite::Eager)?;
         if let Some(path) = validated.config.path.as_deref() {
             crate::sealed_store::sweep_abandoned_sealed_staging(path);
+            crate::sealed_store::sweep_abandoned_row_spills(path);
         }
         markers.bind(opened.identity);
         let graph = Arc::new(Self {

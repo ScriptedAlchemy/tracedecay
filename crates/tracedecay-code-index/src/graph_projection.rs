@@ -16,15 +16,16 @@ use tracedecay_domain::{
     EdgeAuthorityV1, FileOccurrenceId, LanguageDescriptorRevision, RelationEdgeKindV1,
     RepositoryId, SourceFreshness, SourceSpan, SymbolOccurrenceId, canonical_sha256,
 };
+#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
+use tracedecay_graph_db::NeverCancelled;
 use tracedecay_graph_db::{
     GraphCancellation, GraphConflictContextV1, GraphDbError, GraphEntity, GraphEntityId,
-    GraphEntityRef, GraphGenerationId, GraphGenerationManifest, GraphIdempotencyKey, GraphLabel,
-    GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProjectorRevision,
-    GraphProperty, GraphPropertyName, GraphServingEnginePin, GraphTraversalDirection,
-    SourceGeneration, TraversalRequest, VerifiedGraphSnapshot,
+    GraphEntityRef, GraphGenerationId, GraphGenerationManifest, GraphGenerationManifestIdentity,
+    GraphIdempotencyKey, GraphLabel, GraphNamespace, GraphProjectionId, GraphProjectionIdentity,
+    GraphProjectorRevision, GraphProperty, GraphPropertyName, GraphServingEnginePin,
+    GraphTraversalDirection, GraphWatermark, SourceGeneration, TraversalRequest,
+    VerifiedGraphSnapshot,
 };
-#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
-use tracedecay_graph_db::{GraphWatermark, NeverCancelled};
 
 mod builder;
 mod interactive;
@@ -32,7 +33,8 @@ mod reader;
 mod schema;
 mod traversal;
 
-pub use self::builder::build_published_code_graph_manifest_checked;
+pub use self::builder::build_sealed_code_graph_rows;
+pub(crate) use self::builder::unresolved_call_limitations;
 use self::builder::{ProductionCodeGraphInputs, build_projection};
 use self::interactive::InteractiveCatalogCache;
 pub use self::interactive::{
@@ -176,6 +178,23 @@ pub enum CodeGraphProjectionError {
     DurabilityUncertain(String),
     #[error("code graph database is closed")]
     Closed,
+}
+
+/// Why a sealed generation's graph rows could not be built: its segments did
+/// not decode into a readable generation, or the rows it decoded did not
+/// project.
+#[derive(Debug, Error)]
+pub enum SealedCodeGraphRowsError {
+    #[error(transparent)]
+    Source(#[from] crate::production::CodeIndexProductionErrorV1),
+    #[error(transparent)]
+    Projection(#[from] CodeGraphProjectionError),
+}
+
+impl From<GraphDbError> for SealedCodeGraphRowsError {
+    fn from(error: GraphDbError) -> Self {
+        Self::Projection(error.into())
+    }
 }
 
 impl From<GraphDbError> for CodeGraphProjectionError {
@@ -817,6 +836,23 @@ pub fn code_graph_generation_id(
     ))
     .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
     GraphGenerationId::new(format!("code-graph:{}", digest.as_str())).map_err(Into::into)
+}
+
+/// The identity half of the graph generation one sealed code generation
+/// publishes: everything that names it and binds it to its (empty)
+/// dependency closure, derived without a single row.
+pub fn code_graph_manifest_identity(
+    projection: GraphProjectionIdentity,
+    generation: &CodeGenerationId,
+    projector_revision: &GraphProjectorRevision,
+) -> Result<GraphGenerationManifestIdentity, CodeGraphProjectionError> {
+    Ok(GraphGenerationManifestIdentity::new(
+        projection,
+        code_graph_generation_id(generation, projector_revision)?,
+        source_generation(generation)?,
+        GraphWatermark::new(stable_identity("watermark", generation.as_str()))?,
+        Vec::new(),
+    ))
 }
 
 pub fn code_graph_idempotency_key(

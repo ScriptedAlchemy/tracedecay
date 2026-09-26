@@ -15,9 +15,8 @@ use tracedecay_domain::canonical_text::{
 use tracedecay_store::runtime::{
     GraphDependencyGenerationClosureDigestV1, GraphDependencyGenerationIdentityV1,
     GraphGenerationIdV1, GraphNamespaceV1, GraphProjectionIdV1, GraphProjectionIdentityV1,
-    GraphPublicationIdempotencyKeyV1, GraphPublicationInputDigestV1, GraphPublicationKeyV1,
-    GraphPublicationReplayV1, GraphRecoveredGenerationDigestV1, GraphVerifiedHeadV1,
-    MAX_GRAPH_REPLAY_SOURCE_BYTES_V1, StoreShardIdV1,
+    GraphPublicationInputDigestV1, GraphPublicationReplayV1, GraphRecoveredGenerationDigestV1,
+    GraphVerifiedHeadV1, MAX_GRAPH_REPLAY_SOURCE_BYTES_V1, StoreShardIdV1,
 };
 
 use crate::limits::{MAX_VERIFIED_GENERATION_ENTITIES, MAX_VERIFIED_GENERATION_RELATIONS};
@@ -42,6 +41,8 @@ mod identity;
 mod recovered;
 #[path = "generation/replay.rs"]
 mod replay;
+#[path = "generation/spill.rs"]
+mod spill;
 pub use identity::{
     GraphEntityRef, GraphGenerationDependency, GraphProjectionIdentity, GraphRelationRef,
 };
@@ -55,8 +56,9 @@ pub use replay::{
     GraphProjectorRevision, SealedCodeGenerationReplay, SealedGraphStateDigest,
 };
 pub(crate) use replay::{
-    checked_decode_replay_source, metadata_manifest_from_source, validate_supplied_manifest_binding,
+    checked_decode_replay_source, metadata_manifest_from_source, validate_supplied_rows_binding,
 };
+pub use spill::{GraphGenerationRowSpill, GraphGenerationRows, SpilledGraphGeneration};
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -421,34 +423,52 @@ impl GraphGenerationManifest {
         Ok(manifest)
     }
 
-    #[hotpath::measure(
-        label = "graph_db.generation.replay.hydrate",
-        impl_type = "GraphGenerationManifest"
-    )]
-    pub fn from_replay(
+    /// The manifest an inline replay journals, bound to its relational key.
+    pub fn from_inline_replay(
         publication: &GraphPublicationReplayV1,
-        provider: &dyn GraphGenerationManifestProvider,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<Self, GraphDbError> {
         check()?;
         let source = checked_decode_replay_source(&publication.canonical_replay_source, check)?;
-        Self::from_replay_source(publication, source, provider, check)
+        let rows = GraphGenerationRows::from_replay_source(
+            publication,
+            source,
+            &InlineOnlyGraphGenerationManifestProvider,
+            || {
+                Err(GraphDbError::unavailable(
+                    "an inline replay hydrates without a row spill",
+                ))
+            },
+            check,
+        )?;
+        rows.into_manifest(check).map(Arc::unwrap_or_clone)
     }
+}
 
-    /// [`Self::from_replay`] over an already-decoded `source`, for callers
-    /// that inspect the source first and must not decode the payload twice.
+impl GraphGenerationRows {
+    /// Hydrates the rows a journaled replay names and binds them to its
+    /// relational key and digests. A sealed code generation is rebuilt by
+    /// `provider` into the spill `spill` creates.
+    #[hotpath::measure(
+        label = "graph_db.generation.replay.hydrate",
+        impl_type = "GraphGenerationRows"
+    )]
     pub(crate) fn from_replay_source(
         publication: &GraphPublicationReplayV1,
         source: GraphGenerationReplaySource,
         provider: &dyn GraphGenerationManifestProvider,
+        spill: impl FnOnce() -> Result<GraphGenerationRowSpill, GraphDbError>,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<Self, GraphDbError> {
         check()?;
         publication
             .validate()
             .map_err(|error| GraphDbError::invalid(error.to_string()))?;
-        let manifest = match source {
-            GraphGenerationReplaySource::InlineManifest(manifest) => *manifest,
+        let rows: Self = match source {
+            GraphGenerationReplaySource::InlineManifest(manifest) => {
+                manifest.validate_checked(check)?;
+                Self::Manifest(Arc::new(*manifest))
+            }
             GraphGenerationReplaySource::MetadataOnlyManifest(_) => {
                 return Err(GraphDbError::unavailable(
                     "metadata-only replay requires verified native generation rows",
@@ -456,59 +476,49 @@ impl GraphGenerationManifest {
             }
             GraphGenerationReplaySource::SealedCodeGeneration(source) => {
                 validate_sealed_replay(&source)?;
-                provider.hydrate_sealed_code_generation(
-                    &publication.key.projection,
-                    &source,
-                    check,
-                )?
+                provider
+                    .hydrate_sealed_code_generation(
+                        &publication.key.projection,
+                        &source,
+                        spill()?,
+                        check,
+                    )?
+                    .into()
             }
         };
-        manifest.validate_checked(check)?;
+        let identity = rows.identity();
         let projection = &publication.key.projection;
-        if projection.namespace.as_str() != manifest.projection.namespace.as_str()
-            || projection.projection.as_str() != manifest.projection.projection.as_str()
-            || publication.key.generation.as_str() != manifest.generation.as_str()
+        if projection.namespace.as_str() != identity.projection.namespace.as_str()
+            || projection.projection.as_str() != identity.projection.projection.as_str()
+            || publication.key.generation.as_str() != identity.generation.as_str()
         {
             return Err(GraphDbError::invalid(
                 "canonical graph replay identity does not match its relational key",
             ));
         }
         if publication.direct_dependency_generations
-            != manifest.relational_dependency_generations(&projection.shard_id)?
+            != relational_dependency_generations(&identity.dependencies, &projection.shard_id)?
         {
             return Err(GraphDbError::conflict("generation.from_replay"));
         }
         if publication.dependency_generation_closure_digest.as_str()
-            != manifest.dependency_closure_digest(check)?.as_str()
+            != rows.dependency_closure_digest(check)?.as_str()
             || publication.expected_recovered_digest.as_str()
-                != manifest.expected_recovered_digest(check)?.as_str()
+                != rows.expected_recovered_digest(check)?.as_str()
         {
             return Err(GraphDbError::conflict("generation.from_replay"));
         }
         check()?;
-        crate::hotpath_observe::record_counts(
-            manifest.entities.len(),
-            manifest.relations.len(),
-            1,
-            0,
-        );
+        let (entities, relations) = rows.row_counts();
+        crate::hotpath_observe::record_counts(entities, relations, 1, 0);
         crate::hotpath_observe::record_hydration_source(
             crate::hotpath_observe::HydrationSource::Replay,
         );
-        Ok(manifest)
+        Ok(rows)
     }
+}
 
-    pub fn from_inline_replay(
-        publication: &GraphPublicationReplayV1,
-        check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<Self, GraphDbError> {
-        Self::from_replay(
-            publication,
-            &InlineOnlyGraphGenerationManifestProvider,
-            check,
-        )
-    }
-
+impl GraphGenerationManifest {
     pub fn canonical_replay_source(
         &self,
         check: &dyn Fn() -> Result<(), GraphDbError>,
@@ -677,38 +687,18 @@ impl GraphGenerationManifest {
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphPublicationReplayV1, GraphDbError> {
         check()?;
-        let projection = GraphProjectionIdentityV1 {
+        // Proved on this instance first so the identity inherits the memo.
+        self.dependency_closure_digest(check)?;
+        let expected_recovered_digest = self.expected_recovered_digest(check)?;
+        self.identity().relational_replay_with_payload(
             shard_id,
-            namespace: GraphNamespaceV1::new(self.projection.namespace.as_str())
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
-            projection: GraphProjectionIdV1::new(self.projection.projection.as_str())
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
-        };
-        let direct_dependencies = self.relational_dependency_generations(&projection.shard_id)?;
-        let key = GraphPublicationKeyV1::new(
-            projection,
-            GraphGenerationIdV1::new(self.generation.as_str())
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
-            GraphPublicationIdempotencyKeyV1::new(idempotency_key.as_str())
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
-        );
-        GraphPublicationReplayV1::new(
-            key,
+            idempotency_key,
             input_digest,
-            self.dependency_closure_digest(check)?,
-            direct_dependencies,
             expected_prior_head,
-            self.expected_recovered_digest(check)?,
+            expected_recovered_digest,
             payload,
+            check,
         )
-        .map_err(|error| GraphDbError::invalid(error.to_string()))
-    }
-
-    fn relational_dependency_generations(
-        &self,
-        shard_id: &StoreShardIdV1,
-    ) -> Result<Vec<GraphDependencyGenerationIdentityV1>, GraphDbError> {
-        relational_dependency_generations(&self.dependencies, shard_id)
     }
 
     pub(crate) fn validate_checked(

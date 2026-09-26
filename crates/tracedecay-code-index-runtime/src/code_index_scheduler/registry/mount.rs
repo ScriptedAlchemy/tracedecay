@@ -1683,6 +1683,67 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 let mut result = match source_result {
                     Ok(mut outcome) if prepare_graph => {
+                        // Publish the graph head from the sealed segments
+                        // before the serving decode below. The graph build and
+                        // the decoded generation are this step's two
+                        // corpus-sized working sets and must not be resident
+                        // together; the activation after the decode recovers
+                        // the head published here.
+                        let mut graph_publish_refusal = None;
+                        if let Some(text) = graph_text.as_ref() {
+                            let generation_id = text.metadata().manifest().generation_id.clone();
+                            let binding_scheduler = Arc::clone(&worker_scheduler);
+                            let shutting_down = Arc::clone(&worker_shutting_down);
+                            let binding_passes = Arc::clone(&worker_reconcile_in_progress);
+                            let replay_binding = tokio::task::spawn_blocking(move || {
+                                Self::lock_scheduler_for_graph_step(
+                                    &binding_scheduler,
+                                    &shutting_down,
+                                    &binding_passes,
+                                )?
+                                .1
+                                .code_graph_replay_binding(&generation_id)
+                            })
+                            .await;
+                            match replay_binding {
+                                Ok(Ok(replay_binding)) => {
+                                    match worker_graph_activation
+                                        .publish_sealed_graph(
+                                            &worker_project_id,
+                                            &worker_repository_id,
+                                            &worker_worktree_id,
+                                            text,
+                                            replay_binding,
+                                            Arc::clone(&worker_shutting_down),
+                                        )
+                                        .await
+                                    {
+                                        Ok(_) => {}
+                                        Err(error) if error.is_resident_memory_graph_refusal() => {
+                                            graph_publish_refusal = Some(error.to_string());
+                                        }
+                                        Err(error) => tracing::warn!(
+                                            event = "code_index_graph_publish_before_decode_failed",
+                                            error = %error,
+                                            "sealed graph publication failed before the serving \
+                                             decode; activation retries it after the decode"
+                                        ),
+                                    }
+                                }
+                                Ok(Err(error)) => tracing::warn!(
+                                    event = "code_index_graph_publish_binding_unavailable",
+                                    error = %error,
+                                    "sealed replay binding is unavailable; activation publishes \
+                                     the graph after the serving decode"
+                                ),
+                                Err(error) => tracing::warn!(
+                                    event = "code_index_graph_publish_binding_task_failed",
+                                    error = %error,
+                                    "sealed replay binding task failed; activation publishes the \
+                                     graph after the serving decode"
+                                ),
+                            }
+                        }
                         let graph_scheduler = Arc::clone(&worker_scheduler);
                         let graph_text = graph_text.clone();
                         let shutting_down = Arc::clone(&worker_shutting_down);
@@ -1691,6 +1752,11 @@ impl CodeIndexSchedulerRegistryV1 {
                         let prepare_wake = Arc::clone(&worker_wake);
                         match hotpath::future!(
                             tokio::task::spawn_blocking(move || {
+                                // A graph build the memory watermark stopped
+                                // parks exactly like a decode that does not fit.
+                                if let Some(detail) = graph_publish_refusal {
+                                    return Ok((None, None, false, Some(detail)));
+                                }
                                 let decoder = Self::lock_scheduler_for_graph_step(
                                     &graph_scheduler,
                                     &shutting_down,

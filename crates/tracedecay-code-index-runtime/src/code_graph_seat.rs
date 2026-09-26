@@ -20,7 +20,6 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, atomic::AtomicBool};
 
-use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_domain::errors::Result;
 use tracedecay_domain::{CodeGenerationId, ProjectId, RefId, RepositoryId, WorktreeId};
 use tracedecay_graph_db::{GraphDbError, SealedGraphStateDigest, VerifiedGraphSnapshot};
@@ -41,9 +40,10 @@ pub struct CodeGraphReplayBindingV1 {
 pub trait CodeGraphSeatLeaseV1: Send {
     fn authority(&self) -> Arc<CanonicalCodeGraphStoreLeaseV1>;
 
+    /// Publishes the retained sealed generation's graph head, building its
+    /// rows from the sealed segments when the head has not landed yet.
     fn publish_verified_snapshot(
         &self,
-        generation: &CodeIndexPublishedGenerationV1,
         request_cancelled: Arc<AtomicBool>,
     ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError>;
 
@@ -76,6 +76,5 @@ pub trait CodeGraphSeatRuntimePortV1: Send + Sync {
         generation_id: CodeGenerationId,
         project_database: Arc<Database>,
         replay_binding: CodeGraphReplayBindingV1,
-        decoded_generation: Option<Arc<CodeIndexPublishedGenerationV1>>,
     ) -> CodeGraphSeatLeaseFutureV1<'_>;
 }

@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use tracedecay_graph_db::{
-    GraphGenerationManifestProvider, GraphTraversalDirection,
+    GraphGenerationManifestProvider, GraphGenerationRowSpill, GraphTraversalDirection,
     MAX_NATIVE_GENERATION_STAGE_MUTATIONS, MAX_VERIFIED_GENERATION_BATCH_MUTATIONS,
-    TraversalRequest,
+    SpilledGraphGeneration, TraversalRequest,
 };
 
 use super::*;
@@ -235,7 +235,7 @@ fn publish_sealed(
             authority,
             &context,
             &record.publication.key,
-            Some(Arc::new(manifest.clone())),
+            Some(Arc::new(manifest.clone()).into()),
         )
         .unwrap()
 }
@@ -346,9 +346,15 @@ impl GraphGenerationManifestProvider for RemountSealedProvider {
         &self,
         _owner: &tracedecay_store::GraphProjectionIdentityV1,
         _source: &SealedCodeGenerationReplay,
-        _check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<GraphGenerationManifest, GraphDbError> {
-        Ok(self.manifest.clone())
+        mut spill: GraphGenerationRowSpill,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<SpilledGraphGeneration, GraphDbError> {
+        spill.push_batch(
+            self.manifest.entities.clone(),
+            self.manifest.relations.clone(),
+            check,
+        )?;
+        spill.finish(self.manifest.identity(), check)
     }
 }
 
@@ -1512,7 +1518,7 @@ fn corrupt_sealed_artifact_repair_case(staged_rows_retained: bool) {
             &mut authority,
             &context,
             &record.publication.key,
-            Some(Arc::new(manifest.clone())),
+            Some(Arc::new(manifest.clone()).into()),
         )
         .expect("republishing the adopted head must repair the corrupt artifact");
     assert_snapshot_reads(&repaired.snapshot, &identity, "repaired");
@@ -1729,7 +1735,7 @@ fn a_cancelled_release_never_leaves_a_row_set_recovery_cannot_serve() {
                         &mut authority,
                         &context,
                         &record.publication.key,
-                        Some(Arc::new(manifest.clone())),
+                        Some(Arc::new(manifest.clone()).into()),
                     )
                     .unwrap_or_else(|republish| {
                         panic!(
@@ -1932,7 +1938,7 @@ fn a_partially_released_generation_is_repaired_from_its_manifest_and_swept() {
                     &mut authority,
                     &context,
                     &record.publication.key,
-                    Some(Arc::new(manifest.clone())),
+                    Some(Arc::new(manifest.clone()).into()),
                 )
                 .unwrap_or_else(|republish| {
                     panic!(
