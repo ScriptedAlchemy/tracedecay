@@ -775,8 +775,9 @@ jobs:
       - name: Install npm packages and Cargo sources
         run: pnpm install --frozen-lockfile
 
-      - name: Verify canonical SDK registry-client parity
-        run: scripts/check-sdk-codegen.sh
+      - name: Verify generated contracts and SDK sources
+        working-directory: dashboard
+        run: pnpm run contracts:check
 
       - name: Typecheck
         working-directory: sdks/typescript
