@@ -21,6 +21,7 @@ const project = (id: string) => ({
   alias_count: 0,
   branches: [],
   default_branch: null,
+  head_branch: null,
   last_seen_at: 1700000000,
 });
 

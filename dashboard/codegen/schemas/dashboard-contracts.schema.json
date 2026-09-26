@@ -19917,6 +19917,14 @@
           "type": "string"
         },
         "default_branch": {
+          "description": "Repository default branch recorded at registration.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "head_branch": {
+          "description": "Branch the checkout's HEAD names now; `None` when HEAD is detached or\nno checkout of this project could be read.",
           "type": [
             "string",
             "null"
@@ -19957,6 +19965,7 @@
         "canonical_root",
         "kind",
         "default_branch",
+        "head_branch",
         "branches",
         "store_count",
         "artifact_count",
@@ -20516,6 +20525,7 @@
           "type": "integer"
         },
         "default_branch": {
+          "description": "Repository default branch recorded at registration.",
           "type": [
             "string",
             "null"
@@ -20525,6 +20535,13 @@
           "type": "string"
         },
         "git_common_dir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "head_branch": {
+          "description": "Branch the checkout's HEAD names now; `None` when HEAD is detached or\nno checkout of this project could be read.",
           "type": [
             "string",
             "null"
@@ -20558,6 +20575,7 @@
         "canonical_root",
         "git_common_dir",
         "default_branch",
+        "head_branch",
         "created_at",
         "last_seen_at"
       ],

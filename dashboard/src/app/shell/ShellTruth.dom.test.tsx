@@ -424,6 +424,7 @@ function projectRecord(projectId: string, label: string): PublicCodeProject {
     canonical_root: `/repos/${projectId}`,
     created_at: 1,
     default_branch: 'master',
+    head_branch: 'master',
     display_root: `~/repos/${projectId}`,
     git_common_dir: null,
     label,

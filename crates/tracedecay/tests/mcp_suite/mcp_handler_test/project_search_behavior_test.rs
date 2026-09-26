@@ -21,11 +21,15 @@ use crate::support::{
 
 const TOOL: &str = "tracedecay_project_search";
 const SECRET: &str = "secret-token-xyz";
+const ACTIVE_HEAD: &str = "served-head";
 
 struct RegisteredProject {
     id: String,
     label: String,
+    /// Registered default branch.
     branch: String,
+    /// Live checkout HEAD; `None` for the plain directories.
+    head_branch: Option<&'static str>,
     display_root: String,
     canonical_root: String,
     created_at: i64,
@@ -36,6 +40,7 @@ struct RegisteredProject {
 struct SearchFixture {
     _cg: TestTraceDecay,
     _env: TestEnv,
+    _project_dir: TestTempDir,
     _registry_dir: TestTempDir,
     _roots: TestTempDir,
     server: std::sync::Arc<McpServer>,
@@ -46,7 +51,7 @@ struct SearchFixture {
 }
 
 async fn open_search_fixture() -> SearchFixture {
-    let (cg, env, _project_dir) = setup_empty_project().await;
+    let (cg, env, project_dir) = setup_empty_project().await;
     let registry_dir = test_temp_dir();
     let roots = test_temp_dir();
     let alpha_root = roots.path().join("search-alpha-root");
@@ -97,7 +102,11 @@ async fn open_search_fixture() -> SearchFixture {
     )
     .await;
     let active_label = file_name(cg.project_root());
-    let active = register_project(
+    crate::common::fixture::git_run(
+        cg.project_root(),
+        &["symbolic-ref", "HEAD", &format!("refs/heads/{ACTIVE_HEAD}")],
+    );
+    let mut active = register_project(
         &runtime,
         &active_id,
         &active_label,
@@ -108,6 +117,7 @@ async fn open_search_fixture() -> SearchFixture {
         1,
     )
     .await;
+    active.head_branch = Some(ACTIVE_HEAD);
 
     let registry_path = registry_dir
         .path()
@@ -129,6 +139,7 @@ async fn open_search_fixture() -> SearchFixture {
     SearchFixture {
         _cg: cg,
         _env: env,
+        _project_dir: project_dir,
         _registry_dir: registry_dir,
         _roots: roots,
         server,
@@ -174,6 +185,7 @@ async fn register_project(
         id: project_id.to_owned(),
         label: label.to_owned(),
         branch: branch.to_owned(),
+        head_branch: None,
         display_root: record.display_root,
         canonical_root: record.canonical_root,
         created_at: record.created_at,
@@ -231,6 +243,7 @@ fn public_project(project: &RegisteredProject, is_active: bool) -> Value {
         "canonical_root": project.canonical_root,
         "git_common_dir": null,
         "default_branch": project.branch,
+        "head_branch": project.head_branch,
         "created_at": project.created_at,
         "last_seen_at": project.last_seen_at,
         "is_active": is_active,
@@ -242,7 +255,7 @@ fn tree_group(project: &RegisteredProject, is_active: bool) -> Value {
         "label": project.label,
         "git_common_dir": null,
         "project_count": 1,
-        "branches": [project.branch],
+        "branches": [listed_branch(project)],
         "projects": [{
             "project_id": project.id,
             "label": project.label,
@@ -250,7 +263,8 @@ fn tree_group(project: &RegisteredProject, is_active: bool) -> Value {
             "canonical_root": project.canonical_root,
             "kind": "project",
             "default_branch": project.branch,
-            "branches": [project.branch],
+            "head_branch": project.head_branch,
+            "branches": [listed_branch(project)],
             "store_count": 0,
             "artifact_count": 0,
             "alias_count": project.alias_count,
@@ -293,8 +307,18 @@ fn markdown_hit(query: &str, project: &RegisteredProject, active: bool) -> Strin
     let marker = if active { " *" } else { "" };
     format!(
         "Found 1 projects matching \"{query}\" across 1 repositories.\n\nRepositories:\n- {} (branches: {})\n  - `{}`{marker} [project] branches: {}; stores: 0; path: {}\n",
-        project.label, project.branch, project.id, project.branch, project.display_root
+        project.label,
+        listed_branch(project),
+        project.id,
+        listed_branch(project),
+        project.display_root
     )
+}
+
+/// A readable checkout lists its live HEAD; a plain directory keeps the
+/// registered branch.
+fn listed_branch(project: &RegisteredProject) -> &str {
+    project.head_branch.unwrap_or(&project.branch)
 }
 
 #[tokio::test]

@@ -15,6 +15,7 @@ function project(id: string, ageDays: number, artifacts: number): ProjectRegistr
     canonical_root: `/repos/${id}`,
     kind: 'primary',
     default_branch: 'main',
+    head_branch: 'main',
     branches: ['main'],
     store_count: 1,
     artifact_count: artifacts,

@@ -42,7 +42,11 @@ pub struct ProjectRegistryEntry {
     pub project_root: String,
     pub canonical_root: String,
     pub kind: String,
+    /// Repository default branch recorded at registration.
     pub default_branch: Option<String>,
+    /// Branch the checkout's HEAD names now; `None` when HEAD is detached or
+    /// no checkout of this project could be read.
+    pub head_branch: Option<String>,
     pub branches: Vec<String>,
     pub store_count: usize,
     pub artifact_count: usize,
@@ -60,7 +64,11 @@ pub struct PublicCodeProject {
     pub display_root: String,
     pub canonical_root: String,
     pub git_common_dir: Option<String>,
+    /// Repository default branch recorded at registration.
     pub default_branch: Option<String>,
+    /// Branch the checkout's HEAD names now; `None` when HEAD is detached or
+    /// no checkout of this project could be read.
+    pub head_branch: Option<String>,
     pub created_at: i64,
     pub last_seen_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
