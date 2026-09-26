@@ -169,7 +169,7 @@ The kernel executes in this order:
    text, every semantic filter, provider/session selector, grain, temporal mode
    and cutoff, budget, ranking/diversity versions, and policy digest into one
    canonical request.
-2. `SessionTemporalExecutionPort` freezes a sorted manifest for every
+2. `RegisteredGlobalDbSessionTemporalExecution::execute` freezes a sorted manifest for every
    participating session/source: store generation and source, projection,
    graph, index, summary, configuration, and authorization watermarks.
 3. `TemporalReadPort` emits compact exact-literal, lexical, phrase, fuzzy,
@@ -462,7 +462,7 @@ reads.
   entry point.
 - `crates/tracedecay-session-memory/src/session/retrieval.rs::SessionRetrievalService::retrieve`
   owns authorization and canonical request construction.
-- `crates/tracedecay-session-temporal-store/src/execution.rs::SessionTemporalExecutionPort` owns the
+- `crates/tracedecay-session-temporal-store/src/lib.rs::RegisteredGlobalDbSessionTemporalExecution` owns the
   application/kernel boundary.
 - `crates/tracedecay-session-memory/src/session/refresh.rs::SessionRefreshService` owns explicit
   refresh begin-or-join, status, and cancellation.

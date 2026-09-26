@@ -35,7 +35,10 @@ use crate::session::types::{
 };
 use tracedecay_session_temporal_store::execution::{
     AuthorizedTemporalExecutionRequest, SessionTemporalExecutionError,
-    SessionTemporalExecutionPort, SessionTemporalExecutionReport,
+    SessionTemporalExecutionReport,
+};
+use tracedecay_session_temporal_store::{
+    RegisteredGlobalDbSessionTemporalExecution, SessionTemporalRegisteredDb,
 };
 
 mod task_session;
@@ -278,18 +281,18 @@ impl fmt::Display for SessionTemporalQueryError {
 
 impl std::error::Error for SessionTemporalQueryError {}
 
-pub struct SessionRetrievalService<A, P, E> {
+pub struct SessionRetrievalService<'db, A, D: SessionTemporalRegisteredDb, E> {
     authorizer: A,
-    execution: P,
+    execution: RegisteredGlobalDbSessionTemporalExecution<'db, D>,
     estimator: E,
     configuration: SessionRetrievalConfiguration,
 }
 
-impl<A, P, E> SessionRetrievalService<A, P, E> {
+impl<'db, A, D: SessionTemporalRegisteredDb, E> SessionRetrievalService<'db, A, D, E> {
     #[hotpath::skip]
     pub const fn new(
         authorizer: A,
-        execution: P,
+        execution: RegisteredGlobalDbSessionTemporalExecution<'db, D>,
         estimator: E,
         configuration: SessionRetrievalConfiguration,
     ) -> Self {
@@ -302,10 +305,10 @@ impl<A, P, E> SessionRetrievalService<A, P, E> {
     }
 }
 
-impl<A, P, E> SessionRetrievalService<A, P, E>
+impl<A, D, E> SessionRetrievalService<'_, A, D, E>
 where
     A: SessionScopeAuthorizer,
-    P: SessionTemporalExecutionPort,
+    D: SessionTemporalRegisteredDb + Sync,
     E: VersionedTokenEstimator + Sync,
 {
     #[hotpath::measure(label = "usecases.session.retrieve")]
@@ -324,7 +327,7 @@ where
             run_application_request_interruptible(
                 context,
                 binding.cancellation(),
-                self.execution.execute(admitted.execution, &self.estimator),
+                Box::pin(self.execution.execute(admitted.execution, &self.estimator)),
                 || {
                     admitted.cancellation_control.cancel();
                 },
@@ -972,7 +975,462 @@ fn sha256_binding(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use tracedecay_contracts::retrieval::SessionRetrievalBudgetObservationV1;
+    use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
+    use tracedecay_domain::{
+        CompactContextBundleV1, CompactContextOmissionV1, SessionSummaryIdV1,
+        TemporalCoverageCountsV1,
+    };
+    use tracedecay_temporal_query::context::CompactContext;
+    use tracedecay_temporal_query::execution::BindingDigest;
+    use tracedecay_temporal_query::ranking::RankedCandidate;
+    use tracedecay_temporal_query::resolution::{SummaryOmission, ValidatedAuthorization};
+    use tracedecay_temporal_query::snapshot::{
+        KernelVersions, TemporalExecutionSnapshot, TemporalSnapshotRequest, TemporalWatermarks,
+    };
+
     use super::*;
+
+    /// One executed page as the store reports it, before the application maps
+    /// it onto a retrieval outcome.
+    #[derive(Default)]
+    struct Page {
+        coverage: TemporalCoverageCountsV1,
+        ranked: usize,
+        omissions: Vec<ContextOmissionReasonV1>,
+        summary_rejections: Vec<SummaryLineageRejection>,
+        next_cursor: Option<String>,
+    }
+
+    fn anchor(index: usize) -> RetrievalAnchorId {
+        RetrievalAnchorId::new(format!("anchor-{index}")).unwrap()
+    }
+
+    fn outcome(
+        page: Page,
+        freshness: SessionDataFreshness,
+        policy: SessionFreshnessPolicy,
+    ) -> SessionRetrievalOutcome<TemporalKernelResult> {
+        let snapshot = TemporalExecutionSnapshot::new_authorized(
+            TemporalSnapshotRequest::new(
+                SessionId::new("session.mapping").unwrap(),
+                digest('0'),
+                digest('1'),
+                digest('2'),
+                TemporalModeV1::Current,
+                RetrievalGrainV1::LogicalMessage,
+            )
+            .unwrap(),
+            TemporalWatermarks {
+                generation: 1,
+                source: 2,
+                projection: 3,
+                index: 3,
+                summary: 4,
+            },
+            KernelVersions {
+                schema: 3,
+                ranking: 5,
+                configuration_digest: BindingDigest::new("configuration_digest", digest('3'))
+                    .unwrap(),
+            },
+            None,
+            ValidatedAuthorization::Authorized,
+        )
+        .unwrap();
+        let omissions = page
+            .omissions
+            .into_iter()
+            .map(|reason| CompactContextOmissionV1 {
+                anchor_id: Some(anchor(0)),
+                reason,
+            })
+            .collect();
+        let summary_omissions = page
+            .summary_rejections
+            .into_iter()
+            .enumerate()
+            .map(|(index, rejection)| SummaryOmission {
+                summary_id: SessionSummaryIdV1::new(format!("summary-{index}")).unwrap(),
+                anchor_id: anchor(index),
+                rejection,
+            })
+            .collect();
+        let ranked = (0..page.ranked)
+            .map(|index| RankedCandidate {
+                stable_id: format!("candidate-{index}"),
+                anchor_id: anchor(index),
+                normalized_score_micros: 1,
+                knowledge_at_micros: 1,
+                logical_message: None,
+                turn: None,
+                session: None,
+                source: None,
+                evidence_role: None,
+                contributions: Vec::new(),
+            })
+            .collect();
+        let result = TemporalKernelResult {
+            snapshot,
+            ranked,
+            hydrated: Vec::new(),
+            context: CompactContext {
+                rendered: String::new(),
+                bundle: CompactContextBundleV1 {
+                    omissions,
+                    coverage: page.coverage,
+                    ..CompactContextBundleV1::default()
+                },
+                accounted_bytes: 0,
+                estimated_tokens: 0,
+                estimator_version: "words-v1".to_owned(),
+            },
+            coverage: page.coverage,
+            conflicts: Vec::new(),
+            lineage: Vec::new(),
+            summary_omissions,
+            next_cursor: page.next_cursor,
+        };
+        map_report(
+            SessionTemporalExecutionReport::new(result, freshness),
+            policy,
+        )
+    }
+
+    fn fresh(page: Page) -> SessionRetrievalOutcome<TemporalKernelResult> {
+        outcome(
+            page,
+            SessionDataFreshness::Fresh,
+            SessionFreshnessPolicy::AllowStored,
+        )
+    }
+
+    fn coverage(
+        visible: u64,
+        hidden: u64,
+        unknown: u64,
+        redacted: u64,
+    ) -> TemporalCoverageCountsV1 {
+        TemporalCoverageCountsV1 {
+            visible,
+            hidden,
+            unknown,
+            redacted,
+        }
+    }
+
+    #[test]
+    fn empty_page_omissions_keep_their_typed_outcome() {
+        for (reason, coverage, expected) in [
+            (
+                ContextOmissionReasonV1::Deleted,
+                coverage(0, 0, 0, 1),
+                SessionRetrievalOutcome::Deleted,
+            ),
+            (
+                ContextOmissionReasonV1::RetentionExpired,
+                coverage(0, 0, 0, 1),
+                SessionRetrievalOutcome::Deleted,
+            ),
+            (
+                ContextOmissionReasonV1::Redacted,
+                coverage(0, 0, 0, 1),
+                SessionRetrievalOutcome::Redacted,
+            ),
+            (
+                ContextOmissionReasonV1::Unauthorized,
+                coverage(0, 1, 0, 0),
+                SessionRetrievalOutcome::Denied,
+            ),
+            (
+                ContextOmissionReasonV1::Locked,
+                coverage(0, 0, 1, 0),
+                SessionRetrievalOutcome::Locked,
+            ),
+            (
+                ContextOmissionReasonV1::Unavailable,
+                coverage(0, 0, 1, 0),
+                SessionRetrievalOutcome::Unavailable,
+            ),
+            (
+                ContextOmissionReasonV1::ByteBudget,
+                coverage(0, 0, 1, 0),
+                SessionRetrievalOutcome::BudgetExhausted {
+                    stage: SessionRetrievalBudgetStageV1::ContextBytes,
+                    accounting: None,
+                },
+            ),
+        ] {
+            assert_eq!(
+                fresh(Page {
+                    coverage,
+                    omissions: vec![reason],
+                    ..Page::default()
+                }),
+                expected,
+                "{reason:?}"
+            );
+        }
+        assert_eq!(
+            outcome(
+                Page {
+                    coverage: coverage(0, 0, 0, 1),
+                    omissions: vec![ContextOmissionReasonV1::Deleted],
+                    ..Page::default()
+                },
+                SessionDataFreshness::Stored { generation_lag: 2 },
+                SessionFreshnessPolicy::RequireFresh,
+            ),
+            SessionRetrievalOutcome::Deleted,
+            "deletion outranks a stale generation"
+        );
+        assert_eq!(
+            fresh(Page {
+                coverage: coverage(1, 0, 0, 0),
+                ..Page::default()
+            }),
+            SessionRetrievalOutcome::Unavailable,
+            "visible coverage without ranked items is not an authoritative zero"
+        );
+    }
+
+    #[test]
+    fn empty_page_summary_rejections_keep_their_typed_outcome() {
+        let anchor_id = anchor(0);
+        for (rejection, expected) in [
+            (
+                SummaryLineageRejection::LockedSource {
+                    anchor_id: anchor_id.clone(),
+                },
+                SessionRetrievalOutcome::Locked,
+            ),
+            (
+                SummaryLineageRejection::DeletedSource {
+                    anchor_id: anchor_id.clone(),
+                },
+                SessionRetrievalOutcome::Deleted,
+            ),
+            (
+                SummaryLineageRejection::ExpiredSource {
+                    anchor_id: anchor_id.clone(),
+                },
+                SessionRetrievalOutcome::Deleted,
+            ),
+            (
+                SummaryLineageRejection::RedactedSource {
+                    anchor_id: anchor_id.clone(),
+                },
+                SessionRetrievalOutcome::Redacted,
+            ),
+            (
+                SummaryLineageRejection::UnauthorizedSource {
+                    anchor_id: anchor_id.clone(),
+                },
+                SessionRetrievalOutcome::Denied,
+            ),
+            (
+                SummaryLineageRejection::StaleSource {
+                    anchor_id: anchor_id.clone(),
+                },
+                SessionRetrievalOutcome::Unavailable,
+            ),
+            (
+                SummaryLineageRejection::UnavailableSource {
+                    anchor_id: anchor_id.clone(),
+                },
+                SessionRetrievalOutcome::Unavailable,
+            ),
+            (
+                SummaryLineageRejection::MissingSource {
+                    anchor_id: anchor_id.clone(),
+                },
+                SessionRetrievalOutcome::Unavailable,
+            ),
+            (
+                SummaryLineageRejection::CycleSource {
+                    anchor_id: anchor_id.clone(),
+                },
+                SessionRetrievalOutcome::Unavailable,
+            ),
+        ] {
+            let label = format!("{rejection:?}");
+            assert_eq!(
+                fresh(Page {
+                    coverage: coverage(0, 0, 1, 0),
+                    summary_rejections: vec![rejection],
+                    ..Page::default()
+                }),
+                expected,
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn ranked_pages_preserve_partial_coverage_continuation_and_freshness() {
+        assert!(matches!(
+            fresh(Page {
+                coverage: coverage(1, 0, 2, 0),
+                ranked: 1,
+                ..Page::default()
+            }),
+            SessionRetrievalOutcome::Partial { omitted: 2, .. }
+        ));
+        assert!(matches!(
+            fresh(Page {
+                coverage: coverage(1, 0, 0, 0),
+                ranked: 1,
+                next_cursor: Some("cursor.next".to_owned()),
+                ..Page::default()
+            }),
+            SessionRetrievalOutcome::Partial { omitted: 0, .. }
+        ));
+        let unavailable = |index| SummaryLineageRejection::UnavailableSource {
+            anchor_id: anchor(index),
+        };
+        assert!(matches!(
+            fresh(Page {
+                coverage: coverage(1, 0, 1, 0),
+                ranked: 1,
+                summary_rejections: vec![unavailable(0), unavailable(1)],
+                ..Page::default()
+            }),
+            SessionRetrievalOutcome::Partial { omitted: 2, .. }
+        ));
+        assert_eq!(
+            outcome(
+                Page {
+                    coverage: coverage(1, 0, 0, 0),
+                    ranked: 1,
+                    ..Page::default()
+                },
+                SessionDataFreshness::Stored { generation_lag: 2 },
+                SessionFreshnessPolicy::RequireFresh,
+            ),
+            SessionRetrievalOutcome::Stale {
+                freshness: SessionDataFreshness::Stored { generation_lag: 2 }
+            }
+        );
+        assert!(matches!(
+            fresh(Page {
+                coverage: coverage(1, 0, 0, 0),
+                ranked: 1,
+                ..Page::default()
+            }),
+            SessionRetrievalOutcome::Complete {
+                freshness: SessionDataFreshness::Fresh,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn execution_refusals_keep_their_typed_outcome() {
+        let accounting = SessionRetrievalBudgetAccountingV1 {
+            limit: 1_024,
+            observed: SessionRetrievalBudgetObservationV1::ConsumedWithMoreAvailable {
+                units: 1_024,
+            },
+        };
+        for (error, expected) in [
+            (
+                SessionTemporalExecutionError::WrongScope,
+                SessionRetrievalOutcome::WrongScope,
+            ),
+            (
+                SessionTemporalExecutionError::Stale { generation_lag: 3 },
+                SessionRetrievalOutcome::Stale {
+                    freshness: SessionDataFreshness::Stored { generation_lag: 3 },
+                },
+            ),
+            (
+                SessionTemporalExecutionError::Locked,
+                SessionRetrievalOutcome::Locked,
+            ),
+            (
+                SessionTemporalExecutionError::Redacted,
+                SessionRetrievalOutcome::Redacted,
+            ),
+            (
+                SessionTemporalExecutionError::Deleted,
+                SessionRetrievalOutcome::Deleted,
+            ),
+            (
+                SessionTemporalExecutionError::Denied,
+                SessionRetrievalOutcome::Denied,
+            ),
+            (
+                SessionTemporalExecutionError::Unavailable,
+                SessionRetrievalOutcome::Unavailable,
+            ),
+            // The store names the boundary it refused at and the numbers that
+            // boundary counted; the service forwards both instead of
+            // re-labelling every refusal as work-unit exhaustion.
+            (
+                SessionTemporalExecutionError::BudgetExhausted {
+                    stage: SessionRetrievalBudgetStageV1::RecordReadExhausted,
+                    accounting: Some(accounting),
+                },
+                SessionRetrievalOutcome::BudgetExhausted {
+                    stage: SessionRetrievalBudgetStageV1::RecordReadExhausted,
+                    accounting: Some(accounting),
+                },
+            ),
+            (
+                SessionTemporalExecutionError::Cancelled,
+                SessionRetrievalOutcome::Cancelled,
+            ),
+        ] {
+            let label = format!("{error:?}");
+            assert_eq!(map_execution_error(error), expected, "{label}");
+        }
+    }
+
+    #[test]
+    fn cursor_refusals_split_into_scope_denial_and_unavailability() {
+        for error in [
+            CursorError::RootMismatch,
+            CursorError::SessionMismatch,
+            CursorError::WrongAccess,
+            CursorError::TemporalModeMismatch,
+            CursorError::GrainMismatch,
+        ] {
+            assert_eq!(
+                map_kernel_error(TemporalKernelError::Cursor(error)),
+                SessionRetrievalOutcome::WrongScope
+            );
+        }
+        for error in [
+            CursorError::Malformed,
+            CursorError::Tampered,
+            CursorError::SortKeyMismatch,
+        ] {
+            assert_eq!(
+                map_kernel_error(TemporalKernelError::Cursor(error)),
+                SessionRetrievalOutcome::Denied
+            );
+        }
+        for error in [
+            CursorError::WrongRequest,
+            CursorError::SchemaMismatch,
+            CursorError::RankingMismatch,
+            CursorError::ConfigurationMismatch,
+            CursorError::GenerationMismatch,
+            CursorError::SourceWatermarkMismatch,
+            CursorError::ProjectionWatermarkMismatch,
+            CursorError::IndexWatermarkMismatch,
+            CursorError::SummaryWatermarkMismatch,
+            CursorError::KeyIdMismatch,
+            CursorError::KeyVersionMismatch,
+            CursorError::KeyUnavailable,
+            CursorError::InvalidKeyMaterial,
+        ] {
+            assert_eq!(
+                map_kernel_error(TemporalKernelError::Cursor(error)),
+                SessionRetrievalOutcome::Unavailable
+            );
+        }
+    }
 
     #[test]
     fn deadline_and_cancellation_remain_distinct_application_outcomes() {

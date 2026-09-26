@@ -28,7 +28,6 @@ mod observation_projection;
 mod observation_store;
 mod observation_workflow_projection;
 mod session_runtime;
-mod temporal_application;
 mod temporal_benchmark;
 #[cfg(unix)]
 mod temporal_benchmark_runner;

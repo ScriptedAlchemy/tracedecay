@@ -132,7 +132,7 @@ async fn registered_authorized_retrieval_returns_only_sanitized_context() {
     let execution = RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
     let service = SessionRetrievalService::new(
         AllowAuthorizer,
-        &execution,
+        execution,
         Words,
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );
@@ -170,7 +170,7 @@ async fn registered_denied_retrieval_never_exposes_private_context() {
     let execution = RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
     let service = SessionRetrievalService::new(
         DenyAuthorizer,
-        &execution,
+        execution,
         Words,
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );
@@ -244,7 +244,7 @@ async fn registered_sanitized_temporal_state_stays_private_across_reopen() {
             RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
         let service = SessionRetrievalService::new(
             AllowAuthorizer,
-            &execution,
+            execution,
             Words,
             SessionRetrievalConfiguration::new(3, 5).unwrap(),
         );
@@ -256,7 +256,7 @@ async fn registered_sanitized_temporal_state_stays_private_across_reopen() {
         RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
     let reopened_service = SessionRetrievalService::new(
         AllowAuthorizer,
-        &reopened_execution,
+        reopened_execution,
         Words,
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );
@@ -301,7 +301,7 @@ async fn registered_sanitized_temporal_state_is_stable_across_execution_replay()
         RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
     let first_service = SessionRetrievalService::new(
         AllowAuthorizer,
-        &first_execution,
+        first_execution,
         Words,
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );
@@ -312,7 +312,7 @@ async fn registered_sanitized_temporal_state_is_stable_across_execution_replay()
         RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
     let replay_service = SessionRetrievalService::new(
         AllowAuthorizer,
-        &replay_execution,
+        replay_execution,
         Words,
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );
@@ -353,7 +353,7 @@ async fn registered_lcm_describe_expand_and_expand_query_reauthorize_without_sto
     let execution = RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
     let service = SessionRetrievalService::new(
         authorizer.clone(),
-        &execution,
+        RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref()),
         Words,
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );
@@ -486,7 +486,7 @@ async fn registered_direct_anchor_replay_and_continuation_reauthorize_without_st
     let execution = RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
     let service = SessionRetrievalService::new(
         authorizer.clone(),
-        &execution,
+        execution,
         Words,
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );
@@ -551,7 +551,7 @@ async fn registered_direct_anchor_replay_and_continuation_reauthorize_without_st
         RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
     let replay_service = SessionRetrievalService::new(
         authorizer.clone(),
-        &replay_execution,
+        replay_execution,
         Words,
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );

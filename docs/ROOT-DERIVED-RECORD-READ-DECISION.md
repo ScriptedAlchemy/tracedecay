@@ -87,7 +87,7 @@ That is why narrowing the expansion is a semantics decision.
 
 ## What blocks the hermetic test
 
-The reproduction has to go through `SessionTemporalExecutionPort::execute`, not
+The reproduction has to go through `RegisteredGlobalDbSessionTemporalExecution::execute`, not
 `freeze`, because the refusal is in the record read. The
 `participant_freeze` fixtures reach `freeze` only: `execute` returns
 `Unavailable` on those fixtures even for a corpus that freezes cleanly, because

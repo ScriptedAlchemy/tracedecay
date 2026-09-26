@@ -1,7 +1,10 @@
 //! File-backed hydration through the production backend: a payload near the
 //! per-payload limit must be proven before any chunk crosses the sink and must
-//! stream with chunk-sized transient memory, and a source that is replaced,
-//! removed, or cancelled between proof and emission must settle typed.
+//! stream with chunk-sized transient memory, and a source that drifts under
+//! the reader or is cancelled mid-stream must settle typed. The descriptor is
+//! the one resolution would hand the reader; everything from the open onward
+//! is the production read. Replacement between proof and emission is owned
+//! and tested by `tracedecay_lcm::payload` itself.
 //!
 //! Peak memory is measured with a thread-local live-byte allocator. Tests run
 //! on parallel threads, so the counter is per thread; the measured future is
@@ -13,29 +16,19 @@ use std::cell::Cell;
 use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
-use tracedecay_domain::{RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalModeV1};
 use tracedecay_global_db::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
-use tracedecay_temporal_query::execution::{BindingDigest, ExecutionControl, ExecutionLimits};
+use tracedecay_temporal_query::execution::ExecutionControl;
 use tracedecay_temporal_query::execution::{ReadBudgetAccounting, TemporalPortError};
-use tracedecay_temporal_query::resolution::ValidatedAuthorization;
-use tracedecay_temporal_query::snapshot::TemporalSnapshotRequest;
-use tracedecay_temporal_query::snapshot::{
-    KernelVersions, TemporalExecutionSnapshot, TemporalWatermarks,
-};
 
-use super::{
-    BackendFuture, BoundedPayload, HydrationAuthorization, HydrationError, HydrationResolution,
-    PayloadDescriptor, PayloadSource, SessionTemporalHydrationAdapter,
-    SessionTemporalHydrationBackend, TemporalHydrationBackend,
-};
+use super::{HydrationError, PayloadDescriptor, PayloadSource, SessionTemporalHydrationAdapter};
 
 /// Default per-payload limit; the fixture payload sits just under it.
 const MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
@@ -182,118 +175,10 @@ fn external_descriptor(content: &[u8]) -> PayloadDescriptor {
     }
 }
 
-type Hook = Mutex<Option<Box<dyn FnOnce() + Send>>>;
-
-fn run_hook(hook: &Hook) {
-    if let Some(hook) = hook.lock().expect("hook").take() {
-        hook();
+impl RegisteredRead {
+    fn adapter(&self) -> SessionTemporalHydrationAdapter<'_> {
+        SessionTemporalHydrationAdapter::for_registered_snapshot(&self.read, &self.storage_root)
     }
-}
-
-/// The production registered backend with only anchor resolution replaced by
-/// a fixed external descriptor, so the proof and emission under test are the
-/// real file-backed journey. `before_open` runs once as the adapter asks for
-/// the payload; `after_open` runs once between the proof and the adapter's
-/// emission.
-struct ExternalPayloadBackend<'snapshot> {
-    inner: SessionTemporalHydrationBackend<'snapshot>,
-    descriptor: PayloadDescriptor,
-    before_open: Hook,
-    after_open: Hook,
-}
-
-impl<'snapshot> ExternalPayloadBackend<'snapshot> {
-    fn new(read: &'snapshot RegisteredRead, content: &[u8]) -> Self {
-        Self {
-            inner: SessionTemporalHydrationBackend::new_registered(&read.read, &read.storage_root),
-            descriptor: external_descriptor(content),
-            before_open: Mutex::new(None),
-            after_open: Mutex::new(None),
-        }
-    }
-
-    fn with_before_open(self, hook: impl FnOnce() + Send + 'static) -> Self {
-        *self.before_open.lock().expect("hook") = Some(Box::new(hook));
-        self
-    }
-
-    fn with_after_open(self, hook: impl FnOnce() + Send + 'static) -> Self {
-        *self.after_open.lock().expect("hook") = Some(Box::new(hook));
-        self
-    }
-}
-
-impl TemporalHydrationBackend for ExternalPayloadBackend<'_> {
-    fn snapshot_is_stable(&self) -> bool {
-        true
-    }
-
-    fn resolve_current<'a>(
-        &'a self,
-        _snapshot: &'a TemporalExecutionSnapshot,
-        _anchor_id: &'a RetrievalAnchorId,
-    ) -> BackendFuture<'a, HydrationResolution> {
-        Box::pin(async move { Ok(HydrationResolution::Available(self.descriptor.clone())) })
-    }
-
-    fn open_bounded<'a>(
-        &'a self,
-        descriptor: &'a PayloadDescriptor,
-        max_bytes: usize,
-        control: &'a ExecutionControl,
-    ) -> BackendFuture<'a, BoundedPayload> {
-        Box::pin(async move {
-            run_hook(&self.before_open);
-            let payload = self
-                .inner
-                .open_bounded(descriptor, max_bytes, control)
-                .await?;
-            run_hook(&self.after_open);
-            Ok(payload)
-        })
-    }
-}
-
-use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
-
-fn snapshot(control: ExecutionControl) -> TemporalExecutionSnapshot {
-    let limits = ExecutionLimits {
-        hydration_payload_bytes: MAX_PAYLOAD_BYTES,
-        hydration_chunk_bytes: CHUNK_BYTES,
-        ..ExecutionLimits::default()
-    };
-    TemporalExecutionSnapshot::new_authorized(
-        TemporalSnapshotRequest::new(
-            SessionId::new("session-1").expect("session"),
-            digest('0'),
-            digest('1'),
-            digest('2'),
-            TemporalModeV1::Current,
-            RetrievalGrainV1::LogicalMessage,
-        )
-        .expect("request")
-        .with_limits(limits)
-        .with_execution_control(control),
-        TemporalWatermarks {
-            generation: 1,
-            source: 2,
-            projection: 3,
-            index: 4,
-            summary: 5,
-        },
-        KernelVersions {
-            schema: 1,
-            ranking: 1,
-            configuration_digest: BindingDigest::new("configuration", digest('3')).expect("digest"),
-        },
-        None,
-        ValidatedAuthorization::Authorized,
-    )
-    .expect("snapshot")
-}
-
-fn anchor() -> RetrievalAnchorId {
-    RetrievalAnchorId::new("anchor-file").expect("anchor")
 }
 
 /// Sink that authenticates what it receives without buffering it, so the
@@ -324,18 +209,14 @@ async fn near_limit_file_payload_streams_with_chunk_sized_peak_memory() {
     let content = payload_bytes(PAYLOAD_BYTES);
     seed_payload_file(&read.storage_root, &content);
     let expected_hash = hex(&Sha256::digest(&content));
-    let adapter =
-        SessionTemporalHydrationAdapter::new(ExternalPayloadBackend::new(&read, &content));
-    let snapshot = snapshot(ExecutionControl::default());
-    assert_eq!(
-        adapter.authorize(&snapshot, &anchor()).await,
-        Ok(HydrationAuthorization::Authorized)
-    );
+    let adapter = read.adapter();
+    let control = ExecutionControl::default();
+    let descriptor = external_descriptor(&content);
 
     let mut sink = HashingSink::default();
-    let (result, peak_bytes) = measure_peak_live_bytes(adapter.read_after_recheck(
-        &snapshot,
-        &anchor(),
+    let (result, peak_bytes) = measure_peak_live_bytes(adapter.read_descriptor(
+        &control,
+        &descriptor,
         MAX_PAYLOAD_BYTES,
         CHUNK_BYTES,
         &mut |chunk| sink.write(chunk),
@@ -361,7 +242,7 @@ async fn near_limit_file_payload_streams_with_chunk_sized_peak_memory() {
 }
 
 #[tokio::test]
-async fn payload_file_replaced_or_removed_between_proof_and_emission_is_refused() {
+async fn payload_file_rewritten_or_removed_under_the_reader_is_refused() {
     for remove_instead_of_replace in [false, true] {
         let dir = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -370,30 +251,35 @@ async fn payload_file_replaced_or_removed_between_proof_and_emission_is_refused(
         let read = registered_read(&runtime).await;
         let content = payload_bytes(3 * CHUNK_BYTES);
         let payload_path = seed_payload_file(&read.storage_root, &content);
-        let swap_path = payload_path.clone();
-        let backend = ExternalPayloadBackend::new(&read, &content).with_after_open(move || {
-            if remove_instead_of_replace {
-                fs::remove_file(&swap_path).expect("remove proven payload");
-            } else {
-                let displaced = swap_path.with_extension("displaced");
-                fs::rename(&swap_path, &displaced).expect("displace proven payload");
-                // Same length and valid UTF-8, so only identity tells it apart.
-                let replacement = payload_bytes(3 * CHUNK_BYTES)
-                    .iter()
-                    .rev()
-                    .copied()
-                    .collect::<Vec<_>>();
-                fs::write(&swap_path, replacement).expect("write replacement payload");
-            }
-        });
-        let adapter = SessionTemporalHydrationAdapter::new(backend);
-        let snapshot = snapshot(ExecutionControl::default());
+        let adapter = read.adapter();
+        let control = ExecutionControl::default();
+        let descriptor = external_descriptor(&content);
 
+        let mut intact = HashingSink::default();
+        adapter
+            .read_descriptor(
+                &control,
+                &descriptor,
+                MAX_PAYLOAD_BYTES,
+                CHUNK_BYTES,
+                &mut |chunk| intact.write(chunk),
+            )
+            .await
+            .expect("intact payload hydrates");
+        assert_eq!(intact.bytes, content.len());
+
+        if remove_instead_of_replace {
+            fs::remove_file(&payload_path).expect("remove proven payload");
+        } else {
+            // Same length and valid UTF-8, so only the content proof tells it apart.
+            let replacement = content.iter().rev().copied().collect::<Vec<_>>();
+            fs::write(&payload_path, replacement).expect("rewrite payload under the reader");
+        }
         let mut sink = HashingSink::default();
         let outcome = adapter
-            .read_after_recheck(
-                &snapshot,
-                &anchor(),
+            .read_descriptor(
+                &control,
+                &descriptor,
                 MAX_PAYLOAD_BYTES,
                 CHUNK_BYTES,
                 &mut |chunk| sink.write(chunk),
@@ -406,14 +292,14 @@ async fn payload_file_replaced_or_removed_between_proof_and_emission_is_refused(
         );
         assert_eq!(
             sink.bytes, 0,
-            "no chunk may cross the sink from a source replaced after its proof \
+            "no chunk may cross the sink from a source that drifted from its descriptor \
              (remove={remove_instead_of_replace})"
         );
     }
 }
 
 #[tokio::test]
-async fn cancellation_during_file_proof_and_emission_settles_typed_and_releases_the_source() {
+async fn cancellation_after_the_first_chunk_settles_typed_and_releases_the_source() {
     let dir = tempdir().expect("temporary directory");
     let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
         .await
@@ -421,45 +307,20 @@ async fn cancellation_during_file_proof_and_emission_settles_typed_and_releases_
     let read = registered_read(&runtime).await;
     let content = payload_bytes(4 * CHUNK_BYTES);
     let payload_path = seed_payload_file(&read.storage_root, &content);
-
-    // Cancelled after the adapter's pre-open checkpoint, as the backend is
-    // asked for the payload: the proof's own checkpoint surfaces the
-    // cancellation, no stream is produced, and no chunk is emitted.
-    let control = ExecutionControl::default();
-    let cancel = control.clone();
-    let adapter = SessionTemporalHydrationAdapter::new(
-        ExternalPayloadBackend::new(&read, &content).with_before_open(move || cancel.cancel()),
-    );
-    let snapshot_during_proof = snapshot(control);
-    let mut sink = HashingSink::default();
-    assert_eq!(
-        adapter
-            .read_after_recheck(
-                &snapshot_during_proof,
-                &anchor(),
-                MAX_PAYLOAD_BYTES,
-                CHUNK_BYTES,
-                &mut |chunk| sink.write(chunk),
-            )
-            .await,
-        Err(HydrationError::Interrupted(TemporalPortError::Cancelled))
-    );
-    assert_eq!(sink.bytes, 0);
+    let adapter = read.adapter();
+    let descriptor = external_descriptor(&content);
 
     // Cancelled by the sink after the first chunk: the next emission
     // checkpoint stops the stream and reports the cancellation, not a payload
     // fault, and exactly one chunk crossed.
     let control = ExecutionControl::default();
     let cancel = control.clone();
-    let adapter =
-        SessionTemporalHydrationAdapter::new(ExternalPayloadBackend::new(&read, &content));
-    let snapshot_during_emission = snapshot(control);
     let mut chunks = 0_usize;
     assert_eq!(
         adapter
-            .read_after_recheck(
-                &snapshot_during_emission,
-                &anchor(),
+            .read_descriptor(
+                &control,
+                &descriptor,
                 MAX_PAYLOAD_BYTES,
                 CHUNK_BYTES,
                 &mut |chunk| {
@@ -474,33 +335,30 @@ async fn cancellation_during_file_proof_and_emission_settles_typed_and_releases_
     );
     assert_eq!(chunks, 1);
 
-    // Neither interrupted run retained the source: the file is still exactly
-    // the seeded payload, and a fresh hydration proves and emits all of it.
+    // The interrupted run retained nothing: the file is still exactly the
+    // seeded payload, and a fresh hydration proves and emits all of it.
     assert_eq!(fs::read(&payload_path).expect("payload file"), content);
-    let adapter =
-        SessionTemporalHydrationAdapter::new(ExternalPayloadBackend::new(&read, &content));
-    let snapshot = snapshot(ExecutionControl::default());
     let mut sink = HashingSink::default();
     adapter
-        .read_after_recheck(
-            &snapshot,
-            &anchor(),
+        .read_descriptor(
+            &ExecutionControl::default(),
+            &descriptor,
             MAX_PAYLOAD_BYTES,
             CHUNK_BYTES,
             &mut |chunk| sink.write(chunk),
         )
         .await
-        .expect("fresh hydration after interrupted runs");
+        .expect("fresh hydration after interrupted run");
     assert_eq!(sink.bytes, content.len());
     assert_eq!(hex(&sink.hasher.finalize()), hex(&Sha256::digest(&content)));
 }
 
 /// A work budget that runs out while the proof is still hashing windows is a
-/// typed budget interruption, not a payload fault, and emits nothing. Five
-/// checkpoints precede the first proof window (two in the adapter, one in the
+/// typed budget interruption, not a payload fault, and emits nothing. Four
+/// checkpoints precede the first proof window (one in the adapter, one in the
 /// backend, two in the LCM open) and the proof then checkpoints once per
 /// 64 KiB window of the 1 MiB payload, so a budget of eight is exhausted at
-/// the fourth window, any budget in 6..=20 trips inside the proof.
+/// the fifth window, any budget in 5..=20 trips inside the proof.
 #[tokio::test]
 async fn work_budget_exhausted_during_file_proof_is_typed_and_emits_nothing() {
     let dir = tempdir().expect("temporary directory");
@@ -510,16 +368,15 @@ async fn work_budget_exhausted_during_file_proof_is_typed_and_emits_nothing() {
     let read = registered_read(&runtime).await;
     let content = payload_bytes(PAYLOAD_BYTES);
     seed_payload_file(&read.storage_root, &content);
-    let adapter =
-        SessionTemporalHydrationAdapter::new(ExternalPayloadBackend::new(&read, &content));
-    let snapshot = snapshot(ExecutionControl::default().with_work_limit(8));
+    let adapter = read.adapter();
+    let control = ExecutionControl::default().with_work_limit(8);
 
     let mut sink = HashingSink::default();
     assert_eq!(
         adapter
-            .read_after_recheck(
-                &snapshot,
-                &anchor(),
+            .read_descriptor(
+                &control,
+                &external_descriptor(&content),
                 MAX_PAYLOAD_BYTES,
                 CHUNK_BYTES,
                 &mut |chunk| { sink.write(chunk) }
