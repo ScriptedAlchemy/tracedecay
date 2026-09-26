@@ -74,7 +74,6 @@ convenience, they encode the path/ref/symlink safety the contract §13 demands.
 | **Reference-set computation** | `referenced_payload_refs` | `gc.rs` / doctor diagnostics | The canonical "is this ref cited by a live raw row" query (whole-message `payload_ref` **and** placeholders in the 4 text columns). GC and read-only Doctor diagnostics must agree exactly (OM-2). |
 | All metadata refs | `all_payload_metadata_refs` | `maintenance.rs` | Set of `payload_ref` PKs. |
 | Unreferenced count | `count_unreferenced_payload_metadata` | status/maintenance queries | For status; GC's scan reuses the same sets. |
-| Backup before mutate | `checkpoint_wal_for_backup`, `backup_database` | `maintenance.rs` | Reuse for an authorized owner "backup before reap" (§13); Doctor never calls it. |
 | Now | `current_timestamp` (`crate::tracedecay`) / SQL `unixepoch()` | — | Marker/`last_gc_at` timestamps. |
 
 **New symbols this design introduces** (implementation task): `delete_external_payload`,
@@ -200,8 +199,6 @@ skipped via config.
 ```
 run_payload_gc(conn, root, provider, session_id, cfg) -> LcmGcReport:
     report = LcmGcReport::default()
-    if cfg.backup_before_reap && cfg.apply:
-        checkpoint_wal_for_backup(conn); backup_database(db_path, root)   # owner §13
 
     dir = existing_payload_dir(root)            # validated canonical dir
     metadata_refs = all_payload_metadata_refs(conn)        # PK set
@@ -495,7 +492,6 @@ nor MCP accepts GC policy or invokes maintenance.
 | `lcm_payload_reap_missing_metadata_after_seconds` | u64 | `604800` (7d) | `0` = never | Window after which a *missing* payload (row+ref, no file) becomes eligible for tombstoning. |
 | `lcm_payload_reap_missing_metadata_enabled` | bool | `false` | — | Master opt-in for Phase C auto-tombstone. `false` ⇒ missing payloads reported forever (contract §9 caution). |
 | `lcm_payload_gc_max_batch_size` | usize | `500` (== `SQLITE_IN_BATCH_SIZE`) | ≥1 | Caps refs reaped per run; bounds txn/lock time. Excess candidates wait for the next run. |
-| `lcm_payload_gc_backup_before_reap` | bool | `true` | — | Run `checkpoint_wal_for_backup`+`backup_database` before an authorized owner maintenance run (contract §13). |
 | `lcm_payload_gc_interval_seconds` | u64 | `21600` (6h) | — | Daemon maintenance cadence; the store records `last_gc_at` and the owner skips if too recent. |
 | `lcm_payload_gc_enabled` | bool | `true` | — | Master switch for daemon-scheduled GC. An explicitly authorized owner run may be invoked independently of the scheduler. |
 
@@ -509,7 +505,7 @@ concurrent ingest. `grace_seconds` clamps up to 300.
 
 - **Per-ref `BEGIN IMMEDIATE`.** GC opens the writer transaction only across one
   ref's decision+delete, never across filesystem I/O or across the whole run
-  (contract §10.7). `checkpoint_wal_for_backup` runs once before the run.
+  (contract §10.7).
 - **Referenced-ness re-check under the txn** (§3.2 step 3a, §5.3) is the guard
   against racing ingest/replay/compression carry-over: a ref marked unreferenced
   on pass N is reaped on pass N+1 only if *still* unreferenced when the reap txn
@@ -585,7 +581,7 @@ and records `last_gc_at`; scheduling is host-driven.
 
 - The daemon maintenance coordinator may schedule `run_payload_gc` and perform
   an apply run under its write ownership. An explicit owner API may do the same
-  after validating the active write scope and recording the backup/report.
+  after validating the active write scope and recording the report.
 - `lcm_doctor` remains a read-only diagnosis/evidence surface. It may expose GC
   candidate counts and the last run status, but it has no `gc` mode, no `apply`
   flag, and no destructive alias. A separate owner operation is required for
@@ -633,8 +629,8 @@ Mapped to the contract §13 and this doc. Implementation and tests assert each.
    300 s floor enforced (§9).
 9. **Idempotent + convergent:** any re-run after any crash reaches a clean state
    with no data loss and no double-work (§5.3, §10).
-10. **Backup before mutate:** `checkpoint_wal_for_backup` + `backup_database`
-    before an authorized owner `apply` run (§4, §12).
+10. **No secondary copies:** an `apply` run mutates the live store in place and
+    never writes a copy of the database beside it.
 11. **Dry-run default; destruction opt-in** (`apply = true`) for owner operations
     (§11, §12). Doctor is always read-only.
 12. **Per-ref `BEGIN IMMEDIATE`, no FS I/O under the lock;** bounded by

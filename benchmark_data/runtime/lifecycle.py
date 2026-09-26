@@ -94,13 +94,12 @@ class HostResult:
 
 
 class RunWorkspace:
-    """A disposable run directory with explicit failure preservation."""
+    """A disposable run directory removed on exit, including after failure."""
 
-    def __init__(self, parent: Path, *, preserve_on_failure: bool) -> None:
+    def __init__(self, parent: Path) -> None:
         parent = Path(parent)
         parent.mkdir(parents=True, exist_ok=True)
         self.path = Path(tempfile.mkdtemp(prefix="runtime-run-", dir=parent))
-        self.preserve_on_failure = preserve_on_failure
 
     def __enter__(self) -> RunWorkspace:
         return self
@@ -111,8 +110,7 @@ class RunWorkspace:
         exception: BaseException | None,
         traceback: object,
     ) -> bool:
-        if exception_type is None or not self.preserve_on_failure:
-            shutil.rmtree(self.path, ignore_errors=True)
+        shutil.rmtree(self.path, ignore_errors=True)
         return False
 
 

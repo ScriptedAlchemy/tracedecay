@@ -808,10 +808,7 @@ def _capture_diagnostic_authority(args: argparse.Namespace) -> int:
             fail(f"incident output already exists: {path}")
     test_binary_sha256 = sha256_file(test_binary)
     captured: list[dict[str, Any]] = []
-    with RunWorkspace(
-        Path(tempfile.gettempdir()),
-        preserve_on_failure=False,
-    ) as workspace:
+    with RunWorkspace(Path(tempfile.gettempdir())) as workspace:
         validation = run_host(
             validation_command,
             env=environment,
@@ -991,10 +988,7 @@ def _capture_diagnostic_flood(args: argparse.Namespace) -> int:
     candidate_id = sha256_file(binary)[:16]
     captured: list[dict[str, Any]] = []
     output.parent.mkdir(parents=True, exist_ok=True)
-    with RunWorkspace(
-        Path(tempfile.gettempdir()),
-        preserve_on_failure=False,
-    ) as workspace:
+    with RunWorkspace(Path(tempfile.gettempdir())) as workspace:
         base = prepare_fixture_snapshot(
             workspace.path / "base",
             prebuilt_binary=binary,
@@ -1307,10 +1301,7 @@ def capture_incident(args: argparse.Namespace) -> int:
     candidate_id = sha256_file(binary)[:16]
     captured: list[dict[str, Any]] = []
     output.parent.mkdir(parents=True, exist_ok=True)
-    with RunWorkspace(
-        Path(tempfile.gettempdir()),
-        preserve_on_failure=False,
-    ) as workspace:
+    with RunWorkspace(Path(tempfile.gettempdir())) as workspace:
         base = prepare_fixture_snapshot(
             workspace.path / "base",
             prebuilt_binary=binary,
@@ -1584,10 +1575,7 @@ def capture(args: argparse.Namespace) -> int:
         else None
     )
     output.parent.mkdir(parents=True, exist_ok=True)
-    with RunWorkspace(
-        Path(tempfile.gettempdir()),
-        preserve_on_failure=False,
-    ) as workspace:
+    with RunWorkspace(Path(tempfile.gettempdir())) as workspace:
         if prepared_source is None:
             prepared = prepare_fixture_snapshot(
                 workspace.path / "fixture",
@@ -1640,10 +1628,7 @@ def paired(args: argparse.Namespace) -> int:
     )
     samples: list[dict[str, Any]] = []
     output.parent.mkdir(parents=True, exist_ok=True)
-    with RunWorkspace(
-        Path(tempfile.gettempdir()),
-        preserve_on_failure=False,
-    ) as workspace:
+    with RunWorkspace(Path(tempfile.gettempdir())) as workspace:
         base = prepare_fixture_snapshot(
             workspace.path / "base",
             prebuilt_binary=baseline,

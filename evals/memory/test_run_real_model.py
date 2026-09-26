@@ -113,27 +113,13 @@ class EvalStorageIsolationTest(unittest.TestCase):
         self.assertTrue(env.data_dir.is_relative_to(env.root))
         self.assertNotEqual(env.global_db, Path.home() / ".tracedecay/global.db")
 
-    def test_keep_fixture_preserves_isolated_eval_store(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            fixture = Path(tmp) / "fixture"
-            fixture.mkdir()
-            eval_env = run_real_model.create_eval_environment("keep-store")
-            self.addCleanup(eval_env.cleanup)
-
-            args = argparse.Namespace(keep_fixture=True)
-            run_real_model.cleanup_eval_artifacts(args, fixture, eval_env)
-
-            self.assertTrue(fixture.exists())
-            self.assertTrue(eval_env.data_dir.exists())
-
-    def test_cleanup_removes_fixture_and_isolated_eval_store_by_default(self):
+    def test_cleanup_removes_fixture_and_isolated_eval_store(self):
         with tempfile.TemporaryDirectory() as tmp:
             fixture = Path(tmp) / "fixture"
             fixture.mkdir()
             eval_env = run_real_model.create_eval_environment("cleanup-store")
 
-            args = argparse.Namespace(keep_fixture=False)
-            run_real_model.cleanup_eval_artifacts(args, fixture, eval_env)
+            run_real_model.cleanup_eval_artifacts(fixture, eval_env)
 
             self.assertFalse(fixture.exists())
             self.assertFalse(eval_env.root.exists())
