@@ -605,7 +605,25 @@ where
         return Ok(Some(setup_activity));
     };
     let report_ready = if request.doctor_report_requested() {
-        Box::pin(doctor_report_ready()).await?
+        match Box::pin(doctor_report_ready()).await {
+            Ok(ready) => ready,
+            // Enrollment is the client's state. Answering it here used to
+            // drop the socket before any frame, which Doctor could only
+            // report as a closed connection and then treat as store damage.
+            Err(error) if super::error_is_project_not_enrolled(&error) => {
+                drop(setup_activity);
+                Box::pin(write_json_rpc_response(
+                    transport,
+                    &super::project_open_handshake::project_open_error_response(
+                        request.id.clone(),
+                        &error,
+                    ),
+                ))
+                .await?;
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        }
     } else {
         false
     };
@@ -984,6 +1002,117 @@ mod doctor_runtime_route_tests {
         assert!(
             transport.output.contains("git_watcher") && transport.output.contains("degraded_poll"),
             "the production core Doctor response must expose watcher health"
+        );
+    }
+
+    #[tokio::test]
+    async fn doctor_report_probe_answers_project_not_enrolled_without_closing() {
+        let root = tempfile::TempDir::new().expect("fixture root");
+        let profile = root.path().join("profile");
+        let handshake = handshake(
+            root.path().join("project"),
+            profile.clone(),
+            profile.join("registry.db"),
+        );
+        let lifecycle = DaemonLifecycle::default();
+        let setup_activity = lifecycle.try_enter().expect("setup activity");
+        lifecycle.begin_draining();
+        let mut transport = DoctorRouteTransport {
+            lifecycle,
+            output: String::new(),
+            idle_before_write: false,
+        };
+        let store_administration = StoreAdministration::default();
+        let first_request = AuthenticatedFirstRequest::new(doctor_report_request_line());
+        let detail = "no TraceDecay index found at '/tmp/unenrolled'; run 'tracedecay init'";
+
+        let outcome = serve_core_doctor_runtime_request(
+            &mut transport,
+            &handshake,
+            &store_administration,
+            CoreDoctorStatusV1 {
+                project_open: None,
+                git_watcher_health: None,
+            },
+            setup_activity,
+            &first_request,
+            || async {
+                Err(tracedecay_domain::errors::TraceDecayError::project_route(
+                    super::super::PROJECT_NOT_ENROLLED_REASON_CODE,
+                    false,
+                    detail,
+                ))
+            },
+        )
+        .await
+        .expect("not-enrolled is a response, not a closed connection");
+
+        assert!(outcome.is_none());
+        assert!(
+            transport
+                .output
+                .contains(r#""reason_code":"project_not_enrolled""#),
+            "doctor probe response: {}",
+            transport.output
+        );
+        assert!(
+            transport.output.contains(r#""retryable":false"#),
+            "doctor probe response: {}",
+            transport.output
+        );
+        assert!(
+            !transport
+                .output
+                .contains(r#""reason":"doctor_report_owner_warming""#),
+            "not-enrolled must not be reported as a warming owner: {}",
+            transport.output
+        );
+    }
+
+    #[tokio::test]
+    async fn doctor_report_probe_still_propagates_other_readiness_errors() {
+        let root = tempfile::TempDir::new().expect("fixture root");
+        let profile = root.path().join("profile");
+        let handshake = handshake(
+            root.path().join("project"),
+            profile.clone(),
+            profile.join("registry.db"),
+        );
+        let lifecycle = DaemonLifecycle::default();
+        let setup_activity = lifecycle.try_enter().expect("setup activity");
+        let mut transport = DoctorRouteTransport {
+            lifecycle,
+            output: String::new(),
+            idle_before_write: false,
+        };
+        let store_administration = StoreAdministration::default();
+        let first_request = AuthenticatedFirstRequest::new(doctor_report_request_line());
+
+        let outcome = serve_core_doctor_runtime_request(
+            &mut transport,
+            &handshake,
+            &store_administration,
+            CoreDoctorStatusV1 {
+                project_open: None,
+                git_watcher_health: None,
+            },
+            setup_activity,
+            &first_request,
+            || async {
+                Err(tracedecay_domain::errors::TraceDecayError::Config {
+                    message: "project route probe failed".to_string(),
+                })
+            },
+        )
+        .await;
+
+        let Err(error) = outcome else {
+            panic!("non-enrollment probe errors still close as typed failures");
+        };
+        assert!(error.to_string().contains("project route probe failed"));
+        assert!(
+            transport.output.is_empty(),
+            "an unrelated probe error must not be rewritten as a doctor report"
         );
     }
 
