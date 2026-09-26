@@ -52,7 +52,7 @@ use tracedecay_runtime_core::resident_memory::{
 use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 use super::{
-    ALPHA_LIB_V1, CALLER_PAGE, CALLER_STAR, GitFixture, ReadyRetrievalControlV1,
+    ALPHA_LIB_V1, CALLER_PAGE, CALLER_STAR, GitFixture, OwnerSignals, ReadyRetrievalControlV1,
     active_text_artifact_path, application_context, build_progress_snapshot, callee_fanout_sources,
     caller_star_sources, callers_page_meta, core_search_request, decode_hex, git,
     install_verified_graph_store, install_verified_graph_store_on_text, mount_core_query_authority,
@@ -63,6 +63,7 @@ use super::{
     rewrite_active_text_artifact_format_revision, routed_core_search_request, scheduler,
     settle_text_projection, test_project_id, wait_for_live_complete_generation,
     wait_for_queryable_text_generation, wait_for_queryable_text_generation_change,
+    wait_for_settled_owner,
 };
 use crate::{
     code_index::production::{
@@ -880,6 +881,9 @@ async fn dashboard_freshness_does_not_join_a_text_projection_slice() {
     while !latest.query_owners_are_ready() {
         latest.advance_text_serving(1).expect("advance text build");
     }
+    // Clone readiness reports stale while the seating pass is still verifying
+    // source, so start from the settled owner this test is about.
+    wait_for_settled_owner(&registry, fixture.path()).await;
 
     let held_slot = latest.text_projection_build.lock_slot();
     let freshness = tokio::time::timeout(
@@ -3909,6 +3913,7 @@ async fn moved_reference_label_still_serves_the_exact_worktree_as_current() {
     // The root-scope ready gate behind graph reads and the runtime census,
     // the arms with no stale fallback, must not be orphaned either. Seating
     // races the publication event, so the gate is polled bounded.
+    let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
     let decoded = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let Some(decoded) = registry
@@ -3917,7 +3922,7 @@ async fn moved_reference_label_still_serves_the_exact_worktree_as_current() {
             {
                 break decoded;
             }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            signals.changed().await;
         }
     })
     .await
@@ -6112,6 +6117,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
         "mounted graph-off worktree accepts the overflow reconcile"
     );
 
+    let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
     let query_deadline = std::time::Instant::now() + Duration::from_secs(10);
     let executed = loop {
         match registry
@@ -6124,7 +6130,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
                     std::time::Instant::now() <= query_deadline,
                     "graph-off text projection never became queryable: {error}"
                 );
-                tokio::time::sleep(Duration::from_millis(2)).await;
+                signals.changed_before(query_deadline).await;
             }
         }
     };
@@ -6132,6 +6138,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
         executed.served_stale,
         "an explicit overflow keeps the currently served text generation stale until reconcile settles"
     );
+    let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
     let overflow_deadline = std::time::Instant::now() + Duration::from_secs(10);
     let dashboard = loop {
         let overflow_settled = {
@@ -6159,7 +6166,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
             std::time::Instant::now() <= overflow_deadline,
             "graph-off overflow did not settle through a real no-op reconcile"
         );
-        tokio::time::sleep(Duration::from_millis(2)).await;
+        signals.changed_before(overflow_deadline).await;
     };
     let (owner_epoch_after_overflow, progress_after_overflow, decode_count) = {
         let scheduler = scheduler

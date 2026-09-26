@@ -1225,15 +1225,60 @@ async fn wait_for_quiescent_owner_pass(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
 ) {
-    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
-    while registry.reconcile_in_progress_for_test(project_root).await {
-        assert!(
-            Instant::now() <= deadline,
-            "the owner pass for {} never finished",
-            project_root.display()
-        );
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
+    wait_for_owner(
+        registry,
+        project_root,
+        SERVING_SEAT_FAILURE_CEILING,
+        "a finished owner pass",
+        || async {
+            registry
+                .subscribe_owner_activity(project_root)
+                .await
+                .is_none_or(|activity| activity.pass_finished())
+                .then_some(())
+        },
+    )
+    .await;
+}
+
+/// Wait until the worker for `project_root` reaches `phase`.
+async fn wait_for_worker_phase(
+    registry: &CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
+    phase: crate::code_index_scheduler::CodeIndexWorkerPhaseV1,
+) {
+    wait_for_owner(
+        registry,
+        project_root,
+        SERVING_SEAT_FAILURE_CEILING,
+        "the awaited worker phase",
+        || async {
+            registry
+                .subscribe_owner_activity(project_root)
+                .await
+                .is_some_and(|activity| activity.worker_phase() == phase)
+                .then_some(())
+        },
+    )
+    .await;
+}
+
+/// Wait until an owner pass is running for `project_root`: the worker has
+/// taken its admission permit and publication gate and entered the pass.
+async fn wait_for_owner_pass(registry: &CodeIndexSchedulerRegistryV1, project_root: &Path) {
+    wait_for_owner(
+        registry,
+        project_root,
+        SERVING_SEAT_FAILURE_CEILING,
+        "a running owner pass",
+        || async {
+            registry
+                .reconcile_in_progress_for_test(project_root)
+                .await
+                .then_some(())
+        },
+    )
+    .await;
 }
 
 /// Wait until the mounted worker for `path` is idle with nothing queued.
@@ -1243,21 +1288,20 @@ async fn wait_for_quiescent_owner_pass(
 /// whose receipt lands later, so a test pinning receipt accounting has to wait
 /// for the pending-wake slot as well.
 async fn wait_for_settled_owner(registry: &CodeIndexSchedulerRegistryV1, path: &Path) {
-    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
-    loop {
-        wait_for_quiescent_owner_pass(registry, path).await;
-        if registry.pending_wake_micros_for_root(path).await == Some(0)
-            && !registry.reconcile_in_progress_for_test(path).await
-        {
-            return;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "the owner for {} never settled",
-            path.display()
-        );
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
+    wait_for_owner(
+        registry,
+        path,
+        SERVING_SEAT_FAILURE_CEILING,
+        "a settled owner",
+        || async {
+            registry
+                .subscribe_owner_activity(path)
+                .await
+                .is_none_or(|activity| activity.pass_finished() && !activity.wake_pending())
+                .then_some(())
+        },
+    )
+    .await;
 }
 
 /// Settle the mounted owner's text projection and the worker's owed passes.
@@ -1269,6 +1313,7 @@ async fn wait_for_settled_owner(registry: &CodeIndexSchedulerRegistryV1, path: &
 async fn settle_text_projection(registry: &CodeIndexSchedulerRegistryV1, path: &Path) {
     let canonical = canonical_existing_identity(path).expect("canonical project");
     let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    let mut signals = OwnerSignals::subscribe(registry, path).await;
     loop {
         assert!(
             Instant::now() <= deadline,
@@ -1302,7 +1347,7 @@ async fn settle_text_projection(registry: &CodeIndexSchedulerRegistryV1, path: &
             // starts drives the pending projection on the retained path.
             registry.request_complete_generation(path).await;
         }
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        signals.changed_before(deadline).await;
     }
 }
 
@@ -1403,25 +1448,23 @@ async fn settled_owner_with_idle_admission(
     project_root: &Path,
 ) {
     let admission = registry.background_reconcile_admission();
-    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
-    loop {
-        drop(quiesced_background_reconcile_admission(registry, project_root).await);
-        // A banked permit is claimed by the worker's very next `notified()`,
-        // whose first act is to take this admission. Give that claim its turn,
-        // then settle: a pass that did start moves the guard or the slot this
-        // wait joins, and the free permit afterwards is the proof none is left.
-        tokio::time::sleep(Duration::from_millis(5)).await;
-        wait_for_settled_owner(registry, project_root).await;
-        if admission.available_permits() == 1 {
-            return;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "the admission for {} never went idle",
-            project_root.display()
-        );
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
+    drop(quiesced_background_reconcile_admission(registry, project_root).await);
+    // A banked permit keeps the worker from parking: it resolves the wake
+    // wait at once and its no-op pass takes the admission. Parked with the
+    // slot empty is therefore the drained state.
+    wait_for_worker_phase(
+        registry,
+        project_root,
+        crate::code_index_scheduler::CodeIndexWorkerPhaseV1::Parked,
+    )
+    .await;
+    wait_for_settled_owner(registry, project_root).await;
+    assert_eq!(
+        admission.available_permits(),
+        1,
+        "the admission for {} never went idle",
+        project_root.display()
+    );
 }
 
 /// Empty the coalesced pending-wake slot and prove the owner's pass tail is
@@ -1437,19 +1480,20 @@ async fn clear_pending_wake_until_quiet(
     registry: &CodeIndexSchedulerRegistryV1,
     scope: &tracedecay_contracts::ResolvedScope,
 ) {
-    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
-    loop {
-        registry.clear_pending_wake_for_scope(scope).await;
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        if registry.pending_wake_micros_for_scope(scope).await == Some(0) {
-            return;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "the pending-wake slot for {:?} never stayed empty",
-            scope.worktree_id
-        );
-    }
+    let root = registry
+        .mounted_root_for_scope_for_test(scope)
+        .await
+        .expect("mounted worktree for scope");
+    // With the admission held the worker cannot start another pass, and once
+    // it is back at a wait its tail can no longer stamp the slot.
+    wait_for_quiescent_owner_pass(registry, &root).await;
+    registry.clear_pending_wake_for_scope(scope).await;
+    assert_eq!(
+        registry.pending_wake_micros_for_scope(scope).await,
+        Some(0),
+        "the pending-wake slot for {:?} was restamped after the owner settled",
+        scope.worktree_id
+    );
 }
 
 const CALLER_STAR: usize = 2_000;
@@ -1552,7 +1596,7 @@ async fn serving_seat_wait_diagnostic(
         None => "unmounted".to_owned(),
     };
     format!(
-        "serving seat never arrived for worktree {}; last observed serving={:?} generation={:?}; registry serving={:?} generation={:?} {mounted}",
+        "worktree {}; last observed serving={:?} generation={:?}; registry serving={:?} generation={:?} {mounted}",
         path.display(),
         last_serving.map(CodeGenerationId::as_str),
         last_generation.map(CodeGenerationId::as_str),
@@ -1561,32 +1605,146 @@ async fn serving_seat_wait_diagnostic(
     )
 }
 
-/// Wait until `probe` observes a serving seat for `path`.
+/// Every signal a mounted owner publishes for `path`: registry-wide serving
+/// seats and mounts, the worktree's serving-generation changes, its owner
+/// passes and pending wake, and cadence receipts.
 ///
-/// Checks the current slot before subscribing so a seat that arrived before
-/// this waiter exists is not missed, then waits on
-/// [`CodeIndexSchedulerRegistryV1::subscribe_serving_seats`]. A seat can also
-/// land between that first probe and subscribe; the loop re-reads the slot
-/// before blocking on the next wake.
+/// Subscribe before the first probe. `watch::Sender::subscribe()` marks the
+/// current value seen, so a change between subscribe and `changed()` still
+/// wakes the waiter, and a probe that misses a transition re-runs on the next
+/// one instead of on a timer. The per-worktree channels exist only while the
+/// worktree is mounted: `changed()` returns as soon as one is (re)subscribed,
+/// so a caller re-probes before depending on it.
+pub(crate) struct OwnerSignals<'a> {
+    registry: &'a CodeIndexSchedulerRegistryV1,
+    path: PathBuf,
+    seats: tokio::sync::watch::Receiver<u64>,
+    root_mounted: tokio::sync::watch::Receiver<u64>,
+    receipts:
+        tokio::sync::watch::Receiver<crate::code_index_scheduler::CodeIndexCadenceTelemetryV1>,
+    serving: Option<tokio::sync::watch::Receiver<()>>,
+    activity: Option<crate::code_index_scheduler::CodeIndexOwnerActivityV1>,
+}
+
+impl<'a> OwnerSignals<'a> {
+    pub(crate) async fn subscribe(registry: &'a CodeIndexSchedulerRegistryV1, path: &Path) -> Self {
+        Self {
+            registry,
+            path: path.to_path_buf(),
+            seats: registry.subscribe_serving_seats(),
+            root_mounted: registry.subscribe_root_mounted(),
+            receipts: registry.subscribe_cadence_receipts(),
+            serving: registry.subscribe_serving_generation_changes(path).await,
+            activity: registry.subscribe_owner_activity(path).await,
+        }
+    }
+
+    pub(crate) async fn changed(&mut self) {
+        if self.serving.is_none() {
+            self.serving = self
+                .registry
+                .subscribe_serving_generation_changes(&self.path)
+                .await;
+            if self.serving.is_some() {
+                return;
+            }
+        }
+        if self.activity.is_none() {
+            self.activity = self.registry.subscribe_owner_activity(&self.path).await;
+            if self.activity.is_some() {
+                return;
+            }
+        }
+        tokio::select! {
+            changed = self.seats.changed() => {
+                changed.expect("the seating channel stays open while the registry lives");
+            }
+            changed = self.root_mounted.changed() => {
+                changed.expect("the root-mounted channel stays open while the registry lives");
+            }
+            changed = self.receipts.changed() => {
+                changed.expect("the cadence channel stays open while the registry lives");
+            }
+            changed = async {
+                match self.serving.as_mut() {
+                    Some(serving) => serving.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if changed.is_err() {
+                    self.serving = None;
+                }
+            }
+            changed = async {
+                match self.activity.as_mut() {
+                    Some(activity) => activity.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if changed.is_err() {
+                    self.activity = None;
+                }
+            }
+        }
+        self.settle_burst().await;
+    }
+
+    /// Consume publications until a scheduler turn passes without one, so a
+    /// burst of owner updates costs the waiter one probe instead of one per
+    /// update contending with the worker.
+    async fn settle_burst(&mut self) {
+        loop {
+            self.seats.borrow_and_update();
+            self.root_mounted.borrow_and_update();
+            self.receipts.borrow_and_update();
+            if let Some(serving) = self.serving.as_mut() {
+                serving.borrow_and_update();
+            }
+            tokio::task::yield_now().await;
+            let pending = [
+                self.seats.has_changed(),
+                self.root_mounted.has_changed(),
+                self.receipts.has_changed(),
+            ]
+            .into_iter()
+            .any(|changed| changed.unwrap_or(false))
+                || self
+                    .serving
+                    .as_ref()
+                    .is_some_and(|serving| serving.has_changed().unwrap_or(false))
+                || self.activity.as_ref().is_some_and(
+                    crate::code_index_scheduler::CodeIndexOwnerActivityV1::has_changed,
+                );
+            if !pending {
+                return;
+            }
+            if let Some(activity) = self.activity.as_mut()
+                && activity.has_changed()
+                && activity.changed().await.is_err()
+            {
+                self.activity = None;
+            }
+        }
+    }
+
+    /// [`Self::changed`] bounded by a caller's failure deadline, so the
+    /// caller's own assertion reports a wait that never ends.
+    pub(crate) async fn changed_before(&mut self, deadline: Instant) {
+        let _ =
+            tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), self.changed()).await;
+    }
+}
+
+/// Wait until `probe` answers for `path`, re-probing only when the owner
+/// publishes a change ([`OwnerSignals`]).
 ///
-/// [`CodeIndexSchedulerRegistryV1::subscribe_serving_generation_changes`]
-/// wakes on per-worktree seating, including restored mounts that emit no new
-/// registry-wide seat count. That subscribe returns `None` until the worktree
-/// is mounted, so the loop re-attempts it each iteration until it returns
-/// `Some`. A waiter that starts before mount observes
-/// [`CodeIndexSchedulerRegistryV1::subscribe_root_mounted`] and
-/// [`CodeIndexSchedulerRegistryV1::subscribe_serving_seats`].
-///
-/// `watch::Sender::subscribe()` marks the current value seen, so a seat that
-/// lands between subscribe and the first `changed()` is invisible unless we
-/// re-probe after subscribe and before `changed()`.
-///
-/// `ceiling` is a failure bound only. The wait is still signal-driven; a
-/// test must not pass because the ceiling elapsed.
-async fn wait_until_serving_seat<T, F, Fut>(
+/// `ceiling` is a failure bound only: the wait is signal-driven, and a test
+/// must not pass because the ceiling elapsed.
+async fn wait_for_owner<T, F, Fut>(
     registry: &CodeIndexSchedulerRegistryV1,
     path: &Path,
     ceiling: Duration,
+    awaited: &str,
     mut probe: F,
 ) -> T
 where
@@ -1594,47 +1752,12 @@ where
     Fut: std::future::Future<Output = Option<T>>,
 {
     let wait = async {
-        if let Some(value) = probe().await {
-            return value;
-        }
-        let mut seats = registry.subscribe_serving_seats();
-        let mut root_mounted = registry.subscribe_root_mounted();
-        let mut per_worktree = None;
+        let mut signals = OwnerSignals::subscribe(registry, path).await;
         loop {
-            if per_worktree.is_none() {
-                per_worktree = registry.subscribe_serving_generation_changes(path).await;
-            }
-            // watch::Sender::subscribe() marks the current value seen, so a
-            // seat that landed between this subscribe and the wait below is
-            // missed unless we re-probe before changed().
             if let Some(value) = probe().await {
                 return value;
             }
-            match per_worktree.as_mut() {
-                Some(changes) => {
-                    tokio::select! {
-                        result = seats.changed() => {
-                            result.expect("the seating channel stays open while the registry lives");
-                        }
-                        result = changes.changed() => {
-                            result.expect("the per-worktree serving channel stays open while the owner lives");
-                        }
-                        result = root_mounted.changed() => {
-                            result.expect("the root-mounted channel stays open while the registry lives");
-                        }
-                    }
-                }
-                None => {
-                    tokio::select! {
-                        result = seats.changed() => {
-                            result.expect("the seating channel stays open while the registry lives");
-                        }
-                        result = root_mounted.changed() => {
-                            result.expect("the root-mounted channel stays open while the registry lives");
-                        }
-                    }
-                }
-            }
+            signals.changed().await;
         }
     };
     match tokio::time::timeout(ceiling, wait).await {
@@ -1646,7 +1769,7 @@ where
                 .map(|latest| latest.generation.manifest().generation_id.clone());
             let last_generation = registry.latest_generation_id(path).await;
             panic!(
-                "{}",
+                "{awaited} never arrived for {}",
                 serving_seat_wait_diagnostic(
                     registry,
                     path,
@@ -1657,6 +1780,20 @@ where
             )
         }
     }
+}
+
+/// Wait until `probe` observes a serving seat for `path`.
+async fn wait_until_serving_seat<T, F, Fut>(
+    registry: &CodeIndexSchedulerRegistryV1,
+    path: &Path,
+    ceiling: Duration,
+    probe: F,
+) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    wait_for_owner(registry, path, ceiling, "serving seat", probe).await
 }
 
 /// Wait until the registry-mounted worktree seats its first generation.
@@ -1713,47 +1850,36 @@ async fn wait_for_live_complete_generation_by_polling(
 }
 
 async fn wait_for_dashboard_ready(registry: &CodeIndexSchedulerRegistryV1, path: &Path) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let ready = registry
-                .dashboard_freshness(path)
+    let fresh_complete = || async {
+        registry
+            .dashboard_freshness(path)
+            .await
+            .is_some_and(|freshness| {
+                freshness.staleness_state
+                    == Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh)
+                    && freshness.coverage
+                        == tracedecay_contracts::code_index_freshness::CodeIndexFreshnessCoverageV1::Complete
+            })
+    };
+    // Fresh is projected whenever refresh_in_flight is briefly false between
+    // owner passes, and a seat can leave a continuation queued that reports
+    // Verifying while it runs. Ready means fresh with no pass running and none
+    // pending.
+    wait_for_owner(
+        registry,
+        path,
+        Duration::from_secs(5),
+        "fresh complete dashboard freshness",
+        || async {
+            (registry
+                .subscribe_owner_activity(path)
                 .await
-                .is_some_and(|freshness| {
-                    freshness.staleness_state == Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh)
-                        && freshness.coverage == tracedecay_contracts::code_index_freshness::CodeIndexFreshnessCoverageV1::Complete
-                });
-            if ready {
-                // Fresh is projected whenever refresh_in_flight is briefly
-                // false between owner passes. Join the seating pass and
-                // re-sample so ready is not a trough before Verifying.
-                wait_for_quiescent_owner_pass(registry, path).await;
-                let still_ready = registry
-                    .dashboard_freshness(path)
-                    .await
-                    .is_some_and(|freshness| {
-                        freshness.staleness_state
-                            == Some(
-                                tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh,
-                            )
-                            && freshness.coverage
-                                == tracedecay_contracts::code_index_freshness::CodeIndexFreshnessCoverageV1::Complete
-                    });
-                // A seat can leave a continuation queued, and the ladder
-                // reports Verifying for as long as that pass runs. Ready means
-                // no pass is running and none is pending.
-                if still_ready
-                    && !registry.reconcile_in_progress_for_test(path).await
-                    && registry.pending_wake_micros_for_root(path).await == Some(0)
-                {
-                    break;
-                }
-                continue;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await
-    .expect("dashboard reaches fresh complete state");
+                .is_some_and(|activity| activity.pass_finished() && !activity.wake_pending())
+                && fresh_complete().await)
+                .then_some(())
+        },
+    )
+    .await;
 }
 
 /// Wait until exact/lexical text serving is seated for `path`.
@@ -1835,15 +1961,18 @@ async fn wait_for_generation_change(
 async fn wait_for_event_to_ready(
     registry: &CodeIndexSchedulerRegistryV1,
 ) -> super::CodeIndexEventToReadyReceiptV1 {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Some(receipt) = registry.latest_event_to_ready_receipt() {
-            return receipt;
+    let mut receipts = registry.subscribe_cadence_receipts();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(receipt) = receipts.borrow_and_update().latest().cloned() {
+                return receipt;
+            }
+            receipts
+                .changed()
+                .await
+                .expect("the cadence channel stays open while the registry lives");
         }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "timed out waiting for event-to-ready receipt"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    })
+    .await
+    .expect("timed out waiting for event-to-ready receipt")
 }

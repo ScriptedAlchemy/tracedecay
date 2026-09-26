@@ -13,7 +13,7 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock, RwLock, Weak,
-        atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -475,7 +475,7 @@ struct ColdMountOpenTestControlV1 {
     release: Condvar,
     events: Mutex<Vec<ColdMountOpenEventV1>>,
     changed: tokio::sync::watch::Sender<usize>,
-    followers: AtomicUsize,
+    followers: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(test)]
@@ -488,7 +488,7 @@ impl ColdMountOpenTestControlV1 {
             release: Condvar::new(),
             events: Mutex::new(Vec::new()),
             changed,
-            followers: AtomicUsize::new(0),
+            followers: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -751,9 +751,12 @@ pub struct MountedCodeIndexWorktreeV1 {
     /// canonical index or retrieval observations (never a fabricated zero).
     index_observability: Arc<OnceLock<super::observability::CodeIndexObservabilityV1>>,
     shutting_down: Arc<AtomicBool>,
-    /// Count of in-flight owner passes; nonzero means activation or reconcile
-    /// work is running for this worktree.
-    reconcile_in_progress: Arc<AtomicUsize>,
+    /// In-flight owner passes; running means activation or reconcile work is
+    /// in progress for this worktree.
+    reconcile_in_progress: Arc<super::ReconcilePassesV1>,
+    /// Where the background worker is between wakes; see
+    /// [`CodeIndexWorkerPhaseV1`].
+    worker_phase: Arc<tokio::sync::watch::Sender<CodeIndexWorkerPhaseV1>>,
     /// Live handle to the publication's encoded-byte counter; observed only by
     /// test memory accounting today.
     _active_generation_encoded_bytes: Arc<AtomicU64>,
@@ -1347,7 +1350,11 @@ struct PendingWakeStateV1 {
 /// linearizable transition: no producer can arrive between a claim's owner
 /// release and its marker release.
 struct PendingWakeV1 {
-    state: Mutex<PendingWakeStateV1>,
+    slot: Mutex<PendingWakeStateV1>,
+    /// Whether the slot holds a wake. Every writer publishes it through
+    /// [`PendingWakeGuardV1`] before releasing `slot`, so subscribers observe
+    /// occupancy changes in lock order.
+    occupied: tokio::sync::watch::Sender<bool>,
     #[cfg(test)]
     drop_gate: Mutex<Option<Arc<PendingWakeDropGateTestV1>>>,
 }
@@ -1355,20 +1362,141 @@ struct PendingWakeV1 {
 impl Default for PendingWakeV1 {
     fn default() -> Self {
         Self {
-            state: Mutex::new(PendingWakeStateV1::default()),
+            slot: Mutex::new(PendingWakeStateV1::default()),
+            occupied: tokio::sync::watch::Sender::new(false),
             #[cfg(test)]
             drop_gate: Mutex::new(None),
         }
     }
 }
 
+/// Where one worktree's background worker is between wakes.
+///
+/// The pass counter deliberately drops between graph-tail steps (an O(store)
+/// decode is not a rebuild in flight), so "no pass running" is not "the worker
+/// finished its pass". The worker is done only once it is back at one of the
+/// waits below.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CodeIndexWorkerPhaseV1 {
+    /// Not yet started, or running a pass or its tail.
+    #[default]
+    Working,
+    /// Waiting for a wake.
+    Parked,
+    /// Woken and waiting for a background reconcile permit.
+    AwaitingAdmission,
+    /// Holding a permit and waiting for the worktree's build/publication gate.
+    AwaitingPublicationGate,
+}
+
+impl CodeIndexWorkerPhaseV1 {
+    pub(super) fn enter(phase: &tokio::sync::watch::Sender<Self>, next: Self) {
+        phase.send_if_modified(|current| std::mem::replace(current, next) != next);
+    }
+}
+
+/// One mounted worktree's owner activity: its owner passes, whether a wake
+/// is queued for it (together the freshness ladder's `refresh_in_flight`),
+/// and where its background worker is.
+pub struct CodeIndexOwnerActivityV1 {
+    passes: tokio::sync::watch::Receiver<super::CodeIndexOwnerPassesV1>,
+    pending_wake: tokio::sync::watch::Receiver<bool>,
+    worker_phase: tokio::sync::watch::Receiver<CodeIndexWorkerPhaseV1>,
+}
+
+impl CodeIndexOwnerActivityV1 {
+    pub fn worker_phase(&self) -> CodeIndexWorkerPhaseV1 {
+        *self.worker_phase.borrow()
+    }
+
+    /// No owner pass holds the worktree and the worker is back at a wait, so
+    /// the last pass and its tail have finished.
+    pub fn pass_finished(&self) -> bool {
+        !self.passes().running() && self.worker_phase() != CodeIndexWorkerPhaseV1::Working
+    }
+
+    pub fn passes(&self) -> super::CodeIndexOwnerPassesV1 {
+        *self.passes.borrow()
+    }
+
+    pub fn wake_pending(&self) -> bool {
+        *self.pending_wake.borrow()
+    }
+
+    pub fn refresh_in_flight(&self) -> bool {
+        self.passes().running() || self.wake_pending()
+    }
+
+    /// Resolves on the next pass, pending-wake, or worker-phase transition, or with
+    /// [`tokio::sync::watch::error::RecvError`] once the worktree's owner is
+    /// gone.
+    ///
+    /// Every transition published before it resolves is consumed with it, so
+    /// a burst of intra-pass updates wakes a subscriber once.
+    pub async fn changed(&mut self) -> Result<(), tokio::sync::watch::error::RecvError> {
+        let changed = tokio::select! {
+            changed = self.passes.changed() => changed,
+            changed = self.pending_wake.changed() => changed,
+            changed = self.worker_phase.changed() => changed,
+        };
+        self.passes.borrow_and_update();
+        self.pending_wake.borrow_and_update();
+        self.worker_phase.borrow_and_update();
+        changed
+    }
+
+    /// Whether a transition was published since the last [`Self::changed`].
+    pub fn has_changed(&self) -> bool {
+        [
+            self.passes.has_changed(),
+            self.pending_wake.has_changed(),
+            self.worker_phase.has_changed(),
+        ]
+        .into_iter()
+        .any(|changed| changed.unwrap_or(true))
+    }
+}
+
+struct PendingWakeGuardV1<'a> {
+    state: std::sync::MutexGuard<'a, PendingWakeStateV1>,
+    occupied: &'a tokio::sync::watch::Sender<bool>,
+}
+
+impl std::ops::Deref for PendingWakeGuardV1<'_> {
+    type Target = PendingWakeStateV1;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+impl std::ops::DerefMut for PendingWakeGuardV1<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
+    }
+}
+
+impl Drop for PendingWakeGuardV1<'_> {
+    fn drop(&mut self) {
+        let occupied = self.state.micros != 0;
+        self.occupied
+            .send_if_modified(|published| std::mem::replace(published, occupied) != occupied);
+    }
+}
+
 impl PendingWakeV1 {
+    fn lock(&self) -> PendingWakeGuardV1<'_> {
+        PendingWakeGuardV1 {
+            state: self
+                .slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            occupied: &self.occupied,
+        }
+    }
+
     fn has_pending_arrival(&self) -> bool {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .micros
-            != 0
+        self.lock().micros != 0
     }
 
     #[cfg(test)]
@@ -1445,10 +1573,7 @@ struct PendingWakeClaimV1 {
 
 impl PendingWakeClaimV1 {
     fn claim(pending_wake: Arc<PendingWakeV1>) -> Option<Self> {
-        let mut state = pending_wake
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = pending_wake.lock();
         if state.micros != 0 {
             return None;
         }
@@ -1471,11 +1596,7 @@ impl PendingWakeClaimV1 {
     }
 
     fn still_owns(&self) -> bool {
-        let state = self
-            .pending_wake
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = self.pending_wake.lock();
         state.owner == self.owner && state.micros == self.claimed_micros
     }
 }
@@ -1488,11 +1609,7 @@ impl Drop for PendingWakeClaimV1 {
             // the production lock.
             #[cfg(test)]
             self.pending_wake.pause_claim_drop_for_test();
-            let mut state = self
-                .pending_wake
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut state = self.pending_wake.lock();
             if state.owner == self.owner && state.micros == self.claimed_micros {
                 state.micros = 0;
                 state.trigger = 0;
@@ -1512,7 +1629,7 @@ type ReadyProbeServingPartsV1 = (
     Arc<AtomicBool>,
     Arc<tokio::sync::Notify>,
     Arc<PendingWakeV1>,
-    Arc<AtomicUsize>,
+    Arc<super::ReconcilePassesV1>,
 );
 
 /// Typed verdict from a demand-driven reconcile wake (hooks, overflow, query
@@ -1560,7 +1677,7 @@ pub struct CodeIndexSchedulerRegistryV1 {
     /// activation observe this so they can re-subscribe instead of parking on
     /// a forever-pending per-worktree arm.
     root_mounted: Arc<tokio::sync::watch::Sender<u64>>,
-    cadence_telemetry: Arc<Mutex<CodeIndexCadenceTelemetryV1>>,
+    cadence_telemetry: Arc<tokio::sync::watch::Sender<CodeIndexCadenceTelemetryV1>>,
     pub(super) relation_symbol_hydrations: Arc<AtomicU64>,
     activations: Arc<Mutex<BTreeMap<ManifestDigest, Weak<super::CodeIndexActivationV1>>>>,
     /// The serving generation each root last proved current, held weakly so a
@@ -1938,11 +2055,7 @@ impl CodeIndexSchedulerRegistryV1 {
             if worktree.repository_id == scope.repository_id
                 && worktree.worktree_id == scope.worktree_id
             {
-                let mut pending_wake = worktree
-                    .pending_wake
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut pending_wake = worktree.pending_wake.lock();
                 pending_wake.micros = 0;
                 pending_wake.owner = 0;
                 pending_wake.trigger = 0;
@@ -2129,10 +2242,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let wake_micros = u64::try_from(now_micros().0).unwrap_or(u64::MAX);
         #[cfg(test)]
         pending_wake.note_foreign_wake_attempt_for_test();
-        let mut state = pending_wake
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = pending_wake.lock();
         state.owner = state.next_owner();
         // A worker continuation occupies the slot without an external instant.
         // This wake is the arrival; keep an already-observed one so a later
@@ -2154,10 +2264,7 @@ impl CodeIndexSchedulerRegistryV1 {
         trigger: CodeIndexCadenceTriggerV1,
     ) -> bool {
         let wake_micros = u64::try_from(now_micros().0).unwrap_or(u64::MAX);
-        let mut state = pending_wake
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = pending_wake.lock();
         // An unattributable continuation is not an arrival. Upgrade it: the
         // caller that just proved work is the event the receipt must name.
         if state.micros != 0 && state.attributable {
@@ -2180,10 +2287,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// keeps that stamp out of the event-to-ready receipt, which otherwise
     /// charged a suppressed freshness probe that raced it.
     fn note_worker_continuation(pending_wake: &PendingWakeV1, wake: &tokio::sync::Notify) {
-        let mut state = pending_wake
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = pending_wake.lock();
         if state.micros != 0 {
             // An arrival is already queued, or a continuation already occupies
             // the slot. Replenish the coalesced permit so the worker cannot
@@ -2207,7 +2311,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// slot and then lose to `BusyFollowUp`. The stamp is the idle boundary;
     /// the guard lives only for the note.
     fn note_visible_worker_continuation(
-        passes: &Arc<AtomicUsize>,
+        passes: &Arc<super::ReconcilePassesV1>,
         pending_wake: &PendingWakeV1,
         wake: &tokio::sync::Notify,
     ) {
@@ -2227,10 +2331,7 @@ impl CodeIndexSchedulerRegistryV1 {
         default_trigger: CodeIndexCadenceTriggerV1,
     ) -> (CodeIndexArrivalV1, CodeIndexCadenceTriggerV1) {
         let (wake_micros, packed_trigger, attributable) = {
-            let mut state = pending_wake
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut state = pending_wake.lock();
             let wake_micros = state.micros;
             let packed_trigger = state.trigger;
             let attributable = state.attributable;
@@ -2271,10 +2372,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let Ok(wake_micros) = u64::try_from(wake_micros) else {
             return;
         };
-        let mut state = pending_wake
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = pending_wake.lock();
         // A wake that arrived while this pass ran is newer, so the restored
         // arrival remains the earliest and stays authoritative. A continuation
         // occupying the slot is not an arrival and must not hide this one.
@@ -2327,7 +2425,7 @@ impl CodeIndexSchedulerRegistryV1 {
     fn lock_scheduler_for_graph_step<'a>(
         scheduler: &'a Mutex<CodeIndexWorktreeSchedulerV1>,
         shutting_down: &AtomicBool,
-        passes: &Arc<AtomicUsize>,
+        passes: &Arc<super::ReconcilePassesV1>,
     ) -> Result<
         (
             super::ReconcilePassGuard,
@@ -2520,10 +2618,7 @@ impl CodeIndexSchedulerRegistryV1 {
         // The pending slot coalesces at most one waiting wake, so the queue
         // behind this pass is empty or singular.
         let queue_depth_bucket = {
-            let state = pending_wake
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let state = pending_wake.lock();
             if state.micros == 0 {
                 tracedecay_domain::QueueDepthBucketV1::Zero
             } else {
@@ -2534,7 +2629,7 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 
     fn record_reconcile_receipt(
-        telemetry: &Mutex<CodeIndexCadenceTelemetryV1>,
+        telemetry: &tokio::sync::watch::Sender<CodeIndexCadenceTelemetryV1>,
         project_root: PathBuf,
         arrival: CodeIndexArrivalV1,
         trigger: CodeIndexCadenceTriggerV1,
@@ -2616,10 +2711,14 @@ impl CodeIndexSchedulerRegistryV1 {
         // `service_micros` is clamped non-negative by construction, so the
         // widening cast is exact.
         let service_micros = receipt.service_micros().max(0) as u64;
-        let mut telemetry = telemetry
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        telemetry.record(receipt);
+        telemetry.send_modify(|telemetry| {
+            telemetry.record(receipt);
+            Self::log_newly_eligible_cadence_percentile(telemetry);
+        });
+        service_micros
+    }
+
+    fn log_newly_eligible_cadence_percentile(telemetry: &CodeIndexCadenceTelemetryV1) {
         // Emit the aggregate exactly when a percentile first becomes eligible,
         // so aggregate lines stay bounded to a few per ring cycle.
         if let Some(percentile) = newly_eligible_percentile(telemetry.latency_sample_count()) {
@@ -2642,13 +2741,21 @@ impl CodeIndexSchedulerRegistryV1 {
                 "code-index cadence percentile became eligible"
             );
         }
-        service_micros
     }
 
     pub fn subscribe_generation_publications(
         &self,
     ) -> tokio::sync::broadcast::Receiver<CodeIndexGenerationPublishedV1> {
         self.generation_publications.subscribe()
+    }
+
+    /// Changes whenever an event-to-ready cadence receipt is recorded, so a
+    /// reader of the cadence read model can wait for the receipt a wake owes
+    /// instead of sampling the ring.
+    pub fn subscribe_cadence_receipts(
+        &self,
+    ) -> tokio::sync::watch::Receiver<CodeIndexCadenceTelemetryV1> {
+        self.cadence_telemetry.subscribe()
     }
 
     /// Push one synthetic publication for scheduler integration tests.
@@ -2675,6 +2782,22 @@ impl CodeIndexSchedulerRegistryV1 {
         let mounted = self.mounted.lock().await;
         let worktree = mounted.get(&project_root)?;
         Some(worktree.serving_generation_changed.subscribe())
+    }
+
+    /// Watch one mounted worktree's owner passes and pending wake, the inputs
+    /// the freshness ladder reports as `refresh_in_flight`.
+    pub async fn subscribe_owner_activity(
+        &self,
+        project_root: &Path,
+    ) -> Option<CodeIndexOwnerActivityV1> {
+        let project_root = canonical_existing_identity(project_root).ok()?;
+        let mounted = self.mounted.lock().await;
+        let worktree = mounted.get(&project_root)?;
+        Some(CodeIndexOwnerActivityV1 {
+            passes: worktree.reconcile_in_progress.subscribe(),
+            pending_wake: worktree.pending_wake.occupied.subscribe(),
+            worker_phase: worktree.worker_phase.subscribe(),
+        })
     }
 
     /// Stamp complete-generation demand for a mounted worktree. The first flip
@@ -2809,7 +2932,7 @@ impl CodeIndexSchedulerRegistryV1 {
             reconciling_worktrees: u64::try_from(
                 mounted
                     .values()
-                    .filter(|worktree| worktree.reconcile_in_progress.load(Ordering::Acquire) != 0)
+                    .filter(|worktree| worktree.reconcile_in_progress.running())
                     .count(),
             )
             .unwrap_or(u64::MAX),
