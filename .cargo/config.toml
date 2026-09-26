@@ -80,9 +80,11 @@ rustflags = ["-C", "split-debuginfo=unpacked"]
 rustflags = ["-C", "split-debuginfo=unpacked"]
 
 # Local macOS links of the tracedecay executable go through this wrapper,
-# which ad-hoc signs the product binary as `dev.tracedecay.cli`. The linker
-# default identifier is the hashed deps filename (`tracedecay-<hash>`), so
-# TCC treats every rebuild as a new app. The wrapper forwards to `cc`, or to
+# which ad-hoc signs the product binary as `dev.tracedecay.cli` with
+# designated requirement `identifier "dev.tracedecay.cli"`. The linker
+# default identifier is the hashed deps filename (`tracedecay-<hash>`), and
+# the default ad-hoc requirement is that binary's cdhash, so TCC treats
+# every rebuild as a new app. The wrapper forwards to `cc`, or to
 # `TRACEDECAY_MACOS_LD` when that is set. That signature does not survive
 # release strip; `build.rustc-workspace-wrapper` signs the same file again
 # after rustc returns, and that is the file `cargo build` / `cargo install`

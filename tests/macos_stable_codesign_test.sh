@@ -20,6 +20,8 @@ trap 'rm -rf "$tmpdir"' EXIT
 
 HASH=3d1e6be7cae777a9
 IDENTIFIER=dev.tracedecay.cli
+# One argv. The `=` marks inline requirement text (`-r='designated => ...'`).
+REQUIREMENT_ARG="-r=designated => identifier \"${IDENTIFIER}\""
 
 # Thin arm64 Mach-O magic. codesign is mocked, so the rest of the file is padding.
 write_macho() {
@@ -34,7 +36,7 @@ mock_codesign() {
   cat >"$bin/codesign" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ ${1:-} == -dv ]]; then
+if [[ ${1:-} == -d || ${1:-} == -dv || ${1:-} == --display ]]; then
   printf '%s\n' "${CODESIGN_REPORT:-}"
   exit "${CODESIGN_DV_STATUS:-0}"
 fi
@@ -51,7 +53,7 @@ assert_signed() {
   }
   local line
   line=$(cat "$log")
-  [[ $line == "--force --sign - --identifier ${IDENTIFIER} "* ]] || {
+  [[ $line == "--force --sign - --identifier ${IDENTIFIER} ${REQUIREMENT_ARG} "* ]] || {
     echo "unexpected codesign invocation: $line" >&2
     exit 1
   }
@@ -91,9 +93,14 @@ assert_signed "$log"
 log=$(sign_with_report "code object is not signed at all" 1)
 assert_signed "$log"
 
-# Already stable.
-log=$(sign_with_report "Identifier=${IDENTIFIER}"$'\nSignature=adhoc\n')
+# Already stable: identifier requirement, not a cdhash. CandidateCDHash in the
+# verbose display is not the designated requirement.
+log=$(sign_with_report "Identifier=${IDENTIFIER}"$'\nSignature=adhoc\nCandidateCDHash sha256=0123456789abcdef\ndesignated => identifier "'"${IDENTIFIER}"$'"\n')
 assert_not_signed "$log"
+
+# Stable identifier whose designated requirement is still the binary cdhash.
+log=$(sign_with_report "Identifier=${IDENTIFIER}"$'\nSignature=adhoc\nTeamIdentifier=not set\ndesignated => cdhash H"0123456789abcdef0123456789abcdef01234567"\n')
+assert_signed "$log"
 
 # Developer ID.
 log=$(sign_with_report $'Identifier=tracedecay-'"$HASH"$'\nAuthority=Developer ID Application: Example (TEAMID1234)\nTeamIdentifier=TEAMID1234\n')
@@ -307,7 +314,7 @@ PATH="$tmpdir/mock-bin:$PATH" \
 strip_line=$(head -n 1 "$tmpdir/codesign.log")
 stable_line=$(tail -n 1 "$tmpdir/codesign.log")
 [[ $strip_line == "--force --sign - --identifier tracedecay-${HASH} ${product}" ]]
-[[ $stable_line == "--force --sign - --identifier ${IDENTIFIER} ${product}" ]]
+[[ $stable_line == "--force --sign - --identifier ${IDENTIFIER} ${REQUIREMENT_ARG} ${product}" ]]
 [[ $strip_line != "$stable_line" ]]
 
 # Glued spellings: --out-dir= and -Cextra-filename=.
@@ -326,7 +333,7 @@ PATH="$tmpdir/mock-bin:$PATH" \
 strip_line=$(head -n 1 "$tmpdir/codesign.log")
 stable_line=$(tail -n 1 "$tmpdir/codesign.log")
 [[ $strip_line == "--force --sign - --identifier tracedecay-${HASH} ${glued}" ]]
-[[ $stable_line == "--force --sign - --identifier ${IDENTIFIER} ${glued}" ]]
+[[ $stable_line == "--force --sign - --identifier ${IDENTIFIER} ${REQUIREMENT_ARG} ${glued}" ]]
 
 # The same Cargo argv inside an @response-file.
 response=$tmpdir/rustc-args
@@ -347,7 +354,7 @@ PATH="$tmpdir/mock-bin:$PATH" \
 strip_line=$(head -n 1 "$tmpdir/codesign.log")
 stable_line=$(tail -n 1 "$tmpdir/codesign.log")
 [[ $strip_line == "--force --sign - --identifier tracedecay-${HASH} ${responded}" ]]
-[[ $stable_line == "--force --sign - --identifier ${IDENTIFIER} ${responded}" ]]
+[[ $stable_line == "--force --sign - --identifier ${IDENTIFIER} ${REQUIREMENT_ARG} ${responded}" ]]
 
 # An explicit -o is still signed.
 direct=$tmpdir/direct/tracedecay-$HASH
@@ -361,7 +368,7 @@ PATH="$tmpdir/mock-bin:$PATH" \
 strip_line=$(head -n 1 "$tmpdir/codesign.log")
 stable_line=$(tail -n 1 "$tmpdir/codesign.log")
 [[ $strip_line == "--force --sign - --identifier tracedecay-${HASH} ${direct}" ]]
-[[ $stable_line == "--force --sign - --identifier ${IDENTIFIER} ${direct}" ]]
+[[ $stable_line == "--force --sign - --identifier ${IDENTIFIER} ${REQUIREMENT_ARG} ${direct}" ]]
 
 # A tracedecay lib, and a different bin, keep the strip identifier.
 lib_product=$tmpdir/lib/deps/tracedecay-$HASH

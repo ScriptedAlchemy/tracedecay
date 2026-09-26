@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Ad-hoc sign one tracedecay executable as dev.tracedecay.cli.
+# Ad-hoc sign one tracedecay executable as dev.tracedecay.cli, with
+# designated requirement `identifier "dev.tracedecay.cli"`.
 #
 # Used when a build bypasses scripts/macos-sign-linker.sh or
 # scripts/macos-rustc-wrapper.sh. install.sh and `tracedecay update` share
 # this policy and run it on the final installed file, after release strip
-# has already rewritten a link-time ad-hoc identifier. A Developer ID or
-# other team signature is left unchanged.
+# has already rewritten a link-time ad-hoc identifier. A matching identifier
+# whose designated requirement is still a cdhash is re-signed. A Developer
+# ID or other team signature is left unchanged.
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then

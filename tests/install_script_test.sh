@@ -247,7 +247,7 @@ chmod +x "$tmpdir/archive/tracedecay"
 cat >"$tmpdir/bin/codesign" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ ${1:-} == -dv ]]; then
+if [[ ${1:-} == -d || ${1:-} == -dv || ${1:-} == --display ]]; then
   printf '%s\n' "${CODESIGN_REPORT:-}"
   exit 0
 fi
@@ -274,6 +274,6 @@ CODESIGN_LOG="$codesign_log" \
 strip_line=$(head -n 1 "$codesign_log")
 stable_line=$(tail -n 1 "$codesign_log")
 [[ $strip_line == "--force --sign - --identifier tracedecay-${deps_hash} ${tmpdir}/archive/tracedecay" ]]
-[[ $stable_line == "--force --sign - --identifier dev.tracedecay.cli ${tmpdir}/install/tracedecay" ]]
+[[ $stable_line == "--force --sign - --identifier dev.tracedecay.cli -r=designated => identifier \"dev.tracedecay.cli\" ${tmpdir}/install/tracedecay" ]]
 [[ $strip_line != "$stable_line" ]]
 grep -Fq "Installed tracedecay ${BETA_TAG#v}" "$tmpdir/macho-install.log"
