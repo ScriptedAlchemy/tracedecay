@@ -1759,7 +1759,6 @@ pub struct CodeIndexSchedulerRegistryV1 {
     /// a forever-pending per-worktree arm.
     root_mounted: Arc<tokio::sync::watch::Sender<u64>>,
     cadence_telemetry: Arc<tokio::sync::watch::Sender<CodeIndexCadenceTelemetryV1>>,
-    pub(super) relation_symbol_hydrations: Arc<AtomicU64>,
     activations: Arc<Mutex<BTreeMap<ManifestDigest, Weak<super::CodeIndexActivationV1>>>>,
     /// The serving generation each root last proved current, held weakly so a
     /// retired generation is not pinned here. Its test attribution is

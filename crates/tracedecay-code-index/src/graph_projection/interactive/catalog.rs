@@ -18,8 +18,8 @@ use super::super::schema::{
     file_import_relation_id, has_label, import_entity_id,
 };
 use super::super::{
-    CodeGraphProjectionError, SOURCE_EDGE_KIND, SymbolRecordV1, TARGET_EDGE_KIND, symbol_entity_id,
-    validate_symbol_record,
+    CodeGraphProjectionError, SymbolRecordV1, TARGET_EDGE_KIND, source_edge_kind_edge,
+    symbol_entity_id, validate_symbol_record,
 };
 use super::models::{CatalogSymbol, InteractiveCatalog};
 use crate::chunks::CodeIndexImportEvidenceV1;
@@ -247,8 +247,10 @@ impl CatalogScan {
             self.count_relation()?;
             match relation.kind.as_str() {
                 FILE_IMPORT_EDGE_KIND => self.record_import_link(relation.clone())?,
-                SOURCE_EDGE_KIND => self.degrees.record_outgoing(relation.from.clone()),
                 TARGET_EDGE_KIND => self.degrees.record_incoming(relation.to.clone()),
+                kind if source_edge_kind_edge(kind).is_some() => {
+                    self.degrees.record_outgoing(relation.from.clone());
+                }
                 _ => {}
             }
         }
@@ -357,7 +359,7 @@ impl CatalogScan {
     }
 }
 
-/// Per-symbol semantic degree tallied from `CodeRelationSource` /
+/// Per-symbol semantic degree tallied from source (`CodeRelationSource.*`) and
 /// `CodeRelationTarget` relations while the rows stream past, keyed by the
 /// symbol's entity identity.
 pub(super) struct SymbolDegreeCounts<K> {

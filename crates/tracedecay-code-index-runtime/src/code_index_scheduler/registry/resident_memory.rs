@@ -84,7 +84,6 @@ impl CodeIndexSchedulerRegistryV1 {
             cadence_telemetry: Arc::new(tokio::sync::watch::Sender::new(
                 super::CodeIndexCadenceTelemetryV1::default(),
             )),
-            relation_symbol_hydrations: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             activations: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
             test_attribution_authorities: Arc::new(std::sync::RwLock::new(
                 std::collections::BTreeMap::new(),

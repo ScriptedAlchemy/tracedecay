@@ -4972,7 +4972,7 @@ async fn callers_page_reports_the_true_relation_count_and_hydrates_only_the_requ
             &request,
         )
         .await;
-    let first_page = match first {
+    let (first_page, first_cost) = match first {
         RetrievalPortOutcome::Completed(evidence) => {
             assert_eq!(
                 evidence.coverage.completeness,
@@ -4980,17 +4980,16 @@ async fn callers_page_reports_the_true_relation_count_and_hydrates_only_the_requ
             );
             assert_eq!(evidence.coverage.eligible, Some(CALLER_STAR as u64));
             assert!(evidence.omissions.is_empty(), "{:?}", evidence.omissions);
-            evidence.payload.expect("first callers page")
+            (evidence.payload.expect("first callers page"), evidence.cost)
         }
         other => panic!("expected a complete callers page, got {other:?}"),
     };
     assert_eq!(first_page.items.len(), CALLER_PAGE as usize);
     assert_eq!(first_page.total, Some(CALLER_STAR as u64));
-    let page1_hydrations = registry.take_relation_symbol_hydrations();
     assert_eq!(
-        page1_hydrations,
-        u64::from(CALLER_PAGE),
-        "page 1 must hydrate only the returned slice; observed {page1_hydrations}"
+        first_cost.map(|cost| cost.total_point_reads()),
+        Some(1 + u64::from(CALLER_PAGE)),
+        "page 1 reads the seed and its returned slice only"
     );
 
     let cursor = first_page.next_cursor.clone().expect("page 2 cursor");
@@ -5010,8 +5009,11 @@ async fn callers_page_reports_the_true_relation_count_and_hydrates_only_the_requ
             &second_request,
         )
         .await;
-    let second_page = match second {
-        RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("second callers page"),
+    let (second_page, second_cost) = match second {
+        RetrievalPortOutcome::Completed(evidence) => (
+            evidence.payload.expect("second callers page"),
+            evidence.cost,
+        ),
         other => panic!("expected a complete callers continuation, got {other:?}"),
     };
     assert_eq!(second_page.total, Some(CALLER_STAR as u64));
@@ -5023,15 +5025,12 @@ async fn callers_page_reports_the_true_relation_count_and_hydrates_only_the_requ
             .all(|item| !first_page.items.contains(item)),
         "page 2 must return a disjoint slice"
     );
-    let page2_hydrations = registry.take_relation_symbol_hydrations();
     assert_eq!(
-        page2_hydrations,
-        u64::from(CALLER_PAGE),
-        "page 2 must hydrate only the returned slice; observed {page2_hydrations}"
+        second_cost.map(|cost| cost.total_point_reads()),
+        Some(1 + u64::from(CALLER_PAGE)),
+        "page 2 reads the seed and its returned slice only"
     );
 
-    // Every page re-enumerates the relation set before hydrating its slice, so
-    // the full walk uses wider pages than the slice assertions above.
     const WALK_PAGE: u32 = 200;
     let mut collected = Vec::new();
     let mut cursor = None;
@@ -5064,7 +5063,6 @@ async fn callers_page_reports_the_true_relation_count_and_hydrates_only_the_requ
             break;
         }
     }
-    let _ = registry.take_relation_symbol_hydrations();
     assert_eq!(
         collected.len(),
         CALLER_STAR,
@@ -5162,6 +5160,7 @@ async fn callees_page_reports_the_true_relation_count_and_walks_every_relation()
         );
         assert_eq!(evidence.coverage.eligible, Some(RELATIONS as u64));
         assert!(evidence.omissions.is_empty(), "{:?}", evidence.omissions);
+        let cost = evidence.cost;
         let page = evidence.payload.expect("callees page");
         assert_eq!(page.total, Some(RELATIONS as u64));
         pages += 1;
@@ -5170,9 +5169,9 @@ async fn callees_page_reports_the_true_relation_count_and_walks_every_relation()
             assert!(page.next_cursor.is_some(), "page 1 must mint a cursor");
         }
         assert_eq!(
-            registry.take_relation_symbol_hydrations(),
-            page.items.len() as u64,
-            "each page hydrates only its own rows"
+            cost.map(|cost| cost.total_point_reads()),
+            Some(1 + page.items.len() as u64),
+            "each page reads the seed and its own rows"
         );
         walked.extend(page.items);
         cursor = page.next_cursor;

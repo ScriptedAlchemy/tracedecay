@@ -254,11 +254,11 @@ async fn typed_callees_carry_their_read_cost_on_the_envelope_and_the_trailer() {
         "src/walk.rs::Walk::read",
         "{payload:#}"
     );
-    // Nine point reads: the seed `known`; its two outgoing edges, each read
-    // to learn its kind; the one callee they reach; the trait-dispatch check
-    // on that callee (its summary, its two incoming edges, and the impl that
-    // contains it); and the callee's summary for the page. Two fan-outs:
-    // `known`'s outgoing edges and the callee's incoming ones.
+    // Six point reads: the seed `known`; the trait-dispatch check on its one
+    // callee (the callee's summary, its two incoming edges, and the impl that
+    // contains it); and the callee's summary for the page. Three fan-outs:
+    // `known`'s call relations and their targets (one row each), then the
+    // callee's incoming edges (two rows).
     let cost = &payload["cost"];
     assert_eq!(
         (
@@ -267,8 +267,8 @@ async fn typed_callees_carry_their_read_cost_on_the_envelope_and_the_trailer() {
             &cost["adjacency_rows"],
         ),
         (
-            &json!({"graph_sealed": 9, "graph_staging": 0}),
-            &json!(2),
+            &json!({"graph_sealed": 6, "graph_staging": 0}),
+            &json!(3),
             &json!(4),
         ),
         "{payload:#}"
@@ -276,8 +276,8 @@ async fn typed_callees_carry_their_read_cost_on_the_envelope_and_the_trailer() {
     assert_eq!(
         cost_trailer(&texts),
         format!(
-            "\ntracedecay_cost: wall_us={} graph_sealed_reads=9 graph_staging_reads=0 \
-             adjacency_queries=2 adjacency_rows=4 bytes_hydrated={}",
+            "\ntracedecay_cost: wall_us={} graph_sealed_reads=6 graph_staging_reads=0 \
+             adjacency_queries=3 adjacency_rows=4 bytes_hydrated={}",
             cost["wall_micros"], cost["bytes_hydrated"]
         ),
         "the trailer renders the envelope's receipt"
@@ -290,7 +290,7 @@ async fn typed_callees_carry_their_read_cost_on_the_envelope_and_the_trailer() {
     )
     .await;
     assert!(
-        cost_trailer(&markdown).contains(" graph_sealed_reads=9 graph_staging_reads=0 "),
+        cost_trailer(&markdown).contains(" graph_sealed_reads=6 graph_staging_reads=0 "),
         "{markdown:?}"
     );
     shutdown_graph_fixture(fixture).await;
