@@ -900,6 +900,7 @@ checkout's exact head, and a remedy when there is one:
 | `bound` | A credential authorizes the reads. |
 | `unauthenticated_public` | No credential was found, so the repository is read anonymously as a public repository. That allows 60 requests per hour. Discovery uses the REST issue search's `head:` qualifier, which also finds fork-headed pull requests. |
 | `denied_no_credential` | No credential was found and GitHub refused the anonymous read: the repository is private or absent. Run `gh auth login`, or set `GH_TOKEN` to a token with read access, then reopen the project. |
+| `absent` | No GitHub source was observed: the checkout has no GitHub `origin`, or its advisory owner has not mounted in this daemon yet. |
 
 ### Private GitHub review sources
 
