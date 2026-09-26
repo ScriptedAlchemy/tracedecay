@@ -602,6 +602,7 @@ pub async fn execute_graph_tool_surface(
         touched_files: envelope.touched_files,
         code_graph: envelope.code_graph,
         analytics: envelope.analytics,
+        cost: envelope.cost,
     })
 }
 

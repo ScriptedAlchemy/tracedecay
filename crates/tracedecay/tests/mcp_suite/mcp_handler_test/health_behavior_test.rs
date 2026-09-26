@@ -182,3 +182,65 @@ async fn health_scores_two_isolated_modules_and_distinguishes_scope() {
         json!({"score": 1.0, "dead_count": 0, "total_fns": 0})
     );
 }
+
+async fn health_report_error(
+    fixture: &ProductionCompositionFixture,
+    tool_name: &str,
+    arguments: Value,
+) -> String {
+    let response = fixture
+        .harness
+        .call_tool(&fixture.project_root, tool_name, arguments)
+        .await
+        .unwrap_or_else(|error| panic!("{tool_name} production invocation failed: {error}"));
+    assert!(response.result.is_none(), "{:?}", response.result);
+    response
+        .error
+        .unwrap_or_else(|| panic!("{tool_name} must refuse the request"))
+        .message
+}
+
+#[tokio::test]
+async fn health_reports_refuse_arguments_outside_their_typed_request() {
+    let fixture = production_composition_fixture_with_sources(write_isolated_modules).await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production health server");
+    wait_for_current_graph(&server).await;
+
+    let response = fixture
+        .harness
+        .call_tool(
+            &fixture.project_root,
+            "tracedecay_gini",
+            json!({"metric": "lines", "format": "json"}),
+        )
+        .await
+        .expect("tracedecay_gini production invocation");
+    let gini = extract_json(&response.result.expect("gini result"));
+    assert_eq!(
+        (
+            &gini["metric"],
+            &gini["scope"],
+            &gini["total_items"],
+            &gini["gini"]
+        ),
+        (&json!("lines"), &json!("file"), &json!(2), &json!(0.0))
+    );
+
+    assert_eq!(
+        health_report_error(&fixture, "tracedecay_gini", json!({"metric": "cyclomatic"})).await,
+        "tool execution failed: config error: invalid arguments for tracedecay_gini: unknown variant `cyclomatic`, expected one of `complexity`, `lines`, `fan_in`, `fan_out`, `members`"
+    );
+    assert_eq!(
+        health_report_error(&fixture, "tracedecay_dsm", json!({"max_files": "30"})).await,
+        "tool execution failed: config error: invalid arguments for tracedecay_dsm: invalid type: string \"30\", expected u32"
+    );
+    assert_eq!(
+        health_report_error(&fixture, "tracedecay_health", json!({"detail": true})).await,
+        "tool execution failed: config error: invalid arguments for tracedecay_health: unknown field `detail`, expected `path` or `details`"
+    );
+
+    fixture.harness.shutdown().await;
+}

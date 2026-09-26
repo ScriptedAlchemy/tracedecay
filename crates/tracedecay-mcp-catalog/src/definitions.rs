@@ -171,26 +171,6 @@ fn def_path_limit_tool(
     )
 }
 
-fn def_path_flag_tool(
-    name: &str,
-    title: &str,
-    description: &str,
-    path_description: &str,
-    flag_name: &str,
-    flag_description: &str,
-) -> ToolDefinition {
-    let mut properties = serde_json::Map::new();
-    properties.insert("path".to_string(), string_property(path_description));
-    properties.insert(
-        flag_name.to_string(),
-        json!({
-            "type": "boolean",
-            "description": flag_description
-        }),
-    );
-    def_object(name, title, description, Value::Object(properties))
-}
-
 fn project_selector_properties() -> Value {
     json!({
         "project_selector": project_selector_object(
@@ -426,7 +406,7 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_port_order(request_schema("port_order")?),
         def_commit_context(),
         def_pr_context(),
-        def_test_map(),
+        def_test_map(request_schema("test_map")?),
         def_branch_search(),
         def_branch_diff(),
         def_branch_list(),
@@ -434,16 +414,16 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_multi_str_replace(),
         def_insert_at(),
         def_ast_grep_rewrite(),
-        def_gini(),
-        def_dependency_depth(),
-        def_health(),
+        def_gini(request_schema("gini")?),
+        def_dependency_depth(request_schema("dependency_depth")?),
+        def_health(request_schema("health")?),
         def_runtime(),
-        def_dsm(),
-        def_test_risk(),
+        def_dsm(request_schema("dsm")?),
+        def_test_risk(request_schema("test_risk")?),
         def_todos(request_schema("todos")?),
         def_by_qualified_name(),
         def_signature(),
-        def_diagnose(),
+        def_diagnose(request_schema("diagnose")?),
         def_derives(),
         def_run_affected_tests(),
     ];

@@ -489,13 +489,26 @@ pub(crate) fn compute_graph_tool_for_owner<'a>(
         let freshness = graph_freshness_reader(tool_name, &options);
         let ctx = admitted_tool_context(&options, &project, &snapshots, freshness)?;
         let open = verified_graph_open(&options);
-        let computed = tracedecay_mcp::handlers::graph_tool::compute_graph_tool(
-            &ctx,
-            &open,
-            operation,
-            args,
-            scope_prefix,
-        );
+        let computed = async {
+            if operation == ApplicationSurfaceOperation::Diagnose {
+                let graph = admitted_graph_query(&options, "diagnostics_read").await?;
+                return workflow::compute_diagnose(
+                    cg,
+                    &graph,
+                    args,
+                    options.code_index_publication_identity.as_deref(),
+                )
+                .await;
+            }
+            tracedecay_mcp::handlers::graph_tool::compute_graph_tool(
+                &ctx,
+                &open,
+                operation,
+                args,
+                scope_prefix,
+            )
+            .await
+        };
         let mut completion = match tokio::time::timeout(budget, computed).await {
             Ok(result) => result?,
             Err(_elapsed) => return Err(tool_dispatch_deadline_error(tool_name, budget)),
@@ -874,16 +887,6 @@ fn dispatch_session_workflow_tools_inner<'a>(
     // measured wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
         match tool_name {
-            "tracedecay_diagnose" => {
-                let graph = admitted_graph_query(&options, "diagnostics_read").await?;
-                workflow::handle_diagnose(
-                    cg,
-                    &graph,
-                    args,
-                    options.code_index_publication_identity.as_deref(),
-                )
-                .await
-            }
             "tracedecay_run_affected_tests" => {
                 workflow::handle_run_affected_tests(
                     cg,

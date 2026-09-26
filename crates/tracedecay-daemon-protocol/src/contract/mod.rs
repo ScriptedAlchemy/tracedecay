@@ -989,7 +989,14 @@ impl DaemonInvocationRequest {
             | ApplicationSurfaceOperation::RenamePreview
             | ApplicationSurfaceOperation::PortStatus
             | ApplicationSurfaceOperation::PortOrder
-            | ApplicationSurfaceOperation::Todos => {
+            | ApplicationSurfaceOperation::Todos
+            | ApplicationSurfaceOperation::TestMap
+            | ApplicationSurfaceOperation::TestRisk
+            | ApplicationSurfaceOperation::Gini
+            | ApplicationSurfaceOperation::DependencyDepth
+            | ApplicationSurfaceOperation::Health
+            | ApplicationSurfaceOperation::Dsm
+            | ApplicationSurfaceOperation::Diagnose => {
                 unreachable!("graph-tool operations use their typed constructor")
             }
             ApplicationSurfaceOperation::FactStoreCurate

@@ -253,6 +253,13 @@ fn application_surface_branch_sensitivity(
         | ApplicationSurfaceOperation::PortStatus
         | ApplicationSurfaceOperation::PortOrder
         | ApplicationSurfaceOperation::Todos
+        | ApplicationSurfaceOperation::TestMap
+        | ApplicationSurfaceOperation::TestRisk
+        | ApplicationSurfaceOperation::Gini
+        | ApplicationSurfaceOperation::DependencyDepth
+        | ApplicationSurfaceOperation::Health
+        | ApplicationSurfaceOperation::Dsm
+        | ApplicationSurfaceOperation::Diagnose
         | HealthRead
         | HealthDelta
         | DiagnosticsRead
@@ -328,8 +335,7 @@ const BINDING_GROUPS: &[BindingGroup] = binding_groups![
         "tracedecay_commit_context", "tracedecay_pr_context", "tracedecay_branch_search",
         "tracedecay_branch_diff", "tracedecay_branch_list"],
     [Some(McpToolDispatchGroup::Health), RegisteredProjectAccess::ActiveProjectOnly,
-        "tracedecay_test_map", "tracedecay_gini", "tracedecay_dependency_depth", "tracedecay_health",
-        "tracedecay_runtime", "tracedecay_dsm", "tracedecay_test_risk"],
+        "tracedecay_runtime"],
     [Some(McpToolDispatchGroup::Memory), RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_automation_run_list", "tracedecay_automation_run_view", "tracedecay_automation_run_artifact_view"],
     [Some(McpToolDispatchGroup::Memory), RegisteredProjectAccess::SelectorOnly, "tracedecay_analytics"],
@@ -339,7 +345,7 @@ const BINDING_GROUPS: &[BindingGroup] = binding_groups![
         "tracedecay_multi_root_scope_set_read", "tracedecay_multi_root_scope_set_compare_and_swap",
         "tracedecay_multi_root_execute"],
     [Some(McpToolDispatchGroup::SessionWorkflow), RegisteredProjectAccess::ActiveProjectOnly,
-        "tracedecay_diagnose", "tracedecay_run_affected_tests", "tracedecay_dashboard"],
+        "tracedecay_run_affected_tests", "tracedecay_dashboard"],
     [None, RegisteredProjectAccess::SelectorOnly, "tracedecay_fact_feedback"],
     [None, RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_lcm_describe", "tracedecay_lcm_doctor", "tracedecay_lcm_expand", "tracedecay_lcm_expand_query",
@@ -746,9 +752,6 @@ fn compute_tool_supports_live_cancellation(tool_name: &str) -> bool {
                 | "tracedecay_dead_code"
                 | "tracedecay_circular"
                 | "tracedecay_affected"
-                | "tracedecay_dependency_depth"
-                | "tracedecay_health"
-                | "tracedecay_dsm"
         )
 }
 

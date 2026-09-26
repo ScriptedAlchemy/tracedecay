@@ -1,4 +1,4 @@
-//! Graph and port reads served by the project's graph-tool owner.
+//! Graph-backed reads and reports served by the project's graph-tool owner.
 //!
 //! The owner computes each operation's typed catalog result; every surface
 //! renders it here, so MCP and the CLI print the same tool result.
@@ -15,13 +15,21 @@ use crate::handlers::graph::{
     compute_context, compute_impact, compute_node, compute_redundancy, compute_rename_preview,
     compute_similar, not_found_tool_result, render_context,
 };
+use crate::handlers::health::{
+    compute_dependency_depth, compute_dsm, compute_gini, compute_health, compute_test_map,
+    compute_test_risk, render_dsm_md,
+};
 use crate::handlers::info::{compute_port_order, compute_port_status, compute_todos};
-use crate::handlers::support::{generic_tool_result, unknown_tool_error};
+use crate::handlers::support::{generic_tool_result, rendered_tool_result, unknown_tool_error};
 use crate::handlers::verified_read::{VerifiedGraphOpen, verified_read_operation as read};
+use crate::tools::render;
 use crate::tools::response_trailers::ResponseTrailer;
 use crate::{McpToolContext, ToolResult};
 
 /// Computes one graph-tool operation's typed result on the owner's side.
+///
+/// `tracedecay_diagnose` publishes into the project's own store, so its owner
+/// computes it beside this table.
 pub async fn compute_graph_tool(
     ctx: &McpToolContext<'_>,
     open: &VerifiedGraphOpen<'_>,
@@ -51,8 +59,47 @@ pub async fn compute_graph_tool(
         ApplicationSurfaceOperation::Todos => {
             compute_todos(&open(read("todos")?).await?, args, scope_prefix).await
         }
+        ApplicationSurfaceOperation::TestMap
+        | ApplicationSurfaceOperation::TestRisk
+        | ApplicationSurfaceOperation::Gini
+        | ApplicationSurfaceOperation::DependencyDepth
+        | ApplicationSurfaceOperation::Health
+        | ApplicationSurfaceOperation::Dsm => {
+            compute_health_report(open, operation, args, scope_prefix).await
+        }
         operation => Err(unknown_tool_error(operation.mcp_tool_name())),
     }
+}
+
+/// Runs one code-health report over a metered verified-graph reader and
+/// reports what the read cost beside its result.
+async fn compute_health_report(
+    open: &VerifiedGraphOpen<'_>,
+    operation: ApplicationSurfaceOperation,
+    args: Value,
+    scope_prefix: Option<&str>,
+) -> Result<GraphToolCompletionV1> {
+    let graph_operation = if operation == ApplicationSurfaceOperation::Health {
+        "health_delta"
+    } else {
+        "health_read"
+    };
+    let graph = open(read(graph_operation)?).await?;
+    let mut completion = match operation {
+        ApplicationSurfaceOperation::TestMap => compute_test_map(&graph, args).await,
+        ApplicationSurfaceOperation::TestRisk => {
+            compute_test_risk(&graph, args, scope_prefix).await
+        }
+        ApplicationSurfaceOperation::Gini => compute_gini(&graph, args, scope_prefix).await,
+        ApplicationSurfaceOperation::DependencyDepth => {
+            compute_dependency_depth(&graph, args, scope_prefix).await
+        }
+        ApplicationSurfaceOperation::Health => compute_health(&graph, args, scope_prefix).await,
+        ApplicationSurfaceOperation::Dsm => compute_dsm(&graph, args, scope_prefix).await,
+        operation => Err(unknown_tool_error(operation.mcp_tool_name())),
+    }?;
+    completion.cost = Some(graph.read_cost());
+    Ok(completion)
 }
 
 /// Renders a typed graph-tool result as its tool result, with the stale-graph
@@ -71,12 +118,25 @@ pub fn render_graph_tool(
         touched_files,
         code_graph,
         analytics,
+        cost,
     } = completion;
     let mut rendered = match &result {
         GraphToolResultV1::Context(context) => render_context(response_handle_root, args, context)?,
         GraphToolResultV1::Node(NodeResultV1::NotFound(not_found))
         | GraphToolResultV1::RenamePreview(RenamePreviewPrimitiveOutcomeV1::NotFound(not_found)) => {
             not_found_tool_result(not_found)?
+        }
+        GraphToolResultV1::Dsm(_) => {
+            let value = result.result_value()?;
+            rendered_tool_result(response_handle_root, args, &value, Vec::new(), || {
+                render_dsm_md(&value)
+            })
+        }
+        GraphToolResultV1::Diagnose(_) => {
+            let value = result.result_value()?;
+            rendered_tool_result(response_handle_root, args, &value, Vec::new(), || {
+                render::diagnostics_md(&value)
+            })
         }
         _ => generic_tool_result(
             response_handle_root,
@@ -88,7 +148,7 @@ pub fn render_graph_tool(
     ResponseTrailer {
         touched_files: &touched_files,
         code_graph: code_graph.as_ref(),
-        cost: None,
+        cost: cost.as_ref(),
     }
     .attach(&mut rendered);
     Ok(match analytics {
@@ -130,6 +190,7 @@ mod tests {
             touched_files: vec!["src/lib.rs".to_owned()],
             code_graph,
             analytics: None,
+            cost: None,
         }
     }
 
@@ -252,6 +313,7 @@ mod tests {
             touched_files: Vec::new(),
             code_graph: None,
             analytics,
+            cost: None,
         };
         let markdown = render_graph_tool(None, &json!({}), completion(Some(analytics.clone())))
             .expect("markdown");

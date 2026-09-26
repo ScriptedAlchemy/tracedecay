@@ -1,14 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-macro_rules! count_operations {
-    () => {
-        0usize
-    };
-    ($head:ident $(, $tail:ident)*) => {
-        1usize + count_operations!($($tail),*)
-    };
-}
-
 macro_rules! application_surface_operations {
     (
         $(
@@ -29,11 +20,11 @@ macro_rules! application_surface_operations {
         }
 
         impl ApplicationSurfaceOperation {
-            pub const ALL: [Self; count_operations!($($variant),+)] = [
+            pub const ALL: [Self; [$(stringify!($variant)),+].len()] = [
                 $(Self::$variant,)+
             ];
 
-            pub const MCP_TOOL_NAMES: [&'static str; count_operations!($($variant),+)] = [
+            pub const MCP_TOOL_NAMES: [&'static str; [$(stringify!($variant)),+].len()] = [
                 $(
                     application_surface_operations!(
                         @mcp_tool_name $catalog_name $(, $mcp_name)?
@@ -178,6 +169,13 @@ application_surface_operations! {
     PortStatus => "port_status";
     PortOrder => "port_order";
     Todos => "todos";
+    TestMap => "test_map";
+    TestRisk => "test_risk";
+    Gini => "gini";
+    DependencyDepth => "dependency_depth";
+    Health => "health";
+    Dsm => "dsm";
+    Diagnose => "diagnose";
     HealthRead => "health_read";
     HealthDelta => "health_delta";
     StorageStatus => "storage_status";
@@ -245,9 +243,9 @@ application_surface_operations! {
 }
 
 impl ApplicationSurfaceOperation {
-    /// Graph and port reads answered by the project's graph-tool owner with
-    /// their typed catalog result in `ApplicationOutcome::Result`.
-    pub const GRAPH_TOOL_OPERATIONS: [Self; 9] = [
+    /// Graph-backed reads and reports answered by the project's graph-tool
+    /// owner with their typed catalog result in `ApplicationOutcome::Result`.
+    pub const GRAPH_TOOL_OPERATIONS: &[Self] = &[
         Self::Context,
         Self::Node,
         Self::Impact,
@@ -257,6 +255,13 @@ impl ApplicationSurfaceOperation {
         Self::PortStatus,
         Self::PortOrder,
         Self::Todos,
+        Self::TestMap,
+        Self::TestRisk,
+        Self::Gini,
+        Self::DependencyDepth,
+        Self::Health,
+        Self::Dsm,
+        Self::Diagnose,
     ];
 
     pub fn is_graph_tool(self) -> bool {

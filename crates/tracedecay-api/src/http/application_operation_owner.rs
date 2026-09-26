@@ -109,7 +109,14 @@ pub const fn http_application_owner_kind(
         | ApplicationSurfaceOperation::RenamePreview
         | ApplicationSurfaceOperation::PortStatus
         | ApplicationSurfaceOperation::PortOrder
-        | ApplicationSurfaceOperation::Todos => return None,
+        | ApplicationSurfaceOperation::Todos
+        | ApplicationSurfaceOperation::TestMap
+        | ApplicationSurfaceOperation::TestRisk
+        | ApplicationSurfaceOperation::Gini
+        | ApplicationSurfaceOperation::DependencyDepth
+        | ApplicationSurfaceOperation::Health
+        | ApplicationSurfaceOperation::Dsm
+        | ApplicationSurfaceOperation::Diagnose => return None,
         ApplicationSurfaceOperation::FactStoreCurate
         | ApplicationSurfaceOperation::FactStoreAdd
         | ApplicationSurfaceOperation::FactStoreSearch

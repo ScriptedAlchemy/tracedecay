@@ -893,7 +893,14 @@ pub fn parse_application_surface_request(
         | ApplicationSurfaceOperation::RenamePreview
         | ApplicationSurfaceOperation::PortStatus
         | ApplicationSurfaceOperation::PortOrder
-        | ApplicationSurfaceOperation::Todos => match value {
+        | ApplicationSurfaceOperation::Todos
+        | ApplicationSurfaceOperation::TestMap
+        | ApplicationSurfaceOperation::TestRisk
+        | ApplicationSurfaceOperation::Gini
+        | ApplicationSurfaceOperation::DependencyDepth
+        | ApplicationSurfaceOperation::Health
+        | ApplicationSurfaceOperation::Dsm
+        | ApplicationSurfaceOperation::Diagnose => match value {
             Value::Object(arguments) => Ok(ApplicationSurfaceRequest::GraphTool(arguments)),
             _ => Err(ApplicationSurfaceAdapterError::invalid_request(format!(
                 "invalid arguments: {} expects a JSON object",

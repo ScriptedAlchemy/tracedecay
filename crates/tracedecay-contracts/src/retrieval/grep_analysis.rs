@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::UtcMicros;
 
@@ -179,7 +180,7 @@ impl DependencyDepthRequestV1 {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DependencyDepthChainV1 {
     pub file: String,
@@ -187,7 +188,8 @@ pub struct DependencyDepthChainV1 {
     pub chain: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+/// `ideal_depth` is `ceil(log2(file_count))`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct DependencyDepthResultV1 {
     pub max_depth: u64,

@@ -655,15 +655,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
                     boxed_send(dispatch_git_tools(tool_name, cg, args, options)).await
                 }
                 Some(McpToolDispatchGroup::Health) => {
-                    boxed_send(dispatch_health_tools(
-                        tool_name,
-                        cg,
-                        args,
-                        scope_prefix,
-                        project_session_db,
-                        options,
-                    ))
-                    .await
+                    boxed_send(dispatch_health_tools(tool_name, cg, args, options)).await
                 }
                 Some(McpToolDispatchGroup::Memory) => {
                     boxed_send(dispatch_memory_tools(tool_name, cg, args, options)).await

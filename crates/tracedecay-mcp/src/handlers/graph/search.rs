@@ -1005,6 +1005,7 @@ where
         touched_files,
         code_graph: None,
         analytics: Some(analytics),
+        cost: None,
     })
 }
 

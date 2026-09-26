@@ -2,9 +2,7 @@
 
 use serde_json::{Value, json};
 
-use super::{
-    def, def_object, def_path_flag_tool, def_path_limit_tool, number_property, string_property,
-};
+use super::{def, def_object, def_path_limit_tool, number_property, string_property};
 use crate::ToolDefinition;
 
 pub(super) fn def_dead_code() -> ToolDefinition {
@@ -298,72 +296,39 @@ pub(super) fn def_port_order(input_schema: Value) -> ToolDefinition {
     )
 }
 
-pub(super) fn def_gini() -> ToolDefinition {
-    def_object(
+pub(super) fn def_gini(input_schema: Value) -> ToolDefinition {
+    def(
         "tracedecay_gini",
         "Gini Inequality",
         "Compute inequality (Gini coefficient) for any metric across files or symbols. Detects god files and uneven complexity distribution.",
-        json!({
-            "metric": {
-                "type": "string",
-                "enum": ["complexity", "lines", "fan_in", "fan_out", "members"],
-                "description": "Metric to measure inequality for (default: complexity)"
-            },
-            "scope": {
-                "type": "string",
-                "enum": ["file", "symbol"],
-                "description": "Aggregate per file or per symbol (default: file)"
-            },
-            "path": string_property("Filter to files under this directory path"),
-            "limit": number_property("Number of top outliers to return (default: 10)")
-        }),
+        input_schema,
     )
 }
 
-pub(super) fn def_dependency_depth() -> ToolDefinition {
-    def_path_limit_tool(
+pub(super) fn def_dependency_depth(input_schema: Value) -> ToolDefinition {
+    def(
         "tracedecay_dependency_depth",
         "Dependency Depth",
         "Show the longest file-level dependency chains. Files at the end of long chains are fragile to upstream changes.",
-        "Filter to files under this directory path",
-        "Maximum number of chains to return (default: 10)",
+        input_schema,
     )
 }
 
-pub(super) fn def_health() -> ToolDefinition {
-    def_path_flag_tool(
+pub(super) fn def_health(input_schema: Value) -> ToolDefinition {
+    def(
         "tracedecay_health",
         "Health Score",
         "Get quality signal (0-10000) with root cause breakdown (acyclicity, depth, equality, redundancy, modularity). Quality signal = geometric mean of 5 dimensions, maximize this ONE number.",
-        "Filter to files under this directory path",
-        "details",
-        "If true, include full dimension breakdown (default: false)",
+        input_schema,
     )
 }
 
-pub(super) fn def_dsm() -> ToolDefinition {
+pub(super) fn def_dsm(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_dsm",
         "Design Structure Matrix",
         "Get the Design Structure Matrix: file dependency summary showing clusters, density, and layering violations.",
-        json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Filter to files under this directory path"
-                },
-                "shape": {
-                    "type": "string",
-                    "enum": ["stats", "clusters", "matrix"],
-                    "description": "DSM data shape: stats, clusters, or matrix (default: stats)."
-                },
-                "max_files": {
-                    "type": "number",
-                    "description": "Maximum files in matrix format (default: 30)"
-                }
-            }
-        }),
+        input_schema,
     )
 }
 

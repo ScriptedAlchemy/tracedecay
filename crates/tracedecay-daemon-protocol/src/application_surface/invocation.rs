@@ -562,7 +562,7 @@ pub fn application_response(
             touched_files: completion.touched_files,
             code_graph: completion.code_graph,
             analytics: completion.analytics,
-            cost: None,
+            cost: completion.cost,
         },
         // The daemon already resolved this invocation to a typed problem
         // (e.g. `configuration.conflict`); carry it whole so surface adapters
@@ -858,6 +858,13 @@ pub fn application_surface_feedback_operation(
         | ApplicationSurfaceOperation::PortStatus
         | ApplicationSurfaceOperation::PortOrder
         | ApplicationSurfaceOperation::Todos
+        | ApplicationSurfaceOperation::TestMap
+        | ApplicationSurfaceOperation::TestRisk
+        | ApplicationSurfaceOperation::Gini
+        | ApplicationSurfaceOperation::DependencyDepth
+        | ApplicationSurfaceOperation::Health
+        | ApplicationSurfaceOperation::Dsm
+        | ApplicationSurfaceOperation::Diagnose
         | ApplicationSurfaceOperation::HealthRead
         | ApplicationSurfaceOperation::HealthDelta
         | ApplicationSurfaceOperation::StorageStatus
