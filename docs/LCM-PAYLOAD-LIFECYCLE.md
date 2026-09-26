@@ -386,9 +386,9 @@ The full algorithm is `t_bbd369f2`'s to design, but it MUST satisfy this contrac
   `.`/`..`/slashes), non-symlink storage root (`canonical_storage_root`), 0700 payload dir /
   0600 files, Linux `O_NOFOLLOW` (`payload.rs:456-483`). Reap must use the same primitives.
 - **Never delete outside the canonical payload dir; never follow symlinks during reap.**
-- **Keep DB backups before destructive GC** (the owner maintenance path calls
-  `checkpoint_wal_for_backup` then `backup_database`/`copy_sqlite_file_set`): a reap
-  run that mutates state should checkpoint WAL first so the store is recoverable.
+- **No DB copies around destructive GC:** a reap mutates the one live store in place;
+  recoverability comes from per-ref transactions and crash-convergent pending deletes,
+  never from a secondary copy of the database.
 
 ## 14. Non-goals
 

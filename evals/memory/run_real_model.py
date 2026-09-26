@@ -106,11 +106,6 @@ def parse_args(argv):
         type=Path,
         help="tracedecay binary (default: target/debug/tracedecay if built, else PATH).",
     )
-    parser.add_argument(
-        "--keep-fixture",
-        action="store_true",
-        help="Keep the throwaway fixture project for inspection.",
-    )
     args = parser.parse_args(argv)
     if args.model is None:
         args.model = DEFAULT_CURSOR_MODEL if args.driver == "cursor-agent" else DEFAULT_MODEL
@@ -130,11 +125,10 @@ class EvalEnvironment:
         self._temp_dir.cleanup()
 
 
-def cleanup_eval_artifacts(args, fixture, eval_env):
-    if fixture is not None and not args.keep_fixture:
+def cleanup_eval_artifacts(fixture, eval_env):
+    if fixture is not None:
         shutil.rmtree(fixture, ignore_errors=True)
-    if not args.keep_fixture:
-        eval_env.cleanup()
+    eval_env.cleanup()
 
 
 def create_eval_environment(scenario_id):
@@ -750,8 +744,6 @@ def main(argv):
                     "status": status,
                     "assertions": outcomes,
                     "transcripts": transcripts,
-                    "fixture": str(fixture) if args.keep_fixture else "(removed)",
-                    "store": str(eval_env.data_dir) if args.keep_fixture else "(removed)",
                 }
             )
             overall_ok &= not failed
@@ -766,7 +758,7 @@ def main(argv):
                         f"{outcome['op']} expected {outcome['expected']}"
                     )
         finally:
-            cleanup_eval_artifacts(args, fixture, eval_env)
+            cleanup_eval_artifacts(fixture, eval_env)
 
     report["status"] = "pass" if overall_ok else "fail"
     report_path = run_dir / "report.json"

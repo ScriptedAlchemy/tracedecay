@@ -337,7 +337,7 @@ impl FeedbackCycleRuntimePort for ProductionProximityFeedbackCycleRuntimeV1 {
             feedback_cycle
                 .run_once_with_advisory(&invocation.context, invocation.request, advisory)
                 .await
-                .map_err(|_| LspRuntimeFailure::new("feedback-cycle-proximity-execution"))?;
+                .map_err(|error| LspRuntimeFailure::new(error.lsp_failure_class()))?;
             Ok(())
         })
     }

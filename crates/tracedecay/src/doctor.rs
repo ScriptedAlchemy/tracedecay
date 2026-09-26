@@ -141,6 +141,10 @@ pub async fn run_doctor(
                 }
             }
         }
+        Err(error) if crate::daemon::error_is_project_not_enrolled(error) => {
+            report_project_not_enrolled(&mut dc, &project_path);
+            DatabaseHealth::unknown("project_not_enrolled")
+        }
         Err(error) => {
             report_daemon_diagnostics_unavailable(
                 &mut dc,
@@ -557,6 +561,13 @@ impl DatabaseHealth {
             (Self::Healthy, Self::Healthy) => Self::Healthy,
         }
     }
+}
+
+fn report_project_not_enrolled(dc: &mut DoctorCounters, project_path: &Path) {
+    dc.warn(&format!(
+        "Current project is not enrolled in this profile ({}). Run `tracedecay init` to enroll it.",
+        project_path.display()
+    ));
 }
 
 fn report_daemon_diagnostics_unavailable(

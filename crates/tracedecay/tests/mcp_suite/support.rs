@@ -1124,7 +1124,7 @@ pub(crate) fn canonicalize_test_db_path(path: &Path) -> PathBuf {
 }
 
 pub(crate) struct TestTempDir {
-    pub(crate) dir: Option<TempDir>,
+    dir: TempDir,
 }
 
 impl TestTempDir {
@@ -1134,7 +1134,7 @@ impl TestTempDir {
         let dir = TempDir::new_in(canonicalize_test_dir(&std::env::temp_dir())).unwrap();
         #[cfg(not(target_os = "macos"))]
         let dir = TempDir::new().unwrap();
-        Self { dir: Some(dir) }
+        Self { dir }
     }
 }
 
@@ -1142,16 +1142,7 @@ impl std::ops::Deref for TestTempDir {
     type Target = TempDir;
 
     fn deref(&self) -> &Self::Target {
-        self.dir.as_ref().expect("test temp dir already kept")
-    }
-}
-
-impl Drop for TestTempDir {
-    fn drop(&mut self) {
-        #[cfg(windows)]
-        if let Some(dir) = self.dir.take() {
-            let _ = dir.keep();
-        }
+        &self.dir
     }
 }
 

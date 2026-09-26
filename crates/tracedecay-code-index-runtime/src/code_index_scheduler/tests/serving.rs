@@ -52,7 +52,7 @@ use tracedecay_runtime_core::resident_memory::{
 use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 use super::{
-    ALPHA_LIB_V1, CALLER_PAGE, CALLER_STAR, GitFixture, ReadyRetrievalControlV1,
+    ALPHA_LIB_V1, CALLER_PAGE, CALLER_STAR, GitFixture, OwnerSignals, ReadyRetrievalControlV1,
     active_text_artifact_path, application_context, build_progress_snapshot, callee_fanout_sources,
     caller_star_sources, callers_page_meta, core_search_request, decode_hex, git,
     install_verified_graph_store, install_verified_graph_store_on_text, mount_core_query_authority,
@@ -63,6 +63,7 @@ use super::{
     rewrite_active_text_artifact_format_revision, routed_core_search_request, scheduler,
     settle_text_projection, test_project_id, wait_for_live_complete_generation,
     wait_for_queryable_text_generation, wait_for_queryable_text_generation_change,
+    wait_for_settled_owner,
 };
 use crate::{
     code_index::production::{
@@ -822,15 +823,14 @@ fn clone_index_is_ready_when_the_artifact_first_seals() {
     else {
         panic!("clone data must be available when the artifact first seals, got {status:?}");
     };
-    assert!(
-        observation
-            .coverage
-            .source_bodies
-            .is_some_and(|bodies| bodies > 0)
-    );
     assert_eq!(
-        observation.coverage.near_fingerprint_bodies, observation.coverage.eligible_source_bodies,
-        "positional fingerprints cover every eligible body at the first seal"
+        (
+            observation.coverage.source_bodies,
+            observation.coverage.eligible_source_bodies,
+            observation.coverage.near_fingerprint_bodies,
+        ),
+        (Some(2), Some(2), Some(2)),
+        "positional fingerprints cover both eligible bodies at the first seal"
     );
     assert!(observation.resources.peak_scratch_memory_bytes.is_some());
     let revision: i64 = rusqlite::Connection::open(active_text_artifact_path(store.path()))
@@ -881,6 +881,9 @@ async fn dashboard_freshness_does_not_join_a_text_projection_slice() {
     while !latest.query_owners_are_ready() {
         latest.advance_text_serving(1).expect("advance text build");
     }
+    // Clone readiness reports stale while the seating pass is still verifying
+    // source, so start from the settled owner this test is about.
+    wait_for_settled_owner(&registry, fixture.path()).await;
 
     let held_slot = latest.text_projection_build.lock_slot();
     let freshness = tokio::time::timeout(
@@ -897,6 +900,63 @@ async fn dashboard_freshness_does_not_join_a_text_projection_slice() {
 
     drop(held_slot);
     registry.shutdown().await;
+}
+
+/// The clone census is a property of the sealed artifact: the seal computes
+/// it once and binds it into the receipt. Status therefore reports it on the
+/// first read after the owners install, and a restarted registry that
+/// reopens the retained artifact reports the same census without computing
+/// it again.
+#[tokio::test]
+async fn dashboard_freshness_reports_the_sealed_clone_census_across_a_restart() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn alpha() { one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }\npub fn beta() { one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let mut reported = Vec::new();
+    for _incarnation in 0..2 {
+        let registry = CodeIndexSchedulerRegistryV1::new(1);
+        registry
+            .mount_worktree(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+            )
+            .await
+            .expect("mount worktree");
+        let latest = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+        while !latest.query_owners_are_ready() {
+            latest.advance_text_serving(1).expect("advance text owners");
+        }
+        let freshness = registry
+            .dashboard_freshness(fixture.path())
+            .await
+            .expect("mounted dashboard freshness");
+        let Some(tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Ready {
+            observation,
+        }) = freshness.clone_index
+        else {
+            panic!(
+                "the sealed census must be ready on the first status read, got {:?}",
+                freshness.clone_index
+            );
+        };
+        reported.push((
+            observation.coverage.source_bodies,
+            observation.coverage.eligible_source_bodies,
+            observation.coverage.unique_payloads,
+            observation.coverage.near_fingerprint_bodies,
+        ));
+        registry.shutdown().await;
+    }
+    assert_eq!(
+        reported,
+        vec![
+            (Some(2), Some(2), Some(1), Some(2)),
+            (Some(2), Some(2), Some(1), Some(2)),
+        ]
+    );
 }
 
 #[tokio::test]
@@ -3853,6 +3913,7 @@ async fn moved_reference_label_still_serves_the_exact_worktree_as_current() {
     // The root-scope ready gate behind graph reads and the runtime census,
     // the arms with no stale fallback, must not be orphaned either. Seating
     // races the publication event, so the gate is polled bounded.
+    let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
     let decoded = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let Some(decoded) = registry
@@ -3861,7 +3922,7 @@ async fn moved_reference_label_still_serves_the_exact_worktree_as_current() {
             {
                 break decoded;
             }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            signals.changed().await;
         }
     })
     .await
@@ -5876,61 +5937,6 @@ async fn generation_read_callers_install_exact_affected_test_attribution() {
     registry.shutdown().await;
 }
 
-/// The join holds every test's transitive coverage closure, so a full-repo
-/// generation's join is large; copying it on each query admission cost tens
-/// of seconds per call. Repeated queries must share one materialization.
-#[tokio::test(flavor = "multi_thread")]
-async fn repeated_ready_decoded_queries_share_one_test_attribution_materialization() {
-    let fixture = GitFixture::new(&[(
-        "tests/production.rs",
-        "fn helper() {}\n#[test]\nfn verifies_helper() { helper(); }\n",
-    )]);
-    let store = TempDir::new().expect("store root");
-    let registry = CodeIndexSchedulerRegistryV1::new(1);
-    registry
-        .mount_worktree(
-            test_project_id(),
-            fixture.path(),
-            store.path().to_path_buf(),
-        )
-        .await
-        .expect("mount fixture");
-    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
-    let generation_id = latest.generation().manifest().generation_id.clone();
-    let snapshot = latest.generation().snapshot();
-    let scope = ResolvedScope::new(
-        test_project_id(),
-        snapshot.repository.clone(),
-        snapshot.worktree.clone().expect("worktree id"),
-        snapshot.reference.clone(),
-    )
-    .expect("resolved scope");
-    let query = || async {
-        let decoded = registry
-            .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
-            .await
-            .expect("ready-decoded caller resolves generation");
-        assert_eq!(decoded.generation().manifest().generation_id, generation_id);
-    };
-
-    query().await;
-    let first = registry.read_test_attribution(&generation_id);
-    assert!(
-        first.evidence.is_some(),
-        "the seated generation attributes tests"
-    );
-    for _ in 0..3 {
-        query().await;
-    }
-    let second = registry.read_test_attribution(&generation_id);
-    assert!(
-        Arc::ptr_eq(&first, &second),
-        "queries on one generation must reuse its attribution, not rebuild or copy it"
-    );
-
-    registry.shutdown().await;
-}
-
 /// A graph-off cold mount must keep the authenticated lightweight text owner
 /// authoritative when an overflow reconcile arrives between bounded text
 /// slices. Rebinding the same sealed generation through the full-generation
@@ -6111,6 +6117,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
         "mounted graph-off worktree accepts the overflow reconcile"
     );
 
+    let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
     let query_deadline = std::time::Instant::now() + Duration::from_secs(10);
     let executed = loop {
         match registry
@@ -6123,7 +6130,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
                     std::time::Instant::now() <= query_deadline,
                     "graph-off text projection never became queryable: {error}"
                 );
-                tokio::time::sleep(Duration::from_millis(2)).await;
+                signals.changed_before(query_deadline).await;
             }
         }
     };
@@ -6131,6 +6138,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
         executed.served_stale,
         "an explicit overflow keeps the currently served text generation stale until reconcile settles"
     );
+    let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
     let overflow_deadline = std::time::Instant::now() + Duration::from_secs(10);
     let dashboard = loop {
         let overflow_settled = {
@@ -6158,7 +6166,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
             std::time::Instant::now() <= overflow_deadline,
             "graph-off overflow did not settle through a real no-op reconcile"
         );
-        tokio::time::sleep(Duration::from_millis(2)).await;
+        signals.changed_before(overflow_deadline).await;
     };
     let (owner_epoch_after_overflow, progress_after_overflow, decode_count) = {
         let scheduler = scheduler

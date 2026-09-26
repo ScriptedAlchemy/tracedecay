@@ -486,6 +486,100 @@ fn activation_reinstalls_a_same_version_cache_holding_an_older_build() {
 
 #[cfg(unix)]
 #[test]
+fn activation_reinstalls_when_installed_plugins_records_an_older_plugin() {
+    let home = tempfile::tempdir().unwrap();
+    let bin_dir = tempfile::tempdir().unwrap();
+    let log = bin_dir.path().join("invocations.log");
+    let claude = bin_dir.path().join("claude");
+    deploy_rendered_bundle(home.path(), "/bin/tracedecay");
+    let installed = home.path().join(".claude/plugins/installed_plugins.json");
+    std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+    safe_write_json_file(
+        &installed,
+        &json!({
+            "version": 2,
+            "plugins": {
+                "tracedecay@tracedecay": [{
+                    "scope": "user",
+                    "installPath": home.path().join(
+                        ".claude/plugins/cache/tracedecay/tracedecay/0.1.0-beta.21"
+                    ),
+                    "version": "0.1.0-beta.21"
+                }]
+            }
+        }),
+    )
+    .unwrap();
+    fake_claude_cli(&claude, &log, "exit 0");
+
+    claude_plugin_activate_with(&claude, home.path())
+        .expect("an installed_plugins record with a missing current cache reinstalls");
+
+    let invocations = recorded_invocations(&log);
+    assert_eq!(
+        invocations.first().map(String::as_str),
+        Some("plugin uninstall tracedecay"),
+        "stock plugin install leaves a recorded plugin's cache untouched: {invocations:?}"
+    );
+}
+
+#[test]
+fn non_catalog_marketplace_files_are_removed_and_catalog_files_stay() {
+    let home = tempfile::tempdir().unwrap();
+    deploy_rendered_bundle(home.path(), "/bin/tracedecay");
+    let skill = plugin_deploy_dir(home.path()).join("skills/retired-beta21/SKILL.md");
+    std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+    std::fs::write(&skill, b"---\nname: retired\n---\n").unwrap();
+    let plugin_json = plugin_deploy_dir(home.path()).join(".claude-plugin/plugin.json");
+
+    remove_non_catalog_claude_marketplace_files(home.path()).unwrap();
+
+    assert!(!skill.exists(), "retired skill remained in the marketplace");
+    assert!(
+        !skill.parent().unwrap().exists(),
+        "empty retired skill directory remained"
+    );
+    assert!(plugin_json.is_file(), "catalog plugin.json was removed");
+}
+
+#[test]
+fn stale_claude_plugin_cache_versions_are_removed_without_backups() {
+    let home = tempfile::tempdir().unwrap();
+    let versions = home
+        .path()
+        .join(".claude/plugins/cache/tracedecay/tracedecay");
+    let stale = versions.join("0.1.0-beta.21");
+    std::fs::create_dir_all(stale.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        stale.join(".claude-plugin/plugin.json"),
+        b"{\"version\":\"0.1.0-beta.21\"}",
+    )
+    .unwrap();
+    let current = versions.join(crate::PRODUCT_VERSION);
+    std::fs::create_dir_all(&current).unwrap();
+    std::fs::write(current.join("plugin.json"), b"{\"name\":\"tracedecay\"}").unwrap();
+
+    remove_stale_claude_plugin_cache(home.path()).unwrap();
+
+    assert!(!stale.exists(), "stale cache version remained");
+    assert!(current.join("plugin.json").is_file());
+    for entry in std::fs::read_dir(&versions).unwrap() {
+        let name = entry.unwrap().file_name();
+        let name = name.to_string_lossy();
+        assert!(
+            !name.contains("backup") && !name.contains(".bak"),
+            "cache cleanup left a backup named {name}"
+        );
+        assert_eq!(
+            name.as_ref(),
+            crate::PRODUCT_VERSION,
+            "cache cleanup left a non-current version"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn removal_drives_the_hosts_own_uninstall_by_plugin_selection_name() {
     let home = tempfile::tempdir().unwrap();
     let bin_dir = tempfile::tempdir().unwrap();

@@ -59,44 +59,6 @@ fn after_next_publish(hook: impl FnOnce() + 'static) {
     AFTER_PUBLISH.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
 
-pub async fn backup_live_sqlite_database(source: &Path, destination: &Path) -> io::Result<()> {
-    let source = source.to_path_buf();
-    let destination = destination.to_path_buf();
-    tokio::task::spawn_blocking(move || backup_live_sqlite_database_sync(&source, &destination))
-        .await
-        .map_err(|error| io::Error::other(format!("live SQLite backup task failed: {error}")))?
-}
-
-/// Online backup of a possibly-live `SQLite` family. This is the production
-/// Copy-mode authority: committed WAL frames are folded into one standalone
-/// file. Callers must not `fs::copy` a locked Windows store instead (#933).
-///
-/// The source is opened `SQLITE_OPEN_READ_ONLY` without `immutable=1`. That
-/// URI skips locking and ignores WAL/SHM; it is illegal on a changing family.
-/// Each attempt exclusively creates an owned staging file beside
-/// `destination` (`create_new`) and retires only that scratch. A colliding
-/// name is refused, not deleted.
-///
-/// `destination` is a fresh name the caller owns; this helper never replaces
-/// a destination and never removes anything found there. An existing main,
-/// `-wal`, `-shm`, or `-journal` at the destination is refused with
-/// `AlreadyExists` before the source is opened, and publication is a
-/// kernel-atomic no-replace rename, so a main created concurrently keeps its
-/// own family and fails the backup instead. `SQLite` durability is a
-/// family-level invariant: pathname existence cannot prove which main a later
-/// sidecar belongs to, so a displaced family can only be handled by an owner
-/// with lifecycle exclusion (see
-/// [`crate::db::DatabaseAuthority::replace_sqlite_with_rollback_atomically`]).
-/// Production callers publish into a directory they exclusively created and
-/// swap that directory themselves.
-///
-/// A WAL family whose transient `-shm` is absent is copied as an offline
-/// unlocked family and folded in staging, opening it as a reader would
-/// reconstruct SHM in the source directory.
-fn backup_live_sqlite_database_sync(source: &Path, destination: &Path) -> io::Result<()> {
-    backup_live_sqlite_database_with(source, destination, || Ok(()))
-}
-
 fn backup_staging_path(destination: &Path, id: u64) -> PathBuf {
     let mut staging = destination.as_os_str().to_os_string();
     staging.push(format!(".{}.{id}.backup-partial", std::process::id()));
@@ -190,6 +152,32 @@ fn reject_occupied_destination_family(destination: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Online backup of a possibly-live `SQLite` family. This is the production
+/// Copy-mode authority: committed WAL frames are folded into one standalone
+/// file. Callers must not `fs::copy` a locked Windows store instead (#933).
+///
+/// The source is opened `SQLITE_OPEN_READ_ONLY` without `immutable=1`. That
+/// URI skips locking and ignores WAL/SHM; it is illegal on a changing family.
+/// Each attempt exclusively creates an owned staging file beside
+/// `destination` (`create_new`) and retires only that scratch. A colliding
+/// name is refused, not deleted.
+///
+/// `destination` is a fresh name the caller owns; this helper never replaces
+/// a destination and never removes anything found there. An existing main,
+/// `-wal`, `-shm`, or `-journal` at the destination is refused with
+/// `AlreadyExists` before the source is opened, and publication is a
+/// kernel-atomic no-replace rename, so a main created concurrently keeps its
+/// own family and fails the backup instead. `SQLite` durability is a
+/// family-level invariant: pathname existence cannot prove which main a later
+/// sidecar belongs to, so a displaced family can only be handled by an owner
+/// with lifecycle exclusion (see
+/// [`crate::db::DatabaseAuthority::replace_sqlite_with_rollback_atomically`]).
+/// Production callers publish into a directory they exclusively created and
+/// swap that directory themselves.
+///
+/// A WAL family whose transient `-shm` is absent is copied as an offline
+/// unlocked family and folded in staging, opening it as a reader would
+/// reconstruct SHM in the source directory.
 fn backup_live_sqlite_database_with(
     source: &Path,
     destination: &Path,

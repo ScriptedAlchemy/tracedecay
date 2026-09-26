@@ -24,16 +24,6 @@
           "type": "json",
           "path": "sdks/typescript/package.json",
           "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
-          "path": "sdks/typescript/package-lock.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
-          "path": "sdks/typescript/package-lock.json",
-          "jsonpath": "$.packages[''].version"
         }
       ]
     }

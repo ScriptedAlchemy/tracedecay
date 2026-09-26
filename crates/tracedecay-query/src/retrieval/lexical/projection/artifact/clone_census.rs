@@ -135,18 +135,6 @@ fn validate_payload_batch(
     Ok(validated.into_iter().flatten().collect())
 }
 
-#[cfg(test)]
-std::thread_local! {
-    static CENSUS_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-/// Census walks this thread has started, so a test can prove a path never
-/// walks the clone tables.
-#[cfg(test)]
-pub(super) fn census_reads_on_this_thread() -> u64 {
-    CENSUS_READS.with(std::cell::Cell::get)
-}
-
 /// Walk every clone table of a staged or sealed artifact. This validates each
 /// stored payload against its digest and decodes every fingerprint posting,
 /// so it is corpus-sized: the seal runs it once, and an explicit verification
@@ -156,8 +144,6 @@ pub(super) fn read_clone_index_census(
     hot_posting_threshold: u64,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<CodeLexicalCloneIndexCensusV1, CodeLexicalArtifactErrorV1> {
-    #[cfg(test)]
-    CENSUS_READS.with(|reads| reads.set(reads.get() + 1));
     let mut census = CodeLexicalCloneIndexCensusV1::default();
     let incomplete_rename = validate_stored_clone_payloads(connection, control)?;
     // The inner join proves every counted occurrence has its verified payload
@@ -374,7 +360,7 @@ pub(super) mod tests {
                 (0..8)
                     .map(|index| ConservativeCloneTokenV1::Syntax {
                         syntax_kind: "identifier".into(),
-                        text: format!("token_{seed}_{index}"),
+                        text: format!("token_{seed}_{index}").into(),
                     })
                     .collect::<Vec<_>>(),
             ),

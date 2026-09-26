@@ -30,6 +30,7 @@ use super::super::graph_activation::{
     injected_activation_attempt_count, install_injected_activation_gate,
     set_injected_activation_failures,
 };
+use super::super::tests::OwnerSignals;
 use super::CodeIndexSchedulerRegistryV1;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
@@ -415,9 +416,10 @@ async fn fresh_graph_activation_never_delays_the_published_text_owner() {
             .clone()
     }
     .expect("the publication installed its text owner before activation");
+    let mut signals = OwnerSignals::subscribe(&fixture.registry, &fixture.project).await;
     tokio::time::timeout(CONVERGENCE_DEADLINE, async {
         while !text.query_owners_are_ready() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            signals.changed().await;
         }
     })
     .await
@@ -432,6 +434,7 @@ async fn fresh_graph_activation_never_delays_the_published_text_owner() {
             .is_none(),
         "the seat waits for the held graph activation"
     );
+    let mut signals = OwnerSignals::subscribe(&fixture.registry, &fixture.project).await;
     gate.release();
     tokio::time::timeout(CONVERGENCE_DEADLINE, async {
         while fixture
@@ -442,7 +445,7 @@ async fn fresh_graph_activation_never_delays_the_published_text_owner() {
             .serving_generation
             .is_none()
         {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            signals.changed().await;
         }
     })
     .await

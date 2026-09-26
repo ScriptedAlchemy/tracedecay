@@ -396,6 +396,7 @@ async fn collect_registered_finding(
     }
 
     let check = check_store_durable_memory(
+        profile_root,
         &finding.data_root,
         finding.expected_manifest_bytes.as_deref(),
         &finding.graph_scope_relpaths,
@@ -559,7 +560,7 @@ pub(super) enum DurableDatabaseInventoryV1 {
     /// database inventory. This is not an unverifiable green light: callers
     /// preserve the exact cancellation/deadline state for the coordinator.
     Interrupted,
-    /// The complete set of database paths, relative to the store's data root.
+    /// The complete set of database paths, relative to the profile root.
     Resolved(Vec<PathBuf>),
     /// The set could not be enumerated, a missing or malformed manifest, or a
     /// directory that could not be listed. Never a green light for deletion.
@@ -641,7 +642,9 @@ fn safe_store_path(data_root: &Path, relative: &Path) -> bool {
 }
 
 /// Enumerates every durable database a store's manifest and registered graph
-/// scopes name, relative to its data root.
+/// scopes name, relative to the profile root. The manifest names its graph
+/// relative to the store at `store_relpath`; registered scopes are already
+/// profile-relative.
 ///
 /// Fails closed. The manifest is the store's own record of where its graph
 /// lives; if it is absent or will not parse, guessing the default filename
@@ -649,6 +652,7 @@ fn safe_store_path(data_root: &Path, relative: &Path) -> bool {
 /// real graph sits elsewhere.
 pub(super) fn durable_database_inventory(
     manifest_bytes: Option<&[u8]>,
+    store_relpath: &Path,
     graph_scope_relpaths: &[PathBuf],
     control: CollectionControl<'_>,
 ) -> DurableDatabaseInventoryV1 {
@@ -670,11 +674,13 @@ pub(super) fn durable_database_inventory(
         return DurableDatabaseInventoryV1::Interrupted;
     }
 
-    if !safe_store_relative_path(&manifest.graph_db_relpath) {
+    if !safe_store_relative_path(store_relpath)
+        || !safe_store_relative_path(&manifest.graph_db_relpath)
+    {
         return DurableDatabaseInventoryV1::Unverifiable;
     }
 
-    let mut inventory = vec![manifest.graph_db_relpath];
+    let mut inventory = vec![store_relpath.join(&manifest.graph_db_relpath)];
     for relpath in graph_scope_relpaths {
         if control.completion().is_some() {
             return DurableDatabaseInventoryV1::Interrupted;
@@ -693,6 +699,7 @@ pub(super) fn durable_database_inventory(
 /// Runs [`check_durable_memory_rows`] over every database in the store's
 /// inventory. Any single `Present` or `Unverifiable` protects the whole store.
 pub(super) async fn check_store_durable_memory(
+    profile_root: &Path,
     data_root: &Path,
     manifest_bytes: Option<&[u8]>,
     graph_scope_relpaths: &[PathBuf],
@@ -702,8 +709,15 @@ pub(super) async fn check_store_durable_memory(
     if control.completion().is_some() {
         return DurableMemoryCheck::Interrupted;
     }
-    let inventory = match durable_database_inventory(manifest_bytes, graph_scope_relpaths, control)
-    {
+    let Ok(store_relpath) = data_root.strip_prefix(profile_root) else {
+        return DurableMemoryCheck::Unverifiable;
+    };
+    let inventory = match durable_database_inventory(
+        manifest_bytes,
+        store_relpath,
+        graph_scope_relpaths,
+        control,
+    ) {
         DurableDatabaseInventoryV1::Interrupted => return DurableMemoryCheck::Interrupted,
         DurableDatabaseInventoryV1::Resolved(inventory) => inventory,
         DurableDatabaseInventoryV1::Unverifiable => return DurableMemoryCheck::Unverifiable,
@@ -712,7 +726,7 @@ pub(super) async fn check_store_durable_memory(
         if control.completion().is_some() {
             return DurableMemoryCheck::Interrupted;
         }
-        match check_durable_memory_rows(data_root, &relpath, scratch_root, control).await {
+        match check_durable_memory_rows(profile_root, &relpath, scratch_root, control).await {
             DurableMemoryCheck::Empty => {}
             protected => return protected,
         }
@@ -732,26 +746,27 @@ pub(super) fn durable_check_scratch_root(profile_root: &Path) -> PathBuf {
     profile_root.join("scratch").join("sqlite-read")
 }
 
-/// Checks whether `data_root`'s graph database carries rows in any canonical
-/// `memory_*` table. This intentionally discovers tables from the schema
-/// instead of maintaining a fixed list: both legacy memory and Memory V2 add
-/// durable tables, and a newly added table must be protected automatically.
+/// Checks whether the database at `root` joined with `db_relpath` carries
+/// rows in any canonical `memory_*` table. This intentionally discovers tables
+/// from the schema instead of maintaining a fixed list: both legacy memory and
+/// Memory V2 add durable tables, and a newly added table must be protected
+/// automatically.
 /// Side-effect-free with respect to the store: opens the database through
 /// [`tracedecay_runtime_core::sqlite_read_snapshot`], so the live store is never mutated or
 /// locked against a concurrent writer.
 async fn check_durable_memory_rows(
-    data_root: &Path,
-    graph_db_relpath: &Path,
+    root: &Path,
+    db_relpath: &Path,
     scratch_root: &Path,
     control: CollectionControl<'_>,
 ) -> DurableMemoryCheck {
     if control.completion().is_some() {
         return DurableMemoryCheck::Interrupted;
     }
-    if !safe_store_path(data_root, graph_db_relpath) {
+    if !safe_store_path(root, db_relpath) {
         return DurableMemoryCheck::Unverifiable;
     }
-    let graph_db_path = data_root.join(graph_db_relpath);
+    let graph_db_path = root.join(db_relpath);
     match std::fs::symlink_metadata(&graph_db_path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.file_type().is_file() => {
             return DurableMemoryCheck::Unverifiable;
@@ -961,6 +976,7 @@ async fn collect_unregistered_finding(
             // An unregistered store has no registry graph scopes by
             // definition; the manifest remains the canonical graph path.
             check_store_durable_memory(
+                profile_root,
                 &finding.data_root,
                 Some(&manifest_bytes),
                 &[],

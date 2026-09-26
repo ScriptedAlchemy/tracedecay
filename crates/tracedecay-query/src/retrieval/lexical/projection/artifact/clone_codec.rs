@@ -383,7 +383,7 @@ pub(super) fn decode_clone_payload(
                     (RENAME_TOKEN_TEXT, ConservativeCloneTokenV1::Syntax { syntax_kind, .. }) => {
                         Ok(ConservativeCloneTokenV1::Syntax {
                             syntax_kind: syntax_kind.clone(),
-                            text: take_string(&mut bytes)?,
+                            text: Cow::Owned(take_string(&mut bytes)?),
                         })
                     }
                     _ => Err(corrupt("rename token difference is not canonical")),
@@ -508,7 +508,7 @@ fn take_tokens(
             TOKEN_STRUCTURE_START => ConservativeCloneTokenV1::StructureStart { syntax_kind },
             TOKEN_SYNTAX => ConservativeCloneTokenV1::Syntax {
                 syntax_kind,
-                text: take_string(bytes)?,
+                text: Cow::Owned(take_string(bytes)?),
             },
             _ => ConservativeCloneTokenV1::StructureEnd { syntax_kind },
         });
@@ -579,7 +579,7 @@ mod tests {
         match text {
             Some(text) => ConservativeCloneTokenV1::Syntax {
                 syntax_kind: Cow::Borrowed(kind),
-                text: text.to_owned(),
+                text: Cow::Owned(text.to_owned()),
             },
             None => ConservativeCloneTokenV1::StructureStart {
                 syntax_kind: Cow::Borrowed(kind),

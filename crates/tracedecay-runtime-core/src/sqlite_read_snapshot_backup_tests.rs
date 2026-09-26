@@ -15,9 +15,8 @@ use rusqlite::{Connection, OpenFlags};
 use tempfile::TempDir;
 
 use super::{
-    SnapshotReadControl, backup_live_sqlite_database, backup_live_sqlite_database_sync,
-    backup_live_sqlite_database_with, family_state, first_backup_step, open, open_foreign_in,
-    with_suffix,
+    SnapshotReadControl, backup_live_sqlite_database_with, family_state, first_backup_step, open,
+    open_foreign_in, with_suffix,
 };
 use crate::db::sqlite_generation_identity;
 
@@ -106,9 +105,7 @@ async fn live_backup_includes_wal_resident_rows_and_does_not_checkpoint_the_sour
     let writer = wal_writer(&source);
     let before = family_state(&source).unwrap();
 
-    backup_live_sqlite_database(&source, &destination)
-        .await
-        .unwrap();
+    backup_live_sqlite_database_with(&source, &destination, || Ok(())).unwrap();
 
     assert_eq!(integrity_ok(&destination), "ok");
     assert_eq!(snapshot_ids(&destination), [0, 1]);
@@ -164,9 +161,7 @@ async fn live_backup_of_a_concurrent_wal_writer_is_a_contiguous_committed_prefix
         thread::sleep(Duration::from_millis(1));
     }
 
-    backup_live_sqlite_database(&source, &destination)
-        .await
-        .unwrap();
+    backup_live_sqlite_database_with(&source, &destination, || Ok(())).unwrap();
     stop.store(true, Ordering::Relaxed);
     writer.join().unwrap();
 
@@ -232,7 +227,7 @@ fn live_backup_cancellation_retires_partial_scratch_and_never_publishes_destinat
         .unwrap();
     drop(writer);
 
-    backup_live_sqlite_database_sync(&source, &destination).unwrap();
+    backup_live_sqlite_database_with(&source, &destination, || Ok(())).unwrap();
     assert_eq!(integrity_ok(&destination), "ok");
     assert_eq!(
         Connection::open_with_flags(&destination, OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -394,8 +389,7 @@ async fn live_backup_refuses_to_replace_destination_with_wal_sidecars() {
     let bytes = fs::read(&destination).unwrap();
     let wal_bytes = fs::read(&dest_wal).unwrap();
 
-    let error = backup_live_sqlite_database(&source, &destination)
-        .await
+    let error = backup_live_sqlite_database_with(&source, &destination, || Ok(()))
         .expect_err("replacing a destination that still has a WAL family is not coherent");
 
     assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
@@ -424,8 +418,7 @@ async fn live_backup_refuses_to_replace_destination_with_rollback_journal() {
     let journal = with_suffix(&destination, "-journal");
     fs::write(&journal, b"stale-hot-journal").unwrap();
 
-    let error = backup_live_sqlite_database(&source, &destination)
-        .await
+    let error = backup_live_sqlite_database_with(&source, &destination, || Ok(()))
         .expect_err("a leftover dest journal must block replace");
 
     assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
@@ -449,9 +442,7 @@ async fn live_backup_of_wal_without_shm_does_not_write_the_source_directory() {
     assert!(!shm.exists());
     let before = family_state(&source).unwrap();
 
-    backup_live_sqlite_database(&source, &destination)
-        .await
-        .unwrap();
+    backup_live_sqlite_database_with(&source, &destination, || Ok(())).unwrap();
 
     assert_eq!(integrity_ok(&destination), "ok");
     assert_eq!(snapshot_ids(&destination), [0, 1]);
@@ -697,9 +688,7 @@ async fn live_backup_of_a_checkpointed_family_does_not_require_sidecars() {
     assert!(!with_suffix(&source, "-shm").exists());
     let before = family_state(&source).unwrap();
 
-    backup_live_sqlite_database(&source, &destination)
-        .await
-        .unwrap();
+    backup_live_sqlite_database_with(&source, &destination, || Ok(())).unwrap();
 
     assert_eq!(integrity_ok(&destination), "ok");
     assert_eq!(snapshot_ids_text(&destination), ["checkpointed"]);
@@ -804,9 +793,7 @@ async fn windows_live_wal_writer_survives_copy_mode_backup() {
     let destination = temp.path().join("snapshot.db");
     let writer = wal_writer(&source);
 
-    backup_live_sqlite_database(&source, &destination)
-        .await
-        .unwrap();
+    backup_live_sqlite_database_with(&source, &destination, || Ok(())).unwrap();
     writer
         .execute(
             "INSERT INTO durable(id, value) VALUES (2, 'after-backup')",

@@ -1,6 +1,7 @@
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use tracedecay_domain::errors::Result;
@@ -80,13 +81,16 @@ pub fn hook_v2_admission_ledger_root(
 }
 
 /// Bound on distinct ledgers held open at once. A daemon serves one profile, so
-/// this is (projects opened) x (bound hosts); beyond it admission reports
+/// this is (projects opened + the profile) x (bound hosts); beyond it admission reports
 /// backpressure and the hook spools the envelope for replay rather than
 /// admitting something it cannot deduplicate.
 const MAX_OPEN_HOOK_V2_ADMISSION_LEDGERS: usize = 64;
 
-type HookV2AdmissionLedgers =
-    BTreeMap<(std::path::PathBuf, &'static str), tracedecay_hooks::HookAdmissionLedgerV1>;
+/// The daemon is the single writer of every Hook V2 admission ledger, project
+/// or profile scoped: each ledger is opened once, keyed by its root, and kept
+/// here with its cross-process writer lock held, so concurrent admissions
+/// serialize on this map instead of racing that lock.
+type HookV2AdmissionLedgers = BTreeMap<std::path::PathBuf, tracedecay_hooks::HookAdmissionLedgerV1>;
 
 fn hook_v2_admission_ledgers() -> &'static StdMutex<HookV2AdmissionLedgers> {
     static LEDGERS: OnceLock<StdMutex<HookV2AdmissionLedgers>> = OnceLock::new();
@@ -111,7 +115,7 @@ fn complete_hook_v2_pending_work(
     sequence: u64,
     now: UtcMicros,
 ) -> bool {
-    let key = (data_root.to_path_buf(), envelope.producer.hook_key());
+    let key = hook_v2_admission_ledger_root(data_root, envelope.producer);
     let Some(mut ledgers) = hook_v2_admission_ledgers().lock().ok() else {
         return false;
     };
@@ -213,25 +217,43 @@ pub fn record_hook_v2_admission(
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
     now: UtcMicros,
 ) -> Option<tracedecay_hooks::HookAdmissionLedgerReceiptV1> {
-    let key = (data_root.to_path_buf(), envelope.producer.hook_key());
+    with_hook_v2_admission_ledger(
+        hook_v2_admission_ledger_root(data_root, envelope.producer),
+        envelope.producer,
+        now,
+        |ledger| ledger.admit_with_receipt(envelope, now).ok(),
+    )
+    .flatten()
+}
+
+/// Runs `operation` on the retained ledger at `ledger_root`, opening it on
+/// first use. `None` means the ledger is unavailable (open failure, poisoned
+/// owner, or the open-ledger bound).
+fn with_hook_v2_admission_ledger<T>(
+    ledger_root: std::path::PathBuf,
+    host: tracedecay_domain::NativeHostIdentityV1,
+    now: UtcMicros,
+    operation: impl FnOnce(&mut tracedecay_hooks::HookAdmissionLedgerV1) -> T,
+) -> Option<T> {
     let mut ledgers = hook_v2_admission_ledgers().lock().ok()?;
-    if !ledgers.contains_key(&key) {
-        if ledgers.len() >= MAX_OPEN_HOOK_V2_ADMISSION_LEDGERS {
-            return None;
+    let open_ledgers = ledgers.len();
+    let ledger = match ledgers.entry(ledger_root) {
+        Entry::Occupied(retained) => retained.into_mut(),
+        Entry::Vacant(unopened) => {
+            if open_ledgers >= MAX_OPEN_HOOK_V2_ADMISSION_LEDGERS {
+                return None;
+            }
+            let (ledger, _report) = tracedecay_hooks::HookAdmissionLedgerV1::open(
+                unopened.key().clone(),
+                host,
+                tracedecay_hooks::HookAdmissionLedgerLimitsV1::stock(),
+                now,
+            )
+            .ok()?;
+            unopened.insert(ledger)
         }
-        let (ledger, _report) = tracedecay_hooks::HookAdmissionLedgerV1::open(
-            hook_v2_admission_ledger_root(data_root, envelope.producer),
-            envelope.producer,
-            tracedecay_hooks::HookAdmissionLedgerLimitsV1::stock(),
-            now,
-        )
-        .ok()?;
-        ledgers.insert(key.clone(), ledger);
-    }
-    ledgers
-        .get_mut(&key)?
-        .admit_with_receipt(envelope, now)
-        .ok()
+    };
+    Some(operation(ledger))
 }
 
 #[cfg(test)]
@@ -242,7 +264,7 @@ fn forget_hook_v2_admission_ledger_for_test(
     hook_v2_admission_ledgers()
         .lock()
         .unwrap()
-        .remove(&(data_root.to_path_buf(), host.hook_key()));
+        .remove(&hook_v2_admission_ledger_root(data_root, host));
 }
 
 /// The daemon-side result of admitting one Hook V2 envelope, shared by the
@@ -839,26 +861,25 @@ pub(super) fn hook_v2_profile_admit(
     let ledger_root = profile_root
         .join("hook-v2-profile-admissions")
         .join(binding.host.hook_key());
-    let outcome = tracedecay_hooks::HookAdmissionLedgerV1::open(
-        ledger_root,
-        binding.host,
-        tracedecay_hooks::HookAdmissionLedgerLimitsV1::stock(),
-        hook_now(),
-    )
-    .and_then(|(mut ledger, _)| ledger.admit(&envelope, hook_now()));
+    let now = hook_now();
+    let outcome = with_hook_v2_admission_ledger(ledger_root, binding.host, now, |ledger| {
+        ledger.admit(&envelope, now)
+    });
     Ok(match outcome {
-        Ok(tracedecay_hooks::HookAdmissionDecisionV1::Admitted) => json!({
+        Some(Ok(tracedecay_hooks::HookAdmissionDecisionV1::Admitted)) => json!({
             "action": action,
             "status": "accepted",
             "disposition": tracedecay_hooks::HookTransportDispositionV1::Accepted,
         }),
-        Ok(tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate) => json!({
+        Some(Ok(tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate)) => json!({
             "action": action,
             "status": "exact_duplicate",
             "disposition": tracedecay_hooks::HookTransportDispositionV1::Accepted,
         }),
-        Ok(tracedecay_hooks::HookAdmissionDecisionV1::Conflict) => hook_v2_catchup_response(action),
-        Err(_) => json!({
+        Some(Ok(tracedecay_hooks::HookAdmissionDecisionV1::Conflict)) => {
+            hook_v2_catchup_response(action)
+        }
+        None | Some(Err(_)) => json!({
             "action": action,
             "status": "unavailable",
         }),

@@ -31,6 +31,7 @@ use tracedecay_contracts::{
     ApplicationContractError, ApplicationOperation, CoverageCompleteness, FreshnessState,
     PolicyEvaluationV1, RequestAdmission, RequestContext,
 };
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::feedback::{
     FeedbackDurabilityV1, FeedbackFindingId, FeedbackFindingV1, FeedbackImpactStateV1,
     FeedbackImpactV1, FeedbackTriggerV1,
@@ -52,7 +53,9 @@ use tracedecay_graph_query::{
 };
 use tracedecay_runtime_core::db::Database;
 
-use super::concrete::{FeedbackRuntime, ProjectFeedbackRouteAuthorization, ProjectFeedbackStore};
+use super::concrete::{
+    FeedbackRuntime, FeedbackRuntimeError, ProjectFeedbackRouteAuthorization, ProjectFeedbackStore,
+};
 use super::diagnostics::{DatabaseDiagnosticStore, DiagnosticStoreFeedbackProvider};
 use super::observations::FeedbackObservationEmitterV1;
 
@@ -216,6 +219,8 @@ impl Deref for CanonicalFeedbackResultV1 {
 pub enum FeedbackCycleRuntimeError {
     #[error("feedback cycle contract is invalid")]
     Contract(#[from] ApplicationContractError),
+    #[error("feedback cycle runtime failed")]
+    Runtime(#[from] FeedbackRuntimeError),
     #[error("feedback cycle requires at least one managed diagnostic provider")]
     NoManagedDiagnosticProviders,
     #[error("feedback cycle request provider identities differ from its admission set")]
@@ -225,9 +230,13 @@ pub enum FeedbackCycleRuntimeError {
 }
 
 impl FeedbackCycleRuntimeError {
-    fn lsp_failure_class(&self) -> &'static str {
+    pub fn lsp_failure_class(&self) -> &'static str {
         match self {
             Self::Contract(_) => "feedback-cycle-contract",
+            Self::Runtime(FeedbackRuntimeError::HandleStore(TraceDecayError::SyncLock {
+                ..
+            })) => "feedback-cycle-handle-store-busy",
+            Self::Runtime(_) => "feedback-cycle-runtime",
             Self::NoManagedDiagnosticProviders => "feedback-cycle-provider-missing",
             Self::ProviderSetMismatch => "feedback-cycle-provider-mismatch",
             Self::UnsupportedTrigger => "feedback-cycle-trigger-unsupported",
@@ -388,11 +397,7 @@ impl FeedbackCycleRuntime {
         let requested_durability = request.input.request.durability();
         let execution = self.service.execute(&context, request).await?;
         crate::hotpath_observe::feedback_query(execution.cycle.findings.len());
-        Ok(compose_canonical_result(
-            &self.feedback,
-            execution,
-            requested_durability,
-        )?)
+        compose_canonical_result(&self.feedback, execution, requested_durability)
     }
 
     /// Runs one canonical feedback cycle with source-backed advisory findings.
@@ -404,13 +409,14 @@ impl FeedbackCycleRuntime {
         context: &RequestContext,
         request: FeedbackCycleExecutionRequest,
         advisory: FeedbackCycleAdvisoryV1,
-    ) -> Result<CanonicalFeedbackResultV1, ApplicationContractError> {
+    ) -> Result<CanonicalFeedbackResultV1, FeedbackCycleRuntimeError> {
         if !self.admits_current_provider_set(&request).await
             || !self.admits_provider_set(&request.providers)
         {
             return Err(ApplicationContractError::Inconsistent {
                 field: "feedback cycle provider set",
-            });
+            }
+            .into());
         }
         let requested_durability = request.input.request.durability();
         let execution = self
@@ -509,65 +515,48 @@ pub(crate) fn compose_canonical_result(
     feedback: &FeedbackRuntime,
     execution: FeedbackCycleExecutionResult,
     requested_durability: FeedbackDurabilityV1,
-) -> Result<CanonicalFeedbackResultV1, ApplicationContractError> {
+) -> Result<CanonicalFeedbackResultV1, FeedbackCycleRuntimeError> {
     if execution.cycle.durability != requested_durability {
         return Err(ApplicationContractError::Inconsistent {
             field: "feedback result durability",
-        });
+        }
+        .into());
     }
     if execution.cycle.durability != FeedbackDurabilityV1::Durable
         || execution.publication.is_none()
     {
-        return CanonicalFeedbackResultV1::new(execution, None, Vec::new());
+        return Ok(CanonicalFeedbackResultV1::new(execution, None, Vec::new())?);
     }
 
     let observed_at = execution.usage.completed_at;
     let read_handles = FeedbackCycleReadHandlesV1 {
-        diagnostics_handle: feedback
-            .mint_diagnostics(
-                feedback_cycle_handle_request_id("diagnostics", &execution)?,
-                FeedbackDiagnosticsReadRequestV1 {
-                    head_commit_id: execution.cycle.scope.head_commit_id.clone(),
-                },
-                observed_at,
-            )
-            .map_err(|_| ApplicationContractError::Inconsistent {
-                field: "feedback diagnostics handle authority",
-            })?,
-        list_handle: feedback
-            .mint_list(
-                feedback_cycle_handle_request_id("list", &execution)?,
-                Some(execution.cycle.scope.head_commit_id.clone()),
-                100,
-                observed_at,
-            )
-            .map_err(|_| ApplicationContractError::Inconsistent {
-                field: "feedback list handle authority",
-            })?,
+        diagnostics_handle: feedback.mint_diagnostics(
+            feedback_cycle_handle_request_id("diagnostics", &execution)?,
+            FeedbackDiagnosticsReadRequestV1 {
+                head_commit_id: execution.cycle.scope.head_commit_id.clone(),
+            },
+            observed_at,
+        )?,
+        list_handle: feedback.mint_list(
+            feedback_cycle_handle_request_id("list", &execution)?,
+            Some(execution.cycle.scope.head_commit_id.clone()),
+            100,
+            observed_at,
+        )?,
     };
     let mut finding_handles = Vec::with_capacity(execution.cycle.findings.len());
     for finding in &execution.cycle.findings {
-        let get_handle = feedback
-            .mint_get(
-                feedback_handle_request_id("get", &execution, finding)?,
-                finding.finding_id.clone(),
-                observed_at,
-            )
-            .map_err(|_| ApplicationContractError::Inconsistent {
-                field: "feedback get handle authority",
-            })?;
+        let get_handle = feedback.mint_get(
+            feedback_handle_request_id("get", &execution, finding)?,
+            finding.finding_id.clone(),
+            observed_at,
+        )?;
         let expansion_handle = if let Some(request) = feedback_expansion_request(finding)? {
-            Some(
-                feedback
-                    .mint_expand(
-                        feedback_handle_request_id("expand", &execution, finding)?,
-                        request,
-                        observed_at,
-                    )
-                    .map_err(|_| ApplicationContractError::Inconsistent {
-                        field: "feedback expansion handle authority",
-                    })?,
-            )
+            Some(feedback.mint_expand(
+                feedback_handle_request_id("expand", &execution, finding)?,
+                request,
+                observed_at,
+            )?)
         } else {
             None
         };
@@ -578,7 +567,11 @@ pub(crate) fn compose_canonical_result(
             expansion_handle,
         });
     }
-    CanonicalFeedbackResultV1::new(execution, Some(read_handles), finding_handles)
+    Ok(CanonicalFeedbackResultV1::new(
+        execution,
+        Some(read_handles),
+        finding_handles,
+    )?)
 }
 
 fn feedback_cycle_handle_request_id(

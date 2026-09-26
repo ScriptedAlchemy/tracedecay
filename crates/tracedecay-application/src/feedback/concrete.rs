@@ -39,6 +39,7 @@ use tracedecay_contracts::{
     RequestId, ResolvedScope, ResultProjection, RetrievalOrder, RetrievalRequestMeta,
     RetryDirective, now_micros,
 };
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::feedback::{
     FeedbackCycleTerminationV1, FeedbackDedupeKeyV1, FeedbackFindingId, FeedbackFindingV1,
 };
@@ -99,6 +100,8 @@ pub enum FeedbackRuntimeError {
     Store,
     #[error("feedback runtime handle operation failed")]
     Handle,
+    #[error("feedback runtime handle store failed")]
+    HandleStore(#[source] TraceDecayError),
     #[error("feedback runtime record is corrupt")]
     Corrupt,
     #[error("feedback observation worker failed")]
@@ -1630,7 +1633,7 @@ fn store_request_handle(
         &content,
         micros_to_seconds(observed_at),
     )
-    .map_err(|_| FeedbackRuntimeError::Handle)?;
+    .map_err(FeedbackRuntimeError::HandleStore)?;
     Ok(stored.handle)
 }
 

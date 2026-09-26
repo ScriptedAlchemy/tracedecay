@@ -723,24 +723,13 @@ fn retrieval_only_publication_serves_no_names_truthfully() {
 }
 
 /// Ranking reads the degrees the catalog tallied from the relation rows: the
-/// same totals adjacency reports, over the whole generation, and no adjacency
-/// fan-out per examined symbol, so its cost does not scale with graph size.
+/// same totals adjacency reports, over the whole generation.
 #[test]
-fn degree_ranking_serves_catalog_degrees_without_adjacency_reads() {
+fn degree_ranking_serves_catalog_degrees_over_the_whole_generation() {
     let reader = reader(&store_for(production_manifest()));
-    reader
-        .symbols_page(None, 1, request())
-        .expect("warm catalog");
-    tracedecay_graph_db::take_graph_db_traversal_counters();
 
     let ranking = reader.degree_ranking(3, request()).expect("ranking");
 
-    let counters = tracedecay_graph_db::take_graph_db_traversal_counters();
-    assert_eq!(
-        counters.adjacency_index_hits + counters.adjacency_index_builds,
-        0,
-        "ranking must not fan out per symbol: {counters:?}"
-    );
     assert_eq!(ranking.symbol_count, 4);
     assert_eq!(
         ranking

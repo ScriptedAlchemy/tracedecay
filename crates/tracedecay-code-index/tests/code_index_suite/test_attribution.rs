@@ -1,3 +1,5 @@
+use std::borrow::Borrow;
+
 use tracedecay_code_index::generations::GenerationPlanner;
 use tracedecay_code_index::intake::{CodeIndexIntake, SanitizedCodeIntake};
 use tracedecay_code_index::test_attribution::{
@@ -298,4 +300,44 @@ fn generation_source_and_content_drift_are_typed_partial_not_current() {
         record.disposition,
         GenerationTestJoinDispositionV1::Current { .. }
     )));
+}
+
+#[test]
+fn records_covering_one_occurrence_share_a_single_resident_copy() {
+    let (snapshot, manifest) = generation();
+    let attributions = vec![
+        attribution(
+            &manifest,
+            TestAttributionEvidenceClassV1::ObservedCoverageCandidates,
+        ),
+        attribution(
+            &manifest,
+            TestAttributionEvidenceClassV1::ConservativeDependencyCandidates,
+        ),
+    ];
+    let occurrence_evidence = occurrences();
+    let joined = GenerationTestJoinV1::join(
+        &manifest,
+        &snapshot,
+        &attributions,
+        &occurrence_evidence,
+        &watermark(
+            &snapshot,
+            &manifest,
+            TestAttributionJoinInputCoverageV1::Complete,
+            &attributions,
+            &occurrence_evidence,
+        ),
+    )
+    .expect("joined attribution");
+
+    let covered = |record: usize| -> &TestAttributionOccurrenceV1 {
+        joined.records[record].covered_occurrences[0].borrow()
+    };
+    assert_eq!(covered(0).occurrence_id, covered(1).occurrence_id);
+    assert!(
+        std::ptr::eq(covered(0), covered(1)),
+        "every test covering an occurrence must share it; a transitive closure \
+         copied per test makes the join quadratic in resident memory"
+    );
 }

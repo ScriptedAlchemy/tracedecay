@@ -908,3 +908,58 @@ fn opencode_rendered_plugin_queues_only_tool_after_lifecycle_identity() {
         native_context_scout_lifecycle(NativeHostIdentityV1::OpenCode, &fields, [1; 16]).is_none()
     );
 }
+
+/// A hook callback appending to an already-prepared spool holds its writer
+/// lease for one bounded append. Project open republishing the binding at that
+/// moment waits for the peer instead of failing the open with `Busy`.
+#[test]
+fn binding_publication_waits_for_a_live_callback_holding_the_spool() {
+    let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let project = tempfile::tempdir().unwrap();
+    let project_root = project.path().canonicalize().unwrap();
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        &project_root,
+        "proj_hook_binding_contention",
+    )
+    .unwrap();
+    let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
+        &project_root,
+        &tracedecay_runtime_core::storage::default_profile_root().unwrap(),
+        &tracedecay_runtime_core::storage::EnrollmentMarker {
+            project_id: "proj_hook_binding_contention".to_owned(),
+            storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    fn contention_scope(_: &Path, _: &ProjectId) -> Result<ResolvedScope, String> {
+        Ok(scope("worktree.binding-contention"))
+    }
+    let runtime = HookRuntimeV1 {
+        scope_resolver: contention_scope,
+        ..crate::ports::hook_runtime::crate_test_runtime()
+    };
+    publish_daemon_bindings(&runtime, &layout).unwrap();
+
+    let host = NativeHostIdentityV1::ClaudeCode;
+    let held = std::time::Duration::from_millis(20);
+    let (capture, _) = HookSpoolV1::open(
+        tracedecay_hooks::hook_v2_spool_root(&layout.data_root, host),
+        HookSpoolConfigV1::stock(host),
+        UtcMicros(1),
+    )
+    .unwrap();
+    let delivery = tracedecay_hooks::HookDeliveryReceiptSpoolV1::open(
+        tracedecay_hooks::hook_delivery_receipt_spool_root(&layout.data_root, host),
+    )
+    .unwrap();
+    let callback = std::thread::spawn(move || {
+        std::thread::sleep(held);
+        drop(capture);
+        drop(delivery);
+    });
+    assert!(held < tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET);
+
+    publish_daemon_bindings(&runtime, &layout)
+        .expect("publication waits for the live callback instead of failing busy");
+    callback.join().unwrap();
+}

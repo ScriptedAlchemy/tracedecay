@@ -3,7 +3,6 @@ set -euo pipefail
 
 script_path=${BASH_SOURCE[0]}
 repo=$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)
-keep_temp=false
 reuse_release_binary=""
 skip_packaged_runtime_battery=false
 
@@ -20,7 +19,6 @@ release-builds the source tree.
 
 Options:
   --repo PATH                      Repository root (default: parent of this script)
-  --keep-temp                      Preserve the isolated package/install directory
   --reuse-release-binary PATH      Also prove this already-built production
                                    binary reports the staged source commit
   --skip-packaged-runtime-battery  After packaging and manifest checks, skip
@@ -218,10 +216,6 @@ while (($#)); do
       repo=$2
       shift 2
       ;;
-    --keep-temp)
-      keep_temp=true
-      shift
-      ;;
     --reuse-release-binary)
       [[ $# -ge 2 ]] || die "--reuse-release-binary requires a path"
       reuse_release_binary=$2
@@ -286,14 +280,7 @@ product_version=$(read_workspace_product_version "$repo/Cargo.toml")
   die "$repo/Cargo.toml must declare a literal version in [workspace.package]"
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/tracedecay-distribution.XXXXXX")
-cleanup() {
-  if [[ $keep_temp == true ]]; then
-    echo "distribution acceptance: preserved temporary directory $work"
-  else
-    rm -rf -- "$work"
-  fi
-}
-trap cleanup EXIT
+trap 'rm -rf -- "$work"' EXIT
 
 host_target=""
 while IFS= read -r rustc_version_line; do
@@ -360,8 +347,8 @@ tar -C "$repo" \
   --exclude=./.git \
   --exclude=./.codex-worktrees \
   --exclude=./.claude-worktrees \
-  --exclude='./dashboard/node_modules' \
-  --exclude='./node_modules' \
+  --exclude=node_modules \
+  --exclude=.pnpm \
   -cf - . | tar -xf - -C "$staged"
 resolve_clean_source_head "$repo" "$source_git_sha" >/dev/null
 

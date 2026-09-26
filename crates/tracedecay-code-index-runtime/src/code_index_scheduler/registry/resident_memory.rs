@@ -65,7 +65,7 @@ impl CodeIndexSchedulerRegistryV1 {
             generation_publications,
             serving_seats: Arc::new(tokio::sync::watch::Sender::new(0)),
             root_mounted: Arc::new(tokio::sync::watch::Sender::new(0)),
-            cadence_telemetry: Arc::new(std::sync::Mutex::new(
+            cadence_telemetry: Arc::new(tokio::sync::watch::Sender::new(
                 super::CodeIndexCadenceTelemetryV1::default(),
             )),
             relation_symbol_hydrations: Arc::new(std::sync::atomic::AtomicU64::new(0)),

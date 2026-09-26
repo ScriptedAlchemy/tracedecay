@@ -73,8 +73,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .await
             .get(&project_root)
             .map(|worktree| Arc::clone(&worktree.reconcile_in_progress));
-        reconcile_in_progress
-            .is_some_and(|reconcile_in_progress| reconcile_in_progress.load(Ordering::Acquire) != 0)
+        reconcile_in_progress.is_some_and(|reconcile_in_progress| reconcile_in_progress.running())
     }
 
     /// Test-only: hold an exact mounted worktree's owner-pass authority, as
@@ -493,6 +492,22 @@ impl CodeIndexSchedulerRegistryV1 {
         gate.drop_release.notify_all();
     }
 
+    /// The mounted root that owns one exact scope's worktree.
+    #[cfg(test)]
+    pub async fn mounted_root_for_scope_for_test(
+        &self,
+        scope: &tracedecay_contracts::ResolvedScope,
+    ) -> Option<std::path::PathBuf> {
+        let mounted = self.mounted.lock().await;
+        mounted
+            .iter()
+            .find(|(_, worktree)| {
+                worktree.repository_id == scope.repository_id
+                    && worktree.worktree_id == scope.worktree_id
+            })
+            .map(|(root, _)| root.clone())
+    }
+
     /// The pending-wake slot for one exact scope's worktree, in unix micros;
     /// `0` means no wake is outstanding.
     #[cfg(test)]
@@ -507,14 +522,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree.repository_id == scope.repository_id
                     && worktree.worktree_id == scope.worktree_id
             })
-            .map(|worktree| {
-                worktree
-                    .pending_wake
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .micros
-            })
+            .map(|worktree| worktree.pending_wake.lock().micros)
     }
 
     /// The pending-wake slot for one exact mounted root, in unix micros; `0`
@@ -526,14 +534,9 @@ impl CodeIndexSchedulerRegistryV1 {
     pub(crate) async fn pending_wake_micros_for_root(&self, project_root: &Path) -> Option<u64> {
         let project_root = canonical_existing_identity(project_root).ok()?;
         let mounted = self.mounted.lock().await;
-        mounted.get(&project_root).map(|worktree| {
-            worktree
-                .pending_wake
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .micros
-        })
+        mounted
+            .get(&project_root)
+            .map(|worktree| worktree.pending_wake.lock().micros)
     }
 
     /// The exact-source currency witness for one mounted root, so tests can
@@ -627,19 +630,14 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Latest completed event-to-ready receipt for this registry, if any.
     #[cfg(test)]
     pub fn latest_event_to_ready_receipt(&self) -> Option<CodeIndexEventToReadyReceiptV1> {
-        self.cadence_telemetry
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .latest()
-            .cloned()
+        self.cadence_telemetry.borrow().latest().cloned()
     }
 
     /// Every retained event-to-ready receipt, oldest first.
     #[cfg(test)]
     pub fn event_to_ready_receipts(&self) -> Vec<CodeIndexEventToReadyReceiptV1> {
         self.cadence_telemetry
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .borrow()
             .receipts()
             .cloned()
             .collect()
@@ -652,10 +650,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// as unavailable rather than counted as zero-latency samples.
     #[cfg(test)]
     pub fn cadence_read_model(&self) -> CodeIndexCadenceReadModelV1 {
-        self.cadence_telemetry
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .read_model()
+        self.cadence_telemetry.borrow().read_model()
     }
 
     /// Test support for proving the explicit same-store build/publication
