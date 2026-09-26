@@ -642,6 +642,9 @@ pub struct ProjectRuntimeRegistryV1 {
     root_fences: Arc<ProfiledMutex<ProjectRuntimeRootFencesV1>>,
     reservation_changed: watch::Sender<u64>,
     reservation_blocking_changed: Arc<(StdMutex<u64>, Condvar)>,
+    /// Bumped whenever a published owner or a project's publication state
+    /// changes, so a request waiting on an owner re-reads the runtime.
+    published_changed: watch::Sender<u64>,
     /// The blocking drain is retained independently of whichever async
     /// shutdown caller first requested it. A retry can therefore join the
     /// same work after that caller is cancelled.
@@ -658,6 +661,7 @@ pub struct ProjectRuntimeRegistryV1 {
 impl Default for ProjectRuntimeRegistryV1 {
     fn default() -> Self {
         let (reservation_changed, _) = watch::channel(0);
+        let (published_changed, _) = watch::channel(0);
         let (shutdown_complete, _) = watch::channel(ShutdownState::Pending);
         Self {
             runtimes: Arc::new(hotpath::mutex!(
@@ -670,6 +674,7 @@ impl Default for ProjectRuntimeRegistryV1 {
             )),
             reservation_changed,
             reservation_blocking_changed: Arc::new((StdMutex::new(0), Condvar::new())),
+            published_changed,
             shutdown_task: Arc::new(AsyncMutex::new(None)),
             closed: Arc::new(AtomicBool::new(false)),
             shutdown_started: Arc::new(AtomicBool::new(false)),
@@ -1096,6 +1101,8 @@ impl ProjectRuntimeRegistryV1 {
                 let runtime = runtimes.entry(project_root.clone()).or_default();
                 if !runtime.reservations.contains(&TypeId::of::<C>()) {
                     *C::slot(runtime) = Some(component);
+                    drop(runtimes);
+                    self.signal_published_changed();
                     return Ok(());
                 }
             }
@@ -1243,6 +1250,9 @@ impl ProjectRuntimeRegistryV1 {
                         .map_err(|_| FeedbackCyclePublicationError::RouterUnavailable)?;
                     runtime.advisory = Some(advisory);
                     runtime.advisory_cycle = Some(advisory_cycle);
+                    drop(runtimes);
+                    drop(root_fences);
+                    self.signal_published_changed();
                     return Ok(());
                 }
             }
@@ -1349,7 +1359,35 @@ impl ProjectRuntimeRegistryV1 {
         }
         runtime.publication = state;
         runtime.publication_attempt = None;
+        drop(runtimes);
+        self.signal_published_changed();
         true
+    }
+
+    fn signal_published_changed(&self) {
+        self.published_changed
+            .send_modify(|version| *version = version.wrapping_add(1));
+    }
+
+    /// The advisory-cycle owner and publication state held for
+    /// `project_root`, with a receiver subscribed before the read so no later
+    /// publication is missed.
+    pub(crate) fn advisory_cycle_view(
+        &self,
+        project_root: &Path,
+    ) -> (
+        Option<DaemonAdvisoryCycleInvocationOwner>,
+        Option<ProjectRuntimePublicationStateV1>,
+        watch::Receiver<u64>,
+    ) {
+        let changed = self.published_changed.subscribe();
+        let runtimes = self.lock_runtimes();
+        let runtime = runtimes.get(project_root);
+        (
+            runtime.and_then(|runtime| runtime.advisory_cycle.clone()),
+            runtime.map(|runtime| runtime.publication),
+            changed,
+        )
     }
 
     /// Record terminal owner failure only for the attempt that is still current.
