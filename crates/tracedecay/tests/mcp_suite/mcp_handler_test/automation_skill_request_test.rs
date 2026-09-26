@@ -7,7 +7,7 @@
 #![cfg(feature = "test-transport")]
 
 use std::fs;
-use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -64,41 +64,17 @@ async fn refusal(
         .message
 }
 
-/// Runs the memory curator once through `tracedecay_fact_store_curate` and
-/// returns its run id. An empty store settles the run as a skipped
-/// `nothing_to_review` terminal in the project's automation ledger.
-async fn curate_once(fixture: &ProductionCompositionFixture) -> String {
-    for _attempt in 0..20 {
-        let envelope = call_json(
-            fixture,
-            "tracedecay_fact_store_curate",
-            json!({"fact_review_limit": 7, "min_confidence_millionths": 500_000}),
-        )
-        .await;
-        let run = &envelope["outcome"]["value"]["payload"];
-        if run["terminal"]["reason"] == "scheduler_lock_active" {
-            tokio::time::sleep(Duration::from_millis(250)).await;
-            continue;
-        }
-        assert_eq!(run["terminal"]["reason"], "nothing_to_review", "{envelope}");
-        return run["run_id"].as_str().expect("curate run id").to_owned();
-    }
-    panic!("the curator lock never released");
+/// One project whose automation ledger holds exactly one application run:
+/// the memory curator, run through `tracedecay_fact_store_curate` on an empty
+/// store, which settles as a skipped `nothing_to_review` terminal.
+struct CuratedProject {
+    fixture: ProductionCompositionFixture,
+    run_id: String,
+    /// The run's terminal row, read from the ledger file the run wrote.
+    terminal_row: Value,
 }
 
-/// The terminal ledger row for `run_id`, read from the file the run wrote.
-fn terminal_ledger_row(dashboard_root: &Path, run_id: &str) -> Value {
-    fs::read_to_string(dashboard_root.join("automation_runs.jsonl"))
-        .expect("automation run ledger")
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str::<Value>(line).expect("ledger row JSON"))
-        .rfind(|row| row["run_id"] == run_id)
-        .unwrap_or_else(|| panic!("ledger must record run {run_id}"))
-}
-
-#[tokio::test]
-async fn automation_run_reads_refuse_arguments_outside_their_typed_request() {
+async fn curated_project() -> CuratedProject {
     let fixture = production_composition_fixture().await;
     let dashboard_root = fixture
         .harness
@@ -109,8 +85,72 @@ async fn automation_run_reads_refuse_arguments_outside_their_typed_request() {
         .store_layout()
         .dashboard_root
         .clone();
-    let run_id = curate_once(&fixture).await;
-    let row = terminal_ledger_row(&dashboard_root, &run_id);
+    for _attempt in 0..20 {
+        let envelope = call_json(
+            &fixture,
+            "tracedecay_fact_store_curate",
+            json!({
+                "fact_review_limit": 7,
+                "min_confidence_millionths": 500_000,
+                "format": "json",
+            }),
+        )
+        .await;
+        let run = &envelope["outcome"]["value"]["payload"];
+        if run["terminal"]["reason"] == "scheduler_lock_active" {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            continue;
+        }
+        assert_eq!(run["terminal"]["reason"], "nothing_to_review", "{envelope}");
+        let run_id = run["run_id"].as_str().expect("curate run id").to_owned();
+        let terminal_row = fs::read_to_string(dashboard_root.join("automation_runs.jsonl"))
+            .expect("automation run ledger")
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<Value>(line).expect("ledger row JSON"))
+            .rfind(|row| row["run_id"] == run_id)
+            .unwrap_or_else(|| panic!("ledger must record run {run_id}"));
+        return CuratedProject {
+            fixture,
+            run_id,
+            terminal_row,
+        };
+    }
+    panic!("the curator lock never released");
+}
+
+async fn fixture_with_keeper_skill() -> ProductionCompositionFixture {
+    let fixture = production_composition_fixture().await;
+    create_managed_skill(
+        fixture.harness.profile_root(),
+        ManagedSkillDraft {
+            id: "keeper".to_owned(),
+            title: "Keeper".to_owned(),
+            summary: "Keeps the ledger honest.".to_owned(),
+            routing_description: "Use when the ledger needs keeping.".to_owned(),
+            category: "maintenance".to_owned(),
+            targets: vec![SkillInstallTarget::Codex],
+            body_markdown: "Keep the ledger.".to_owned(),
+            support_files: Vec::new(),
+            provenance: ManagedSkillProvenance {
+                source: ManagedSkillSource::User,
+                actor: "typed-request-proof".to_owned(),
+                run_id: None,
+            },
+        },
+    )
+    .await
+    .expect("seed managed skill");
+    fixture
+}
+
+#[tokio::test]
+async fn automation_run_list_refuses_a_mistyped_limit() {
+    let CuratedProject {
+        fixture,
+        run_id,
+        terminal_row,
+    } = curated_project().await;
 
     let listed = call_json(
         &fixture,
@@ -131,7 +171,7 @@ async fn automation_run_reads_refuse_arguments_outside_their_typed_request() {
             "task": "memory_curator",
             "task_key": "memory_curator",
             "trigger": "application",
-            "backend": row["backend"],
+            "backend": terminal_row["backend"],
             "model": null,
             "status": "skipped",
             "reviewed_count": 0,
@@ -139,8 +179,8 @@ async fn automation_run_reads_refuse_arguments_outside_their_typed_request() {
             "rejected_count": 0,
             "skipped_count": 1,
             "error": "nothing_to_review",
-            "started_at": row["started_at"],
-            "completed_at": row["completed_at"],
+            "started_at": terminal_row["started_at"],
+            "completed_at": terminal_row["completed_at"],
             "artifact_kinds": [],
         })]
     );
@@ -156,13 +196,25 @@ async fn automation_run_reads_refuse_arguments_outside_their_typed_request() {
         "tool execution failed: config error: invalid arguments for tracedecay_automation_run_list: invalid type: string \"5\", expected u32"
     );
 
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn automation_run_view_refuses_an_unknown_field() {
+    let CuratedProject {
+        fixture,
+        run_id,
+        terminal_row,
+    } = curated_project().await;
+
     let viewed = call_json(
         &fixture,
         "tracedecay_automation_run_view",
         json!({"run_id": run_id, "format": "json"}),
     )
     .await;
-    assert_eq!(viewed["run"], row);
+    assert_eq!(viewed["run"], terminal_row);
+    assert_eq!(viewed["run"]["status"], "skipped");
     assert_eq!(
         refusal(
             &fixture,
@@ -172,6 +224,15 @@ async fn automation_run_reads_refuse_arguments_outside_their_typed_request() {
         .await,
         "tool execution failed: config error: invalid arguments for tracedecay_automation_run_view: unknown field `verbose`, expected `run_id`"
     );
+
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn automation_run_artifact_view_refuses_an_unknown_kind() {
+    let CuratedProject {
+        fixture, run_id, ..
+    } = curated_project().await;
 
     assert_eq!(
         refusal(
@@ -194,6 +255,13 @@ async fn automation_run_reads_refuse_arguments_outside_their_typed_request() {
         )
     );
 
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn analytics_refuses_an_unknown_field() {
+    let CuratedProject { fixture, .. } = curated_project().await;
+
     let analytics = call_json(
         &fixture,
         "tracedecay_analytics",
@@ -213,28 +281,8 @@ async fn automation_run_reads_refuse_arguments_outside_their_typed_request() {
 }
 
 #[tokio::test]
-async fn skill_reads_refuse_arguments_outside_their_typed_request() {
-    let fixture = production_composition_fixture().await;
-    create_managed_skill(
-        fixture.harness.profile_root(),
-        ManagedSkillDraft {
-            id: "keeper".to_owned(),
-            title: "Keeper".to_owned(),
-            summary: "Keeps the ledger honest.".to_owned(),
-            routing_description: "Use when the ledger needs keeping.".to_owned(),
-            category: "maintenance".to_owned(),
-            targets: vec![SkillInstallTarget::Codex],
-            body_markdown: "Keep the ledger.".to_owned(),
-            support_files: Vec::new(),
-            provenance: ManagedSkillProvenance {
-                source: ManagedSkillSource::User,
-                actor: "typed-request-proof".to_owned(),
-                run_id: None,
-            },
-        },
-    )
-    .await
-    .expect("seed managed skill");
+async fn skill_list_refuses_an_unknown_field() {
+    let fixture = fixture_with_keeper_skill().await;
 
     let listed = call_json(&fixture, "tracedecay_skill_list", json!({"format": "json"})).await;
     let ids: Vec<&Value> = listed["skills"]
@@ -254,6 +302,13 @@ async fn skill_reads_refuse_arguments_outside_their_typed_request() {
         .await,
         "tool execution failed: config error: invalid arguments for tracedecay_skill_list: unknown field `include_bodies`, expected `state` or `include_body`"
     );
+
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn skill_view_refuses_an_unknown_field() {
+    let fixture = fixture_with_keeper_skill().await;
 
     let viewed = call_json(
         &fixture,
@@ -275,7 +330,13 @@ async fn skill_reads_refuse_arguments_outside_their_typed_request() {
         "tool execution failed: config error: invalid arguments for tracedecay_skill_view: unknown field `include_support`, expected `id` or `include_support_files`"
     );
 
-    let home = ProductionProjectCompositionHarnessV1::transcript_source_home(
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn hermes_skill_bridge_refuses_an_unknown_field() {
+    let fixture = production_composition_fixture().await;
+    let home: PathBuf = ProductionProjectCompositionHarnessV1::transcript_source_home(
         fixture.harness.isolation_root(),
     )
     .expect("composition home");
@@ -286,6 +347,7 @@ async fn skill_reads_refuse_arguments_outside_their_typed_request() {
         "---\nname: keeper\ndescription: Keeps the ledger\n---\n\nKeep it.\n",
     )
     .unwrap();
+
     let bridge = call_json(
         &fixture,
         "tracedecay_hermes_skill_bridge",
