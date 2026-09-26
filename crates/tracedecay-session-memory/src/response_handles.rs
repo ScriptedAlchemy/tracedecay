@@ -84,8 +84,6 @@ pub fn is_valid_response_handle(handle: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
-/// Publishes `content` under `root`, the owning store's
-/// [`response_handle_root`](tracedecay_runtime_core::storage::StoreLayout::response_handle_root).
 pub fn store_response_handle(root: &Path, content: &str, now: i64) -> Result<ResponseHandleRecord> {
     PrivateStoreIo::create_dir_all_durable(root)
         .map_err(|error| file_error(root, "create durable directory", error))?;

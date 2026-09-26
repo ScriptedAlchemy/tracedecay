@@ -1,7 +1,6 @@
 //! Local response-handle cache for reversible MCP truncation.
 //!
-//! Handles are stored in the owning project store's `response-handles` root
-//! (`StoreLayout::response_handle_root`), which every caller passes in.
+//! Handles are stored in the owning store's `response-handles` root.
 //! They are only references to local files, never external URLs or remote
 //! identifiers.
 

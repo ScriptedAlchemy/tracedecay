@@ -518,14 +518,14 @@ fn dispatch_analysis_tools_inner<'a>(
     // Erase the portable dispatch future before it reaches the measured
     // wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
-        Box::pin(portable_analysis::dispatch_tool(
+        portable_analysis::dispatch_tool(
             cg.project_root(),
             &cg.store_layout().response_handle_root,
             &verified_graph_open(&options),
             tool_name,
             args,
             scope_prefix,
-        ))
+        )
         .await
     })
 }

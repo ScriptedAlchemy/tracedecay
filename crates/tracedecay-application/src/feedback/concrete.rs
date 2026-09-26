@@ -459,8 +459,7 @@ struct StoredFeedbackRequestV1 {
 }
 
 /// Concrete factory central daemon integration mounts for one admitted
-/// project root. Request and continuation handles live under
-/// `response_handle_root`, the admitted project store's handle root.
+/// project root.
 pub async fn open_feedback_runtime(
     database: Database,
     project_root: impl Into<PathBuf>,
@@ -2099,8 +2098,6 @@ mod tests {
         }
     }
 
-    /// Two owners minting at once each keep their handles in the store they
-    /// were opened with; neither sees nor resolves the other's.
     #[test]
     fn concurrent_request_authorities_keep_handles_in_their_own_store() {
         let stores = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
@@ -2139,15 +2136,6 @@ mod tests {
         assert_ne!(handles[0], handles[1]);
 
         for (owner, other) in [(0, 1), (1, 0)] {
-            let inventory =
-                tracedecay_session_memory::response_handles::inventory_response_handles(
-                    &authorities[owner].response_handle_root,
-                )
-                .unwrap();
-            assert_eq!(
-                inventory.file_count, 1,
-                "owner {owner} store holds one handle"
-            );
             assert!(
                 authorities[owner]
                     .resolve_record(

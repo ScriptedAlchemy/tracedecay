@@ -758,9 +758,7 @@ async fn dispatch_cli_graph_tool(
     tool_result_process_outcome(&result.value, tool_name)
 }
 
-/// The CLI resolves the enrolled project's store once, at its process
-/// boundary, and hands the renderer that store's handle root. An unenrolled
-/// path has no store, so truncation reports the handle as unavailable.
+/// Enrolled project's handle root, or none when that path has no store.
 fn cli_response_handle_root(project: Option<&Path>) -> Result<Option<PathBuf>> {
     let Some(project) = project else {
         return Ok(None);
