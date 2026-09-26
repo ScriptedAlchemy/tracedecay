@@ -1,17 +1,13 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
-use std::time::{Duration, Instant, SystemTime};
 
 use crate::common::host_sources;
 use tempfile::TempDir;
 use tracedecay_agent_hosts::agents::host_bundle::{HostComponentV1, HostKindV1};
 use tracedecay_agent_hosts::agents::host_bundle_registry::verified_embedded_host_component_set_with_tracedecay_bin;
-use tracedecay_runtime_core::ast_grep::ast_grep_command;
 
 // Compiles the generated plugin sources with py_compile (argv[1] is the
 // plugin dir). Only `generated_python_sources_compile` runs this: loading the
@@ -62,63 +58,28 @@ sys.modules[module_name] = plugin
 spec.loader.exec_module(plugin)
 "#;
 
-/// Binary path baked into the generated `tools.py` for the shared install.
-/// Part of the bundle fingerprint: changing it changes the rendered plugin.
+/// Binary path baked into the generated `tools.py` of each rendered install.
 const FIXTURE_TRACEDECAY_BIN: &str = "/usr/local/bin/tracedecay";
 
-/// Generator commit baked into the rendered bundle's provenance header. A
-/// fixed 40-hex fixture value keeps the shared cross-process install
-/// byte-stable regardless of the checkout that runs the suite.
+/// Generator commit baked into the rendered bundle's provenance header.
 const GENERATOR_COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-/// One unpinned Hermes install shared by every check.
-///
-/// The embedded host catalog regenerates the full plugin from embedded
-/// templates, so the output is identical for every unpinned install. There
-/// is no reason to redo it per test. Each check writes its own uniquely
-/// named script into the shared plugin dir and only mutates state inside its
-/// own python interpreter, so tests stay independent.
-///
-/// The bundle is also shared across *processes* (see [`cached_install_home`]):
-/// nextest runs one process per test, so a `LazyLock` alone re-renders the
-/// bundle 70+ times per suite. Rendering is not cheap. `get_tool_definitions`
-/// probes the host `ast-grep` with `--version` and `outline --help`, two real
-/// subprocess spawns, and Windows CI resolves `ast-grep` through an npm shim.
-struct SharedInstall {
-    home: PathBuf,
-    plugin_dir: PathBuf,
-    fake_tools_dir: PathBuf,
-    /// Set only on the fallback path, where the bundle could not be shared
-    /// and this process rendered a private copy that it must clean up.
-    _tempdir: Option<TempDir>,
+/// A Hermes install rendered for one check; dropping it removes the install.
+struct RenderedInstall {
+    home: TempDir,
 }
 
-/// Written last, so its presence means the bundle beside it is complete.
-const INSTALL_READY_MARKER: &str = ".tracedecay-hermes-install-ready";
-/// How long a process waits for a peer that is already rendering the bundle
-/// before giving up and rendering a private copy.
-const INSTALL_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
-/// A lock older than this outlived the run that took it, so it is stale.
-const INSTALL_LOCK_STALE_AFTER: Duration = Duration::from_secs(300);
-
-static SHARED_INSTALL: LazyLock<SharedInstall> = LazyLock::new(|| match cached_install_home() {
-    Some(home) => SharedInstall {
-        plugin_dir: plugin_dir_for(&home),
-        fake_tools_dir: fake_tools_dir_for(&home),
-        home,
-        _tempdir: None,
-    },
-    None => {
-        let tempdir = TempDir::new().unwrap();
-        render_install(tempdir.path()).unwrap();
-        SharedInstall {
-            home: tempdir.path().to_path_buf(),
-            plugin_dir: plugin_dir_for(tempdir.path()),
-            fake_tools_dir: fake_tools_dir_for(tempdir.path()),
-            _tempdir: Some(tempdir),
-        }
+impl RenderedInstall {
+    fn new() -> Self {
+        let home = TempDir::new().unwrap();
+        render_install(home.path()).unwrap();
+        Self { home }
     }
-});
+
+    fn plugin_dir(&self) -> PathBuf {
+        plugin_dir_for(self.home.path())
+    }
+}
 
 fn plugin_dir_for(home: &Path) -> PathBuf {
     home.join(".hermes/plugins/tracedecay")
@@ -128,7 +89,7 @@ fn fake_tools_dir_for(home: &Path) -> PathBuf {
     home.join("fake-tools")
 }
 
-/// Renders everything the checks read out of a shared install: the generated
+/// Renders everything the checks read out of an install: the generated
 /// Hermes plugin plus the immutable fake `tracedecay` binaries the subprocess
 /// failure-mode check executes.
 fn render_install(home: &Path) -> std::io::Result<()> {
@@ -159,99 +120,8 @@ fn render_install(home: &Path) -> std::io::Result<()> {
     write_fake_tracedecay_binaries(&fake_tools_dir_for(home))
 }
 
-/// Path of the machine-shared bundle for the current inputs, rendering it
-/// first if no complete bundle exists yet.
-///
-/// Returns `None` when the bundle cannot be shared (unwritable temp dir, a
-/// peer still rendering after [`INSTALL_WAIT_TIMEOUT`]); the caller then
-/// renders a private copy, which is exactly the old per-process behaviour.
-fn cached_install_home() -> Option<PathBuf> {
-    let root = std::env::temp_dir().join(format!("tracedecay-hermes-suite-{}", install_key()));
-    let ready = root.join(INSTALL_READY_MARKER);
-    if ready.is_file() {
-        return Some(root);
-    }
-
-    let lock = root.with_extension("lock");
-    if lock_is_stale(&lock) {
-        let _ = std::fs::remove_file(&lock);
-    }
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&lock)
-    {
-        Ok(_) => {
-            // A leftover directory here is a partial render from a run that
-            // died before publishing the marker; nobody can be reading it,
-            // because readers only ever follow the marker.
-            let _ = std::fs::remove_dir_all(&root);
-            let rendered =
-                render_install(&root).and_then(|()| std::fs::write(&ready, install_key()));
-            let _ = std::fs::remove_file(&lock);
-            rendered.ok()?;
-            Some(root)
-        }
-        Err(_) => wait_for_ready(&ready, &lock).then_some(root),
-    }
-}
-
-/// Every input that can change the rendered bundle: the generator build (this
-/// executable embeds the plugin templates), the binary path baked into
-/// `tools.py`, and the `ast-grep` image whose presence decides which tool
-/// definitions are rendered. Metadata only. Resolving the key must not spawn
-/// the subprocesses the shared bundle exists to avoid.
-fn install_key() -> String {
-    let mut hasher = DefaultHasher::new();
-    FIXTURE_TRACEDECAY_BIN.hash(&mut hasher);
-    let ast_grep = PathBuf::from(ast_grep_command().get_program());
-    for path in [std::env::current_exe().ok(), Some(ast_grep)]
-        .into_iter()
-        .flatten()
-    {
-        path.hash(&mut hasher);
-        file_identity(&path).hash(&mut hasher);
-    }
-    format!("{:016x}", hasher.finish())
-}
-
-fn file_identity(path: &Path) -> Option<(u64, Duration)> {
-    let metadata = std::fs::metadata(path).ok()?;
-    let modified = metadata
-        .modified()
-        .ok()?
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .ok()?;
-    Some((metadata.len(), modified))
-}
-
-fn lock_is_stale(lock: &Path) -> bool {
-    file_identity(lock)
-        .and_then(|(_, modified)| SystemTime::UNIX_EPOCH.checked_add(modified)?.elapsed().ok())
-        .is_some_and(|age| age > INSTALL_LOCK_STALE_AFTER)
-}
-
-/// Blocks until the peer holding `lock` publishes the ready marker.
-///
-/// The holder writes the marker before releasing the lock, so a lock that
-/// disappears with no marker means the render failed and waiting longer is
-/// pointless. The timeout only covers a holder killed outright.
-fn wait_for_ready(ready: &Path, lock: &Path) -> bool {
-    let deadline = Instant::now() + INSTALL_WAIT_TIMEOUT;
-    while Instant::now() < deadline {
-        if ready.is_file() {
-            return true;
-        }
-        if !lock.exists() {
-            return ready.is_file();
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    false
-}
-
 /// Fake `tracedecay` binaries for the subprocess failure-mode check, written
-/// once as part of the shared bundle.
+/// as part of each rendered install.
 ///
 /// `(file stem, POSIX body, Windows body)`. cmd.exe `echo` always appends a
 /// newline that POSIX `printf` does not, and a plain `echo text 1>&2` would
@@ -322,28 +192,25 @@ fn python_command() -> Command {
     Command::new(&*PYTHON)
 }
 
-/// Writes `script` into the shared plugin dir and runs it with a hermetic
-/// environment (isolated HOME, no HERMES_HOME/HERMES_PROFILE, no ambient
-/// LCM_* knobs), passing the plugin dir as argv[1].
+/// Writes `script` into a freshly rendered plugin dir and runs it with a
+/// hermetic environment (isolated HOME, no HERMES_HOME/HERMES_PROFILE, no
+/// ambient LCM_* knobs), passing the plugin dir as argv[1].
 fn run_python_check(script_name: &str, script: &str, failure_message: &str) {
-    let install = &*SHARED_INSTALL;
-    let script_path = install.plugin_dir.join(script_name);
-    // Script names are unique per check and their bodies are constants, so a
-    // matching file in a reused bundle is already this exact script. Skipping
-    // the rewrite keeps the shared plugin dir immutable across processes.
-    let already_written =
-        std::fs::read(&script_path).is_ok_and(|existing| existing == script.as_bytes());
-    if !already_written {
-        std::fs::write(&script_path, script).unwrap();
-    }
+    let install = RenderedInstall::new();
+    let plugin_dir = install.plugin_dir();
+    let script_path = plugin_dir.join(script_name);
+    std::fs::write(&script_path, script).unwrap();
 
     let mut command = python_command();
     command
         .arg(&script_path)
-        .arg(&install.plugin_dir)
+        .arg(&plugin_dir)
         // Isolate from the developer's real ~/.hermes.
-        .env("HOME", &install.home)
-        .env("TRACEDECAY_TEST_FAKE_TOOLS", &install.fake_tools_dir)
+        .env("HOME", install.home.path())
+        .env(
+            "TRACEDECAY_TEST_FAKE_TOOLS",
+            fake_tools_dir_for(install.home.path()),
+        )
         .env_remove("HERMES_HOME")
         .env_remove("HERMES_PROFILE");
     // Ambient LCM_* vars from the worker shell must not leak into the
@@ -1782,9 +1649,7 @@ spec.loader.exec_module(plugin)
 
 tools = plugin.tools
 
-# The fake binaries are part of the shared immutable fixture, generated once
-# per machine by the Rust harness rather than rewritten (and re-chmodded, and
-# on Windows rescanned and re-imaged) on every run of this check.
+# The fake binaries are rendered with the install by the Rust harness.
 def fake_binary(name):
     path = fake_tools / (f"{name}.cmd" if os.name == "nt" else name)
     assert path.is_file(), f"missing fake tracedecay fixture: {path}"
@@ -1942,9 +1807,9 @@ assert ctx.skills[0][1].name == "SKILL.md"
 #[test]
 fn generated_skill_mirrors_session_context_retrieval_contract() {
     let template = host_sources::HERMES_SKILL_MD;
+    let install = RenderedInstall::new();
     let installed =
-        std::fs::read_to_string(SHARED_INSTALL.plugin_dir.join("skills/tracedecay/SKILL.md"))
-            .unwrap();
+        std::fs::read_to_string(install.plugin_dir().join("skills/tracedecay/SKILL.md")).unwrap();
     // Every host skill must route to these operations and preserve these
     // response fields: they are the retrieval contract, not tool manual text.
     let shared_markers = [

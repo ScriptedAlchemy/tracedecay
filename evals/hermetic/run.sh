@@ -120,7 +120,7 @@ make_env_dir() {
 }
 
 # Write env.sh into an env dir so it can be sourced by `run`/`smoke` and by a
-# human debugging with --keep.
+# human debugging a `setup` env.
 write_env_file() {
   local env_dir="$1" staged_bin="$2"
   local home_dir="${env_dir}/home"
@@ -570,10 +570,9 @@ Common options:
   --model <name>        Model override (default: sonnet for claude; gpt-5.6-sol for codex).
   --reps <N>            Re-run the corpus N times (default: 1; `run` only).
   --debug               Reuse/produce a debug build instead of release (faster).
-  --keep                Do not tear down the env dir on exit.
 
 Examples:
-  run.sh smoke --agent claude --debug --keep
+  run.sh smoke --agent claude --debug
   run.sh setup --agent codex --debug
   run.sh run --agent claude --env-dir /tmp/eval-env-... --corpus my-corpus.jsonl --model sonnet
 EOF
@@ -584,7 +583,7 @@ main() {
   local sub="$1"; shift
 
   local env_dir="" project="${DEFAULT_PROJECT}" corpus="" model="" agent="claude"
-  local keep=0 reps=1
+  local reps=1
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --env-dir) env_dir="$2"; shift 2 ;;
@@ -594,7 +593,6 @@ main() {
       --model)   model="$2"; shift 2 ;;
       --reps)    reps="$2"; shift 2 ;;
       --debug)   export BUILD_DEBUG=1; shift ;;
-      --keep)    keep=1; shift ;;
       -h|--help) usage; exit 0 ;;
       *) die "unknown option: $1" ;;
     esac
@@ -666,20 +664,14 @@ print(json.dumps({
 PY
       run_corpus "${env_dir}" "${smoke_corpus}" "${model}" "${agent}" "${project}"
 
-      if [[ "${keep}" == "1" ]]; then
-        log "kept env dir: ${env_dir}"
-      elif [[ "${created}" == "1" ]]; then
+      if [[ "${created}" == "1" ]]; then
         rm -rf "${env_dir}"
-        log "removed env dir ${env_dir} (pass --keep to preserve)"
+        log "removed env dir ${env_dir}"
       fi
       ;;
 
     *) usage; exit 2 ;;
   esac
-
-  if [[ "${keep}" == "1" && -n "${env_dir}" && -d "${env_dir}" ]]; then
-    log "env preserved: ${env_dir}"
-  fi
 }
 
 main "$@"

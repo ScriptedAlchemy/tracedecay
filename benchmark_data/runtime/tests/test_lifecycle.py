@@ -475,37 +475,28 @@ class HostLifecycleTests(unittest.TestCase):
 
 
 class RunWorkspaceTests(unittest.TestCase):
-    def test_workspace_cleanup_and_preserve_on_failure_are_explicit(self) -> None:
+    def test_workspace_is_removed_after_success_and_after_failure(self) -> None:
         with tempfile.TemporaryDirectory(prefix="runtime-lifecycle-test-") as directory:
             root = Path(directory)
-            normal = lifecycle.RunWorkspace(root, preserve_on_failure=False)
+            normal = lifecycle.RunWorkspace(root)
             with normal:
                 normal_path = normal.path
                 (normal.path / "evidence.json").write_text("{}\n", encoding="utf-8")
+                self.assertTrue(normal_path.is_dir())
             self.assertFalse(normal_path.exists())
 
-            failed = lifecycle.RunWorkspace(root, preserve_on_failure=False)
+            failed = lifecycle.RunWorkspace(root)
             with self.assertRaisesRegex(RuntimeError, "failed"):
                 with failed:
                     failed_path = failed.path
-                    raise RuntimeError("failed")
-            self.assertFalse(failed_path.exists())
-
-            preserved = lifecycle.RunWorkspace(root, preserve_on_failure=True)
-            with self.assertRaisesRegex(RuntimeError, "preserve"):
-                with preserved:
-                    preserved_path = preserved.path
-                    (preserved.path / "evidence.json").write_text(
+                    (failed.path / "evidence.json").write_text(
                         json.dumps({"sample_count": 1}) + "\n",
                         encoding="utf-8",
                     )
-                    raise RuntimeError("preserve")
-            self.assertTrue(preserved_path.is_dir())
-            self.assertEqual(
-                json.loads((preserved_path / "evidence.json").read_text(encoding="utf-8")),
-                {"sample_count": 1},
-            )
-
+                    self.assertTrue(failed_path.is_dir())
+                    raise RuntimeError("failed")
+            self.assertFalse(failed_path.exists())
+            self.assertEqual(list(root.iterdir()), [])
 
 if __name__ == "__main__":
     unittest.main()

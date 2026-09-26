@@ -1,9 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::{Connection, TransactionBehavior};
@@ -129,8 +128,6 @@ pub struct LcmGcReport {
     pub totals: LcmGcTotals,
     pub last_gc_at: Option<i64>,
     pub last_error: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backup: Option<Value>,
 }
 
 impl LcmGcReport {
@@ -162,7 +159,6 @@ impl LcmGcReport {
             totals: LcmGcTotals::default(),
             last_gc_at: None,
             last_error: None,
-            backup: None,
         }
     }
 
@@ -545,12 +541,6 @@ pub async fn run_payload_gc_in_transaction(
     // marks, dangling placeholders).
     let dir = payload::existing_payload_dir_opt(storage_root)?;
     let all_metadata_refs = maintenance::all_payload_metadata_refs(conn).await?;
-
-    if apply && cfg.backup_before_reap && (dir.is_some() || !all_metadata_refs.is_empty()) {
-        report.backup = Some(
-            maintenance::backup_database(&gc_database_path(storage_root), storage_root).await?,
-        );
-    }
 
     let scoped_metadata_refs = payload_metadata_refs_for_scope(conn, provider, session_id).await?;
     let referenced = referenced_payload_refs(conn, provider, session_id).await?;
@@ -1260,18 +1250,6 @@ async fn upsert_gc_marks(
         conn.execute(&sql, values).await?;
     }
     Ok(())
-}
-
-fn gc_database_path(storage_root: &Path) -> PathBuf {
-    let sessions = storage_root.join("sessions.db");
-    if sessions.is_file() {
-        return sessions;
-    }
-    let global = storage_root.join("global.db");
-    if global.is_file() {
-        return global;
-    }
-    sessions
 }
 
 #[cfg(test)]

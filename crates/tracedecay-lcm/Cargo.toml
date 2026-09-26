@@ -28,15 +28,13 @@ tracing = "0.1"
 tracedecay-contracts = { path = "../tracedecay-contracts" }
 tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-privacy = { path = "../tracedecay-privacy" }
-tracedecay-private-fs = { path = "../tracedecay-private-fs" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
-tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime" }
 tracedecay-store = { path = "../tracedecay-store" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query" }
 
 [dev-dependencies]
-# The maintenance backup test verifies snapshots through a raw SQLite handle.
-rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
+# `test_support` seeds fixtures through a raw SQLite handle.
+rusqlite = { version = "0.40.1", default-features = false }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 # This crate's own test target needs the kernel's `db::engine::TestConnection`.

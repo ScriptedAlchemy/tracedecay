@@ -225,11 +225,13 @@ fn profile_large_registered_schema_convergence() {
         .build()
         .expect("schema convergence runtime");
 
+    let profiles = (0..SHARD_COUNT)
+        .map(|_| tempfile::tempdir().expect("temporary shard profile"))
+        .collect::<Vec<_>>();
     let runtimes = tokio.block_on(async {
         let mut runtimes = Vec::with_capacity(SHARD_COUNT);
-        for shard in 0..SHARD_COUNT {
-            let profile = tempfile::tempdir().expect("temporary shard profile");
-            let runtime = RegisteredGlobalDbTestRuntime::profile(profile.keep())
+        for (shard, profile) in profiles.iter().enumerate() {
+            let runtime = RegisteredGlobalDbTestRuntime::profile(profile.path())
                 .await
                 .expect("open registered shard");
             seed_authority_rows(&runtime, shard).await;
