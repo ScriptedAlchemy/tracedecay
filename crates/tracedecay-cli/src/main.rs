@@ -51,6 +51,7 @@ mod global;
 mod hook_capture_cmd;
 mod hook_cmd;
 mod lsp_cmd;
+mod macos_codesign;
 mod monitor_cmd;
 mod product_runtime;
 mod project_cmd;
@@ -1037,7 +1038,8 @@ impl CommandFamily {
             | Commands::HookKimiEvent
             | Commands::HookOpenCodeEvent
             | Commands::HookOpenCodeToolAfter
-            | Commands::HookPiEvent => Self::Hook,
+            | Commands::HookPiEvent
+            | Commands::HookDroidEvent => Self::Hook,
             Commands::Upgrade { .. }
             | Commands::Update { .. }
             | Commands::PostUpdate { .. }
@@ -1676,7 +1678,8 @@ async fn dispatch_hook_command(
         | Commands::HookKimiEvent
         | Commands::HookOpenCodeEvent
         | Commands::HookOpenCodeToolAfter
-        | Commands::HookPiEvent) => hook_cmd::handle_hook_command(hook_command).await?,
+        | Commands::HookPiEvent
+        | Commands::HookDroidEvent) => hook_cmd::handle_hook_command(hook_command).await?,
         _ => unreachable!("non-hook command passed to hook dispatcher"),
     };
     Ok(CommandOutcome::Exit(code))

@@ -225,14 +225,16 @@ impl StaticLanguageRegistry {
             // TypeScript v8 records same-module `export { a as b }` clauses as
             // forwarding evidence, and its per-file pass no longer binds calls
             // to test titles or to declarations outside the scope that shadows
-            // an import.
+            // an import. TypeScript v9 records `export default <name>` the same
+            // way and retains member calls on imported names, so default and
+            // namespace imports bind.
             // The C-comment docstring languages moved one revision when a
             // docstring stopped absorbing trailing or blank-line-detached
             // comments and `///` lost its stray `/`; QBasic dialects moved when
             // CONST names stopped losing their text before an underscore.
             let extractor_revision = match language.as_str() {
                 "rust" => 13,
-                "typescript" => 8,
+                "typescript" => 9,
                 "protobuf" => 7,
                 "sql" => 6,
                 "c" | "cpp" | "metal" | "objc" | "go" | "glsl" | "pascal" | "qbasic"

@@ -142,8 +142,62 @@ async fn typescript_monorepo_callers_and_file_dependents_bind_across_packages() 
         // reach: no invented edge, and the empty answer is disclosed.
         ("apps/web/src/decoys.ts::missing", Vec::new(), "partial"),
         ("apps/web/src/decoys.ts::gone", Vec::new(), "partial"),
-        // An external dependency (`react`) is not a coverage gap.
+        // An external dependency (`react`, also as `React.useState`) is not a
+        // coverage gap.
         ("apps/web/src/decoys.ts::useState", Vec::new(), "complete"),
+        // Default imports: `export default function` (also re-defaulted by
+        // `relay.ts`), `export default <name>`, `export { impl as default }`,
+        // and `export { default as welcome } from` reached by name and as a
+        // namespace member.
+        (
+            "apps/web/src/defaults/greet.ts::greet",
+            vec!["consumeDefaults"],
+            "complete",
+        ),
+        (
+            "apps/web/src/defaults/farewell.ts::farewell",
+            vec!["consumeDefaults"],
+            "complete",
+        ),
+        (
+            "apps/web/src/defaults/aliased.ts::aliasedImpl",
+            vec!["consumeDefaults"],
+            "complete",
+        ),
+        (
+            "apps/web/src/defaults/welcome.ts::welcome",
+            vec!["consumeDefaults"],
+            "complete",
+        ),
+        // Namespace member calls: `import * as`, a nested `export * as`
+        // behind the workspace package, and a named import of it.
+        (
+            "apps/web/src/tools.ts::sharpen",
+            vec!["consumeNamespaces"],
+            "complete",
+        ),
+        (
+            "packages/shared/src/strings.ts::upper",
+            vec!["consumeNamespaces"],
+            "complete",
+        ),
+        (
+            "packages/shared/src/strings.ts::lower",
+            vec!["consumeNamespaces"],
+            "complete",
+        ),
+        // `export *` never forwards `default`; a namespace without the member
+        // binds nothing. Both are disclosed.
+        (
+            "packages/shared/src/defaulted.ts::defaulted",
+            Vec::new(),
+            "partial",
+        ),
+        (
+            "apps/web/src/decoys.ts::absentMember",
+            Vec::new(),
+            "partial",
+        ),
     ] {
         let (names, evidence) = callers_evidence(&fixture, qualified_name).await;
         assert_eq!(names, expected_callers, "{qualified_name}: {evidence:#}");
@@ -183,6 +237,22 @@ async fn typescript_monorepo_callers_and_file_dependents_bind_across_packages() 
         json!(["apps/web/src/main.ts"]),
         "{evidence:#}"
     );
+
+    for file in [
+        "apps/web/src/defaults/welcome.ts",
+        "packages/shared/src/strings.ts",
+    ] {
+        let evidence = file_dependents_evidence(&fixture, file).await;
+        assert_eq!(
+            evidence["payload"]["dependent_files"],
+            json!(["apps/web/src/consumers.ts"]),
+            "{file}: {evidence:#}"
+        );
+        assert_eq!(
+            evidence["coverage"]["completeness"], "complete",
+            "{file}: {evidence:#}"
+        );
+    }
 
     let evidence = file_dependents_evidence(&fixture, "apps/web/src/decoys.ts").await;
     assert_eq!(

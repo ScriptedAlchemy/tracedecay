@@ -29,11 +29,10 @@ import type { WorkChannel } from './workChannel.ts';
  * What `operation.work.views` said, or the reason it said nothing.
  *
  * Shaped like `WorkAttemptReading` on purpose: a read is pending, refused, or
- * answered, and there is no fourth case and no empty default. The one
- * difference is that this read has no typed `absent`, the daemon conceals
- * absence and denial behind one 404, which `workRefusal` reports as `denied`,
- * so an absence arrives here as a refusal wearing that state rather than as an
- * answer.
+ * answered, and there is no fourth case and no empty default. An authorized
+ * selection with no graph yet is an answer, the daemon's `absent` mode, and
+ * arrives as a read whose page carries no entry; only a real denial arrives as
+ * a refusal.
  */
 export type WorkGraphReading =
   | { readonly state: 'pending' }
@@ -51,11 +50,11 @@ export type WorkGraphReading =
  * `entries` and `coverage` rather than folded into a channel, an average over
  * versions would be a number no version holds.
  *
- * `entry` is null exactly when a timeline came back with no entries in it. That
- * is a SUCCESS: a complete coverage of zero returned entries means the read
- * reached the authority and the authority had no version in the window. The
- * channels are absent under it, but absent with `complete_zero_findings`, never
- * with a failure state.
+ * `entry` is null exactly when a timeline came back with no entries in it, or
+ * the read answered `absent` because no graph exists yet. Both are SUCCESSES:
+ * the read reached the authority and the authority had no version to serve.
+ * The channels are absent under them, but absent with `complete_zero_findings`,
+ * never with a failure state.
  */
 export interface WorkGraphPage {
   readonly mode: WorkGraphReadV1['mode'];
@@ -120,6 +119,17 @@ export function workGraphReading(
           entry: newestEntry(read.timeline.entries),
           entries: read.timeline.entries.length,
           coverage: read.timeline.coverage,
+        },
+      };
+    case 'absent':
+      return {
+        state: 'read',
+        page: {
+          mode: read.mode,
+          scope: read.authorized_scope,
+          entry: null,
+          entries: 0,
+          coverage: null,
         },
       };
     default: {
@@ -201,12 +211,15 @@ export function graphChannelGap(
       };
     case 'read':
       // The honest success with nothing in it. The read reached the authority
-      // and the authority held no version in the window, which is a fact about
-      // the window rather than a failure of the read.
+      // and the authority held no version to serve, which is a fact about the
+      // graph or the window rather than a failure of the read.
       return {
         available: false,
         state: 'complete_zero_findings',
-        detail: `the work-product graph read returned no graph version at all, so there is no version for ${measure} to be a property of, this is the authority reporting an empty window, not a read that failed`,
+        detail:
+          reading.page.mode === 'absent'
+            ? `no Work graph exists yet, so there is no version for ${measure} to be a property of; create a task to start one`
+            : `the work-product graph read returned no graph version at all, so there is no version for ${measure} to be a property of, this is the authority reporting an empty window, not a read that failed`,
       };
     default: {
       const unhandled: never = reading;

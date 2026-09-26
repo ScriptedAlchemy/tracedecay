@@ -24044,7 +24044,7 @@
       ]
     },
     "StoreKeyV1": {
-      "description": "Logical name of one owner-profile store (for example `sessions.db`,\n`graph.db`, or `branches/feature-x`). Never an absolute on-disk path.",
+      "description": "Logical name of one owner-profile store (for example `sessions.db`,\n`graph.db`, or `projects/proj_x`). Never an absolute on-disk path.",
       "type": "string"
     },
     "StoreSizeSampleV1": {
@@ -28759,6 +28759,27 @@
             "authorized_scope",
             "selection_coverage",
             "timeline"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A `Current` or `AsOf` point read under an authorized selection that has\nno published graph version at that point: no task has been created yet.\nThe caller was authorized; the legal next action is creating a task.",
+          "properties": {
+            "authorized_scope": {
+              "$ref": "#/$defs/AuthorizedWorkProductScopeV1"
+            },
+            "mode": {
+              "const": "absent",
+              "type": "string"
+            },
+            "selection_coverage": {
+              "$ref": "#/$defs/WorkGraphSelectionCoverageV1"
+            }
+          },
+          "required": [
+            "mode",
+            "authorized_scope",
+            "selection_coverage"
           ],
           "type": "object"
         }

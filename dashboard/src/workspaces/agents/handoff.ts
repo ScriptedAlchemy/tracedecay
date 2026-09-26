@@ -62,6 +62,9 @@ export type AgentHandoffReading =
   | { readonly state: 'pending' }
   /** The daemon refused, or answered something this build cannot read. */
   | { readonly state: 'refused'; readonly chip: DomainStateKind; readonly detail: string }
+  /** The selection is authorized and no Work graph exists yet: there is no
+   * frontier to count, and the legal action is creating a task. */
+  | { readonly state: 'absent' }
   /** The graph answered. `handoffs` may be empty, which is a measurement. */
   | {
       readonly state: 'read';
@@ -105,6 +108,8 @@ export function latestGraphEntry(read: WorkGraphReadV1): {
       const entry = read.timeline.entries[read.timeline.entries.length - 1];
       return entry ? { entry, fromTimeline: true } : null;
     }
+    case 'absent':
+      return null;
     default: {
       const unhandled: never = read;
       return unhandled;
@@ -162,6 +167,7 @@ export function readHandoffFrontier(
   if (result.outcome === 'refused') {
     return { state: 'refused', chip: result.state, detail: result.detail };
   }
+  if (result.value.mode === 'absent') return { state: 'absent' };
   const latest = latestGraphEntry(result.value);
   if (latest === null) {
     return {

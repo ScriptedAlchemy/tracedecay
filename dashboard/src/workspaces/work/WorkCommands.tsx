@@ -302,7 +302,8 @@ function integer(value: string): number | undefined {
 function currentWorkSelection(
   graph: WorkResult<WorkGraphReadV1> | undefined,
 ): WorkProductSelectionScopeV1 | undefined {
-  if (graph?.outcome !== 'value' || graph.value.mode !== 'current') return undefined;
+  if (graph?.outcome !== 'value') return undefined;
+  if (graph.value.mode !== 'current' && graph.value.mode !== 'absent') return undefined;
   return graph.value.authorized_scope.selection;
 }
 

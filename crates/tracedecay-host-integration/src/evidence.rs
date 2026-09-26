@@ -189,6 +189,15 @@ pub(crate) const HOST_REGISTRATIONS: &[HostRegistrationDescriptor] = host_regist
         Cli => "plugin/pi/index.ts",
         Hook => "plugin/pi/index.ts",
     }
+    // Factory Droid carries two routes: the `mcpServers.tracedecay` entry
+    // that `droid mcp add` writes into the host-owned `~/.factory/mcp.json`,
+    // and the managed SessionStart / Stop merge into `~/.factory/hooks.json`
+    // whose payloads the checked-in `droid.json` fixture proves.
+    FactoryDroid {
+        Cli => "src/tool_command.rs",
+        Hook => "src/agents/droid.rs",
+        Mcp => "src/agents/droid.rs",
+    }
 };
 
 /// Registration routes and their evidence for one stock host, used by
@@ -426,6 +435,15 @@ pub fn stock_host_native_fixture_evidence_from_embedded_assets(
             "session_start,agent_end",
             &["saved_edit"][..],
         ),
+        // The captured Droid fixtures prove the session boundaries the
+        // integration deploys (`SessionStart`, `Stop`); no tool-lifecycle
+        // event was captured, so the edit boundary stays unclaimed.
+        HostKindV1::FactoryDroid => (
+            "droid",
+            "crates/tracedecay-hooks/fixtures/host_events/droid.json",
+            "SessionStart,Stop",
+            &[][..],
+        ),
         HostKindV1::CursorCloud
         | HostKindV1::Devin
         | HostKindV1::Zed
@@ -543,6 +561,7 @@ pub fn native_host_edit_stop_conformance_evidence_from_embedded_assets(
         HostKindV1::KimiCode,
         HostKindV1::OpenCode,
         HostKindV1::Pi,
+        HostKindV1::FactoryDroid,
     ]
     .into_iter()
     .filter_map(|host| stock_host_native_fixture_evidence_from_embedded_assets(assets, host))

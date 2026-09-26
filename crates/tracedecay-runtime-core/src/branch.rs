@@ -109,12 +109,7 @@ pub fn current_branch(project_root: &Path) -> Option<String> {
     {
         record_live_branch_resolution(project_root);
     }
-    crate::git_repository::GitRepositoryAuthority::discover(project_root)
-        .ok()?
-        .head()
-        .ok()?
-        .branch()
-        .map(str::to_owned)
+    crate::git_repository::GitRepositoryAuthority::current_branch(project_root)
 }
 
 /// Live HEAD of one checkout.
@@ -154,8 +149,8 @@ pub fn checkout_head(project_root: &Path) -> Option<CheckoutHead> {
 
 /// One live-branch resolution, scoped to a single request or write gate.
 ///
-/// [`current_branch`] opens a `gix` repository and, for linked worktrees,
-/// spawns `git symbolic-ref`. A single request can cross several drift checks
+/// [`current_branch`] stats HEAD and reopens the repository whenever HEAD was
+/// replaced. A single request can cross several drift checks
 /// and write gates, each of which used to pay that cost again. A `BranchMemo`
 /// is created at the request or gate entry, threaded down, and dropped with
 /// the request.
@@ -351,7 +346,59 @@ pub fn resolve_branch_db_path(
 
 #[cfg(test)]
 mod branch_memo_tests {
+    use std::path::Path;
+
     use super::BranchMemo;
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    /// Repeated reads reuse the last HEAD answer, so a checkout between two
+    /// reads must still be observed on the very next one, in the main
+    /// checkout and in a linked worktree's own HEAD.
+    #[test]
+    fn current_branch_observes_every_checkout_immediately() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).expect("repository directory");
+        let root = root.canonicalize().expect("canonical repository");
+        run_git(&root, &["init", "--quiet", "--initial-branch=main"]);
+        run_git(&root, &["commit", "--quiet", "--allow-empty", "-m", "base"]);
+        assert_eq!(super::current_branch(&root).as_deref(), Some("main"));
+        assert_eq!(super::current_branch(&root).as_deref(), Some("main"));
+
+        run_git(&root, &["checkout", "--quiet", "-b", "feature"]);
+        assert_eq!(super::current_branch(&root).as_deref(), Some("feature"));
+        run_git(&root, &["checkout", "--quiet", "--detach"]);
+        assert_eq!(super::current_branch(&root), None);
+        run_git(&root, &["checkout", "--quiet", "main"]);
+        assert_eq!(super::current_branch(&root).as_deref(), Some("main"));
+
+        let linked = temp.path().join("linked");
+        run_git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "side",
+                linked.to_str().expect("utf-8"),
+            ],
+        );
+        let linked = linked.canonicalize().expect("linked worktree");
+        assert_eq!(super::current_branch(&linked).as_deref(), Some("side"));
+        run_git(&linked, &["checkout", "--quiet", "-b", "side-two"]);
+        assert_eq!(super::current_branch(&linked).as_deref(), Some("side-two"));
+        assert_eq!(super::current_branch(&root).as_deref(), Some("main"));
+    }
 
     /// A memo answers repeated reads of its own root from one resolution, and
     /// refuses to answer for a different root, a different repository is a

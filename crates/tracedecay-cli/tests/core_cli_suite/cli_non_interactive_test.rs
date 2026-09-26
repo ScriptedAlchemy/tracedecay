@@ -738,8 +738,11 @@ fn explicit_kimi_install_fails_with_interactive_remediation() {
     assert!(!kimi_home.join("plugins/installed.json").exists());
 }
 
+/// Kimi Code activates only through its interactive `/plugins` step, so a
+/// detected install reports that host, exits with the operator-action status,
+/// and still installs every other detected host.
 #[test]
-fn detected_install_continues_past_a_failing_host_and_reports_it() {
+fn detected_install_continues_past_a_host_waiting_on_the_operator() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let home_path = canonical_temp_path(home.path());
@@ -758,13 +761,16 @@ fn detected_install_continues_past_a_failing_host_and_reports_it() {
     let output = run_with_timeout(install, cli_timeout());
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !output.status.success(),
-        "a failed host must fail the pass\nstderr:\n{stderr}"
+    // 75 is the lifecycle status for "nothing failed, but a host still needs
+    // an interactive operator step" (`EX_TEMPFAIL`).
+    assert_eq!(
+        output.status.code(),
+        Some(75),
+        "a host waiting on an operator step exits with the operator-action status\nstderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("agent install failed for: kimi"),
-        "{stderr}"
+        stderr.contains("kimi") && stderr.contains("pending operator action"),
+        "the pass must name the host that still needs an operator step\nstderr:\n{stderr}"
     );
     assert!(
         home_path.join(".vibe/config.toml").is_file(),

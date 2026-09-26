@@ -12,7 +12,7 @@ use tracedecay_domain::{
 
 use crate::{
     ApplicationProblem, RequestContext, WorkGraphReadPortV1, WorkGraphReadRequestV1,
-    WorkGraphReadV1, WorkProductApplicationErrorV1, WorkProductAttemptAdmissionErrorV1,
+    WorkProductApplicationErrorV1, WorkProductAttemptAdmissionErrorV1,
     WorkProductAttemptAdmissionOutcomeV1, WorkProductAttemptAdmissionPortV1,
     WorkProductAttemptAdmissionV1, WorkProductAuthorizedRelationScopeV1, WorkProductBindingV1,
     WorkProductEventDraftV1, WorkProductOwnerAuthorizationErrorV1,
@@ -121,12 +121,13 @@ where
             WorkProductApplicationErrorV1::SelectionCoverageIncomplete,
         ));
     }
-    let WorkGraphReadV1::Current { snapshot, .. } = read else {
-        return Err(ApplicationProblem::unavailable(crate::SafeDiagnostic {
+    let snapshot = read.into_current_snapshot().map_err(|error| match error {
+        WorkProductApplicationErrorV1::NotFoundOrNotAuthorized => product_problem(error),
+        _ => ApplicationProblem::unavailable(crate::SafeDiagnostic {
             code: "application.work-attempt.product-read-unavailable".to_owned(),
             message: "The canonical Work product graph is unavailable.".to_owned(),
-        }));
-    };
+        }),
+    })?;
     Ok(CurrentWorkProductAttemptGraphV1 {
         context: product_context,
         verified: snapshot.verified_version().clone(),

@@ -472,6 +472,13 @@ pub enum WorkGraphReadV1 {
         selection_coverage: WorkGraphSelectionCoverageV1,
         timeline: WorkGraphTimelineV1,
     },
+    /// A `Current` or `AsOf` point read under an authorized selection that has
+    /// no published graph version at that point: no task has been created yet.
+    /// The caller was authorized; the legal next action is creating a task.
+    Absent {
+        authorized_scope: AuthorizedWorkProductScopeV1,
+        selection_coverage: WorkGraphSelectionCoverageV1,
+    },
 }
 
 impl WorkGraphReadV1 {
@@ -488,6 +495,9 @@ impl WorkGraphReadV1 {
                 authorized_scope, ..
             }
             | Self::Forensic {
+                authorized_scope, ..
+            }
+            | Self::Absent {
                 authorized_scope, ..
             } => authorized_scope,
         }
@@ -510,6 +520,9 @@ impl WorkGraphReadV1 {
             }
             | Self::Forensic {
                 selection_coverage, ..
+            }
+            | Self::Absent {
+                selection_coverage, ..
             } => selection_coverage,
         }
     }
@@ -521,6 +534,22 @@ impl WorkGraphReadV1 {
             }
             Self::Evolution { timeline, .. } | Self::Forensic { timeline, .. } => {
                 timeline.entries()
+            }
+            Self::Absent { .. } => &[],
+        }
+    }
+
+    /// The snapshot of a `Current` read, for callers that act on a named task.
+    /// An absent graph holds no task, so it answers not-found; any other mode
+    /// was never requested and marks the graph authority unavailable.
+    pub fn into_current_snapshot(
+        self,
+    ) -> Result<WorkGraphVersionEntryV1, WorkProductApplicationErrorV1> {
+        match self {
+            Self::Current { snapshot, .. } => Ok(snapshot),
+            Self::Absent { .. } => Err(WorkProductApplicationErrorV1::NotFoundOrNotAuthorized),
+            Self::AsOf { .. } | Self::Evolution { .. } | Self::Forensic { .. } => {
+                Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable)
             }
         }
     }
@@ -648,22 +677,20 @@ where
             },
         ]))
         .map_err(|_| WorkProductApplicationErrorV1::InvalidRequest)?;
-        let read = match self.read_graph(
+        match self.read_graph(
             context,
             WorkGraphReadRequestV1::current(selection, observed_at),
-        ) {
-            Ok(read) => read,
-            Err(WorkProductApplicationErrorV1::NotFoundOrNotAuthorized) => {
-                return Ok(WorkAttemptTopologyStateV1::Absent);
+        )? {
+            WorkGraphReadV1::Current { snapshot, .. } => Ok(WorkAttemptTopologyStateV1::Verified(
+                work_product_attempt_topology_binding(&snapshot)?,
+            )),
+            WorkGraphReadV1::Absent { .. } => Ok(WorkAttemptTopologyStateV1::Absent),
+            WorkGraphReadV1::AsOf { .. }
+            | WorkGraphReadV1::Evolution { .. }
+            | WorkGraphReadV1::Forensic { .. } => {
+                Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable)
             }
-            Err(error) => return Err(error),
-        };
-        let WorkGraphReadV1::Current { snapshot, .. } = read else {
-            return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
-        };
-        Ok(WorkAttemptTopologyStateV1::Verified(
-            work_product_attempt_topology_binding(&snapshot)?,
-        ))
+        }
     }
 }
 
@@ -705,6 +732,9 @@ pub(crate) fn validate_result(
         ) | (
             WorkGraphReadModeV1::Forensic { .. },
             WorkGraphReadV1::Forensic { .. }
+        ) | (
+            WorkGraphReadModeV1::Current | WorkGraphReadModeV1::AsOf { .. },
+            WorkGraphReadV1::Absent { .. }
         )
     );
     if !mode_matches {

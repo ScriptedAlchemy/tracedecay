@@ -20,6 +20,7 @@ pub enum NativeHostIdentityV1 {
     KimiCode,
     OpenCode,
     Pi,
+    FactoryDroid,
 }
 
 impl NativeHostIdentityV1 {
@@ -37,6 +38,7 @@ impl NativeHostIdentityV1 {
             Self::KimiCode => HostKindV1::KimiCode,
             Self::OpenCode => HostKindV1::OpenCode,
             Self::Pi => HostKindV1::Pi,
+            Self::FactoryDroid => HostKindV1::FactoryDroid,
         }
     }
 
@@ -58,6 +60,7 @@ impl NativeHostIdentityV1 {
             Self::KimiCode => "kimi",
             Self::OpenCode => "opencode",
             Self::Pi => "pi",
+            Self::FactoryDroid => "droid",
         }
     }
 }
@@ -210,6 +213,7 @@ impl HostKindV1 {
             Self::KimiCode => Some(NativeHostIdentityV1::KimiCode),
             Self::OpenCode => Some(NativeHostIdentityV1::OpenCode),
             Self::Pi => Some(NativeHostIdentityV1::Pi),
+            Self::FactoryDroid => Some(NativeHostIdentityV1::FactoryDroid),
         }
     }
 
@@ -421,6 +425,18 @@ pub fn host_descriptor_v1(host: HostKindV1) -> HostDescriptorV1 {
             "pi",
             Native(NativeHostIdentityV1::Pi),
             vec![Core, Agent],
+            ManagedEmbedded,
+            Managed,
+            HostProjectRegistrationPathV1::Unavailable,
+        ),
+        // Factory Droid's `droid mcp add|remove` registry owns the MCP
+        // document; TraceDecay drives the commands and owns only the
+        // receipt-backed component descriptor, Copilot's shape exactly.
+        HostKindV1::FactoryDroid => (
+            "droid",
+            "factory-droid",
+            Native(NativeHostIdentityV1::FactoryDroid),
+            vec![Core, ContextMcp],
             ManagedEmbedded,
             Managed,
             HostProjectRegistrationPathV1::Unavailable,

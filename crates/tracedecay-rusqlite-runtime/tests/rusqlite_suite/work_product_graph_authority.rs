@@ -486,15 +486,24 @@ fn current_read_at_an_earlier_observation_excludes_later_published_versions() {
 }
 
 #[test]
-fn an_owner_with_no_journal_has_no_current_graph_but_an_explicitly_empty_timeline() {
+fn an_owner_with_no_journal_has_an_absent_current_graph_and_an_explicitly_empty_timeline() {
     let store = RegisteredWorkStore::start("work-product-empty");
 
     // A point read of a version that was never published is an absence, not a
     // zero: a verified version identity requires a real event sequence, so
-    // there is no representable empty current graph to answer with.
+    // there is no representable empty current graph. The caller is
+    // authorized, so the absence is an answer under its scope, not a denial.
+    let WorkGraphReadV1::Absent {
+        authorized_scope,
+        selection_coverage,
+    } = read_current(&store).expect("an authorized read of no graph is answered")
+    else {
+        panic!("an unpublished graph must read as absent");
+    };
+    assert_eq!(authorized_scope.selection(), &repository_selection());
     assert_eq!(
-        read_current(&store).expect_err("an unpublished graph has no current version"),
-        WorkProductApplicationErrorV1::NotFoundOrNotAuthorized
+        selection_coverage,
+        WorkGraphSelectionCoverageV1::Complete { covered_events: 0 }
     );
 
     // A range read's zero state IS representable, so it is answered as an
@@ -565,8 +574,9 @@ fn a_selection_that_covers_no_event_has_no_current_version() {
     // The journal was written under a repository relation scope from its very
     // first event, so a no-Git selection covers none of it. `Current` is a
     // point read of a version and there is no version inside this selection to
-    // read, which is exactly the absence an empty journal reports.
-    let refused = reads(&store)
+    // read, which is the absence an empty journal reports, disclosing the
+    // excluded event so it cannot be mistaken for an empty journal.
+    let read = reads(&store)
         .read_graph(
             &context(),
             WorkGraphReadRequestV1::current(
@@ -574,10 +584,20 @@ fn a_selection_that_covers_no_event_has_no_current_version() {
                 PROJECTED_AT,
             ),
         )
-        .expect_err("a selection covering no event has no current version");
+        .expect("a selection covering no event is answered");
+    let WorkGraphReadV1::Absent {
+        selection_coverage, ..
+    } = read
+    else {
+        panic!("a selection covering no event has no current version: {read:?}");
+    };
     assert_eq!(
-        refused,
-        WorkProductApplicationErrorV1::NotFoundOrNotAuthorized
+        selection_coverage,
+        WorkGraphSelectionCoverageV1::Partial {
+            covered_events: 0,
+            excluded_events: 1,
+            first_excluded_sequence: WorkProductEventSequenceV1::new(1).unwrap(),
+        }
     );
 }
 
@@ -841,9 +861,10 @@ fn a_tampered_journal_without_its_verified_version_is_not_readable() {
             .expect("drop the published version");
     });
 
+    // Not absent either: events exist, so "no graph yet" would be untrue.
     assert_eq!(
         read_current(&store).expect_err("an unverified event is not a readable graph"),
-        WorkProductApplicationErrorV1::NotFoundOrNotAuthorized
+        WorkProductApplicationErrorV1::GraphAuthorityUnavailable
     );
     assert_eq!(store.count("work_product_events_v1"), 1);
 }

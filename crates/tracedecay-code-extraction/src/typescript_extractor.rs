@@ -265,6 +265,7 @@ impl TypeScriptExtractor {
 
         let start_line = node.start_position().row as u32;
         imports::visit_reexport(state, node);
+        imports::visit_default_export(state, node);
 
         let mut cursor = node.walk();
         if cursor.goto_first_child() {

@@ -42,7 +42,11 @@ import { WorkTimelineView } from './views/WorkTimelineView.tsx';
 import { WorkTopologyView } from './views/WorkTopologyView.tsx';
 import { WorkWorkloadView } from './views/WorkWorkloadView.tsx';
 import type { WorkResult } from './workApi.ts';
-import { currentWorkProductView, type WorkProductView } from './workProductView.ts';
+import {
+  currentWorkProductView,
+  type WorkProductView,
+  type WorkProductViewResult,
+} from './workProductView.ts';
 import { workDagReading } from './workViewsModel.ts';
 
 /**
@@ -230,12 +234,15 @@ function RegisterCell({
 
 function graphRegister(
   pending: boolean,
-  result: WorkResult<WorkProductView> | undefined,
+  result: WorkProductViewResult | undefined,
 ): { tone: string | null; text: string; state: DomainStateKind } {
   if (pending) return { tone: 'bg-state-loading', text: 'reading', state: 'loading' };
   if (result === undefined) return { tone: null, text: 'unread', state: 'unknown' };
   if (result.outcome === 'refused') {
     return { tone: 'bg-state-error', text: result.state.replaceAll('_', ' '), state: result.state };
+  }
+  if (result.outcome === 'absent') {
+    return { tone: 'bg-state-complete-zero', text: 'no graph yet', state: 'complete_zero_findings' };
   }
   return {
     tone: result.value.projections.length === 0 ? 'bg-state-complete-zero' : 'bg-state-ready',
@@ -257,7 +264,7 @@ function WorkRegister({
   projection,
 }: {
   pending: boolean;
-  result: WorkResult<WorkProductView> | undefined;
+  result: WorkProductViewResult | undefined;
   selected: string | null;
   projection: WorkProjectionKind;
 }) {
@@ -409,6 +416,18 @@ export function WorkPage() {
                   </Panel>
                 ) : null}
 
+                {result?.outcome === 'absent' ? (
+                  <Panel legend="Work read model">
+                    <div data-work-graph="absent">
+                      <StateChip kind="complete_zero_findings" detail="no Work graph yet" />
+                      <p className="mt-1 text-3xs text-text-muted">
+                        This selection is authorized and holds no task yet. Create a task to
+                        start the Work graph.
+                      </p>
+                    </div>
+                  </Panel>
+                ) : null}
+
                 {value === undefined ? null : (
                   <WorkProjectionView
                     kind={concurrent.active}
@@ -432,7 +451,9 @@ export function WorkPage() {
             </div>
 
             <div className="flex min-w-0 flex-col gap-3" data-work-inspector-column>
-              {value === undefined ? (
+              {result?.outcome === 'absent' ? (
+                <WorkCreate graph={graph.data} />
+              ) : value === undefined ? (
                 <Panel legend="Selected task">
                   {graph.isPending ? (
                     <StateChip kind="loading" detail="the inspector opens once the graph read answers" />

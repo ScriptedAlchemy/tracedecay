@@ -765,11 +765,13 @@ fn inline_terminal_wire_shape_is_rejected_without_rewrite() {
     let Err(error) = reserve_or_replay_blocking(&path, admitted) else {
         panic!("inline terminal journal must be rejected")
     };
+    let (authority, reason) = error
+        .reset_required_context()
+        .unwrap_or_else(|| panic!("inline terminal journal must be a typed reset: {error:?}"));
+    assert_eq!(authority, "automation effect journal");
     assert!(
-        error
-            .to_string()
-            .contains(r#"string "terminal", expected "state" or "value""#),
-        "unexpected rejection: {error}"
+        reason.contains(r#"string "terminal", expected "state" or "value""#),
+        "{reason}"
     );
     assert_eq!(std::fs::read(&path).expect("preserved bytes"), inline);
     assert!(!terminal_sidecar_path(&path).expect("sidecar").exists());
@@ -3188,6 +3190,57 @@ async fn cancelled_after_admission_does_not_reserve_journal() {
             .is_empty(),
         "cancelled run must not enter the pending journal index"
     );
+}
+
+#[tokio::test]
+async fn released_fact_proposal_history_is_a_typed_reset_before_reservation() {
+    for released in ["fact_proposals.json", "fact_proposals.archive"] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (authority, _, _) = retained_external_authority(
+            temp.path(),
+            external_admission("run.fixture-proposals", "request.fixture-proposals"),
+        );
+        let context = authority.context.clone();
+        let cancellation = authority.cancellation.clone();
+        let configuration_digest = authority.admission.configuration_digest.clone();
+        authority
+            .abandon_uncommitted()
+            .await
+            .expect("abandon fixture reservation");
+        let released_path = temp.path().join(released);
+        let bytes = br#"{"schema_version":1,"proposals":[{"add_fact_request":{"source_label":"reflector"}}]}"#;
+        std::fs::write(&released_path, bytes).expect("released proposal history");
+
+        let request = session_reflector_admission("run.proposals", "request.proposals").request;
+        let journal_path = canonical_journal_path(temp.path(), &request.run_id);
+        let Err(error) = Box::pin(AutomationEffectAuthority::prepare(
+            AdmittedAutomationEffectRequest {
+                context: context.clone(),
+                cancellation,
+                observed_at: UtcMicros(2),
+                configuration_digest,
+                request,
+                dashboard_root: temp.path().to_path_buf(),
+            },
+            || {
+                Ok(FactOwnerV1::Project {
+                    project_id: context.scope().project_id.clone(),
+                })
+            },
+            |_, _| async { Err(contract_error("a refused admission must not read receipts")) },
+        ))
+        .await
+        else {
+            panic!("released proposal history must refuse admission")
+        };
+        let (authority, reason) = error.reset_required_context().unwrap_or_else(|| {
+            panic!("released proposal history must be a typed reset: {error:?}")
+        });
+        assert_eq!(authority, "automation fact proposal store");
+        assert!(reason.contains(released), "{reason}");
+        assert!(!journal_path.exists(), "a refused run reserves no journal");
+        assert_eq!(std::fs::read(&released_path).expect("preserved"), bytes);
+    }
 }
 
 #[tokio::test]

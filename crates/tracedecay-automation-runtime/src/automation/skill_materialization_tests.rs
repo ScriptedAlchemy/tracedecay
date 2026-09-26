@@ -184,3 +184,83 @@ fn interrupted_manifest_atomic_write_keeps_v1_authoritative_and_public_retry_com
     assert!(!pending_path.exists());
     assert_eq!(child_names(&dir), baseline_children);
 }
+
+/// Rewrites a materialized package into the released pre-package-hash shape:
+/// no manifest, and a `content-hash` recording the body-only hash.
+fn rewrite_as_released_body_hash_package(dir: &Path, body_edit: Option<&str>) -> Vec<u8> {
+    fs::remove_file(dir.join(MATERIALIZATION_MANIFEST_FILE)).unwrap();
+    let contents = fs::read_to_string(dir.join(SKILL_FILE)).unwrap();
+    let after_open = contents.strip_prefix("---\n").unwrap();
+    let close_at = after_open.find("\n---\n").unwrap();
+    let region = &after_open[close_at + "\n---\n".len()..];
+    let body = region.strip_prefix('\n').unwrap_or(region);
+    let body = body.strip_suffix('\n').unwrap_or(body);
+    let recorded = contents
+        .lines()
+        .find_map(|line| line.strip_prefix("content-hash: "))
+        .unwrap()
+        .to_owned();
+    let mut released = contents.replacen(
+        &format!("content-hash: {recorded}\n"),
+        &format!("content-hash: {}\n", sha256_bytes(body.as_bytes())),
+        1,
+    );
+    if let Some(edit) = body_edit {
+        released.push_str(edit);
+    }
+    fs::write(dir.join(SKILL_FILE), &released).unwrap();
+    released.into_bytes()
+}
+
+#[test]
+fn released_body_hash_package_is_a_typed_reset_not_a_user_fork() {
+    let host_io = production_host_io();
+    let temp = tempfile::tempdir().unwrap();
+    let scope = MaterializationScope::global(MaterializationHost::Claude, temp.path().join("home"));
+    let skill = active_skill("# v1\n\nReleased body-hash package.");
+    materialize_skill(&host_io, &scope, &skill, INSTALLATION).unwrap();
+    let dir = scope.skill_dir(&skill.host_skill_slug());
+    let released = rewrite_as_released_body_hash_package(&dir, None);
+
+    let errors = [
+        materialize_skill(&host_io, &scope, &skill, INSTALLATION).unwrap_err(),
+        remove_materialized_skill(&host_io, &scope, &skill.host_skill_slug(), INSTALLATION)
+            .unwrap_err(),
+    ];
+    for error in errors {
+        let (authority, reason) = error
+            .reset_required_context()
+            .unwrap_or_else(|| panic!("released package must be a typed reset: {error:?}"));
+        assert_eq!(authority, "materialized skill package");
+        assert!(reason.contains("body-hash package"), "{reason}");
+    }
+    assert_eq!(fs::read(dir.join(SKILL_FILE)).unwrap(), released);
+    assert!(!dir.join(MATERIALIZATION_MANIFEST_FILE).exists());
+
+    fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(
+        materialize_skill(&host_io, &scope, &skill, INSTALLATION)
+            .unwrap()
+            .action,
+        MaterializeAction::Written,
+        "deleting the refused package is the reset"
+    );
+}
+
+#[test]
+fn edited_released_body_hash_package_stays_a_user_fork() {
+    let host_io = production_host_io();
+    let temp = tempfile::tempdir().unwrap();
+    let scope = MaterializationScope::global(MaterializationHost::Claude, temp.path().join("home"));
+    let skill = active_skill("# v1\n\nReleased body-hash package.");
+    materialize_skill(&host_io, &scope, &skill, INSTALLATION).unwrap();
+    let dir = scope.skill_dir(&skill.host_skill_slug());
+    rewrite_as_released_body_hash_package(&dir, Some("\nOperator edit.\n"));
+
+    assert_eq!(
+        materialize_skill(&host_io, &scope, &skill, INSTALLATION)
+            .unwrap()
+            .action,
+        MaterializeAction::SkippedForked
+    );
+}

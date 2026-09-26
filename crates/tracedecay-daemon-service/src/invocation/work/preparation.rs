@@ -149,9 +149,7 @@ pub(super) fn prepare_execution_snapshot(
             tracedecay_contracts::WorkProductApplicationErrorV1::SelectionCoverageIncomplete,
         ));
     }
-    let tracedecay_contracts::WorkGraphReadV1::Current { snapshot, .. } = read else {
-        return Err(work_product_authority_unavailable());
-    };
+    let snapshot = read.into_current_snapshot().map_err(work_product_problem)?;
     let tracedecay_contracts::WorkProductExpectedAuthorityV1::Verified { verified_version } =
         &request.mutation.expected_authority
     else {
@@ -275,14 +273,7 @@ pub(super) fn current_work_product_snapshot(
         tracedecay_contracts::WorkGraphReadRequestV1::current(selection, observed_at),
     )
     .map_err(work_product_problem)?;
-    match read {
-        tracedecay_contracts::WorkGraphReadV1::Current { snapshot, .. } => Ok(snapshot),
-        tracedecay_contracts::WorkGraphReadV1::AsOf { .. }
-        | tracedecay_contracts::WorkGraphReadV1::Evolution { .. }
-        | tracedecay_contracts::WorkGraphReadV1::Forensic { .. } => {
-            Err(work_product_authority_unavailable())
-        }
-    }
+    read.into_current_snapshot().map_err(work_product_problem)
 }
 
 pub(super) fn decide_product_proposal(

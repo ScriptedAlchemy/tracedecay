@@ -107,9 +107,17 @@ fn store_response_handle_locked(
         expires_at: now.saturating_add(RESPONSE_HANDLE_TTL_SECS),
         content: content.to_owned(),
     };
-    let payload = serde_json::to_vec_pretty(&stored)?;
-
     let rollback_payload = match lookup_record(root, &handle, now) {
+        // The handle is the content digest, so an identical record with at
+        // least half its lifetime left already answers this store. Renewing
+        // it only once that half has passed keeps every issued handle valid
+        // for half a TTL without a durable write per repeated response.
+        Ok(ResponseHandleLookup::Found(existing))
+            if existing.content == stored.content
+                && existing.expires_at.saturating_sub(now) >= RESPONSE_HANDLE_TTL_SECS / 2 =>
+        {
+            return Ok(existing);
+        }
         Ok(ResponseHandleLookup::Found(existing)) if existing.content == stored.content => {
             Some(serde_json::to_vec_pretty(&StoredResponseHandleRecord {
                 created_at: existing.created_at,
@@ -135,6 +143,7 @@ fn store_response_handle_locked(
         Err(error) if is_corrupt_record_error(&error) => None,
         Err(error) => return Err(error),
     };
+    let payload = serde_json::to_vec_pretty(&stored)?;
     if let Err(error) = publish_record_durable(root, &path, &payload) {
         if let Some(rollback_payload) = rollback_payload {
             return match publish_record_durable(root, &path, &rollback_payload) {
@@ -569,7 +578,7 @@ fn is_corrupt_record_error(error: &TraceDecayError) -> bool {
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
     use std::sync::{Arc, Barrier};
 
     use super::*;
@@ -920,6 +929,39 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn repeated_identical_store_reuses_the_record_without_writing() {
+        let root = tempfile::tempdir().unwrap();
+        let first = store_response_handle(root.path(), "same search", 10).unwrap();
+        let path = response_handle_path(root.path(), &first.handle).unwrap();
+        let written = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let second = store_response_handle(root.path(), "same search", 20);
+
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let second = second.expect("an identical live record answers without a write");
+        assert_eq!(second.handle, first.handle);
+        assert_eq!(second.expires_at, first.expires_at);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            written
+        );
+
+        let renewed = store_response_handle(
+            root.path(),
+            "same search",
+            10 + RESPONSE_HANDLE_TTL_SECS / 2 + 1,
+        )
+        .unwrap();
+        assert_eq!(renewed.handle, first.handle);
+        assert!(
+            renewed.expires_at > first.expires_at,
+            "past half its TTL a store renews"
+        );
+    }
+
     #[test]
     fn failed_renewal_restores_the_previously_issued_record() {
         let root = tempfile::tempdir().unwrap();
@@ -928,7 +970,13 @@ mod tests {
         assert!(
             with_durable_atomic_write_fault_for_test(
                 DurableAtomicWriteFaultForTest::AfterRename,
-                || store_response_handle(root.path(), "renew safely", 20),
+                || {
+                    store_response_handle(
+                        root.path(),
+                        "renew safely",
+                        10 + RESPONSE_HANDLE_TTL_SECS / 2 + 1,
+                    )
+                },
             )
             .is_err()
         );

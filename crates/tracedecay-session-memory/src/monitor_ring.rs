@@ -150,7 +150,9 @@ fn write_entry_inner(
     let new_idx = write_idx + 1;
     mmap[OFF_WRITE_IDX..OFF_WRITE_IDX + 8].copy_from_slice(&new_idx.to_le_bytes());
 
-    mmap.flush()?;
+    // No msync: readers map the same page-cache pages and see the entry as
+    // soon as the lock is released, and this display ring needs no
+    // durability. A per-call flush cost 22-53 ms on every tool call.
     file.release()?;
     Ok(())
 }
@@ -252,5 +254,26 @@ impl MmapReader {
         let file = std::fs::OpenOptions::new().read(true).open(&mmap_path)?;
         self.mmap = unsafe { memmap2::Mmap::map(&file)? };
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MmapReader, write_entry_to};
+
+    /// Writers no longer msync, so an already-open reader must still observe
+    /// every entry through its existing mapping, without a refresh.
+    #[test]
+    fn open_reader_observes_every_unflushed_entry() {
+        let dir = tempfile::tempdir().expect("monitor dir");
+        let project = tempfile::tempdir().expect("project dir");
+        write_entry_to(dir.path(), project.path(), "tracedecay", "first", 1, 2);
+        let reader = MmapReader::open_at(dir.path()).expect("open monitor");
+        for call in 1..40_u64 {
+            write_entry_to(dir.path(), project.path(), "tracedecay", "poll", call, 2);
+        }
+        assert_eq!(reader.write_idx(), 40);
+        let last = reader.entry(39).expect("last slot");
+        assert_eq!((last.tool_name.as_str(), last.delta), ("poll", 39));
     }
 }

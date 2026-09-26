@@ -825,15 +825,8 @@ fn latest_cadence_terminal_record(
 /// next real attempt. Other settled skips did enter the task and consume its
 /// evidence/review opportunity, so their completion starts the next interval.
 fn is_scheduler_diagnostic_skip(reason: Option<&str>) -> bool {
-    let Some(reason) = reason else {
-        return false;
-    };
-    // Retired intermediate label. Current producers emit the task-specific
-    // disabled variant. Historical rows must stay cadence-neutral.
-    if reason == "task_disabled" {
-        return true;
-    }
-    AutomationSkipReasonV1::from_ledger_reason(reason)
+    reason
+        .and_then(AutomationSkipReasonV1::from_ledger_reason)
         .is_some_and(AutomationSkipReasonV1::is_cadence_diagnostic)
 }
 

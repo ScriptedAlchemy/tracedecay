@@ -28,9 +28,68 @@ fn routing_draft() -> ManagedSkillDraft {
 }
 
 #[tokio::test]
-async fn missing_or_invalid_routing_is_rejected_without_rewriting_records() {
+async fn released_summary_only_record_is_refused_and_the_store_scan_resets_only_it() {
+    let profile = tempfile::TempDir::new().unwrap();
+    let skill = create_managed_skill(profile.path(), routing_draft())
+        .await
+        .unwrap();
+    create_managed_skill(
+        profile.path(),
+        ManagedSkillDraft {
+            id: "keeper".to_string(),
+            ..routing_draft()
+        },
+    )
+    .await
+    .unwrap();
+    let dir = managed_skill_dir(profile.path(), &skill.metadata.id).unwrap();
+    let record = dir.join("skill.json");
+    let mut value = serde_json::to_value(&skill).unwrap();
+    value["metadata"]
+        .as_object_mut()
+        .unwrap()
+        .remove("routing_description");
+    let bytes = serde_json::to_vec_pretty(&value).unwrap();
+    std::fs::write(&record, &bytes).unwrap();
+
+    let refusal = load_managed_skill(profile.path(), "routing")
+        .await
+        .unwrap_err();
+    let expected_reason = format!(
+        "managed skill record '{}' is the released summary-only shape",
+        record.display()
+    );
+    assert_eq!(
+        refusal.reset_required_context(),
+        Some(("managed skill store", expected_reason.as_str()))
+    );
+    assert_eq!(
+        std::fs::read(&record).unwrap(),
+        bytes,
+        "a single-record read refuses without rewriting"
+    );
+
+    let listed = list_managed_skills(profile.path()).await.unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .map(|skill| skill.metadata.id.as_str())
+            .collect::<Vec<_>>(),
+        ["keeper"]
+    );
+    assert!(!dir.exists(), "the refused skill directory is reset");
+    assert_eq!(
+        load_managed_skill(profile.path(), "routing")
+            .await
+            .unwrap_err()
+            .to_string(),
+        "config error: managed skill 'routing' not found"
+    );
+}
+
+#[tokio::test]
+async fn invalid_routing_is_rejected_without_rewriting_records() {
     for (invalid, expected_error) in [
-        (None, "missing field `routing_description`"),
         (
             Some(serde_json::Value::Null),
             "invalid type: null, expected a string",

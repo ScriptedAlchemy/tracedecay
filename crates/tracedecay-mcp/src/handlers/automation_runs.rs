@@ -15,7 +15,12 @@ use crate::tools::renderers;
 const DEFAULT_RUN_LIMIT: usize = 50;
 const MAX_RUN_LIMIT: usize = 200;
 
-fn ledger_unavailable(operation: &str, error: &TraceDecayError) -> TraceDecayError {
+/// A reset refusal is terminal and keeps its authority; only a transient
+/// read failure becomes the retryable route state.
+fn ledger_unavailable(operation: &str, error: TraceDecayError) -> TraceDecayError {
+    if error.reset_required_context().is_some() {
+        return error;
+    }
     TraceDecayError::project_route(
         "automation_run_ledger_unavailable",
         true,
@@ -76,7 +81,7 @@ pub async fn handle_list(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
         label = "mcp.automation.run_list.load"
     )
     .await
-    .map_err(|error| ledger_unavailable("list", &error))?;
+    .map_err(|error| ledger_unavailable("list", error))?;
     let completeness = if page.is_complete() {
         "known"
     } else {
@@ -109,7 +114,7 @@ pub async fn handle_view(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
         label = "mcp.automation.run_view.load"
     )
     .await
-    .map_err(|error| ledger_unavailable("view", &error))?
+    .map_err(|error| ledger_unavailable("view", error))?
     .ok_or_else(|| run_not_found(run_id))?;
     let payload = json!({
         "status": "ok",
@@ -122,4 +127,34 @@ pub async fn handle_view(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
         &payload,
         || renderers::automation_run_view_md(&payload),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ledger_reset_refusal_keeps_its_authority_and_read_failures_stay_retryable() {
+        let reset = ledger_unavailable(
+            "list",
+            TraceDecayError::reset_required("automation run ledger", "schema v1 row"),
+        );
+        assert_eq!(
+            reset.reset_required_context(),
+            Some(("automation run ledger", "schema v1 row"))
+        );
+
+        let transient = ledger_unavailable(
+            "list",
+            TraceDecayError::Config {
+                message: "automation dashboard root is not a directory".to_owned(),
+            },
+        );
+        assert_eq!(
+            transient
+                .project_route_context()
+                .map(|(code, retryable, _)| (code, retryable)),
+            Some(("automation_run_ledger_unavailable", true))
+        );
+    }
 }

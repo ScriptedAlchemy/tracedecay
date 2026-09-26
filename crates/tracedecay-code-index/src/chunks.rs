@@ -2309,9 +2309,17 @@ fn cross_file_reference_candidate(
     let receiver_call = reference.reference_kind == EdgeKind::Calls
         && reference.file_path.ends_with(".rs")
         && reference.reference_name.contains('.');
-    let explicitly_imported = typescript_family_path(&reference.file_path)
-        && imported_locals.contains(reference.reference_name.as_str());
+    let typescript = typescript_family_path(&reference.file_path);
+    let explicitly_imported =
+        typescript && imported_locals.contains(reference.reference_name.as_str());
+    // `ns.f()` through an imported module namespace binds at sealing, where
+    // the namespace's module is known.
+    let imported_member_call = typescript
+        && reference.reference_kind == EdgeKind::Calls
+        && typescript_member_call_path(&reference.reference_name)
+            .is_some_and(|(head, _)| imported_locals.contains(head));
     if !receiver_call
+        && !imported_member_call
         && (reference.reference_name.contains('.')
             || (!explicitly_imported
                 && cross_file_reference_name_is_blocklisted(&reference.reference_name)))
@@ -2329,9 +2337,24 @@ fn cross_file_reference_candidate(
     })
 }
 
+/// `(local name, member path)` of a TypeScript member call `a.b.c`, whose
+/// segments are all plain identifiers; `None` for a bare name or any other
+/// callee expression (calls, indexing, optional chaining).
+pub(crate) fn typescript_member_call_path(reference_name: &str) -> Option<(&str, &str)> {
+    let (head, members) = reference_name.split_once('.')?;
+    let identifier = |segment: &str| {
+        !segment.is_empty()
+            && !segment.starts_with(|c: char| c.is_ascii_digit())
+            && segment
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+    };
+    (identifier(head) && members.split('.').all(identifier)).then_some((head, members))
+}
+
 /// Whether a path is a TypeScript-family source the TypeScript extractor
 /// produced import bindings for.
-fn typescript_family_path(path: &str) -> bool {
+pub(crate) fn typescript_family_path(path: &str) -> bool {
     path.rsplit('.').next().is_some_and(|extension| {
         matches!(extension, "ts" | "tsx" | "js" | "jsx" | "astro" | "svelte")
     })

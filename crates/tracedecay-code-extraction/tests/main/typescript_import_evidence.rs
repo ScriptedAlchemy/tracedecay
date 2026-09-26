@@ -564,3 +564,69 @@ fn reexport_statements_are_public_import_evidence() {
         "the export-clause statements stay in the graph as their own nodes"
     );
 }
+
+#[test]
+fn local_and_default_exports_forward_through_the_module_itself() {
+    for (source, expected) in [
+        (
+            "export default function greet(): void {}\n",
+            vec![(Some("greet"), Some("default"), ImportNamespaceV1::Value)],
+        ),
+        (
+            "export default class Greeter {}\n",
+            vec![(Some("Greeter"), Some("default"), ImportNamespaceV1::Value)],
+        ),
+        (
+            "export default interface Shape {}\n",
+            vec![(Some("Shape"), Some("default"), ImportNamespaceV1::Type)],
+        ),
+        (
+            "function farewell(): void {}\nexport default farewell;\n",
+            vec![(Some("farewell"), Some("default"), ImportNamespaceV1::Value)],
+        ),
+        (
+            "function impl(): void {}\ntype T = string;\nexport { impl as default, type T };\n",
+            vec![
+                (Some("impl"), Some("default"), ImportNamespaceV1::Value),
+                (Some("T"), Some("T"), ImportNamespaceV1::Type),
+            ],
+        ),
+        // Anonymous defaults and default expressions name no binding.
+        ("export default function (): void {}\n", Vec::new()),
+        ("export default () => 1;\n", Vec::new()),
+        ("export default { a: 1 };\n", Vec::new()),
+        // A declaration export binds its own name; nothing forwards.
+        ("export function plain(): void {}\n", Vec::new()),
+    ] {
+        let artifact =
+            TypeScriptExtractor.extract_artifact("apps/web/src/defaults/greet.ts", source);
+        assert!(
+            artifact.result.errors.is_empty(),
+            "{source}: {:?}",
+            artifact.result.errors
+        );
+        assert!(
+            artifact
+                .imports
+                .iter()
+                .all(|row| row.module_specifier == "./greet.ts"
+                    && row.is_public
+                    && !row.is_glob
+                    && row.module_kind == ImportModuleKindV1::ProjectRelative),
+            "{source}: {:?}",
+            artifact.imports
+        );
+        let rows = artifact
+            .imports
+            .iter()
+            .map(|row| {
+                (
+                    row.imported_name.as_deref(),
+                    row.local_name.as_deref(),
+                    row.namespace,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rows, expected, "{source}");
+    }
+}

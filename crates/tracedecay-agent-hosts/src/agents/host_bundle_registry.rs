@@ -22,7 +22,7 @@ const FIRST_PARTY_COMPONENT_SCHEMA_VERSION: u16 = 1;
 /// Canonical hosts whose first-party component lifecycle can publish durable
 /// ownership receipts. Discovery-only and evidence-unadmitted hosts stay in
 /// `HostKindV1::ALL`, but never enter install/update/uninstall sweeps.
-pub const RECEIPT_BACKED_HOST_KINDS: [HostKindV1; 17] = [
+pub const RECEIPT_BACKED_HOST_KINDS: [HostKindV1; 18] = [
     HostKindV1::ClaudeCode,
     HostKindV1::CursorDesktop,
     HostKindV1::Codex,
@@ -40,6 +40,7 @@ pub const RECEIPT_BACKED_HOST_KINDS: [HostKindV1; 17] = [
     HostKindV1::RooCode,
     HostKindV1::Kilo,
     HostKindV1::Pi,
+    HostKindV1::FactoryDroid,
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -134,6 +135,9 @@ pub fn unsupported_host_component_set_reason(
         | HostKindV1::RooCode
         | HostKindV1::Kilo
         | HostKindV1::Pi => None,
+        // Factory Droid's `droid mcp add|remove` registry is its whole
+        // integration surface.
+        | HostKindV1::FactoryDroid => None,
         // Cursor cloud exposes no host registration API to install into. Its
         // presence in the host enum and capability catalog is not support
         // evidence, so it stays typed unavailable until a real component set
@@ -186,6 +190,9 @@ pub fn default_components(host: HostKindV1) -> Vec<HostComponentV1> {
         | HostKindV1::RooCode
         | HostKindV1::Kilo => {
             vec![HostComponentV1::ContextMcp]
+        }
+        HostKindV1::FactoryDroid => {
+            vec![HostComponentV1::Core, HostComponentV1::ContextMcp]
         }
         HostKindV1::Pi => vec![HostComponentV1::Core, HostComponentV1::Agent],
         HostKindV1::CursorCloud | HostKindV1::ClineFamily => Vec::new(),
@@ -699,6 +706,32 @@ fn component_assets(
             vec![(
                 "context-mcp.json",
                 r#"{"host":"kilo","registration":"../kilo.jsonc","registrar":"tracedecay managed merge","route":"mcp","server":{"command":["__TRACEDECAY_BIN__","serve"]}}"#,
+            )],
+        ),
+        // Factory Droid's `~/.factory/mcp.json` is written by
+        // `droid mcp add`, never by TraceDecay, so it must never be a managed
+        // artifact: owning it here would put the transaction's own write in
+        // the middle of the host command's registry merge, the exact failure
+        // Kiro's and Copilot's comments record. Own a receipt descriptor
+        // under `.factory/tracedecay` instead. It names the registry document
+        // the host CLI owns so a receipt reader can find it without the
+        // catalog ever claiming to write it.
+        (HostKindV1::FactoryDroid, HostComponentV1::ContextMcp) => (
+            ".factory/tracedecay",
+            vec![(
+                "context-mcp.json",
+                r#"{"host":"droid","registration":"mcp.json","registrar":"droid mcp add|remove","route":"mcp","server":{"command":"__TRACEDECAY_BIN__","args":["serve"],"type":"stdio"}}"#,
+            )],
+        ),
+        // The Core descriptor names the host-owned hooks document; the
+        // activation adapter merges the SessionStart / Stop entries into
+        // `~/.factory/hooks.json` and retains the byte snapshot, exactly the
+        // Cline MCP merge shape for a host-owned configuration file.
+        (HostKindV1::FactoryDroid, HostComponentV1::Core) => (
+            ".factory/tracedecay",
+            vec![(
+                "core.json",
+                r#"{"host":"droid","registration":"../hooks.json","registrar":"tracedecay managed merge","route":"hooks","server":{"command":"__TRACEDECAY_BIN__","args":["hook-droid-event"]}}"#,
             )],
         ),
         (HostKindV1::OpenCode, HostComponentV1::Agent) => (

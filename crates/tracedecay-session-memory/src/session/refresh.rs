@@ -182,6 +182,11 @@ pub enum SessionRefreshOutcome {
     Denied,
     WrongScope,
     Stale,
+    /// The requested window no longer contains the committed projection
+    /// frontier; the caller rebuilds the request from that frontier.
+    StaleFrontier {
+        active_projection_frontier: u64,
+    },
     NotFound,
     Aborted,
     DeadlineExceeded,
@@ -347,6 +352,14 @@ where
             Ok(Err(SessionStoreError::IdempotencyConflict { .. })) => {
                 return SessionRefreshOutcome::Busy;
             }
+            Ok(Err(SessionStoreError::StaleRefreshFrontier {
+                active_projection_frontier,
+                ..
+            })) => {
+                return SessionRefreshOutcome::StaleFrontier {
+                    active_projection_frontier,
+                };
+            }
             Ok(Err(error)) => {
                 return SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::store(
                     &error,
@@ -354,11 +367,22 @@ where
             }
             Err(outcome) => return outcome,
         };
+        // The store begins the window at the committed projection frontier,
+        // which may have advanced past the caller's view but never past the
+        // requested target; the handle binds the window that actually began.
+        let effective = receipt.target_frontier();
+        let requested = target.frozen_frontier();
         if receipt.session_id() != target.session_id()
-            || receipt.target_frontier() != target.frozen_frontier()
+            || effective.observed_through() != requested.observed_through()
+            || effective.committed_through() < requested.committed_through()
         {
             return SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::ReceiptMismatch);
         }
+        let target = SessionRefreshTarget {
+            frozen_frontier: effective,
+            ..target
+        };
+        let digests = refresh_digests(context, binding, &target, &grant, &self.configuration);
         let handle = SessionRefreshHandle {
             operation_id: receipt.operation_id().clone(),
             target,
@@ -446,72 +470,67 @@ where
         if let Err(outcome) = self.authorize_handle(context, binding, handle) {
             return outcome;
         }
-        let progress = match await_with_request_controls(
-            context,
-            binding,
-            self.store
-                .session_refresh_progress(SessionRefreshProgressRequestV1::new(
-                    handle.operation_id.clone(),
-                    handle.target.session_id.clone(),
-                )),
-        )
-        .await
-        {
-            Ok(Ok(progress)) => progress,
-            Ok(Err(error)) => {
-                return SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::store(
-                    &error,
-                ));
+        // The receipt read and the cancel write are separate store calls. The
+        // worker can commit a terminal receipt, or a newer progress row, in
+        // that gap. A terminal receipt is the answer; a newer progress row is
+        // retried. The same progress snapshot conflicting again is a real
+        // refusal, so status reports it instead of spinning.
+        let mut attempted_progress = None;
+        loop {
+            if let Some(outcome) = request_interruption(context, binding) {
+                return outcome;
             }
-            Err(outcome) => return outcome,
-        };
-        match self.read_receipt(context, binding, handle).await {
-            Ok(Some(receipt)) => return terminal_outcome(receipt),
-            Ok(None) => {}
-            Err(outcome) => return outcome,
-        }
-        let (frontier, coverage) = progress.as_ref().map_or_else(
-            || (handle.target.frozen_frontier(), empty_coverage()),
-            |progress| (progress.frontier(), *progress.coverage()),
-        );
-        let request = SessionRefreshCancellationRequestV1::new(
-            handle.operation_id.clone(),
-            handle.target.session_id.clone(),
-            frontier,
-            coverage,
-        );
-        let request = match progress
-            .as_ref()
-            .and_then(SessionRefreshProgressV1::source_coverage)
-            .cloned()
-            .or_else(|| source_coverage_for_target(None, &handle.target, frontier))
-        {
-            Some(source_coverage) => request.with_source_coverage(source_coverage),
-            None => request,
-        };
-        match await_with_request_controls(
-            context,
-            binding,
-            self.store.cancel_session_refresh(request),
-        )
-        .await
-        {
-            Ok(Ok(receipt)) => {
-                if (self.scheduler)().is_err() {
-                    SessionRefreshOutcome::CancelledReconciliationRequired(receipt)
-                } else {
-                    terminal_outcome(receipt)
+            let progress = match await_with_request_controls(
+                context,
+                binding,
+                self.store
+                    .session_refresh_progress(SessionRefreshProgressRequestV1::new(
+                        handle.operation_id.clone(),
+                        handle.target.session_id.clone(),
+                    )),
+            )
+            .await
+            {
+                Ok(Ok(progress)) => progress,
+                Ok(Err(error)) => {
+                    return SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::store(
+                        &error,
+                    ));
                 }
+                Err(outcome) => return outcome,
+            };
+            match self.read_receipt(context, binding, handle).await {
+                Ok(Some(receipt)) => return terminal_outcome(receipt),
+                Ok(None) => {}
+                Err(outcome) => return outcome,
             }
-            Ok(Err(
-                SessionStoreError::InvalidRefreshState { .. }
-                | SessionStoreError::InvalidStateTransition { .. }
-                | SessionStoreError::ReceiptIdentityMismatch { .. },
-            )) => self.status(context, binding, handle).await,
-            Ok(Err(error)) => {
-                SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::store(&error))
+            if attempted_progress.as_ref() == Some(&progress) {
+                return self.status(context, binding, handle).await;
             }
-            Err(outcome) => outcome,
+            attempted_progress = Some(progress.clone());
+            let request = cancellation_request(handle, progress.as_ref());
+            match await_with_request_controls(
+                context,
+                binding,
+                self.store.cancel_session_refresh(request),
+            )
+            .await
+            {
+                Ok(Ok(receipt)) => {
+                    return if (self.scheduler)().is_err() {
+                        SessionRefreshOutcome::CancelledReconciliationRequired(receipt)
+                    } else {
+                        terminal_outcome(receipt)
+                    };
+                }
+                Ok(Err(error)) if refresh_cancel_lost_the_race(&error) => continue,
+                Ok(Err(error)) => {
+                    return SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::store(
+                        &error,
+                    ));
+                }
+                Err(outcome) => return outcome,
+            }
         }
     }
 
@@ -679,6 +698,43 @@ const fn empty_coverage() -> TemporalCoverageCountsV1 {
         unknown: 0,
         redacted: 0,
     }
+}
+
+fn cancellation_request(
+    handle: &SessionRefreshHandle,
+    progress: Option<&SessionRefreshProgressV1>,
+) -> SessionRefreshCancellationRequestV1 {
+    let (frontier, coverage) = progress.map_or_else(
+        || (handle.target.frozen_frontier(), empty_coverage()),
+        |progress| (progress.frontier(), *progress.coverage()),
+    );
+    let request = SessionRefreshCancellationRequestV1::new(
+        handle.operation_id.clone(),
+        handle.target.session_id.clone(),
+        frontier,
+        coverage,
+    );
+    match progress
+        .and_then(SessionRefreshProgressV1::source_coverage)
+        .cloned()
+        .or_else(|| source_coverage_for_target(None, &handle.target, frontier))
+    {
+        Some(source_coverage) => request.with_source_coverage(source_coverage),
+        None => request,
+    }
+}
+
+/// The store refuses a cancel whose snapshot is no longer the running
+/// operation: another terminal receipt won, or progress moved. Both are races
+/// with the worker, not unavailable storage.
+fn refresh_cancel_lost_the_race(error: &SessionStoreError) -> bool {
+    matches!(
+        error,
+        SessionStoreError::InvalidRefreshState { .. }
+            | SessionStoreError::InvalidStateTransition { .. }
+            | SessionStoreError::ReceiptIdentityMismatch { .. }
+            | SessionStoreError::IdempotencyConflict { .. }
+    )
 }
 
 fn source_coverage_for_target(
@@ -855,6 +911,10 @@ impl CanonicalDigest {
         SessionRefreshDigest(self.0.finalize().into())
     }
 }
+
+#[cfg(test)]
+#[path = "refresh_cancel_tests.rs"]
+mod refresh_cancel_tests;
 
 fn validate_component(
     value: &str,

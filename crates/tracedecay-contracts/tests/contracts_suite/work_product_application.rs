@@ -554,7 +554,10 @@ impl WorkGraphReadPortV1 for RecordingGraphPort {
         self.calls.fetch_add(1, Ordering::Relaxed);
         self.requests.lock().unwrap().push(request.clone());
         if self.absent.load(Ordering::Relaxed) {
-            return Err(WorkGraphReadPortErrorV1::NotFoundOrNotAuthorized);
+            return Ok(WorkGraphReadV1::Absent {
+                authorized_scope: context.authorized_scope().clone(),
+                selection_coverage: WorkGraphSelectionCoverageV1::Complete { covered_events: 0 },
+            });
         }
         let scope = if self.return_wrong_owner.load(Ordering::Relaxed) {
             AuthorizedWorkProductScopeV1::new(

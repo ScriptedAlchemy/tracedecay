@@ -56,6 +56,40 @@ function frontierFixture() {
 }
 
 describe('AgentHandoffs', () => {
+  it('reads an absent Work graph as no graph yet, never as a refusal', () => {
+    const absent = render(
+      <AgentHandoffs
+        reading={readHandoffFrontier(
+          landed({
+            mode: 'absent',
+            authorized_scope: {
+              owner_brain_id: 'brain.agents',
+              owner_profile_id: 'profile.agents',
+              selection: { selection: 'profile_owned_no_git' },
+            },
+            selection_coverage: { coverage: 'complete', covered_events: 0 },
+          }),
+        )}
+      />,
+    );
+    expect(absent.container.querySelector('[data-agent-handoffs="absent"]')).not.toBeNull();
+    expect(screen.getByText(/no Work graph yet/)).toBeTruthy();
+    expect(absent.container.querySelector('[data-agent-handoffs="refused"]')).toBeNull();
+    absent.unmount();
+
+    const denied = render(
+      <AgentHandoffs
+        reading={readHandoffFrontier({
+          outcome: 'refused',
+          state: 'denied',
+          detail: 'not found, or not authorized for this actor',
+        })}
+      />,
+    );
+    expect(denied.container.querySelector('[data-agent-handoffs="refused"]')).not.toBeNull();
+    expect(screen.queryByText(/no Work graph yet/)).toBeNull();
+  });
+
   it('renders every handoff with the actors, the evidence and the unknowns it carried', () => {
     render(<AgentHandoffs reading={readHandoffFrontier(landed(frontierFixture()))} />);
 

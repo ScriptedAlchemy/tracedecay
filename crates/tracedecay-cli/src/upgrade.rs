@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 use crate::cloud::{self, InstallMethod};
+use crate::macos_codesign::stabilize_installed_executable;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::git::{GitCommandBounds, GitCommandError, bounded_command_output};
 use tracedecay_session_memory::user_config::UserConfig;
@@ -536,7 +537,10 @@ fn publish_release_at(staged: &StagedRelease, executable: &Path) -> Result<()> {
     executable.parent().ok_or_else(|| TraceDecayError::Config {
         message: "cannot determine the running executable's directory".into(),
     })?;
-    publish_member(&staged.executable(), executable, RELEASE_MEMBER_MODE)
+    publish_member(&staged.executable(), executable, RELEASE_MEMBER_MODE)?;
+    // The archive checksum already matched. This only replaces an ad-hoc or
+    // missing signature on the installed Mach-O; a team signature stays.
+    stabilize_installed_executable(executable)
 }
 
 /// Outcome of an upgrade attempt that completed without error.

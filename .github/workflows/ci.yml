@@ -232,6 +232,7 @@ jobs:
           bash scripts/test-check-distribution-clean-source.sh
           bash scripts/test-check-distribution-snapshot.sh
           bash scripts/test-check-distribution-reuse.sh
+          bash tests/macos_stable_codesign_test.sh
 
       # Release guards: drift, safety, installer, PR integrity, bundle check.
       # Pull requests only; the release PR itself is exempt because it is

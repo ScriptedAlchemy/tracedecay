@@ -249,6 +249,14 @@ cargo check --no-default-features
 cargo clippy --workspace --all-targets
 ```
 
+On macOS those links ad-hoc sign `tracedecay` as `dev.tracedecay.cli`.
+macOS TCC keys removable-volume and file grants on that identifier; the
+linker default (`tracedecay-<hash>`) changes every build and re-prompts,
+and the daemon blocks in `open()` until the prompt is answered. `install.sh`
+and `tracedecay update` apply the same identity after the archive checksum
+check when the binary is unsigned or only ad-hoc signed. A Developer ID or
+other team signature is left as published.
+
 ## Docs
 
 - [User guide](docs/USER-GUIDE.md)

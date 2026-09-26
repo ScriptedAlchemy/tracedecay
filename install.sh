@@ -1,6 +1,51 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Stable ad-hoc identifier for local macOS installs. TCC keys removable-volume
+# and file grants on it. The linker default is the hashed deps filename
+# (`tracedecay-<hash>`), so every rebuild is a new app and the daemon blocks
+# in open() until the prompt is answered. A Developer ID or other team
+# signature is preserved.
+TRACEDECAY_MACOS_CODE_SIGN_IDENTIFIER=dev.tracedecay.cli
+
+# Re-sign `target` when it is an unsigned or ad-hoc Mach-O. No-op off Darwin
+# and for non-Mach-O files (the Linux installer tests install a shell fixture).
+stabilize_macos_adhoc_identity() {
+  local target=$1
+  if [[ ${TRACEDECAY_ASSUME_DARWIN:-} != 1 && "$(uname -s)" != Darwin ]]; then
+    return 0
+  fi
+  [[ -f $target ]] || {
+    printf 'tracedecay installer: cannot sign missing binary %s\n' "$target" >&2
+    return 1
+  }
+  local magic
+  magic=$(od -An -t x1 -N 4 "$target" | tr -d ' \n')
+  case $magic in
+    feedfacf | cffaedfe | feedface | cefaedfe | cafebabe | bebafeca | cafebabf | bfbafeca) ;;
+    *) return 0 ;;
+  esac
+  local report ident team
+  report=$(codesign -dv --verbose=2 "$target" 2>&1 || true)
+  if printf '%s\n' "$report" | grep -q '^Authority='; then
+    return 0
+  fi
+  team=$(printf '%s\n' "$report" | sed -n 's/^TeamIdentifier=//p' | head -n 1)
+  if [[ -n $team && $team != "not set" ]]; then
+    return 0
+  fi
+  ident=$(printf '%s\n' "$report" | sed -n 's/^Identifier=//p' | head -n 1)
+  if [[ $ident == "$TRACEDECAY_MACOS_CODE_SIGN_IDENTIFIER" ]]; then
+    return 0
+  fi
+  codesign --force --sign - --identifier "$TRACEDECAY_MACOS_CODE_SIGN_IDENTIFIER" "$target"
+}
+
+# The macOS link wrapper sources this file to reuse the function above.
+if [[ ${TRACEDECAY_INSTALL_LIBRARY:-} == 1 && ${BASH_SOURCE[0]} != "$0" ]]; then
+  return 0
+fi
+
 repository=${TRACEDECAY_REPOSITORY:-ScriptedAlchemy/tracedecay}
 install_dir=${TRACEDECAY_INSTALL_DIR:-${XDG_BIN_HOME:-${HOME}/.local/bin}}
 requested_version=${TRACEDECAY_VERSION:-latest}
@@ -136,6 +181,9 @@ tar -xzf "${tmp_dir}/${asset}" -C "$tmp_dir"
 
 mkdir -p "$install_dir"
 install -m 0755 "${tmp_dir}/tracedecay" "${install_dir}/tracedecay"
+# After the archive checksum check. Re-signing changes the installed bytes
+# only; the published digest still matches the archive.
+stabilize_macos_adhoc_identity "${install_dir}/tracedecay"
 printf 'Installed tracedecay %s to %s\n' "${tag#v}" "${install_dir}/tracedecay"
 
 case ":${PATH}:" in

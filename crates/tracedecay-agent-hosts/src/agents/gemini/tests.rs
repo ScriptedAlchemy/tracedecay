@@ -249,22 +249,41 @@ fn activation_without_a_staged_source_refuses_before_invoking_the_host() {
 }
 
 /// The lifecycle activates Gemini's canonical set, the lone context-MCP
-/// component, through the component boundary. It must reach the extension
-/// lifecycle, whose refusal here (no staged source, or no `gemini` on PATH)
-/// proves it ran; a silent `Ok` left install to fail verify opaquely.
+/// component, through the component boundary. It must drive the extension
+/// lifecycle's host install; a silent `Ok` left install to fail verify
+/// opaquely.
+#[cfg(unix)]
 #[test]
-fn context_mcp_component_activation_reaches_the_extension_lifecycle() {
+fn context_mcp_component_activation_installs_the_staged_extension_through_the_host() {
     use crate::agents::host_bundle::HostComponentV1;
 
     let home = tempfile::tempdir().unwrap();
+    let bin_dir = tempfile::tempdir().unwrap();
+    let log = bin_dir.path().join("invocations.log");
+    fake_gemini_cli(
+        &bin_dir.path().join("gemini"),
+        &log,
+        FAKE_EXTENSION_LIFECYCLE_BODY,
+    );
+    let _gemini_cli =
+        tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(bin_dir.path());
+    let stage_dir = stage_rendered_extension(home.path(), "/bin/tracedecay");
 
     GeminiIntegration
         .activate_deployed_host_component_registration(
             &[HostComponentV1::ContextMcp],
             &install_context(home.path(), "/bin/tracedecay"),
         )
-        .expect_err("an uninstalled extension cannot be reported as activated");
-    assert!(!installed_extension_dir(home.path()).exists());
+        .expect("the context-MCP set activates the staged extension");
+
+    assert_eq!(
+        recorded_invocations(&log),
+        vec![format!("extensions install {}", stage_dir.display())]
+    );
+    assert_eq!(
+        read_json(&installed_manifest_path(home.path()))["mcpServers"]["tracedecay"]["command"],
+        "/bin/tracedecay"
+    );
 }
 
 /// Deactivation is Gemini's own `extensions uninstall`, addressed by the

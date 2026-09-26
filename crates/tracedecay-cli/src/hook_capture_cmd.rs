@@ -125,6 +125,10 @@ const NATIVE_CAPTURE_COMMANDS: &[(&str, NativeHookCaptureSourceV1)] = &[
         "hook-pi-event",
         NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::Pi),
     ),
+    (
+        "hook-droid-event",
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::FactoryDroid),
+    ),
 ];
 
 pub(crate) fn try_run(args: &[OsString]) -> Option<i32> {
@@ -203,6 +207,7 @@ fn native_response_command_from_name(command: &str) -> bool {
             | "hook-opencode-event"
             | "hook-opencode-tool-after"
             | "hook-pi-event"
+            | "hook-droid-event"
     )
 }
 
@@ -236,6 +241,7 @@ fn capture_command_name(command: &Commands) -> Option<&'static str> {
         Commands::HookOpenCodeEvent => Some("hook-opencode-event"),
         Commands::HookOpenCodeToolAfter => Some("hook-opencode-tool-after"),
         Commands::HookPiEvent => Some("hook-pi-event"),
+        Commands::HookDroidEvent => Some("hook-droid-event"),
         _ => None,
     }
 }
