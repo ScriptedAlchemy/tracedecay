@@ -893,6 +893,19 @@ fn project_open_refusal_response(
             tracedecay_contracts::ApplicationProblem::runtime_mounting(),
         );
     }
+    // No route names an enrolled project: the caller must pick one, so a
+    // retryable `unavailable` would only be retried until its deadline.
+    if let Some((
+        reason_code @ (PROJECT_NOT_ENROLLED_REASON_CODE | PROJECT_REQUIRED_REASON_CODE),
+        false,
+        detail,
+    )) = error.project_route_context()
+    {
+        return DaemonInvocationResponse::application_problem(
+            request_id,
+            tracedecay_contracts::ApplicationProblem::invalid_request(reason_code, detail),
+        );
+    }
     DaemonInvocationResponse::problem(
         request_id,
         project_open_problem(error, workflow_application, git_operation),

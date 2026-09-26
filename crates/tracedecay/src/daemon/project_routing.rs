@@ -75,9 +75,12 @@ pub(super) fn project_route_for_handshake(
     owner_home: Option<&Path>,
 ) -> Result<(PathBuf, ProjectRouteKey)> {
     let Some(project_path) = handshake.project_path.as_ref() else {
-        return Err(TraceDecayError::Config {
-            message: "project server requested without project_path".to_string(),
-        });
+        return Err(TraceDecayError::project_route(
+            PROJECT_REQUIRED_REASON_CODE,
+            false,
+            "this operation needs a TraceDecay project, and the request named none; \
+             run it inside an initialized project or pass --project <path>",
+        ));
     };
     let canonical_project_path =
         tracedecay_runtime_core::path_safety::canonical_root_identity(project_path);

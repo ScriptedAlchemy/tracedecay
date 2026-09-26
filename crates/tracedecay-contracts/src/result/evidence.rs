@@ -348,6 +348,12 @@ pub enum OmissionReason {
     /// Evidence came from a macro body that was not expanded, so what the
     /// expansion defines or calls is not covered.
     MacroBodyUnparsed,
+    /// The continuation cursor can no longer be redeemed (its lifetime ended
+    /// or the snapshot it pages is gone); restart the request without it.
+    CursorExpired,
+    /// The continuation cursor was issued for another project, worktree, or
+    /// ref; redeem it where it was issued.
+    CursorForeign,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

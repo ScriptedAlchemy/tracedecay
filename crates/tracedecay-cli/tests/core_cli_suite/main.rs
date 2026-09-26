@@ -28,6 +28,8 @@ mod source_provenance_test;
 mod sync_test;
 mod test_profile_isolation_test;
 #[cfg(unix)]
+mod tool_cursor_test;
+#[cfg(unix)]
 mod tool_daemon_test;
 mod tool_first_touch_test;
 #[cfg(unix)]
