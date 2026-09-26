@@ -124,7 +124,23 @@ pub fn application_http_route_path(operation: ApplicationSurfaceOperation) -> St
         | ApplicationSurfaceOperation::DependencyDepth
         | ApplicationSurfaceOperation::Health
         | ApplicationSurfaceOperation::Dsm
-        | ApplicationSurfaceOperation::Diagnose) => {
+        | ApplicationSurfaceOperation::Diagnose
+        | ApplicationSurfaceOperation::DeadCode
+        | ApplicationSurfaceOperation::Circular
+        | ApplicationSurfaceOperation::Hotspots
+        | ApplicationSurfaceOperation::UnmountedFiles
+        | ApplicationSurfaceOperation::Rank
+        | ApplicationSurfaceOperation::Largest
+        | ApplicationSurfaceOperation::Coupling
+        | ApplicationSurfaceOperation::InheritanceDepth
+        | ApplicationSurfaceOperation::Distribution
+        | ApplicationSurfaceOperation::Recursion
+        | ApplicationSurfaceOperation::Complexity
+        | ApplicationSurfaceOperation::DocCoverage
+        | ApplicationSurfaceOperation::GodClass
+        | ApplicationSurfaceOperation::UnsafePatterns
+        | ApplicationSurfaceOperation::Constructors
+        | ApplicationSurfaceOperation::FieldSites) => {
             format!("/primitives/{}", operation.as_str())
         }
         operation @ (ApplicationSurfaceOperation::ConfigurationList

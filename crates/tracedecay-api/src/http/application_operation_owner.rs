@@ -116,7 +116,23 @@ pub const fn http_application_owner_kind(
         | ApplicationSurfaceOperation::DependencyDepth
         | ApplicationSurfaceOperation::Health
         | ApplicationSurfaceOperation::Dsm
-        | ApplicationSurfaceOperation::Diagnose => return None,
+        | ApplicationSurfaceOperation::Diagnose
+        | ApplicationSurfaceOperation::DeadCode
+        | ApplicationSurfaceOperation::Circular
+        | ApplicationSurfaceOperation::Hotspots
+        | ApplicationSurfaceOperation::UnmountedFiles
+        | ApplicationSurfaceOperation::Rank
+        | ApplicationSurfaceOperation::Largest
+        | ApplicationSurfaceOperation::Coupling
+        | ApplicationSurfaceOperation::InheritanceDepth
+        | ApplicationSurfaceOperation::Distribution
+        | ApplicationSurfaceOperation::Recursion
+        | ApplicationSurfaceOperation::Complexity
+        | ApplicationSurfaceOperation::DocCoverage
+        | ApplicationSurfaceOperation::GodClass
+        | ApplicationSurfaceOperation::UnsafePatterns
+        | ApplicationSurfaceOperation::Constructors
+        | ApplicationSurfaceOperation::FieldSites => return None,
         ApplicationSurfaceOperation::FactStoreCurate
         | ApplicationSurfaceOperation::FactStoreAdd
         | ApplicationSurfaceOperation::FactStoreSearch

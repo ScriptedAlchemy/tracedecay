@@ -1,25 +1,23 @@
 //! `tracedecay_constructors`, struct-literal construction sites and the fields each one sets.
 
 use super::*;
+use tracedecay_contracts::retrieval::{
+    ConstructorFieldCoverageV1, ConstructorResolutionReasonV1, ConstructorResolutionStatusV1,
+    ConstructorSiteV1, ConstructorsNotFoundV1, ConstructorsReportV1, ConstructorsResultV1,
+    ConstructorsSurfaceRequestV1,
+};
 use tree_sitter::{Node, Parser};
 
 #[hotpath::measure(future = true, label = "mcp.analysis.constructors.total")]
-pub async fn handle_constructors(
-    response_handle_root: &Path,
+pub(super) async fn compute_constructors(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
-) -> Result<ToolResult> {
-    let struct_name =
-        args.get("struct")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "tracedecay_constructors requires a 'struct' argument".to_string(),
-            })?;
-    let limit = args
-        .get("limit")
-        .and_then(serde_json::Value::as_u64)
-        .map_or(100, |v| v.clamp(1, 1000) as usize);
+) -> Result<GraphToolCompletionV1> {
+    let request: ConstructorsSurfaceRequestV1 =
+        decode_primitive_request(&args, "tracedecay_constructors")?;
+    let struct_name = request.struct_name.as_str();
+    let limit = request.limit.map_or(100, |v| v.clamp(1, 1000) as usize);
 
     let struct_nodes = hotpath::measure_block!("mcp.analysis.constructors.resolve", {
         let candidates = graph.resolve_simple_name(struct_name, None, 50)?;
@@ -44,21 +42,19 @@ pub async fn handle_constructors(
     });
 
     if struct_nodes.is_empty() {
-        let payload = hotpath::measure_block!(
-            "mcp.analysis.constructors.assemble",
-            json!({
-                "found": false,
-                "struct": struct_name,
-                "message": format!("No struct, class, or case-class named '{struct_name}' found."),
-                "match_count": 0,
-                "sites": [],
-            })
-        );
-        return Ok(generic_tool_result(
-            Some(response_handle_root),
-            &args,
-            &payload,
-            vec![],
+        return Ok(graph_tool_completion(
+            GraphToolResultV1::Constructors(ConstructorsResultV1::NotFound(
+                ConstructorsNotFoundV1 {
+                    found: false,
+                    message: format!(
+                        "No struct, class, or case-class named '{struct_name}' found."
+                    ),
+                    struct_name: request.struct_name,
+                    match_count: 0,
+                    sites: Vec::new(),
+                },
+            )),
+            Vec::new(),
         ));
     }
     let candidate_count = struct_nodes.len();
@@ -108,7 +104,7 @@ pub async fn handle_constructors(
 
     let (sites, touched) = hotpath::future!(
         tokio::task::spawn_blocking(move || -> Result<_> {
-            let mut sites: Vec<Value> = Vec::new();
+            let mut sites: Vec<ConstructorSiteV1> = Vec::new();
             let mut touched: Vec<String> = Vec::new();
             let language = tracedecay_code_extraction::ts_provider::try_language("rust")
                 .map_err(|message| TraceDecayError::Config { message })?;
@@ -154,14 +150,18 @@ pub async fn handle_constructors(
                     if !touched.contains(path) {
                         touched.push(path.clone());
                     }
-                    sites.push(json!({
-                        "file": path,
-                        "line": site.line,
-                        "fields": site.fields,
-                        "update_fields": update_fields,
-                        "missing_fields": missing_fields,
-                        "field_coverage": if coverage_unknown { "unknown" } else { "complete" },
-                    }));
+                    sites.push(ConstructorSiteV1 {
+                        file: path.clone(),
+                        line: site.line,
+                        fields: site.fields,
+                        update_fields,
+                        missing_fields,
+                        field_coverage: if coverage_unknown {
+                            ConstructorFieldCoverageV1::Unknown
+                        } else {
+                            ConstructorFieldCoverageV1::Complete
+                        },
+                    });
                     if sites.len() >= limit {
                         break 'outer;
                     }
@@ -177,30 +177,20 @@ pub async fn handle_constructors(
         message: format!("tracedecay_constructors scan failed to join: {e}"),
     })??;
 
-    let payload = hotpath::measure_block!(
-        "mcp.analysis.constructors.assemble",
-        json!({
-            "struct": struct_name,
-            "candidate_count": candidate_count,
-            "resolution_status": "unverified",
-            "resolution_reason": if ambiguous_definition {
-                "ambiguous_simple_name"
+    Ok(graph_tool_completion(
+        GraphToolResultV1::Constructors(ConstructorsResultV1::Report(ConstructorsReportV1 {
+            candidate_count: candidate_count as u64,
+            resolution_status: ConstructorResolutionStatusV1::Unverified,
+            resolution_reason: if ambiguous_definition {
+                ConstructorResolutionReasonV1::AmbiguousSimpleName
             } else {
-                "syntax_only_simple_name"
+                ConstructorResolutionReasonV1::SyntaxOnlySimpleName
             },
-            "expected_fields": if ambiguous_definition {
-                Value::Null
-            } else {
-                json!(reported_expected_fields)
-            },
-            "match_count": sites.len(),
-            "sites": sites,
-        })
-    );
-    Ok(generic_tool_result(
-        Some(response_handle_root),
-        &args,
-        &payload,
+            expected_fields: (!ambiguous_definition).then_some(reported_expected_fields),
+            match_count: sites.len() as u64,
+            sites,
+            struct_name: request.struct_name,
+        })),
         touched,
     ))
 }

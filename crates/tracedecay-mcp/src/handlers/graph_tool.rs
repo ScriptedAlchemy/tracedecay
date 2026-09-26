@@ -11,6 +11,7 @@ use tracedecay_contracts::retrieval::{NodeResultV1, RenamePreviewPrimitiveOutcom
 use tracedecay_domain::errors::Result;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
+use crate::handlers::analysis::{compute_analysis_report, render_circular_md};
 use crate::handlers::graph::{
     compute_context, compute_impact, compute_node, compute_redundancy, compute_rename_preview,
     compute_similar, not_found_tool_result, render_context,
@@ -66,6 +67,24 @@ pub async fn compute_graph_tool(
         | ApplicationSurfaceOperation::Health
         | ApplicationSurfaceOperation::Dsm => {
             compute_health_report(open, operation, args, scope_prefix).await
+        }
+        ApplicationSurfaceOperation::DeadCode
+        | ApplicationSurfaceOperation::Circular
+        | ApplicationSurfaceOperation::Hotspots
+        | ApplicationSurfaceOperation::UnmountedFiles
+        | ApplicationSurfaceOperation::Rank
+        | ApplicationSurfaceOperation::Largest
+        | ApplicationSurfaceOperation::Coupling
+        | ApplicationSurfaceOperation::InheritanceDepth
+        | ApplicationSurfaceOperation::Distribution
+        | ApplicationSurfaceOperation::Recursion
+        | ApplicationSurfaceOperation::Complexity
+        | ApplicationSurfaceOperation::DocCoverage
+        | ApplicationSurfaceOperation::GodClass
+        | ApplicationSurfaceOperation::UnsafePatterns
+        | ApplicationSurfaceOperation::Constructors
+        | ApplicationSurfaceOperation::FieldSites => {
+            compute_analysis_report(ctx.project_root(), open, operation, args, scope_prefix).await
         }
         operation => Err(unknown_tool_error(operation.mcp_tool_name())),
     }
@@ -136,6 +155,25 @@ pub fn render_graph_tool(
             let value = result.result_value()?;
             rendered_tool_result(response_handle_root, args, &value, Vec::new(), || {
                 render::diagnostics_md(&value)
+            })
+        }
+        GraphToolResultV1::Circular(circular) => rendered_tool_result(
+            response_handle_root,
+            args,
+            &result.result_value()?,
+            Vec::new(),
+            || render_circular_md(circular),
+        ),
+        GraphToolResultV1::UnmountedFiles(_) => {
+            let value = result.result_value()?;
+            rendered_tool_result(response_handle_root, args, &value, Vec::new(), || {
+                render::unmounted_files_md(&value)
+            })
+        }
+        GraphToolResultV1::UnsafePatterns(_) => {
+            let value = result.result_value()?;
+            rendered_tool_result(response_handle_root, args, &value, Vec::new(), || {
+                render::risky_patterns_md(&value)
             })
         }
         _ => generic_tool_result(

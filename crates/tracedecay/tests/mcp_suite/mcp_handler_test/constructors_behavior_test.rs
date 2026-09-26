@@ -141,7 +141,7 @@ fn json_payload(response: &JsonRpcResponse) -> Value {
     extract_first_json_content(response.result.as_ref().expect("constructors result"))
 }
 
-fn assert_missing_struct_argument(response: &JsonRpcResponse) {
+fn assert_struct_argument_refused(response: &JsonRpcResponse, detail: &str) {
     let error = response
         .error
         .as_ref()
@@ -150,7 +150,9 @@ fn assert_missing_struct_argument(response: &JsonRpcResponse) {
     assert_eq!(error.code, -32603);
     assert_eq!(
         error.message,
-        "tool execution failed: config error: tracedecay_constructors requires a 'struct' argument"
+        format!(
+            "tool execution failed: config error: invalid arguments for tracedecay_constructors: {detail}"
+        )
     );
     assert_eq!(
         error
@@ -285,9 +287,13 @@ async fn constructors_reports_literal_sites_and_denies_a_missing_struct() {
         })
     );
 
-    assert_missing_struct_argument(&call_constructors(&fixture, json!({"format": "json"})).await);
-    assert_missing_struct_argument(
+    assert_struct_argument_refused(
+        &call_constructors(&fixture, json!({"format": "json"})).await,
+        "missing field `struct`",
+    );
+    assert_struct_argument_refused(
         &call_constructors(&fixture, json!({"struct": 4, "format": "json"})).await,
+        "invalid type: integer `4`, expected a string",
     );
 
     fixture.harness.shutdown().await;

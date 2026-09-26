@@ -11,7 +11,6 @@ use tracedecay_contracts::code_index_freshness::{
     CodeIndexFreshnessReader, CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitV1,
 };
 use tracedecay_dashboard_api::AdmittedDoctorReportV1;
-use tracedecay_mcp::handlers::analysis as portable_analysis;
 use tracedecay_mcp::handlers::git;
 use tracedecay_mcp::handlers::graph as portable_graph;
 use tracedecay_mcp::handlers::info as portable_info;
@@ -85,7 +84,7 @@ async fn admitted_graph_query_for_operation(
         .as_ref()
         .ok_or_else(|| graph_read_unavailable("the caller cancellation signal is unavailable"))?;
     // Admission wait is measured apart from handler execution: every
-    // graph-backed tool in the graph/info/analysis/git/health groups funnels
+    // graph-backed tool in the graph/info/git groups and the graph-tool owner funnels
     // through this one open, so a slow span here is admission contention or a
     // stale generation, never handler work.
     let query = hotpath::future!(
@@ -515,41 +514,6 @@ pub(crate) fn compute_graph_tool_for_owner<'a>(
         };
         completion.code_graph = options.served_code_graph.served();
         Ok(completion)
-    })
-}
-
-/// Dispatch static-analysis report tools such as `tracedecay_dead_code` and
-/// `tracedecay_complexity`.
-#[hotpath::measure(future = true, label = "mcp.dispatch.analysis")]
-pub(super) async fn dispatch_analysis_tools(
-    tool_name: &str,
-    cg: &TraceDecay,
-    args: Value,
-    scope_prefix: Option<&str>,
-    options: ToolCallRegistryOptions<'_>,
-) -> Result<ToolResult> {
-    dispatch_analysis_tools_inner(tool_name, cg, args, scope_prefix, options).await
-}
-
-fn dispatch_analysis_tools_inner<'a>(
-    tool_name: &'a str,
-    cg: &'a TraceDecay,
-    args: Value,
-    scope_prefix: Option<&'a str>,
-    options: ToolCallRegistryOptions<'a>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
-    // Erase the portable dispatch future before it reaches the measured
-    // wrapper so every profiling feature can compute its layout.
-    Box::pin(async move {
-        Box::pin(portable_analysis::dispatch_tool(
-            cg.project_root(),
-            &cg.store_layout().response_handle_root,
-            &verified_graph_open(&options),
-            tool_name,
-            args,
-            scope_prefix,
-        ))
-        .await
     })
 }
 

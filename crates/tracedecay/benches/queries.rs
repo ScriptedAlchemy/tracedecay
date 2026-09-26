@@ -440,9 +440,9 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
         tool: "tracedecay_god_class",
         queries: five(|i| {
             Query::read(
-                "threshold",
+                "limit",
                 "tracedecay_god_class",
-                json!({ "min_methods": 5 + (i as u32) * 5 }),
+                json!({ "limit": 5 + (i as u32) * 5 }),
             )
         }),
     });
@@ -506,9 +506,9 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
         tool: "tracedecay_circular",
         queries: five(|i| {
             Query::read(
-                "depth",
+                "limit",
                 "tracedecay_circular",
-                json!({ "max_depth": 4 + (i as u32) * 2 }),
+                json!({ "limit": 5 + (i as u32) * 5 }),
             )
         }),
     });

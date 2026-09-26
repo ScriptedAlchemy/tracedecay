@@ -176,6 +176,22 @@ application_surface_operations! {
     Health => "health";
     Dsm => "dsm";
     Diagnose => "diagnose";
+    DeadCode => "dead_code";
+    Circular => "circular";
+    Hotspots => "hotspots";
+    UnmountedFiles => "unmounted_files";
+    Rank => "rank";
+    Largest => "largest";
+    Coupling => "coupling";
+    InheritanceDepth => "inheritance_depth";
+    Distribution => "distribution";
+    Recursion => "recursion";
+    Complexity => "complexity";
+    DocCoverage => "doc_coverage";
+    GodClass => "god_class";
+    UnsafePatterns => "unsafe_patterns";
+    Constructors => "constructors";
+    FieldSites => "field_sites";
     HealthRead => "health_read";
     HealthDelta => "health_delta";
     StorageStatus => "storage_status";
@@ -262,6 +278,22 @@ impl ApplicationSurfaceOperation {
         Self::Health,
         Self::Dsm,
         Self::Diagnose,
+        Self::DeadCode,
+        Self::Circular,
+        Self::Hotspots,
+        Self::UnmountedFiles,
+        Self::Rank,
+        Self::Largest,
+        Self::Coupling,
+        Self::InheritanceDepth,
+        Self::Distribution,
+        Self::Recursion,
+        Self::Complexity,
+        Self::DocCoverage,
+        Self::GodClass,
+        Self::UnsafePatterns,
+        Self::Constructors,
+        Self::FieldSites,
     ];
 
     pub fn is_graph_tool(self) -> bool {

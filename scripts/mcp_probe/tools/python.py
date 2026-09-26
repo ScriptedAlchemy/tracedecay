@@ -45,11 +45,11 @@ def probes_for(d):
         "tracedecay_impact":            [{"node_id": i} for i in ids],
         "tracedecay_rename_preview":    [{"node_id": i, "new_name": "renamed"} for i in ids],
         # analysis (whole-DB sweeps)
-        "tracedecay_hotspots":          [{}, {"limit": 10}, {"path": "src"}, {"path": "tests"}, {"path": "examples"}],
+        "tracedecay_hotspots":          [{}, {"limit": 1}, {"limit": 10}, {"limit": 25}, {"limit": 100}],
         "tracedecay_complexity":        [{}, {"limit": 10}, {"path": "src"}, {"path": "tests"}, {"path": "examples"}],
         "tracedecay_dead_code":         [{}, {"limit": 10}, {"include_public": False},
                                         {"path": "src"}, {"path": "tests"}],
-        "tracedecay_circular":          [{}, {"limit": 5}, {"path": "src"}, {"path": "tests"}, {"path": "examples"}],
+        "tracedecay_circular":          [{}, {"limit": 1}, {"limit": 5}, {"limit": 25}, {"limit": 100}],
         "tracedecay_doc_coverage":      [{}, {"limit": 10}, {"path": "src"}, {"path": "tests"}, {"path": files[0]}],
         "tracedecay_god_class":         [{}, {"limit": 10}, {"path": "src"}, {"path": "tests"}, {"path": "examples"}],
         "tracedecay_dependency_depth":  [{}, {"limit": 10}, {"path": "src"}, {"path": "tests"}, {"path": "examples"}],

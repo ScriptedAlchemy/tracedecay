@@ -26,11 +26,6 @@ test-transport = []
 # Cross-crate fixture surface: the session-authority composition over the
 # registered host-admission test runtime. Production code is never gated by it.
 test-helpers = ["tracedecay-project/test-helpers"]
-# Source-parsing analysis (field receiver typing, the unmounted-files
-# handler) needs the canonical Rust and TypeScript grammar tier. The
-# composition root mounts this production feature where that tier is already
-# part of the shipped code-index closure.
-source-analysis = ["tracedecay-code-extraction/lite"]
 
 [dependencies]
 futures-util = "0.3.33"

@@ -337,7 +337,7 @@ pub(super) fn def_derives() -> ToolDefinition {
     )
 }
 
-pub(super) fn def_field_sites() -> ToolDefinition {
+pub(super) fn def_field_sites(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_field_sites",
         "Field Read/Write Sites",
@@ -349,28 +349,11 @@ pub(super) fn def_field_sites() -> ToolDefinition {
          is the exact blast radius. Pattern matches `.<field>` references; \
          field-by-name is shorthand for any struct's same-named field, while \
          `Struct::field` form narrows to a specific declaration.",
-        json!({
-            "type": "object",
-            "properties": {
-                "field": {
-                    "type": "string",
-                    "description": "Field name. Bare name ('last_sync_at') matches across structs; qualified form ('GraphStats::last_sync_at') narrows to one struct's field."
-                },
-                "writes_only": {
-                    "type": "boolean",
-                    "description": "When true, returns only write_sites and omits reads. Default false."
-                },
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum sites per kind (default: 200, max: 2000)."
-                }
-            },
-            "required": ["field"]
-        }),
+        input_schema,
     )
 }
 
-pub(super) fn def_constructors() -> ToolDefinition {
+pub(super) fn def_constructors(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_constructors",
         "Struct Literal Sites",
@@ -382,20 +365,7 @@ pub(super) fn def_constructors() -> ToolDefinition {
          unverified because syntax alone cannot link same-name types across \
          modules; ambiguous definitions or recovered syntax report unknown \
          field coverage instead of inferred missing fields.",
-        json!({
-            "type": "object",
-            "properties": {
-                "struct": {
-                    "type": "string",
-                    "description": "Struct name to search literal sites of (e.g. 'GraphStats', 'Config')."
-                },
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum number of literal sites to return (default: 100, max: 1000)."
-                }
-            },
-            "required": ["struct"]
-        }),
+        input_schema,
     )
 }
 

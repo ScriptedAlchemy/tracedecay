@@ -1,3 +1,4 @@
+mod analysis_report_surface;
 mod callable_code;
 mod callable_code_catalog;
 mod callable_code_service;
@@ -62,6 +63,25 @@ fn validate_current_temporal_meta(
     PageRequest::new(meta.page.page_size, meta.page.cursor.clone()).map(|_| ())
 }
 
+pub use analysis_report_surface::{
+    CircularCycleV1, CircularResultV1, CircularSurfaceRequestV1, ComplexityReportEntryV1,
+    ComplexityReportV1, ComplexitySurfaceRequestV1, ConstructorFieldCoverageV1,
+    ConstructorResolutionReasonV1, ConstructorResolutionStatusV1, ConstructorSiteV1,
+    ConstructorsNotFoundV1, ConstructorsReportV1, ConstructorsResultV1,
+    ConstructorsSurfaceRequestV1, CouplingDirectionV1, CouplingEntryV1, CouplingResultV1,
+    CouplingSurfaceRequestV1, DeadCodeResultV1, DeadCodeSurfaceRequestV1, DeadCodeSymbolV1,
+    DistributionFileV1, DistributionKindCountV1, DistributionResultV1,
+    DistributionSurfaceRequestV1, DistributionViewV1, DocCoverageFileV1, DocCoverageResultV1,
+    DocCoverageSurfaceRequestV1, DocCoverageSymbolV1, FieldSiteV1, FieldSitesResultV1,
+    FieldSitesSurfaceRequestV1, GodClassEntryV1, GodClassResultV1, GodClassSurfaceRequestV1,
+    HotspotV1, HotspotsResultV1, HotspotsSurfaceRequestV1, InheritanceDepthEntryV1,
+    InheritanceDepthResultV1, InheritanceDepthSurfaceRequestV1, LargestEntryV1, LargestResultV1,
+    LargestSurfaceRequestV1, RankDirectionV1, RankEdgeKindV1, RankEntryV1, RankResultV1,
+    RankSurfaceRequestV1, RecursionCycleV1, RecursionResultV1, RecursionSurfaceRequestV1,
+    RecursionSymbolV1, UnmountedEcosystemStatusV1, UnmountedEcosystemV1, UnmountedFileV1,
+    UnmountedFilesResultV1, UnmountedFilesSurfaceRequestV1, UnsafePatternKindV1,
+    UnsafePatternMatchV1, UnsafePatternsResultV1, UnsafePatternsSurfaceRequestV1,
+};
 pub use callable_code::{
     CALLABLE_CODE_OPERATION_COUNT, CallableCodeOperationKind, CallableCodeOperations,
     CodeFacetDimension, CodeFacetRecord, CodeFacetRequest, CodeHierarchyRequest, CodeImpactRequest,

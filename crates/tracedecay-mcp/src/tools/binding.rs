@@ -50,7 +50,6 @@ pub enum McpToolDispatchGroup {
     Graph,
     Info,
     Admin,
-    Analysis,
     Git,
     Health,
     Memory,
@@ -87,7 +86,6 @@ pub fn tool_branch_sensitivity(tool_name: &str) -> BranchSensitivity {
             McpToolDispatchGroup::Graph
             | McpToolDispatchGroup::Info
             | McpToolDispatchGroup::Admin
-            | McpToolDispatchGroup::Analysis
             | McpToolDispatchGroup::Git
             | McpToolDispatchGroup::Health
             | McpToolDispatchGroup::MultiRoot
@@ -260,6 +258,22 @@ fn application_surface_branch_sensitivity(
         | ApplicationSurfaceOperation::Health
         | ApplicationSurfaceOperation::Dsm
         | ApplicationSurfaceOperation::Diagnose
+        | ApplicationSurfaceOperation::DeadCode
+        | ApplicationSurfaceOperation::Circular
+        | ApplicationSurfaceOperation::Hotspots
+        | ApplicationSurfaceOperation::UnmountedFiles
+        | ApplicationSurfaceOperation::Rank
+        | ApplicationSurfaceOperation::Largest
+        | ApplicationSurfaceOperation::Coupling
+        | ApplicationSurfaceOperation::InheritanceDepth
+        | ApplicationSurfaceOperation::Distribution
+        | ApplicationSurfaceOperation::Recursion
+        | ApplicationSurfaceOperation::Complexity
+        | ApplicationSurfaceOperation::DocCoverage
+        | ApplicationSurfaceOperation::GodClass
+        | ApplicationSurfaceOperation::UnsafePatterns
+        | ApplicationSurfaceOperation::Constructors
+        | ApplicationSurfaceOperation::FieldSites
         | HealthRead
         | HealthDelta
         | DiagnosticsRead
@@ -325,11 +339,6 @@ const BINDING_GROUPS: &[BindingGroup] = binding_groups![
         "tracedecay_todos", "tracedecay_config"],
     [Some(McpToolDispatchGroup::Admin), RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_hook_runtime", "tracedecay_admin_cli", "tracedecay_admin_project"],
-    [Some(McpToolDispatchGroup::Analysis), RegisteredProjectAccess::ActiveProjectOnly,
-        "tracedecay_dead_code", "tracedecay_circular", "tracedecay_hotspots", "tracedecay_unmounted_files",
-        "tracedecay_rank", "tracedecay_largest", "tracedecay_coupling", "tracedecay_inheritance_depth",
-        "tracedecay_distribution", "tracedecay_recursion", "tracedecay_complexity", "tracedecay_doc_coverage",
-        "tracedecay_god_class", "tracedecay_unsafe_patterns", "tracedecay_constructors", "tracedecay_field_sites"],
     [Some(McpToolDispatchGroup::Git), RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_admin_branch_add", "tracedecay_affected", "tracedecay_diff_context", "tracedecay_changelog",
         "tracedecay_commit_context", "tracedecay_pr_context", "tracedecay_branch_search",
@@ -749,8 +758,6 @@ fn compute_tool_supports_live_cancellation(tool_name: &str) -> bool {
                 | "tracedecay_grep"
                 | "tracedecay_run_affected_tests"
                 | "tracedecay_pr_context"
-                | "tracedecay_dead_code"
-                | "tracedecay_circular"
                 | "tracedecay_affected"
         )
 }

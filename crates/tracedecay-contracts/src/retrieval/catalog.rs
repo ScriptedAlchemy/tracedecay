@@ -20,6 +20,17 @@ use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
 use crate::retrieval::DependencyDepthResultV1;
+use crate::retrieval::analysis_report_surface::{
+    CircularResultV1, CircularSurfaceRequestV1, ComplexityReportV1, ComplexitySurfaceRequestV1,
+    ConstructorsResultV1, ConstructorsSurfaceRequestV1, CouplingResultV1, CouplingSurfaceRequestV1,
+    DeadCodeResultV1, DeadCodeSurfaceRequestV1, DistributionResultV1, DistributionSurfaceRequestV1,
+    DocCoverageResultV1, DocCoverageSurfaceRequestV1, FieldSitesResultV1,
+    FieldSitesSurfaceRequestV1, GodClassResultV1, GodClassSurfaceRequestV1, HotspotsResultV1,
+    HotspotsSurfaceRequestV1, InheritanceDepthResultV1, InheritanceDepthSurfaceRequestV1,
+    LargestResultV1, LargestSurfaceRequestV1, RankResultV1, RankSurfaceRequestV1,
+    RecursionResultV1, RecursionSurfaceRequestV1, UnmountedFilesResultV1,
+    UnmountedFilesSurfaceRequestV1, UnsafePatternsResultV1, UnsafePatternsSurfaceRequestV1,
+};
 use crate::retrieval::callable_code_catalog::CALLABLE_CODE_DEFAULT_PAGE_SIZE;
 use crate::retrieval::graph_report_surface::{
     DependencyDepthSurfaceRequestV1, DiagnoseResultV1, DiagnoseSurfaceRequestV1, DsmResultV1,
@@ -185,6 +196,22 @@ const PRIMITIVE_READ_SPECS: &[PrimitiveReadSpec] = &[
     graph_report_spec("health"),
     graph_report_spec("dsm"),
     graph_report_spec("diagnose"),
+    graph_report_spec("dead_code"),
+    graph_report_spec("circular"),
+    graph_report_spec("hotspots"),
+    graph_report_spec("unmounted_files"),
+    graph_report_spec("rank"),
+    graph_report_spec("largest"),
+    graph_report_spec("coupling"),
+    graph_report_spec("inheritance_depth"),
+    graph_report_spec("distribution"),
+    graph_report_spec("recursion"),
+    graph_report_spec("complexity"),
+    graph_report_spec("doc_coverage"),
+    graph_report_spec("god_class"),
+    graph_report_spec("unsafe_patterns"),
+    graph_report_spec("constructors"),
+    graph_report_spec("field_sites"),
     primitive_spec("session_lookup"),
     primitive_spec("qualified_name"),
     primitive_spec("call_chain"),
@@ -220,7 +247,12 @@ fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface
         // only; their typed results render as the established tool output.
         "context" | "node" | "impact" | "similar" | "redundancy" | "rename_preview"
         | "port_status" | "port_order" | "todos" | "test_map" | "test_risk" | "gini"
-        | "dependency_depth" | "health" | "dsm" | "diagnose" => &CLI_MCP_PRIMITIVE_SURFACES,
+        | "dependency_depth" | "health" | "dsm" | "diagnose" | "dead_code" | "circular"
+        | "hotspots" | "unmounted_files" | "rank" | "largest" | "coupling"
+        | "inheritance_depth" | "distribution" | "recursion" | "complexity" | "doc_coverage"
+        | "god_class" | "unsafe_patterns" | "constructors" | "field_sites" => {
+            &CLI_MCP_PRIMITIVE_SURFACES
+        }
         "health_read" | "storage_status" | "diagnostics_read" => &DASHBOARD_PRIMITIVE_SURFACES,
         _ => &PRE_DASHBOARD_PRIMITIVE_SURFACES,
     }
@@ -332,6 +364,40 @@ fn primitive_read_description(operation: &str) -> &'static str {
         }
         "diagnose" => {
             "Map raw cargo, clippy, or rustc diagnostics to the smallest containing graph symbol and its callers, and publish them to the managed diagnostics store."
+        }
+        "dead_code" => {
+            "List functions and methods with no indexed incoming reference, excluding entry points, tests, and (by default) public items."
+        }
+        "circular" => {
+            "Report file-level dependency cycles, largest first, each bounded to its listed members with its true size stated."
+        }
+        "hotspots" => "Rank symbols by total incoming plus outgoing graph relations.",
+        "unmounted_files" => {
+            "Find source files on disk that no compiler, bundler, or test runner reaches from its entry points, per ecosystem, with each ecosystem's verdict and blind spots."
+        }
+        "rank" => "Rank symbols by how many relations of one edge kind they receive or originate.",
+        "largest" => "Rank symbols by their line span.",
+        "coupling" => {
+            "Rank files by how many other files depend on them (fan-in) or they depend on (fan-out)."
+        }
+        "inheritance_depth" => "Rank classes and interfaces by the depth of their extends chain.",
+        "distribution" => "Count symbols by kind per file, or across every matching file.",
+        "recursion" => "Report self-recursive and mutually recursive call cycles, shortest first.",
+        "complexity" => {
+            "Rank symbols by lines plus weighted fan-out and fan-in, with their extraction-time branch, loop, and nesting counters."
+        }
+        "doc_coverage" => {
+            "List public symbols without documentation, grouped by file, after verifying the indexed sources still match the files on disk."
+        }
+        "god_class" => "Rank classes and structs by their contained methods plus fields.",
+        "unsafe_patterns" => {
+            "Find unwrap, expect, panic, todo, unimplemented, and unsafe sites in indexed source, with each site's enclosing symbol and test scope."
+        }
+        "constructors" => {
+            "Find struct-literal construction sites of a named struct and the fields each site sets, updates, or omits."
+        }
+        "field_sites" => {
+            "Find read and write sites of a named field, optionally narrowed to one owner's field."
         }
         _ => "Read bounded data from the admitted project's current retained state.",
     }
@@ -669,6 +735,50 @@ fn primitive_executable_schemas(
     add!("health", HealthSurfaceRequestV1, HealthResultV1);
     add!("dsm", DsmSurfaceRequestV1, DsmResultV1);
     add!("diagnose", DiagnoseSurfaceRequestV1, DiagnoseResultV1);
+    add!("dead_code", DeadCodeSurfaceRequestV1, DeadCodeResultV1);
+    add!("circular", CircularSurfaceRequestV1, CircularResultV1);
+    add!("hotspots", HotspotsSurfaceRequestV1, HotspotsResultV1);
+    add!(
+        "unmounted_files",
+        UnmountedFilesSurfaceRequestV1,
+        UnmountedFilesResultV1
+    );
+    add!("rank", RankSurfaceRequestV1, RankResultV1);
+    add!("largest", LargestSurfaceRequestV1, LargestResultV1);
+    add!("coupling", CouplingSurfaceRequestV1, CouplingResultV1);
+    add!(
+        "inheritance_depth",
+        InheritanceDepthSurfaceRequestV1,
+        InheritanceDepthResultV1
+    );
+    add!(
+        "distribution",
+        DistributionSurfaceRequestV1,
+        DistributionResultV1
+    );
+    add!("recursion", RecursionSurfaceRequestV1, RecursionResultV1);
+    add!("complexity", ComplexitySurfaceRequestV1, ComplexityReportV1);
+    add!(
+        "doc_coverage",
+        DocCoverageSurfaceRequestV1,
+        DocCoverageResultV1
+    );
+    add!("god_class", GodClassSurfaceRequestV1, GodClassResultV1);
+    add!(
+        "unsafe_patterns",
+        UnsafePatternsSurfaceRequestV1,
+        UnsafePatternsResultV1
+    );
+    add!(
+        "constructors",
+        ConstructorsSurfaceRequestV1,
+        ConstructorsResultV1
+    );
+    add!(
+        "field_sites",
+        FieldSitesSurfaceRequestV1,
+        FieldSitesResultV1
+    );
     Ok(schemas)
 }
 

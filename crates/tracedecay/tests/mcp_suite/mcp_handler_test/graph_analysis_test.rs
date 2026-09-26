@@ -4223,7 +4223,7 @@ async fn field_sites_behavior_reports_literal_read_and_write_sites() {
     );
     assert_eq!(
         missing_field,
-        "config error: tracedecay_field_sites failed over production MCP: tool execution failed: config error: tracedecay_field_sites requires a 'field' argument"
+        "config error: tracedecay_field_sites failed over production MCP: tool execution failed: config error: invalid arguments for tracedecay_field_sites: missing field `field`"
     );
 
     // `take!` is parseable Rust, but its body is a token tree, so the qualifier
