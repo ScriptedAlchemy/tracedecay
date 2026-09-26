@@ -27,6 +27,7 @@ use crate::cli::{
     SessionsRefreshAction,
 };
 use crate::commands::{daemon_tool_json, retained_effect_payload, retained_tool_payload};
+use crate::registered_project_path_selector;
 
 const PROJECT_CONTEXT_TOOL: &str = "tracedecay_project_context";
 
@@ -295,7 +296,10 @@ where
         (Some(project_id), None) => {
             json!({ "project_selector": { "project_id": project_id }, "format": "json" })
         }
-        (None, Some(project_path)) => json!({ "path": project_path, "format": "json" }),
+        (None, Some(project_path)) => json!({
+            "path": registered_project_path_selector(project_path)?,
+            "format": "json",
+        }),
         (None, None) => {
             return Err(refresh_config_error(
                 "sessions refresh requires --project-id, --project-path, or --profile; it never falls back to the current directory",

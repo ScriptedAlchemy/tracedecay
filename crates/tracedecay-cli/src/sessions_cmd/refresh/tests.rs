@@ -426,6 +426,34 @@ async fn project_refresh_uses_registered_authorities_and_the_canonical_payload()
     );
 }
 
+/// The daemon resolves paths from its own directory, so a relative
+/// `--project-path` reaches it as the CLI's canonical directory.
+#[tokio::test]
+async fn project_refresh_sends_a_relative_project_path_as_the_cli_directory() {
+    let (project_root, git_common_dir) = project_fixture_authorities();
+    let transport = FakeDaemonTransport::new([
+        registry_context(&project_root, &git_common_dir),
+        effect_reply(
+            RetainedSurfaceOperation::SessionRefreshBegin,
+            begin_result(RetainedOutcomeStatusV1::Started, "opaque-refresh-handle"),
+        ),
+    ]);
+    let selectors = SessionRefreshSelectors {
+        project_path: Some(".".to_owned()),
+        ..project_selectors()
+    };
+
+    execute_session_refresh(&transport, SessionRefreshOperation::Begin, &selectors, None)
+        .await
+        .unwrap();
+
+    let cli_directory = std::env::current_dir().unwrap().canonicalize().unwrap();
+    assert_eq!(
+        transport.calls()[0].arguments,
+        json!({ "path": cli_directory, "format": "json" })
+    );
+}
+
 #[tokio::test]
 async fn profile_refresh_stays_projectless_and_roundtrips_only_the_opaque_handle() {
     let transport = FakeDaemonTransport::new([
