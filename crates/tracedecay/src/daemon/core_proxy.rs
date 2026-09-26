@@ -594,7 +594,8 @@ pub(super) fn repository_discovery_deferred(
         let retry_after_ms = super::REPOSITORY_DISCOVERY_DEADLINE.as_millis();
         match tracedecay_runtime_core::git_discovery::identity_resolution_elapsed(path) {
             Some(elapsed) => format!(
-                "; resolution in progress for {:.1}s and publishing its result, retry after {retry_after_ms}ms",
+                "; repository discovery blocked on {} for {:.1}s; retry after {retry_after_ms}ms",
+                path.display(),
                 elapsed.as_secs_f64()
             ),
             None => format!("; retry after {retry_after_ms}ms"),

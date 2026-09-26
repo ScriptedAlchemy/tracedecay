@@ -52,9 +52,26 @@ pub fn git_worktree_root(dir: &Path) -> Option<PathBuf> {
 /// For a linked worktree this is the main checkout's `.git` directory, which is
 /// the stable local identity all linked worktrees share.
 pub fn git_common_dir(dir: &Path) -> Option<PathBuf> {
-    crate::git_repository::repository_topology(dir)
-        .ok()
-        .map(|topology| topology.common_dir.clone())
+    git_common_dir_outcome(dir).ok().flatten()
+}
+
+/// [`git_common_dir`] that keeps a blocked discovery distinct from "not a
+/// repository".
+///
+/// `Ok(None)` is a path that is not a readable repository. `Err` is only
+/// [`crate::git_repository::GitRepositoryError::DiscoveryBlocked`]: another
+/// thread owns the walk, and treating that as absence would mint a second
+/// project identity while the real one is still unresolved.
+pub fn git_common_dir_outcome(
+    dir: &Path,
+) -> std::result::Result<Option<PathBuf>, crate::git_repository::GitRepositoryError> {
+    match crate::git_repository::repository_topology(dir) {
+        Ok(topology) => Ok(Some(topology.common_dir.clone())),
+        Err(error @ crate::git_repository::GitRepositoryError::DiscoveryBlocked { .. }) => {
+            Err(error)
+        }
+        Err(_) => Ok(None),
+    }
 }
 
 /// Stable repository locator digest for a registered project root.

@@ -82,7 +82,23 @@ impl TraceDecay {
         // Every linked worktree resolves through its repository, attached or
         // not; suppressing this for detached worktrees dropped them onto the
         // path-hashed identity fallback and minted a duplicate store.
-        let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(project_root);
+        let git_common_dir = match tracedecay_runtime_core::worktree::git_common_dir_outcome(
+            project_root,
+        ) {
+            Ok(git_common_dir) => git_common_dir,
+            Err(
+                tracedecay_runtime_core::git_repository::GitRepositoryError::DiscoveryBlocked {
+                    path,
+                },
+            ) => {
+                return Err(TraceDecayError::project_route(
+                    tracedecay_runtime_core::git_discovery::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
+                    true,
+                    format!("repository discovery blocked on {path}"),
+                ));
+            }
+            Err(_) => None,
+        };
         if selected.is_none()
             && let Some(registry_database) = registry_database
             && let Some(resolution) = registry_database
