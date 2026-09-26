@@ -63,6 +63,7 @@ impl From<GrepSearchHit> for GrepHit {
 #[hotpath::measure(future = true, label = "mcp.search.grep.total")]
 pub async fn handle_grep(
     project_root: &Path,
+    response_handle_root: &Path,
     graph: std::result::Result<&VerifiedGraphQuery, &TraceDecayError>,
     args: Value,
     scope_prefix: Option<&str>,
@@ -163,7 +164,7 @@ pub async fn handle_grep(
 
     let text = hotpath::measure_block!(
         "mcp.search.grep.render",
-        render::finalize(Some(project_root), &args, &output_value, || {
+        render::finalize(Some(response_handle_root), &args, &output_value, || {
             render_grep_md(&hits, truncated, scan.files_scanned, scan.omissions)
         })
     );
@@ -987,6 +988,7 @@ mod tests {
     ) -> Value {
         let result = handle_grep(
             project,
+            &project.join("response-handles"),
             Ok(graph),
             json!({"pattern": ENRICHMENT_TOKEN, "fixed_strings": true, "format": "json"}),
             None,

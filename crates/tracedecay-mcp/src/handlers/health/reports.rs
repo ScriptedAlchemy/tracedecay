@@ -8,6 +8,7 @@ const MAX_GINI_RELATIONS: usize = 2_000_000;
 
 #[hotpath::measure(label = "mcp.health.gini.total")]
 pub async fn handle_gini(
+    response_handle_root: &Path,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
@@ -72,7 +73,7 @@ pub async fn handle_gini(
     );
 
     Ok(generic_tool_result(
-        Some(graph.project_root()?),
+        Some(response_handle_root),
         &args,
         &output,
         vec![],
@@ -252,6 +253,7 @@ fn verified_gini_member_values(
 
 #[hotpath::measure(label = "mcp.health.dependency_depth.total")]
 pub async fn handle_dependency_depth(
+    response_handle_root: &Path,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
@@ -296,7 +298,7 @@ pub async fn handle_dependency_depth(
     );
 
     Ok(generic_tool_result(
-        Some(graph.project_root()?),
+        Some(response_handle_root),
         &args,
         &output,
         vec![],
@@ -305,6 +307,7 @@ pub async fn handle_dependency_depth(
 
 #[hotpath::measure(label = "mcp.health.health.total")]
 pub async fn handle_health(
+    response_handle_root: &Path,
     graph: &VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
@@ -379,7 +382,7 @@ pub async fn handle_health(
     );
 
     Ok(generic_tool_result(
-        Some(graph.project_root()?),
+        Some(response_handle_root),
         &args,
         &output,
         vec![],

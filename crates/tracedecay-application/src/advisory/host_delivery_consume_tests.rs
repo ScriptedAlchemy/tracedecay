@@ -432,6 +432,7 @@ async fn consume_fixture() -> ConsumeFixture {
         open_feedback_runtime(
             database,
             root.path(),
+            root.path().join("response-handles"),
             scope.clone(),
             source_access(&scope, &operation, observed_at),
         )
@@ -548,7 +549,6 @@ async fn consume_fixture() -> ConsumeFixture {
 
 #[tokio::test]
 async fn completed_publication_is_consumed_into_exactly_one_hook_notice() {
-    let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let fixture = consume_fixture().await;
     let publication = fixture
         .completed
@@ -683,7 +683,6 @@ async fn completed_publication_is_consumed_into_exactly_one_hook_notice() {
 
 #[tokio::test]
 async fn unpublished_cycles_and_hookless_hosts_deliver_nothing() {
-    let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let fixture = consume_fixture().await;
 
     // A tick without a completed publication is a typed error, not a delivery.

@@ -72,14 +72,14 @@ pub type SourceEditOutcome =
 /// Run one source-edit tool on `surface` and render its tool result.
 #[hotpath::measure(label = "mcp.edit.total", future = true)]
 pub async fn source_edit_tool(
-    project_root: Option<&Path>,
+    response_handle_root: Option<&Path>,
     surface: BindingSurface,
     operation: ApplicationSurfaceOperation,
     args: Value,
     invocation: SourceEditInvocationContext<'_>,
 ) -> Result<ToolResult> {
     let outcome = run_source_edit(surface, operation, &args, invocation).await?;
-    render_source_edit_outcome(project_root, operation, &args, outcome)
+    render_source_edit_outcome(response_handle_root, operation, &args, outcome)
 }
 
 /// Decode, dispatch, and settle one source-edit tool call. `Err` is an
@@ -138,13 +138,13 @@ pub async fn run_source_edit(
 
 /// Render a settled source edit as the edit tools always have.
 pub fn render_source_edit_outcome(
-    project_root: Option<&Path>,
+    response_handle_root: Option<&Path>,
     operation: ApplicationSurfaceOperation,
     args: &Value,
     outcome: SourceEditOutcome,
 ) -> Result<ToolResult> {
     let result = outcome.map_err(|problem| problem.into_source().into_trace_decay_error())?;
-    render_source_edit_result(project_root, operation, args, &result)
+    render_source_edit_result(response_handle_root, operation, args, &result)
 }
 
 fn unexpected_outcome() -> TraceDecayError {
@@ -154,7 +154,7 @@ fn unexpected_outcome() -> TraceDecayError {
 }
 
 fn render_source_edit_result(
-    project_root: Option<&Path>,
+    response_handle_root: Option<&Path>,
     operation: ApplicationSurfaceOperation,
     args: &Value,
     result: &SourceEditSurfaceResultV1,
@@ -164,10 +164,10 @@ fn render_source_edit_result(
     let tool_result = match operation {
         ApplicationSurfaceOperation::SourceEditRollback
         | ApplicationSurfaceOperation::SourceEditReconcile => {
-            generic_tool_result(project_root, args, &value, Vec::new())
+            generic_tool_result(response_handle_root, args, &value, Vec::new())
         }
         _ => rendered_tool_result(
-            project_root,
+            response_handle_root,
             args,
             &value,
             result.outcome.touched_files(),

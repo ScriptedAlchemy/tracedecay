@@ -481,7 +481,7 @@ pub use layout::{
     enrolled_project_roots, path_local_profile_project_id, profile_sharded_data_root,
     profile_sharded_layout, registered_project_id, resolve_enrolled_layout_for_current_profile,
     resolve_layout, resolve_layout_for_current_profile, resolve_lcm_payload_root,
-    resolve_persisted_layout, resolve_project_session_db_path, resolve_response_handle_root,
+    resolve_persisted_layout, resolve_project_session_db_path,
 };
 pub use manifest::{read_store_manifest, write_store_manifest, write_store_manifest_to_path};
 pub use paths_and_io::{

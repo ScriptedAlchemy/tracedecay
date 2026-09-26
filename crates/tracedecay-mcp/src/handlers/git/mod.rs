@@ -66,9 +66,14 @@ fn git_error_result(
             "message": message,
         }
     });
-    generic_tool_result(Some(ctx.project_root()), args, &output, vec![])
-        .with_semantic_error(true)
-        .with_failure_message(message)
+    generic_tool_result(
+        Some(&ctx.store_layout().response_handle_root),
+        args,
+        &output,
+        vec![],
+    )
+    .with_semantic_error(true)
+    .with_failure_message(message)
 }
 
 /// Typed result returned when a git-dispatched tool exhausts the dispatch

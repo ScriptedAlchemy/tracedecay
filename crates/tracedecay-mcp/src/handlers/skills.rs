@@ -160,7 +160,7 @@ pub async fn handle_skill_list(
             .collect::<Vec<_>>(),
     });
     Ok(tool_json_with_md(
-        Some(cg.project_root()),
+        Some(&cg.store_layout().response_handle_root),
         &args,
         &payload,
         || renderers::skill_list_md(&payload),
@@ -242,7 +242,7 @@ pub async fn handle_skill_view(
         "support_file_summaries": support_file_summaries,
     });
     Ok(tool_json_with_md(
-        Some(cg.project_root()),
+        Some(&cg.store_layout().response_handle_root),
         &args,
         &payload,
         || renderers::skill_view_md(&payload),
@@ -284,7 +284,7 @@ pub async fn handle_automation_run_artifact_view(
         "payload": payload,
     });
     Ok(tool_json_with_md(
-        Some(cg.project_root()),
+        Some(&cg.store_layout().response_handle_root),
         &args,
         &payload,
         || renderers::automation_artifact_md(&payload),
@@ -316,5 +316,9 @@ pub fn handle_hermes_skill_bridge(cg: &TraceDecay, args: &Value) -> Result<ToolR
         "status": "ok",
         "bridge": snapshot,
     });
-    Ok(tool_json(Some(cg.project_root()), args, &payload))
+    Ok(tool_json(
+        Some(&cg.store_layout().response_handle_root),
+        args,
+        &payload,
+    ))
 }

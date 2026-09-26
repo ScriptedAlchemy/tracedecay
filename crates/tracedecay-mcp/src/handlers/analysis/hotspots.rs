@@ -12,6 +12,7 @@ static EXTRACTORS: LazyLock<LanguageRegistry> = LazyLock::new(LanguageRegistry::
 
 #[hotpath::measure(future = true, label = "mcp.analysis.hotspots.total")]
 pub async fn handle_hotspots(
+    response_handle_root: &Path,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
@@ -83,7 +84,7 @@ pub async fn handle_hotspots(
     let touched_files = unique_file_paths(touched.iter().map(std::string::String::as_str));
 
     Ok(generic_tool_result(
-        Some(graph.project_root()?),
+        Some(response_handle_root),
         &args,
         &output,
         touched_files,

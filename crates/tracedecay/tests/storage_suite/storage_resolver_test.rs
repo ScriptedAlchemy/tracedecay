@@ -24,8 +24,8 @@ use tracedecay_runtime_core::storage::{
     EnrollmentMarker, PrivateStoreIo, ProjectPath, STORE_MANIFEST_FILENAME,
     STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreArtifactPath, StoreKind, StoreManifest,
     default_profile_project_id, profile_sharded_layout, read_repository_identity_marker,
-    read_store_manifest, repository_identity_path, resolve_layout, resolve_lcm_payload_root,
-    resolve_project_session_db_path, resolve_response_handle_root,
+    read_store_manifest, repository_identity_path, resolve_layout,
+    resolve_layout_for_current_profile, resolve_lcm_payload_root, resolve_project_session_db_path,
     write_repository_identity_marker, write_store_manifest, write_store_manifest_to_path,
 };
 

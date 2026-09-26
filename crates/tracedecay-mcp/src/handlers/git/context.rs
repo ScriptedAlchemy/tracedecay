@@ -565,7 +565,7 @@ pub async fn handle_diff_context(
     );
 
     Ok(generic_tool_result(
-        Some(ctx.project_root()),
+        Some(&ctx.store_layout().response_handle_root),
         &args,
         &output,
         touched_files,
@@ -641,7 +641,7 @@ pub async fn handle_changelog(ctx: &McpToolContext<'_>, args: Value) -> Result<T
                 },
             });
             return Ok(generic_tool_result(
-                Some(ctx.project_root()),
+                Some(&ctx.store_layout().response_handle_root),
                 &args,
                 &result,
                 touched_files,
@@ -684,7 +684,7 @@ pub async fn handle_changelog(ctx: &McpToolContext<'_>, args: Value) -> Result<T
     );
 
     Ok(generic_tool_result(
-        Some(ctx.project_root()),
+        Some(&ctx.store_layout().response_handle_root),
         &args,
         &result,
         touched_files,
@@ -746,7 +746,7 @@ pub async fn handle_commit_context(
             })
         );
         return Ok(generic_tool_result(
-            Some(ctx.project_root()),
+            Some(&ctx.store_layout().response_handle_root),
             &args,
             &output,
             vec![],
@@ -842,7 +842,7 @@ pub async fn handle_commit_context(
     );
 
     Ok(generic_tool_result(
-        Some(ctx.project_root()),
+        Some(&ctx.store_layout().response_handle_root),
         &args,
         &output,
         changed_files,
@@ -1187,7 +1187,7 @@ where
                 "PR context returned Git evidence while graph enrichment was unavailable"
             );
             return Ok(generic_tool_result(
-                Some(ctx.project_root()),
+                Some(&ctx.store_layout().response_handle_root),
                 &args,
                 &output,
                 changed_files,
@@ -1216,7 +1216,7 @@ where
         Ok(diff) if diff.head_generation == graph.generation().as_str() => diff,
         Ok(_) => {
             return Ok(generic_tool_result(
-                Some(ctx.project_root()),
+                Some(&ctx.store_layout().response_handle_root),
                 &args,
                 &json!({
                     "status": "partial",
@@ -1248,7 +1248,7 @@ where
         }
         Err(unavailable) => {
             return Ok(generic_tool_result(
-                Some(ctx.project_root()),
+                Some(&ctx.store_layout().response_handle_root),
                 &args,
                 &json!({
                     "status": "partial",
@@ -1593,13 +1593,16 @@ where
         "PR context stage timings"
     );
 
-    Ok(
-        generic_tool_result(Some(ctx.project_root()), &args, &output, changed_files)
-            .with_internal_analytics(json!({
-                "stage_timings_us": stage_timings,
-                "symbol_coverage": output["symbol_page"],
-            })),
+    Ok(generic_tool_result(
+        Some(&ctx.store_layout().response_handle_root),
+        &args,
+        &output,
+        changed_files,
     )
+    .with_internal_analytics(json!({
+        "stage_timings_us": stage_timings,
+        "symbol_coverage": output["symbol_page"],
+    })))
 }
 
 #[cfg(test)]

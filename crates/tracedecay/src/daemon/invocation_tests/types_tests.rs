@@ -1053,6 +1053,7 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
         open_feedback_runtime(
             database.clone(),
             project.path(),
+            project.path().join("response-handles"),
             scope.clone(),
             access.clone(),
         )
@@ -1125,6 +1126,7 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
             .open_and_register(
                 database.clone(),
                 project.path().to_path_buf(),
+                project.path().join("response-handles"),
                 scope.clone(),
                 access.clone(),
                 Arc::new(DaemonCallableCodeAuthorizationSource::production(
@@ -1212,6 +1214,7 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
             .open_and_register(
                 publisher_database,
                 publisher_root.clone(),
+                publisher_root.join("response-handles"),
                 publisher_scope.clone(),
                 publisher_access,
                 Arc::new(DaemonCallableCodeAuthorizationSource::production(

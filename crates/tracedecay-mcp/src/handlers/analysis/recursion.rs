@@ -6,6 +6,7 @@ use super::*;
 /// edge subgraph. Each cycle is a vec of node IDs forming the loop.
 #[hotpath::measure(future = true, label = "mcp.analysis.recursion.total")]
 pub async fn handle_recursion(
+    response_handle_root: &Path,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
@@ -99,7 +100,7 @@ pub async fn handle_recursion(
     let touched_files = unique_file_paths(touched.iter().map(std::string::String::as_str));
 
     Ok(generic_tool_result(
-        Some(graph.project_root()?),
+        Some(response_handle_root),
         &args,
         &output,
         touched_files,

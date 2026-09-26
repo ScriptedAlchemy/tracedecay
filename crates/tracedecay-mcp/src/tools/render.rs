@@ -54,16 +54,21 @@ pub fn wants_json(args: &Value) -> bool {
     parse_format(args) == RequestedOutputFormat::Json
 }
 
-pub fn finalize<F>(project_root: Option<&Path>, args: &Value, value: &Value, md: F) -> String
+pub fn finalize<F>(
+    response_handle_root: Option<&Path>,
+    args: &Value,
+    value: &Value,
+    md: F,
+) -> String
 where
     F: FnOnce() -> String,
 {
-    finalize_with_format(project_root, parse_format(args), value, md)
+    finalize_with_format(response_handle_root, parse_format(args), value, md)
 }
 
 #[hotpath::measure(label = "mcp.server.response.render")]
 pub fn finalize_with_format<F>(
-    project_root: Option<&Path>,
+    response_handle_root: Option<&Path>,
     format: RequestedOutputFormat,
     value: &Value,
     md: F,
@@ -74,31 +79,34 @@ where
     match format {
         RequestedOutputFormat::Json => {
             let json = value.to_string();
-            truncated_json_envelope_with_handle(project_root, &json)
+            truncated_json_envelope_with_handle(response_handle_root, &json)
         }
         RequestedOutputFormat::Markdown => {
             let text = md();
             if text.is_empty() {
                 return text;
             }
-            truncated_markdown_with_handle(project_root, &text)
+            truncated_markdown_with_handle(response_handle_root, &text)
         }
     }
 }
 
-/// Wraps oversized JSON text in a valid preview envelope. With a project root,
+/// Wraps oversized JSON text in a valid preview envelope. With a handle root,
 /// stores the full original locally and includes a retrieval handle.
 ///
 /// If local handle storage is unavailable or fails, the envelope still carries
 /// a preview but also includes explicit recovery metadata so clients can tell
 /// why no handle was emitted and what to retry.
-pub fn truncated_json_envelope_with_handle(project_root: Option<&Path>, formatted: &str) -> String {
+pub fn truncated_json_envelope_with_handle(
+    response_handle_root: Option<&Path>,
+    formatted: &str,
+) -> String {
     if formatted.len() <= MAX_RESPONSE_CHARS {
         return formatted.to_string();
     }
     let started = std::time::Instant::now();
     let now = current_timestamp();
-    let handle = prepare_truncated_response_handle(project_root, formatted);
+    let handle = prepare_truncated_response_handle(response_handle_root, formatted);
     let original_chars = formatted.chars().count();
     let mut end = formatted.len().min(MAX_RESPONSE_CHARS.saturating_sub(1024));
     loop {
@@ -148,7 +156,7 @@ pub fn truncated_json_envelope_with_handle(project_root: Option<&Path>, formatte
                 // failed/absent handle means the preview is all that survives.
                 handle.record.is_some(),
                 now,
-                truncation_handle_status(project_root, &handle),
+                truncation_handle_status(response_handle_root, &handle),
                 started.elapsed(),
             );
             return text;
@@ -158,7 +166,7 @@ pub fn truncated_json_envelope_with_handle(project_root: Option<&Path>, formatte
 }
 
 pub fn markdown_preview_with_handle(
-    project_root: Option<&Path>,
+    response_handle_root: Option<&Path>,
     full_text: &str,
     preview: &str,
 ) -> String {
@@ -166,17 +174,17 @@ pub fn markdown_preview_with_handle(
         return full_text.to_string();
     }
     if full_text == preview {
-        return truncated_markdown_with_handle(project_root, full_text);
+        return truncated_markdown_with_handle(response_handle_root, full_text);
     }
-    markdown_preview_truncation_with_handle(project_root, full_text, preview)
+    markdown_preview_truncation_with_handle(response_handle_root, full_text, preview)
 }
 
-fn truncated_markdown_with_handle(project_root: Option<&Path>, text: &str) -> String {
+fn truncated_markdown_with_handle(response_handle_root: Option<&Path>, text: &str) -> String {
     if text.len() <= MAX_RESPONSE_CHARS {
         return text.to_string();
     }
     render_markdown_truncation_with_handle(
-        project_root,
+        response_handle_root,
         text,
         text.len(),
         |end| markdown_truncation_preview(text, end),
@@ -191,12 +199,12 @@ fn truncated_markdown_with_handle(project_root: Option<&Path>, text: &str) -> St
 }
 
 fn markdown_preview_truncation_with_handle(
-    project_root: Option<&Path>,
+    response_handle_root: Option<&Path>,
     full_text: &str,
     preview: &str,
 ) -> String {
     render_markdown_truncation_with_handle(
-        project_root,
+        response_handle_root,
         full_text,
         preview.len(),
         |end| {
@@ -217,7 +225,7 @@ fn markdown_preview_truncation_with_handle(
 }
 
 fn render_markdown_truncation_with_handle(
-    project_root: Option<&Path>,
+    response_handle_root: Option<&Path>,
     full_text: &str,
     mut end: usize,
     mut preview_for_end: impl FnMut(usize) -> String,
@@ -225,7 +233,7 @@ fn render_markdown_truncation_with_handle(
 ) -> String {
     let started = std::time::Instant::now();
     let now = current_timestamp();
-    let handle = prepare_truncated_response_handle(project_root, full_text);
+    let handle = prepare_truncated_response_handle(response_handle_root, full_text);
     end = end.min(MAX_RESPONSE_CHARS.saturating_sub(MARKDOWN_TRUNCATION_RESERVED_CHARS));
     loop {
         let preview = preview_for_end(end);
@@ -236,7 +244,7 @@ fn render_markdown_truncation_with_handle(
                 rendered.len(),
                 handle.record.is_some(),
                 now,
-                truncation_handle_status(project_root, &handle),
+                truncation_handle_status(response_handle_root, &handle),
                 started.elapsed(),
             );
             return rendered;
@@ -341,12 +349,12 @@ struct TruncatedResponseHandle {
 }
 
 fn truncation_handle_status(
-    project_root: Option<&Path>,
+    response_handle_root: Option<&Path>,
     handle: &TruncatedResponseHandle,
 ) -> &'static str {
     if handle.record.is_some() {
         "stored"
-    } else if project_root.is_none() {
+    } else if response_handle_root.is_none() {
         "no_project_root"
     } else {
         "store_failed"
@@ -393,10 +401,10 @@ fn handle_store_failure_status(error: &TraceDecayError) -> Value {
 }
 
 fn prepare_truncated_response_handle(
-    project_root: Option<&Path>,
+    response_handle_root: Option<&Path>,
     text: &str,
 ) -> TruncatedResponseHandle {
-    if let Some(root) = project_root {
+    if let Some(root) = response_handle_root {
         match hotpath::measure_block!(
             "mcp.server.response.handle_store",
             run_blocking_handle_store(|| store_response_handle(root, text, current_timestamp()))

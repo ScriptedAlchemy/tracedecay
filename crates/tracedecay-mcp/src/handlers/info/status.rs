@@ -239,7 +239,7 @@ pub async fn handle_status(
             output["scope_prefix"] = json!(prefix);
         }
         return Ok(generic_tool_result(
-            Some(ctx.project_root()),
+            Some(&ctx.store_layout().response_handle_root),
             &args,
             &output,
             vec![],
@@ -448,7 +448,7 @@ pub async fn handle_status(
     }
 
     Ok(rendered_tool_result(
-        Some(ctx.project_root()),
+        Some(&ctx.store_layout().response_handle_root),
         &args,
         &output,
         vec![],
@@ -725,7 +725,7 @@ pub async fn handle_active_project(
     );
     let output = active_project_context(ctx, &branch, server_stats, scope_prefix);
     Ok(generic_tool_result(
-        Some(ctx.project_root()),
+        Some(&ctx.store_layout().response_handle_root),
         args,
         &output,
         vec![],

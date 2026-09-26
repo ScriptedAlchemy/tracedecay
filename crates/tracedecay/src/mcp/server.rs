@@ -866,7 +866,7 @@ impl McpServer {
             host_admission_test_runtime,
         } = context;
         let file_token_map = HashMap::new();
-        let response_handle_project_root = cg.project_root().to_path_buf();
+        let response_handle_root = cg.store_layout().response_handle_root.clone();
         let persisted_tokens_saved = match cg.get_tokens_saved().await {
             Ok(persisted) => Some(persisted),
             Err(error) => {
@@ -1166,7 +1166,7 @@ impl McpServer {
 
         tokio::task::spawn_blocking(move || {
             let _ = cleanup_expired_response_handles(
-                &response_handle_project_root,
+                &response_handle_root,
                 tracedecay_runtime_core::tracedecay::current_timestamp(),
             );
         });
@@ -1473,7 +1473,8 @@ impl McpServer {
         }
 
         let cg = self.cg_snapshot().await;
-        stats["response_handles"] = response_handle_stats_json(Some(cg.project_root()));
+        stats["response_handles"] =
+            response_handle_stats_json(Some(&cg.store_layout().response_handle_root));
 
         // Surface the verbose worktree-mismatch warning when present, so
         // `tracedecay_status` is the one tool whose output is loud about

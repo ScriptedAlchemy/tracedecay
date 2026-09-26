@@ -188,7 +188,7 @@ pub async fn handle_affected(
     );
 
     Ok(generic_tool_result(
-        Some(ctx.project_root()),
+        Some(&ctx.store_layout().response_handle_root),
         &args,
         &output,
         touched_files,

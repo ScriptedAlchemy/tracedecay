@@ -440,8 +440,7 @@ impl ProductionCompositionFixture {
         ))
         .await
         .expect("reopen production composition");
-        let (data_dir_guard, global_db_guard) =
-            pin_production_composition_profile(&harness, &project_root);
+        let (data_dir_guard, global_db_guard) = pin_production_composition_profile(&harness);
         Self {
             harness,
             project_root,
@@ -482,8 +481,7 @@ pub(crate) async fn production_composition_fixture_with_sources(
     ))
     .await
     .expect("production composition harness");
-    let (data_dir_guard, global_db_guard) =
-        pin_production_composition_profile(&harness, &project_root);
+    let (data_dir_guard, global_db_guard) = pin_production_composition_profile(&harness);
     ProductionCompositionFixture {
         harness,
         project_root,
@@ -530,21 +528,12 @@ fn seed_production_composition_project(
 #[cfg(feature = "test-transport")]
 fn pin_production_composition_profile(
     harness: &ProductionProjectCompositionHarnessV1,
-    project_root: &Path,
 ) -> (common::EnvVarGuard, common::EnvVarGuard) {
     let profile_root = harness.profile_root();
     let data_dir_guard =
         common::EnvVarGuard::set(tracedecay_project::config::USER_DATA_DIR_ENV, profile_root);
     let global_db_guard =
         common::EnvVarGuard::set(common::GLOBAL_DB_ENV, profile_root.join("global.db"));
-    let response_handle_root =
-        tracedecay_runtime_core::storage::resolve_response_handle_root(project_root)
-            .expect("production composition response-handle root");
-    assert!(
-        response_handle_root.starts_with(profile_root),
-        "response handles must stay inside the fixture profile: {}",
-        response_handle_root.display()
-    );
     (data_dir_guard, global_db_guard)
 }
 

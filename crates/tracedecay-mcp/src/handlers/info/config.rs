@@ -11,7 +11,11 @@ use crate::generic_tool_result;
 
 /// Structured TOML / JSON queries by dotted key path.
 #[hotpath::measure(label = "mcp.info.config.total")]
-pub async fn handle_config(project_root: &Path, args: &Value) -> Result<ToolResult> {
+pub async fn handle_config(
+    project_root: &Path,
+    response_handle_root: &Path,
+    args: &Value,
+) -> Result<ToolResult> {
     let key = args
         .get("key")
         .and_then(|v| v.as_str())
@@ -98,7 +102,7 @@ pub async fn handle_config(project_root: &Path, args: &Value) -> Result<ToolResu
         message: format!("tracedecay_config scan failed to join: {join_error}"),
     })??;
     Ok(generic_tool_result(
-        Some(project_root),
+        Some(response_handle_root),
         args,
         &payload,
         touched,
