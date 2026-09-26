@@ -38,6 +38,8 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/setup-pnpm
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target/hawk"

@@ -1,10 +1,13 @@
 clean
 
-Regenerate the vendor snapshot from the checked-in lockfile:
+Regenerate the vendor snapshot from the checked-in lockfile. Run Cargo from
+outside the checkout, because the repository `.cargo/config.toml` replaces
+crates.io with the crates pnpm vendored for the root workspace, and those do
+not cover this fixture's lock.
 
 ```sh
-cd crates/tracedecay-cli/tests/fixtures/source-provenance-cargo
-cargo vendor --locked vendor
+fixture="$PWD/crates/tracedecay-cli/tests/fixtures/source-provenance-cargo"
+(cd / && cargo vendor --locked --manifest-path "$fixture/Cargo.toml" "$fixture/vendor")
 ```
 
 `Cargo.lock` is the exact dependency authority; update it deliberately before

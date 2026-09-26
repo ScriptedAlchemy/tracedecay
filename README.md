@@ -231,13 +231,15 @@ Common fixes:
 
 ## Build
 
-Building from a source checkout requires Node.js 22+ and npm in addition to
-Rust: `dashboard/app-dist/` is generated output and is not committed, so
-`build.rs` runs `npm ci` and `npm run build` in `dashboard/` before embedding
-the UI. Release users should install the prebuilt, checksummed GitHub archive;
+Building from a source checkout requires Node.js 22+ and pnpm in addition to
+Rust. Run `pnpm install` at the repository root first. It installs the
+dashboard's npm packages and the crates that the committed `.cargo/config.toml`
+builds against; `build.rs` then runs `pnpm run build` in `dashboard/` before
+embedding the UI. Release users should install the prebuilt, checksummed GitHub archive;
 workspace Cargo packages are private.
 
 ```bash
+pnpm install
 cargo build --release
 cargo build --release --features medium
 cargo build --release --no-default-features

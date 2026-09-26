@@ -27,8 +27,6 @@ use std::{
     process::Command,
 };
 
-use sha2::{Digest, Sha256};
-
 #[path = "build-support/dashboard_bundle.rs"]
 mod dashboard_bundle;
 #[path = "build-support/dashboard_manifest.rs"]
@@ -40,7 +38,7 @@ const DASHBOARD_BUILD_INPUTS: &[&str] = &[
     "dashboard/src",
     "dashboard/codegen/schemas",
     "dashboard/package.json",
-    "dashboard/package-lock.json",
+    "pnpm-lock.yaml",
     "dashboard/postcss.config.mjs",
     "dashboard/rsbuild.config.ts",
     "dashboard/tsconfig.json",
@@ -57,13 +55,6 @@ const BUNDLE_STORE_DIR: &str = "dashboard-bundle";
 /// Rsbuild reads this to redirect its output away from the checkout-global
 /// `dashboard/app-dist` (see `dashboard/rsbuild.config.ts`).
 const DASHBOARD_DIST_PATH_ENV: &str = "TRACEDECAY_DASHBOARD_DIST_PATH";
-
-/// Written into `dashboard/node_modules` after a successful `npm ci`: the
-/// sha256 of the `package-lock.json` that installation satisfied. The marker
-/// lives beside the installed tree so every target directory and linked
-/// worktree sharing that tree shares the attestation; a tree without a
-/// matching marker cannot attest the current lockfile and is reinstalled.
-const LOCKFILE_MARKER: &str = ".tracedecay-lockfile-sha256";
 
 /// The embedded dashboard bundle: manifest-validated relative paths, the
 /// `include_bytes!` root the generated module uses (a compile-time env var
@@ -93,8 +84,10 @@ impl EmbeddedDashboard {
 /// the checkout-global `dashboard/app-dist` that `rsbuild dev` and other
 /// target directories rewrite. The frontend is rebuilt, straight into the
 /// store's staging directory, only when the fingerprint of its inputs
-/// differs from the recorded one; `npm ci` runs only when the installed tree
-/// cannot attest the current `package-lock.json`. When
+/// differs from the recorded one. This script never installs dependencies.
+/// `pnpm install` owns them, together with the Cargo sources this build
+/// compiles, and `pnpm run` (`verifyDepsBeforeRun: error`) refuses to build
+/// against a tree that no longer matches `pnpm-lock.yaml`. When
 /// `TRACEDECAY_SKIP_DASHBOARD_BUILD` is set the prebuilt `dashboard/app-dist`
 /// is staged instead and must match the digest
 /// `TRACEDECAY_DASHBOARD_BUNDLE_SHA256` names, so a skip can never embed
@@ -180,10 +173,9 @@ fn embed_dashboard(
         return Ok(EmbeddedDashboard::staged(bundle));
     }
 
-    ensure_dashboard_dependencies(&dashboard)?;
     let staging = dashboard_bundle::prepare_staging(&store)
         .map_err(|error| format!("failed to prepare {}: {error}", store.display()))?;
-    run_npm(
+    run_pnpm(
         &dashboard,
         &["run", "build"],
         &[(DASHBOARD_DIST_PATH_ENV, staging.as_os_str())],
@@ -203,24 +195,6 @@ fn embed_dashboard(
         )
     })?;
     Ok(EmbeddedDashboard::staged(bundle))
-}
-
-/// Runs `npm ci` unless `node_modules` carries the marker of the current
-/// `package-lock.json`. Existence of a `node_modules` directory alone proves
-/// nothing about which lockfile it satisfies.
-fn ensure_dashboard_dependencies(dashboard: &Path) -> Result<(), Box<dyn Error>> {
-    let lockfile = dashboard.join("package-lock.json");
-    let lockfile_bytes = fs::read(&lockfile)
-        .map_err(|error| format!("failed to read {}: {error}", lockfile.display()))?;
-    let lockfile_digest = dashboard_bundle::hex(&Sha256::digest(&lockfile_bytes));
-    let marker = dashboard.join("node_modules").join(LOCKFILE_MARKER);
-    if matches!(fs::read_to_string(&marker), Ok(recorded) if recorded.trim() == lockfile_digest) {
-        return Ok(());
-    }
-    run_npm(dashboard, &["ci"], &[])?;
-    fs::write(&marker, format!("{lockfile_digest}\n"))
-        .map_err(|error| format!("failed to write {}: {error}", marker.display()))?;
-    Ok(())
 }
 
 fn required_bundle_digest_env() -> Result<String, Box<dyn Error>> {
@@ -253,20 +227,34 @@ fn required_bundle_digest_env() -> Result<String, Box<dyn Error>> {
     Ok(expected)
 }
 
-fn run_npm(dir: &Path, args: &[&str], envs: &[(&str, &OsStr)]) -> io::Result<()> {
-    let status = Command::new(if cfg!(windows) { "npm.cmd" } else { "npm" })
-        .args(args)
-        .envs(envs.iter().copied())
-        .current_dir(dir)
-        .status()
-        .map_err(|error| {
-            io::Error::other(format!("failed to run npm {}: {error}", args.join(" ")))
-        })?;
+fn run_pnpm(dir: &Path, args: &[&str], envs: &[(&str, &OsStr)]) -> io::Result<()> {
+    let spawn = |program: &str| {
+        Command::new(program)
+            .args(args)
+            .envs(envs.iter().copied())
+            .current_dir(dir)
+            .status()
+    };
+    // Standalone pnpm installs `pnpm.exe`; npm and Corepack install a
+    // `pnpm.cmd` shim, which `Command` does not resolve on its own.
+    let status = match spawn("pnpm") {
+        Err(error) if cfg!(windows) && error.kind() == io::ErrorKind::NotFound => spawn("pnpm.cmd"),
+        result => result,
+    }
+    .map_err(|error| {
+        io::Error::other(format!(
+            "failed to run pnpm {}: {error}; install pnpm and run `pnpm install` at the \
+             repository root",
+            args.join(" ")
+        ))
+    })?;
     if status.success() {
         Ok(())
     } else {
         Err(io::Error::other(format!(
-            "npm {} failed in {} (status {status}); the dashboard frontend must build for the binary to embed it",
+            "pnpm {} failed in {} (status {status}); the dashboard frontend must build for the \
+             binary to embed it (run `pnpm install` at the repository root if dependencies are \
+             out of date)",
             args.join(" "),
             dir.display()
         )))

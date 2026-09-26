@@ -8,7 +8,7 @@ use tracedecay_domain::{
     ManifestDigest, RepositoryStateSnapshotId, RepositoryStateSnapshotV1, UtcMicros,
 };
 
-use crate::authorization::{PolicyIdentifierV1, policy_digest};
+use crate::identity::{PolicyIdentifierV1, policy_digest};
 
 /// The only index operations policy may classify. Native Git/application owns
 /// previews, CAS guards, mutations, idempotency, and receipts.

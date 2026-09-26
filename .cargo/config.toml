@@ -12,7 +12,10 @@ CXXFLAGS = { value = "-DNDEBUG", force = false }
 # SQLite's sorter merges at most 16 runs, so 15 helpers are the largest
 # effective auxiliary width. Keep the bundled build deterministic across
 # developer and CI hosts instead of accepting SQLite's default ceiling of 8.
-LIBSQLITE3_FLAGS = { value = "-DSQLITE_MAX_WORKER_THREADS=15", force = true }
+# Memory statistics are off: with them on, every SQLite allocation and free
+# in the process takes one global mutex, which serializes all concurrent
+# connections. Nothing reads those statistics or sets a heap limit.
+LIBSQLITE3_FLAGS = { value = "-DSQLITE_MAX_WORKER_THREADS=15 -DSQLITE_DEFAULT_MEMSTATUS=0", force = true }
 
 # Global accounting (savings ledger, worldwide-counter flushes) is ON by
 # default for installed binaries, but `cargo test` / `cargo run` would then
@@ -80,3 +83,32 @@ test-ci = "nextest run --workspace --profile ci --features tracedecay/test-helpe
 # acceptance suites, hotpath, …) under the same cargo profile, with the
 # default nextest policy (no retries).
 test-all = "nextest run --workspace --all-features --no-fail-fast --cargo-profile perf"
+
+# `pnpm install` generates the block below from Cargo.lock and creates the
+# directories it names (see `cargo` in pnpm-workspace.yaml). Do not edit it by
+# hand; rerun `pnpm install` when Cargo.lock changes.
+# >>> pnpm-managed cargo sources >>>
+[source.crates-io]
+replace-with = "pnpm-crates-io"
+
+[source.pnpm-crates-io]
+directory = ".pnpm/crates/crates-io"
+
+[source.pnpm-git]
+directory = ".pnpm/crates/git"
+
+[source."git+https://github.com/ScriptedAlchemy/grafeo.git?rev=4dc04db299bb63269a2c216c66aa94fab40d9819"]
+git = "https://github.com/ScriptedAlchemy/grafeo.git"
+rev = "4dc04db299bb63269a2c216c66aa94fab40d9819"
+replace-with = "pnpm-git"
+
+[source."git+https://github.com/ScriptedAlchemy/tokensave-large-treesitters?rev=102d0103b6fd093c1e5989cceede1ed9f08fe6a9"]
+git = "https://github.com/ScriptedAlchemy/tokensave-large-treesitters"
+rev = "102d0103b6fd093c1e5989cceede1ed9f08fe6a9"
+replace-with = "pnpm-git"
+
+[source."git+https://github.com/vanessa-rodrigues/tree-sitter-rust?rev=877df9f82f320243ab23929589a940208faa9d15"]
+git = "https://github.com/vanessa-rodrigues/tree-sitter-rust"
+rev = "877df9f82f320243ab23929589a940208faa9d15"
+replace-with = "pnpm-git"
+# <<< pnpm-managed cargo sources <<<

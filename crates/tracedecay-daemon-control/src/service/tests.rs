@@ -19,7 +19,10 @@ use tempfile::TempDir;
 use tracing_subscriber::fmt::MakeWriter;
 
 use super::runner::ServiceRunner;
-use super::{DaemonServiceSpec, DaemonServiceState, QuiescedDaemonLifecycle, RestoreSettlement};
+use super::{
+    DaemonServiceMemoryLimitsV1, DaemonServiceSpec, DaemonServiceState, QuiescedDaemonLifecycle,
+    RestoreSettlement,
+};
 use tracedecay_daemon_protocol::SOCKET_ENV;
 use tracedecay_runtime_core::config::{
     USER_DATA_DIR_ENV, lock_user_data_dir_test_env, user_data_dir,
@@ -957,6 +960,7 @@ fn running_service_snapshot_uses_one_authenticated_connection() {
         socket_path: socket_path.clone(),
         data_dir_override: None,
         remote_tls: None,
+        memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
     }
     .render_unit()
     .expect("installed service unit");
@@ -1001,12 +1005,81 @@ fn daemon_shutdown_response_requires_matching_acknowledgement() {
 }
 
 #[test]
+fn service_memory_limits_scale_with_physical_memory_under_a_fixed_kill_line() {
+    const GIB: u64 = 1 << 30;
+    let limits = |physical_gib: u64| {
+        let limits = DaemonServiceMemoryLimitsV1::for_physical_memory(physical_gib * GIB);
+        (limits.high_bytes, limits.max_bytes, limits.swap_max_bytes)
+    };
+    assert_eq!(limits(128), (18 * GIB, 24 * GIB, 3 * GIB));
+    assert_eq!(limits(512), (18 * GIB, 24 * GIB, 3 * GIB));
+    assert_eq!(limits(16), (6 * GIB, 8 * GIB, GIB));
+    assert_eq!(limits(8), (3 * GIB, 4 * GIB, GIB / 2));
+}
+
+#[test]
+fn systemd_unit_declares_memory_high_max_and_swap_cap() {
+    let spec = DaemonServiceSpec {
+        tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
+        socket_path: PathBuf::from("/run/user/1000/tracedecay.sock"),
+        data_dir_override: None,
+        remote_tls: None,
+        memory: DaemonServiceMemoryLimitsV1::for_physical_memory(128 << 30),
+    };
+
+    let unit = spec.render_systemd_user_unit().expect("systemd unit");
+    let service = unit
+        .split("[Service]")
+        .nth(1)
+        .and_then(|section| section.split("[Install]").next())
+        .expect("service section");
+
+    for line in [
+        "MemoryHigh=19327352832",
+        "MemoryMax=25769803776",
+        "MemorySwapMax=3221225472",
+    ] {
+        assert!(
+            service.lines().any(|candidate| candidate == line),
+            "the [Service] section must declare {line}, got:\n{unit}"
+        );
+    }
+}
+
+#[test]
+fn launchd_plist_hands_the_memory_budget_to_the_daemon_authority() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let profile = tempfile::TempDir::new().expect("profile temp dir");
+    let home = tempfile::TempDir::new().expect("home temp dir");
+    let _home_guard = EnvVarGuard::set("HOME", home.path());
+    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, profile.path());
+    let spec = DaemonServiceSpec {
+        tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
+        socket_path: profile.path().join("daemon.sock"),
+        data_dir_override: None,
+        remote_tls: None,
+        memory: DaemonServiceMemoryLimitsV1::for_physical_memory(16 << 30),
+    };
+
+    let plist = spec.render_launchd_plist().expect("launchd plist");
+
+    assert_eq!(
+        super::unit_file::launchd_plist_env_value(
+            &plist,
+            tracedecay_runtime_core::resident_memory::PROCESS_RESIDENT_MEMORY_LIMIT_ENV_V1,
+        ),
+        Some((8_u64 << 30).to_string())
+    );
+}
+
+#[test]
 fn systemd_unit_quotes_exec_start_paths_that_systemd_would_misparse() {
     let spec = DaemonServiceSpec {
         tracedecay_bin: PathBuf::from("/opt/trace decay/bin/tracedecay"),
         socket_path: PathBuf::from("/run/user/1000/trace decay%50.sock"),
         data_dir_override: None,
         remote_tls: None,
+        memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
     };
 
     let unit = spec.render_systemd_user_unit().expect("systemd unit");
@@ -1030,6 +1103,7 @@ fn systemd_unit_does_not_cap_malloc_arenas() {
         socket_path: PathBuf::from("/run/user/1000/tracedecay.sock"),
         data_dir_override: None,
         remote_tls: None,
+        memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
     };
 
     let unit = spec.render_systemd_user_unit().expect("systemd unit");
@@ -1177,6 +1251,7 @@ fn render_launchd_plist_escapes_xml_and_parser_unescapes_socket_path() {
         socket_path: socket_path.clone(),
         data_dir_override: None,
         remote_tls: None,
+        memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
     };
 
     let plist = spec.render_launchd_plist().expect("launchd plist");
@@ -1215,6 +1290,7 @@ fn launchd_plist_env_value_round_trips_data_dir_override() {
         socket_path: profile.path().join("daemon.sock"),
         data_dir_override: Some(profile.path().to_path_buf()),
         remote_tls: None,
+        memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
     };
 
     let plist = spec.render_launchd_plist().expect("launchd plist");
@@ -1534,6 +1610,7 @@ fn refresh_installed_service_skips_missing_unit() {
         socket_path: PathBuf::from("/run/user/1000/tracedecay.sock"),
         data_dir_override: None,
         remote_tls: None,
+        memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
     };
 
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
@@ -1627,6 +1704,7 @@ fn refresh_installed_service_preserves_existing_socket_path() {
         socket_path: PathBuf::from("/run/user/1000/tracedecay.sock"),
         data_dir_override: None,
         remote_tls: None,
+        memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
     };
 
     let previous_state =
@@ -1848,6 +1926,7 @@ fn no_start_install_then_refresh_and_restore_has_no_activation_commands() {
         socket_path: PathBuf::from("/custom/tracedecay.sock"),
         data_dir_override: None,
         remote_tls: None,
+        memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
     };
 
     runner
@@ -2216,6 +2295,7 @@ fn refresh_installed_service_preserves_stopped_state() {
         socket_path: PathBuf::from("/run/user/1000/tracedecay.sock"),
         data_dir_override: None,
         remote_tls: None,
+        memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
     };
 
     super::with_quiesced_installed_service_with_runner(
@@ -2285,6 +2365,7 @@ fn refresh_preserves_persistent_systemd_mask_symlink() {
         socket_path: PathBuf::from("/run/user/1000/tracedecay.sock"),
         data_dir_override: None,
         remote_tls: None,
+        memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
     };
 
     let error = super::refresh_installed_service_under_lease_with_state(

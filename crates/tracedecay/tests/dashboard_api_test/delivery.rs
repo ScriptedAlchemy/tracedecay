@@ -41,10 +41,16 @@ use tracedecay_domain::{
     ObservationSourceIdentityV1, ProjectId, ProviderId, RefId, RepositoryId, SessionId, SourceSpan,
     SymbolOccurrenceId, UtcMicros, WorktreeId,
 };
+use tracedecay_global_db::ParseOffset;
 use tracedecay_mcp::handlers::dashboard_delivery::DashboardDeliveryReadAdapter;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::dashboard_api_support::*;
+use serde_json::json;
+use tracedecay_sessions::runtime::git_correlation::{
+    DEFAULT_SPAN_MERGE_GAP_SECS, SpanObservation, SpanSource,
+};
+use tracedecay_sessions::runtime::hosts::codex::CodexSource;
 
 const DELIVERY_HTTP_ADMISSION_MATCHED_PR: &str = "42";
 const DELIVERY_HTTP_ADMISSION_UNMATCHED_PR: &str = "99";
@@ -588,6 +594,281 @@ fn delivery_overview_serves_real_git_reads_and_typed_unmounted_authority() {
         }
 
         fixture.server.stop();
+    });
+}
+
+const CODEX_SUBAGENT_THREAD: &str = "codex-subagent-thread";
+
+fn write_codex_subagent_rollout(home: &Path, project_root: &Path, branch: &str) {
+    let day = home.join(".codex/sessions/2026/09/25");
+    std::fs::create_dir_all(&day).unwrap();
+    let call = |n: u32, name: &str| {
+        [
+            json!({"timestamp": format!("2026-09-25T11:00:1{n}.000Z"), "type": "response_item",
+                   "payload": {"type": "function_call", "name": name,
+                               "arguments": "{\"command\":[\"ls\"]}", "call_id": format!("call-{n}")}}),
+            json!({"timestamp": format!("2026-09-25T11:00:1{n}.500Z"), "type": "response_item",
+                   "payload": {"type": "function_call_output", "call_id": format!("call-{n}"),
+                               "output": "ok"}}),
+        ]
+    };
+    let mut lines = vec![
+        json!({"timestamp": "2026-09-25T11:00:00.000Z", "type": "session_meta", "payload": {
+            "id": CODEX_SUBAGENT_THREAD,
+            "cwd": project_root,
+            "git": {"branch": branch},
+            "thread_source": "subagent",
+            "source": {"subagent": {"thread_spawn": {"parent_thread_id": "codex-parent-thread"}}},
+        }}),
+        json!({"timestamp": "2026-09-25T11:00:01.000Z", "type": "response_item", "payload": {
+            "type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "review the dialog change"}],
+        }}),
+    ];
+    for (n, name) in [(1, "shell"), (2, "shell"), (3, "apply_patch")] {
+        lines.extend(call(n, name));
+    }
+    let body: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    std::fs::write(
+        day.join(format!(
+            "rollout-2026-09-25T11-00-00-{CODEX_SUBAGENT_THREAD}.jsonl"
+        )),
+        body,
+    )
+    .unwrap();
+}
+
+fn agent_usage_session(
+    project_key: &str,
+    project_path: &Path,
+    session_id: &str,
+    agent_id: Option<&str>,
+) -> SessionRecord {
+    SessionRecord {
+        provider: "codex".to_string(),
+        session_id: session_id.to_string(),
+        project_key: project_key.to_string(),
+        project_path: project_path.display().to_string(),
+        title: Some(format!("Agent usage fixture {session_id}")),
+        started_at: Some(1_760_000_000),
+        ended_at: None,
+        transcript_path: None,
+        metadata_json: None,
+        parent_session_id: None,
+        is_subagent: agent_id.is_some(),
+        agent_id: agent_id.map(str::to_string),
+        parent_tool_use_id: None,
+    }
+}
+
+#[test]
+fn delivery_overview_counts_agent_tool_calls_for_sessions_on_the_live_branch() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture_without_memory().await;
+        let project_root = fixture.project_root.clone();
+        write_file(&project_root.join("src/lib.rs"), "pub fn agents() {}\n");
+        commit_all(&project_root, "agent usage fixture");
+        git(&project_root, &["branch", "-M", "feature/agents"]);
+        let agent = http_agent();
+        let overview_url = format!("{}/api/delivery/overview", fixture.base_url);
+
+        // No span has been recorded, so the correlation index cannot place any
+        // session on the branch: that is an unpublished authority, not zero.
+        let (status, body) = get_json(&agent, &overview_url);
+        assert_eq!(status, 200, "{body}");
+        let usage = &body["payload"]["agent_usage"];
+        assert_eq!(usage["state"], "not_published", "{body}");
+        assert_eq!(usage["required_authority"], "session-Git correlation index");
+
+        let project_key = fixture.host_runtime.project_id().as_str().to_string();
+        let sessions = [
+            agent_usage_session(&project_key, &project_root, "planner-1", Some("planner")),
+            agent_usage_session(&project_key, &project_root, "planner-2", Some("planner")),
+            agent_usage_session(&project_key, &project_root, "unlabeled-1", None),
+            // On another branch of this project.
+            agent_usage_session(&project_key, &project_root, "main-1", Some("planner")),
+            // On the same branch name in another project.
+            agent_usage_session(
+                "other-project",
+                Path::new("/elsewhere"),
+                "other-1",
+                Some("planner"),
+            ),
+        ];
+        for session in &sessions {
+            assert!(
+                fixture
+                    .host_runtime
+                    .upsert_session_for_test(HostAdmissionScope::Project, session)
+                    .await
+                    .expect("seed agent usage session")
+            );
+        }
+        let tool_rows = [
+            ("planner-1", "tool_call", 3),
+            ("planner-1", "file_edit", 1),
+            ("planner-1", "chat", 2),
+            ("planner-2", "tool_call", 1),
+            ("unlabeled-1", "tool_call", 2),
+            ("main-1", "tool_call", 7),
+            ("other-1", "tool_call", 11),
+        ];
+        // One Codex `apply_patch` invocation: its named call row, the paired
+        // unnamed output row, and the `patch_apply_end` edit row share a
+        // call id and count once.
+        let patch_call = r#"{"call_id":"call-patch-1"}"#;
+        let codex_patch_rows = [
+            ("tool_event", Some("apply_patch")),
+            ("tool_event", None),
+            ("file_edit", None),
+        ];
+        for session in &sessions {
+            let patch_rows = (session.session_id == "unlabeled-1")
+                .then_some(codex_patch_rows.iter())
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .map(|(n, (kind, tool))| {
+                    MessageRecordBuilder::new(
+                        "codex",
+                        &format!("unlabeled-1-patch-{n}"),
+                        "unlabeled-1",
+                        "tool",
+                        100 + i64::try_from(n).unwrap(),
+                        "fixture patch",
+                        kind,
+                    )
+                    .with_timestamp(Some(1_760_000_011))
+                    .with_tool_names(*tool)
+                    .with_metadata(Some(patch_call))
+                    .build()
+                });
+            let messages: Vec<SessionMessageRecord> = tool_rows
+                .iter()
+                .filter(|(id, _, _)| *id == session.session_id)
+                .flat_map(|(id, kind, count)| (0..*count).map(move |n| (*id, *kind, n)))
+                .enumerate()
+                .map(|(ordinal, (id, kind, n))| {
+                    let message_id = format!("{id}-{kind}-{n}");
+                    MessageRecordBuilder::new(
+                        "codex",
+                        &message_id,
+                        id,
+                        "assistant",
+                        i64::try_from(ordinal).unwrap(),
+                        "fixture message",
+                        kind,
+                    )
+                    .with_timestamp(Some(1_760_000_010))
+                    .with_tool_names((kind != "chat").then_some("Bash"))
+                    .build()
+                })
+                .chain(patch_rows)
+                .collect();
+            fixture
+                .host_runtime
+                .upsert_transcript_batch_for_test(
+                    HostAdmissionScope::Project,
+                    session,
+                    &messages,
+                    &format!("agent-usage-fixture:{}", session.session_id),
+                    ParseOffset::default(),
+                )
+                .await
+                .expect("seed agent usage transcript");
+        }
+        // A subagent rollout admitted through the production Codex source:
+        // its tool invocations exist only as canonical observations, and the
+        // paired outputs are results, not invocations.
+        let codex_home = tempfile::tempdir().expect("codex home");
+        write_codex_subagent_rollout(codex_home.path(), &project_root, "feature/agents");
+        let stats = fixture
+            .host_runtime
+            .ingest_project_transcript_source_for_test(
+                &CodexSource::with_home(codex_home.path()),
+                &project_root,
+            )
+            .await
+            .expect("ingest Codex rollout");
+        assert!(stats.messages_upserted > 0, "{stats:?}");
+
+        for (session_id, branch) in [
+            ("planner-1", "feature/agents"),
+            ("planner-2", "feature/agents"),
+            ("unlabeled-1", "feature/agents"),
+            ("main-1", "main"),
+            ("other-1", "feature/agents"),
+        ] {
+            fixture
+                .host_runtime
+                .record_project_span_for_test(
+                    &SpanObservation {
+                        provider: "codex".to_string(),
+                        session_id: session_id.to_string(),
+                        thread_id: None,
+                        branch: Some(branch.to_string()),
+                        worktree: project_root.display().to_string(),
+                        ts: 1_760_000_020,
+                        source: SpanSource::Ingest,
+                    },
+                    DEFAULT_SPAN_MERGE_GAP_SECS,
+                )
+                .await
+                .expect("record agent usage branch span");
+        }
+
+        let (status, body) = get_json(&agent, &overview_url);
+        assert_eq!(status, 200, "{body}");
+        let usage = &body["payload"]["agent_usage"];
+        let value = &usage["value"];
+        assert_eq!(value["branch"], "feature/agents", "{body}");
+        assert_eq!(
+            value["sessions"], 4,
+            "only this project's branch sessions: {body}"
+        );
+        assert_eq!(value["truncated"], false);
+        let agents = value["agents"].as_array().expect("agent rows");
+        assert_eq!(agents.len(), 3, "{body}");
+        let subagent = agents
+            .iter()
+            .find(|row| !row["agent"].is_null() && row["agent"] != "planner")
+            .unwrap_or_else(|| panic!("canonical Codex subagent row: {body}"));
+        assert_eq!(subagent["sessions"], 1, "{body}");
+        assert_eq!(
+            subagent["tool_calls"], 3,
+            "canonical invocations, not their outputs: {body}"
+        );
+        let planner = agents
+            .iter()
+            .find(|row| row["agent"] == "planner")
+            .unwrap_or_else(|| panic!("planner row: {body}"));
+        assert_eq!(planner["provider"], "codex");
+        assert_eq!(planner["sessions"], 2);
+        assert_eq!(
+            planner["tool_calls"], 5,
+            "tool calls and file edits, not chat"
+        );
+        let unlabeled = agents
+            .iter()
+            .find(|row| row["agent"].is_null())
+            .unwrap_or_else(|| panic!("unlabeled row: {body}"));
+        assert_eq!(
+            unlabeled["tool_calls"], 3,
+            "two tool calls plus one Codex patch invocation: {body}"
+        );
+        // No provider usage was observed for these sessions; the rows say so
+        // instead of reporting zero tokens.
+        for row in agents {
+            assert_eq!(row["sessions_with_usage"], 0, "{body}");
+            assert_eq!(row["usage_complete"], false);
+            assert!(row["counters"]["total_tokens"].is_null(), "{body}");
+        }
+        assert_ne!(value["usage_coverage"], "complete", "{body}");
+        assert_eq!(usage["state"], "partial", "{body}");
     });
 }
 

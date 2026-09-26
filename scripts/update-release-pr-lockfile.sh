@@ -19,7 +19,13 @@ if [[ -z "$release_version" ]]; then
   echo "Release version is empty" >&2
   exit 1
 fi
-cargo update -p tracedecay --precise "$release_version"
+toolchain=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+repository_root=$PWD
+# The checkout's .cargo/config.toml replaces crates.io with pnpm-vendored
+# sources, which `cargo update` refuses. Cargo reads config from its working
+# directory, so resolve from outside the checkout with the pinned toolchain.
+(cd / && cargo "+$toolchain" update --manifest-path "$repository_root/Cargo.toml" \
+  -p tracedecay --precise "$release_version")
 
 if git diff --quiet -- Cargo.lock; then
   exit 0

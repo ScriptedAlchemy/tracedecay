@@ -3,7 +3,8 @@
 //! All grammars are served from the bundled tree-sitter crate via a
 //! lazily-initialised lookup table.
 
-use std::collections::HashMap;
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 use tree_sitter::{Language, Parser, Tree};
 
@@ -98,6 +99,26 @@ fn build_language_table() -> HashMap<&'static str, Language> {
     )));
 
     languages.collect()
+}
+
+/// Every node-kind name of every registered grammar, as the grammar's own
+/// `&'static str`.
+static GRAMMAR_NODE_KINDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    LANGUAGES
+        .values()
+        .flat_map(|language| {
+            (0..u16::try_from(language.node_kind_count()).unwrap_or(u16::MAX))
+                .filter_map(|id| language.node_kind_for_id(id))
+        })
+        .collect()
+});
+
+/// The grammar's static copy of `name` when some registered grammar names a
+/// node kind so, otherwise an owned copy.
+pub fn grammar_str(name: &str) -> Cow<'static, str> {
+    GRAMMAR_NODE_KINDS
+        .get(name)
+        .map_or_else(|| Cow::Owned(name.to_owned()), |name| Cow::Borrowed(*name))
 }
 
 /// Returns the `tree_sitter::Language` for the given extractor language key.

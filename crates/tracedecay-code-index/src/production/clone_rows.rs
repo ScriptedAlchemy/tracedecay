@@ -11,13 +11,13 @@
 //! tokens and rebinds the occurrence to the authority it is validated
 //! against.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tracedecay_code_extraction::{
     CloneBodyRenameIssueV1, CloneBodyTokenizationIssueV1, CloneBodyTokenizationStatusV1,
+    ts_provider::grammar_str,
 };
 use tracedecay_domain::{ManifestDigest, SourceSpan, SymbolOccurrenceId};
 
@@ -226,7 +226,7 @@ impl PersistedCloneBodiesV1 {
                                     "sealed clone rename renames a position that is not a syntax token",
                                 ));
                             };
-                            string(&strings, text)?.clone_into(slot);
+                            *slot = grammar_str(string(&strings, text)?);
                         }
                         Some(tokens.into())
                     }
@@ -376,11 +376,13 @@ fn string(strings: &[String], index: u32) -> Result<&str, CodeIndexProductionErr
         .ok_or_else(|| contract("sealed clone token names a string outside its table"))
 }
 
+/// Kinds, and texts that name a grammar node, borrow the grammar's static
+/// names: a decoded generation holds tens of millions of tokens, and owning
+/// both strings per token made clone streams most of its resident bytes.
 fn decode_tokens(
     codes: &[u32],
     strings: &[String],
 ) -> Result<Vec<ConservativeCloneTokenV1>, CodeIndexProductionErrorV1> {
-    let owned = |kind: &str| Cow::Owned(kind.to_owned());
     let mut tokens = Vec::with_capacity(codes.len());
     let mut open = Vec::new();
     let mut codes = codes.iter().copied();
@@ -390,7 +392,7 @@ fn decode_tokens(
                 contract("sealed clone token stream closes a structure it never opened")
             })?;
             tokens.push(ConservativeCloneTokenV1::StructureEnd {
-                syntax_kind: owned(kind),
+                syntax_kind: grammar_str(kind),
             });
             continue;
         };
@@ -399,23 +401,26 @@ fn decode_tokens(
             TAG_START => {
                 open.push(kind);
                 ConservativeCloneTokenV1::StructureStart {
-                    syntax_kind: owned(kind),
+                    syntax_kind: grammar_str(kind),
                 }
             }
             TAG_END => ConservativeCloneTokenV1::StructureEnd {
-                syntax_kind: owned(kind),
+                syntax_kind: grammar_str(kind),
             },
-            TAG_SYNTAX_KIND_TEXT => ConservativeCloneTokenV1::Syntax {
-                syntax_kind: owned(kind),
-                text: kind.to_owned(),
-            },
+            TAG_SYNTAX_KIND_TEXT => {
+                let syntax_kind = grammar_str(kind);
+                ConservativeCloneTokenV1::Syntax {
+                    text: syntax_kind.clone(),
+                    syntax_kind,
+                }
+            }
             _ => {
                 let text = codes
                     .next()
                     .ok_or_else(|| contract("sealed clone syntax token is missing its text"))?;
                 ConservativeCloneTokenV1::Syntax {
-                    syntax_kind: owned(kind),
-                    text: string(strings, text)?.to_owned(),
+                    syntax_kind: grammar_str(kind),
+                    text: grammar_str(string(strings, text)?),
                 }
             }
         });
@@ -425,6 +430,8 @@ fn decode_tokens(
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use super::*;
 
     fn start(kind: &'static str) -> ConservativeCloneTokenV1 {
@@ -442,7 +449,7 @@ mod tests {
     fn syntax(kind: &'static str, text: &str) -> ConservativeCloneTokenV1 {
         ConservativeCloneTokenV1::Syntax {
             syntax_kind: Cow::Borrowed(kind),
-            text: text.to_owned(),
+            text: Cow::Owned(text.to_owned()),
         }
     }
 
@@ -498,6 +505,46 @@ mod tests {
             codes.len(),
             tokens.len() + 2,
             "only differing texts add a code"
+        );
+    }
+
+    #[test]
+    fn decoded_grammar_names_borrow_the_grammar_instead_of_owning_a_copy() {
+        let tokens = vec![
+            start("block"),
+            syntax("identifier", "value"),
+            syntax("(", "("),
+            syntax("identifier", "fixture_only_identifier"),
+            end("block"),
+        ];
+        let (codes, strings) = round_trip(&tokens);
+        let first = decode_tokens(&codes, &strings).expect("decode");
+        let second = decode_tokens(&codes, &strings).expect("decode");
+        let kind = |token: &ConservativeCloneTokenV1| match token {
+            ConservativeCloneTokenV1::StructureStart { syntax_kind }
+            | ConservativeCloneTokenV1::StructureEnd { syntax_kind }
+            | ConservativeCloneTokenV1::Syntax { syntax_kind, .. } => syntax_kind.clone(),
+        };
+        for (left, right) in first.iter().zip(&second) {
+            let (Cow::Borrowed(left), Cow::Borrowed(right)) = (kind(left), kind(right)) else {
+                panic!("a grammar kind must decode as the grammar's static name");
+            };
+            assert!(std::ptr::eq(left, right), "both decodes share one name");
+        }
+        let texts = first
+            .iter()
+            .filter_map(|token| match token {
+                ConservativeCloneTokenV1::Syntax { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(texts[1], Cow::Borrowed("(")),
+            "punctuation borrows"
+        );
+        assert!(
+            matches!(texts[2], Cow::Owned(text) if text == "fixture_only_identifier"),
+            "a name no grammar declares stays owned"
         );
     }
 

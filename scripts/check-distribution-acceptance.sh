@@ -362,8 +362,8 @@ tar -C "$repo" \
   --exclude=./.git \
   --exclude=./.codex-worktrees \
   --exclude=./.claude-worktrees \
-  --exclude='./dashboard/node_modules' \
-  --exclude='./node_modules' \
+  --exclude=node_modules \
+  --exclude=.pnpm \
   -cf - . | tar -xf - -C "$staged"
 resolve_clean_source_head "$repo" "$source_git_sha" >/dev/null
 

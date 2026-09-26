@@ -70,10 +70,10 @@ pub use types::{
     LcmRawMessageMetadata, LcmRawMessageOverview, LcmRecentSession, LcmRelationProjectionStatus,
     LcmReplayMessage, LcmReplaySummaryNode, LcmScope, LcmSessionBoundaryRequest,
     LcmSessionBoundaryResponse, LcmSessionReplayRequest, LcmSessionReplaySlice, LcmSourceRef,
-    LcmStatus, LcmStorageKind, LcmStoreStatus, LcmSummaryConvergenceStatus, LcmSummaryExpansion,
-    LcmSummaryNode, LcmSummaryNodeDraft, LcmSummaryNodeOverview, LcmSummaryRequest,
-    LcmSummarySourceMessage, LcmSummarySourceRange, MAX_DERIVED_SNIPPET_CHARS,
-    MAX_DERIVED_TEXT_CHARS,
+    LcmStatus, LcmStorageKind, LcmStoreStatus, LcmSummaryConvergenceReasonCount,
+    LcmSummaryConvergenceStatus, LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeDraft,
+    LcmSummaryNodeOverview, LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange,
+    MAX_DERIVED_SNIPPET_CHARS, MAX_DERIVED_TEXT_CHARS,
 };
 
 pub use gc::LcmGcReport;

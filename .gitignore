@@ -1,5 +1,9 @@
 /target
 /node_modules
+# Cargo sources that `pnpm install` links from its store; see the managed
+# block in each `.cargo/config.toml`.
+/.pnpm/
+/sdks/codegen/.pnpm/
 .DS_Store
 .codegraph
 .tracedecay

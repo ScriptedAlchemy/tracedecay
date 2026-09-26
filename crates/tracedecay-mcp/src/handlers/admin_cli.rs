@@ -534,7 +534,8 @@ async fn registry_list(
     project_arg: Option<&Path>,
 ) -> Result<Value> {
     use tracedecay_dashboard_api::project_registry::{
-        build_project_registry_view, public_code_project_from_record,
+        align_public_checkout_branches, build_project_registry_view,
+        public_code_project_from_record,
     };
 
     let limit = limit.clamp(1, 100_000);
@@ -544,18 +545,21 @@ async fn registry_list(
     };
     let truncated = projects.len() > limit;
     projects.truncate(limit);
-    let active_id = match cg.map(TraceDecay::project_root).or(project_arg) {
+    let active_checkout = cg.map(TraceDecay::project_root).or(project_arg);
+    let active_id = match active_checkout {
         Some(project_root) => active_project_id(project_root, global_db).await?,
         None => None,
     };
     let contexts = global_db
         .project_registry_contexts_for_projects(&projects)
         .await?;
-    let view = build_project_registry_view(&contexts, active_id.as_deref(), truncated);
-    let public = projects
+    let view =
+        build_project_registry_view(&contexts, active_id.as_deref(), active_checkout, truncated);
+    let mut public = projects
         .iter()
         .map(|project| public_code_project_from_record(project, active_id.as_deref()))
         .collect::<Vec<_>>();
+    align_public_checkout_branches(&mut public, &view);
     Ok(json!({
         "status": "ok",
         "limit": limit,
@@ -598,7 +602,8 @@ async fn registry_context(
         Some(cg) => active_project_id(cg.project_root(), global_db).await?,
         None => None,
     };
-    let public = PublicProjectRegistryContext::new(&context, active_id.as_deref());
+    let public =
+        PublicProjectRegistryContext::at_checkout(&context, active_id.as_deref(), Some(selector));
     Ok(json!({
         "status": "ok",
         "profile_id": global_db.binding().shard_id.profile_id.as_str(),

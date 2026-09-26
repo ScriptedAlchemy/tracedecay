@@ -797,6 +797,56 @@ impl GitEvidenceGraphView {
         Ok(Some(scope_session_ids(Some(identities))))
     }
 
+    /// Every span and commit attribution recorded for `session_ids`, read by
+    /// each session's own fan-out so the rows touched scale with the sessions
+    /// asked for, never with the store. Spans come back in
+    /// `(provider, session_id, first_ts)` order and commits in canonical
+    /// projection order.
+    #[hotpath::measure(label = "sessions.git_correlation.graph_view.session_evidence")]
+    pub fn session_evidence(
+        &self,
+        session_ids: &BTreeSet<String>,
+    ) -> Result<(Vec<SessionGitSpan>, Vec<CommitSessionRecord>), GitCorrelationError> {
+        let commit_kinds = BTreeSet::from([GraphRelationKind::new(SESSION_COMMIT_RELATION)?]);
+        let mut spans = Vec::new();
+        let mut commits = Vec::new();
+        for session_id in session_ids {
+            spans.extend(self.session_spans(&stable_digest(session_id))?);
+            let mut relations = Vec::new();
+            self.snapshot.visit_outgoing_relation_targets(
+                &session_entity_id(session_id)?,
+                &commit_kinds,
+                Arc::clone(&self.cancellation),
+                &mut |target| relations.push(target.relation),
+            )?;
+            for relation in relations {
+                commits.push(serde_json::from_slice::<CommitSessionRecord>(
+                    required_bytes_property(
+                        &relation.properties,
+                        COMMIT_RECORD_PROPERTY,
+                        "commit evidence record",
+                    )?,
+                )?);
+            }
+        }
+        spans.sort_by(|left, right| {
+            (
+                &left.provider,
+                &left.session_id,
+                left.first_ts,
+                &left.span_id,
+            )
+                .cmp(&(
+                    &right.provider,
+                    &right.session_id,
+                    right.first_ts,
+                    &right.span_id,
+                ))
+        });
+        commits.sort_by(commit_record_order);
+        Ok((spans, commits))
+    }
+
     fn span_hits_from_hub(
         &self,
         hub: GraphEntityId,

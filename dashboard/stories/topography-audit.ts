@@ -1,7 +1,7 @@
 /**
  * Interaction-state audit for the code-topography surfaces.
  *
- * `npm run visual:topography`
+ * `pnpm run visual:topography`
  *
  * `stories/audit.ts` captures each of the twelve workspaces in its INITIAL
  * render, which is the right shape for a shipped-state gallery and the wrong

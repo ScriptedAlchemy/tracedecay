@@ -29,7 +29,7 @@ never replaced wholesale.
   a second language analyzer. Hooks, MCP, CLI, and authorized feedback reads
   remain separate routes. The extension commits
   `plugin/cursor-native-extension/embedded/extension.js` so the Rust host
-  bundle can embed it at compile time without Node; `npm run check:embedded`
+  bundle can embed it at compile time without Node; `pnpm run check:embedded`
   guards drift. That is an intentional offline-packaging exception, opposite
   the dashboard's gitignored `app-dist/` rebuilt by `build.rs`. See
   `plugin/cursor-native-extension/README.md`.

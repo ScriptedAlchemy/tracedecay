@@ -1,0 +1,7 @@
+# >>> pnpm-managed cargo sources >>>
+[source.crates-io]
+replace-with = "pnpm-crates-io"
+
+[source.pnpm-crates-io]
+directory = ".pnpm/crates/crates-io"
+# <<< pnpm-managed cargo sources <<<

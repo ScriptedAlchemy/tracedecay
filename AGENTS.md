@@ -76,8 +76,19 @@ unauthorized external action after completing independent, authorized work.
 
 - Edition 2024, resolver 3. Use the toolchain pinned in `rust-toolchain.toml`.
   Run `cargo <subcommand>` normally.
-- Dashboard: `npm run build` (rsbuild), `npm run typecheck` (`tsc --noEmit`),
-  `npm test` (vitest) from `dashboard/`.
+- pnpm (pinned by `packageManager`) manages the npm packages and the Cargo
+  sources. Run `pnpm install` at the repository root after cloning and after
+  any `pnpm-lock.yaml` or `Cargo.lock` change. The committed
+  `.cargo/config.toml` replaces crates.io and the pinned git sources with
+  `.pnpm/crates`, so cargo cannot resolve dependencies until that install has
+  run. Add crates with `pnpm add crate:<name>`. Inside the checkout
+  `cargo update` refuses the vendored sources and `cargo add` sees only
+  vendored versions. For a targeted lock bump, run
+  `cargo update -p <crate> --manifest-path <root>/Cargo.toml` from outside the
+  checkout (Cargo reads config from its working directory), then
+  `pnpm install`.
+- Dashboard: `pnpm run build` (rsbuild), `pnpm run typecheck` (`tsc --noEmit`),
+  `pnpm test` (vitest) from `dashboard/`.
 - libtest `--exact` requires the full module path and exits 0 when a filter
   matches nothing. That is a vacuous "0 passed" green. For name-filtered runs prefer
   the ad-hoc anti-vacuity helper `scripts/require-exact-test.sh`; it is not a
@@ -104,7 +115,7 @@ unauthorized external action after completing independent, authorized work.
   `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`,
   `simplify`, `style`, `test`. `simplify` is a behavior-preserving deletion
   or dedup; like `refactor` it is hidden from generated release notes. Every non-merge commit message must pass commitlint
-  (`npm run lint:commit`, configured in `commitlint.config.cjs`; the
+  (`pnpm run lint:commit`, configured in `commitlint.config.cjs`; the
   `.githooks/commit-msg` hook runs it locally via
   `scripts/install-git-hooks.sh`).
 - Integration branch is `master` (GitHub: ScriptedAlchemy/tracedecay); CI

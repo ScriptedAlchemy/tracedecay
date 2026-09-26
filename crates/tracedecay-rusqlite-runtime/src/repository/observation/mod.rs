@@ -13,8 +13,8 @@ use tracedecay_domain::{
 use tracedecay_store::{
     AnchoredObservationWrite, CursorAdvanceLedgerDisagreementV1, CursorAdvanceLedgerIdentityV1,
     ObservationCoverageReason, ObservationCursorAdvance, ObservationReadOperationV1,
-    ObservationReadResultV1, ProjectionRebuildProgressV1, ProjectionRebuildStateV1,
-    SESSION_MESSAGE_PROJECTOR_VERSION,
+    ObservationReadResultV1, PROJECTION_TERMINAL_RETRY_MICROS, ProjectionRebuildProgressV1,
+    ProjectionRebuildStateV1, SESSION_MESSAGE_PROJECTOR_VERSION,
 };
 
 use crate::operation::StorageOperationError;
@@ -317,13 +317,18 @@ impl ObservationExecutor {
                          WHERE next_retry_at_micros <= ?2
                            AND observation_sequence = (
                              SELECT MIN(observation_sequence) FROM projection_queue
+                             WHERE next_retry_at_micros < ?3
                            )
                            AND NOT EXISTS (
                            SELECT 1 FROM observation_projection_rebuilds
                            WHERE projector_version = ?1
                          )
                          LIMIT 1",
-                        (SESSION_MESSAGE_PROJECTOR_VERSION, now_micros),
+                        (
+                            SESSION_MESSAGE_PROJECTOR_VERSION,
+                            now_micros,
+                            PROJECTION_TERMINAL_RETRY_MICROS,
+                        ),
                         |row| row.get::<_, String>(0),
                     )
                     .optional()?

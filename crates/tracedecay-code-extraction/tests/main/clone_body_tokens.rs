@@ -94,7 +94,7 @@ fn syntax_tokens_keep_comment_markers_inside_literals_and_javascript_asi_boundar
     let literal_text = literal
         .iter()
         .filter_map(|token| match token {
-            ConservativeCloneTokenV1::Syntax { text, .. } => Some(text.as_str()),
+            ConservativeCloneTokenV1::Syntax { text, .. } => Some(text.as_ref()),
             ConservativeCloneTokenV1::StructureStart { .. }
             | ConservativeCloneTokenV1::StructureEnd { .. } => None,
         })
@@ -335,7 +335,7 @@ fn extracted_token_kinds_borrow_the_grammar_table_without_changing_the_wire_shap
     let texts: Vec<&str> = emitted
         .iter()
         .filter_map(|token| match token {
-            ConservativeCloneTokenV1::Syntax { text, .. } => Some(text.as_str()),
+            ConservativeCloneTokenV1::Syntax { text, .. } => Some(text.as_ref()),
             _ => None,
         })
         .collect();

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Create a linked worktree and seed the dashboard/app-dist + node_modules ritual
-# from the primary checkout so a fresh tree can compile and commit.
+# Create a linked worktree, seed dashboard/app-dist from the primary checkout,
+# and run `pnpm install` so a fresh tree can compile and commit.
 #
 # usage: scripts/agent-worktree.sh <path> [-b <branch>] [<start-point>]
 set -euo pipefail
@@ -10,8 +10,8 @@ usage() {
 usage: scripts/agent-worktree.sh <path> [-b <branch>] [<start-point>]
 
 Create a linked Git worktree, lock it as an active agent lane, and seed
-dashboard/app-dist from the primary checkout. Symlink root and
-dashboard/node_modules when the primary has them. Prints the unlock+remove
+dashboard/app-dist from the primary checkout, and run a frozen `pnpm install`
+for the worktree's own npm packages and Cargo sources. Prints the unlock+remove
 one-liner for the owning lane and the recommended env
 (TRACEDECAY_SKIP_DASHBOARD_BUILD=1 plus the seeded bundle's
 TRACEDECAY_DASHBOARD_BUNDLE_SHA256 digest).
@@ -112,32 +112,15 @@ worktree="$(cd -- "$path" && pwd)"
 mkdir -p "$worktree/dashboard/app-dist"
 cp -R "$src_app_dist/." "$worktree/dashboard/app-dist/"
 
-linked_node_modules=0
-if [[ -d "$primary_root/node_modules" && ! -e "$worktree/node_modules" ]]; then
-    ln -s "$primary_root/node_modules" "$worktree/node_modules"
-    linked_node_modules=1
-fi
-
-linked_dashboard_node_modules=0
-if [[ -d "$primary_root/dashboard/node_modules" && ! -e "$worktree/dashboard/node_modules" ]]; then
-    ln -s "$primary_root/dashboard/node_modules" "$worktree/dashboard/node_modules"
-    linked_dashboard_node_modules=1
-fi
+# Cargo resolves only from the `.pnpm/crates` sources matching this tree's
+# Cargo.lock; pnpm links them (and node_modules) from its shared store.
+(cd -- "$worktree" && pnpm install --frozen-lockfile)
 
 git worktree lock "$worktree" --reason "active agent lane"
 
 echo "Worktree created and locked: $worktree"
 echo "Seeded dashboard/app-dist from $src_app_dist"
-if [[ "$linked_node_modules" -eq 1 ]]; then
-    echo "Linked node_modules -> $primary_root/node_modules"
-else
-    echo "Primary has no node_modules; skipped symlink"
-fi
-if [[ "$linked_dashboard_node_modules" -eq 1 ]]; then
-    echo "Linked dashboard/node_modules -> $primary_root/dashboard/node_modules"
-else
-    echo "Primary has no dashboard/node_modules; skipped symlink"
-fi
+echo "Installed npm packages and Cargo sources with pnpm"
 echo
 echo "When this lane is finished, unlock and remove the exact path:"
 echo "  git worktree unlock $worktree && git worktree remove $worktree"

@@ -342,6 +342,66 @@ async fn reopen_and_settle(
 }
 
 #[tokio::test]
+async fn refresh_begin_store_failure_reports_its_cause_instead_of_bare_unavailable() {
+    let temp = TempDir::new().expect("temporary fixture");
+    let fixture = RetiredRefreshFixture::open(&temp, "store-failure").await;
+    let writer = fixture
+        .database
+        .begin_write_transaction()
+        .await
+        .expect("refresh store writer");
+    writer
+        .execute_batch("DROP TABLE session_refresh_operations")
+        .await
+        .expect("remove the durable refresh operations table");
+    writer.commit().await.expect("commit refresh store damage");
+    let session_id = SessionId::new("session.retained.store-failure").expect("session id");
+    let request = fixture.request(SessionRefreshActionV1::Begin, &session_id, None);
+
+    let (context, signal) = application_context(&fixture, &request, "request.store-failure");
+    let command = admitted_session_refresh_command(
+        &request,
+        &context,
+        &signal,
+        &fixture.mounted_authority(&context),
+    )
+    .expect("admitted begin command");
+    let SessionRefreshServiceOutcome::Unavailable { reason } =
+        fixture.refresh.execute(command).await
+    else {
+        panic!("a failed refresh store must be unavailable");
+    };
+    assert!(
+        reason.starts_with("session refresh store failed: ")
+            && reason.contains("session_refresh_operations"),
+        "the unavailable outcome must carry the store error: {reason}"
+    );
+
+    let (context, signal) =
+        application_context(&fixture, &request, "request.store-failure-application");
+    let problem = fixture
+        .application
+        .execute(
+            &context,
+            &signal,
+            UtcMicros(2),
+            &RetainedSurfaceRequestV1::SessionRefresh(request),
+        )
+        .await
+        .expect_err("a failed refresh store cannot begin");
+    assert_eq!(problem.kind(), ApplicationProblemKind::Unavailable);
+    let encoded = serde_json::to_value(&problem).expect("serialized problem");
+    let message = encoded["diagnostic"]["message"]
+        .as_str()
+        .expect("problem diagnostic message");
+    assert!(
+        message.contains(&reason),
+        "the application problem must carry the refresh cause: {message}"
+    );
+    fixture.registry.shutdown().await;
+}
+
+#[tokio::test]
 async fn retained_begin_and_join_report_partial_effect_and_restart_recovers_same_operation() {
     let temp = TempDir::new().expect("temporary fixture");
     let label = "retained-begin-join-reopen";

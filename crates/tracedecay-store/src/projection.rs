@@ -84,6 +84,13 @@ pub enum ProjectionSkipReason {
     SanitizationRefused,
 }
 
+/// Retry deadline that parks one projection queue row permanently.
+///
+/// A genuine session-output collision records its error on that row and sets
+/// this deadline. Queue-head selection and restart re-arm ignore the row, so
+/// the projector advances and the same collision is not retried every pass.
+pub const PROJECTION_TERMINAL_RETRY_MICROS: i64 = i64::MAX;
+
 impl ProjectionSkipReason {
     pub fn as_str(self) -> &'static str {
         match self {
