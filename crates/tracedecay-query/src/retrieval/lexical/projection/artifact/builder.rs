@@ -15,9 +15,7 @@ use rusqlite::types::{ToSqlOutput, Value, ValueRef};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracedecay_code_index::chunks::{
-    CodeIndexImportEvidenceV1, ExtractionAdmittedCodeSearchChunkV1,
-};
+use tracedecay_code_index::chunks::ExtractionAdmittedCodeSearchChunkV1;
 use tracedecay_code_index::production::{
     CodeIndexExecutionControlV1, VerifiedSealedLexicalCursorV1, VerifiedSealedLexicalPageV1,
     VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedLexicalSymbolDisplayV1,
@@ -156,13 +154,8 @@ struct PreparedExactInsertPlanV1<'a> {
     interned_terms: Vec<(&'a [u8], i64)>,
 }
 
-const BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 15] = [
+const BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 14] = [
     ("builder_gate_source_pages_insert", "source_pages", "INSERT"),
-    (
-        "builder_gate_import_evidence_insert",
-        "import_evidence",
-        "INSERT",
-    ),
     ("builder_gate_row_blocks_insert", "row_blocks", "INSERT"),
     ("builder_gate_row_blocks_update", "row_blocks", "UPDATE"),
     ("builder_gate_row_blocks_delete", "row_blocks", "DELETE"),
@@ -407,7 +400,7 @@ const CLONE_FINGERPRINT_IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 2] 
         "immutable clone fingerprint postings",
     ),
 ];
-const IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 6] = [
+const IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 4] = [
     (
         "immutable_source_pages_update",
         "source_pages",
@@ -419,18 +412,6 @@ const IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 6] = [
         "source_pages",
         "DELETE",
         "immutable lexical source pages",
-    ),
-    (
-        "immutable_import_evidence_update",
-        "import_evidence",
-        "UPDATE",
-        "immutable lexical import evidence",
-    ),
-    (
-        "immutable_import_evidence_delete",
-        "import_evidence",
-        "DELETE",
-        "immutable lexical import evidence",
     ),
     (
         "immutable_ngram_postings_update",
@@ -594,8 +575,6 @@ fn take_failed_staging_initialization() -> bool {
 enum FinalizationSectionV1 {
     SourcePages,
     DocumentIntegrity,
-    ImportIntegrity,
-    ImportEvidence,
     Rows,
     TermPostings,
     ExactPostings,
@@ -609,11 +588,9 @@ enum FinalizationSectionV1 {
 }
 
 impl FinalizationSectionV1 {
-    const ALL: [Self; 14] = [
+    const ALL: [Self; 12] = [
         Self::SourcePages,
         Self::DocumentIntegrity,
-        Self::ImportIntegrity,
-        Self::ImportEvidence,
         Self::Rows,
         Self::TermPostings,
         Self::ExactPostings,
@@ -639,8 +616,6 @@ impl FinalizationSectionV1 {
         match self {
             Self::SourcePages => "source_pages",
             Self::DocumentIntegrity => "document_integrity",
-            Self::ImportIntegrity => "import_integrity",
-            Self::ImportEvidence => "import_evidence",
             Self::Rows => "rows",
             Self::TermPostings => "term_postings",
             Self::ExactPostings => "exact_postings",
@@ -681,8 +656,6 @@ impl FinalizationSectionV1 {
             // posting lists belong to the adopted `term_postings` section.
             Self::Vocabulary => Some("SELECT term, in_fuzzy FROM term_postings ORDER BY term"),
             Self::DocumentIntegrity
-            | Self::ImportIntegrity
-            | Self::ImportEvidence
             | Self::Rows
             | Self::TermPostings
             | Self::ExactPostings
@@ -738,8 +711,6 @@ impl FinalizationSectionV1 {
             ),
             (
                 Self::DocumentIntegrity
-                | Self::ImportIntegrity
-                | Self::ImportEvidence
                 | Self::Rows
                 | Self::TermPostings
                 | Self::ExactPostings
@@ -949,14 +920,6 @@ impl FinalizationWakeMetricsV1 {
             }
             FinalizationSectionV1::DocumentIntegrity => {
                 hotpath::gauge!("query.artifact.finalization.phase.document_integrity_total")
-                    .inc(1u64);
-            }
-            FinalizationSectionV1::ImportIntegrity => {
-                hotpath::gauge!("query.artifact.finalization.phase.import_integrity_total")
-                    .inc(1u64);
-            }
-            FinalizationSectionV1::ImportEvidence => {
-                hotpath::gauge!("query.artifact.finalization.phase.import_evidence_total")
                     .inc(1u64);
             }
             FinalizationSectionV1::Rows => {
@@ -1601,13 +1564,6 @@ impl CodeLexicalArtifactBuilderV1 {
                 let _mutation_authority = BuilderMutationGuardV1::enter(mutation_gate)?;
                 let transaction = connection.transaction().map_err(sqlite_error)?;
                 let mutation = (|| {
-                    hotpath::measure_block!("query.artifact.batch.imports", {
-                        for page in pages {
-                            append_prepared_imports(&transaction, page, control)?;
-                        }
-                        Ok::<(), CodeLexicalArtifactErrorV1>(())
-                    })?;
-                    record_batch_import_metrics(pages);
                     hotpath::measure_block!(
                         "query.artifact.batch.clone_bodies",
                         append_prepared_clone_bodies(&transaction, pages, control)
@@ -1718,7 +1674,19 @@ impl CodeLexicalArtifactBuilderV1 {
             return Ok(step);
         }
 
-        if load_finalization_state(&self.connection)?.is_none() {
+        let pending_state = load_finalization_state(&self.connection)?;
+        super::select_temp_store(
+            &self.connection,
+            merge_wake_fits_memory_temp_store(
+                &self.connection,
+                pending_state
+                    .as_ref()
+                    .map(|state| (state.phase, state.section_ordinal)),
+                self.memory_budget_bytes
+                    .saturating_sub(ARTIFACT_SQLITE_CACHE_BYTES),
+            )?,
+        )?;
+        if pending_state.is_none() {
             let transaction = self.connection.transaction().map_err(sqlite_error)?;
             let mut transaction_metrics = FinalizationTransactionMetricsV1::new();
             let terminal_cursor = verify_staged_source_chain(&transaction, source, control)?;
@@ -3002,7 +2970,7 @@ fn symbol_field_size(display: Option<&VerifiedSealedLexicalSymbolDisplayV1>) -> 
     })
 }
 
-/// The widest transient upper bound one staged chunk or import can require.
+/// The widest transient upper bound one staged chunk can require.
 /// It is evaluated a record at a time without allocations and aborts once
 /// `abort_above` is exceeded. The returned lower bound already fails admission.
 fn page_transient_peak_bytes(
@@ -3019,12 +2987,6 @@ fn page_transient_peak_bytes(
             symbol_field_bytes,
             symbol_field_entries,
         )?);
-        if peak > abort_above {
-            return Ok(peak);
-        }
-    }
-    for evidence in page.imports() {
-        peak = peak.max(import_transient_bytes(evidence)?);
         if peak > abort_above {
             return Ok(peak);
         }
@@ -3073,19 +3035,7 @@ fn page_prepared_retained_upper_bound_bytes(
                 })
         },
     )?;
-    let record_bytes = page
-        .imports()
-        .iter()
-        .try_fold(chunk_bytes, |total, evidence| {
-            total
-                .checked_add(import_transient_bytes(evidence)?)
-                .ok_or_else(|| {
-                    CodeLexicalArtifactErrorV1::Contract(
-                        "lexical artifact page preparation charge overflowed".to_owned(),
-                    )
-                })
-        })?;
-    record_bytes
+    chunk_bytes
         .checked_add(prepared_page_authority_upper_bound_bytes(page)?)
         .ok_or_else(|| {
             CodeLexicalArtifactErrorV1::Contract(
@@ -3131,8 +3081,8 @@ fn projected_chunk_prepared_retained_upper_bound_bytes(
         })
 }
 
-/// Page-level prepared ownership that is not attributable to one chunk or
-/// import. Duplicating the source page's complete retained charge covers
+/// Page-level prepared ownership that is not attributable to one chunk.
+/// Duplicating the source page's complete retained charge covers
 /// vector capacities and typed identities; the explicit cursor envelope
 /// covers both serialized cursor copies and their JSON framing without
 /// allocating during admission.
@@ -3327,20 +3277,6 @@ fn anchor_owned_bytes(anchor: &CodeSearchChunkAnchorV1) -> usize {
         )
 }
 
-fn import_transient_bytes(
-    evidence: &CodeIndexImportEvidenceV1,
-) -> Result<usize, CodeLexicalArtifactErrorV1> {
-    Ok(evidence
-        .logical_path
-        .len()
-        .saturating_add(evidence.file_occurrence_id.as_str().len())
-        .saturating_add(evidence.module_specifier.len())
-        .saturating_add(evidence.imported_name.as_ref().map_or(0, String::len))
-        .saturating_add(evidence.local_name.as_ref().map_or(0, String::len))
-        .saturating_mul(6)
-        .saturating_add(256))
-}
-
 fn validate_prepared_page_batch(
     current: &CodeLexicalArtifactBuildProgressV1,
     pages: &[PreparedCodeLexicalArtifactPageV1],
@@ -3358,9 +3294,7 @@ fn validate_prepared_page_batch(
                 "prepared lexical pages must continue the exact durable cursor in order".to_owned(),
             ));
         }
-        if usize::try_from(page.chunk_count).map_err(contract_number)? < page.documents.len()
-            || usize::try_from(page.import_count).map_err(contract_number)? != page.imports.len()
-        {
+        if usize::try_from(page.chunk_count).map_err(contract_number)? < page.documents.len() {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
                 "prepared lexical page cardinality disagrees with its source receipt".to_owned(),
             ));
@@ -3765,25 +3699,6 @@ fn append_prepared_clone_fingerprints(
     insert.finish()
 }
 
-fn append_prepared_imports(
-    transaction: &Transaction<'_>,
-    page: &PreparedCodeLexicalArtifactPageV1,
-    control: &dyn CodeIndexExecutionControlV1,
-) -> Result<(), CodeLexicalArtifactErrorV1> {
-    // The canonical encoding is the evidence itself, and its integrity digest
-    // is a pure function of it, so the key is the only stored column.
-    let mut evidence = transaction
-        .prepare_cached("INSERT INTO import_evidence(canonical) VALUES (?1)")
-        .map_err(sqlite_error)?;
-    for import in &page.imports {
-        checkpoint(control)?;
-        evidence
-            .execute(params![import.canonical.as_slice()])
-            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
-    }
-    Ok(())
-}
-
 /// `(language, class, normalization revision, fingerprint)` of one sealed
 /// fingerprint list.
 type FingerprintKeyV1 = (String, i64, i64, i64);
@@ -4127,9 +4042,6 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
                 payload_bytes INTEGER NOT NULL,
                 next_cursor BLOB NOT NULL
             );
-            CREATE TABLE import_evidence (
-                canonical BLOB NOT NULL PRIMARY KEY
-            ) WITHOUT ROWID;
             CREATE TABLE row_blocks (
                 first_document INTEGER PRIMARY KEY,
                 payload BLOB NOT NULL
@@ -4198,13 +4110,10 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
             ) WITHOUT ROWID;
             CREATE TRIGGER content_epoch_source_pages_insert AFTER INSERT ON source_pages BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
             CREATE TRIGGER content_epoch_row_chunk_pages_insert AFTER INSERT ON row_chunk_pages BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
-            CREATE TRIGGER content_epoch_import_evidence_insert AFTER INSERT ON import_evidence BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
             CREATE TRIGGER immutable_source_pages_update BEFORE UPDATE ON source_pages BEGIN SELECT RAISE(ABORT, 'immutable lexical source pages'); END;
             CREATE TRIGGER immutable_source_pages_delete BEFORE DELETE ON source_pages BEGIN SELECT RAISE(ABORT, 'immutable lexical source pages'); END;
             CREATE TRIGGER immutable_source_page_cursors_update BEFORE UPDATE ON source_page_cursors BEGIN SELECT RAISE(ABORT, 'immutable lexical source page cursors'); END;
             CREATE TRIGGER immutable_source_page_cursors_delete BEFORE DELETE ON source_page_cursors BEGIN SELECT RAISE(ABORT, 'immutable lexical source page cursors'); END;
-            CREATE TRIGGER immutable_import_evidence_update BEFORE UPDATE ON import_evidence BEGIN SELECT RAISE(ABORT, 'immutable lexical import evidence'); END;
-            CREATE TRIGGER immutable_import_evidence_delete BEFORE DELETE ON import_evidence BEGIN SELECT RAISE(ABORT, 'immutable lexical import evidence'); END;
             CREATE TRIGGER immutable_ngram_postings_update BEFORE UPDATE ON ngram_postings BEGIN SELECT RAISE(ABORT, 'immutable lexical ngram postings'); END;
             CREATE TRIGGER immutable_ngram_postings_delete BEFORE DELETE ON ngram_postings BEGIN SELECT RAISE(ABORT, 'immutable lexical ngram postings'); END;
             CREATE TRIGGER immutable_exact_vocabulary_update BEFORE UPDATE ON exact_vocabulary BEGIN SELECT RAISE(ABORT, 'immutable lexical exact vocabulary'); END;
@@ -4213,7 +4122,6 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
             CREATE TRIGGER immutable_row_dictionary_pages_delete BEFORE DELETE ON row_dictionary_pages BEGIN SELECT RAISE(ABORT, 'immutable lexical row dictionary pages'); END;
             CREATE TRIGGER builder_gate_source_pages_insert BEFORE INSERT ON source_pages WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
             CREATE TRIGGER builder_gate_source_page_cursors_insert BEFORE INSERT ON source_page_cursors WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_import_evidence_insert BEFORE INSERT ON import_evidence WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
             CREATE TRIGGER builder_gate_row_blocks_insert BEFORE INSERT ON row_blocks WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
             CREATE TRIGGER builder_gate_row_blocks_update BEFORE UPDATE ON row_blocks WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
             CREATE TRIGGER builder_gate_row_blocks_delete BEFORE DELETE ON row_blocks WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
@@ -4486,7 +4394,6 @@ fn install_base_freeze(transaction: &Transaction<'_>) -> Result<(), CodeLexicalA
             "
             CREATE TRIGGER frozen_source_pages_insert BEFORE INSERT ON source_pages BEGIN SELECT RAISE(ABORT, 'frozen lexical source pages'); END;
             CREATE TRIGGER frozen_source_page_cursors_insert BEFORE INSERT ON source_page_cursors BEGIN SELECT RAISE(ABORT, 'frozen lexical source pages'); END;
-            CREATE TRIGGER frozen_import_evidence_insert BEFORE INSERT ON import_evidence BEGIN SELECT RAISE(ABORT, 'frozen lexical import evidence'); END;
             CREATE TRIGGER frozen_row_blocks_insert BEFORE INSERT ON row_blocks BEGIN SELECT RAISE(ABORT, 'frozen lexical rows'); END;
             CREATE TRIGGER frozen_row_blocks_update BEFORE UPDATE ON row_blocks BEGIN SELECT RAISE(ABORT, 'frozen lexical rows'); END;
             CREATE TRIGGER frozen_row_blocks_delete BEFORE DELETE ON row_blocks BEGIN SELECT RAISE(ABORT, 'frozen lexical rows'); END;
@@ -4538,28 +4445,24 @@ fn authenticated_authority_epoch(
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<i64, CodeLexicalArtifactErrorV1> {
     verify_builder_mutation_gate_schema(transaction)?;
-    let (pages, documents, imports): (i64, i64, i64) = transaction
+    let (pages, documents): (i64, i64) = transaction
         .query_row(
-            "SELECT (SELECT COUNT(*) FROM source_pages), (SELECT COUNT(*) FROM row_chunk_pages), (SELECT COUNT(*) FROM import_evidence)",
+            "SELECT (SELECT COUNT(*) FROM source_pages), (SELECT COUNT(*) FROM row_chunk_pages)",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(sqlite_error)?;
-    let expected_epoch = pages
-        .checked_add(documents)
-        .and_then(|count| count.checked_add(imports))
-        .ok_or_else(|| {
-            CodeLexicalArtifactErrorV1::Contract(
-                "lexical artifact authority row count overflowed".to_owned(),
-            )
-        })?;
+    let expected_epoch = pages.checked_add(documents).ok_or_else(|| {
+        CodeLexicalArtifactErrorV1::Contract(
+            "lexical artifact authority row count overflowed".to_owned(),
+        )
+    })?;
     let actual_epoch = content_epoch(transaction)?;
     let admitted = admitted_documents(transaction)?;
     if actual_epoch != expected_epoch
         || u64::try_from(pages).ok() != Some(source.page_count())
         || u64::try_from(documents).ok() != Some(admitted)
         || admitted > source.total_chunks()
-        || u64::try_from(imports).ok() != Some(source.total_imports())
     {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
             "lexical artifact authenticated authority disagrees with its source receipt".to_owned(),
@@ -4669,6 +4572,38 @@ fn verify_clone_rows(
         }
     }
     Ok(())
+}
+
+/// Whether a finalization wake runs with memory-backed temporary storage.
+/// A merge wake inserts every merged list into a builder-gated serving
+/// table, so each insert journals its statement; under file-backed storage
+/// the first journal to spill stays a temp file that every later insert of
+/// the wake rewrites (1.1 GB of `write()` for the 198k term lists of the
+/// 768-file journey). Memory storage keeps those journals in memory but also
+/// holds the merge's whole `ORDER BY` input, so a merge over staged runs is
+/// admitted only when those runs fit the sorter budget. The allowance per
+/// run covers the sorter's record header and list node.
+fn merge_wake_fits_memory_temp_store(
+    connection: &Connection,
+    pending_step: Option<(PersistedFinalizationPhaseV1, u64)>,
+    sorter_budget_bytes: usize,
+) -> Result<bool, CodeLexicalArtifactErrorV1> {
+    let Some((PersistedFinalizationPhaseV1::Indexes, ordinal)) = pending_step else {
+        return Ok(false);
+    };
+    let staged_runs = match ordinal {
+        1 => "SELECT coalesce(sum(length(term) + length(postings) + 64), 0) FROM term_posting_runs",
+        2 => "SELECT coalesce(sum(length(documents) + 64), 0) FROM exact_posting_runs",
+        // The n-gram rebuild orders its lists in Rust under its own budget.
+        3 => return Ok(true),
+        _ => return Ok(false),
+    };
+    let staged_bytes: i64 = connection
+        .query_row(staged_runs, [], |row| row.get(0))
+        .map_err(sqlite_error)?;
+    let staged_bytes = u64::try_from(staged_bytes).map_err(contract_number)?;
+    hotpath::gauge!("query.artifact.finalization.merge.staged_run_bytes").set(staged_bytes);
+    Ok(staged_bytes <= u64::try_from(sorter_budget_bytes).map_err(contract_number)?)
 }
 
 fn advance_pre_digest_work(
@@ -5971,8 +5906,6 @@ fn native_row_key(
             row.get(0).map_err(sqlite_error)?,
         )),
         FinalizationSectionV1::DocumentIntegrity
-        | FinalizationSectionV1::ImportIntegrity
-        | FinalizationSectionV1::ImportEvidence
         | FinalizationSectionV1::Rows
         | FinalizationSectionV1::TermPostings
         | FinalizationSectionV1::ExactPostings
@@ -6222,8 +6155,6 @@ fn verify_final_sections_against_source(
     let expected = [
         ("source_pages", source.page_count()),
         ("document_integrity", admitted_documents),
-        ("import_integrity", source.total_imports()),
-        ("import_evidence", source.total_imports()),
         ("rows", admitted_documents),
     ];
     for (name, expected_rows) in expected {
@@ -6678,16 +6609,6 @@ fn record_prepared_batch_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
     let _ = pages;
 }
 
-fn record_batch_import_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
-    #[cfg(feature = "hotpath")]
-    {
-        let imports = pages.iter().map(|page| page.imports.len()).sum::<usize>();
-        hotpath::gauge!("query.artifact.batch.import_rows_total").inc(imports as u64);
-    }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = pages;
-}
-
 fn record_batch_posting_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
     #[cfg(feature = "hotpath")]
     {
@@ -6888,6 +6809,38 @@ mod tests {
         fn is_deadline_exceeded(&self) -> bool {
             false
         }
+    }
+
+    /// A merge wake keeps its statement journals in memory only while its
+    /// staged runs, plus the per-run sorter allowance, fit the sorter budget;
+    /// the n-gram rebuild sorts in Rust, and every other wake keeps the
+    /// file-backed sorter.
+    #[test]
+    fn merge_wakes_use_memory_temp_storage_only_within_the_sorter_budget() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE term_posting_runs(page_ordinal INTEGER, term TEXT, field INTEGER, postings BLOB);
+                 INSERT INTO term_posting_runs VALUES (0, 'alpha', 4, X'0102'), (1, 'beta', 4, X'03');
+                 CREATE TABLE exact_posting_runs(page_ordinal INTEGER, term_id INTEGER, field INTEGER, documents BLOB);
+                 INSERT INTO exact_posting_runs VALUES (0, 9, 1, X'010203');",
+            )
+            .unwrap();
+        let fits =
+            |step, budget| merge_wake_fits_memory_temp_store(&connection, step, budget).unwrap();
+        let indexes = |ordinal| Some((PersistedFinalizationPhaseV1::Indexes, ordinal));
+
+        assert!(fits(indexes(1), 140));
+        assert!(!fits(indexes(1), 139));
+        assert!(fits(indexes(2), 67));
+        assert!(!fits(indexes(2), 66));
+        assert!(fits(indexes(3), 0));
+        assert!(!fits(indexes(0), usize::MAX));
+        assert!(!fits(
+            Some((PersistedFinalizationPhaseV1::Digest, 1)),
+            usize::MAX
+        ));
+        assert!(!fits(None, usize::MAX));
     }
 
     #[test]

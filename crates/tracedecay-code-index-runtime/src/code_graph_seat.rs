@@ -23,9 +23,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_domain::errors::Result;
 use tracedecay_domain::{CodeGenerationId, ProjectId, RefId, RepositoryId, WorktreeId};
-use tracedecay_graph_db::{
-    GraphDbError, SealedGraphStateDigest, SealedReadBundleArtifactStateV1, VerifiedGraphSnapshot,
-};
+use tracedecay_graph_db::{GraphDbError, SealedGraphStateDigest, VerifiedGraphSnapshot};
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::shard_runtime::registry::CanonicalCodeGraphStoreLeaseV1;
 
@@ -38,12 +36,9 @@ pub struct CodeGraphReplayBindingV1 {
 
 /// Short-lived activation lease returned by [`CodeGraphSeatRuntimePortV1`].
 ///
-/// The serving slot keeps [`Self::authority`]. The activation lease may remain
-/// alive in the detached catalog-restore task so optional read artifacts never
-/// delay occurrence graph publication.
+/// The serving slot keeps [`Self::authority`]; the activation lease itself is
+/// released once the verified snapshot is installed.
 pub trait CodeGraphSeatLeaseV1: Send {
-    fn sweep_aborted_read_bundle_temporaries(&self) -> std::result::Result<(), GraphDbError>;
-
     fn authority(&self) -> Arc<CanonicalCodeGraphStoreLeaseV1>;
 
     fn publish_verified_snapshot(
@@ -61,11 +56,6 @@ pub trait CodeGraphSeatLeaseV1: Send {
         &self,
         request_cancelled: Arc<AtomicBool>,
     ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError>;
-
-    fn load_sealed_read_bundle_catalog(
-        &self,
-        request_cancelled: &Arc<AtomicBool>,
-    ) -> std::result::Result<SealedReadBundleArtifactStateV1, GraphDbError>;
 }
 
 /// Registry-side seat gate the code-index scheduler consumes.

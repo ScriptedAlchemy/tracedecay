@@ -381,14 +381,6 @@ impl<K: Ord> SymbolDegreeCounts<K> {
         self.counts.entry(symbol).or_default().1 += 1;
     }
 
-    pub(super) fn get<Q>(&self, symbol: &Q) -> (u64, u64)
-    where
-        K: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
-        self.counts.get(symbol).copied().unwrap_or_default()
-    }
-
     pub(super) fn take<Q>(&mut self, symbol: &Q) -> (u64, u64)
     where
         K: Borrow<Q>,

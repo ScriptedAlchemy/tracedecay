@@ -36,16 +36,12 @@
 //!     sealed.checked            <- written only after post-reopen proof
 //! ```
 //!
-//! # Sealed-read-bundle integration point
-//!
 //! Each `<physical-namespace-hex>/` directory is a self-describing,
-//! digest-bound, immutable artifact, exactly the shape a sealed-read bundle
-//! catalogs. The bundle manifest work owns the catalog; its integration
-//! point here is the directory plus `sealed.json` (identity, physical
-//! namespace, recovered digest, row counts, and the `form` the store was
-//! sealed in). A bundle that ships this directory can be adopted on any host
-//! through [`GraphDb::open_sealed_generation_store_if_present`], which
-//! re-proves the digest before the store serves a read.
+//! digest-bound, immutable artifact: the directory plus `sealed.json`
+//! (identity, physical namespace, recovered digest, row counts, and the
+//! `form` the store was sealed in) can be adopted on any host through
+//! [`GraphDb::open_sealed_generation_store_if_present`], which re-proves the
+//! digest before the store serves a read.
 
 use std::collections::{BTreeMap, HashMap};
 use std::panic::{AssertUnwindSafe, catch_unwind};

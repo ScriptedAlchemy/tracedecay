@@ -95,7 +95,7 @@ impl Drop for MaintenancePhaseInstrumentation {
 /// collectable, a sealed code generation superseding its predecessor, and
 /// pulls the next tick forward to at most one retry delay away. Requests
 /// inside that window coalesce into one tick. Before this, every publication
-/// left its predecessor's sealed artifact, read bundle, and segments on disk
+/// left its predecessor's sealed artifact and segments on disk
 /// until the daily tick.
 #[derive(Default)]
 pub struct MaintenanceWake {

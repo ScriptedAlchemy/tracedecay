@@ -35,10 +35,6 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::{
     chunks::content_digest,
-    graph_projection::{
-        CODE_GRAPH_PROJECTOR_REVISION, build_published_code_graph_manifest_checked,
-        code_graph_projection_identity, write_interactive_catalog_artifact,
-    },
     languages::{LanguageRegistry, StaticLanguageRegistry},
     lineage::LineageKindV1,
     production::{
@@ -62,7 +58,6 @@ use tracedecay_domain::{
     SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1, TreeId, UtcMicros,
     WorktreeId,
 };
-use tracedecay_graph_db::{GraphNamespace, GraphProjectorRevision, NeverCancelled};
 
 const REPO_ENV: &str = "SEALED_STORAGE_REPO";
 const REV_ENV: &str = "SEALED_STORAGE_REV";
@@ -217,32 +212,6 @@ struct Report {
     decoded_section_bytes: BTreeMap<String, usize>,
     decoded_digest: String,
     linked_worktree: LinkedWorktreeReport,
-    read_bundle: ReadBundleReport,
-}
-
-/// The interactive-catalog artifact a sealed read bundle stores for the
-/// primary checkout and for a linked worktree of the same tree, and what the
-/// two cost when identical catalogs are stored once.
-#[derive(Serialize)]
-struct ReadBundleReport {
-    primary_catalog_bytes: usize,
-    linked_catalog_identical_to_primary: bool,
-    two_worktree_catalog_bytes: usize,
-}
-
-/// The catalog artifact bytes a graph seal writes for `generation`.
-fn interactive_catalog(
-    generation: &CodeIndexPublishedGenerationV1,
-) -> Result<Vec<u8>, Box<dyn Error>> {
-    let manifest = build_published_code_graph_manifest_checked(
-        code_graph_projection_identity(GraphNamespace::new("sealed-storage")?)?,
-        generation,
-        &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())?,
-        &|| Ok(()),
-    )?;
-    let mut bytes = Vec::new();
-    write_interactive_catalog_artifact(&manifest, &mut bytes, &NeverCancelled)?;
-    Ok(bytes)
 }
 
 /// The clean generation sealed again as a linked worktree of the same
@@ -349,17 +318,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             + scope_bytes(&clean_sealed)
             + scope_bytes(&linked_sealed),
     };
-    let primary_catalog = interactive_catalog(&clean)?;
-    let linked_catalog = interactive_catalog(&linked)?;
-    let read_bundle = ReadBundleReport {
-        primary_catalog_bytes: primary_catalog.len(),
-        linked_catalog_identical_to_primary: linked_catalog == primary_catalog,
-        two_worktree_catalog_bytes: if linked_catalog == primary_catalog {
-            primary_catalog.len()
-        } else {
-            primary_catalog.len() + linked_catalog.len()
-        },
-    };
     let mut store_segments = clean_sealed.file_segments.clone();
     store_segments.extend(
         successor_sealed
@@ -404,7 +362,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         decoded_section_bytes: sections,
         decoded_digest: format!("sha256:{}", hex::encode(decoded.finalize())),
         linked_worktree,
-        read_bundle,
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())

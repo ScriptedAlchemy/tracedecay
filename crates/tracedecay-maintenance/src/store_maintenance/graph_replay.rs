@@ -24,19 +24,6 @@ pub enum ReconcileOutcome {
     Failed,
 }
 
-/// Removes the retired generation's sealed read bundle files from the
-/// durable generations root. Idempotent; an absent bundle is a success.
-fn retire_generation_read_bundle(store_root: &Path, generation_file: &str) -> Result<(), String> {
-    let digest = generation_file
-        .strip_prefix("generation-")
-        .and_then(|value| value.strip_suffix(".json"))
-        .ok_or_else(|| "sealed generation filename is invalid".to_owned())?;
-    let sealed = tracedecay_graph_db::SealedGraphStateDigest::try_from(format!("sha256:{digest}"))
-        .map_err(|error| error.to_string())?;
-    tracedecay_graph_db::retire_sealed_read_bundle(&store_root.join("code-generations-v1"), &sealed)
-        .map_err(|error| error.to_string())
-}
-
 /// Every code-generation degradation is a genuine anomaly: it keeps the tick
 /// summary loud and logs on every attempt.
 pub fn log_code_generation_retention_degraded(
@@ -222,24 +209,6 @@ pub async fn reconcile_graph_replay_releases(
             .await
         {
             Ok(true) => {
-                // The generation's graph replay is retired; its sealed
-                // read bundle (derived read artifacts) retires with it.
-                // Runs before the release checkpoint so a crash here
-                // retries the idempotent sweep on the next pass.
-                if let Err(error) =
-                    retire_generation_read_bundle(store_root, &release.generation.generation_file)
-                {
-                    observations.mark_loud_retention_log();
-                    log_daemon_event(
-                        "retention_degraded",
-                        &[
-                            ("pass", "code_generations".to_string()),
-                            ("failure", "graph_read_bundle_retire_failed".to_string()),
-                            ("error", error),
-                        ],
-                    );
-                    return ReconcileOutcome::Failed;
-                }
                 if complete_code_generation_graph_replay_release(store_root, &release).is_err() {
                     log_code_generation_retention_degraded(
                         observations,
