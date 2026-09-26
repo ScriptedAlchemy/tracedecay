@@ -1807,8 +1807,8 @@ async fn a_stale_served_graph_read_carries_the_typed_freshness_trailer() {
 
     let stale = handle_tool_call_with_registry_options(
         &cg,
-        "tracedecay_files",
-        json!({}),
+        "tracedecay_search",
+        json!({ "query": "probe" }),
         None,
         None,
         verified_graph_stale_options(&cg, ToolCallRegistryOptions::default()),
@@ -1831,8 +1831,8 @@ async fn a_stale_served_graph_read_carries_the_typed_freshness_trailer() {
 
     let unverified = handle_tool_call_with_registry_options(
         &cg,
-        "tracedecay_files",
-        json!({}),
+        "tracedecay_search",
+        json!({ "query": "probe" }),
         None,
         None,
         verified_graph_wedged_options(&cg, ToolCallRegistryOptions::default()),
@@ -1851,8 +1851,8 @@ async fn a_stale_served_graph_read_carries_the_typed_freshness_trailer() {
 
     let current = handle_tool_call_with_registry_options(
         &cg,
-        "tracedecay_files",
-        json!({}),
+        "tracedecay_search",
+        json!({ "query": "probe" }),
         None,
         None,
         verified_graph_options(&cg, ToolCallRegistryOptions::default()),

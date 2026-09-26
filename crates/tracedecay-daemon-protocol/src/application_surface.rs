@@ -930,7 +930,9 @@ pub fn parse_application_surface_request(
         | ApplicationSurfaceOperation::PrContext
         | ApplicationSurfaceOperation::BranchSearch
         | ApplicationSurfaceOperation::BranchDiff
-        | ApplicationSurfaceOperation::BranchList => match value {
+        | ApplicationSurfaceOperation::BranchList
+        | ApplicationSurfaceOperation::Files
+        | ApplicationSurfaceOperation::Config => match value {
             Value::Object(arguments) => Ok(ApplicationSurfaceRequest::GraphTool(arguments)),
             _ => Err(ApplicationSurfaceAdapterError::invalid_request(format!(
                 "invalid arguments: {} expects a JSON object",

@@ -255,7 +255,9 @@ async fn tracedecay_config_reports_literal_values_and_typed_failures() {
     let missing_key = config(&server, json!({"path": "app.toml", "format": "json"})).await;
     assert_eq!(
         missing_key,
-        invalid_params("missing required parameter: key")
+        execution_failed(
+            "tool execution failed: config error: invalid arguments for tracedecay_config: missing field `key`"
+        )
     );
 
     let non_string_key = config(
@@ -265,7 +267,9 @@ async fn tracedecay_config_reports_literal_values_and_typed_failures() {
     .await;
     assert_eq!(
         non_string_key,
-        invalid_params("missing required parameter: key")
+        execution_failed(
+            "tool execution failed: config error: invalid arguments for tracedecay_config: invalid type: integer `1`, expected a string"
+        )
     );
 
     let missing_locator = config(&server, json!({"key": "package.name", "format": "json"})).await;
@@ -281,7 +285,9 @@ async fn tracedecay_config_reports_literal_values_and_typed_failures() {
     .await;
     assert_eq!(
         non_string_path,
-        invalid_params("missing required parameter: 'path' or 'glob'")
+        execution_failed(
+            "tool execution failed: config error: invalid arguments for tracedecay_config: invalid type: boolean `true`, expected a string"
+        )
     );
 
     let both_locators = config(

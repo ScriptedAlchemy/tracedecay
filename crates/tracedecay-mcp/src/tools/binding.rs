@@ -288,6 +288,8 @@ fn application_surface_branch_sensitivity(
         | ApplicationSurfaceOperation::BranchSearch
         | ApplicationSurfaceOperation::BranchDiff
         | ApplicationSurfaceOperation::BranchList
+        | ApplicationSurfaceOperation::Files
+        | ApplicationSurfaceOperation::Config
         | HealthRead
         | HealthDelta
         | DiagnosticsRead
@@ -346,8 +348,8 @@ const BINDING_GROUPS: &[BindingGroup] = binding_groups![
     [Some(McpToolDispatchGroup::Info), RegisteredProjectAccess::SelectorOnly,
         "tracedecay_project_context"],
     [Some(McpToolDispatchGroup::Info), RegisteredProjectAccess::ActiveProjectOnly,
-        "tracedecay_files", "tracedecay_admin_sync", "tracedecay_port_status", "tracedecay_port_order",
-        "tracedecay_todos", "tracedecay_config"],
+        "tracedecay_admin_sync", "tracedecay_port_status", "tracedecay_port_order",
+        "tracedecay_todos"],
     [Some(McpToolDispatchGroup::Admin), RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_hook_runtime", "tracedecay_admin_cli", "tracedecay_admin_project"],
     [Some(McpToolDispatchGroup::Git), RegisteredProjectAccess::ActiveProjectOnly,

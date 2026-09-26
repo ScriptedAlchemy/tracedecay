@@ -9,10 +9,11 @@ use std::path::Path;
 use serde_json::Value;
 use tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
+use tracedecay_contracts::retrieval::{CallableCodeOperationKind, callable_code_operation};
 use tracedecay_contracts::retrieval::{
     DerivesResultV1, NodeResultV1, RenamePreviewPrimitiveOutcomeV1,
 };
-use tracedecay_domain::errors::Result;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use crate::handlers::analysis::{compute_analysis_report, render_circular_md};
@@ -32,9 +33,13 @@ use crate::handlers::health::{
     compute_dependency_depth, compute_dsm, compute_gini, compute_health, compute_test_map,
     compute_test_risk, render_dsm_md,
 };
-use crate::handlers::info::{compute_port_order, compute_port_status, compute_todos};
+use crate::handlers::info::{
+    compute_config, compute_files, compute_port_order, compute_port_status, compute_todos,
+    render_files_md,
+};
 use crate::handlers::support::{
-    generic_tool_result, rendered_tool_result, text_tool_result, unknown_tool_error,
+    decode_primitive_request, generic_tool_result, rendered_tool_result, text_tool_result,
+    unknown_tool_error,
 };
 use crate::handlers::verified_read::{VerifiedGraphOpen, verified_read_operation as read};
 use crate::tools::render;
@@ -163,6 +168,17 @@ pub async fn compute_graph_tool(
         ApplicationSurfaceOperation::BranchSearch => compute_branch_search(ctx, args).await,
         ApplicationSurfaceOperation::BranchDiff => compute_branch_diff(ctx, args).await,
         ApplicationSurfaceOperation::BranchList => compute_branch_list(ctx, args).await,
+        ApplicationSurfaceOperation::Files => {
+            // The request is decoded before the graph is admitted, so a
+            // malformed call is refused even while the graph is unavailable.
+            let request = decode_primitive_request(&args, "tracedecay_files")?;
+            let operation = callable_code_operation(CallableCodeOperationKind::SourceMetadata)
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("invalid source metadata operation: {error}"),
+                })?;
+            compute_files(&open(operation).await?, request, scope_prefix).await
+        }
+        ApplicationSurfaceOperation::Config => compute_config(ctx.project_root(), args).await,
         operation => Err(unknown_tool_error(operation.mcp_tool_name())),
     }
 }
@@ -257,6 +273,13 @@ pub fn render_graph_tool(
             text_tool_result("No matching symbol found.", Vec::new())
         }
         GraphToolResultV1::Grep(grep) => render_grep(response_handle_root, args, grep)?,
+        GraphToolResultV1::Files(files) => rendered_tool_result(
+            response_handle_root,
+            args,
+            &result.result_value()?,
+            Vec::new(),
+            || render_files_md(files),
+        ),
         GraphToolResultV1::AstGrepSearch(search) => {
             render_ast_grep_search(response_handle_root, args, search)?
         }

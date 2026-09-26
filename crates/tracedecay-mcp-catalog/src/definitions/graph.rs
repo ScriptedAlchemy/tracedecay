@@ -219,29 +219,12 @@ pub(super) fn def_node(input_schema: Value) -> ToolDefinition {
     )
 }
 
-pub(super) fn def_files() -> ToolDefinition {
+pub(super) fn def_files(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_files",
         "File List",
         "List indexed project files. Use to explore file structure without reading file contents.",
-        json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Filter to files under this directory path"
-                },
-                "pattern": {
-                    "type": "string",
-                    "description": "Filter files matching this glob pattern (e.g. '**/*.rs')"
-                },
-                "layout": {
-                    "type": "string",
-                    "enum": ["flat", "grouped"],
-                    "description": "File listing layout: flat (one per line) or grouped by directory (default: grouped)."
-                }
-            }
-        }),
+        input_schema,
     )
 }
 
@@ -308,7 +291,7 @@ pub(super) fn def_constructors(input_schema: Value) -> ToolDefinition {
     )
 }
 
-pub(super) fn def_config() -> ToolDefinition {
+pub(super) fn def_config(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_config",
         "Config File Query",
@@ -320,28 +303,7 @@ pub(super) fn def_config() -> ToolDefinition {
          detected from extension: .toml → TOML, .json → JSON. \
          \n\nDoes not query the code graph, pure filesystem + parser. Works \
          on uninitialized projects.",
-        json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Project-relative path to a single config file (e.g. 'Cargo.toml'). Mutually exclusive with 'glob'."
-                },
-                "glob": {
-                    "type": "string",
-                    "description": "Glob pattern to match multiple config files (e.g. '**/Cargo.toml', 'crates/*/Cargo.toml'). Mutually exclusive with 'path'."
-                },
-                "key": {
-                    "type": "string",
-                    "description": "Dot-separated key path (e.g. 'package.version', 'dependencies.tokio.version'). Required."
-                }
-            },
-            "required": ["key"],
-            "anyOf": [
-                { "required": ["glob"] },
-                { "required": ["path"] }
-            ]
-        }),
+        input_schema,
     )
 }
 

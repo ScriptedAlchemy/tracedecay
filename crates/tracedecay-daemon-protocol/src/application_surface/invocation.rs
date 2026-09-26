@@ -895,6 +895,8 @@ pub fn application_surface_feedback_operation(
         | ApplicationSurfaceOperation::BranchSearch
         | ApplicationSurfaceOperation::BranchDiff
         | ApplicationSurfaceOperation::BranchList
+        | ApplicationSurfaceOperation::Files
+        | ApplicationSurfaceOperation::Config
         | ApplicationSurfaceOperation::HealthRead
         | ApplicationSurfaceOperation::HealthDelta
         | ApplicationSurfaceOperation::StorageStatus

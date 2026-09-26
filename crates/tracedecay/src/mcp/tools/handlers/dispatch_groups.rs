@@ -157,7 +157,7 @@ fn dispatch_graph_tools_inner<'a>(
 }
 
 /// Dispatch project-info, registry, and file-inspection tools
-/// (`tracedecay_status`, `tracedecay_project_list`, `tracedecay_files`, ...).
+/// (`tracedecay_status`, `tracedecay_project_list`, ...).
 #[allow(clippy::too_many_arguments)]
 #[hotpath::measure(future = true, label = "mcp.dispatch.info")]
 pub(super) async fn dispatch_info_tools(
@@ -166,32 +166,17 @@ pub(super) async fn dispatch_info_tools(
     args: Value,
     server_stats: Option<Value>,
     scope_prefix: Option<&str>,
-    selected_scope_prefix: Option<&str>,
-    active_project_session_db: Option<&RegisteredGlobalDbLeaseV1>,
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
-    dispatch_info_tools_inner(
-        tool_name,
-        cg,
-        args,
-        server_stats,
-        scope_prefix,
-        selected_scope_prefix,
-        active_project_session_db,
-        options,
-    )
-    .await
+    dispatch_info_tools_inner(tool_name, cg, args, server_stats, scope_prefix, options).await
 }
 
-#[allow(clippy::too_many_arguments)]
 fn dispatch_info_tools_inner<'a>(
     tool_name: &'a str,
     cg: &'a TraceDecay,
     args: Value,
     server_stats: Option<Value>,
     scope_prefix: Option<&'a str>,
-    selected_scope_prefix: Option<&'a str>,
-    _active_project_session_db: Option<&'a RegisteredGlobalDbLeaseV1>,
     options: ToolCallRegistryOptions<'a>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
     // Erase the deeply nested match-arm futures before they reach the
@@ -255,17 +240,7 @@ fn dispatch_info_tools_inner<'a>(
             "tracedecay_admin_sync" => {
                 info::handle_admin_sync(cg, options.code_index_reconcile_sink.as_ref()).await
             }
-            _ => {
-                portable_info::dispatch_tool(
-                    cg.project_root(),
-                    &cg.store_layout().response_handle_root,
-                    &verified_graph_open(&options),
-                    tool_name,
-                    args,
-                    selected_scope_prefix,
-                )
-                .await
-            }
+            _ => Err(unknown_tool_error(tool_name)),
         }
     })
 }
