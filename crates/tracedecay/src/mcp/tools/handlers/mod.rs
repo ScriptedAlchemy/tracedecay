@@ -318,6 +318,8 @@ pub struct ToolCallRegistryOptions<'a> {
         Option<tracedecay_contracts::RemoteOperationalStatusReaderV1>,
     pub(crate) code_index_freshness_reader:
         Option<tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader>,
+    pub(crate) code_index_readiness_waiter:
+        Option<tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaiter>,
     pub feedback_status_reader:
         Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
     pub(crate) pr_autotrack_reader:
@@ -401,6 +403,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             doctor_report_reader: None,
             remote_operational_status: None,
             code_index_freshness_reader: None,
+            code_index_readiness_waiter: None,
             feedback_status_reader: None,
             pr_autotrack_reader: None,
             diagnostics_lsp: None,

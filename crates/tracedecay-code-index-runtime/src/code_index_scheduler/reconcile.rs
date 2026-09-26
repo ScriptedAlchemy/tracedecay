@@ -3139,6 +3139,16 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// as movement here made a concurrent query escalate the targeted hint
     /// pass into an overflow rescan and relabel the arrival as its own.
     pub(super) fn freshness_probe_verdict(&mut self) -> FreshnessProbeVerdictV1 {
+        self.freshness_ladder_verdict(true)
+    }
+
+    /// The ladder behind [`Self::freshness_probe_verdict`]. Without the
+    /// bounded-staleness shortcut it always sweeps the source witness, which
+    /// is what a caller waiting for the source as it is now asks for.
+    fn freshness_ladder_verdict(
+        &mut self,
+        trust_recent_reconcile: bool,
+    ) -> FreshnessProbeVerdictV1 {
         let freshness = self.freshness_fence.snapshot();
         if !freshness.verified_against_source {
             return FreshnessProbeVerdictV1::Unverified;
@@ -3148,7 +3158,9 @@ impl CodeIndexWorktreeSchedulerV1 {
         {
             return FreshnessProbeVerdictV1::Moved;
         }
-        if freshness.last_reconciled_at.elapsed() < self.policy.staleness_threshold {
+        if trust_recent_reconcile
+            && freshness.last_reconciled_at.elapsed() < self.policy.staleness_threshold
+        {
             return FreshnessProbeVerdictV1::Current;
         }
         if self.source_witness_matches_worktree(&freshness) {
@@ -3194,7 +3206,19 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// into the full sealed-generation replay the revision-7 verified-head
     /// recovery exists to avoid.
     pub fn request_fresh_for_query_background(&mut self) -> bool {
-        match self.freshness_probe_verdict() {
+        let verdict = self.freshness_probe_verdict();
+        self.request_reconcile_for_verdict(verdict)
+    }
+
+    /// [`Self::request_fresh_for_query_background`] against the source as it
+    /// is now: the source witness is swept even inside the staleness window.
+    pub fn request_fresh_now_background(&mut self) -> bool {
+        let verdict = self.freshness_ladder_verdict(false);
+        self.request_reconcile_for_verdict(verdict)
+    }
+
+    fn request_reconcile_for_verdict(&mut self, verdict: FreshnessProbeVerdictV1) -> bool {
+        match verdict {
             FreshnessProbeVerdictV1::Current => false,
             FreshnessProbeVerdictV1::Unverified => true,
             FreshnessProbeVerdictV1::Moved => {

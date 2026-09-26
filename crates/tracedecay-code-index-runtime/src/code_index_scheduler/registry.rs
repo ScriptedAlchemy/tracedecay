@@ -53,6 +53,7 @@ pub(super) mod graph_cursor_retention;
 mod ignored_dependencies;
 mod lsp_projection;
 mod mount;
+mod owner_signals;
 mod query_authority;
 #[cfg(test)]
 mod reconcile_failure_isolation_tests;
@@ -432,6 +433,7 @@ mod resident_memory;
 #[cfg(test)]
 mod test_gates;
 pub mod watch_ingress;
+pub use owner_signals::{CodeIndexOwnerSignalsClosedV1, CodeIndexOwnerSignalsV1};
 
 /// At most two distinct worktrees may reconcile concurrently. Each reconcile
 /// already saturates the shared indexing pool during extraction; the second

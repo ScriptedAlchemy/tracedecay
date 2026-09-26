@@ -316,6 +316,7 @@ impl McpServer {
                 doctor_report_reader: self.dashboard_doctor_report_reader.clone(),
                 remote_operational_status: self.remote_operational_status.clone(),
                 code_index_freshness_reader: self.dashboard_code_index_freshness_reader.clone(),
+                code_index_readiness_waiter: self.code_index_readiness_waiter.clone(),
                 feedback_status_reader: self.dashboard_feedback_status_reader.clone(),
                 pr_autotrack_reader: self.dashboard_pr_autotrack_reader.clone(),
                 diagnostics_lsp: Some(Arc::clone(&self.diagnostics_lsp)),

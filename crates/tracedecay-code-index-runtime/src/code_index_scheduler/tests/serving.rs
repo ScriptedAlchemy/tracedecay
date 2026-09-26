@@ -929,6 +929,9 @@ async fn dashboard_freshness_reports_the_sealed_clone_census_across_a_restart() 
         while !latest.query_owners_are_ready() {
             latest.advance_text_serving(1).expect("advance text owners");
         }
+        // Clone readiness reports stale while the seating pass still verifies
+        // source; the census claim is about the settled owner's first read.
+        wait_for_settled_owner(&registry, fixture.path()).await;
         let freshness = registry
             .dashboard_freshness(fixture.path())
             .await

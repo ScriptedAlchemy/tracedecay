@@ -1606,126 +1606,20 @@ async fn serving_seat_wait_diagnostic(
     )
 }
 
-/// Every signal a mounted owner publishes for `path`: registry-wide serving
-/// seats and mounts, the worktree's serving-generation changes, its owner
-/// passes and pending wake, and cadence receipts.
-///
-/// Subscribe before the first probe. `watch::Sender::subscribe()` marks the
-/// current value seen, so a change between subscribe and `changed()` still
-/// wakes the waiter, and a probe that misses a transition re-runs on the next
-/// one instead of on a timer. The per-worktree channels exist only while the
-/// worktree is mounted: `changed()` returns as soon as one is (re)subscribed,
-/// so a caller re-probes before depending on it.
-pub(crate) struct OwnerSignals<'a> {
-    registry: &'a CodeIndexSchedulerRegistryV1,
-    path: PathBuf,
-    seats: tokio::sync::watch::Receiver<u64>,
-    root_mounted: tokio::sync::watch::Receiver<u64>,
-    receipts:
-        tokio::sync::watch::Receiver<crate::code_index_scheduler::CodeIndexCadenceTelemetryV1>,
-    serving: Option<tokio::sync::watch::Receiver<()>>,
-    activity: Option<crate::code_index_scheduler::CodeIndexOwnerActivityV1>,
-}
+/// [`crate::code_index_scheduler::CodeIndexOwnerSignalsV1`] with the
+/// registry's lifetime assumed and a caller failure deadline.
+pub(crate) struct OwnerSignals(crate::code_index_scheduler::CodeIndexOwnerSignalsV1);
 
-impl<'a> OwnerSignals<'a> {
-    pub(crate) async fn subscribe(registry: &'a CodeIndexSchedulerRegistryV1, path: &Path) -> Self {
-        Self {
-            registry,
-            path: path.to_path_buf(),
-            seats: registry.subscribe_serving_seats(),
-            root_mounted: registry.subscribe_root_mounted(),
-            receipts: registry.subscribe_cadence_receipts(),
-            serving: registry.subscribe_serving_generation_changes(path).await,
-            activity: registry.subscribe_owner_activity(path).await,
-        }
+impl OwnerSignals {
+    pub(crate) async fn subscribe(registry: &CodeIndexSchedulerRegistryV1, path: &Path) -> Self {
+        Self(crate::code_index_scheduler::CodeIndexOwnerSignalsV1::subscribe(registry, path).await)
     }
 
     pub(crate) async fn changed(&mut self) {
-        if self.serving.is_none() {
-            self.serving = self
-                .registry
-                .subscribe_serving_generation_changes(&self.path)
-                .await;
-            if self.serving.is_some() {
-                return;
-            }
-        }
-        if self.activity.is_none() {
-            self.activity = self.registry.subscribe_owner_activity(&self.path).await;
-            if self.activity.is_some() {
-                return;
-            }
-        }
-        tokio::select! {
-            changed = self.seats.changed() => {
-                changed.expect("the seating channel stays open while the registry lives");
-            }
-            changed = self.root_mounted.changed() => {
-                changed.expect("the root-mounted channel stays open while the registry lives");
-            }
-            changed = self.receipts.changed() => {
-                changed.expect("the cadence channel stays open while the registry lives");
-            }
-            changed = async {
-                match self.serving.as_mut() {
-                    Some(serving) => serving.changed().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                if changed.is_err() {
-                    self.serving = None;
-                }
-            }
-            changed = async {
-                match self.activity.as_mut() {
-                    Some(activity) => activity.changed().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                if changed.is_err() {
-                    self.activity = None;
-                }
-            }
-        }
-        self.settle_burst().await;
-    }
-
-    /// Consume publications until a scheduler turn passes without one, so a
-    /// burst of owner updates costs the waiter one probe instead of one per
-    /// update contending with the worker.
-    async fn settle_burst(&mut self) {
-        loop {
-            self.seats.borrow_and_update();
-            self.root_mounted.borrow_and_update();
-            self.receipts.borrow_and_update();
-            if let Some(serving) = self.serving.as_mut() {
-                serving.borrow_and_update();
-            }
-            tokio::task::yield_now().await;
-            let pending = [
-                self.seats.has_changed(),
-                self.root_mounted.has_changed(),
-                self.receipts.has_changed(),
-            ]
-            .into_iter()
-            .any(|changed| changed.unwrap_or(false))
-                || self
-                    .serving
-                    .as_ref()
-                    .is_some_and(|serving| serving.has_changed().unwrap_or(false))
-                || self.activity.as_ref().is_some_and(
-                    crate::code_index_scheduler::CodeIndexOwnerActivityV1::has_changed,
-                );
-            if !pending {
-                return;
-            }
-            if let Some(activity) = self.activity.as_mut()
-                && activity.has_changed()
-                && activity.changed().await.is_err()
-            {
-                self.activity = None;
-            }
-        }
+        self.0
+            .changed()
+            .await
+            .expect("the registry outlives the test's owner signals");
     }
 
     /// [`Self::changed`] bounded by a caller's failure deadline, so the

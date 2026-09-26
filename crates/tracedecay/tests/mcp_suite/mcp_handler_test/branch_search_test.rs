@@ -198,26 +198,27 @@ async fn wait_until_worktree_search_serves_dirty_anchor(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
 ) -> Value {
-    let mut last = Value::Null;
-    for _ in 0..60 {
-        let (refused, payload) = call_raw(
-            harness,
-            project,
-            "tracedecay_search",
-            json!({"query": "dirty_anchor", "limit": 5, "format": "json"}),
-        )
+    crate::support::harness_wait_for_readiness(harness, project, "ready", Duration::from_secs(30))
         .await;
-        last = payload;
-        let served = !refused
-            && last["code_generation"].as_str().is_some()
-            && crate::common::incomplete_code_index_query_lanes(&last).is_empty()
-            && search_names(&last).contains(&"dirty_anchor");
-        if served {
-            return last;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    panic!("dirty worktree search never served dirty_anchor: {last}");
+    let (refused, payload) = call_raw(
+        harness,
+        project,
+        "tracedecay_search",
+        json!({"query": "dirty_anchor", "limit": 5, "format": "json"}),
+    )
+    .await;
+    assert!(!refused, "{payload}");
+    assert!(payload["code_generation"].as_str().is_some(), "{payload}");
+    assert_eq!(
+        crate::common::incomplete_code_index_query_lanes(&payload),
+        Vec::<&str>::new(),
+        "{payload}"
+    );
+    assert!(
+        search_names(&payload).contains(&"dirty_anchor"),
+        "{payload}"
+    );
+    payload
 }
 
 fn search_names(payload: &Value) -> Vec<&str> {

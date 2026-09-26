@@ -25,7 +25,7 @@ use crate::code_index_journey::{
     ExactIndexIdentity, RECEIPT_TIMEOUT, assert_exact_identity, assert_project_identity,
     commit_all, daemon_log_for_failure, deliver_save, exact_identity, exact_symbol, git,
     initialize_tracedecay, result_paths, search, status, stop_daemon_gracefully, tool,
-    wait_for_terminal_generation,
+    wait_for_readiness, wait_for_terminal_generation,
 };
 use crate::common::{EnvVarGuard, IsolatedEnv, daemon_socket_path, spawn_tracedecay_daemon_with};
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
@@ -498,6 +498,67 @@ async fn one_line_append_publishes_fresh_generation_with_carried_clone_bodies() 
         result_paths(&carried).contains(&"src/carried.rs"),
         "the unchanged carried source stopped serving: {carried}"
     );
+    stop_daemon_gracefully(&mut daemon);
+}
+
+/// `tracedecay_status` `wait_for` holds the read across a saved edit's
+/// reconcile and returns `reached` with the edit's generation already in the
+/// same payload.
+#[tokio::test]
+async fn status_wait_for_returns_reached_with_the_saved_edit_generation() {
+    let (environment, project) = IsolatedEnv::acquire().await;
+    let project = canonical_existing_identity(&project).expect("canonical fixture project");
+    fs::create_dir_all(project.join("src")).expect("fixture source directory");
+    fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"status-wait\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("fixture manifest");
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub fn before_wait() -> usize { 1 }\n",
+    )
+    .expect("fixture source");
+    git(&project, &["init", "--quiet", "--initial-branch=main"]);
+    commit_all(&project, "status wait fixture");
+    let socket = daemon_socket_path(environment.home());
+    let log_path = environment.scratch().join("status-wait.log");
+    let _daemon_log = EnvVarGuard::set("TRACEDECAY_TEST_DAEMON_LOG", &log_path);
+    let mut daemon = spawn_tracedecay_daemon_with(environment.home(), |_| {});
+    initialize_tracedecay(environment.home(), &project);
+    tracedecay_project::product_runtime::register_fixture_product_runtime();
+    let handshake =
+        tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
+            .expect("production daemon handshake");
+
+    let initial = wait_for_readiness(&socket, &handshake, "fresh", RECEIPT_TIMEOUT).await;
+    let initial_generation = initial["code_index_freshness"]["worktree"]["latest_generation_id"]
+        .as_str()
+        .expect("initial generation")
+        .to_owned();
+
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub fn before_wait() -> usize { 1 }\npub fn after_wait() -> usize { 2 }\n",
+    )
+    .expect("edit source");
+    deliver_save(&project, &["src/lib.rs"]).await;
+    let waited = wait_for_readiness(&socket, &handshake, "fresh", RECEIPT_TIMEOUT).await;
+    assert_eq!(
+        waited["code_index_freshness"]["status"], "current",
+        "{waited}"
+    );
+    let waited_generation = waited["code_index_freshness"]["worktree"]["latest_generation_id"]
+        .as_str()
+        .expect("waited generation");
+    assert_ne!(waited_generation, initial_generation, "{waited}");
+    let found = search(&socket, &handshake, "after_wait").await;
+    assert_eq!(
+        found["code_generation"].as_str(),
+        Some(waited_generation),
+        "{found}"
+    );
+    assert_eq!(result_paths(&found), vec!["src/lib.rs"], "{found}");
     stop_daemon_gracefully(&mut daemon);
 }
 

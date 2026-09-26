@@ -380,6 +380,8 @@ pub struct McpServer {
     doctor_report_published: AtomicBool,
     dashboard_code_index_freshness_reader:
         Option<tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader>,
+    code_index_readiness_waiter:
+        Option<tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaiter>,
     dashboard_feedback_status_reader:
         Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
     dashboard_pr_autotrack_reader:
@@ -837,6 +839,7 @@ impl McpServer {
             remote_operational_status,
             dashboard_doctor_report_reader,
             dashboard_code_index_freshness_reader,
+            code_index_readiness_waiter,
             dashboard_feedback_status_reader,
             dashboard_pr_autotrack_reader,
             diagnostics_lsp,
@@ -1109,6 +1112,7 @@ impl McpServer {
             dashboard_doctor_report_reader,
             doctor_report_published: AtomicBool::new(false),
             dashboard_code_index_freshness_reader,
+            code_index_readiness_waiter,
             dashboard_feedback_status_reader,
             dashboard_pr_autotrack_reader,
             background_refresh_writer,
