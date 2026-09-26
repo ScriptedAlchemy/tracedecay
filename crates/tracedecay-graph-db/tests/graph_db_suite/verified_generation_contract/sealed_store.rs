@@ -1447,6 +1447,98 @@ fn retirement_waits_for_a_live_direct_sealed_reader() {
     );
 }
 
+/// A generation shaped like a code graph: `symbol:<digest>` entities chained
+/// by `edge:<digest>` relations, the identities `graph_stable_identity` mints.
+fn stable_identity_manifest(
+    projection_identity: GraphProjectionIdentity,
+    rows: usize,
+) -> GraphGenerationManifest {
+    let symbol = |index: usize| {
+        GraphEntityId::new(graph_stable_identity("symbol", &index.to_string())).unwrap()
+    };
+    let entities = (0..rows)
+        .map(|index| GraphEntity::new(symbol(index), BTreeSet::new(), BTreeMap::new()).unwrap())
+        .collect();
+    let relations = (0..rows - 1)
+        .map(|index| {
+            GraphGenerationRelation::new(
+                GraphRelationId::new(graph_stable_identity("edge", &index.to_string())).unwrap(),
+                GraphEntityRef::new(projection_identity.clone(), symbol(index)),
+                GraphEntityRef::new(projection_identity.clone(), symbol(index + 1)),
+                GraphRelationKind::new("calls").unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap()
+        })
+        .collect();
+    GraphGenerationManifest::new(
+        projection_identity,
+        GraphGenerationId::new("key-budget-g1").unwrap(),
+        SourceGeneration::new("source:key-budget-g1").unwrap(),
+        GraphWatermark::new("watermark:key-budget-g1").unwrap(),
+        Vec::new(),
+        entities,
+        relations,
+    )
+    .unwrap()
+}
+
+/// Unique keys are written once per entity and relation locator, so their
+/// encoding sets a sealed generation's size. Hex keys that repeat the
+/// namespace sealed this 2,000-symbol generation to 3,150,837 bytes; binary
+/// namespace-id keys seal it to 1,786,870, and the rows still resolve
+/// through them.
+#[test]
+fn sealed_generation_bytes_stay_within_the_binary_key_budget() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("sealed-store:key-budget", "code");
+    let manifest = stable_identity_manifest(identity.clone(), 2_000);
+    let record = stage_sealed_manifest(
+        &mut authority,
+        &registered.binding,
+        &manifest,
+        "publish:key-budget-g1",
+        None,
+        '0',
+    );
+    let commit = publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
+    assert!(commit.snapshot.serves_from_sealed_store());
+
+    let sealed_bytes = directory_bytes(&sealed_store_root(temp.path()));
+    assert!(
+        sealed_bytes <= 1_900_000,
+        "sealed generation took {sealed_bytes} bytes"
+    );
+    let last = GraphEntityId::new(graph_stable_identity("symbol", "1999")).unwrap();
+    assert_eq!(
+        commit
+            .snapshot
+            .entity(
+                &GraphEntityRef::new(identity.clone(), last.clone()),
+                Arc::new(TestCancellation),
+            )
+            .unwrap(),
+        Some(GraphEntity::new(last, BTreeSet::new(), BTreeMap::new()).unwrap())
+    );
+    let relation = commit
+        .snapshot
+        .relation(
+            &GraphRelationRef::new(
+                identity,
+                GraphRelationId::new(graph_stable_identity("edge", "0")).unwrap(),
+            ),
+            Arc::new(TestCancellation),
+        )
+        .unwrap()
+        .expect("sealed relation must resolve through its binary key");
+    assert_eq!(
+        relation.to.identity.as_str(),
+        graph_stable_identity("symbol", "1")
+    );
+}
+
 // ---------------------------------------------------------------------------
 // At-rest measurement probe (ignored): sealed artifact open vs staging replay
 // ---------------------------------------------------------------------------

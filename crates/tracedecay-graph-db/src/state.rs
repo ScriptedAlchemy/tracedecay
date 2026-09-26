@@ -18,10 +18,10 @@ use crate::schema::{
     PUBLICATION_LABEL, RELATION_EDGE_PROPERTY, RELATION_FROM_PROPERTY, RELATION_ID_PROPERTY,
     RELATION_KEY_PROPERTY, RELATION_LABEL, RELATION_TO_PROPERTY, SEQUENCE_PROPERTY,
     SOURCE_GENERATION_PROPERTY, WATERMARK_PROPERTY, decode_entity, decode_relation,
-    encoded_namespace_key, entity_key_value, entity_projection_label, has_native_label,
+    entity_key_value, entity_projection_label, has_native_label, namespace_key_id,
     nodes_with_label, nodes_with_label_count, projection_state_key_value, publication_key_value,
     relation_edge_value, relation_key_value, relation_projection_label, required_i64,
-    required_string, stable_key_from_encoded,
+    required_string, stable_key,
 };
 use crate::{
     GraphCommit, GraphDbError, GraphEntity, GraphEntityId, GraphIdempotencyKey, GraphMutation,
@@ -55,9 +55,9 @@ pub(crate) struct StoredPublication {
 }
 
 pub(crate) struct ExistingBatchState {
-    pub(crate) entities: BTreeMap<String, StoredEntity>,
-    pub(crate) entity_locators: BTreeMap<String, EntityLocator>,
-    pub(crate) relations: BTreeMap<String, StoredRelation>,
+    pub(crate) entities: BTreeMap<Vec<u8>, StoredEntity>,
+    pub(crate) entity_locators: BTreeMap<Vec<u8>, EntityLocator>,
+    pub(crate) relations: BTreeMap<Vec<u8>, StoredRelation>,
 }
 
 impl ExistingBatchState {
@@ -65,7 +65,7 @@ impl ExistingBatchState {
         if batch.cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
-        let encoded_namespace = encoded_namespace_key(&batch.namespace);
+        let namespace_id = namespace_key_id(&batch.namespace);
         let physical_generation =
             crate::generation::is_physical_generation_namespace(&batch.namespace);
         let (entity_count, relation_count, relation_endpoint_count) =
@@ -100,26 +100,20 @@ impl ExistingBatchState {
         for mutation in &batch.mutations {
             match mutation {
                 GraphMutation::DeleteEntity(identity) => {
-                    entity_keys.insert(
-                        stable_key_from_encoded(&encoded_namespace, identity.as_str()),
-                        identity,
-                    );
+                    entity_keys.insert(stable_key(&namespace_id, identity.as_str()), identity);
                 }
                 GraphMutation::UpsertEntity(entity) => {
                     entity_keys.insert(
-                        stable_key_from_encoded(&encoded_namespace, entity.identity.as_str()),
+                        stable_key(&namespace_id, entity.identity.as_str()),
                         &entity.identity,
                     );
                 }
                 GraphMutation::DeleteRelation(identity) => {
-                    relation_keys.insert(
-                        stable_key_from_encoded(&encoded_namespace, identity.as_str()),
-                        identity,
-                    );
+                    relation_keys.insert(stable_key(&namespace_id, identity.as_str()), identity);
                 }
                 GraphMutation::UpsertRelation(relation) => {
                     relation_keys.insert(
-                        stable_key_from_encoded(&encoded_namespace, relation.identity.as_str()),
+                        stable_key(&namespace_id, relation.identity.as_str()),
                         &relation.identity,
                     );
                     let endpoint_keys = if physical_generation {
@@ -128,11 +122,11 @@ impl ExistingBatchState {
                         &mut entity_keys
                     };
                     endpoint_keys.insert(
-                        stable_key_from_encoded(&encoded_namespace, relation.from.as_str()),
+                        stable_key(&namespace_id, relation.from.as_str()),
                         &relation.from,
                     );
                     endpoint_keys.insert(
-                        stable_key_from_encoded(&encoded_namespace, relation.to.as_str()),
+                        stable_key(&namespace_id, relation.to.as_str()),
                         &relation.to,
                     );
                 }
@@ -364,10 +358,10 @@ pub(crate) fn load_entity(
 }
 
 fn load_requested<K, V>(
-    requested: HashMap<String, &K>,
+    requested: HashMap<Vec<u8>, &K>,
     batch: &GraphWriteBatch,
     mut load: impl FnMut(&K) -> Result<Option<V>, GraphDbError>,
-) -> Result<BTreeMap<String, V>, GraphDbError> {
+) -> Result<BTreeMap<Vec<u8>, V>, GraphDbError> {
     let mut loaded = BTreeMap::new();
     for (index, (key, identity)) in requested.into_iter().enumerate() {
         if index % 256 == 0 && batch.cancellation.is_cancelled() {
@@ -459,7 +453,14 @@ fn load_relation_by_key(
     else {
         return Ok(None);
     };
-    load_relation_by_locator_cached(database.graph_store().as_ref(), locator, cache).map(Some)
+    let (stored_namespace, relation) =
+        load_owned_relation_by_locator(database.graph_store().as_ref(), locator, cache)?;
+    if stored_namespace != *namespace || relation.relation.identity != *identity {
+        return Err(GraphDbError::Corrupt {
+            message: "relation native index does not match its scalar identity".to_owned(),
+        });
+    }
+    Ok(Some(relation))
 }
 
 /// Takes the graph store rather than the database handle so the recovered
@@ -469,6 +470,14 @@ pub(crate) fn load_relation_by_locator_cached(
     locator_id: NodeId,
     cache: &mut EndpointIdentityCache,
 ) -> Result<StoredRelation, GraphDbError> {
+    load_owned_relation_by_locator(store, locator_id, cache).map(|(_, relation)| relation)
+}
+
+fn load_owned_relation_by_locator(
+    store: &dyn GraphStore,
+    locator_id: NodeId,
+    cache: &mut EndpointIdentityCache,
+) -> Result<(GraphNamespace, StoredRelation), GraphDbError> {
     let locator = store
         .get_node(locator_id)
         .ok_or_else(|| GraphDbError::Corrupt {
@@ -512,14 +521,17 @@ pub(crate) fn load_relation_by_locator_cached(
             message: "relation scalar endpoints do not match native topology".to_owned(),
         });
     }
-    Ok(StoredRelation {
-        locator: locator_id,
-        edge: edge_id,
-        source: edge.src,
-        target: edge.dst,
-        projection,
-        relation,
-    })
+    Ok((
+        namespace,
+        StoredRelation {
+            locator: locator_id,
+            edge: edge_id,
+            source: edge.src,
+            target: edge.dst,
+            projection,
+            relation,
+        },
+    ))
 }
 
 pub(crate) struct RelationReference {
