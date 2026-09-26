@@ -30,6 +30,9 @@ use tracedecay_rusqlite_runtime::workflow::{
     WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1, WORKFLOW_SCHEMA_IDENTITY_V1, WORKFLOW_SCHEMA_VERSION_V1,
     WORKFLOW_TABLE_CONTRACTS_V1,
 };
+use tracedecay_sessions::runtime::git_correlation::{
+    GIT_CORRELATION_SCHEMA_VERSION, recorded_git_correlation_schema_version,
+};
 
 const REGISTRY_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS projects (
@@ -435,6 +438,7 @@ async fn classify_registered_schema_authorities(
     )
     .await?;
     let workflow_admission = inspect_workflow_schema_for_admission(connection).await?;
+    require_admissible_git_correlation_schema(connection).await?;
     configuration::admit_configuration_schema(connection, configuration_fresh.as_ref())
         .await
         .map_err(|error| match error {
@@ -462,6 +466,30 @@ async fn classify_registered_schema_authorities(
         temporal_admission,
         workflow_admission,
     })
+}
+
+/// Git evidence is stored as per-session rows since schema version 6. A store
+/// recorded at any other version holds a shape nothing converts, so it keeps
+/// its data untouched behind the typed reset.
+async fn require_admissible_git_correlation_schema(
+    connection: &impl QueryExecutor,
+) -> tracedecay_domain::errors::Result<()> {
+    let recorded = recorded_git_correlation_schema_version(connection)
+        .await
+        .map_err(|error| global_db_operation_error("inspect git correlation schema", error))?;
+    match recorded {
+        Some(found) if found != GIT_CORRELATION_SCHEMA_VERSION => {
+            Err(tracedecay_domain::errors::TraceDecayError::reset_required(
+                "git correlation",
+                format!(
+                    "the store records Git correlation schema version {found}; this build \
+                     stores Git evidence as per-session rows at version \
+                     {GIT_CORRELATION_SCHEMA_VERSION}"
+                ),
+            ))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Authority named by the typed reset an existing store receives when the

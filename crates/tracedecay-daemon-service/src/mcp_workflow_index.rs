@@ -93,6 +93,7 @@ impl DaemonWorkflowIndexReadService {
                 };
                 let session_ids = match SessionTemporalAccess::new(&*self.database)
                     .git_scope_session_ids_bounded(&filter, MAX_WORKFLOW_LIMIT + 1)
+                    .await
                 {
                     Ok(session_ids) => session_ids,
                     Err(GitCorrelationError::Unavailable(_)) => {

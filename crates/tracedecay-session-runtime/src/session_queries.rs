@@ -277,12 +277,6 @@ fn map_git_error(error: GitCorrelationError) -> RetainedSurfaceExecutionErrorV1 
             RetainedSurfaceExecutionErrorV1::InvalidRequest
         }
         GitCorrelationError::Corrupt(_) => RetainedSurfaceExecutionErrorV1::ProjectResetRequired,
-        GitCorrelationError::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled(
-            tracedecay_contracts::CancellationStage::DuringRead,
-        ),
-        GitCorrelationError::BudgetExhausted => RetainedSurfaceExecutionErrorV1::TimedOut(
-            tracedecay_contracts::CancellationStage::DuringRead,
-        ),
         error @ (GitCorrelationError::Db(_) | GitCorrelationError::Unavailable(_)) => {
             RetainedSurfaceExecutionErrorV1::unavailable(error.to_string())
         }

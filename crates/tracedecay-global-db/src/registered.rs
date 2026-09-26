@@ -4,7 +4,6 @@ use std::sync::{Arc, OnceLock, RwLock, Weak};
 
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::{
-    RuntimeOperationTaskOwnerV1,
     db::{
         Database, DatabaseAuthority, DatabaseEngineReadConnection, DatabaseEngineReadSnapshot,
         DatabaseOwnerErrorV1, DatabaseOwnerRetirementReservationV1, DatabaseOwnerV1,
@@ -42,7 +41,6 @@ pub struct RegisteredGlobalDbOwnerV1 {
     database: DatabaseOwnerV1,
     project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
     session_relation_graph: Arc<SessionRelationGraphStateV1>,
-    operation_task_owner: Arc<RuntimeOperationTaskOwnerV1>,
 }
 
 /// Cloneable, weak issuance route for one registered global-database owner.
@@ -55,7 +53,6 @@ pub struct RegisteredGlobalDbWeakLeaseIssuerV1 {
     database: DatabaseOwnerWeakLeaseIssuerV1,
     project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
     session_relation_graph: Weak<SessionRelationGraphStateV1>,
-    operation_task_owner: Arc<RuntimeOperationTaskOwnerV1>,
 }
 
 impl RegisteredGlobalDbOwnerV1 {
@@ -78,28 +75,12 @@ impl RegisteredGlobalDbOwnerV1 {
     /// tamper-invalidation triggers deleted the trusted audit checkpoint (or
     /// whose guard triggers were altered) fails the attach instead of opening
     /// on unaudited authority rows.
+    #[hotpath::measure(future = true, label = "global_db.registered.admit")]
     pub async fn admit_and_attach(
         database: DatabaseOwnerV1,
     ) -> tracedecay_domain::errors::Result<Self> {
-        Self::admit_and_attach_with_operation_task_owner(
-            database,
-            Arc::new(RuntimeOperationTaskOwnerV1::new()),
-        )
-        .await
-    }
-
-    /// Performs ordinary full schema attachment while retaining the supplied
-    /// operation-task owner for every issued registered facade.
-    #[hotpath::measure(future = true, label = "global_db.registered.admit")]
-    pub async fn admit_and_attach_with_operation_task_owner(
-        database: DatabaseOwnerV1,
-        operation_task_owner: Arc<RuntimeOperationTaskOwnerV1>,
-    ) -> tracedecay_domain::errors::Result<Self> {
         let temporary = database.issue_lease().map_err(registered_owner_error)?;
-        let registered = RegisteredGlobalDb::from_database_with_operation_task_owner(
-            temporary,
-            Arc::clone(&operation_task_owner),
-        );
+        let registered = RegisteredGlobalDb::from_owned_database(temporary);
         super::schema_stages::ensure_attached_registered_schema(&registered.database).await?;
         super::schema_stages::converge_attached_registered_schema(&registered.database).await?;
         drop(registered);
@@ -107,7 +88,6 @@ impl RegisteredGlobalDbOwnerV1 {
             database,
             project_graph: Arc::new(OnceLock::new()),
             session_relation_graph: Arc::new(RwLock::new(None)),
-            operation_task_owner,
         })
     }
 
@@ -116,14 +96,10 @@ impl RegisteredGlobalDbOwnerV1 {
     #[hotpath::measure(future = true, label = "global_db.registered.admit_daemon")]
     pub async fn admit_and_attach_for_daemon(
         database: DatabaseOwnerV1,
-        operation_task_owner: Arc<RuntimeOperationTaskOwnerV1>,
     ) -> tracedecay_domain::errors::Result<(Self, super::schema_stages::RegisteredSchemaConvergence)>
     {
         let temporary = database.issue_lease().map_err(registered_owner_error)?;
-        let registered = RegisteredGlobalDb::from_database_with_operation_task_owner(
-            temporary,
-            Arc::clone(&operation_task_owner),
-        );
+        let registered = RegisteredGlobalDb::from_owned_database(temporary);
         let convergence =
             super::schema_stages::ensure_attached_registered_schema(&registered.database).await?;
         drop(registered);
@@ -132,7 +108,6 @@ impl RegisteredGlobalDbOwnerV1 {
                 database,
                 project_graph: Arc::new(OnceLock::new()),
                 session_relation_graph: Arc::new(RwLock::new(None)),
-                operation_task_owner,
             },
             convergence,
         ))
@@ -147,7 +122,6 @@ impl RegisteredGlobalDbOwnerV1 {
                 self.database.issue_lease()?,
                 Arc::clone(&self.project_graph),
                 Arc::clone(&self.session_relation_graph),
-                Arc::clone(&self.operation_task_owner),
             ),
         ))
     }
@@ -159,7 +133,6 @@ impl RegisteredGlobalDbOwnerV1 {
                 self.database.issue_read_only_lease()?,
                 Arc::clone(&self.project_graph),
                 Arc::clone(&self.session_relation_graph),
-                Arc::clone(&self.operation_task_owner),
             ),
         ))
     }
@@ -172,7 +145,6 @@ impl RegisteredGlobalDbOwnerV1 {
             database: self.database.weak_lease_issuer(),
             project_graph: Arc::clone(&self.project_graph),
             session_relation_graph: Arc::downgrade(&self.session_relation_graph),
-            operation_task_owner: Arc::clone(&self.operation_task_owner),
         }
     }
 
@@ -221,7 +193,6 @@ impl RegisteredGlobalDbWeakLeaseIssuerV1 {
                 self.database.issue_lease()?,
                 Arc::clone(&self.project_graph),
                 session_relation_graph,
-                Arc::clone(&self.operation_task_owner),
             ),
         ))
     }
@@ -289,7 +260,6 @@ pub struct RegisteredGlobalDb {
     database: Database,
     project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
     session_relation_graph: Arc<SessionRelationGraphStateV1>,
-    operation_task_owner: Arc<RuntimeOperationTaskOwnerV1>,
 }
 
 impl RegisteredGlobalDb {
@@ -328,21 +298,14 @@ impl RegisteredGlobalDb {
 
     #[cfg(test)]
     fn from_database(database: Database) -> Self {
-        Self::from_database_with_operation_task_owner(
-            database,
-            Arc::new(RuntimeOperationTaskOwnerV1::new()),
-        )
+        Self::from_owned_database(database)
     }
 
-    fn from_database_with_operation_task_owner(
-        database: Database,
-        operation_task_owner: Arc<RuntimeOperationTaskOwnerV1>,
-    ) -> Self {
+    fn from_owned_database(database: Database) -> Self {
         Self::from_database_with_project_graph(
             database,
             Arc::new(OnceLock::new()),
             Arc::new(RwLock::new(None)),
-            operation_task_owner,
         )
     }
 
@@ -350,13 +313,11 @@ impl RegisteredGlobalDb {
         database: Database,
         project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
         session_relation_graph: Arc<SessionRelationGraphStateV1>,
-        operation_task_owner: Arc<RuntimeOperationTaskOwnerV1>,
     ) -> Self {
         Self {
             database,
             project_graph,
             session_relation_graph,
-            operation_task_owner,
         }
     }
 
@@ -437,10 +398,6 @@ impl RegisteredGlobalDb {
 
     pub fn project_graph_runtime(&self) -> Option<&VerifiedGraphRuntimeWeakProxyV1> {
         self.project_graph.get()
-    }
-
-    pub(crate) fn operation_task_owner(&self) -> Arc<RuntimeOperationTaskOwnerV1> {
-        Arc::clone(&self.operation_task_owner)
     }
 
     #[hotpath::measure(future = true, label = "global_db.registered.txn.snapshot")]
@@ -929,6 +886,9 @@ fn engine_error(error: TraceDecayError) -> tracedecay_runtime_core::db::engine::
     tracedecay_runtime_core::db::engine::Error::invalid_operation(error.to_string())
 }
 
+#[cfg(test)]
+#[path = "registered/git_correlation_schema_tests.rs"]
+mod git_correlation_schema_tests;
 #[cfg(test)]
 #[path = "registered/workflow_schema_tests.rs"]
 mod workflow_schema_tests;

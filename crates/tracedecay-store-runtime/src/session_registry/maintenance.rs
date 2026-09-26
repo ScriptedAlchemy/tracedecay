@@ -557,23 +557,15 @@ impl DaemonSessionRuntimeRegistryV1 {
             let database =
                 Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?;
             let long_lived = self.long_lived_session_maintenance;
-            // Every registry mode shares terminal graph-operation ownership; only
-            // long-lived daemons defer schema convergence to resumable maintenance.
+            // Only long-lived daemons defer schema convergence to resumable
+            // maintenance.
             let (database, convergence) = if long_lived {
                 let (database, convergence) =
-                    RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
-                        database,
-                        Arc::clone(&self.operation_task_owner),
-                    )
-                    .await?;
+                    RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(database).await?;
                 (database, Some(convergence))
             } else {
                 (
-                    RegisteredGlobalDbOwnerV1::admit_and_attach_with_operation_task_owner(
-                        database,
-                        Arc::clone(&self.operation_task_owner),
-                    )
-                    .await?,
+                    RegisteredGlobalDbOwnerV1::admit_and_attach(database).await?,
                     None,
                 )
             };

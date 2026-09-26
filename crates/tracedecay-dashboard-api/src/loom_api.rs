@@ -4,8 +4,7 @@
 //! `sessions`/`lcm_raw_messages` provide thread bounds and
 //! `sessions.metadata_json` provides provider-native edited-file rollups. Git
 //! correlation is read through [`DashboardGitCorrelationReadPortV1`], the
-//! daemon-owned typed read over the verified session-git-evidence graph
-//! projection; a state composed without that authority reports the git
+//! daemon-owned typed read over the session Git evidence rows; a state composed without that authority reports the git
 //! sources unavailable instead of inferring relationships from session rows.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -40,7 +39,7 @@ const MAX_LIMIT: i64 = 500;
 const GIT_CORRELATION_AUTHORITY: &str = "typed Git correlation graph read port";
 const GIT_CORRELATION_REASON: &str = "Git correlation is owned by the registered graph runtime; \
 the retained session snapshot cannot query or infer commit, branch, or worktree relationships";
-const GIT_CORRELATION_PROJECTION: &str = "verified session-git-evidence graph projection";
+const GIT_CORRELATION_PROJECTION: &str = "session Git evidence rows";
 
 /// Verified git-correlation evidence recovered for one dashboard read.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,7 +72,7 @@ pub type DashboardGitCorrelationReadFutureV1<'a> = Pin<
     >,
 >;
 
-/// Daemon-owned read over the verified session-git-evidence projection.
+/// Daemon-owned read over the session Git evidence rows.
 /// HTTP adapters receive complete typed rows for the requested sessions and
 /// never a graph store handle.
 pub trait DashboardGitCorrelationReadPortV1: Send + Sync {
@@ -787,8 +786,7 @@ fn resolve_git_sources(
                 .iter()
                 .map(|record| loom_commit(record))
                 .collect::<Result<Vec<_>, _>>()?;
-            let reason =
-                format!("recovered from the verified Git evidence generation {generation}");
+            let reason = format!("recovered from Git evidence generation {generation}");
             let span_providers = distinct_strings(page_spans.iter().map(|span| &span.provider));
             let commit_providers =
                 distinct_strings(page_commits.iter().map(|record| &record.provider));

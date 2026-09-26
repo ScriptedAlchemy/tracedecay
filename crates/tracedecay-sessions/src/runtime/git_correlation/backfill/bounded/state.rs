@@ -567,7 +567,7 @@ pub(super) async fn advance_publish<S: GitCorrelationSessionStore>(
     }
 
     let worktree = canonical_worktree_evidence(progress)?;
-    let mut graph_spans = Vec::new();
+    let mut evidence_spans = Vec::new();
     for span_pair in spans.chunks(2) {
         let first = span_pair
             .iter()
@@ -587,9 +587,9 @@ pub(super) async fn advance_publish<S: GitCorrelationSessionStore>(
             first,
             last,
         );
-        graph_spans.push(span);
+        evidence_spans.push(span);
     }
-    let graph_commits = commits
+    let evidence_commits = commits
         .iter()
         .map(|commit| CommitSessionRecord {
             commit_sha: commit.oid.clone(),
@@ -606,32 +606,28 @@ pub(super) async fn advance_publish<S: GitCorrelationSessionStore>(
             evidence_message_id: None,
         })
         .collect::<Vec<_>>();
-    let publication_prefix = format!(
-        "git-bounded:{}:{}",
-        progress.key.source_rowid, progress.generation
-    );
     control.check()?;
-    let (published_spans, published_commits) = publish_graph_evidence_controlled(
-        session_store,
-        &publication_prefix,
-        &graph_spans,
-        &graph_commits,
-        control.verified_graph_cancellation(),
-    )
-    .map_err(|error| match error {
-        GitCorrelationError::Cancelled => BoundedBackfillInterruption::Cancelled,
-        _ => BoundedBackfillInterruption::SourceUnavailable,
-    })?;
-    stats.spans_written = stats.spans_written.saturating_add(published_spans);
-    stats.commits_attributed = stats.commits_attributed.saturating_add(published_commits);
-    *committed = true;
-    control.check()?;
-
-    // Publication precedes receipt advancement deliberately. If the process
-    // stops here, the staged rows remain and the next pass republishes the
-    // same content-addressed generation before deleting them.
+    // The evidence rows and the receipt advancement commit together: an
+    // interrupted pass leaves both the staged rows and the evidence unwritten.
     let transaction = session_store
         .open_write_transaction()
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    control.check()?;
+    let mut writer = GitEvidenceWriter::open(&transaction)
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    let written = writer
+        .apply(GitEvidenceBatch {
+            spans: evidence_spans,
+            commits: evidence_commits,
+            merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+            ..GitEvidenceBatch::default()
+        })
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    writer
+        .finish()
         .await
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     control.check()?;
@@ -666,6 +662,11 @@ pub(super) async fn advance_publish<S: GitCorrelationSessionStore>(
     GitCorrelationWriteTxn::commit(transaction)
         .await
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    *committed = true;
+    stats.spans_written = stats.spans_written.saturating_add(written.spans_changed);
+    stats.commits_attributed = stats
+        .commits_attributed
+        .saturating_add(written.commits_changed);
     Ok(StreamGitEvidenceOutcome::Progressed)
 }
 

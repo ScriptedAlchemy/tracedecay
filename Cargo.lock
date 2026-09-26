@@ -6679,7 +6679,6 @@ dependencies = [
  "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-framing",
- "tracedecay-graph-db",
  "tracedecay-lcm",
  "tracedecay-privacy",
  "tracedecay-private-fs",

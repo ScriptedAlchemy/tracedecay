@@ -48,14 +48,12 @@ mod sql;
 pub mod store;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::Arc;
 
 use tracedecay_contracts::retrieval::{
     SessionRetrievalBudgetAccountingV1, SessionRetrievalBudgetObservationV1,
     SessionRetrievalBudgetStageV1,
 };
 use tracedecay_domain::{HydrationStateV1, RetrievalAnchorId, SessionId, SignedCursorKeyRefV1};
-use tracedecay_graph_db::{GraphNamespace, NeverCancelled};
 
 use self::execution::{
     AuthorizedTaskSessionExecutionRequestV1, AuthorizedTemporalExecutionRequest,
@@ -77,8 +75,7 @@ use tracedecay_query::retrieval::evidence_lanes::{
 };
 use tracedecay_runtime_core::db::engine::Error as EngineError;
 use tracedecay_sessions::runtime::git_correlation::{
-    GitCorrelationError, GitScopeFilter, git_evidence_projection_identity,
-    open_git_evidence_graph_view,
+    GitCorrelationError, GitScopeFilter, open_git_evidence_view,
 };
 use tracedecay_store::{SessionMessageRecord, SessionRecord};
 use tracedecay_temporal_query::context::VersionedTokenEstimator;
@@ -111,27 +108,29 @@ pub use refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
 pub use store::SessionTemporalStore;
 
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
-    /// Resolves a Git filter through the verified Git-evidence graph.
+    /// Resolves a Git filter through the store's Git evidence rows.
     ///
     /// `None` means the request is unscoped. A non-empty filter always returns
-    /// `Some`, including an authoritative empty set when the graph has no
-    /// matching sessions.
-    pub fn git_scope_session_ids(
+    /// `Some`, including an authoritative empty set when no recorded session
+    /// matches. A store that never recorded Git evidence answers typed
+    /// unavailable: it cannot prove that no durable session matches.
+    pub async fn git_scope_session_ids(
         &self,
         filter: &GitScopeFilter,
     ) -> Result<Option<Vec<(String, String)>>, GitCorrelationError> {
-        self.git_scope_session_ids_with_bound(filter, None)
+        self.git_scope_session_ids_with_bound(filter, None).await
     }
 
-    pub fn git_scope_session_ids_bounded(
+    pub async fn git_scope_session_ids_bounded(
         &self,
         filter: &GitScopeFilter,
         maximum: usize,
     ) -> Result<Option<Vec<(String, String)>>, GitCorrelationError> {
         self.git_scope_session_ids_with_bound(filter, Some(maximum))
+            .await
     }
 
-    fn git_scope_session_ids_with_bound(
+    async fn git_scope_session_ids_with_bound(
         &self,
         filter: &GitScopeFilter,
         maximum: Option<usize>,
@@ -139,26 +138,18 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         if filter.is_empty() {
             return Ok(None);
         }
-        let runtime = self.project_graph_runtime().ok_or_else(|| {
-            GitCorrelationError::Unavailable(
-                "registered project graph runtime is not mounted".to_owned(),
-            )
-        })?;
-        let identity = git_evidence_projection_identity(GraphNamespace::new("project")?)?;
-        // Absence is not an authoritative empty projection. Until Git
-        // evidence has been published, callers cannot prove that no durable
-        // session holds a matching worktree.
-        let Some(view) =
-            open_git_evidence_graph_view(runtime, &identity, Arc::new(NeverCancelled))?
-                .into_indexed()?
-        else {
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| GitCorrelationError::Db(error.to_string()))?;
+        let Some(view) = open_git_evidence_view(&snapshot).await? else {
             return Err(GitCorrelationError::Unavailable(
-                "verified Git-evidence projection has not been published".to_owned(),
+                "Git evidence has not been recorded for this project".to_owned(),
             ));
         };
         let session_ids = match maximum {
-            Some(maximum) => view.session_ids_for_scope_bounded(filter, maximum),
-            None => view.session_ids_for_scope(filter),
+            Some(maximum) => view.session_ids_for_scope_bounded(filter, maximum).await,
+            None => view.session_ids_for_scope(filter).await,
         }?
         .ok_or_else(|| {
             GitCorrelationError::Contract(

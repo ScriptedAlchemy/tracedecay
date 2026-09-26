@@ -98,6 +98,7 @@ impl RegisteredGlobalDb {
     pub async fn lcm_grep(&self, request: LcmGrepRequest) -> Result<LcmGrepOutcome, LcmError> {
         let git_scope_session_ids = SessionTemporalAccess::new(self)
             .git_scope_session_ids(&request.git_filter)
+            .await
             .map_err(|error| LcmError::Db(error.to_string()))?;
         SessionStoreAccess::new(self)
             .lcm_grep(request, git_scope_session_ids.as_deref())

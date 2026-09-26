@@ -22,7 +22,6 @@ use tracedecay_sessions::observation::{
 use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
 use tracedecay_sessions::runtime::git_correlation::{
     CommitRelationFilter, GitRefFilter, SessionsForQuery, normalize_worktree,
-    pending_git_evidence_publication_count,
 };
 
 fn run_git(project: &Path, args: &[&str]) -> String {
@@ -163,39 +162,15 @@ async fn canonical_codex_capture_publishes_admitted_git_evidence_for_sessions_fo
     assert!(sanitized.contains("capture-branch"));
     assert!(sanitized.contains(&commit_sha));
 
+    // The capture recorded the evidence rows in its own transaction; the
+    // projection drain that follows neither needs nor changes them.
     let store = GlobalDbGitCorrelationStore::new(database);
-    assert_eq!(
-        pending_git_evidence_publication_count(database)
-            .await
-            .unwrap(),
-        1
-    );
-    assert!(
-        store
-            .sessions_for_with_relation(
-                &SessionsForQuery {
-                    git_ref: GitRefFilter::Branch("capture-branch".to_owned()),
-                    since: None,
-                    until: None,
-                    limit: 10,
-                },
-                CommitRelationFilter::All,
-            )
-            .await
-            .unwrap()
-            .is_empty(),
-        "capture stages evidence without publishing the Git graph inline"
-    );
+    let captured = store.correlation_index_health().await.unwrap();
+    assert_eq!((captured.span_count, captured.commit_count), (1, 1));
     facade
         .drain_projection_queue("codex", &scope, &ObservationCancellation::default(), 1)
         .await
         .unwrap();
-    assert_eq!(
-        pending_git_evidence_publication_count(database)
-            .await
-            .unwrap(),
-        0
-    );
     let branch_hits = store
         .sessions_for_with_relation(
             &SessionsForQuery {

@@ -15,7 +15,6 @@ use std::path::Path;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_runtime_core::db::engine::{Error as EngineError, IntoParams, Rows};
-use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimeWeakProxyV1;
 
 use crate::relations::{SessionRelationGraphStore, SessionRelationScope};
 
@@ -86,8 +85,6 @@ pub trait SessionTemporalRegisteredDb: Sync {
     fn session_relation_store(
         &self,
     ) -> Result<(SessionRelationScope, SessionRelationGraphStore), TraceDecayError>;
-
-    fn project_graph_runtime(&self) -> Option<&VerifiedGraphRuntimeWeakProxyV1>;
 }
 
 /// Inherent-method host for former `impl RegisteredGlobalDb` temporal operations.

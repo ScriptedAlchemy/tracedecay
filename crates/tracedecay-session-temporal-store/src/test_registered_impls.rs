@@ -17,7 +17,6 @@ use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_runtime_core::db::engine::{
     Connection, Error as EngineError, Executor, IntoParams, QueryExecutor, Rows, TestConnection,
 };
-use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimeWeakProxyV1;
 use tracedecay_store::StoreShardScopeV1;
 
 use crate::handle::{
@@ -199,10 +198,6 @@ impl SessionTemporalRegisteredDb for RegisteredGlobalDb {
         };
         Ok((scope, SessionRelationGraphStore::new(lease)))
     }
-
-    fn project_graph_runtime(&self) -> Option<&VerifiedGraphRuntimeWeakProxyV1> {
-        RegisteredGlobalDb::project_graph_runtime(self)
-    }
 }
 
 impl SessionTemporalRegisteredDb for RegisteredGlobalDbLeaseV1 {
@@ -234,9 +229,5 @@ impl SessionTemporalRegisteredDb for RegisteredGlobalDbLeaseV1 {
         &self,
     ) -> Result<(SessionRelationScope, SessionRelationGraphStore), TraceDecayError> {
         <RegisteredGlobalDb as SessionTemporalRegisteredDb>::session_relation_store(self)
-    }
-
-    fn project_graph_runtime(&self) -> Option<&VerifiedGraphRuntimeWeakProxyV1> {
-        RegisteredGlobalDb::project_graph_runtime(self)
     }
 }

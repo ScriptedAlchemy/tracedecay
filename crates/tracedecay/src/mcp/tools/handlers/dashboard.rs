@@ -915,9 +915,9 @@ pub(super) async fn handle_dashboard(
                 .map(|adapter| {
                     Arc::new(adapter) as Arc<dyn tracedecay_dashboard_api::DashboardLcmReadPortV1>
                 });
-            // Loom's git sources read the verified session-git-evidence
-            // projection through the same registered store; a state composed
-            // without it reports those sources unavailable.
+            // Loom's git sources read the session Git evidence rows of the
+            // same registered store; a state composed without it reports
+            // those sources unavailable.
             let git_correlation_read_authority =
                 registered_project_session_db.as_ref().map(|database| {
                     Arc::new(
