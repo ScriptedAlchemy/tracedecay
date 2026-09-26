@@ -42,7 +42,7 @@ pub const DOCTOR_FINDINGS_ROUTE_PATH: &str = "/api/doctor/findings";
 pub struct DoctorFindingsQueryV1 {
     /// Optional per-family filter (`advisory`, `configuration`,
     /// `storage_runtime`, `storage`, `language_server`, `code_index`,
-    /// `observability`).
+    /// `observability`, `memory`).
     #[serde(default)]
     pub family: Option<String>,
 }

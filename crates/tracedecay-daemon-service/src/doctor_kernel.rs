@@ -24,6 +24,7 @@ use tracedecay_contracts::doctor::{
     LanguageServerAnalyzerV1, LanguageServerDoctorPort, LanguageServerReadV1,
     ObservabilityDoctorPort, ObservabilityReadV1, ObservabilityStateV1, OperationalAuditDoctorPort,
     OperationalAuditReadV1, ProfileAuthorityReadV1, RemoteOperationalReadV1,
+    ResidentMemoryDoctorPort, ResidentMemoryOwnerReadV1, ResidentMemoryReadV1,
     RuntimeHealthDoctorPort, RuntimeHealthReadV1, StorageDoctorPort,
     advisory_feedback_read_from_publication, merge_storage_reads, runtime_health_read,
     storage_family_read,
@@ -738,6 +739,55 @@ struct KernelDoctorSources<'a> {
     inputs: &'a DoctorKernelInputsV1,
 }
 
+/// The daemon's resident-memory inventory as the Doctor read: the same
+/// report `tracedecay_status` renders, so the two never disagree.
+fn resident_memory_read() -> ResidentMemoryReadV1 {
+    use tracedecay_runtime_core::resident_memory::{
+        ResidentMemoryPressureStateV1, process_resident_memory_pressure_v1,
+        process_resident_owners_v1,
+    };
+    let pressure = process_resident_memory_pressure_v1();
+    let (resident_bytes, over_budget) = match pressure.state() {
+        ResidentMemoryPressureStateV1::Unobserved => (None, false),
+        ResidentMemoryPressureStateV1::Nominal { observed_bytes, .. } => {
+            (Some(observed_bytes), false)
+        }
+        ResidentMemoryPressureStateV1::OverBudget { observed_bytes, .. } => {
+            (Some(observed_bytes), true)
+        }
+    };
+    let report = process_resident_owners_v1().report(std::time::Instant::now());
+    ResidentMemoryReadV1::Observed {
+        resident_bytes,
+        limit_bytes: pressure.limit_bytes(),
+        high_watermark_bytes: pressure.high_watermark_bytes(),
+        over_budget,
+        retained_bytes: report.measured_bytes,
+        owners: report
+            .owners
+            .into_iter()
+            .map(|row| ResidentMemoryOwnerReadV1 {
+                kind: row.kind.as_str().to_owned(),
+                project_id: row.scope.project_id.as_str().to_owned(),
+                worktree_id: row.scope.worktree_id.as_str().to_owned(),
+                generation_id: row.generation_id.as_str().to_owned(),
+                bytes: row.bytes.measured(),
+                idle_seconds: row.idle_for.as_secs(),
+                protected: row.protected,
+            })
+            .collect(),
+    }
+}
+
+impl ResidentMemoryDoctorPort for KernelDoctorSources<'_> {
+    fn resident_memory<'b>(
+        &'b self,
+        _context: &'b RequestContext,
+    ) -> DoctorSourceFuture<'b, ResidentMemoryReadV1> {
+        Box::pin(async move { resident_memory_read() })
+    }
+}
+
 impl ConfigurationAuthorityDoctorPort for KernelDoctorSources<'_> {
     fn configuration_health<'b>(
         &'b self,
@@ -859,6 +909,7 @@ pub async fn compose_doctor_report(
         .with_code_index(&sources)
         .with_observability(&sources)
         .with_storage(&sources)
+        .with_memory(&sources)
         .compose(context)
         .await
 }

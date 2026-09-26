@@ -436,7 +436,7 @@ async fn composed_report_carries_real_states_and_enumerates_coverage() {
 
     let report = compose_doctor_report(&ctx, &inputs).await.expect("report");
 
-    assert_eq!(report.coverage().families().len(), 7);
+    assert_eq!(report.coverage().families().len(), 8);
 
     let family_state = |family: DoctorFindingFamilyV1| {
         report
@@ -472,6 +472,11 @@ async fn composed_report_carries_real_states_and_enumerates_coverage() {
         family_state(DoctorFindingFamilyV1::Observability),
         Some(DoctorEvidenceStateV1::Partial)
     );
+    assert_eq!(
+        family_state(DoctorFindingFamilyV1::Memory),
+        Some(DoctorEvidenceStateV1::HealthyCompleteCoverage),
+        "an unsampled daemon with no over-budget verdict reports memory healthy"
+    );
 
     assert!(!report.is_healthy_complete());
     assert_ne!(
@@ -493,6 +498,10 @@ async fn composed_report_carries_real_states_and_enumerates_coverage() {
     );
     assert_eq!(
         consultation(DoctorFindingFamilyV1::Observability),
+        Some(DoctorFamilyConsultationV1::Consulted)
+    );
+    assert_eq!(
+        consultation(DoctorFindingFamilyV1::Memory),
         Some(DoctorFamilyConsultationV1::Consulted)
     );
     assert_eq!(

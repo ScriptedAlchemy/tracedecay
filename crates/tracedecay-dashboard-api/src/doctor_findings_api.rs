@@ -315,8 +315,8 @@ mod tests {
         HostIntegrationDoctorPort, HostIntegrationReadV1, IngestRefusalCensusReadV1,
         LanguageServerDoctorPort, LanguageServerReadV1, ObservabilityDoctorPort,
         ObservabilityReadV1, OperationalAuditDoctorPort, OperationalAuditReadV1,
-        ProfileAuthorityReadV1, RemoteOperationalReadV1, RuntimeHealthDoctorPort,
-        RuntimeHealthReadV1, StorageDoctorPort,
+        ProfileAuthorityReadV1, RemoteOperationalReadV1, ResidentMemoryDoctorPort,
+        ResidentMemoryReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1, StorageDoctorPort,
     };
     use tracedecay_contracts::storage::{
         SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStageV1,
@@ -428,6 +428,15 @@ mod tests {
         }
     }
 
+    impl ResidentMemoryDoctorPort for DoctorTestSourcesV1 {
+        fn resident_memory<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+        ) -> DoctorSourceFuture<'a, ResidentMemoryReadV1> {
+            Box::pin(async { ResidentMemoryReadV1::Unobserved })
+        }
+    }
+
     impl StorageDoctorPort for DoctorTestSourcesV1 {
         fn storage_findings<'a>(
             &'a self,
@@ -490,6 +499,7 @@ mod tests {
             .with_code_index(inputs)
             .with_observability(inputs)
             .with_storage(inputs)
+            .with_memory(inputs)
             .compose(&context)
             .await
             .expect("canonical Doctor report")

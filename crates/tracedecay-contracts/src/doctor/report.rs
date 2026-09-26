@@ -22,10 +22,11 @@ use super::sources::{
     DoctorStorageFamilyReadV1, DoctorStorageIncompleteReasonV1, HostIntegrationDoctorPort,
     HostIntegrationReadV1, LanguageServerDoctorPort, LanguageServerReadV1, ObservabilityDoctorPort,
     ObservabilityReadV1, OperationalAuditDoctorPort, ProfileAuthorityReadV1,
-    RemoteOperationalReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1, StorageDoctorPort,
-    advisory_feedback_findings, code_index_finding, configuration_finding,
-    host_integration_finding, ingest_refusal_finding, language_server_finding,
-    observability_finding, operational_audit_findings, runtime_health_finding,
+    RemoteOperationalReadV1, ResidentMemoryDoctorPort, ResidentMemoryReadV1,
+    RuntimeHealthDoctorPort, RuntimeHealthReadV1, StorageDoctorPort, advisory_feedback_findings,
+    code_index_finding, configuration_finding, host_integration_finding, ingest_refusal_finding,
+    language_server_finding, observability_finding, operational_audit_findings,
+    resident_memory_findings, runtime_health_finding,
 };
 use super::types::{
     DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,
@@ -36,7 +37,7 @@ use super::types::{
 /// Every finding family the Doctor report is contracted to consult, in a stable
 /// order. A family absent from a composed report would be a silent omission; the
 /// composer always emits an entry and a coverage record for each of these.
-pub const DOCTOR_FINDING_FAMILIES: [DoctorFindingFamilyV1; 7] = [
+pub const DOCTOR_FINDING_FAMILIES: [DoctorFindingFamilyV1; 8] = [
     DoctorFindingFamilyV1::Advisory,
     DoctorFindingFamilyV1::Configuration,
     DoctorFindingFamilyV1::StorageRuntime,
@@ -44,6 +45,7 @@ pub const DOCTOR_FINDING_FAMILIES: [DoctorFindingFamilyV1; 7] = [
     DoctorFindingFamilyV1::LanguageServer,
     DoctorFindingFamilyV1::CodeIndex,
     DoctorFindingFamilyV1::Observability,
+    DoctorFindingFamilyV1::Memory,
 ];
 
 /// The stable snake_case slug for a finding family, matching its serde encoding.
@@ -56,6 +58,7 @@ pub const fn doctor_finding_family_label(family: DoctorFindingFamilyV1) -> &'sta
         DoctorFindingFamilyV1::LanguageServer => "language_server",
         DoctorFindingFamilyV1::CodeIndex => "code_index",
         DoctorFindingFamilyV1::Observability => "observability",
+        DoctorFindingFamilyV1::Memory => "memory",
     }
 }
 
@@ -417,6 +420,7 @@ pub struct DoctorReportComposerV1<'a> {
     code_index: Option<&'a dyn CodeIndexMountDoctorPort>,
     observability: Option<&'a dyn ObservabilityDoctorPort>,
     storage: Option<&'a dyn StorageDoctorPort>,
+    memory: Option<&'a dyn ResidentMemoryDoctorPort>,
 }
 
 impl<'a> DoctorReportComposerV1<'a> {
@@ -490,6 +494,13 @@ impl<'a> DoctorReportComposerV1<'a> {
         self
     }
 
+    /// Wire the resident-memory inventory (Memory family).
+    #[must_use]
+    pub fn with_memory(mut self, port: &'a dyn ResidentMemoryDoctorPort) -> Self {
+        self.memory = Some(port);
+        self
+    }
+
     /// Gather findings across every family and assemble the report.
     #[hotpath::measure(label = "application.doctor.compose", future = true)]
     pub async fn compose(
@@ -510,6 +521,7 @@ impl<'a> DoctorReportComposerV1<'a> {
                 }
                 DoctorFindingFamilyV1::CodeIndex => self.compose_code_index(context).await?,
                 DoctorFindingFamilyV1::Observability => self.compose_observability(context).await?,
+                DoctorFindingFamilyV1::Memory => self.compose_memory(context).await?,
             };
             entries.extend(family_entries);
             coverage.push(DoctorFamilyCoverageV1 {
@@ -757,6 +769,29 @@ impl<'a> DoctorReportComposerV1<'a> {
             ],
             consultation,
         ))
+    }
+
+    #[hotpath::skip]
+    async fn compose_memory(
+        &self,
+        context: &RequestContext,
+    ) -> Result<(Vec<DoctorReportEntryV1>, DoctorFamilyConsultationV1), ApplicationContractError>
+    {
+        let Some(port) = self.memory else {
+            return unwired_family(DoctorFindingFamilyV1::Memory);
+        };
+        let read = port.resident_memory(context).await;
+        let consultation = match read {
+            ResidentMemoryReadV1::Observed { .. } => DoctorFamilyConsultationV1::Consulted,
+            ResidentMemoryReadV1::Unobserved => {
+                unavailable(DoctorFamilyUnavailableReasonV1::Unknown)
+            }
+        };
+        let entries = resident_memory_findings(&read)?
+            .into_iter()
+            .map(|finding| DoctorReportEntryV1::new(finding, None))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((entries, consultation))
     }
 
     #[hotpath::skip]

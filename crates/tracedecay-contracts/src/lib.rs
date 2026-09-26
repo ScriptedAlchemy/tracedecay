@@ -165,11 +165,13 @@ pub use doctor::{
     LanguageServerDoctorPort, LanguageServerReadV1, LanguageServerStateV1, ObservabilityDoctorPort,
     ObservabilityReadV1, ObservabilityStateV1, OperationalAuditDoctorPort, OperationalAuditReadV1,
     ProfileAuthorityReadV1, RemoteAuthorityReadV1, RemoteListenerReadV1, RemoteOperationalReadV1,
+    ResidentMemoryDoctorPort, ResidentMemoryOwnerReadV1, ResidentMemoryReadV1,
     RuntimeHealthDoctorPort, RuntimeHealthReadV1, RuntimeLivenessV1, StorageDoctorPort,
     advisory_feedback_findings, advisory_feedback_read_from_publication, code_index_finding,
     configuration_finding, doctor_finding_family_label, host_integration_finding,
     ingest_refusal_finding, language_server_finding, merge_storage_reads, observability_finding,
-    operational_audit_findings, runtime_health_finding, runtime_health_read, storage_family_read,
+    operational_audit_findings, resident_memory_findings, runtime_health_finding,
+    runtime_health_read, storage_family_read,
 };
 pub use error::ApplicationContractError;
 pub use execution_topology_metrics::{
