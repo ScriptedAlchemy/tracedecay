@@ -161,7 +161,7 @@ impl TestProfile {
     }
 
     async fn enroll_inner(&self, project_root: &Path) -> RegisteredProject {
-        let project_root = canonical_existing_identity(&project_root).unwrap_or_else(|err| {
+        let project_root = canonical_existing_identity(project_root).unwrap_or_else(|err| {
             panic!(
                 "fixture project root '{}' must exist to be enrolled: {err}",
                 project_root.display()
@@ -701,7 +701,7 @@ impl GitFixture {
     }
 
     fn assert_collapses_onto_primary(&self, path: &Path) -> PathBuf {
-        let path = canonical_existing_identity(&path).unwrap_or_else(|err| {
+        let path = canonical_existing_identity(path).unwrap_or_else(|err| {
             panic!(
                 "failed to canonicalize fixture worktree '{}': {err}",
                 path.display()

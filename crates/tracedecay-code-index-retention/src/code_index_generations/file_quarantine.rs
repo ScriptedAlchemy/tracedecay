@@ -412,8 +412,7 @@ mod tests {
         let fixture = fixture(&[("payload", b"owned")]);
         let moved = fixture.source_path.with_file_name("source-moved");
         let rebind = std::fs::rename(&fixture.source_path, &moved);
-        // A held Windows directory capability is opened without
-        // `FILE_SHARE_DELETE`, so the platform refuses the rebind itself.
+        // Held without `FILE_SHARE_DELETE`. Windows returns sharing violation 32.
         #[cfg(windows)]
         assert_eq!(
             rebind

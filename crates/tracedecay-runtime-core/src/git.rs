@@ -146,7 +146,6 @@ fn resolve_git_program_from(
     .ok_or(GitProgramUnavailable)
 }
 
-/// [`find_in_path`] against the process `PATH` (and `PATHEXT` on Windows).
 pub(crate) fn find_executable_on_path(name: &str) -> Option<PathBuf> {
     find_in_path(
         name,
@@ -159,8 +158,9 @@ pub(crate) fn find_executable_on_path(name: &str) -> Option<PathBuf> {
 /// Minimal `which`-style lookup: find `name` as an executable on `PATH`.
 ///
 /// On Windows, each `PATH` entry is probed with every `PATHEXT` suffix (and the
-/// bare name when it already has an extension) so `git.exe` resolves from `git`. On Unix, the bare name is probed
-/// and the entry must carry at least one execute bit.
+/// bare name when it already has an extension) so `git.exe` resolves from `git`.
+/// On Unix, the bare name is probed and the entry must carry at least one
+/// execute bit.
 fn find_in_path(
     name: &str,
     path: &OsStr,
@@ -195,10 +195,8 @@ fn probe_dir(dir: &Path, name: &str, pathext: Option<&OsStr>) -> Option<PathBuf>
         .and_then(OsStr::to_str)
         .unwrap_or(".COM;.EXE;.BAT;.CMD");
 
-    // `CreateProcess` cannot launch an extensionless file, and package
-    // managers install exactly such shell shims beside the runnable `.cmd`
-    // (npm's global bin directory), so the bare name is a candidate only when
-    // it already carries an extension.
+    // `CreateProcess` cannot launch an extensionless file. npm's global bin
+    // directory leaves that shim beside the runnable `.cmd`.
     let bare = dir.join(name);
     if bare.extension().is_some() && is_executable_file(&bare) {
         return Some(bare);

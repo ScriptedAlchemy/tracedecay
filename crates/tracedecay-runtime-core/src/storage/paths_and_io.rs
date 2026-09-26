@@ -994,9 +994,8 @@ pub fn set_private_dir_permissions(path: &Path) -> std::io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
 }
 
-/// A directory created under an ordinary parent inherits that parent's ACEs,
-/// and the private-directory readers refuse exactly that shape, so this must
-/// install the protected current-user DACL rather than no-op.
+/// A new directory inherits its parent's ACEs, which private-directory
+/// readers reject.
 #[cfg(windows)]
 pub fn set_private_dir_permissions(path: &Path) -> std::io::Result<()> {
     tracedecay_private_fs::make_private_directory(path)
