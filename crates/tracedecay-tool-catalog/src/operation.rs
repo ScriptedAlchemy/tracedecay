@@ -192,6 +192,12 @@ application_surface_operations! {
     UnsafePatterns => "unsafe_patterns";
     Constructors => "constructors";
     FieldSites => "field_sites";
+    FindExactSymbol => "find_exact_symbol";
+    ByQualifiedName => "by_qualified_name";
+    Signature => "signature";
+    Derives => "derives";
+    Grep => "grep";
+    AstGrepSearch => "ast_grep_search";
     HealthRead => "health_read";
     HealthDelta => "health_delta";
     StorageStatus => "storage_status";
@@ -294,6 +300,12 @@ impl ApplicationSurfaceOperation {
         Self::UnsafePatterns,
         Self::Constructors,
         Self::FieldSites,
+        Self::FindExactSymbol,
+        Self::ByQualifiedName,
+        Self::Signature,
+        Self::Derives,
+        Self::Grep,
+        Self::AstGrepSearch,
     ];
 
     pub fn is_graph_tool(self) -> bool {

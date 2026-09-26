@@ -4,6 +4,7 @@ mod callable_code_catalog;
 mod callable_code_service;
 pub mod catalog;
 mod git_topology_anchor;
+mod graph_lookup_surface;
 mod graph_report_surface;
 pub mod grep_analysis;
 mod ports;
@@ -105,6 +106,14 @@ pub use git_topology_anchor::{
     GitTopologyAnchorAuthority, GitTopologyAnchorAuthorityError, GitTopologyAnchorFuture,
     GitTopologyAnchorPublication, GitTopologyAnchorPublicationOutcome, GitTopologyAnchorResolution,
     GitTopologyAnchorResolutionOutcome, MAX_GIT_TOPOLOGY_ANCHORS_PER_PUBLICATION,
+};
+pub use graph_lookup_surface::{
+    AstGrepSearchMatchV1, AstGrepSearchResultV1, AstGrepSearchSurfaceRequestV1,
+    ByQualifiedNameResultV1, ByQualifiedNameSurfaceRequestV1, DeriveAnnotationV1,
+    DeriveEvidenceClassV1, DerivesResultV1, DerivesSymbolV1, FindExactSymbolMatchV1,
+    FindExactSymbolResultV1, FindExactSymbolSurfaceRequestV1, GrepGraphEnrichmentV1, GrepMatchV1,
+    GrepScanOmissionsV1, GrepSearchResultV1, GrepSurfaceRequestV1, SignatureResultV1,
+    SymbolSelectorSurfaceRequestV1, SymbolSignatureV1,
 };
 pub use graph_report_surface::{
     DependencyDepthSurfaceRequestV1, DiagnoseItemV1, DiagnosePublicationV1, DiagnoseResultV1,

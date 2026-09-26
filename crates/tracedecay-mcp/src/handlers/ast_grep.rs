@@ -7,14 +7,18 @@
 
 use std::path::Path;
 
-use serde_json::{Value, json};
-use tracedecay_code_index::ast_grep_search::{
-    AstGrepSearchMatch, AstGrepSearchResult, search_tree_scoped_with_cancel,
+use serde_json::Value;
+use tracedecay_code_index::ast_grep_search::{AstGrepSearchResult, search_tree_scoped_with_cancel};
+use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
+use tracedecay_contracts::retrieval::{
+    AstGrepSearchMatchV1, AstGrepSearchResultV1, AstGrepSearchSurfaceRequestV1,
 };
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::Result;
 
 use crate::ToolResult;
+use crate::handlers::graph::graph_tool_completion;
 use crate::handlers::run_bounded_search;
+use crate::handlers::support::{decode_primitive_request, text_tool_result};
 use crate::tools::render::{self, Md};
 use crate::unique_file_paths;
 
@@ -24,45 +28,29 @@ const MAX_RESULTS_CAP: usize = 200;
 const DEFAULT_MAX_RESULTS: usize = 50;
 
 #[hotpath::measure(future = true, label = "mcp.search.ast_grep.total")]
-pub async fn handle_ast_grep_search(
+pub async fn compute_ast_grep_search(
     project_root: &Path,
-    response_handle_root: &Path,
     args: Value,
     scope_prefix: Option<&str>,
     deadline: Option<tracedecay_contracts::Deadline>,
     cancellation: Option<tracedecay_contracts::CancellationSignal>,
-) -> Result<ToolResult> {
-    let pattern =
-        args.get("pattern")
-            .and_then(Value::as_str)
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "missing required parameter: pattern".to_string(),
-            })?;
-    let lang = args
-        .get("lang")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let path_glob = args
-        .get("path_glob")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let max_results = args
-        .get("max_results")
-        .and_then(Value::as_u64)
+) -> Result<GraphToolCompletionV1> {
+    let request: AstGrepSearchSurfaceRequestV1 =
+        decode_primitive_request(&args, "tracedecay_ast_grep_search")?;
+    let lang = non_blank(request.lang);
+    let path_glob = non_blank(request.path_glob);
+    let max_results = request
+        .max_results
         .map_or(DEFAULT_MAX_RESULTS, |v| (v as usize).min(MAX_RESULTS_CAP))
         .max(1);
 
     let project_root_buf = project_root.to_path_buf();
-    let query = pattern.to_owned();
-    let lang = lang.map(str::to_owned);
-    let path_glob = path_glob.map(str::to_owned);
+    let query = request.pattern.clone();
     let scope_prefix = scope_prefix.map(str::to_owned);
     let search: AstGrepSearchResult = hotpath::future!(
         run_bounded_search(
             "tracedecay_ast_grep_search",
-            pattern.to_owned(),
+            request.pattern,
             deadline,
             cancellation,
             move |cancelled, transport_cancellation| {
@@ -86,61 +74,69 @@ pub async fn handle_ast_grep_search(
     )
     .await?;
 
-    let hits = search.matches;
-
-    let touched_files = unique_file_paths(hits.iter().map(|hit| hit.file.as_ref()));
-    let output_value = build_output_value(&hits, search.truncated, search.files_scanned);
-
-    let text = render::finalize(Some(response_handle_root), &args, &output_value, || {
-        render_md(&hits, search.truncated, search.files_scanned)
-    });
-    Ok(ToolResult::new(
-        json!({ "content": [{ "type": "text", "text": text }] }),
+    let touched_files = unique_file_paths(search.matches.iter().map(|hit| hit.file.as_ref()));
+    let results = search
+        .matches
+        .into_iter()
+        .map(|hit| AstGrepSearchMatchV1 {
+            file: hit.file.to_string(),
+            line: hit.line,
+            column: hit.column,
+            lang: hit.lang,
+            matched_text: hit.matched_text,
+            line_text: hit.line_text,
+        })
+        .collect::<Vec<_>>();
+    Ok(graph_tool_completion(
+        GraphToolResultV1::AstGrepSearch(AstGrepSearchResultV1 {
+            match_count: results.len() as u64,
+            results,
+            files_scanned: search.files_scanned as u64,
+            truncated: search.truncated,
+        }),
         touched_files,
     ))
 }
 
-fn build_output_value(hits: &[AstGrepSearchMatch], truncated: bool, files_scanned: usize) -> Value {
-    let items: Vec<Value> = hits
-        .iter()
-        .map(|hit| {
-            json!({
-                "file": hit.file.as_ref(),
-                "line": hit.line,
-                "column": hit.column,
-                "lang": hit.lang,
-                "match": hit.matched_text,
-                "line_text": hit.line_text,
-            })
-        })
-        .collect();
-
-    json!({
-        "results": items,
-        "match_count": hits.len(),
-        "files_scanned": files_scanned,
-        "truncated": truncated,
-    })
+fn non_blank(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
-fn render_md(hits: &[AstGrepSearchMatch], truncated: bool, files_scanned: usize) -> String {
+/// Renders a structural-search result as its tool text.
+pub fn render_ast_grep_search(
+    response_handle_root: Option<&Path>,
+    args: &Value,
+    result: &AstGrepSearchResultV1,
+) -> Result<ToolResult> {
+    let value = serde_json::to_value(result)?;
+    let text = render::finalize(response_handle_root, args, &value, || render_md(result));
+    Ok(text_tool_result(&text, Vec::new()))
+}
+
+fn render_md(result: &AstGrepSearchResultV1) -> String {
+    let files_scanned = result.files_scanned;
     let mut md = Md::new();
     md.heading(2, "Structural Search Results");
-    if hits.is_empty() {
+    if result.results.is_empty() {
         md.empty_note("No structural matches.");
         md.line(&format!("_Scanned {files_scanned} files._"));
         return md.render();
     }
 
-    for hit in hits {
+    for hit in &result.results {
         let location = format!("{}:{}", hit.file, hit.line);
         md.bullet(&location);
         md.line(&format!("  > {}", hit.matched_text));
     }
 
     md.blank();
-    let mut summary = format!("_{} matches across {files_scanned} files._", hits.len());
-    if truncated {
+    let mut summary = format!(
+        "_{} matches across {files_scanned} files._",
+        result.results.len()
+    );
+    if result.truncated {
         summary.push_str(" Results capped. Narrow with `path_glob` or `max_results`.");
     }
     md.line(&summary);
@@ -167,10 +163,9 @@ mod tests {
         std::fs::write(temp.path().join("lib.rs"), "fn f() { target(1); }\n")
             .expect("write fixture");
 
-        let result = handle_ast_grep_search(
+        let result = compute_ast_grep_search(
             temp.path(),
-            &temp.path().join("response-handles"),
-            json!({"pattern": "target($A)", "lang": "rust", "max_results": 10}),
+            serde_json::json!({"pattern": "target($A)", "lang": "rust", "max_results": 10}),
             None,
             None,
             None,

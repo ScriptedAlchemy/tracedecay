@@ -86,13 +86,6 @@ fn tool_text(response: &Value) -> &str {
         .unwrap_or_else(|| panic!("tools/call returned no text: {response}"))
 }
 
-fn assert_invalid_params(response: &Value, message: &str, data: Value) {
-    assert_eq!(response.get("result"), None);
-    assert_eq!(response["error"]["code"], -32602);
-    assert_eq!(response["error"]["message"], message);
-    assert_eq!(response["error"]["data"], data);
-}
-
 fn assert_config_error(response: &Value, detail: &str) {
     assert_eq!(response.get("result"), None);
     assert_eq!(response["error"]["code"], -32603);
@@ -406,15 +399,9 @@ _1 matches across 1 files._ Results capped. Narrow with `path_glob` or `max_resu
     );
 
     let missing = call_ast_grep(&fixture, json!({})).await;
-    assert_invalid_params(
+    assert_config_error(
         &missing,
-        "missing required parameter: pattern",
-        json!({
-            "tool": "tracedecay_ast_grep_search",
-            "reason_code": "missing_required_parameter",
-            "retryable": false,
-            "detail": "missing required parameter: pattern"
-        }),
+        "invalid arguments for tracedecay_ast_grep_search: missing field `pattern`",
     );
 
     let blank = call_ast_grep(&fixture, json!({"pattern": "   "})).await;

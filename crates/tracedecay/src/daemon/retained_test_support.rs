@@ -190,7 +190,19 @@ pub(crate) async fn register_project_retained_owner_for_test(
         access.configuration_digest.clone(),
     );
     DaemonRetainedRuntimeRegistrar::new(service)
-        .register(project_root, scope, access.requester, grant, ports)
+        .register(
+            project_root.clone(),
+            scope.clone(),
+            access.requester,
+            grant,
+            ports,
+        )
+        .await?;
+    // Project open registers the graph-tool owner beside the retained owner,
+    // under the checkout the route admitted.
+    let admitted = server.admitted_project_scope().unwrap_or(scope);
+    server
+        .register_graph_tool_owner_on(service, &project_root, admitted)
         .await
 }
 

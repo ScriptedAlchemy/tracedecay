@@ -331,7 +331,9 @@ impl EvidenceCoverage {
 }
 
 /// Safe reason why authorized requested evidence was omitted.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum OmissionReason {
     Budget,
@@ -345,7 +347,7 @@ pub enum OmissionReason {
     Conflict,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Omission {
     pub domain: EvidenceDomain,

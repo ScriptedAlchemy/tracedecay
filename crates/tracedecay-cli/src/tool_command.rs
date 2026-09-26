@@ -711,6 +711,19 @@ async fn dispatch_cli_graph_tool(
     deadline: Instant,
 ) -> Result<()> {
     let tool_name = operation.mcp_tool_name();
+    // The graph-tool owner answers for the handshake's project; a selector
+    // naming another registered project would otherwise be dropped with the
+    // transport keys and answered from the wrong project.
+    if tool_args
+        .get("project_selector")
+        .is_some_and(|selector| !selector.is_null())
+    {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "`tracedecay tool` answers {tool_name} for the project named by --project; pass --project <registered project path> instead of project_selector"
+            ),
+        });
+    }
     let request_id =
         mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
             message: "could not allocate an application surface request id".to_owned(),
@@ -1196,12 +1209,8 @@ fn group_for(def: &ToolDefinition) -> &'static str {
     } else if n == "tracedecay_call_chain"
         || n == "tracedecay_impact"
         || n == "tracedecay_file_dependents"
-        || n == "tracedecay_by_qualified_name"
-        || n == "tracedecay_signature"
-        || n == "tracedecay_derives"
         || n == "tracedecay_similar"
         || n == "tracedecay_rename_preview"
-        || n == "tracedecay_find_exact_symbol"
     {
         "graph"
     } else if n == "tracedecay_run_affected_tests" {

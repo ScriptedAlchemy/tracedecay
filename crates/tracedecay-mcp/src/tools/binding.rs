@@ -274,6 +274,12 @@ fn application_surface_branch_sensitivity(
         | ApplicationSurfaceOperation::UnsafePatterns
         | ApplicationSurfaceOperation::Constructors
         | ApplicationSurfaceOperation::FieldSites
+        | ApplicationSurfaceOperation::FindExactSymbol
+        | ApplicationSurfaceOperation::ByQualifiedName
+        | ApplicationSurfaceOperation::Signature
+        | ApplicationSurfaceOperation::Derives
+        | ApplicationSurfaceOperation::Grep
+        | ApplicationSurfaceOperation::AstGrepSearch
         | HealthRead
         | HealthDelta
         | DiagnosticsRead
@@ -324,11 +330,8 @@ macro_rules! binding_groups {
 #[rustfmt::skip]
 const BINDING_GROUPS: &[BindingGroup] = binding_groups![
     [Some(McpToolDispatchGroup::Graph), RegisteredProjectAccess::ActiveProjectOnly,
-        "tracedecay_search", "tracedecay_grep", "tracedecay_ast_grep_search", "tracedecay_retrieve",
-        "tracedecay_context", "tracedecay_impact",
-        "tracedecay_node", "tracedecay_similar", "tracedecay_redundancy", "tracedecay_rename_preview",
-        "tracedecay_find_exact_symbol",
-        "tracedecay_by_qualified_name", "tracedecay_signature", "tracedecay_derives"],
+        "tracedecay_search", "tracedecay_retrieve", "tracedecay_context", "tracedecay_impact",
+        "tracedecay_node", "tracedecay_similar", "tracedecay_redundancy", "tracedecay_rename_preview"],
     [Some(McpToolDispatchGroup::Info), RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_status", "tracedecay_remote_status", "tracedecay_active_project",
         "tracedecay_project_list", "tracedecay_project_search"],
@@ -755,7 +758,6 @@ fn compute_tool_supports_live_cancellation(tool_name: &str) -> bool {
             tool_name,
             "tracedecay_admin_cli"
                 | "tracedecay_search"
-                | "tracedecay_grep"
                 | "tracedecay_run_affected_tests"
                 | "tracedecay_pr_context"
                 | "tracedecay_affected"
