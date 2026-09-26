@@ -932,7 +932,14 @@ pub fn parse_application_surface_request(
         | ApplicationSurfaceOperation::BranchDiff
         | ApplicationSurfaceOperation::BranchList
         | ApplicationSurfaceOperation::Files
-        | ApplicationSurfaceOperation::Config => match value {
+        | ApplicationSurfaceOperation::Config
+        | ApplicationSurfaceOperation::AutomationRunList
+        | ApplicationSurfaceOperation::AutomationRunView
+        | ApplicationSurfaceOperation::AutomationRunArtifactView
+        | ApplicationSurfaceOperation::SkillList
+        | ApplicationSurfaceOperation::SkillView
+        | ApplicationSurfaceOperation::HermesSkillBridge
+        | ApplicationSurfaceOperation::Analytics => match value {
             Value::Object(arguments) => Ok(ApplicationSurfaceRequest::GraphTool(arguments)),
             _ => Err(ApplicationSurfaceAdapterError::invalid_request(format!(
                 "invalid arguments: {} expects a JSON object",

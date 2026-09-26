@@ -385,14 +385,14 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
     ];
     definitions.extend(memory::memory_definitions(&request_schema)?);
     definitions.extend([
-        def_automation_run_list(),
-        def_automation_run_view(),
-        def_automation_run_artifact_view(),
-        def_skill_list(),
-        def_skill_view(),
-        def_hermes_skill_bridge(),
+        def_automation_run_list(request_schema("automation_run_list")?),
+        def_automation_run_view(request_schema("automation_run_view")?),
+        def_automation_run_artifact_view(request_schema("automation_run_artifact_view")?),
+        def_skill_list(request_schema("skill_list")?),
+        def_skill_view(request_schema("skill_view")?),
+        def_hermes_skill_bridge(request_schema("hermes_skill_bridge")?),
         def_dashboard(),
-        def_analytics(),
+        def_analytics(request_schema("analytics")?),
         session::def_session_refresh_begin(request_schema("session_refresh_begin")?),
         session::def_session_refresh_status(request_schema("session_refresh_status")?),
         session::def_session_refresh_cancel(request_schema("session_refresh_cancel")?),

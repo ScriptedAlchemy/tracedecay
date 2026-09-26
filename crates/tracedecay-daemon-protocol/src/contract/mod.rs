@@ -1031,7 +1031,14 @@ impl DaemonInvocationRequest {
             | ApplicationSurfaceOperation::BranchDiff
             | ApplicationSurfaceOperation::BranchList
             | ApplicationSurfaceOperation::Files
-            | ApplicationSurfaceOperation::Config => {
+            | ApplicationSurfaceOperation::Config
+            | ApplicationSurfaceOperation::AutomationRunList
+            | ApplicationSurfaceOperation::AutomationRunView
+            | ApplicationSurfaceOperation::AutomationRunArtifactView
+            | ApplicationSurfaceOperation::SkillList
+            | ApplicationSurfaceOperation::SkillView
+            | ApplicationSurfaceOperation::HermesSkillBridge
+            | ApplicationSurfaceOperation::Analytics => {
                 unreachable!("graph-tool operations use their typed constructor")
             }
             ApplicationSurfaceOperation::FactStoreCurate

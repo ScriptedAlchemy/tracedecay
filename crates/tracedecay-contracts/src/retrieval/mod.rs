@@ -1,4 +1,6 @@
 mod analysis_report_surface;
+mod analytics_surface;
+mod automation_surface;
 mod callable_code;
 mod callable_code_catalog;
 mod callable_code_service;
@@ -84,6 +86,26 @@ pub use analysis_report_surface::{
     RecursionSymbolV1, UnmountedEcosystemStatusV1, UnmountedEcosystemV1, UnmountedFileV1,
     UnmountedFilesResultV1, UnmountedFilesSurfaceRequestV1, UnsafePatternKindV1,
     UnsafePatternMatchV1, UnsafePatternsResultV1, UnsafePatternsSurfaceRequestV1,
+};
+pub use analytics_surface::{
+    ANALYTICS_DEFAULT_WINDOW_DAYS, ANALYTICS_MAX_WINDOW_DAYS, ANALYTICS_MIN_WINDOW_DAYS,
+    AnalyticsAutomationJobOutcomesV1, AnalyticsAutomationOutcomesV1, AnalyticsAutomationSectionV1,
+    AnalyticsCanonicalCallNameV1, AnalyticsEventCallNameV1, AnalyticsFactFunnelV1,
+    AnalyticsFactsSectionV1, AnalyticsHintCategoryV1, AnalyticsHintsPayloadV1,
+    AnalyticsLedgerUnavailableV1, AnalyticsProjectSectionUnavailableV1, AnalyticsReportStatusV1,
+    AnalyticsResultV1, AnalyticsScopeV1, AnalyticsSectionUnavailableV1, AnalyticsSectionV1,
+    AnalyticsSurfaceRequestV1, AnalyticsTierCountsV1, AnalyticsToolsSectionV1, AnalyticsTopToolV1,
+    AnalyticsZeroCallToolsV1,
+};
+pub use automation_surface::{
+    AUTOMATION_RUN_LIST_DEFAULT_LIMIT, AUTOMATION_RUN_LIST_MAX_LIMIT, AutomationReadStatusV1,
+    AutomationRunArtifactViewResultV1, AutomationRunArtifactViewSurfaceRequestV1,
+    AutomationRunListResultV1, AutomationRunListSurfaceRequestV1, AutomationRunPageCompletenessV1,
+    AutomationRunScopeV1, AutomationRunSummaryV1, AutomationRunViewResultV1,
+    AutomationRunViewSurfaceRequestV1, HermesSkillBridgeResultV1,
+    HermesSkillBridgeSurfaceRequestV1, SkillListEntryV1, SkillListResultV1,
+    SkillListSurfaceRequestV1, SkillSupportFileSummaryV1, SkillViewResultV1,
+    SkillViewSurfaceRequestV1,
 };
 pub use callable_code::{
     CALLABLE_CODE_OPERATION_COUNT, CallableCodeOperationKind, CallableCodeOperations,

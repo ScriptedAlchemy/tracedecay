@@ -52,7 +52,6 @@ pub enum McpToolDispatchGroup {
     Admin,
     Git,
     Health,
-    Memory,
     SessionWorkflow,
     Work,
     Workflow,
@@ -92,11 +91,9 @@ pub fn tool_branch_sensitivity(tool_name: &str) -> BranchSensitivity {
             | McpToolDispatchGroup::ApplicationSurface
             | McpToolDispatchGroup::SessionWorkflow,
         ) => BranchSensitivity::Sensitive,
-        Some(
-            McpToolDispatchGroup::Memory
-            | McpToolDispatchGroup::Work
-            | McpToolDispatchGroup::Workflow,
-        ) => BranchSensitivity::Independent,
+        Some(McpToolDispatchGroup::Work | McpToolDispatchGroup::Workflow) => {
+            BranchSensitivity::Independent
+        }
         None => {
             if RetainedSurfaceOperation::from_tool_name(tool_name).is_some() {
                 BranchSensitivity::Independent
@@ -195,7 +192,16 @@ fn application_surface_branch_sensitivity(
         | ApplicationSurfaceOperation::LcmGrep
         | ApplicationSurfaceOperation::LcmDescribe
         | ApplicationSurfaceOperation::LcmExpand
-        | ApplicationSurfaceOperation::LcmExpandQuery => BranchSensitivity::Independent,
+        | ApplicationSurfaceOperation::LcmExpandQuery
+        // Ledger, skill and analytics reads use the project root, store
+        // layout and memory identity, never the code graph.
+        | ApplicationSurfaceOperation::AutomationRunList
+        | ApplicationSurfaceOperation::AutomationRunView
+        | ApplicationSurfaceOperation::AutomationRunArtifactView
+        | ApplicationSurfaceOperation::SkillList
+        | ApplicationSurfaceOperation::SkillView
+        | ApplicationSurfaceOperation::HermesSkillBridge
+        | ApplicationSurfaceOperation::Analytics => BranchSensitivity::Independent,
         // Mixed ApplicationSurface group: git walks, worktree inventory, stack
         // snapshots, code-graph reads, source-file bodies, health, diagnostics,
         // and post-edit feedback all depend on the current checkout or graph.
@@ -356,11 +362,6 @@ const BINDING_GROUPS: &[BindingGroup] = binding_groups![
         "tracedecay_admin_branch_add"],
     [Some(McpToolDispatchGroup::Health), RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_runtime"],
-    [Some(McpToolDispatchGroup::Memory), RegisteredProjectAccess::ActiveProjectOnly,
-        "tracedecay_automation_run_list", "tracedecay_automation_run_view", "tracedecay_automation_run_artifact_view"],
-    [Some(McpToolDispatchGroup::Memory), RegisteredProjectAccess::SelectorOnly, "tracedecay_analytics"],
-    [Some(McpToolDispatchGroup::Memory), RegisteredProjectAccess::ActiveProjectOnly,
-        "tracedecay_skill_list", "tracedecay_skill_view", "tracedecay_hermes_skill_bridge"],
     [Some(McpToolDispatchGroup::MultiRoot), RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_multi_root_scope_set_read", "tracedecay_multi_root_scope_set_compare_and_swap",
         "tracedecay_multi_root_execute"],
@@ -1172,18 +1173,16 @@ mod tests {
         }
     }
 
-    /// The retained-surface predicate used to sit between the health and memory
-    /// arms of an ordered match, so retained tools won over those two groups.
-    /// A flat lookup only preserves that if no memory or session-workflow tool
-    /// is also a retained operation.
+    /// The retained-surface predicate used to sit between the health and
+    /// session-workflow arms of an ordered match, so retained tools won over
+    /// that group. A flat lookup only preserves that if no session-workflow
+    /// tool is also a retained operation.
     #[test]
-    fn memory_and_session_workflow_tools_are_not_retained_operations() {
-        for entry in MCP_TOOL_BINDINGS.iter().filter(|entry| {
-            matches!(
-                entry.group,
-                Some(McpToolDispatchGroup::Memory | McpToolDispatchGroup::SessionWorkflow)
-            )
-        }) {
+    fn session_workflow_tools_are_not_retained_operations() {
+        for entry in MCP_TOOL_BINDINGS
+            .iter()
+            .filter(|entry| entry.group == Some(McpToolDispatchGroup::SessionWorkflow))
+        {
             assert!(
                 RetainedSurfaceOperation::from_tool_name(entry.name).is_none(),
                 "{} would change groups under a flat lookup",
@@ -1197,8 +1196,8 @@ mod tests {
     /// missing from this table must stay Sensitive (fail-safe).
     #[rustfmt::skip]
     const PINNED_BRANCH_SENSITIVITY: &[(&str, BranchSensitivity)] = &[
-        // Memory: ledger / skill / analytics reads. Handlers use project_root,
-        // store_layout, and memory identity, never the code graph.
+        // Ledger / skill / analytics reads use project_root, store_layout,
+        // and memory identity, never the code graph.
         ("tracedecay_automation_run_list", BranchSensitivity::Independent),
         ("tracedecay_automation_run_view", BranchSensitivity::Independent),
         ("tracedecay_automation_run_artifact_view", BranchSensitivity::Independent),

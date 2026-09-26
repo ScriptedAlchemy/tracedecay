@@ -1,22 +1,12 @@
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+pub use tracedecay_contracts::automation::{AgentTaskFailureClass, AgentTaskKind};
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 
 use crate::config::AutomationBackend;
 use crate::{AutomationError, Result, config_error};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentTaskKind {
-    MemoryCurator,
-    SessionReflector,
-    SkillWriter,
-    CombinedReview,
-    UserJob,
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentTaskContract {
@@ -124,34 +114,6 @@ pub struct AgentTaskResponse {
     pub input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentTaskFailureClass {
-    Retryable,
-    Permanent,
-    Timeout,
-    Unavailable,
-    Denied,
-    Disconnected,
-    MalformedOutput,
-}
-
-impl AgentTaskFailureClass {
-    pub fn is_retryable(self) -> bool {
-        // Denial is a policy state: retrying without a configuration change
-        // reproduces it, so it is never retried. A disconnect means the
-        // backend was reached and may be reachable again.
-        matches!(
-            self,
-            Self::Retryable | Self::Timeout | Self::Unavailable | Self::Disconnected
-        )
-    }
-
-    fn is_retryable_on_later_run(self) -> bool {
-        self.is_retryable() || self == Self::MalformedOutput
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

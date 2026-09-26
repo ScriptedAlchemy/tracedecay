@@ -208,6 +208,13 @@ application_surface_operations! {
     BranchList => "branch_list";
     Files => "files";
     Config => "config";
+    AutomationRunList => "automation_run_list";
+    AutomationRunView => "automation_run_view";
+    AutomationRunArtifactView => "automation_run_artifact_view";
+    SkillList => "skill_list";
+    SkillView => "skill_view";
+    HermesSkillBridge => "hermes_skill_bridge";
+    Analytics => "analytics";
     HealthRead => "health_read";
     HealthDelta => "health_delta";
     StorageStatus => "storage_status";
@@ -326,6 +333,13 @@ impl ApplicationSurfaceOperation {
         Self::BranchList,
         Self::Files,
         Self::Config,
+        Self::AutomationRunList,
+        Self::AutomationRunView,
+        Self::AutomationRunArtifactView,
+        Self::SkillList,
+        Self::SkillView,
+        Self::HermesSkillBridge,
+        Self::Analytics,
     ];
 
     pub fn is_graph_tool(self) -> bool {

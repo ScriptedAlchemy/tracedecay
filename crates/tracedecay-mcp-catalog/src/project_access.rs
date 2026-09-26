@@ -33,4 +33,5 @@ const REGISTERED_PROJECT_READER_TOOL_NAMES: &[&str] = &[
     "tracedecay_signature_search",
     "tracedecay_call_chain",
     "tracedecay_file_dependents",
+    "tracedecay_analytics",
 ];
