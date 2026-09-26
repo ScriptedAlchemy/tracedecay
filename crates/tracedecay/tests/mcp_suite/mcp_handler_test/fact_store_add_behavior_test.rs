@@ -619,6 +619,7 @@ fn assert_invalid_request(response: &Value) {
                 "code": "application.retained.invalid-request",
                 "message": "The retained operation request is invalid."
             },
+            "detail": null,
             "committed_receipt": null,
             "owning_layer": "application",
             "terminality": "pre_admission",

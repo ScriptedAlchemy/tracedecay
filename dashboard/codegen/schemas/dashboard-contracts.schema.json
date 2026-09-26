@@ -1335,7 +1335,7 @@
       "type": "string"
     },
     "ApplicationProblemDetailV1": {
-      "description": "The structured facts behind a problem. Adapters read these fields; the\nproblem's `message` is only [`Self::message`] rendered from them.",
+      "description": "The structured facts behind a problem. Adapters read these fields; the\nproblem's `message` is only their one human rendering.",
       "oneOf": [
         {
           "additionalProperties": false,

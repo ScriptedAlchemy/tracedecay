@@ -384,7 +384,7 @@ export const ApplicationExecutionFailureClassV1Schema = z.enum(["denied", "malfo
 export type ApplicationExecutionFailureClassV1 = z.infer<typeof ApplicationExecutionFailureClassV1Schema>;
 
 /** The structured facts behind a problem. Adapters read these fields; the
-problem's `message` is only [`Self::message`] rendered from them. */
+problem's `message` is only their one human rendering. */
 export const ApplicationProblemDetailV1Schema = z.discriminatedUnion("kind", [z.object({
   deadline_ms: z.number().int().safe().min(0),
   kind: z.literal("lock_deadline"),

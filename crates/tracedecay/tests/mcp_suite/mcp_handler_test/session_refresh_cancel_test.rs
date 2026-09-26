@@ -119,6 +119,7 @@ fn problem_record(
         "code": code,
         "message": message,
         "diagnostic": diagnostic,
+        "detail": null,
         "committed_receipt": null,
         "owning_layer": "application",
         "terminality": terminality,
