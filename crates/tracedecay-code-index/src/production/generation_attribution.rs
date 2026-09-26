@@ -15,6 +15,15 @@ use super::{GenerationProviderCoverageV1, GenerationProviderReadV1, GenerationTe
 pub struct PublishedGenerationTestAttributionAuthorityV1 {
     pub(super) generation_id: CodeGenerationId,
     pub(super) read: Arc<GenerationProviderReadV1<GenerationTestJoinV1>>,
+    /// [`GenerationTestJoinV1::retained_bytes`] of `read`, measured at build.
+    pub(super) retained_bytes: u64,
+}
+
+impl PublishedGenerationTestAttributionAuthorityV1 {
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        self.retained_bytes
+    }
 }
 
 impl GenerationTestAttributionJoinReadPort for PublishedGenerationTestAttributionAuthorityV1 {

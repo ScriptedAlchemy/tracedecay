@@ -12,6 +12,7 @@ const FAMILY_LABELS: Record<DoctorFindingFamilyV1, string> = {
   language_server: 'Language server',
   code_index: 'Code index',
   observability: 'Observability',
+  memory: 'Memory',
 };
 
 export interface DoctorEvidencePresentation {

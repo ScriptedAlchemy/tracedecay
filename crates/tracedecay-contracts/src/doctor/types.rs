@@ -50,6 +50,10 @@ pub enum DoctorFindingFamilyV1 {
     /// Denominator-safe measurement and telemetry health from analytics,
     /// accounting read models, and session ingest.
     Observability,
+    /// Retained daemon memory as the resident-memory inventory reports it:
+    /// RSS against the admission limit and pressure line, and each retained
+    /// owner's bytes.
+    Memory,
 }
 
 /// Typed subclasses of the [`DoctorFindingFamilyV1::Storage`] finding family.

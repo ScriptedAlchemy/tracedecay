@@ -10694,6 +10694,11 @@
           "const": "observability",
           "description": "Denominator-safe measurement and telemetry health from analytics,\naccounting read models, and session ingest.",
           "type": "string"
+        },
+        {
+          "const": "memory",
+          "description": "Retained daemon memory as the resident-memory inventory reports it:\nRSS against the admission limit and pressure line, and each retained\nowner's bytes.",
+          "type": "string"
         }
       ]
     },

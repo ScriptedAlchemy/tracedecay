@@ -47,6 +47,7 @@ mod deferred_mount_tests;
 mod noop_reconcile_tests;
 mod publication_store;
 mod reconcile;
+mod residency;
 mod retained_configuration_tests;
 mod search_permit_release;
 mod serving;

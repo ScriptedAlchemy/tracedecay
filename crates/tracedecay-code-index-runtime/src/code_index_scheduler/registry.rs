@@ -731,6 +731,10 @@ pub struct MountedCodeIndexWorktreeV1 {
     /// It is paired with `serving_generation_epoch` under the slot CAS.
     serving_generation_installation: Arc<Mutex<Option<ServingGenerationInstallationClaimV1>>>,
     graph_activation: CodeGraphActivationAuthorityV1,
+    /// Lease over this worktree's decoded generations; complete-generation
+    /// reads renew it.
+    residency: Arc<super::residency::WorktreeResidencyV1>,
+    _residency_registration: super::residency::WorktreeResidencyRegistrationV1,
     /// Superseded graph generations still pinned by an unexpired graph
     /// cursor. Holding the owner keeps its replay retained across pages.
     graph_cursor_retention: Arc<graph_cursor_retention::GraphCursorRetentionV1>,
@@ -1228,6 +1232,7 @@ pub(super) fn serving_seat_matches_advertised_generation(
 /// status advertises.
 pub(super) fn dashboard_terminal_status(
     latest: Option<&LatestCompleteCodeIndexV1>,
+    released_seat: Option<&str>,
     text: Option<&LatestCodeTextGenerationV1>,
     text_ready: bool,
     graph_activation_enabled: bool,
@@ -1240,7 +1245,9 @@ pub(super) fn dashboard_terminal_status(
         code_graph_serving,
     ) && serving_seat_matches_advertised_generation(
         graph_activation_enabled,
-        latest.map(|latest| latest.generation().manifest().generation_id.as_str()),
+        latest
+            .map(|latest| latest.generation().manifest().generation_id.as_str())
+            .or(released_seat),
         text.map(|text| text.metadata().manifest().generation_id.as_str()),
     )
 }
@@ -1657,6 +1664,9 @@ pub struct CodeIndexSchedulerRegistryV1 {
     /// cannot reuse a progress ordering key.
     pub next_progress_producer_incarnation: Arc<AtomicU64>,
     pub resident_memory: Arc<resident_memory::ProcessResidentMemoryV1>,
+    /// Inventory that frees each mounted worktree's retained decodes on idle
+    /// and under pressure.
+    resident_owners: Arc<tracedecay_runtime_core::resident_memory::ResidentOwnersV1>,
     pub byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     pub mounted: Arc<tokio::sync::Mutex<BTreeMap<PathBuf, MountedCodeIndexWorktreeV1>>>,
     /// Owners whose project was retired (remote deletion, replacement) but whose
@@ -2825,6 +2835,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let Some(worktree) = mounted.get(&project_root) else {
             return false;
         };
+        worktree.residency.touch();
         if !worktree
             .complete_generation_requested
             .swap(true, Ordering::AcqRel)

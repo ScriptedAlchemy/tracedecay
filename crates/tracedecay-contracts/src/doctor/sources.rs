@@ -43,6 +43,7 @@ use tracedecay_domain::{
 
 use crate::RequestContext;
 use crate::error::ApplicationContractError;
+use crate::storage::findings::truncate_at_char_boundary;
 
 use super::types::{
     DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,
@@ -1504,6 +1505,135 @@ pub fn observability_finding(
     }
 }
 
+/// One retained owner as the resident-memory inventory reports it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResidentMemoryOwnerReadV1 {
+    /// Owner kind label, one of the inventory's shed-order kinds.
+    pub kind: String,
+    pub project_id: String,
+    pub worktree_id: String,
+    pub generation_id: String,
+    /// Measured bytes, or `None` for an owner that cannot size itself.
+    pub bytes: Option<u64>,
+    pub idle_seconds: u64,
+    /// Pressure will not release this owner while it serves inside its
+    /// idle window.
+    pub protected: bool,
+}
+
+/// Retained daemon memory as the resident-memory inventory reports it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ResidentMemoryReadV1 {
+    Observed {
+        /// Last sampled process RSS, `None` before the first sample.
+        resident_bytes: Option<u64>,
+        limit_bytes: u64,
+        high_watermark_bytes: u64,
+        over_budget: bool,
+        retained_bytes: u64,
+        owners: Vec<ResidentMemoryOwnerReadV1>,
+    },
+    /// The process keeps no inventory (not a daemon).
+    Unobserved,
+}
+
+const MIB: u64 = 1024 * 1024;
+
+/// Map the inventory into its `Memory` findings: one for the process against
+/// its limit, then one per retained owner.
+#[hotpath::measure(label = "application.doctor_sources.resident_memory")]
+pub fn resident_memory_findings(
+    read: &ResidentMemoryReadV1,
+) -> Result<Vec<DoctorFindingV1>, ApplicationContractError> {
+    let family = DoctorFindingFamilyV1::Memory;
+    let ResidentMemoryReadV1::Observed {
+        resident_bytes,
+        limit_bytes,
+        high_watermark_bytes,
+        over_budget,
+        retained_bytes,
+        owners,
+    } = read
+    else {
+        return Ok(vec![unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Unknown,
+            "memory.inventory.unobserved",
+            "this process keeps no resident-memory inventory",
+        )?]);
+    };
+    let unmeasured = owners.iter().filter(|owner| owner.bytes.is_none()).count();
+    let resident = resident_bytes.map_or_else(
+        || "unsampled".to_owned(),
+        |bytes| format!("{} MiB", bytes / MIB),
+    );
+    let summary = format!(
+        "resident {resident} of a {} MiB limit (pressure line {} MiB); {} owners retain {} MiB measured, {unmeasured} unmeasured",
+        limit_bytes / MIB,
+        high_watermark_bytes / MIB,
+        owners.len(),
+        retained_bytes / MIB,
+    );
+    let mut findings = vec![if *over_budget {
+        source_finding(
+            family,
+            DoctorEvidenceStateV1::Degraded,
+            "memory.process.over-budget",
+            DoctorCoverageCompletenessV1::Complete,
+            &summary,
+        )?
+    } else {
+        clean_finding(
+            family,
+            "memory.process.nominal",
+            if unmeasured == 0 {
+                DoctorCoverageCompletenessV1::Complete
+            } else {
+                DoctorCoverageCompletenessV1::Partial
+            },
+            &summary,
+        )?
+    }];
+    for owner in owners {
+        let bytes = owner.bytes.map_or_else(
+            || "unmeasured bytes".to_owned(),
+            |bytes| format!("{} MiB", bytes / MIB),
+        );
+        let statement = format!(
+            "{} of worktree {} holds {bytes}, idle {} s{}",
+            owner.kind,
+            owner.worktree_id,
+            owner.idle_seconds,
+            if owner.protected { ", serving" } else { "" },
+        );
+        findings.push(match owner.bytes {
+            Some(_) => clean_finding(
+                family,
+                "memory.owner.measured",
+                DoctorCoverageCompletenessV1::Complete,
+                &truncate_at_char_boundary(&statement, 512),
+            )?,
+            None => source_finding(
+                family,
+                DoctorEvidenceStateV1::Partial,
+                "memory.owner.unmeasured",
+                DoctorCoverageCompletenessV1::Partial,
+                &truncate_at_char_boundary(&statement, 512),
+            )?,
+        });
+    }
+    Ok(findings)
+}
+
+/// Narrow source port for the resident-memory inventory.
+pub trait ResidentMemoryDoctorPort: Send + Sync {
+    fn resident_memory<'a>(
+        &'a self,
+        context: &'a RequestContext,
+    ) -> DoctorSourceFuture<'a, ResidentMemoryReadV1>;
+}
+
 /// Count of durably refused source records for one provider and coverage
 /// reason, read from the observation authority's cursor-advance ledger.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -1730,6 +1860,69 @@ pub trait StorageDoctorPort: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_findings_report_the_process_and_each_owner_in_mib() {
+        let owner = |kind: &str, bytes: Option<u64>, protected: bool| ResidentMemoryOwnerReadV1 {
+            kind: kind.to_owned(),
+            project_id: "project.fixture".to_owned(),
+            worktree_id: "worktree.fixture".to_owned(),
+            generation_id: "generation.fixture".to_owned(),
+            bytes,
+            idle_seconds: 42,
+            protected,
+        };
+        let read = ResidentMemoryReadV1::Observed {
+            resident_bytes: Some(3 * 1024 * MIB),
+            limit_bytes: 6 * 1024 * MIB,
+            high_watermark_bytes: 5 * 1024 * MIB,
+            over_budget: false,
+            retained_bytes: 300 * MIB,
+            owners: vec![
+                owner("decoded_generation", Some(300 * MIB), true),
+                owner("graph_engine", None, false),
+            ],
+        };
+
+        let findings = resident_memory_findings(&read).expect("memory findings");
+
+        assert_eq!(
+            findings
+                .iter()
+                .map(|finding| (
+                    finding.state(),
+                    finding.coverage().statement().to_owned()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    DoctorEvidenceStateV1::Partial,
+                    "resident 3072 MiB of a 6144 MiB limit (pressure line 5120 MiB); 2 owners retain 300 MiB measured, 1 unmeasured".to_owned()
+                ),
+                (
+                    DoctorEvidenceStateV1::HealthyCompleteCoverage,
+                    "decoded_generation of worktree worktree.fixture holds 300 MiB, idle 42 s, serving".to_owned()
+                ),
+                (
+                    DoctorEvidenceStateV1::Partial,
+                    "graph_engine of worktree worktree.fixture holds unmeasured bytes, idle 42 s".to_owned()
+                ),
+            ]
+        );
+
+        let over = ResidentMemoryReadV1::Observed {
+            resident_bytes: Some(5 * 1024 * MIB + 1),
+            limit_bytes: 6 * 1024 * MIB,
+            high_watermark_bytes: 5 * 1024 * MIB,
+            over_budget: true,
+            retained_bytes: 0,
+            owners: Vec::new(),
+        };
+        assert_eq!(
+            resident_memory_findings(&over).expect("memory findings")[0].state(),
+            DoctorEvidenceStateV1::Degraded
+        );
+    }
 
     #[test]
     fn configuration_in_sync_complete_is_healthy() {

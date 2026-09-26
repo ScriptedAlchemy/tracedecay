@@ -1022,3 +1022,14 @@ fn allocator_pressure_reclaimer_installation_preserves_registration_failure() {
         failure
     );
 }
+
+#[test]
+fn psi_some_avg10_reads_the_memory_stall_share() {
+    let pressure = "some avg10=12.50 avg60=3.10 avg300=0.80 total=123456\n\
+                    full avg10=4.00 avg60=1.00 avg300=0.20 total=45678\n";
+    assert_eq!(super::psi_some_avg10_v1(pressure), Some(12.5));
+    assert_eq!(
+        super::psi_some_avg10_v1("full avg10=4.00 avg60=1.00\n"),
+        None
+    );
+}

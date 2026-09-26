@@ -12,6 +12,16 @@ use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 
 use crate::profiled_lock::{ProfiledMutex, ProfiledMutexGuard};
 
+mod owners;
+
+pub use owners::{
+    RESIDENT_OWNER_IDLE_WINDOW_V1, RESIDENT_OWNER_SHED_ORDER_V1, ResidentOwnerBytesV1,
+    ResidentOwnerKindV1, ResidentOwnerRegistrationFailureV1, ResidentOwnerRegistrationV1,
+    ResidentOwnerReleaseCauseV1, ResidentOwnerReleaseV1, ResidentOwnerReleasedV1,
+    ResidentOwnerReportRowV1, ResidentOwnerSampleV1, ResidentOwnerScopeV1, ResidentOwnerV1,
+    ResidentOwnersReportV1, ResidentOwnersV1, process_resident_owners_v1,
+};
+
 /// Conservative fallback when the host cannot report physical memory.
 ///
 /// Production normally derives the authority from the machine. This fallback
@@ -306,6 +316,42 @@ pub fn sampled_process_resident_bytes_v1() -> Option<u64> {
     {
         None
     }
+}
+
+/// Share of the last ten seconds, in percent, that some task in this process's
+/// cgroup stalled on memory, at or above which the daemon sheds retained state
+/// even while RSS is under its watermark. Under `MemoryHigh` the kernel
+/// reclaims by stalling the cgroup; a sustained tenth of wall time lost to
+/// that means retained caches are costing serving latency.
+pub const RESIDENT_MEMORY_PSI_SOME_AVG10_SHED_PERCENT_V1: f64 = 10.0;
+
+/// PSI memory `some avg10` for this process's cgroup (`memory.pressure`), or
+/// the host's (`/proc/pressure/memory`) when the cgroup does not expose it.
+/// `None` where the kernel has no PSI; callers treat that as unobserved.
+#[must_use]
+pub fn sampled_memory_pressure_some_avg10_v1() -> Option<f64> {
+    let cgroup = cgroup_v2_process_directory_v1(
+        Path::new(PROC_SELF_CGROUP_V1),
+        Path::new(CGROUP_V2_ROOT_V1),
+    )
+    .map(|directory| directory.join("memory.pressure"));
+    cgroup
+        .into_iter()
+        .chain(std::iter::once(std::path::PathBuf::from(
+            "/proc/pressure/memory",
+        )))
+        .find_map(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| psi_some_avg10_v1(&text))
+}
+
+fn psi_some_avg10_v1(text: &str) -> Option<f64> {
+    text.lines()
+        .find_map(|line| line.strip_prefix("some "))?
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("avg10="))?
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
 }
 
 /// What the last measured RSS sample says about this process.
@@ -735,6 +781,71 @@ pub fn register_process_allocator_pressure_reclaimer_v1(
             trim.released_bytes()
         }),
     )
+}
+
+/// Retained owners are the largest reclaimable state, so the inventory sheds
+/// first and later reclaimers (the allocator trim last) return what it freed.
+pub const RESIDENT_OWNERS_PRESSURE_PRIORITY_V1: u32 = 0;
+
+/// Shed retained owners in [`RESIDENT_OWNER_SHED_ORDER_V1`] whenever `pressure`
+/// reaches its high watermark, until the measured excess is freed.
+pub fn register_resident_owners_pressure_reclaimer_v1(
+    pressure: &Arc<ResidentMemoryPressureV1>,
+    owners: &Arc<ResidentOwnersV1>,
+) -> Result<ResidentMemoryPressureRegistrationV1, ResidentMemoryPressureRegistrationFailureV1> {
+    let owners = Arc::downgrade(owners);
+    pressure.register_pressure_reclaimer(
+        RESIDENT_OWNERS_PRESSURE_PRIORITY_V1,
+        Arc::new(move |request| {
+            let Some(owners) = owners.upgrade() else {
+                return 0;
+            };
+            owners
+                .shed(request.excess_bytes, std::time::Instant::now())
+                .iter()
+                .map(|released| {
+                    log_resident_owner_release_v1(released);
+                    released.bytes.measured().unwrap_or(0)
+                })
+                .fold(0, u64::saturating_add)
+        }),
+    )
+}
+
+/// The one operator log line for a retained-owner release.
+pub fn log_resident_owner_release_v1(released: &ResidentOwnerReleasedV1) {
+    tracing::info!(
+        event = "resident_owner_released",
+        project_id = released.scope.project_id.as_str(),
+        worktree_id = released.scope.worktree_id.as_str(),
+        kind = released.kind.as_str(),
+        generation_id = released.generation_id.as_str(),
+        bytes = released.bytes.measured(),
+        cause = match released.cause {
+            ResidentOwnerReleaseCauseV1::Idle => "idle",
+            ResidentOwnerReleaseCauseV1::Pressure => "pressure",
+        },
+        "released retained memory"
+    );
+}
+
+static PROCESS_RESIDENT_OWNERS_PRESSURE_REGISTRATION_V1: OnceLock<
+    Result<ResidentMemoryPressureRegistrationV1, ResidentMemoryPressureRegistrationFailureV1>,
+> = OnceLock::new();
+
+/// Bind the process inventory to the process pressure cell, once.
+pub fn install_process_resident_owners_pressure_reclaimer_v1()
+-> Result<(), ResidentMemoryPressureRegistrationFailureV1> {
+    PROCESS_RESIDENT_OWNERS_PRESSURE_REGISTRATION_V1
+        .get_or_init(|| {
+            register_resident_owners_pressure_reclaimer_v1(
+                process_resident_memory_pressure_v1(),
+                process_resident_owners_v1(),
+            )
+        })
+        .as_ref()
+        .map(|_| ())
+        .map_err(|failure| *failure)
 }
 
 /// Install the allocator trim reclaimer on the process pressure cell, once.
