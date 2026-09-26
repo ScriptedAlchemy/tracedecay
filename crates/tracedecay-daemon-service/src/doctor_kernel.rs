@@ -739,8 +739,9 @@ struct KernelDoctorSources<'a> {
     inputs: &'a DoctorKernelInputsV1,
 }
 
-/// The daemon's resident-memory inventory as the Doctor read: the same
-/// report `tracedecay_status` renders, so the two never disagree.
+/// The daemon's resident-memory inventory as the Doctor read: every
+/// project's owners from the one report whose per-project rows
+/// `tracedecay_status` renders, so the two never disagree.
 fn resident_memory_read() -> ResidentMemoryReadV1 {
     use tracedecay_runtime_core::resident_memory::{
         ResidentMemoryPressureStateV1, process_resident_memory_pressure_v1,

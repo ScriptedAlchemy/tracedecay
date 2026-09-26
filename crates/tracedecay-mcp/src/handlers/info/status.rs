@@ -9,6 +9,7 @@ use tracedecay_contracts::code_index_freshness::{
     CodeIndexReadinessWaitV1, CodeIndexStalenessStateV1,
 };
 use tracedecay_contracts::storage::{SchemaConvergenceFindingV1, SchemaConvergenceStateV1};
+use tracedecay_domain::ProjectId;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{RegisteredGlobalDb, SessionIngestHealth};
 use tracedecay_runtime_core::resident_memory::{
@@ -255,15 +256,18 @@ fn attach_full_branch_status(
 /// authority for the `graph_statistics` field: this route serializes it and
 /// `tracedecay status` deserializes the same Rust type, so the two sides
 /// cannot drift.
-/// The daemon's resident memory as its one authority reports it: measured
-/// process RSS against the admission ceiling and pressure line, and every
-/// retained owner with its bytes, idle time, and whether pressure may shed it.
-pub fn daemon_memory_value() -> Value {
+/// The daemon's resident memory as one project sees it: process RSS against
+/// the admission ceiling and pressure line, the daemon-wide retained totals,
+/// and this project's retained owners with their bytes, idle time, and
+/// whether pressure may shed them. Other projects' owners belong to the
+/// daemon-wide Doctor inventory, never to a project read.
+fn project_memory_value(project_id: &ProjectId) -> Value {
     memory_value(
         process_resident_memory_pressure_v1(),
         process_resident_owners_v1(),
         sampled_memory_pressure_some_avg10_v1(),
         std::time::Instant::now(),
+        project_id,
     )
 }
 
@@ -272,6 +276,7 @@ fn memory_value(
     owners: &ResidentOwnersV1,
     psi_some_avg10: Option<f64>,
     now: std::time::Instant,
+    project_id: &ProjectId,
 ) -> Value {
     let (state, resident_bytes) = match pressure.state() {
         ResidentMemoryPressureStateV1::Unobserved => ("unobserved", None),
@@ -286,6 +291,7 @@ fn memory_value(
     let rows = report
         .owners
         .iter()
+        .filter(|row| row.scope.project_id == *project_id)
         .map(|row| {
             json!({
                 "project_id": row.scope.project_id.as_str(),
@@ -364,7 +370,7 @@ pub async fn handle_status(
     let mut output = json!({
         "project_root": ctx.project_root(),
         "graph_statistics": graph_statistics,
-        "memory": daemon_memory_value(),
+        "memory": project_memory_value(&ctx.admitted_scope().project_id),
     });
     output["schema_convergence"] = schema_convergence_status(
         &ctx.store_runtime()
@@ -894,7 +900,7 @@ mod tests {
     }
 
     #[test]
-    fn status_memory_reports_each_retained_owner_through_the_one_authority() {
+    fn status_memory_reports_the_projects_own_owners_and_daemon_totals() {
         use std::sync::Arc;
         use tracedecay_runtime_core::resident_memory::{
             ResidentMemoryPressureV1, ResidentOwnerKindV1, ResidentOwnerScopeV1, ResidentOwnerV1,
@@ -905,20 +911,35 @@ mod tests {
         pressure.publish_observed_resident_bytes(6_000);
         let owners = Arc::new(ResidentOwnersV1::new(std::time::Duration::from_mins(10)));
         let owner: Arc<dyn ResidentOwnerV1> = Arc::new(HeldDecode);
-        let _registration = owners
-            .register(
-                ResidentOwnerScopeV1 {
-                    project_id: tracedecay_domain::ProjectId::new("project.fixture")
-                        .expect("project id"),
-                    worktree_id: tracedecay_domain::WorktreeId::new("worktree.fixture")
-                        .expect("worktree id"),
-                },
-                ResidentOwnerKindV1::DecodedGeneration,
-                Arc::downgrade(&owner),
-            )
-            .expect("register");
+        let project = tracedecay_domain::ProjectId::new("project.fixture").expect("project id");
+        let _registrations = [
+            (project.clone(), "worktree.fixture"),
+            (
+                tracedecay_domain::ProjectId::new("project.other").expect("project id"),
+                "worktree.other",
+            ),
+        ]
+        .map(|(project_id, worktree)| {
+            owners
+                .register(
+                    ResidentOwnerScopeV1 {
+                        project_id,
+                        worktree_id: tracedecay_domain::WorktreeId::new(worktree)
+                            .expect("worktree id"),
+                    },
+                    ResidentOwnerKindV1::DecodedGeneration,
+                    Arc::downgrade(&owner),
+                )
+                .expect("register")
+        });
 
-        let memory = super::memory_value(&pressure, &owners, Some(1.5), std::time::Instant::now());
+        let memory = super::memory_value(
+            &pressure,
+            &owners,
+            Some(1.5),
+            std::time::Instant::now(),
+            &project,
+        );
 
         assert_eq!(
             memory,
@@ -931,7 +952,7 @@ mod tests {
                 "psi_some_avg10": 1.5,
                 "idle_window_seconds": 600,
                 "shed_order": ["superseded_generation", "graph_catalog", "decoded_generation", "graph_engine"],
-                "retained_bytes": 4_096,
+                "retained_bytes": 8_192,
                 "unmeasured_owners": 0,
                 "owners": [{
                     "project_id": "project.fixture",
