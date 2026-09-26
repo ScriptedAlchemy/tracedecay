@@ -72,6 +72,8 @@ const HANDWRITTEN_DEFINITION_OPERATIONS: &[ApplicationSurfaceOperation] = &[
     ApplicationSurfaceOperation::BranchSearch,
     ApplicationSurfaceOperation::BranchDiff,
     ApplicationSurfaceOperation::BranchList,
+    ApplicationSurfaceOperation::Files,
+    ApplicationSurfaceOperation::Config,
     ApplicationSurfaceOperation::StrReplace,
     ApplicationSurfaceOperation::MultiStrReplace,
     ApplicationSurfaceOperation::InsertAt,

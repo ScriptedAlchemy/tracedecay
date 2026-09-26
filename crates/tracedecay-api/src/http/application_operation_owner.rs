@@ -146,7 +146,9 @@ pub const fn http_application_owner_kind(
         | ApplicationSurfaceOperation::PrContext
         | ApplicationSurfaceOperation::BranchSearch
         | ApplicationSurfaceOperation::BranchDiff
-        | ApplicationSurfaceOperation::BranchList => return None,
+        | ApplicationSurfaceOperation::BranchList
+        | ApplicationSurfaceOperation::Files
+        | ApplicationSurfaceOperation::Config => return None,
         ApplicationSurfaceOperation::FactStoreCurate
         | ApplicationSurfaceOperation::FactStoreAdd
         | ApplicationSurfaceOperation::FactStoreSearch

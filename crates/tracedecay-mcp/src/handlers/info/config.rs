@@ -2,29 +2,26 @@
 
 use std::path::Path;
 
-use serde_json::{Value, json};
+use serde_json::Value;
+use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
+use tracedecay_contracts::retrieval::{
+    ConfigKeyFoundV1, ConfigKeyMissingV1, ConfigMatchV1, ConfigParseErrorV1, ConfigResultV1,
+    ConfigSurfaceRequestV1,
+};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage::ProjectPath;
 
-use crate::ToolResult;
-use crate::generic_tool_result;
+use crate::decode_primitive_request;
+use crate::handlers::graph::graph_tool_completion;
 
 /// Structured TOML / JSON queries by dotted key path.
 #[hotpath::measure(label = "mcp.info.config.total")]
-pub async fn handle_config(
-    project_root: &Path,
-    response_handle_root: &Path,
-    args: &Value,
-) -> Result<ToolResult> {
-    let key = args
-        .get("key")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "missing required parameter: key".to_string(),
-        })?
-        .to_owned();
-    let path = args.get("path").and_then(|v| v.as_str()).map(str::to_owned);
-    let glob_pat = args.get("glob").and_then(|v| v.as_str()).map(str::to_owned);
+pub async fn compute_config(project_root: &Path, args: Value) -> Result<GraphToolCompletionV1> {
+    let ConfigSurfaceRequestV1 {
+        key,
+        path,
+        glob: glob_pat,
+    } = decode_primitive_request(&args, "tracedecay_config")?;
 
     if path.is_none() && glob_pat.is_none() {
         return Err(TraceDecayError::Config {
@@ -38,73 +35,76 @@ pub async fn handle_config(
     }
 
     let scan_root = project_root.to_path_buf();
-    let (payload, touched) = hotpath::future!(
+    let (result, touched) = hotpath::future!(
         tokio::task::spawn_blocking(move || -> Result<_> {
-        let mut files: Vec<String> = Vec::new();
-        if let Some(p) = path {
-            let project_path = ProjectPath::resolve(&scan_root, Path::new(&p))?;
-            files.push(project_path.relative_path_string());
-        } else if let Some(pat) = glob_pat {
-            let combined = scan_root.join(&pat);
-            let walker =
-                glob::glob(&combined.to_string_lossy()).map_err(|e| TraceDecayError::Config {
-                    message: format!("invalid glob '{pat}': {e}"),
+            let mut files: Vec<String> = Vec::new();
+            if let Some(p) = path {
+                let project_path = ProjectPath::resolve(&scan_root, Path::new(&p))?;
+                files.push(project_path.relative_path_string());
+            } else if let Some(pat) = glob_pat {
+                let combined = scan_root.join(&pat);
+                let walker = glob::glob(&combined.to_string_lossy()).map_err(|e| {
+                    TraceDecayError::Config {
+                        message: format!("invalid glob '{pat}': {e}"),
+                    }
                 })?;
-            for entry in walker.flatten() {
-                if let Ok(project_path) = ProjectPath::resolve(&scan_root, &entry) {
-                    files.push(project_path.relative_path_string());
+                for entry in walker.flatten() {
+                    if let Ok(project_path) = ProjectPath::resolve(&scan_root, &entry) {
+                        files.push(project_path.relative_path_string());
+                    }
                 }
+                files.sort();
             }
-            files.sort();
-        }
 
-        let mut matches: Vec<Value> = Vec::new();
-        let mut touched: Vec<String> = Vec::new();
-        for rel in &files {
-            let project_path = ProjectPath::resolve(&scan_root, Path::new(rel))?;
-            let abs = project_path.absolute_path();
-            let rel = project_path.relative_path_string();
-            let Ok(contents) = std::fs::read_to_string(&abs) else {
-                continue;
-            };
-            let Some(parsed) = parse_config_value(&rel, &contents) else {
-                continue;
-            };
-            let parsed = match parsed {
-                Ok(value) => value,
-                Err(error) => {
-                    matches.push(json!({
-                        "file": rel,
-                        "error": error,
-                    }));
+            let mut matches: Vec<ConfigMatchV1> = Vec::new();
+            let mut touched: Vec<String> = Vec::new();
+            for rel in &files {
+                let project_path = ProjectPath::resolve(&scan_root, Path::new(rel))?;
+                let abs = project_path.absolute_path();
+                let rel = project_path.relative_path_string();
+                let Ok(contents) = std::fs::read_to_string(&abs) else {
                     continue;
+                };
+                let Some(parsed) = parse_config_value(&rel, &contents) else {
+                    continue;
+                };
+                let parsed = match parsed {
+                    Ok(value) => value,
+                    Err(error) => {
+                        matches.push(ConfigMatchV1::ParseError(ConfigParseErrorV1 {
+                            file: rel,
+                            error,
+                        }));
+                        continue;
+                    }
+                };
+
+                if !touched.contains(&rel) {
+                    touched.push(rel.clone());
                 }
-            };
-
-            if !touched.contains(&rel) {
-                touched.push(rel.clone());
+                matches.push(config_match(&rel, &key, &contents, &parsed));
             }
-            matches.push(config_match_value(&rel, &key, &contents, &parsed));
-        }
 
-        Ok((
-            json!({
-                "match_count": matches.iter().filter(|m| m.get("found") != Some(&Value::Bool(false))).count(),
-                "matches": matches,
-            }),
-            touched,
-        ))
-    }),
+            let match_count = matches
+                .iter()
+                .filter(|matched| !matches!(matched, ConfigMatchV1::Missing(_)))
+                .count();
+            Ok((
+                ConfigResultV1 {
+                    match_count,
+                    matches,
+                },
+                touched,
+            ))
+        }),
         label = "mcp.info.config.scan"
     )
     .await
     .map_err(|join_error| TraceDecayError::Config {
         message: format!("tracedecay_config scan failed to join: {join_error}"),
     })??;
-    Ok(generic_tool_result(
-        Some(response_handle_root),
-        args,
-        &payload,
+    Ok(graph_tool_completion(
+        GraphToolResultV1::Config(result),
         touched,
     ))
 }
@@ -172,19 +172,19 @@ fn toml_to_json(v: &toml::Value) -> Value {
     }
 }
 
-fn config_match_value(file: &str, key: &str, contents: &str, parsed: &Value) -> Value {
+fn config_match(file: &str, key: &str, contents: &str, parsed: &Value) -> ConfigMatchV1 {
     match lookup_dotted(parsed, key) {
-        Some(value) => json!({
-            "file": file,
-            "key": key,
-            "value": value,
-            "line": find_key_line(contents, key),
+        Some(value) => ConfigMatchV1::Found(ConfigKeyFoundV1 {
+            file: file.to_owned(),
+            key: key.to_owned(),
+            value,
+            line: find_key_line(contents, key),
         }),
-        None => json!({
-            "file": file,
-            "key": key,
-            "value": Value::Null,
-            "found": false,
+        None => ConfigMatchV1::Missing(ConfigKeyMissingV1 {
+            file: file.to_owned(),
+            key: key.to_owned(),
+            value: (),
+            found: false,
         }),
     }
 }

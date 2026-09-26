@@ -106,12 +106,23 @@ pub fn require_object_args(args: &Value, tool_name: &str) -> Result<()> {
 }
 
 /// Decode one catalog-owned primitive request after removing keys owned by
-/// the MCP transport rather than the application operation.
+/// the MCP transport rather than the application operation. The session and
+/// thread keys are host route identity: the server routes the call by them
+/// before dispatch, so they never belong to the request body.
 pub fn decode_primitive_request<T: DeserializeOwned>(args: &Value, tool_name: &str) -> Result<T> {
     require_object_args(args, tool_name)?;
     let mut request = args.clone();
     if let Some(object) = request.as_object_mut() {
-        for key in ["format", "__mcp_request_id", "project_selector"] {
+        for key in [
+            "format",
+            "__mcp_request_id",
+            "project_selector",
+            "_meta",
+            "session_id",
+            "sessionId",
+            "thread_id",
+            "threadId",
+        ] {
             object.remove(key);
         }
     }
@@ -213,6 +224,8 @@ mod tests {
                 "format": "json",
                 "project_selector": {"project_id": "project.fixture"},
                 "__mcp_request_id": "request.fixture",
+                "session_id": "session.route",
+                "_meta": {"threadId": "thread.route"},
             }),
             "tracedecay_node",
         )

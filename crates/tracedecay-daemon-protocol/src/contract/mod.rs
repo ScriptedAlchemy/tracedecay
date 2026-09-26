@@ -1026,7 +1026,9 @@ impl DaemonInvocationRequest {
             | ApplicationSurfaceOperation::PrContext
             | ApplicationSurfaceOperation::BranchSearch
             | ApplicationSurfaceOperation::BranchDiff
-            | ApplicationSurfaceOperation::BranchList => {
+            | ApplicationSurfaceOperation::BranchList
+            | ApplicationSurfaceOperation::Files
+            | ApplicationSurfaceOperation::Config => {
                 unreachable!("graph-tool operations use their typed constructor")
             }
             ApplicationSurfaceOperation::FactStoreCurate

@@ -80,6 +80,7 @@ mod health_behavior_test;
 mod hermes_skill_bridge_test;
 mod impact_behavior_test;
 mod implementations_test;
+mod info_file_request_test;
 mod inheritance_depth_test;
 #[cfg(feature = "test-transport")]
 mod insert_at_test;
