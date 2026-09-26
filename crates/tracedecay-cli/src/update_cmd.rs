@@ -198,9 +198,12 @@ pub(crate) enum RefreshPolicy {
 ///
 /// Returns the installed binary's version when an install happened and its
 /// version is known, so the surrounding maintenance window restores the
-/// daemon validating the binary that actually starts. A refresh that did not
-/// complete does not erase that version: the new binary is installed
-/// regardless.
+/// daemon validating the binary that actually starts. Once a binary is
+/// installed this never returns an error: the window adopts the installed
+/// version only from a success value, and an error would make the restore
+/// wait for the replaced binary, which can never answer again. A refresh
+/// that did not complete is therefore reported as
+/// [`PluginRefreshOutcome::Failed`].
 pub(crate) fn run_install_then_refresh<U, P>(
     policy: RefreshPolicy,
     upgrade: U,
@@ -212,19 +215,16 @@ where
 {
     let outcome = upgrade()?;
     match policy {
-        RefreshPolicy::Always => {
-            let (binary, installed_version) = match &outcome {
-                UpgradeOutcome::Installed { binary, version } => {
-                    (binary.as_deref(), version.clone())
-                }
-                UpgradeOutcome::AlreadyCurrent => (None, None),
-            };
-            let refresh = post_update(binary)?;
-            Ok(InstallThenRefresh {
-                installed_version,
-                refresh: Some(refresh),
-            })
-        }
+        RefreshPolicy::Always => match outcome {
+            UpgradeOutcome::Installed { binary, version } => Ok(InstallThenRefresh {
+                refresh: Some(refresh_after_install(post_update, binary.as_deref())),
+                installed_version: version,
+            }),
+            UpgradeOutcome::AlreadyCurrent => Ok(InstallThenRefresh {
+                installed_version: None,
+                refresh: Some(post_update(None)?),
+            }),
+        },
         RefreshPolicy::AfterInstall => match outcome {
             UpgradeOutcome::Installed { binary, version } => {
                 // Point the retry at the installed binary when we know where
@@ -233,15 +233,7 @@ where
                     Some(path) => format!("`{} update`", path.display()),
                     None => "`tracedecay update`".to_string(),
                 };
-                let refresh = match post_update(binary.as_deref()) {
-                    Ok(refresh) => refresh,
-                    Err(error) => {
-                        eprintln!(
-                            "  \x1b[33mwarning:\x1b[0m post-upgrade refresh could not run: {error}"
-                        );
-                        PluginRefreshOutcome::Failed
-                    }
-                };
+                let refresh = refresh_after_install(post_update, binary.as_deref());
                 match refresh {
                     PluginRefreshOutcome::Complete => {}
                     PluginRefreshOutcome::PendingOperatorAction => eprintln!(
@@ -271,6 +263,18 @@ where
             }
         },
     }
+}
+
+/// Runs the refresh after an install, reporting a refresh that could not run
+/// as [`PluginRefreshOutcome::Failed`] so the installed version survives.
+fn refresh_after_install<P>(post_update: P, binary: Option<&Path>) -> PluginRefreshOutcome
+where
+    P: FnOnce(Option<&Path>) -> tracedecay_domain::errors::Result<PluginRefreshOutcome>,
+{
+    post_update(binary).unwrap_or_else(|error| {
+        eprintln!("  \x1b[33mwarning:\x1b[0m post-upgrade refresh could not run: {error}");
+        PluginRefreshOutcome::Failed
+    })
 }
 
 /// What an install-then-refresh step did.
@@ -1118,6 +1122,51 @@ mod tests {
                 installed_version: Some("9.9.9".to_string()),
                 refresh: Some(PluginRefreshOutcome::Failed),
             }
+        );
+    }
+
+    /// A post-update that cannot even start after the install must not erase
+    /// the installed version: the window would then restore the new daemon
+    /// while waiting for the replaced binary's identity, which never answers.
+    #[test]
+    fn update_policy_keeps_the_installed_version_when_the_refresh_cannot_run() {
+        let calls = RefCell::new(Vec::new());
+        let seen_binary = RefCell::new(None);
+
+        let outcome = run_install_then_refresh(
+            RefreshPolicy::Always,
+            record_upgrade(
+                &calls,
+                "upgrade",
+                Ok(UpgradeOutcome::Installed {
+                    binary: None,
+                    version: Some("1.0.0-beta.54+3a9af0b1ce".to_string()),
+                }),
+            ),
+            record_post_update(
+                &calls,
+                "post-update",
+                &seen_binary,
+                Err(config_err("failed to run post-update")),
+            ),
+        )
+        .expect("an installed binary is kept even when its refresh cannot run");
+
+        assert_eq!(
+            outcome,
+            InstallThenRefresh {
+                installed_version: Some("1.0.0-beta.54+3a9af0b1ce".to_string()),
+                refresh: Some(PluginRefreshOutcome::Failed),
+            }
+        );
+        assert_eq!(calls.into_inner(), vec!["upgrade", "post-update"]);
+        let failed = update_completion(outcome.refresh)
+            .expect_err("`update` still fails the refresh it could not run")
+            .to_string();
+        assert_eq!(
+            failed,
+            "config error: the TraceDecay binary is up to date, but the plugin and \
+             agent-integration refresh failed (see above); fix it and run `tracedecay update` again"
         );
     }
 
