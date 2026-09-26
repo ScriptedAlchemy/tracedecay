@@ -22,13 +22,22 @@ fn hub_source() -> String {
     format!("pub fn hub() {{\n{calls}}}\n\n{leaves}")
 }
 
-async fn callees_page(fixture: &GraphQueryFixture, node_id: &str, cursor: Option<&Value>) -> Value {
-    let mut arguments = json!({
-        "node_id": node_id,
-        "maximum_depth": 1,
-        "resolve_trait_dispatch": false,
-        "format": "json",
-    });
+async fn callees_page(
+    fixture: &GraphQueryFixture,
+    node_id: &str,
+    defaults: bool,
+    cursor: Option<&Value>,
+) -> Value {
+    let mut arguments = if defaults {
+        json!({"node_id": node_id, "format": "json"})
+    } else {
+        json!({
+            "node_id": node_id,
+            "maximum_depth": 1,
+            "resolve_trait_dispatch": false,
+            "format": "json",
+        })
+    };
     if let Some(cursor) = cursor {
         arguments["meta"] = json!({
             "projection": "evidence",
@@ -77,7 +86,7 @@ async fn a_callees_page_reads_its_own_rows_not_every_relation() {
     let target: Value = serde_json::from_str(extract_text(&target.value)).unwrap();
     let node_id = target[0]["node_id"].as_str().expect("node id").to_owned();
 
-    let first = callees_page(&fixture, &node_id, None).await;
+    let first = callees_page(&fixture, &node_id, false, None).await;
     let payload = &first["outcome"]["value"]["payload"];
     assert_eq!(
         (
@@ -92,7 +101,7 @@ async fn a_callees_page_reads_its_own_rows_not_every_relation() {
     // each call's target) that decode no entity.
     assert_eq!(page_cost(&first), (11, 2, 210), "{first:#}");
 
-    let second = callees_page(&fixture, &node_id, Some(&payload["next_cursor"])).await;
+    let second = callees_page(&fixture, &node_id, false, Some(&payload["next_cursor"])).await;
     assert_eq!(
         second["outcome"]["value"]["payload"]["items"]
             .as_array()
@@ -101,5 +110,47 @@ async fn a_callees_page_reads_its_own_rows_not_every_relation() {
         "{second:#}"
     );
     assert_eq!(page_cost(&second), (11, 2, 210), "{second:#}");
+    shutdown_graph_fixture(fixture).await;
+}
+
+/// With the MCP defaults (depth 3, trait dispatch on) a page still reads in
+/// proportion to its own rows: the trait-dispatch check resolves containers
+/// from relation keys rather than reading every callee.
+#[tokio::test]
+async fn a_default_callees_page_resolves_dispatch_without_reading_every_callee() {
+    let fixture = graph_query_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(project.join("src/lib.rs"), hub_source()).unwrap();
+    })
+    .await;
+    let target = call_production_tool(
+        &fixture,
+        "tracedecay_by_qualified_name",
+        json!({"qualified_name": "src/lib.rs::hub", "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .expect("exact function");
+    let target: Value = serde_json::from_str(extract_text(&target.value)).unwrap();
+    let node_id = target[0]["node_id"].as_str().expect("node id").to_owned();
+
+    let first = callees_page(&fixture, &node_id, true, None).await;
+    let payload = &first["outcome"]["value"]["payload"];
+    assert_eq!(
+        (
+            payload["total"].as_u64(),
+            payload["items"].as_array().map(Vec::len)
+        ),
+        (Some(105), Some(10)),
+        "{first:#}"
+    );
+    // Eleven reads, as with dispatch off: the dispatch check finds every
+    // callee's container in one batched step (the 105 incoming calls, none a
+    // `Contains`), so no callee is read. Five fan-outs: the two walk hops, the
+    // empty second level, and the two container hops.
+    assert_eq!(page_cost(&first), (11, 5, 315), "{first:#}");
+    let second = callees_page(&fixture, &node_id, true, Some(&payload["next_cursor"])).await;
+    assert_eq!(page_cost(&second), (11, 5, 315), "{second:#}");
     shutdown_graph_fixture(fixture).await;
 }

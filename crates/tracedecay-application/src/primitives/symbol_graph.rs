@@ -5,7 +5,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use tracedecay_code_index::graph_projection::{
-    CodeGraphInteractiveReader, CodeGraphSymbolBindingV1, CodeGraphSymbolSummaryV1,
+    CodeGraphInteractiveReader, CodeGraphReadCostMeter, CodeGraphSymbolBindingV1,
+    CodeGraphSymbolSummaryV1,
 };
 use tracedecay_code_index::lineage::LineageSymbolRecordV1;
 use tracedecay_contracts::retrieval::{
@@ -191,7 +192,7 @@ where
                     &request.meta.page,
                     "search",
                     &claim,
-                    graph.freshness,
+                    &graph,
                     records,
                     Vec::new(),
                     None,
@@ -262,7 +263,7 @@ where
                     &request.meta.page,
                     "exact",
                     &claim,
-                    graph.freshness,
+                    &graph,
                     records,
                     Vec::new(),
                     None,
@@ -325,7 +326,7 @@ where
                     &request.meta.page,
                     "signature",
                     &claim,
-                    graph.freshness,
+                    &graph,
                     records,
                     Vec::new(),
                     None,
@@ -414,7 +415,7 @@ where
                     &request.meta.page,
                     "implementations",
                     &claim,
-                    graph.freshness,
+                    &graph,
                     records,
                     Vec::new(),
                     None,
@@ -468,7 +469,7 @@ where
                             &request.meta.page,
                             "hierarchy",
                             &claim,
-                            graph.freshness,
+                            &graph,
                             Vec::new(),
                             Vec::new(),
                             None,
@@ -533,7 +534,7 @@ where
                     &request.meta.page,
                     "hierarchy",
                     &claim,
-                    graph.freshness,
+                    &graph,
                     records,
                     Vec::new(),
                     None,
@@ -591,7 +592,7 @@ where
                     &request.meta.page,
                     "callers",
                     &claim,
-                    graph.freshness,
+                    &graph,
                     records,
                     gaps,
                     None,
@@ -689,7 +690,7 @@ where
                     &request.meta.page,
                     "callees",
                     &claim,
-                    graph.freshness,
+                    &graph,
                     records,
                     Vec::new(),
                     None,
@@ -748,7 +749,7 @@ where
                     &request.meta.page,
                     "impact",
                     &claim,
-                    graph.freshness,
+                    &graph,
                     records,
                     Vec::new(),
                     Some(edge_count),
@@ -761,7 +762,9 @@ where
 }
 
 struct OpenSymbolGraph {
+    /// Counts every store read on [`Self::cost`].
     reader: CodeGraphInteractiveReader,
+    cost: CodeGraphReadCostMeter,
     cancellation: Arc<dyn GraphCancellation>,
     freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
 }
@@ -781,15 +784,18 @@ async fn open_graph(
         .await
         .map_err(|_| ())?;
     let freshness = verified.freshness();
+    let cost = CodeGraphReadCostMeter::start();
     let reader = verified
         .reader_with_cancellation(
             context.request,
             context.observed_at,
             Arc::clone(&cancellation),
         )
-        .map_err(|_| ())?;
+        .map_err(|_| ())?
+        .metered(&cost);
     Ok(OpenSymbolGraph {
         reader,
+        cost,
         cancellation,
         freshness,
     })
@@ -1137,17 +1143,19 @@ async fn with_implementation_bodies(
     context: SymbolGraphPortContext<'_>,
     outcome: SymbolGraphPortOutcome<SymbolRelationRecord>,
 ) -> SymbolGraphPortOutcome<ImplementationRecord> {
-    let (page, partial, finished_at, budget) = match outcome {
+    let (page, partial, finished_at, budget, cost) = match outcome {
         SymbolGraphPortOutcome::Completed {
             page,
             finished_at,
             budget,
-        } => (page, false, finished_at, budget),
+            cost,
+        } => (page, false, finished_at, budget, cost),
         SymbolGraphPortOutcome::Partial {
             page,
             finished_at,
             budget,
-        } => (page, true, finished_at, budget),
+            cost,
+        } => (page, true, finished_at, budget, cost),
         SymbolGraphPortOutcome::Failed {
             failure,
             finished_at,
@@ -1204,12 +1212,14 @@ async fn with_implementation_bodies(
             page,
             finished_at,
             budget,
+            cost,
         }
     } else {
         SymbolGraphPortOutcome::Completed {
             page,
             finished_at,
             budget,
+            cost,
         }
     }
 }
@@ -1265,12 +1275,22 @@ async fn complete_or_failed<T: Send>(
     request: &PageRequest,
     lane: &str,
     claim: &SymbolGraphPageClaim,
-    freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
+    graph: &OpenSymbolGraph,
     items: Vec<T>,
     gaps: Vec<PrimitiveSupportGap>,
     related_edge_count: Option<u64>,
 ) -> SymbolGraphPortOutcome<T> {
-    let mut page = match paginate(cursors, context, request, lane, claim, freshness, items).await {
+    let mut page = match paginate(
+        cursors,
+        context,
+        request,
+        lane,
+        claim,
+        graph.freshness,
+        items,
+    )
+    .await
+    {
         Ok(page) => page,
         Err(failure) => {
             return SymbolGraphPortOutcome::Failed {
@@ -1282,17 +1302,20 @@ async fn complete_or_failed<T: Send>(
     };
     page.related_edge_count = related_edge_count;
     page.support_gaps = gaps;
+    let cost = Some(graph.cost.receipt());
     if page.support_gaps.is_empty() {
         SymbolGraphPortOutcome::Completed {
             page,
             finished_at: context.observed_at,
             budget: OperationBudgetUsage::default(),
+            cost,
         }
     } else {
         SymbolGraphPortOutcome::Partial {
             page,
             finished_at: context.observed_at,
             budget: OperationBudgetUsage::default(),
+            cost,
         }
     }
 }

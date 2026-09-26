@@ -10,7 +10,7 @@ use crate::error::ApplicationContractError;
 use crate::handlers::ApplicationOperation;
 use crate::result::{OpaqueCursor, OperationBudgetUsage};
 
-use super::RetrievalRequestMeta;
+use super::{CodeQueryRow, RetrievalRequestMeta};
 
 pub const MAX_SYMBOL_GRAPH_DEPTH: u32 = 10;
 pub const MAX_SYMBOL_GRAPH_QUERY_BYTES: usize = 4_096;
@@ -497,11 +497,14 @@ pub enum SymbolGraphPortOutcome<T> {
         page: SymbolGraphPage<T>,
         finished_at: UtcMicros,
         budget: OperationBudgetUsage,
+        /// What the read cost its graph lease.
+        cost: Option<crate::RequestCostReceiptV1>,
     },
     Partial {
         page: SymbolGraphPage<T>,
         finished_at: UtcMicros,
         budget: OperationBudgetUsage,
+        cost: Option<crate::RequestCostReceiptV1>,
     },
     Failed {
         failure: PrimitiveFailure,
@@ -570,4 +573,22 @@ pub trait SymbolGraphPrimitivePort {
         context: SymbolGraphPortContext<'a>,
         request: &'a GraphImpactPrimitiveRequest,
     ) -> SymbolGraphPortFuture<'a, SymbolPrimitiveRecord>;
+}
+
+impl CodeQueryRow for SymbolPrimitiveRecord {
+    fn source_path(&self) -> Option<&str> {
+        Some(&self.symbol().file)
+    }
+}
+
+impl CodeQueryRow for SymbolRelationRecord {
+    fn source_path(&self) -> Option<&str> {
+        Some(&self.symbol().file)
+    }
+}
+
+impl CodeQueryRow for TypeHierarchyRecord {
+    fn source_path(&self) -> Option<&str> {
+        Some(&self.symbol().file)
+    }
 }
