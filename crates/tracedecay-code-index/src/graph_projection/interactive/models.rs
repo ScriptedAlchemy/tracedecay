@@ -2,12 +2,14 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Serialize, Serializer};
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, FileOccurrenceId, RelationEdgeKindV1, SanitizedCodeFileV1,
     SymbolOccurrenceId,
 };
+use tracedecay_graph_db::GraphEntityId;
 
-use super::super::CodeGraphSymbolBindingV1;
+use super::super::{CodeGraphProjectionError, CodeGraphSymbolBindingV1, symbol_entity_id};
 use crate::chunks::{CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1};
 use crate::lineage::LineageSymbolRecordV1;
 
@@ -20,6 +22,47 @@ pub struct CodeGraphSymbolSummaryV1 {
     pub occurrence: SymbolOccurrenceId,
     pub binding: Option<CodeGraphSymbolBindingV1>,
     pub metadata: Option<LineageSymbolRecordV1>,
+}
+
+/// A symbol's identity in the graph, as a relation key names it before any
+/// read decodes the symbol.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct CodeGraphSymbolRefV1(pub(in crate::graph_projection) GraphEntityId);
+
+impl CodeGraphSymbolRefV1 {
+    pub fn for_occurrence(
+        occurrence: &SymbolOccurrenceId,
+    ) -> Result<Self, CodeGraphProjectionError> {
+        occurrence
+            .validate()
+            .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
+        symbol_entity_id(occurrence).map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl Serialize for CodeGraphSymbolRefV1 {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+/// One relation a key walk reached: the far symbol and the edge's kind.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CodeGraphRelationKeyV1 {
+    pub neighbor: CodeGraphSymbolRefV1,
+    pub kind: RelationEdgeKindV1,
+}
+
+/// Relation keys per seed of one walk step; `truncated` when the step's edge
+/// fan-out reached its limit, so relations past it were not read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CodeGraphRelationKeysV1 {
+    pub per_seed: Vec<Vec<CodeGraphRelationKeyV1>>,
+    pub truncated: bool,
 }
 
 /// One semantic edge incident to a requested seed, with the far endpoint

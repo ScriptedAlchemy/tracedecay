@@ -27,9 +27,9 @@ use super::schema::{
 };
 use super::{
     CodeGraphProjectionError, CodeGraphSymbolBindingV1, EDGE_LABEL, EDGE_RECORD_PROPERTY,
-    FILE_SYMBOL_EDGE_KIND, SOURCE_EDGE_KIND, SymbolRecordV1, TARGET_EDGE_KIND,
+    FILE_SYMBOL_EDGE_KIND, SymbolRecordV1, TARGET_EDGE_KIND,
     build_code_graph_manifest_inputs_checked, compare_edges, current_generation_entity,
-    symbol_entity, symbol_entity_id, validate_edge,
+    source_edge_kind, symbol_entity, symbol_entity_id, validate_edge,
 };
 
 #[hotpath::measure(label = "code_index.graph.build_manifest")]
@@ -526,7 +526,7 @@ fn edge_artifacts(
         GraphRelationId::new(stable_identity("source", identity.as_str()))?,
         GraphEntityRef::new(projection.clone(), from.clone()),
         GraphEntityRef::new(projection.clone(), identity.clone()),
-        GraphRelationKind::new(SOURCE_EDGE_KIND)?,
+        GraphRelationKind::new(source_edge_kind(edge.kind))?,
         BTreeMap::new(),
     )?;
     let target = GraphGenerationRelation::new(

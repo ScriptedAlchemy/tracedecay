@@ -39,8 +39,9 @@ pub use self::interactive::{
     CodeGraphCatalogReleaseV1, CodeGraphCensusV1, CodeGraphDegreeRankingV1,
     CodeGraphEdgeKindCountsV1, CodeGraphFileSymbolCountV1, CodeGraphImpactBatchV1,
     CodeGraphImpactedSymbolV1, CodeGraphInteractiveReader, CodeGraphPathSearchV1,
-    CodeGraphRankedSymbolV1, CodeGraphReadCostMeter, CodeGraphSemanticEdgeV1,
-    CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1, CodeGraphSymbolPredicate,
+    CodeGraphRankedSymbolV1, CodeGraphReadCostMeter, CodeGraphRelationKeyV1,
+    CodeGraphRelationKeysV1, CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1,
+    CodeGraphSymbolPageV1, CodeGraphSymbolPredicate, CodeGraphSymbolRefV1,
     CodeGraphSymbolSearchPageV1, CodeGraphSymbolSummaryV1,
 };
 use self::schema::{
@@ -60,7 +61,6 @@ const PROJECTION_NODE_COUNT_PROPERTY: &str = "projection-node-count";
 const EDGE_RECORD_PROPERTY: &str = "edge-record";
 const EDGE_LABEL: &str = "CodeRelationEvidence";
 const FILE_SYMBOL_EDGE_KIND: &str = "CodeFileContainsSymbol";
-const SOURCE_EDGE_KIND: &str = "CodeRelationSource";
 const TARGET_EDGE_KIND: &str = "CodeRelationTarget";
 /// Names the shape of the rows this projector emits for one sealed code
 /// generation; the graph generation id is derived from it, so a revision
@@ -70,8 +70,70 @@ const TARGET_EDGE_KIND: &str = "CodeRelationTarget";
 /// and stores record payloads as JSON strings instead of byte properties.
 /// v7 carries unresolved receiver-call limitations on each source symbol. v8
 /// widens those limitations to bare TypeScript calls whose import the seal
-/// could not bind to project code.
-pub const CODE_GRAPH_PROJECTOR_REVISION: &str = "code-graph-projector.v8";
+/// could not bind to project code. v9 names each source relation for its edge
+/// kind, so adjacency filters kinds without decoding the edge.
+pub const CODE_GRAPH_PROJECTOR_REVISION: &str = "code-graph-projector.v9";
+
+/// Every semantic edge kind, at its [`relation_edge_kind_index`].
+const RELATION_EDGE_KINDS: [RelationEdgeKindV1; 9] = [
+    RelationEdgeKindV1::Calls,
+    RelationEdgeKindV1::Uses,
+    RelationEdgeKindV1::TypeOf,
+    RelationEdgeKindV1::Contains,
+    RelationEdgeKindV1::Implements,
+    RelationEdgeKindV1::Extends,
+    RelationEdgeKindV1::Annotates,
+    RelationEdgeKindV1::Returns,
+    RelationEdgeKindV1::Receives,
+];
+
+/// Adding an edge kind fails this exhaustive match until the kind is listed
+/// in [`RELATION_EDGE_KINDS`] at the index given here.
+const fn relation_edge_kind_index(kind: RelationEdgeKindV1) -> usize {
+    match kind {
+        RelationEdgeKindV1::Calls => 0,
+        RelationEdgeKindV1::Uses => 1,
+        RelationEdgeKindV1::TypeOf => 2,
+        RelationEdgeKindV1::Contains => 3,
+        RelationEdgeKindV1::Implements => 4,
+        RelationEdgeKindV1::Extends => 5,
+        RelationEdgeKindV1::Annotates => 6,
+        RelationEdgeKindV1::Returns => 7,
+        RelationEdgeKindV1::Receives => 8,
+    }
+}
+
+const _: () = {
+    let mut index = 0;
+    while index < RELATION_EDGE_KINDS.len() {
+        assert!(relation_edge_kind_index(RELATION_EDGE_KINDS[index]) == index);
+        index += 1;
+    }
+};
+
+/// The kind of the relation from an edge's source symbol to its edge entity:
+/// one per edge kind, so a fan-out names the kinds it admits.
+fn source_edge_kind(kind: RelationEdgeKindV1) -> &'static str {
+    match kind {
+        RelationEdgeKindV1::Calls => "CodeRelationSource.calls",
+        RelationEdgeKindV1::Uses => "CodeRelationSource.uses",
+        RelationEdgeKindV1::TypeOf => "CodeRelationSource.type_of",
+        RelationEdgeKindV1::Contains => "CodeRelationSource.contains",
+        RelationEdgeKindV1::Implements => "CodeRelationSource.implements",
+        RelationEdgeKindV1::Extends => "CodeRelationSource.extends",
+        RelationEdgeKindV1::Annotates => "CodeRelationSource.annotates",
+        RelationEdgeKindV1::Returns => "CodeRelationSource.returns",
+        RelationEdgeKindV1::Receives => "CodeRelationSource.receives",
+    }
+}
+
+/// The edge kind a source relation kind names, or `None` for any other
+/// relation.
+fn source_edge_kind_edge(relation_kind: &str) -> Option<RelationEdgeKindV1> {
+    RELATION_EDGE_KINDS
+        .into_iter()
+        .find(|kind| source_edge_kind(*kind) == relation_kind)
+}
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum CodeGraphProjectionError {
@@ -1085,7 +1147,30 @@ fn load_symbol_record(
     occurrence: &SymbolOccurrenceId,
     cancellation: Arc<dyn GraphCancellation>,
 ) -> Result<Option<SymbolRecordV1>, CodeGraphProjectionError> {
-    let identity = symbol_entity_id(occurrence)?;
+    let record = load_symbol_entity_record(
+        snapshot,
+        projection,
+        &symbol_entity_id(occurrence)?,
+        cancellation,
+    )?;
+    if record
+        .as_ref()
+        .is_some_and(|record| record.occurrence != *occurrence)
+    {
+        return Err(CodeGraphProjectionError::Corrupt(
+            "code graph symbol identity does not match its payload".to_owned(),
+        ));
+    }
+    Ok(record)
+}
+
+/// Loads the symbol record stored under one symbol entity identity.
+fn load_symbol_entity_record(
+    snapshot: &VerifiedGraphSnapshot,
+    projection: &GraphProjectionIdentity,
+    identity: &GraphEntityId,
+    cancellation: Arc<dyn GraphCancellation>,
+) -> Result<Option<SymbolRecordV1>, CodeGraphProjectionError> {
     let reference = GraphEntityRef::new(projection.clone(), identity.clone());
     let Some(entity) = snapshot.entity(&reference, cancellation)? else {
         return Ok(None);
@@ -1097,7 +1182,7 @@ fn load_symbol_record(
     }
     let record: SymbolRecordV1 = deserialize_property(&entity, SYMBOL_RECORD_PROPERTY)?;
     validate_symbol_record(&record)?;
-    if record.occurrence != *occurrence || symbol_entity_id(&record.occurrence)? != identity {
+    if symbol_entity_id(&record.occurrence)? != *identity {
         return Err(CodeGraphProjectionError::Corrupt(
             "code graph symbol identity does not match its payload".to_owned(),
         ));

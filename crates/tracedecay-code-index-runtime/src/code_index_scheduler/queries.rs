@@ -4,18 +4,17 @@
 //! It selects one already-mounted worktree generation and translates the
 //! generic lane evidence into the typed application-operation records.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::AtomicU64;
-#[cfg(any(test, feature = "test-helpers"))]
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use serde::Serialize;
 
-use tracedecay_code_index::graph_projection::{CodeGraphInteractiveReader, CodeGraphReadCostMeter};
+use tracedecay_code_index::graph_projection::{
+    CodeGraphInteractiveReader, CodeGraphReadCostMeter, CodeGraphSymbolRefV1,
+};
 use tracedecay_contracts::retrieval::{
     CodeFacetDimension, CodeFacetRecord, CodeFacetRequest, CodeLexicalField, CodeNavigationRequest,
     CodeTimelineRecord, CodeTimelineRequest, SymbolPrimitiveRecord, SymbolRelationRecord,
@@ -183,11 +182,6 @@ fn is_unpinned_latest(generation: &CodeGenerationId) -> bool {
 }
 
 impl CodeIndexSchedulerRegistryV1 {
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub fn take_relation_symbol_hydrations(&self) -> u64 {
-        self.relation_symbol_hydrations.swap(0, Ordering::Relaxed)
-    }
-
     /// Compose real exact/lexical/graph lane outcomes only through the query
     /// profile and query/cursor key authority mounted for this exact admitted
     /// scope.
@@ -1324,7 +1318,7 @@ fn check_dispatch_control(
 /// claiming complete trait dispatch.
 fn visit_trait_dispatch_targets(
     reader: &CodeGraphInteractiveReader,
-    callee: &SymbolOccurrenceId,
+    callee: &CodeGraphSymbolRefV1,
     scope: &tracedecay_contracts::CodeQueryScope,
     budget: RetrievalBudget,
     control: &Arc<dyn RetrievalExecutionControl>,
@@ -1334,7 +1328,7 @@ fn visit_trait_dispatch_targets(
 ) -> Result<bool, DispatchExpansionStop> {
     check_dispatch_control(control.as_ref(), budget)?;
     let Some(callee_summary) = reader
-        .symbol_summary(
+        .symbol_summary_for(
             callee,
             graph_read_cancellation(Arc::clone(control), budget.deadline_micros),
         )
@@ -1351,7 +1345,7 @@ fn visit_trait_dispatch_targets(
     let relation_limit = MAX_RELATION_CANDIDATE_KEYS;
     check_dispatch_control(control.as_ref(), budget)?;
     let parent_batches = match reader.callers(
-        std::slice::from_ref(callee),
+        std::slice::from_ref(&callee_summary.occurrence),
         &[RelationEdgeKindV1::Contains],
         relation_limit,
         graph_read_cancellation(Arc::clone(control), budget.deadline_micros),
@@ -1463,22 +1457,24 @@ fn augment_callee_dispatch_keys(
     let mut seen = found
         .keys
         .iter()
-        .map(|key| key.occurrence.clone())
+        .map(|key| key.symbol.clone())
         .collect::<BTreeSet<_>>();
     let mut dispatch = Vec::new();
     for callee in &found.keys {
         let exhausted = visit_trait_dispatch_targets(
             reader,
-            &callee.occurrence,
+            &callee.symbol,
             scope,
             budget,
             control,
             |target| {
-                if seen.insert(target.occurrence.clone()) {
+                let symbol = CodeGraphSymbolRefV1::for_occurrence(&target.occurrence)
+                    .map_err(|_| DispatchExpansionStop::Unavailable)?;
+                if seen.insert(symbol.clone()) {
                     dispatch.push(RelationKeyV1 {
-                        occurrence: target.occurrence.clone(),
+                        symbol,
                         edge_kind: RelationEdgeKindV1::Calls,
-                        dispatch_from: Some(callee.occurrence.clone()),
+                        dispatch_from: Some(callee.symbol.clone()),
                         depth: callee.depth,
                     });
                 }
@@ -1493,7 +1489,7 @@ fn augment_callee_dispatch_keys(
     dispatch.sort_by(|left, right| {
         left.depth
             .cmp(&right.depth)
-            .then(left.occurrence.cmp(&right.occurrence))
+            .then(left.symbol.cmp(&right.symbol))
     });
     found.keys.append(&mut dispatch);
     Ok(())
@@ -2207,15 +2203,16 @@ fn finish_query_with_coverage_unmetered<T: serde::Serialize>(
     }
 }
 
-/// Compact BFS identity for a relation neighborhood.
+/// Compact BFS identity for a relation neighborhood: graph identities only,
+/// so enumerating keys reads no symbol and a page hydrates just its slice.
 ///
 /// `depth` is the emitted one-based depth (`parent_depth + 1`), matching the
 /// `SymbolRelationRecord::depth` the hydrating path used to store.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct RelationKeyV1 {
-    pub occurrence: SymbolOccurrenceId,
+    pub symbol: CodeGraphSymbolRefV1,
     pub edge_kind: RelationEdgeKindV1,
-    pub dispatch_from: Option<SymbolOccurrenceId>,
+    pub dispatch_from: Option<CodeGraphSymbolRefV1>,
     pub depth: u32,
 }
 
@@ -2235,12 +2232,10 @@ struct GraphRelationKeysV1 {
 /// identities only and rows hydrate per page, so `total` is the true relation
 /// count whenever the neighborhood fits under this ceiling.
 ///
-/// Enumeration costs about 60 µs per relation (Hotpath
-/// `query.graph.relation_keys`: 2.1 ms at 32 relations, 5.7 ms at 104, 60 ms
-/// at 1,000, 125 ms at 2,000; two `graph_db` entity reads per edge, the far
-/// symbol's only for the scope path) and is paid again on every page, so this
-/// ceiling keeps a page under one second while the request deadline
-/// (`TimedOut`) remains the bound on the rest.
+/// Enumeration reads relation rows only, two batched fan-outs per walk level
+/// and no entity, and is paid again on every page (a path-scoped walk also
+/// reads each neighbor for its path). This ceiling bounds that per-page walk
+/// while the request deadline (`TimedOut`) remains the bound on the rest.
 const MAX_RELATION_CANDIDATE_KEYS: usize = 10_000;
 
 fn graph_summary_symbol_record(
@@ -2268,71 +2263,75 @@ fn graph_relation_keys(
     cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
 ) -> Result<GraphRelationKeysV1, PreparedQueryErrorV1> {
     let cap = MAX_RELATION_CANDIDATE_KEYS;
-    let mut queue = VecDeque::from([(start.clone(), 0_u32)]);
+    let start = CodeGraphSymbolRefV1::for_occurrence(start)
+        .map_err(|_| PreparedQueryErrorV1::Unavailable)?;
     let mut visited = BTreeSet::from([start.clone()]);
+    let mut frontier = vec![start];
     let mut keys = Vec::new();
     let mut complete = true;
-    while let Some((current, depth)) = queue.pop_front() {
-        if depth >= maximum_depth {
-            continue;
-        }
+    let mut depth = 0_u32;
+    'walk: while !frontier.is_empty() && depth < maximum_depth {
         let remaining = cap.saturating_sub(keys.len());
         if remaining == 0 {
             complete = false;
             break;
         }
-        let limit = remaining.saturating_add(1);
-        let batches = if reverse {
-            reader.callers_truncated(
-                std::slice::from_ref(&current),
+        let step = reader
+            .relation_keys(
+                &frontier,
                 kinds,
-                limit,
+                reverse,
+                remaining.saturating_add(1),
                 Arc::clone(&cancellation),
             )
-        } else {
-            reader.callees_truncated(
-                std::slice::from_ref(&current),
-                kinds,
-                limit,
-                Arc::clone(&cancellation),
-            )
-        }
-        .map_err(|_| PreparedQueryErrorV1::Unavailable)?;
-        let edges = batches.into_iter().next().unwrap_or_default();
-        if edges.len() == limit {
+            .map_err(|_| PreparedQueryErrorV1::Unavailable)?;
+        if step.truncated {
             complete = false;
         }
-        for edge in edges.into_iter().take(remaining) {
-            let next = edge.neighbor.occurrence;
-            if !visited.insert(next.clone()) {
-                continue;
+        let mut next = Vec::new();
+        for (current, seed_keys) in frontier.iter().zip(step.per_seed) {
+            for key in seed_keys {
+                if !visited.insert(key.neighbor.clone()) {
+                    continue;
+                }
+                if keys.len() == cap {
+                    complete = false;
+                    break 'walk;
+                }
+                // ponytail: a path-scoped walk reads each neighbor to test its
+                // path, so its cost stays linear in the neighborhood; a
+                // catalog path lookup by graph identity is the upgrade.
+                if scope.path_prefix.is_some() {
+                    let path = reader
+                        .symbol_summary_for(&key.neighbor, Arc::clone(&cancellation))
+                        .map_err(|_| PreparedQueryErrorV1::Unavailable)?
+                        .and_then(|summary| summary.binding)
+                        .and_then(|binding| binding.logical_path)
+                        .ok_or(PreparedQueryErrorV1::Unavailable)?;
+                    if !path_is_in_code_query_scope(&path, scope) {
+                        continue;
+                    }
+                }
+                keys.push(RelationKeyV1 {
+                    symbol: key.neighbor.clone(),
+                    edge_kind: key.kind,
+                    dispatch_from: (key.kind == RelationEdgeKindV1::Implements)
+                        .then(|| current.clone()),
+                    depth: depth + 1,
+                });
+                next.push(key.neighbor);
             }
-            let path = edge
-                .neighbor
-                .binding
-                .as_ref()
-                .and_then(|binding| binding.logical_path.as_deref())
-                .ok_or(PreparedQueryErrorV1::Unavailable)?;
-            if !path_is_in_code_query_scope(path, scope) {
-                continue;
-            }
-            keys.push(RelationKeyV1 {
-                occurrence: next.clone(),
-                edge_kind: edge.edge.kind,
-                dispatch_from: (edge.edge.kind == RelationEdgeKindV1::Implements)
-                    .then(|| current.clone()),
-                depth: depth + 1,
-            });
-            queue.push_back((next, depth + 1));
         }
         if !complete {
             break;
         }
+        frontier = next;
+        depth += 1;
     }
     keys.sort_by(|left, right| {
         left.depth
             .cmp(&right.depth)
-            .then(left.occurrence.cmp(&right.occurrence))
+            .then(left.symbol.cmp(&right.symbol))
     });
     Ok(GraphRelationKeysV1 { keys, complete })
 }
@@ -2342,32 +2341,29 @@ fn hydrate_graph_relation_records(
     reader: &CodeGraphInteractiveReader,
     keys: &[RelationKeyV1],
     cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
-    hydrations: &AtomicU64,
 ) -> Result<Vec<SymbolRelationRecord>, PreparedQueryErrorV1> {
+    let summary = |symbol: &CodeGraphSymbolRefV1| {
+        reader
+            .symbol_summary_for(symbol, Arc::clone(&cancellation))
+            .map_err(|_| PreparedQueryErrorV1::Unavailable)?
+            .ok_or(PreparedQueryErrorV1::Unavailable)
+    };
     keys.iter()
         .map(|key| {
-            record_relation_symbol_hydration(hydrations);
-            let summary = reader
-                .symbol_summary(&key.occurrence, Arc::clone(&cancellation))
-                .map_err(|_| PreparedQueryErrorV1::Unavailable)?
-                .ok_or(PreparedQueryErrorV1::Unavailable)?;
+            let dispatch_from = key
+                .dispatch_from
+                .as_ref()
+                .map(|symbol| summary(symbol).map(|parent| parent.occurrence.as_str().to_owned()))
+                .transpose()?;
             Ok(SymbolRelationRecord {
-                symbol: graph_summary_symbol_record(summary)?,
+                symbol: graph_summary_symbol_record(summary(&key.symbol)?)?,
                 edge_kind: relation_edge_kind_name(key.edge_kind).to_owned(),
-                dispatch_via_trait: key.dispatch_from.is_some(),
-                dispatch_from: key
-                    .dispatch_from
-                    .as_ref()
-                    .map(|identity| identity.as_str().to_owned()),
+                dispatch_via_trait: dispatch_from.is_some(),
+                dispatch_from,
                 depth: Some(key.depth),
             })
         })
         .collect()
-}
-
-fn record_relation_symbol_hydration(_hydrations: &AtomicU64) {
-    #[cfg(any(test, feature = "test-helpers"))]
-    _hydrations.fetch_add(1, Ordering::Relaxed);
 }
 
 fn retrieval_failure_omission(reason: &RetrievalFailure) -> OmissionReason {
@@ -2833,14 +2829,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 "code_callees",
                 binding,
                 found.keys,
-                |slice| {
-                    hydrate_graph_relation_records(
-                        &prepared.reader,
-                        slice,
-                        cancellation,
-                        &self.relation_symbol_hydrations,
-                    )
-                },
+                |slice| hydrate_graph_relation_records(&prepared.reader, slice, cancellation),
                 &request.meta.page,
                 "callees",
                 found.complete,
@@ -3126,8 +3115,8 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 complete &= found.complete;
                 keys.extend(found.keys);
             }
-            keys.sort_by(|left, right| left.occurrence.cmp(&right.occurrence));
-            keys.dedup_by(|left, right| left.occurrence == right.occurrence);
+            keys.sort_by(|left, right| left.symbol.cmp(&right.symbol));
+            keys.dedup_by(|left, right| left.symbol == right.symbol);
             if keys.len() > cap {
                 keys.truncate(cap);
                 complete = false;
@@ -3138,14 +3127,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 "code_implementations",
                 binding,
                 keys,
-                |slice| {
-                    hydrate_graph_relation_records(
-                        &prepared.reader,
-                        slice,
-                        cancellation,
-                        &self.relation_symbol_hydrations,
-                    )
-                },
+                |slice| hydrate_graph_relation_records(&prepared.reader, slice, cancellation),
                 &request.meta.page,
                 "implementations",
                 complete,
@@ -3198,23 +3180,19 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 binding,
                 found.keys,
                 |slice| {
-                    hydrate_graph_relation_records(
-                        &prepared.reader,
-                        slice,
-                        cancellation,
-                        &self.relation_symbol_hydrations,
+                    hydrate_graph_relation_records(&prepared.reader, slice, cancellation).map(
+                        |relations| {
+                            relations
+                                .into_iter()
+                                .map(|relation| TypeHierarchyRecord {
+                                    parent_node_id: parent_node_id.clone(),
+                                    edge_kind: relation.edge_kind,
+                                    depth: relation.depth.unwrap_or(1),
+                                    symbol: relation.symbol,
+                                })
+                                .collect()
+                        },
                     )
-                    .map(|relations| {
-                        relations
-                            .into_iter()
-                            .map(|relation| TypeHierarchyRecord {
-                                parent_node_id: parent_node_id.clone(),
-                                edge_kind: relation.edge_kind,
-                                depth: relation.depth.unwrap_or(1),
-                                symbol: relation.symbol,
-                            })
-                            .collect()
-                    })
                 },
                 &request.meta.page,
                 "hierarchy entries",
@@ -3262,13 +3240,24 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 return relation_read_failure(&prepared, &graph_control, graph_budget);
             };
             let mut traversed = vec![start];
-            traversed.extend(
-                found
-                    .keys
-                    .iter()
-                    .filter(|key| key.depth < request.maximum_depth)
-                    .map(|key| key.occurrence.clone()),
-            );
+            for key in found
+                .keys
+                .iter()
+                .filter(|key| key.depth < request.maximum_depth)
+            {
+                match prepared
+                    .reader
+                    .symbol_summary_for(&key.symbol, Arc::clone(&cancellation))
+                {
+                    Ok(Some(summary)) => traversed.push(summary.occurrence),
+                    _ => {
+                        return unavailable_for_generation(
+                            query_finished_at(),
+                            prepared.generation().clone(),
+                        );
+                    }
+                }
+            }
             let unsupported = match prepared.reader.has_unresolved_callers(
                 &traversed,
                 request.scope.path_prefix.as_deref(),
@@ -3288,14 +3277,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 "code_callers",
                 binding,
                 found.keys,
-                |slice| {
-                    hydrate_graph_relation_records(
-                        &prepared.reader,
-                        slice,
-                        cancellation,
-                        &self.relation_symbol_hydrations,
-                    )
-                },
+                |slice| hydrate_graph_relation_records(&prepared.reader, slice, cancellation),
                 &request.meta.page,
                 "callers",
                 found.complete,
@@ -3373,18 +3355,14 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 binding,
                 found.keys,
                 |slice| {
-                    hydrate_graph_relation_records(
-                        &prepared.reader,
-                        slice,
-                        cancellation,
-                        &self.relation_symbol_hydrations,
+                    hydrate_graph_relation_records(&prepared.reader, slice, cancellation).map(
+                        |relations| {
+                            relations
+                                .into_iter()
+                                .map(|relation| relation.symbol)
+                                .collect()
+                        },
                     )
-                    .map(|relations| {
-                        relations
-                            .into_iter()
-                            .map(|relation| relation.symbol)
-                            .collect()
-                    })
                 },
                 &request.meta.page,
                 "symbols",
@@ -3734,14 +3712,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 "code_references",
                 binding,
                 found.keys,
-                |slice| {
-                    hydrate_graph_relation_records(
-                        &prepared.reader,
-                        slice,
-                        cancellation,
-                        &self.relation_symbol_hydrations,
-                    )
-                },
+                |slice| hydrate_graph_relation_records(&prepared.reader, slice, cancellation),
                 &request.meta.page,
                 "references",
                 found.complete,
@@ -3824,18 +3795,14 @@ fn navigation_symbol_query<'a>(
                 binding,
                 found.keys,
                 |slice| {
-                    hydrate_graph_relation_records(
-                        &prepared.reader,
-                        slice,
-                        cancellation,
-                        &registry.relation_symbol_hydrations,
+                    hydrate_graph_relation_records(&prepared.reader, slice, cancellation).map(
+                        |relations| {
+                            relations
+                                .into_iter()
+                                .map(|relation| relation.symbol)
+                                .collect()
+                        },
                     )
-                    .map(|relations| {
-                        relations
-                            .into_iter()
-                            .map(|relation| relation.symbol)
-                            .collect()
-                    })
                 },
                 &request.meta.page,
                 "symbols",
