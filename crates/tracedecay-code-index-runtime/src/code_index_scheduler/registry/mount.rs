@@ -924,6 +924,10 @@ impl CodeIndexSchedulerRegistryV1 {
                                 .write()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
                                 Some(retained_text);
+                            // A restored text owner is a serving change with
+                            // no publication: waiters subscribed before the
+                            // restore must wake now, not after the next pass.
+                            worker_serving_generation_changed.send_replace(());
                             worker_wake.notify_one();
                             continue;
                         }
@@ -1232,6 +1236,10 @@ impl CodeIndexSchedulerRegistryV1 {
                                 .write()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
                                 Some(published_text.clone());
+                            // The publication broadcast went out while this
+                            // slot was empty; the reopened owner must wake
+                            // waiters that probed it then.
+                            worker_serving_generation_changed.send_replace(());
                             Some(published_text)
                         }
                         Ok(Ok(Err(error))) => {

@@ -85,7 +85,9 @@ use crate::{
     },
 };
 
-use super::{DaemonCodeIndexPublicationStoreV1, ProfiledStdMutex, queries};
+use super::{
+    CodeIndexSchedulerErrorV1, DaemonCodeIndexPublicationStoreV1, ProfiledStdMutex, queries,
+};
 
 /// Page bounds for streaming one sealed generation into the durable lexical
 /// text artifact. One page is one bounded unit of background build progress.
@@ -916,6 +918,8 @@ pub struct DaemonCodeTextArtifactStoreV1 {
     /// Retained state other worktrees and generations hold. A build sheds it
     /// before refusing, so a stale decode never outranks a fresh index.
     resident_owners: Arc<ResidentOwnersV1>,
+    /// The owning scheduler's worker runtime; text serving fans out under it.
+    worker_runtime: super::reconcile::SchedulerWorkerRuntimeV1,
     project_id: ProjectId,
     worktree_id: WorktreeId,
 }
@@ -983,6 +987,7 @@ impl DaemonCodeTextArtifactStoreV1 {
         publication: &DaemonCodeIndexPublicationStoreV1,
         resident_memory: &Arc<ProcessResidentMemoryV1>,
         resident_owners: &Arc<ResidentOwnersV1>,
+        worker_runtime: &super::reconcile::SchedulerWorkerRuntimeV1,
         project_id: &ProjectId,
         worktree_id: &WorktreeId,
     ) -> Self {
@@ -991,6 +996,7 @@ impl DaemonCodeTextArtifactStoreV1 {
             publication: publication.clone(),
             resident_memory: Arc::clone(resident_memory),
             resident_owners: Arc::clone(resident_owners),
+            worker_runtime: worker_runtime.clone(),
             project_id: project_id.clone(),
             worktree_id: worktree_id.clone(),
         }
@@ -2337,6 +2343,20 @@ impl LatestCodeTextGenerationV1 {
         maximum_work: usize,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<bool, RetrievalPortError> {
+        let _workers = self
+            .text_artifact_store
+            .worker_runtime
+            .enter(&self.text_artifact_store.resident_memory)
+            .map_err(|error| match error {
+                CodeIndexSchedulerErrorV1::WorkerPlan(
+                    tracedecay_code_index::parallelism::CodeIndexWorkerPlanInstallErrorV1::Invalid(
+                        tracedecay_code_index::parallelism::CodeIndexWorkerPlanErrorV1::NoMemorySafeWorker {
+                            ..
+                        },
+                    ),
+                ) => RetrievalPortError::ResidentMemoryRefused(error.to_string()),
+                other => RetrievalPortError::AuthorityUnavailable(other.to_string()),
+            })?;
         let result = self.advance_text_serving_inner(maximum_work, control);
         if matches!(&result, Err(RetrievalPortError::Cancelled)) {
             #[cfg(feature = "hotpath")]
