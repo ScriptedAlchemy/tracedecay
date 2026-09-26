@@ -183,6 +183,97 @@ impl InteractiveCatalog {
         }
     }
 
+    /// Bytes the catalog's entries and their owned strings occupy. Map node
+    /// overhead is not counted.
+    pub(in crate::graph_projection) fn retained_bytes(&self) -> u64 {
+        use std::mem::size_of;
+        let symbol_bytes = |symbol: &CatalogSymbol| {
+            size_of::<SymbolOccurrenceId>()
+                .saturating_add(size_of::<CatalogSymbol>())
+                .saturating_add(symbol.binding.as_ref().map_or(0, |binding| {
+                    binding
+                        .file
+                        .as_str()
+                        .len()
+                        .saturating_add(binding.logical_path.as_ref().map_or(0, String::len))
+                }))
+                .saturating_add(symbol.metadata.as_ref().map_or(0, |metadata| {
+                    metadata
+                        .occurrence
+                        .as_str()
+                        .len()
+                        .saturating_add(metadata.qualified_name.len())
+                        .saturating_add(metadata.simple_name.len())
+                        .saturating_add(metadata.kind.len())
+                        .saturating_add(metadata.visibility.len())
+                        .saturating_add(metadata.signature.as_ref().map_or(0, String::len))
+                }))
+                .saturating_add(symbol.unresolved_calls.iter().fold(0, |bytes, call| {
+                    bytes
+                        .saturating_add(size_of::<CodeIndexUnresolvedReferenceV1>())
+                        .saturating_add(call.reference_name.len())
+                }))
+        };
+        let id_lists = |ids: &[SymbolOccurrenceId]| {
+            size_of::<Vec<SymbolOccurrenceId>>().saturating_add(ids.iter().fold(0, |bytes, id| {
+                bytes
+                    .saturating_add(size_of::<SymbolOccurrenceId>())
+                    .saturating_add(id.as_str().len())
+            }))
+        };
+        let named = |map: &BTreeMap<String, Vec<SymbolOccurrenceId>>| {
+            map.iter().fold(0_usize, |bytes, (name, ids)| {
+                bytes
+                    .saturating_add(size_of::<String>())
+                    .saturating_add(name.len())
+                    .saturating_add(id_lists(ids))
+            })
+        };
+        let bytes = self
+            .symbols
+            .iter()
+            .fold(0_usize, |bytes, (id, symbol)| {
+                bytes
+                    .saturating_add(id.as_str().len())
+                    .saturating_add(symbol_bytes(symbol))
+            })
+            .saturating_add(named(&self.by_qualified_name))
+            .saturating_add(named(&self.by_simple_name))
+            .saturating_add(named(&self.unresolved_call_sources))
+            .saturating_add(self.by_file.iter().fold(0, |bytes, (file, ids)| {
+                bytes
+                    .saturating_add(size_of::<FileOccurrenceId>())
+                    .saturating_add(file.as_str().len())
+                    .saturating_add(id_lists(ids))
+            }))
+            .saturating_add(self.by_logical_path.iter().fold(0, |bytes, (path, file)| {
+                bytes
+                    .saturating_add(size_of::<String>())
+                    .saturating_add(path.len())
+                    .saturating_add(size_of::<FileOccurrenceId>())
+                    .saturating_add(file.as_str().len())
+            }))
+            .saturating_add(self.files.iter().fold(0, |bytes, (id, file)| {
+                bytes
+                    .saturating_add(size_of::<FileOccurrenceId>())
+                    .saturating_add(id.as_str().len())
+                    .saturating_add(size_of::<SanitizedCodeFileV1>())
+                    .saturating_add(file.file_occurrence_id.as_str().len())
+                    .saturating_add(file.logical_path.len())
+                    .saturating_add(file.content_digest.as_str().len())
+            }))
+            .saturating_add(self.imports.iter().fold(0, |bytes, import| {
+                bytes
+                    .saturating_add(size_of::<CodeIndexImportEvidenceV1>())
+                    .saturating_add(import.logical_path.len())
+                    .saturating_add(import.file_occurrence_id.as_str().len())
+                    .saturating_add(import.module_specifier.len())
+                    .saturating_add(import.imported_name.as_ref().map_or(0, String::len))
+                    .saturating_add(import.local_name.as_ref().map_or(0, String::len))
+            }));
+        u64::try_from(bytes).unwrap_or(u64::MAX)
+    }
+
     /// Derives the generation-wide aggregates once every file and symbol,
     /// with its degrees, is recorded.
     pub(super) fn finalize(&mut self) {

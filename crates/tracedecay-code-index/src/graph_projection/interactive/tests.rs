@@ -21,8 +21,8 @@ use crate::chunks::CodeIndexUnresolvedReferenceV1;
 use crate::graph_projection::builder::ProductionCodeGraphInputs;
 use crate::graph_projection::schema::SYMBOL_LABEL;
 use crate::graph_projection::{
-    CODE_GRAPH_PROJECTOR_REVISION, CodeGraphProjectionError, CodeGraphProjectionStore,
-    CodeGraphSymbolSummaryV1, build_code_graph_manifest_inputs_checked,
+    CODE_GRAPH_PROJECTOR_REVISION, CodeGraphCatalogReleaseV1, CodeGraphProjectionError,
+    CodeGraphProjectionStore, CodeGraphSymbolSummaryV1, build_code_graph_manifest_inputs_checked,
     code_graph_projection_identity, current_generation_entity, has_label,
 };
 use crate::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
@@ -925,4 +925,41 @@ fn census_and_search_refuse_zero_sizes_and_cancellation() {
         )
         .expect_err("the containment scan must observe cancellation");
     assert_eq!(error, CodeGraphProjectionError::Cancelled);
+}
+
+#[test]
+fn a_released_catalog_gives_back_its_bytes_and_rebuilds_on_the_next_read() {
+    let store = store_for(production_manifest());
+    assert_eq!(store.interactive_catalog_bytes(), None, "nothing built yet");
+    let reader = reader(&store);
+    let before = occurrences(
+        &reader
+            .symbols_page(None, 10, request())
+            .expect("warm catalog")
+            .symbols,
+    );
+    let held = store.interactive_catalog_bytes();
+    assert_eq!(held, Some(4_066));
+
+    assert_eq!(
+        store.release_interactive_catalog(),
+        CodeGraphCatalogReleaseV1::Released {
+            bytes: held.expect("ready catalog")
+        }
+    );
+    assert_eq!(store.interactive_catalog_bytes(), None);
+    assert_eq!(
+        store.release_interactive_catalog(),
+        CodeGraphCatalogReleaseV1::NotReady
+    );
+
+    let after = occurrences(
+        &reader
+            .symbols_page(None, 10, request())
+            .expect("the next read rebuilds the catalog")
+            .symbols,
+    );
+    assert_eq!(after, before);
+    assert_eq!(store.interactive_catalog_scan_builds(), 2);
+    assert_eq!(store.interactive_catalog_bytes(), held);
 }
