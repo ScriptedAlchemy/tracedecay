@@ -13,7 +13,7 @@ use tracedecay_contracts::{
 use tracedecay_domain::{UtcMicros, canonical_sha256};
 use tracedecay_lcm::{
     LcmCompressionRequest, LcmCompressionResponse, LcmError, LcmGcConfig, LcmPreflightRequest,
-    LcmPreflightResponse, LcmStatus, LcmSummarizerMode,
+    LcmStatus, LcmSummarizerMode,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_session_memory::context::{
@@ -24,7 +24,7 @@ use tracedecay_session_memory::session::lcm::{
     LcmAuthorityFuture, LcmAuthorityInvocation, LcmAuthorityOperation, LcmAuthorityOutcome,
     LcmAuthorityPayload, LcmAuthorityPort, LcmAuthorityRequest, LcmAuthorityResponse,
     LcmAuthorityUnavailableReason, LcmCompactionCommand, LcmDoctorQuery, LcmStatusQuery,
-    LcmTranscriptIngestCommand, lcm_authority_operation_identity,
+    lcm_authority_operation_identity,
 };
 
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -41,7 +41,6 @@ use receipt::{terminal, terminal_failure, terminal_interruption, unavailable};
 type StoreFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, LcmError>> + Send + 'a>>;
 
 trait LcmDaemonStore: Send + Sync {
-    fn ingest(&self, request: LcmPreflightRequest) -> StoreFuture<'_, LcmPreflightResponse>;
     fn compact(&self, request: LcmCompressionRequest) -> StoreFuture<'_, LcmCompressionResponse>;
     fn status(&self, query: LcmStatusQuery) -> StoreFuture<'_, LcmStatus>;
     fn doctor(&self, query: LcmDoctorQuery) -> StoreFuture<'_, serde_json::Value>;
@@ -58,21 +57,6 @@ impl RegisteredLcmDaemonStore {
 }
 
 impl LcmDaemonStore for RegisteredLcmDaemonStore {
-    fn ingest(&self, request: LcmPreflightRequest) -> StoreFuture<'_, LcmPreflightResponse> {
-        let database = self.database.clone();
-        Box::pin(async move {
-            // Persist the host-completed turn through the canonical
-            // compression ingest route (session upsert + protected raw-message
-            // ingest). The no-op summarizer stops before any summary is
-            // minted, so ingest commits raw turn content and nothing else.
-            let turn = turn_ingest_compression_request(request.clone());
-            super::lcm_effects::DaemonLcmEffectService::new(database.clone(), None, None)
-                .compress(turn)
-                .await?;
-            database.lcm_preflight(request).await
-        })
-    }
-
     fn compact(&self, request: LcmCompressionRequest) -> StoreFuture<'_, LcmCompressionResponse> {
         let database = self.database.clone();
         Box::pin(async move {
@@ -114,26 +98,10 @@ impl LcmDaemonStore for RegisteredLcmDaemonStore {
 /// daemon's authoritative summarization route (native evidence or a provider
 /// auxiliary summarizer), never from caller-authored text.
 fn pressure_compression_request(preflight: LcmPreflightRequest) -> LcmCompressionRequest {
-    compression_request_from_preflight(preflight, Vec::new(), LcmSummarizerMode::HermesAuxiliary)
-}
-
-/// Durable ingest of a host-completed turn: the canonical compression route
-/// upserts the session and protected raw messages, and the no-op summarizer
-/// guarantees ingest never mints summary state.
-fn turn_ingest_compression_request(mut preflight: LcmPreflightRequest) -> LcmCompressionRequest {
-    let messages = std::mem::take(&mut preflight.messages);
-    compression_request_from_preflight(preflight, messages, LcmSummarizerMode::Noop)
-}
-
-fn compression_request_from_preflight(
-    preflight: LcmPreflightRequest,
-    messages: Vec<serde_json::Value>,
-    summarizer: LcmSummarizerMode,
-) -> LcmCompressionRequest {
     LcmCompressionRequest {
         provider: preflight.provider,
         session_id: preflight.session_id,
-        messages,
+        messages: Vec::new(),
         current_tokens: preflight.current_tokens,
         focus_topic: None,
         ignore_session_patterns: preflight.ignore_session_patterns,
@@ -151,7 +119,7 @@ fn compression_request_from_preflight(
         dynamic_leaf_chunk_max: preflight.dynamic_leaf_chunk_max,
         context_length: preflight.context_length,
         reserve_tokens_floor: preflight.reserve_tokens_floor,
-        summarizer,
+        summarizer: LcmSummarizerMode::HermesAuxiliary,
     }
 }
 
@@ -285,21 +253,12 @@ impl DaemonLcmAuthority {
         }
 
         match invocation.request {
-            LcmAuthorityRequest::Ingest(command) => {
-                self.execute_ingest(
-                    &invocation.context,
-                    &invocation.cancellation,
-                    started_at,
-                    command,
-                )
-                .await
-            }
             LcmAuthorityRequest::Compact(command) => {
                 self.execute_compaction(
                     &invocation.context,
                     &invocation.cancellation,
                     started_at,
-                    command,
+                    *command,
                 )
                 .await
             }
@@ -340,7 +299,7 @@ impl DaemonLcmAuthority {
             LcmAuthorityRequest::Doctor(_) => {
                 Some(tracedecay_contracts::RetainedSurfaceOperation::LcmDoctor)
             }
-            LcmAuthorityRequest::Ingest(_) | LcmAuthorityRequest::Compact(_) => None,
+            LcmAuthorityRequest::Compact(_) => None,
         };
         let retained_application_operation = retained_operation.and_then(|operation| {
             tracedecay_contracts::retained_surface_application_operation(operation).ok()
@@ -393,7 +352,7 @@ impl DaemonLcmAuthority {
                 self.execute_retained_doctor(context, cancellation, started_at, query)
                     .await
             }
-            LcmAuthorityRequest::Ingest(_) | LcmAuthorityRequest::Compact(_) => terminal(
+            LcmAuthorityRequest::Compact(_) => terminal(
                 context,
                 operation,
                 started_at,
@@ -459,106 +418,6 @@ impl DaemonLcmAuthority {
                 started_at,
                 RequestInterruption::Cancelled,
                 CancellationStage::DuringRead,
-                None,
-            ),
-        }
-    }
-
-    #[hotpath::measure(label = "daemon.lcm.ingest", future = true)]
-    async fn execute_ingest(
-        &self,
-        context: &RequestContext,
-        cancellation: &CancellationToken,
-        started_at: UtcMicros,
-        command: LcmTranscriptIngestCommand,
-    ) -> LcmAuthorityResponse {
-        let Some(store) = self.store.as_ref() else {
-            return unavailable(
-                context,
-                LcmAuthorityOperation::Ingest,
-                started_at,
-                LcmAuthorityUnavailableReason::StoreAuthorityUnavailable,
-            );
-        };
-        if command.protocol_revision != "hermes.turn-completed.v1"
-            || command.preflight.provider != "hermes"
-        {
-            return unavailable(
-                context,
-                LcmAuthorityOperation::Ingest,
-                started_at,
-                LcmAuthorityUnavailableReason::HostProtocolUnavailable,
-            );
-        }
-        if command.preflight.messages.is_empty() {
-            return unavailable(
-                context,
-                LcmAuthorityOperation::Ingest,
-                started_at,
-                LcmAuthorityUnavailableReason::HostPayloadUnavailable,
-            );
-        }
-        let Ok(expected_digest) = canonical_sha256(&(
-            &command.preflight.provider,
-            &command.preflight.session_id,
-            &command.preflight.messages,
-        )) else {
-            return terminal_failure(
-                context,
-                LcmAuthorityOperation::Ingest,
-                started_at,
-                "Hermes turn payload could not be encoded",
-            );
-        };
-        if expected_digest != command.event_digest {
-            return unavailable(
-                context,
-                LcmAuthorityOperation::Ingest,
-                started_at,
-                LcmAuthorityUnavailableReason::HostProtocolUnavailable,
-            );
-        }
-        let event_digest = command.event_digest;
-        let result = run_application_request_interruptible(
-            context,
-            cancellation,
-            store.ingest(command.preflight),
-            || {},
-        )
-        .await;
-        match result {
-            Ok(Ok(response)) => {
-                let Ok(state) = canonical_sha256(&(&event_digest, &response)) else {
-                    return terminal_failure(
-                        context,
-                        LcmAuthorityOperation::Ingest,
-                        started_at,
-                        "Hermes turn ingest receipt could not be encoded",
-                    );
-                };
-                terminal(
-                    context,
-                    LcmAuthorityOperation::Ingest,
-                    started_at,
-                    LcmAuthorityOutcome::Ready,
-                    OperationTermination::Completed,
-                    Some(state),
-                    Some(LcmAuthorityPayload::Ingest(response)),
-                    None,
-                )
-            }
-            Ok(Err(_)) => terminal_failure(
-                context,
-                LcmAuthorityOperation::Ingest,
-                started_at,
-                "Hermes turn ingest failed",
-            ),
-            Err(interruption) => terminal_interruption(
-                context,
-                LcmAuthorityOperation::Ingest,
-                started_at,
-                interruption,
-                CancellationStage::EffectInFlight,
                 None,
             ),
         }

@@ -8,8 +8,8 @@ use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use tracedecay_project::project::TraceDecay;
 use tracedecay_session_memory::session::lcm::{
-    LcmAuthorityOutcome, LcmAuthorityPayload, LcmAuthorityRequest, LcmAuthorityUnavailableReason,
-    LcmCompactionCommand, LcmCompressionEvidence, LcmHostProtocol,
+    LcmAuthorityOutcome, LcmAuthorityPayload, LcmAuthorityRequest, LcmCompactionCommand,
+    LcmCompressionEvidence, LcmHostProtocol,
 };
 use tracedecay_sessions::admission::{
     HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus,
@@ -454,26 +454,13 @@ fn compaction_response_json(
     json!({
         "action": action,
         "status": "unavailable",
-        "reason": compaction_unavailable_reason(&response.outcome),
+        "reason": "lcm_daemon_authority_rejected",
         "authority_outcome": response.outcome,
         "committed_state": response.receipt.committed_state,
         "summary_nodes_created": 0,
         "summary_node_ids": [],
         "messages_upserted": 0,
     })
-}
-
-fn compaction_unavailable_reason(outcome: &LcmAuthorityOutcome) -> &'static str {
-    if matches!(
-        outcome,
-        LcmAuthorityOutcome::Unavailable {
-            reason: LcmAuthorityUnavailableReason::HostPayloadUnavailable
-        }
-    ) {
-        "host_payload_unavailable"
-    } else {
-        "lcm_daemon_authority_rejected"
-    }
 }
 
 fn cursor_compact_skipped(reason: impl Into<String>) -> Value {
@@ -509,7 +496,7 @@ fn pressure_only_command(
     fresh_tail_count: Option<usize>,
     protocol: LcmHostProtocol,
 ) -> LcmAuthorityRequest {
-    LcmAuthorityRequest::Compact(LcmCompactionCommand {
+    LcmAuthorityRequest::Compact(Box::new(LcmCompactionCommand {
         preflight: tracedecay_lcm::LcmPreflightRequest {
             provider: provider.to_owned(),
             session_id: session_id.to_string(),
@@ -530,7 +517,7 @@ fn pressure_only_command(
             reserve_tokens_floor: None,
         },
         evidence: LcmCompressionEvidence::PressureOnly { protocol },
-    })
+    }))
 }
 
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.accounting")]
@@ -671,8 +658,6 @@ pub async fn ingest_transcript_with_cancellation(
         snapshot: snapshot_capture,
         claude_observation: claude_observation_stats,
         source_deferred,
-        lcm_receipt,
-        route_admission,
         observations_committed: route_observations_committed,
         exact_duplicate: route_exact_duplicate,
         admission_owns_commit,
@@ -704,19 +689,12 @@ pub async fn ingest_transcript_with_cancellation(
         || snapshot_capture
             .as_ref()
             .is_some_and(|capture| capture.deferred_by_byte_cap);
-    // A route whose own authority refused the pass reports that verdict here;
-    // otherwise the replay completes against the admission that opened it.
-    let route_reason = route_admission
-        .as_ref()
-        .and_then(|admission| admission.reason_code);
-    let admission = route_admission.unwrap_or_else(|| {
-        complete_ingest_admission(
-            admission,
-            authority_changed,
-            exact_duplicate,
-            deferred_by_byte_cap,
-        )
-    });
+    let admission = complete_ingest_admission(
+        admission,
+        authority_changed,
+        exact_duplicate,
+        deferred_by_byte_cap,
+    );
     let mut output = json!({
         "action": "ingest_transcript",
         "provider": provider,
@@ -726,13 +704,6 @@ pub async fn ingest_transcript_with_cancellation(
         "admission": admission,
         "messages_upserted": messages_upserted,
     });
-    if let Some(reason) = route_reason {
-        output["reason"] = json!(reason);
-    }
-    if let Some(receipt) = lcm_receipt {
-        output["authority_outcome"] = json!(receipt.outcome);
-        output["committed_state"] = json!(receipt.receipt.committed_state);
-    }
     // Project-scope ingest is the production moment new post-hint session
     // activity becomes durable, so settle emitted hook hints into
     // `hint_outcome` analytics events here. Best-effort: unavailable or

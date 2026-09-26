@@ -350,10 +350,7 @@ impl McpServer {
                 )
                 .with_profile_identity(self.profile_identity.clone())
                 .with_background_cpu(self.background_cpu.clone())
-                .with_lcm_authorities(
-                    self.project_lcm_authority.as_deref(),
-                    self.user_lcm_authority.as_deref(),
-                ),
+                .with_project_lcm_authority(self.project_lcm_authority.as_deref()),
             },
         );
         // A composed daemon serves one transcript home. The refresh schedulers

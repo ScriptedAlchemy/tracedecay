@@ -15,9 +15,7 @@ use tracedecay_contracts::{
 use tracedecay_domain::ManifestDigest;
 
 use crate::session::SessionRequestBinding;
-use tracedecay_lcm::{
-    LcmCompressionResponse, LcmPreflightRequest, LcmPreflightResponse, LcmStatus,
-};
+use tracedecay_lcm::{LcmCompressionResponse, LcmPreflightRequest, LcmStatus};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -30,7 +28,6 @@ pub const LCM_DAEMON_QUERY_USE_CASE: &str = "use-case.application.lcm-daemon-que
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LcmAuthorityOperation {
-    Ingest,
     Compact,
     Status,
     Doctor,
@@ -100,20 +97,6 @@ pub struct LcmCompactionCommand {
     pub evidence: LcmCompressionEvidence,
 }
 
-/// One authentic completed Hermes turn admitted by the host callback bridge.
-///
-/// The daemon recomputes `event_digest` from the exact provider/session/message
-/// payload before touching storage. This is intentionally distinct from
-/// compaction: a completed turn is durable transcript content, not pressure or
-/// a caller-authored summary.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LcmTranscriptIngestCommand {
-    pub preflight: LcmPreflightRequest,
-    pub protocol_revision: String,
-    pub event_digest: ManifestDigest,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LcmStatusQuery {
@@ -127,8 +110,7 @@ pub struct LcmDoctorQuery;
 
 #[derive(Clone, Debug)]
 pub enum LcmAuthorityRequest {
-    Ingest(LcmTranscriptIngestCommand),
-    Compact(LcmCompactionCommand),
+    Compact(Box<LcmCompactionCommand>),
     Status(LcmStatusQuery),
     Doctor(LcmDoctorQuery),
 }
@@ -152,7 +134,6 @@ impl LcmAuthorityRequest {
     #[hotpath::skip]
     pub const fn operation(&self) -> LcmAuthorityOperation {
         match self {
-            Self::Ingest(_) => LcmAuthorityOperation::Ingest,
             Self::Compact(_) => LcmAuthorityOperation::Compact,
             Self::Status(_) => LcmAuthorityOperation::Status,
             Self::Doctor(_) => LcmAuthorityOperation::Doctor,
@@ -161,10 +142,6 @@ impl LcmAuthorityRequest {
 
     pub fn authority_target(&self) -> LcmAuthorityTarget {
         match self {
-            Self::Ingest(command) => LcmAuthorityTarget::Provider {
-                provider: command.preflight.provider.clone(),
-                session_id: Some(command.preflight.session_id.clone()),
-            },
             Self::Compact(command) => LcmAuthorityTarget::Provider {
                 provider: command.preflight.provider.clone(),
                 session_id: Some(command.preflight.session_id.clone()),
@@ -182,7 +159,7 @@ pub fn lcm_authority_operation_identity(
     operation: LcmAuthorityOperation,
 ) -> Result<(CapabilityId, UseCaseId), tracedecay_contracts::ApplicationContractError> {
     let (capability, use_case) = match operation {
-        LcmAuthorityOperation::Ingest | LcmAuthorityOperation::Compact => {
+        LcmAuthorityOperation::Compact => {
             (LCM_DAEMON_COMMAND_CAPABILITY, LCM_DAEMON_COMMAND_USE_CASE)
         }
         LcmAuthorityOperation::Status | LcmAuthorityOperation::Doctor => {
@@ -203,7 +180,6 @@ pub struct LcmAuthorityInvocation {
 
 #[derive(Clone, Debug)]
 pub enum LcmAuthorityPayload {
-    Ingest(LcmPreflightResponse),
     Compaction(LcmCompressionResponse),
     Status(LcmStatus),
     Doctor(serde_json::Value),
@@ -214,7 +190,6 @@ pub enum LcmAuthorityPayload {
 pub enum LcmAuthorityUnavailableReason {
     StoreAuthorityUnavailable,
     HostProtocolUnavailable,
-    HostPayloadUnavailable,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

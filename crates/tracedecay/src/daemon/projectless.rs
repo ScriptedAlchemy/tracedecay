@@ -514,16 +514,15 @@ async fn projectless_hook_runtime_response(
                 return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
             }
         };
-    let (user_session_db, profile_lcm) = match boxed_projectless_phase(
-        super::profile_retained::profile_session_lcm(store_administration),
-    )
-    .await
-    {
-        Ok(profile_session) => profile_session,
-        Err(error) => {
-            return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
-        }
-    };
+    let user_session_db =
+        match boxed_projectless_phase(store_administration.registered_profile_session_database())
+            .await
+        {
+            Ok(database) => database,
+            Err(error) => {
+                return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
+            }
+        };
     let profile_identity = match store_administration.profile_identity() {
         Ok(identity) => identity,
         Err(error) => {
@@ -562,8 +561,7 @@ async fn projectless_hook_runtime_response(
                     store_administration
                         .session_temporal_refresh_schedulers()
                         .background_cpu(),
-                )
-                .with_lcm_authorities(None, profile_lcm.as_deref()),
+                ),
             host_admission_broker,
             Arc::clone(&user_refresh),
         ),
