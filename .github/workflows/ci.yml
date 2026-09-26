@@ -269,6 +269,9 @@ jobs:
     # Each group's budget is set in the manifest beside the group, with the
     # measurement it rests on.
     timeout-minutes: ${{ matrix.timeout }}
+    # Re-signs the product after release strip (see .cargo/config.toml).
+    env:
+      CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER: ${{ github.workspace }}/scripts/macos-rustc-wrapper.sh
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.scope-gate.outputs.macos-groups) }}

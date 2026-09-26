@@ -232,6 +232,13 @@ jobs:
           lld-link --version
           "RUSTFLAGS=-C linker=lld-link.exe" >> $env:GITHUB_ENV
 
+      # Re-signs the product after release strip (see .cargo/config.toml).
+      # Cargo has no per-target wrapper, so only macOS runners set it.
+      - name: Use the macOS rustc wrapper
+        if: runner.os == 'macOS'
+        shell: bash
+        run: echo "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER=${GITHUB_WORKSPACE}/scripts/macos-rustc-wrapper.sh" >> "$GITHUB_ENV"
+
       - name: Build release binary for packaging
         run: cargo build ${{ steps.release-profile.outputs.binary_args }} --release --target ${{ matrix.target }} ${{ steps.release-profile.outputs.cargo_args }} --locked
 
