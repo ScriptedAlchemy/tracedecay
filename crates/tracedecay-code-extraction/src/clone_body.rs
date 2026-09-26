@@ -1,6 +1,4 @@
-use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{NodeKind, SourceSpan};
@@ -9,6 +7,11 @@ use tree_sitter::{Node as TreeSitterNode, Point, Tree, TreeCursor};
 use crate::ExtractionArtifactV1;
 
 mod rename;
+mod stream;
+
+pub use stream::{
+    CloneTokenIterV1, CloneTokenStreamErrorV1, CloneTokenStreamV1, ConservativeCloneTokenV1,
+};
 
 pub const CONSERVATIVE_CLONE_NORMALIZATION_REVISION_V1: u16 = 1;
 pub const RENAME_CLONE_NORMALIZATION_REVISION_V1: u16 = 1;
@@ -25,36 +28,6 @@ pub const MAX_AUTOMATIC_CLONE_BODY_BYTES_V1: u64 = 64 * 1024;
 /// way to converge. 4096 tokens is roughly a thousand lines, keeps both
 /// streams under 1.5 MB, and is far past anything clone detection can act on.
 pub const MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1: u32 = 4096;
-
-/// A clone-token syntax kind.
-///
-/// Every kind an extractor emits is a grammar-owned `&'static str`, drawn from
-/// a vocabulary of a few hundred names, while one repository pass emits tens of
-/// millions of tokens. Owning the name per token made the grammar table's
-/// static strings the largest single allocation source of the pre-progress
-/// extraction window; borrowing it keeps the wire shape and pays nothing.
-/// Decoded pages resolve names back to the grammar through
-/// [`crate::ts_provider::grammar_str`].
-pub type CloneSyntaxKindV1 = Cow<'static, str>;
-
-/// A clone-token text. Keywords and punctuation, whose text is their kind,
-/// borrow the grammar's name the same way; identifiers and literals own theirs.
-pub type CloneTokenTextV1 = Cow<'static, str>;
-
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Hash)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ConservativeCloneTokenV1 {
-    StructureStart {
-        syntax_kind: CloneSyntaxKindV1,
-    },
-    Syntax {
-        syntax_kind: CloneSyntaxKindV1,
-        text: CloneTokenTextV1,
-    },
-    StructureEnd {
-        syntax_kind: CloneSyntaxKindV1,
-    },
-}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
@@ -115,24 +88,23 @@ pub struct ExtractedCloneBodyV1 {
     pub tokenization_status: CloneBodyTokenizationStatusV1,
     pub tokenization_issues: Vec<CloneBodyTokenizationIssueV1>,
     /// Shared with every payload built from this body: a token stream is
-    /// read, hashed, and persisted, never edited, and copying it per body
-    /// (one `String` per token) was the dominant allocation of the index
-    /// workers.
-    pub conservative_tokens: Arc<[ConservativeCloneTokenV1]>,
+    /// read, hashed, and persisted, never edited.
+    pub conservative_tokens: CloneTokenStreamV1,
     pub rename_normalization_revision: Option<u16>,
     pub rename_status: CloneBodyRenameStatusV1,
     pub rename_issues: Vec<CloneBodyRenameIssueV1>,
-    pub rename_tokens: Option<Arc<[ConservativeCloneTokenV1]>>,
+    /// Shares the conservative stream's tokens and holds only its renames.
+    pub rename_tokens: Option<CloneTokenStreamV1>,
 }
 
 impl ExtractedCloneBodyV1 {
-    pub fn complete_rename_tokens(&self) -> Option<&[ConservativeCloneTokenV1]> {
+    pub fn complete_rename_tokens(&self) -> Option<&CloneTokenStreamV1> {
         if self.tokenization_status != CloneBodyTokenizationStatusV1::Complete
             || self.rename_status != CloneBodyRenameStatusV1::Complete
         {
             return None;
         }
-        self.rename_tokens.as_deref()
+        self.rename_tokens.as_ref()
     }
 }
 
@@ -213,16 +185,7 @@ fn extract_clone_body(
         .end_byte()
         .saturating_sub(syntax.body.start_byte()) as u64;
     let (conservative, rename) = if body_bytes > MAX_AUTOMATIC_CLONE_BODY_BYTES_V1 {
-        (
-            ConservativeFields {
-                tokens: Arc::from([]),
-                issues: vec![CloneBodyTokenizationIssueV1::BodyExceedsSizeBound],
-                token_count: 0,
-                status: CloneBodyTokenizationStatusV1::Partial,
-                eligibility: oversized_clone_body(),
-            },
-            oversized_rename_fields(),
-        )
+        (oversized_conservative_fields(0), oversized_rename_fields())
     } else {
         tokenize_clone_body(syntax, source, language)
     };
@@ -249,7 +212,7 @@ fn extract_clone_body(
 }
 
 struct ConservativeFields {
-    tokens: Arc<[ConservativeCloneTokenV1]>,
+    tokens: CloneTokenStreamV1,
     issues: Vec<CloneBodyTokenizationIssueV1>,
     token_count: u32,
     status: CloneBodyTokenizationStatusV1,
@@ -318,28 +281,35 @@ fn tokenize_clone_body(
     // An oversized body keeps its count and its typed exclusion but no
     // stream: the streams are what would not fit a page, and rename
     // normalization has nothing to normalize for.
-    let oversized = matches!(eligibility, CloneBodyEligibilityV1::ExcludedTooLarge { .. });
-    let tokens: Arc<[ConservativeCloneTokenV1]> = if oversized {
-        Arc::from([])
-    } else {
-        emitter.tokens.into()
-    };
-    let rename = if oversized {
-        oversized_rename_fields()
-    } else {
-        RenameFields {
-            revision: (normalization.status != CloneBodyRenameStatusV1::UnsupportedLanguage)
-                .then_some(RENAME_CLONE_NORMALIZATION_REVISION_V1),
-            status: normalization.status,
-            issues: normalization.issues,
-            tokens: normalization.replacements.is_some().then(|| {
-                if emitter.replacements.is_some() {
-                    emitter.renamed.into()
-                } else {
-                    Arc::clone(&tokens)
-                }
-            }),
-        }
+    if matches!(eligibility, CloneBodyEligibilityV1::ExcludedTooLarge { .. }) {
+        return (
+            ConservativeFields {
+                tokens: CloneTokenStreamV1::empty(),
+                issues: emitter.issues,
+                token_count: emitter.token_count,
+                status: tokenization_status,
+                eligibility,
+            },
+            oversized_rename_fields(),
+        );
+    }
+    // Both streams come from one walk of a body bounded by
+    // `MAX_AUTOMATIC_CLONE_BODY_BYTES_V1`, so neither can outgrow its code
+    // space; one that did is excluded as too large rather than truncated.
+    let streams =
+        CloneTokenStreamV1::from_tokens(emitter.tokens.iter().copied()).and_then(|tokens| {
+            let rename = if emitter.replacements.is_some() {
+                Some(tokens.renamed(emitter.renamed.iter().copied())?)
+            } else {
+                normalization.replacements.is_some().then(|| tokens.clone())
+            };
+            Ok((tokens, rename))
+        });
+    let Ok((tokens, rename_tokens)) = streams else {
+        return (
+            oversized_conservative_fields(emitter.token_count),
+            oversized_rename_fields(),
+        );
     };
     (
         ConservativeFields {
@@ -349,8 +319,24 @@ fn tokenize_clone_body(
             status: tokenization_status,
             eligibility,
         },
-        rename,
+        RenameFields {
+            revision: (normalization.status != CloneBodyRenameStatusV1::UnsupportedLanguage)
+                .then_some(RENAME_CLONE_NORMALIZATION_REVISION_V1),
+            status: normalization.status,
+            issues: normalization.issues,
+            tokens: rename_tokens,
+        },
     )
+}
+
+fn oversized_conservative_fields(token_count: u32) -> ConservativeFields {
+    ConservativeFields {
+        tokens: CloneTokenStreamV1::empty(),
+        issues: vec![CloneBodyTokenizationIssueV1::BodyExceedsSizeBound],
+        token_count,
+        status: CloneBodyTokenizationStatusV1::Partial,
+        eligibility: oversized_clone_body(),
+    }
 }
 
 const fn oversized_clone_body() -> CloneBodyEligibilityV1 {
@@ -364,7 +350,7 @@ struct RenameFields {
     revision: Option<u16>,
     status: CloneBodyRenameStatusV1,
     issues: Vec<CloneBodyRenameIssueV1>,
-    tokens: Option<Arc<[ConservativeCloneTokenV1]>>,
+    tokens: Option<CloneTokenStreamV1>,
 }
 
 fn oversized_rename_fields() -> RenameFields {
@@ -383,8 +369,11 @@ struct TokenEmitter<'a> {
     /// it is absent `renamed` stays empty and the caller shares the
     /// conservative stream.
     replacements: Option<&'a HashMap<(usize, usize), String>>,
-    tokens: Vec<ConservativeCloneTokenV1>,
-    renamed: Vec<ConservativeCloneTokenV1>,
+    /// Borrowed from the grammar and the source for the length of one body,
+    /// then folded into a compact stream.
+    tokens: Vec<ConservativeCloneTokenV1<'a>>,
+    /// `(position, renamed text)` of every renamed identifier, ascending.
+    renamed: Vec<(u32, &'a str)>,
     issues: Vec<CloneBodyTokenizationIssueV1>,
     token_count: u32,
 }
@@ -403,9 +392,8 @@ impl<'a> TokenEmitter<'a> {
         }
 
         if node.is_named() {
-            self.push(ConservativeCloneTokenV1::StructureStart {
-                syntax_kind: Cow::Borrowed(kind),
-            });
+            self.tokens
+                .push(ConservativeCloneTokenV1::StructureStart { syntax_kind: kind });
         }
         let inside_token_tree = in_token_tree || kind == "token_tree";
         let mut cursor = node.walk();
@@ -418,47 +406,35 @@ impl<'a> TokenEmitter<'a> {
             }
         }
         if node.is_named() {
-            self.push(ConservativeCloneTokenV1::StructureEnd {
-                syntax_kind: Cow::Borrowed(kind),
-            });
+            self.tokens
+                .push(ConservativeCloneTokenV1::StructureEnd { syntax_kind: kind });
         }
-    }
-
-    fn push(&mut self, token: ConservativeCloneTokenV1) {
-        if self.replacements.is_some() {
-            self.renamed.push(token.clone());
-        }
-        self.tokens.push(token);
     }
 
     fn emit_leaf(&mut self, node: TreeSitterNode<'_>, kind: &'static str, in_token_tree: bool) {
-        let Ok(text) = node.utf8_text(self.source) else {
+        let source = self.source;
+        let Ok(text) = node.utf8_text(source) else {
             self.issues
                 .push(CloneBodyTokenizationIssueV1::InvalidSourceRange);
             return;
         };
         if text.trim().is_empty()
-            || is_ignorable_trailing_comma(node, kind, self.source, in_token_tree)
+            || is_ignorable_trailing_comma(node, kind, source, in_token_tree)
             || (kind == ";" && matches!(self.language, "javascript" | "typescript" | "tsx"))
         {
             return;
         }
-        let syntax_kind = Cow::Borrowed(kind);
-        let text = if text == kind {
-            Cow::Borrowed(kind)
-        } else {
-            Cow::Owned(text.to_owned())
-        };
-        if let Some(replacements) = self.replacements {
-            let replacement = replacements.get(&(node.start_byte(), node.end_byte()));
-            self.renamed.push(ConservativeCloneTokenV1::Syntax {
-                syntax_kind: syntax_kind.clone(),
-                text: replacement
-                    .map_or_else(|| text.clone(), |renamed| Cow::Owned(renamed.clone())),
-            });
+        if let Some(renamed) = self
+            .replacements
+            .and_then(|replacements| replacements.get(&(node.start_byte(), node.end_byte())))
+            && let Ok(position) = u32::try_from(self.tokens.len())
+        {
+            self.renamed.push((position, renamed.as_str()));
         }
-        self.tokens
-            .push(ConservativeCloneTokenV1::Syntax { syntax_kind, text });
+        self.tokens.push(ConservativeCloneTokenV1::Syntax {
+            syntax_kind: kind,
+            text,
+        });
         self.token_count = self.token_count.saturating_add(1);
     }
 }

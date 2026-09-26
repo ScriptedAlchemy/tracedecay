@@ -17,7 +17,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tracedecay_code_extraction::{
     CloneBodyRenameIssueV1, CloneBodyTokenizationIssueV1, CloneBodyTokenizationStatusV1,
-    ts_provider::grammar_str,
+    CloneTokenStreamV1,
 };
 use tracedecay_domain::{ManifestDigest, SourceSpan, SymbolOccurrenceId};
 
@@ -157,11 +157,14 @@ impl<'a> PersistedCloneBodiesRefV1<'a> {
                     "sealed clone body occurrence disagrees with its file authority",
                 ));
             }
-            let conservative_tokens = strings.encode(&payload.conservative_tokens)?;
+            let conservative = payload.conservative_tokens.iter().collect::<Vec<_>>();
+            let conservative_tokens = strings.encode(&conservative)?;
             let rename_tokens = payload
                 .rename_tokens
-                .as_deref()
-                .map(|rename| strings.encode_rename(&payload.conservative_tokens, rename))
+                .as_ref()
+                .map(|rename| {
+                    strings.encode_rename(&conservative, &rename.iter().collect::<Vec<_>>())
+                })
                 .transpose()?;
             rows.push(PersistedCloneBodyRefV1 {
                 symbol_occurrence_id: &occurrence.symbol_occurrence_id,
@@ -207,31 +210,25 @@ impl PersistedCloneBodiesV1 {
         bodies
             .into_iter()
             .map(|body| {
-                let conservative_tokens: Arc<[ConservativeCloneTokenV1]> =
-                    decode_tokens(&body.conservative_tokens, &strings)?.into();
+                let conservative_tokens = decode_tokens(&body.conservative_tokens, &strings)?;
                 let rename_tokens = match body.rename_tokens {
                     None => None,
                     Some(PersistedRenameTokensV1::Conservative) => {
-                        Some(Arc::clone(&conservative_tokens))
+                        Some(conservative_tokens.clone())
                     }
                     Some(PersistedRenameTokensV1::Renamed(renamed)) => {
-                        let mut tokens = conservative_tokens.to_vec();
-                        for [position, text] in renamed {
-                            let Some(ConservativeCloneTokenV1::Syntax { text: slot, .. }) =
-                                usize::try_from(position)
-                                    .ok()
-                                    .and_then(|position| tokens.get_mut(position))
-                            else {
-                                return Err(contract(
-                                    "sealed clone rename renames a position that is not a syntax token",
-                                ));
-                            };
-                            *slot = grammar_str(string(&strings, text)?);
-                        }
-                        Some(tokens.into())
+                        let renamed = renamed
+                            .iter()
+                            .map(|[position, text]| Ok((*position, string(&strings, *text)?)))
+                            .collect::<Result<Vec<_>, CodeIndexProductionErrorV1>>()?;
+                        Some(conservative_tokens.renamed(renamed).map_err(|_| {
+                            contract(
+                                "sealed clone rename renames a position that is not a syntax token",
+                            )
+                        })?)
                     }
                     Some(PersistedRenameTokensV1::Tokens(codes)) => {
-                        Some(decode_tokens(&codes, &strings)?.into())
+                        Some(decode_tokens(&codes, &strings)?)
                     }
                 };
                 let payload = CloneBodyPayloadV1::from_parts(CloneBodyPayloadPartsV1 {
@@ -304,18 +301,18 @@ impl<'a> StringTableV1<'a> {
 
     fn encode(
         &mut self,
-        tokens: &'a [ConservativeCloneTokenV1],
+        tokens: &[ConservativeCloneTokenV1<'a>],
     ) -> Result<Vec<u32>, CodeIndexProductionErrorV1> {
         let mut codes = Vec::with_capacity(tokens.len());
         let mut open = Vec::new();
-        for token in tokens {
+        for token in tokens.iter().copied() {
             match token {
                 ConservativeCloneTokenV1::StructureStart { syntax_kind } => {
-                    open.push(syntax_kind.as_ref());
+                    open.push(syntax_kind);
                     codes.push(self.code(syntax_kind, TAG_START)?);
                 }
                 ConservativeCloneTokenV1::StructureEnd { syntax_kind } => {
-                    if open.last() == Some(&syntax_kind.as_ref()) {
+                    if open.last() == Some(&syntax_kind) {
                         open.pop();
                         codes.push(CLOSE_INNERMOST);
                     } else {
@@ -337,8 +334,8 @@ impl<'a> StringTableV1<'a> {
 
     fn encode_rename(
         &mut self,
-        conservative: &'a [ConservativeCloneTokenV1],
-        rename: &'a [ConservativeCloneTokenV1],
+        conservative: &[ConservativeCloneTokenV1<'a>],
+        rename: &[ConservativeCloneTokenV1<'a>],
     ) -> Result<PersistedRenameTokensV1, CodeIndexProductionErrorV1> {
         if rename == conservative {
             return Ok(PersistedRenameTokensV1::Conservative);
@@ -348,7 +345,7 @@ impl<'a> StringTableV1<'a> {
         }
         let mut renamed = Vec::new();
         for (position, (left, right)) in conservative.iter().zip(rename).enumerate() {
-            match (left, right) {
+            match (*left, *right) {
                 _ if left == right => {}
                 (
                     ConservativeCloneTokenV1::Syntax {
@@ -376,13 +373,10 @@ fn string(strings: &[String], index: u32) -> Result<&str, CodeIndexProductionErr
         .ok_or_else(|| contract("sealed clone token names a string outside its table"))
 }
 
-/// Kinds, and texts that name a grammar node, borrow the grammar's static
-/// names: a decoded generation holds tens of millions of tokens, and owning
-/// both strings per token made clone streams most of its resident bytes.
 fn decode_tokens(
     codes: &[u32],
     strings: &[String],
-) -> Result<Vec<ConservativeCloneTokenV1>, CodeIndexProductionErrorV1> {
+) -> Result<CloneTokenStreamV1, CodeIndexProductionErrorV1> {
     let mut tokens = Vec::with_capacity(codes.len());
     let mut open = Vec::new();
     let mut codes = codes.iter().copied();
@@ -391,69 +385,52 @@ fn decode_tokens(
             let kind = open.pop().ok_or_else(|| {
                 contract("sealed clone token stream closes a structure it never opened")
             })?;
-            tokens.push(ConservativeCloneTokenV1::StructureEnd {
-                syntax_kind: grammar_str(kind),
-            });
+            tokens.push(ConservativeCloneTokenV1::StructureEnd { syntax_kind: kind });
             continue;
         };
         let kind = string(strings, value >> 2)?;
         tokens.push(match value & 3 {
             TAG_START => {
                 open.push(kind);
-                ConservativeCloneTokenV1::StructureStart {
-                    syntax_kind: grammar_str(kind),
-                }
+                ConservativeCloneTokenV1::StructureStart { syntax_kind: kind }
             }
-            TAG_END => ConservativeCloneTokenV1::StructureEnd {
-                syntax_kind: grammar_str(kind),
+            TAG_END => ConservativeCloneTokenV1::StructureEnd { syntax_kind: kind },
+            TAG_SYNTAX_KIND_TEXT => ConservativeCloneTokenV1::Syntax {
+                syntax_kind: kind,
+                text: kind,
             },
-            TAG_SYNTAX_KIND_TEXT => {
-                let syntax_kind = grammar_str(kind);
-                ConservativeCloneTokenV1::Syntax {
-                    text: syntax_kind.clone(),
-                    syntax_kind,
-                }
-            }
             _ => {
                 let text = codes
                     .next()
                     .ok_or_else(|| contract("sealed clone syntax token is missing its text"))?;
                 ConservativeCloneTokenV1::Syntax {
-                    syntax_kind: grammar_str(kind),
-                    text: grammar_str(string(strings, text)?),
+                    syntax_kind: kind,
+                    text: string(strings, text)?,
                 }
             }
         });
     }
-    Ok(tokens)
+    CloneTokenStreamV1::from_tokens(tokens)
+        .map_err(|_| contract("sealed clone token stream exceeds its code space"))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
-
     use super::*;
 
-    fn start(kind: &'static str) -> ConservativeCloneTokenV1 {
-        ConservativeCloneTokenV1::StructureStart {
-            syntax_kind: Cow::Borrowed(kind),
-        }
+    fn start(syntax_kind: &'static str) -> ConservativeCloneTokenV1<'static> {
+        ConservativeCloneTokenV1::StructureStart { syntax_kind }
     }
 
-    fn end(kind: &'static str) -> ConservativeCloneTokenV1 {
-        ConservativeCloneTokenV1::StructureEnd {
-            syntax_kind: Cow::Borrowed(kind),
-        }
+    fn end(syntax_kind: &'static str) -> ConservativeCloneTokenV1<'static> {
+        ConservativeCloneTokenV1::StructureEnd { syntax_kind }
     }
 
-    fn syntax(kind: &'static str, text: &str) -> ConservativeCloneTokenV1 {
-        ConservativeCloneTokenV1::Syntax {
-            syntax_kind: Cow::Borrowed(kind),
-            text: Cow::Owned(text.to_owned()),
-        }
+    fn syntax(syntax_kind: &'static str, text: &'static str) -> ConservativeCloneTokenV1<'static> {
+        ConservativeCloneTokenV1::Syntax { syntax_kind, text }
     }
 
-    fn round_trip(tokens: &[ConservativeCloneTokenV1]) -> (Vec<u32>, Vec<String>) {
+    fn round_trip(tokens: &[ConservativeCloneTokenV1<'static>]) -> (Vec<u32>, Vec<String>) {
         let mut table = StringTableV1::default();
         let codes = table.encode(tokens).expect("encode");
         let strings = table
@@ -462,7 +439,10 @@ mod tests {
             .map(|value| (*value).to_owned())
             .collect::<Vec<_>>();
         assert_eq!(
-            decode_tokens(&codes, &strings).expect("decode"),
+            decode_tokens(&codes, &strings)
+                .expect("decode")
+                .iter()
+                .collect::<Vec<_>>(),
             tokens,
             "every token stream must restore exactly"
         );
@@ -509,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn decoded_grammar_names_borrow_the_grammar_instead_of_owning_a_copy() {
+    fn decoded_grammar_kinds_hold_no_text_bytes() {
         let tokens = vec![
             start("block"),
             syntax("identifier", "value"),
@@ -518,34 +498,12 @@ mod tests {
             end("block"),
         ];
         let (codes, strings) = round_trip(&tokens);
-        let first = decode_tokens(&codes, &strings).expect("decode");
-        let second = decode_tokens(&codes, &strings).expect("decode");
-        let kind = |token: &ConservativeCloneTokenV1| match token {
-            ConservativeCloneTokenV1::StructureStart { syntax_kind }
-            | ConservativeCloneTokenV1::StructureEnd { syntax_kind }
-            | ConservativeCloneTokenV1::Syntax { syntax_kind, .. } => syntax_kind.clone(),
-        };
-        for (left, right) in first.iter().zip(&second) {
-            let (Cow::Borrowed(left), Cow::Borrowed(right)) = (kind(left), kind(right)) else {
-                panic!("a grammar kind must decode as the grammar's static name");
-            };
-            assert!(std::ptr::eq(left, right), "both decodes share one name");
-        }
-        let texts = first
-            .iter()
-            .filter_map(|token| match token {
-                ConservativeCloneTokenV1::Syntax { text, .. } => Some(text),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            matches!(texts[1], Cow::Borrowed("(")),
-            "punctuation borrows"
-        );
-        assert!(
-            matches!(texts[2], Cow::Owned(text) if text == "fixture_only_identifier"),
-            "a name no grammar declares stays owned"
-        );
+        let decoded = decode_tokens(&codes, &strings).expect("decode");
+
+        // A 56-byte header, five token codes and two text codes, and only the
+        // two identifier texts (28 bytes) with their ends: `block`,
+        // `identifier` and `(` resolve to grammar kind numbers.
+        assert_eq!(decoded.token_retained_bytes(), 56 + 7 * 4 + 28 + 2 * 4);
     }
 
     #[test]

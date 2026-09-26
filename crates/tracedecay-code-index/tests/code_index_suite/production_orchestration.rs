@@ -4247,3 +4247,64 @@ fn carried_forward_clone_bodies_admit_through_the_reused_sealed_segment() {
         "a carried-forward file keeps its parent clone binding across generations"
     );
 }
+
+/// Every function body keeps a conservative and a rename clone-token stream
+/// for the life of the generation, so their resident form bounds what one
+/// index holds. On this 500-file fixture one 48-byte enum per token, with the
+/// rename stream repeated in full, left the generation retaining 12,045,818
+/// bytes; the compact streams retain 5,110,538.
+#[test]
+fn a_500_file_generation_holds_its_clone_streams_within_the_resident_budget() {
+    const RESIDENT_BUDGET_BYTES: u64 = 6_000_000;
+
+    let mut request = request("file.resident.seed", 1_100_000);
+    request.snapshot.files.clear();
+    request.snapshot.sanitization_receipts.clear();
+    request.captured_files.clear();
+    let mut identity = Sha256::new();
+    for ordinal in 0..500 {
+        let source = format!(
+            "pub fn transform_{ordinal}(input: &str, limit: usize) -> usize {{\n    let trimmed = input.trim();\n    let mut total = 0;\n    for (index, part) in trimmed.split(',').enumerate() {{\n        if index >= limit {{ break; }}\n        total += part.len() * {ordinal};\n    }}\n    total\n}}\n\npub fn describe_{ordinal}(value: u64) -> String {{\n    let doubled = value * 2;\n    let label = format!(\"{{doubled}}-{ordinal}\");\n    label.to_uppercase()\n}}\n"
+        );
+        let path = format!("src/module_{ordinal:03}.rs");
+        identity.update(path.as_bytes());
+        identity.update([0]);
+        identity.update(source.as_bytes());
+        let file_occurrence_id = id::<FileOccurrenceId>(&format!("file.resident.{ordinal:03}"));
+        request.snapshot.files.push(SanitizedCodeFileV1 {
+            file_occurrence_id: file_occurrence_id.clone(),
+            logical_path: path,
+            language: Some(id::<LanguageId>("rust")),
+            content_digest: content_digest(source.as_bytes()),
+            disposition: SnapshotFileDispositionV1::Present,
+        });
+        request
+            .snapshot
+            .sanitization_receipts
+            .push(id::<SanitizationReceiptId>(&format!(
+                "receipt.resident.{ordinal:03}"
+            )));
+        request.captured_files.push(CodeIndexCapturedFileV1 {
+            file_occurrence_id,
+            sanitized_bytes: Arc::from(source.as_bytes()),
+            sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
+        });
+    }
+    request.snapshot.content_identity = content_digest(&identity.finalize());
+
+    let generation = CodeIndexProductionOwnerV1::new(
+        config(),
+        SharedPublicationStore::default(),
+        ApplyingProjectionSink,
+    )
+    .expect("production owner")
+    .build_and_publish(request, &ActiveControl)
+    .expect("generation publishes");
+
+    assert_eq!(generation.symbols().symbols.len(), 1_000);
+    let retained = generation.retained_bytes();
+    assert!(
+        retained <= RESIDENT_BUDGET_BYTES,
+        "a 500-file generation retains {retained} bytes, over its {RESIDENT_BUDGET_BYTES}-byte budget"
+    );
+}

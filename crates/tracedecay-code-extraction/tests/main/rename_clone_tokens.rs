@@ -1,14 +1,14 @@
 use tracedecay_code_extraction::{
-    CloneBodyRenameIssueV1, CloneBodyRenameStatusV1, ConservativeCloneTokenV1, GoExtractor,
-    LanguageExtractor, PythonExtractor, RENAME_CLONE_NORMALIZATION_REVISION_V1, RustExtractor,
-    TypeScriptExtractor,
+    CloneBodyRenameIssueV1, CloneBodyRenameStatusV1, CloneTokenStreamV1, ConservativeCloneTokenV1,
+    GoExtractor, LanguageExtractor, PythonExtractor, RENAME_CLONE_NORMALIZATION_REVISION_V1,
+    RustExtractor, TypeScriptExtractor,
 };
 
 fn rename_tokens(
     extractor: &dyn LanguageExtractor,
     path: &str,
     source: &str,
-) -> Vec<ConservativeCloneTokenV1> {
+) -> CloneTokenStreamV1 {
     let artifact = extractor.extract_artifact(path, source);
     assert!(
         artifact.result.errors.is_empty(),
@@ -24,7 +24,7 @@ fn rename_tokens(
     assert!(body.rename_issues.is_empty());
     body.complete_rename_tokens()
         .expect("complete rename tokens")
-        .to_vec()
+        .clone()
 }
 
 #[test]
@@ -104,7 +104,7 @@ function outer(source: number) {
     let syntax_text = normalized
         .iter()
         .filter_map(|token| match token {
-            ConservativeCloneTokenV1::Syntax { text, .. } => Some(text.as_ref()),
+            ConservativeCloneTokenV1::Syntax { text, .. } => Some(text),
             ConservativeCloneTokenV1::StructureStart { .. }
             | ConservativeCloneTokenV1::StructureEnd { .. } => None,
         })
@@ -308,6 +308,10 @@ fn the_rename_stream_differs_from_the_conservative_one_only_at_renamed_identifie
             ("result".to_owned(), "local_0".to_owned()),
         ]
     );
+    assert!(renamed.shares_tokens_with(&body.conservative_tokens));
+    // A 48-byte header, the three renamed positions, their 19 bytes of text
+    // and three text ends: the rename holds its renames, not a second stream.
+    assert_eq!(renamed.rename_retained_bytes(), 48 + 3 * 4 + 19 + 3 * 4);
 }
 
 #[test]
@@ -316,9 +320,10 @@ fn a_body_that_renames_nothing_shares_the_conservative_stream() {
         RustExtractor.extract_artifact("src/lib.rs", "fn copy() -> bool { validate(\"read\") }");
     let body = artifact.clone_bodies.first().expect("clone body");
     let renamed = body.complete_rename_tokens().expect("rename tokens");
-    assert_eq!(renamed, body.conservative_tokens.as_ref());
+    assert_eq!(renamed, &body.conservative_tokens);
     assert!(
-        std::ptr::eq(renamed.as_ptr(), body.conservative_tokens.as_ptr()),
+        renamed.shares_tokens_with(&body.conservative_tokens),
         "a body with no renamed binding must not allocate a second token stream"
     );
+    assert_eq!(renamed.rename_retained_bytes(), 0);
 }

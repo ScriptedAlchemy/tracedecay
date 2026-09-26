@@ -127,8 +127,8 @@ pub use c_extractor::CExtractor;
 pub use clone_body::{
     CONSERVATIVE_CLONE_NORMALIZATION_REVISION_V1, CloneBodyEligibilityV1, CloneBodyRenameIssueV1,
     CloneBodyRenameStatusV1, CloneBodyTokenizationIssueV1, CloneBodyTokenizationStatusV1,
-    CloneSyntaxKindV1, CloneTokenTextV1, ConservativeCloneTokenV1, ExtractedCloneBodyV1,
-    MAX_AUTOMATIC_CLONE_BODY_BYTES_V1, MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1,
+    CloneTokenIterV1, CloneTokenStreamErrorV1, CloneTokenStreamV1, ConservativeCloneTokenV1,
+    ExtractedCloneBodyV1, MAX_AUTOMATIC_CLONE_BODY_BYTES_V1, MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1,
     MIN_AUTOMATIC_CLONE_BODY_TOKENS_V1, RENAME_CLONE_NORMALIZATION_REVISION_V1,
 };
 pub use cpp_extractor::CppExtractor;

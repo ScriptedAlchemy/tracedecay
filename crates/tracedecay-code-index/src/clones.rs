@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
@@ -8,7 +7,8 @@ use sha2::{Digest, Sha256};
 use tracedecay_code_extraction::ExtractedCloneBodyV1;
 pub use tracedecay_code_extraction::{
     CloneBodyEligibilityV1, CloneBodyRenameIssueV1, CloneBodyRenameStatusV1,
-    CloneBodyTokenizationIssueV1, CloneBodyTokenizationStatusV1, ConservativeCloneTokenV1,
+    CloneBodyTokenizationIssueV1, CloneBodyTokenizationStatusV1, CloneTokenStreamV1,
+    ConservativeCloneTokenV1,
 };
 use tracedecay_domain::{
     CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, SourceSpan, SymbolOccurrenceId,
@@ -48,8 +48,8 @@ pub struct CloneTokenSpanV1 {
 pub struct CloneAlignedDifferenceV1 {
     pub left_span: CloneTokenSpanV1,
     pub right_span: CloneTokenSpanV1,
-    pub left_tokens: Vec<ConservativeCloneTokenV1>,
-    pub right_tokens: Vec<ConservativeCloneTokenV1>,
+    pub left_tokens: CloneTokenStreamV1,
+    pub right_tokens: CloneTokenStreamV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,7 +86,7 @@ pub enum CloneNormalizationClassV1 {
 pub struct CloneFingerprintStreamV1<'a> {
     pub class: CloneNormalizationClassV1,
     pub normalization_revision: u16,
-    pub tokens: &'a [ConservativeCloneTokenV1],
+    pub tokens: &'a CloneTokenStreamV1,
     pub rename_tier_unavailable: Option<CloneBodyRenameStatusV1>,
 }
 
@@ -98,7 +98,7 @@ pub struct CloneSelectedBlockV1 {
     class: CloneNormalizationClassV1,
     normalization_revision: u16,
     rename_tier_unavailable: Option<CloneBodyRenameStatusV1>,
-    tokens: Vec<ConservativeCloneTokenV1>,
+    tokens: CloneTokenStreamV1,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -119,12 +119,12 @@ pub struct CloneBodyPayloadV1 {
     pub token_count: u32,
     pub conservative_normalization_revision: u16,
     pub conservative_digest: ManifestDigest,
-    pub conservative_tokens: Arc<[ConservativeCloneTokenV1]>,
+    pub conservative_tokens: CloneTokenStreamV1,
     pub tokenization_status: CloneBodyTokenizationStatusV1,
     pub tokenization_issues: Vec<CloneBodyTokenizationIssueV1>,
     pub rename_normalization_revision: Option<u16>,
     pub rename_digest: Option<ManifestDigest>,
-    pub rename_tokens: Option<Arc<[ConservativeCloneTokenV1]>>,
+    pub rename_tokens: Option<CloneTokenStreamV1>,
     pub rename_coverage: CloneBodyRenameStatusV1,
     pub rename_issues: Vec<CloneBodyRenameIssueV1>,
 }
@@ -163,11 +163,11 @@ struct ClonePayloadReuseKeyV1<'a> {
     symbol_kind: &'a str,
     token_count: u32,
     conservative_revision: u16,
-    conservative_tokens: &'a [ConservativeCloneTokenV1],
+    conservative_tokens: &'a CloneTokenStreamV1,
     tokenization_status: CloneBodyTokenizationStatusV1,
     tokenization_issues: &'a [CloneBodyTokenizationIssueV1],
     rename_revision: Option<u16>,
-    rename_tokens: Option<&'a [ConservativeCloneTokenV1]>,
+    rename_tokens: Option<&'a CloneTokenStreamV1>,
     rename_coverage: CloneBodyRenameStatusV1,
     rename_issues: &'a [CloneBodyRenameIssueV1],
 }
@@ -244,7 +244,7 @@ impl<'a> ClonePayloadReuseKeyV1<'a> {
             tokenization_status: body.tokenization_status,
             tokenization_issues: &body.tokenization_issues,
             rename_revision: body.rename_normalization_revision,
-            rename_tokens: body.rename_tokens.as_deref(),
+            rename_tokens: body.rename_tokens.as_ref(),
             rename_coverage: body.rename_status,
             rename_issues: &body.rename_issues,
         }
@@ -260,7 +260,7 @@ impl<'a> ClonePayloadReuseKeyV1<'a> {
             tokenization_status: payload.tokenization_status,
             tokenization_issues: &payload.tokenization_issues,
             rename_revision: payload.rename_normalization_revision,
-            rename_tokens: payload.rename_tokens.as_deref(),
+            rename_tokens: payload.rename_tokens.as_ref(),
             rename_coverage: payload.rename_coverage,
             rename_issues: &payload.rename_issues,
         }
@@ -272,11 +272,11 @@ struct ClonePayloadDigestInputV1<'a> {
     symbol_kind: &'a str,
     token_count: u32,
     conservative_revision: u16,
-    conservative_tokens: &'a [ConservativeCloneTokenV1],
+    conservative_tokens: &'a CloneTokenStreamV1,
     tokenization_status: CloneBodyTokenizationStatusV1,
     tokenization_issues: &'a [CloneBodyTokenizationIssueV1],
     rename_revision: Option<u16>,
-    rename_tokens: Option<&'a [ConservativeCloneTokenV1]>,
+    rename_tokens: Option<&'a CloneTokenStreamV1>,
     rename_coverage: CloneBodyRenameStatusV1,
     rename_issues: &'a [CloneBodyRenameIssueV1],
 }
@@ -373,25 +373,18 @@ fn clone_payload_digests(
 
 impl CodeIndexCloneBodyV1 {
     pub fn retained_owned_bytes(&self) -> usize {
-        fn token_bytes(tokens: &[ConservativeCloneTokenV1]) -> usize {
-            let owned_bytes = |name: &Cow<'static, str>| match name {
-                Cow::Borrowed(_) => 0,
-                Cow::Owned(name) => name.capacity(),
+        let conservative = &self.payload.conservative_tokens;
+        let rename = self.payload.rename_tokens.as_ref().map_or(0, |rename| {
+            let tokens = if rename.shares_tokens_with(conservative) {
+                0
+            } else {
+                rename.token_retained_bytes()
             };
-            tokens
-                .iter()
-                .fold(std::mem::size_of_val(tokens), |bytes, token| match token {
-                    ConservativeCloneTokenV1::StructureStart { syntax_kind }
-                    | ConservativeCloneTokenV1::StructureEnd { syntax_kind } => {
-                        bytes.saturating_add(owned_bytes(syntax_kind))
-                    }
-                    ConservativeCloneTokenV1::Syntax { syntax_kind, text } => bytes
-                        .saturating_add(owned_bytes(syntax_kind))
-                        .saturating_add(owned_bytes(text)),
-                })
-        }
-        token_bytes(&self.payload.conservative_tokens)
-            .saturating_add(self.payload.rename_tokens.as_deref().map_or(0, token_bytes))
+            tokens.saturating_add(rename.rename_retained_bytes())
+        });
+        conservative
+            .token_retained_bytes()
+            .saturating_add(rename)
             .saturating_add(self.payload.language.capacity())
             .saturating_add(self.payload.symbol_kind.capacity())
             .saturating_add(
@@ -438,11 +431,11 @@ pub struct CloneBodyPayloadPartsV1 {
     pub symbol_kind: String,
     pub token_count: u32,
     pub conservative_normalization_revision: u16,
-    pub conservative_tokens: Arc<[ConservativeCloneTokenV1]>,
+    pub conservative_tokens: CloneTokenStreamV1,
     pub tokenization_status: CloneBodyTokenizationStatusV1,
     pub tokenization_issues: Vec<CloneBodyTokenizationIssueV1>,
     pub rename_normalization_revision: Option<u16>,
-    pub rename_tokens: Option<Arc<[ConservativeCloneTokenV1]>>,
+    pub rename_tokens: Option<CloneTokenStreamV1>,
     pub rename_coverage: CloneBodyRenameStatusV1,
     pub rename_issues: Vec<CloneBodyRenameIssueV1>,
 }
@@ -454,7 +447,7 @@ impl CloneBodyPayloadV1 {
             symbol_kind: body.symbol_kind.as_str().to_owned(),
             token_count: body.non_trivia_token_count,
             conservative_normalization_revision: body.normalization_revision,
-            conservative_tokens: Arc::clone(&body.conservative_tokens),
+            conservative_tokens: body.conservative_tokens.clone(),
             tokenization_status: body.tokenization_status,
             tokenization_issues: body.tokenization_issues.clone(),
             rename_normalization_revision: body.rename_normalization_revision,
@@ -474,7 +467,7 @@ impl CloneBodyPayloadV1 {
             tokenization_status: parts.tokenization_status,
             tokenization_issues: &parts.tokenization_issues,
             rename_revision: parts.rename_normalization_revision,
-            rename_tokens: parts.rename_tokens.as_deref(),
+            rename_tokens: parts.rename_tokens.as_ref(),
             rename_coverage: parts.rename_coverage,
             rename_issues: &parts.rename_issues,
         })?;
@@ -538,7 +531,7 @@ impl CloneBodyPayloadV1 {
         if self.rename_coverage == CloneBodyRenameStatusV1::Complete
             && let (Some(normalization_revision), Some(tokens)) = (
                 self.rename_normalization_revision,
-                self.rename_tokens.as_deref(),
+                self.rename_tokens.as_ref(),
             )
         {
             return Some(CloneFingerprintStreamV1 {
@@ -563,7 +556,7 @@ impl CloneBodyPayloadV1 {
         let Some(stream) = self.fingerprint_stream(eligibility) else {
             return Ok(Vec::new());
         };
-        winnow_clone_tokens(stream.tokens)
+        winnow_clone_tokens(&stream.tokens.iter().collect::<Vec<_>>())
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -576,7 +569,7 @@ impl CloneBodyPayloadV1 {
             tokenization_status: self.tokenization_status,
             tokenization_issues: &self.tokenization_issues,
             rename_revision: self.rename_normalization_revision,
-            rename_tokens: self.rename_tokens.as_deref(),
+            rename_tokens: self.rename_tokens.as_ref(),
             rename_coverage: self.rename_coverage,
             rename_issues: &self.rename_issues,
         })?;
@@ -606,13 +599,13 @@ impl CloneSelectedBlockV1 {
             .ok_or_else(|| "selected clone block source has no complete token stream".to_owned())?;
         let tokens = stream
             .tokens
-            .get(token_range)
+            .slice(token_range)
+            .map_err(|error| error.to_string())?
             .filter(|tokens| !tokens.is_empty())
             .ok_or_else(|| {
                 "selected clone block token range is empty or outside its source".to_owned()
-            })?
-            .to_vec();
-        if winnow_clone_tokens(&tokens)?.is_empty() {
+            })?;
+        if winnow_clone_tokens(&tokens.iter().collect::<Vec<_>>())?.is_empty() {
             return Err("selected clone block is too small for fingerprint lookup".to_owned());
         }
         Ok(Self {
@@ -650,17 +643,17 @@ impl CloneSelectedBlockV1 {
         self.rename_tier_unavailable
     }
 
-    pub fn tokens(&self) -> &[ConservativeCloneTokenV1] {
+    pub fn tokens(&self) -> &CloneTokenStreamV1 {
         &self.tokens
     }
 
     pub fn fingerprint_positions(&self) -> Result<Vec<CloneFingerprintPositionV1>, String> {
-        winnow_clone_tokens(&self.tokens)
+        winnow_clone_tokens(&self.tokens.iter().collect::<Vec<_>>())
     }
 }
 
 fn winnow_clone_tokens(
-    tokens: &[ConservativeCloneTokenV1],
+    tokens: &[ConservativeCloneTokenV1<'_>],
 ) -> Result<Vec<CloneFingerprintPositionV1>, String> {
     if tokens.len() < CLONE_FINGERPRINT_K_V1 + CLONE_FINGERPRINT_WINDOW_V1 - 1 {
         return Ok(Vec::new());
@@ -712,19 +705,19 @@ pub fn verify_exact_clone_payload(
     fn tokens_for_key<'a>(
         payload: &'a CloneBodyPayloadV1,
         key: &CloneExactKeyV1,
-    ) -> Option<&'a [ConservativeCloneTokenV1]> {
+    ) -> Option<&'a CloneTokenStreamV1> {
         match key.class {
             CloneNormalizationClassV1::Conservative
                 if payload.conservative_normalization_revision == key.normalization_revision
                     && payload.conservative_digest == key.digest =>
             {
-                Some(&payload.conservative_tokens[..])
+                Some(&payload.conservative_tokens)
             }
             CloneNormalizationClassV1::Rename
                 if payload.rename_normalization_revision == Some(key.normalization_revision)
                     && payload.rename_digest.as_ref() == Some(&key.digest) =>
             {
-                payload.rename_tokens.as_deref()
+                payload.rename_tokens.as_ref()
             }
             CloneNormalizationClassV1::Conservative | CloneNormalizationClassV1::Rename => None,
         }
@@ -741,32 +734,32 @@ pub fn verify_exact_clone_payload(
 }
 
 pub fn verify_clone_token_anchor(
-    left: &[ConservativeCloneTokenV1],
+    left: &CloneTokenStreamV1,
     left_position: u32,
-    right: &[ConservativeCloneTokenV1],
+    right: &CloneTokenStreamV1,
     right_position: u32,
 ) -> bool {
-    let Ok(left_position) = usize::try_from(left_position) else {
-        return false;
-    };
-    let Ok(right_position) = usize::try_from(right_position) else {
-        return false;
-    };
-    let Some(left) = left.get(left_position..left_position.saturating_add(CLONE_FINGERPRINT_K_V1))
-    else {
-        return false;
-    };
-    let Some(right) =
-        right.get(right_position..right_position.saturating_add(CLONE_FINGERPRINT_K_V1))
-    else {
-        return false;
-    };
-    left == right
+    fn window(
+        tokens: &CloneTokenStreamV1,
+        position: u32,
+    ) -> Option<Vec<ConservativeCloneTokenV1<'_>>> {
+        usize::try_from(position).ok().map(|position| {
+            tokens
+                .iter()
+                .skip(position)
+                .take(CLONE_FINGERPRINT_K_V1)
+                .collect()
+        })
+    }
+    match (window(left, left_position), window(right, right_position)) {
+        (Some(left), Some(right)) => left.len() == CLONE_FINGERPRINT_K_V1 && left == right,
+        _ => false,
+    }
 }
 
 pub fn align_clone_tokens(
-    left: &[ConservativeCloneTokenV1],
-    right: &[ConservativeCloneTokenV1],
+    left: &[ConservativeCloneTokenV1<'_>],
+    right: &[ConservativeCloneTokenV1<'_>],
     anchors: &[CloneTokenAnchorV1],
     maximum_work: u64,
     should_stop: impl FnMut() -> bool,
@@ -858,8 +851,8 @@ impl<F: FnMut() -> bool> CloneAlignmentWorkMeterV1<F> {
 }
 
 fn chain_clone_anchors<F: FnMut() -> bool>(
-    left: &[ConservativeCloneTokenV1],
-    right: &[ConservativeCloneTokenV1],
+    left: &[ConservativeCloneTokenV1<'_>],
+    right: &[ConservativeCloneTokenV1<'_>],
     anchors: &[CloneTokenAnchorV1],
     meter: &mut CloneAlignmentWorkMeterV1<F>,
 ) -> Result<Vec<CloneTokenAnchorV1>, CloneAlignmentStoppedV1> {
@@ -921,8 +914,8 @@ fn chain_clone_anchors<F: FnMut() -> bool>(
 }
 
 fn verify_clone_token_anchor_with_meter<F: FnMut() -> bool>(
-    left: &[ConservativeCloneTokenV1],
-    right: &[ConservativeCloneTokenV1],
+    left: &[ConservativeCloneTokenV1<'_>],
+    right: &[ConservativeCloneTokenV1<'_>],
     anchor: &CloneTokenAnchorV1,
     meter: &mut CloneAlignmentWorkMeterV1<F>,
 ) -> Result<bool, CloneAlignmentStoppedV1> {
@@ -949,8 +942,8 @@ fn verify_clone_token_anchor_with_meter<F: FnMut() -> bool>(
 }
 
 fn diff_clone_token_segment<F: FnMut() -> bool>(
-    left: &[ConservativeCloneTokenV1],
-    right: &[ConservativeCloneTokenV1],
+    left: &[ConservativeCloneTokenV1<'_>],
+    right: &[ConservativeCloneTokenV1<'_>],
     left_offset: usize,
     right_offset: usize,
     meter: &mut CloneAlignmentWorkMeterV1<F>,
@@ -1038,8 +1031,8 @@ fn diff_clone_token_segment<F: FnMut() -> bool>(
 }
 
 fn myers_clone_diff<F: FnMut() -> bool>(
-    left: &[ConservativeCloneTokenV1],
-    right: &[ConservativeCloneTokenV1],
+    left: &[ConservativeCloneTokenV1<'_>],
+    right: &[ConservativeCloneTokenV1<'_>],
     meter: &mut CloneAlignmentWorkMeterV1<F>,
 ) -> Result<(Vec<bool>, Vec<bool>), CloneAlignmentStoppedV1> {
     let maximum = left.len().saturating_add(right.len());
@@ -1179,8 +1172,8 @@ fn compact_frontier_value<F: FnMut() -> bool>(
 }
 
 fn clone_difference(
-    left: &[ConservativeCloneTokenV1],
-    right: &[ConservativeCloneTokenV1],
+    left: &[ConservativeCloneTokenV1<'_>],
+    right: &[ConservativeCloneTokenV1<'_>],
     left_start: usize,
     right_start: usize,
 ) -> Result<CloneAlignedDifferenceV1, CloneAlignmentStoppedV1> {
@@ -1198,11 +1191,19 @@ fn clone_difference(
             })?,
         })
     };
+    let stream = |tokens: &[ConservativeCloneTokenV1<'_>]| {
+        CloneTokenStreamV1::from_tokens(tokens.iter().copied()).map_err(|_| {
+            CloneAlignmentStoppedV1 {
+                reason: CloneAlignmentStopReasonV1::WorkBudgetExhausted,
+                work: 0,
+            }
+        })
+    };
     Ok(CloneAlignedDifferenceV1 {
         left_span: span(left_start, left.len())?,
         right_span: span(right_start, right.len())?,
-        left_tokens: left.to_vec(),
-        right_tokens: right.to_vec(),
+        left_tokens: stream(left)?,
+        right_tokens: stream(right)?,
     })
 }
 
@@ -1216,29 +1217,29 @@ fn directional_coverage(shared: u32, total: usize) -> Option<u32> {
 
 #[cfg(test)]
 mod payload_digest_tests {
-    use std::sync::Arc;
-
     use tracedecay_domain::canonical_sha256;
 
     use super::{
         BODY_DIGEST_DOMAIN, CONSERVATIVE_DIGEST_DOMAIN, CloneBodyPayloadPartsV1,
         CloneBodyPayloadV1, CloneBodyRenameIssueV1, CloneBodyRenameStatusV1,
-        CloneBodyTokenizationIssueV1, CloneBodyTokenizationStatusV1, ConservativeCloneTokenV1,
-        PAYLOAD_DIGEST_DOMAIN, RENAME_DIGEST_DOMAIN,
+        CloneBodyTokenizationIssueV1, CloneBodyTokenizationStatusV1, CloneTokenStreamV1,
+        ConservativeCloneTokenV1, PAYLOAD_DIGEST_DOMAIN, RENAME_DIGEST_DOMAIN,
     };
 
-    fn tokens(texts: &[&str]) -> Arc<[ConservativeCloneTokenV1]> {
-        let mut tokens = vec![ConservativeCloneTokenV1::StructureStart {
-            syntax_kind: "block".into(),
-        }];
-        tokens.extend(texts.iter().map(|text| ConservativeCloneTokenV1::Syntax {
-            syntax_kind: "identifier".into(),
-            text: (*text).to_owned().into(),
-        }));
-        tokens.push(ConservativeCloneTokenV1::StructureEnd {
-            syntax_kind: "block".into(),
-        });
-        tokens.into()
+    fn tokens(texts: &[&str]) -> CloneTokenStreamV1 {
+        CloneTokenStreamV1::from_tokens(
+            std::iter::once(ConservativeCloneTokenV1::StructureStart {
+                syntax_kind: "block",
+            })
+            .chain(texts.iter().map(|text| ConservativeCloneTokenV1::Syntax {
+                syntax_kind: "identifier",
+                text,
+            }))
+            .chain(std::iter::once(ConservativeCloneTokenV1::StructureEnd {
+                syntax_kind: "block",
+            })),
+        )
+        .expect("stream")
     }
 
     #[test]
@@ -1271,7 +1272,7 @@ mod payload_digest_tests {
                 payload.language.as_str(),
                 payload.symbol_kind.as_str(),
                 payload.conservative_normalization_revision,
-                &*payload.conservative_tokens,
+                &payload.conservative_tokens,
             );
             let body =
                 canonical_sha256(&(BODY_DIGEST_DOMAIN, prefix.0, prefix.1, prefix.2, prefix.3))
@@ -1284,7 +1285,7 @@ mod payload_digest_tests {
                 prefix.3,
             ))
             .expect("conservative");
-            let rename_digest = rename.as_deref().map(|tokens| {
+            let rename_digest = rename.as_ref().map(|tokens| {
                 canonical_sha256(&(RENAME_DIGEST_DOMAIN, prefix.0, prefix.1, 2u16, tokens))
                     .expect("rename")
             });
@@ -1301,7 +1302,7 @@ mod payload_digest_tests {
                 &payload.tokenization_issues,
                 payload.rename_normalization_revision,
                 &rename_digest,
-                payload.rename_tokens.as_deref(),
+                payload.rename_tokens.as_ref(),
                 payload.rename_coverage,
                 &payload.rename_issues,
             ))
@@ -1318,8 +1319,8 @@ mod payload_digest_tests {
 #[cfg(test)]
 mod fingerprint_tests {
     use tracedecay_code_extraction::{
-        CloneBodyEligibilityV1, CloneBodyRenameStatusV1, ConservativeCloneTokenV1,
-        LanguageExtractor, TypeScriptExtractor,
+        CloneBodyEligibilityV1, CloneBodyRenameStatusV1, CloneTokenStreamV1,
+        ConservativeCloneTokenV1, LanguageExtractor, TypeScriptExtractor,
     };
 
     use super::{
@@ -1328,11 +1329,18 @@ mod fingerprint_tests {
         verify_clone_token_anchor, verify_exact_clone_payload, winnow_clone_tokens,
     };
 
-    fn tokens(prefix: &str, count: usize) -> Vec<ConservativeCloneTokenV1> {
+    fn texts(prefix: &str, count: usize) -> Vec<String> {
         (0..count)
-            .map(|ordinal| ConservativeCloneTokenV1::Syntax {
-                syntax_kind: std::borrow::Cow::Borrowed("identifier"),
-                text: format!("{prefix}{ordinal}").into(),
+            .map(|ordinal| format!("{prefix}{ordinal}"))
+            .collect()
+    }
+
+    fn tokens(texts: &[String]) -> Vec<ConservativeCloneTokenV1<'_>> {
+        texts
+            .iter()
+            .map(|text| ConservativeCloneTokenV1::Syntax {
+                syntax_kind: "identifier",
+                text,
             })
             .collect()
     }
@@ -1340,22 +1348,22 @@ mod fingerprint_tests {
     #[test]
     fn standard_winnowing_observes_the_6_7_13_14_token_boundaries() {
         assert!(
-            winnow_clone_tokens(&tokens("six", 6))
+            winnow_clone_tokens(&tokens(&texts("six", 6)))
                 .expect("winnow")
                 .is_empty()
         );
         assert!(
-            winnow_clone_tokens(&tokens("seven", 7))
+            winnow_clone_tokens(&tokens(&texts("seven", 7)))
                 .expect("winnow")
                 .is_empty()
         );
         assert!(
-            winnow_clone_tokens(&tokens("thirteen", 13))
+            winnow_clone_tokens(&tokens(&texts("thirteen", 13)))
                 .expect("winnow")
                 .is_empty()
         );
         assert_eq!(
-            winnow_clone_tokens(&tokens("fourteen", 14))
+            winnow_clone_tokens(&tokens(&texts("fourteen", 14)))
                 .expect("winnow")
                 .len(),
             1
@@ -1378,16 +1386,16 @@ mod fingerprint_tests {
 
     #[test]
     fn a_shared_fourteen_token_run_has_a_common_fingerprint() {
-        let shared = tokens("shared", 14);
-        let mut left = tokens("left-prefix", 9);
+        let shared = texts("shared", 14);
+        let mut left = texts("left-prefix", 9);
         left.extend(shared.clone());
-        left.extend(tokens("left-suffix", 9));
-        let mut right = tokens("right-prefix", 9);
+        left.extend(texts("left-suffix", 9));
+        let mut right = texts("right-prefix", 9);
         right.extend(shared);
-        right.extend(tokens("right-suffix", 9));
+        right.extend(texts("right-suffix", 9));
 
-        let left = winnow_clone_tokens(&left).expect("left winnowing");
-        let right = winnow_clone_tokens(&right).expect("right winnowing");
+        let left = winnow_clone_tokens(&tokens(&left)).expect("left winnowing");
+        let right = winnow_clone_tokens(&tokens(&right)).expect("right winnowing");
         assert!(
             left.iter().any(|left| right
                 .iter()
@@ -1398,15 +1406,22 @@ mod fingerprint_tests {
 
     #[test]
     fn a_forced_fingerprint_collision_cannot_verify_different_token_bytes() {
-        let left = tokens("left", CLONE_FINGERPRINT_K_V1);
+        let left_texts = texts("left", CLONE_FINGERPRINT_K_V1);
+        let left = tokens(&left_texts);
         let mut right = left.clone();
         right[3] = ConservativeCloneTokenV1::Syntax {
-            syntax_kind: std::borrow::Cow::Borrowed("identifier"),
-            text: "different".into(),
+            syntax_kind: "identifier",
+            text: "different",
         };
+        let left = CloneTokenStreamV1::from_tokens(left).expect("stream");
+        let right = CloneTokenStreamV1::from_tokens(right).expect("stream");
 
         assert!(!verify_clone_token_anchor(&left, 0, &right, 0));
         assert!(verify_clone_token_anchor(&left, 0, &left, 0));
+        assert!(
+            !verify_clone_token_anchor(&left, 1, &left, 1),
+            "a window running off the stream end is not an anchor"
+        );
     }
 
     #[test]
@@ -1455,12 +1470,12 @@ mod fingerprint_tests {
             .validate()
             .expect("extracted tokens match their digests");
         let mut colliding = payload;
-        let mut tokens = colliding.conservative_tokens.to_vec();
+        let mut tokens = colliding.conservative_tokens.iter().collect::<Vec<_>>();
         tokens[0] = ConservativeCloneTokenV1::Syntax {
-            syntax_kind: std::borrow::Cow::Borrowed("identifier"),
-            text: "colliding-but-different".into(),
+            syntax_kind: "identifier",
+            text: "colliding-but-different",
         };
-        colliding.conservative_tokens = tokens.into();
+        colliding.conservative_tokens = CloneTokenStreamV1::from_tokens(tokens).expect("stream");
         assert_eq!(
             colliding.validate(),
             Err("clone payload digests do not match their canonical tokens".to_owned())
@@ -1469,15 +1484,19 @@ mod fingerprint_tests {
 
     #[test]
     fn anchored_alignment_reports_insertions_and_literal_changes_directionally() {
-        let left = tokens("token", 30);
+        let left_texts = texts("token", 30);
+        let added_texts = texts("added-branch", 2);
+        let left = tokens(&left_texts);
+        let added = tokens(&added_texts);
+        let changed = ConservativeCloneTokenV1::Syntax {
+            syntax_kind: "string",
+            text: "\"changed\"",
+        };
         let mut right = left[..10].to_vec();
-        right.extend(tokens("added-branch", 2));
-        right.extend(left[10..20].iter().cloned());
-        right.push(ConservativeCloneTokenV1::Syntax {
-            syntax_kind: std::borrow::Cow::Borrowed("string"),
-            text: "\"changed\"".into(),
-        });
-        right.extend(left[21..].iter().cloned());
+        right.extend(added.iter().copied());
+        right.extend(left[10..20].iter().copied());
+        right.push(changed);
+        right.extend(left[21..].iter().copied());
         let anchors = [
             CloneTokenAnchorV1 {
                 fingerprint: 1,
@@ -1506,16 +1525,25 @@ mod fingerprint_tests {
         assert_eq!(alignment.differences.len(), 2);
         assert!(alignment.differences[0].left_tokens.is_empty());
         assert_eq!(
-            alignment.differences[0].right_tokens,
-            tokens("added-branch", 2)
+            alignment.differences[0]
+                .right_tokens
+                .iter()
+                .collect::<Vec<_>>(),
+            added
         );
-        assert_eq!(alignment.differences[1].left_tokens, vec![left[20].clone()]);
         assert_eq!(
-            alignment.differences[1].right_tokens,
-            vec![ConservativeCloneTokenV1::Syntax {
-                syntax_kind: std::borrow::Cow::Borrowed("string"),
-                text: "\"changed\"".into(),
-            }]
+            alignment.differences[1]
+                .left_tokens
+                .iter()
+                .collect::<Vec<_>>(),
+            [left[20]]
+        );
+        assert_eq!(
+            alignment.differences[1]
+                .right_tokens
+                .iter()
+                .collect::<Vec<_>>(),
+            [changed]
         );
         assert!(alignment.work > 0);
         assert!(alignment.work <= 2_000_000);
@@ -1523,8 +1551,10 @@ mod fingerprint_tests {
 
     #[test]
     fn alignment_stops_at_work_and_cancellation_boundaries() {
-        let left = tokens("left", 30);
-        let right = tokens("right", 30);
+        let left_texts = texts("left", 30);
+        let right_texts = texts("right", 30);
+        let left = tokens(&left_texts);
+        let right = tokens(&right_texts);
 
         let exhausted = align_clone_tokens(&left, &right, &[], 1, || false)
             .expect_err("one step cannot align unrelated bodies");
@@ -1542,7 +1572,8 @@ mod fingerprint_tests {
 
     #[test]
     fn anchor_validation_consumes_alignment_work_budget() {
-        let body = tokens("shared", CLONE_FINGERPRINT_K_V1);
+        let body_texts = texts("shared", CLONE_FINGERPRINT_K_V1);
+        let body = tokens(&body_texts);
         let anchors = [CloneTokenAnchorV1 {
             fingerprint: 1,
             left_token_position: 0,

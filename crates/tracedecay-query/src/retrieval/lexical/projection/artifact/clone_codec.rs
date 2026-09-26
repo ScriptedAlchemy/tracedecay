@@ -9,14 +9,14 @@
 //! span, and payload, the blob its eligibility, and the opening route
 //! supplies project, repository, worktree, generation, and snapshot.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use tracedecay_code_index::clones::{
     CloneBodyEligibilityV1, CloneBodyOccurrenceV1, CloneBodyPayloadPartsV1, CloneBodyPayloadV1,
     CloneBodyRenameIssueV1, CloneBodyRenameStatusV1, CloneBodyTokenizationIssueV1,
-    CloneBodyTokenizationStatusV1, CodeIndexCloneBodyV1, ConservativeCloneTokenV1,
+    CloneBodyTokenizationStatusV1, CloneTokenStreamV1, CodeIndexCloneBodyV1,
+    ConservativeCloneTokenV1,
 };
 use tracedecay_domain::{
     CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, SourceSpan, SymbolOccurrenceId,
@@ -277,26 +277,26 @@ pub(super) fn encode_clone_payload(
         });
     }
 
-    let rename = payload.rename_tokens.as_deref();
+    let conservative = payload.conservative_tokens.iter().collect::<Vec<_>>();
+    let rename = payload
+        .rename_tokens
+        .as_ref()
+        .map(|rename| rename.iter().collect::<Vec<_>>());
     let mut kinds = SyntaxKindTableV1::default();
-    for token in payload
-        .conservative_tokens
-        .iter()
-        .chain(rename.into_iter().flatten())
-    {
-        kinds.intern(syntax_kind(token));
+    for token in conservative.iter().chain(rename.iter().flatten()) {
+        kinds.intern(token.syntax_kind());
     }
     put_len(&mut encoded, kinds.names.len())?;
     for name in &kinds.names {
         put_str(&mut encoded, name);
     }
-    put_tokens(&mut encoded, &payload.conservative_tokens, &kinds)?;
-    match rename {
+    put_tokens(&mut encoded, &conservative, &kinds)?;
+    match rename.as_deref() {
         None => encoded.push(RENAME_ABSENT),
-        Some(rename) if aligned(&payload.conservative_tokens, rename) => {
+        Some(rename) if aligned(&conservative, rename) => {
             encoded.push(RENAME_ALIGNED);
-            for (conservative, renamed) in payload.conservative_tokens.iter().zip(rename) {
-                match (conservative, renamed) {
+            for (conservative, renamed) in conservative.iter().zip(rename) {
+                match (*conservative, *renamed) {
                     (
                         ConservativeCloneTokenV1::Syntax { text: original, .. },
                         ConservativeCloneTokenV1::Syntax { text, .. },
@@ -371,27 +371,32 @@ pub(super) fn decode_clone_payload(
     let kinds = (0..take_len(&mut bytes)?)
         .map(|_| take_string(&mut bytes))
         .collect::<Result<Vec<_>, _>>()?;
-    let conservative_tokens: Arc<[ConservativeCloneTokenV1]> =
-        take_tokens(&mut bytes, &kinds)?.into();
-    let rename_tokens: Option<Arc<[ConservativeCloneTokenV1]>> = match take_u8(&mut bytes)? {
+    let conservative_tokens = take_tokens(&mut bytes, &kinds)?;
+    let rename_tokens = match take_u8(&mut bytes)? {
         RENAME_ABSENT => None,
-        RENAME_ALIGNED => Some(
-            conservative_tokens
-                .iter()
-                .map(|token| match (take_u8(&mut bytes)?, token) {
-                    (RENAME_TOKEN_SAME, _) => Ok(token.clone()),
-                    (RENAME_TOKEN_TEXT, ConservativeCloneTokenV1::Syntax { syntax_kind, .. }) => {
-                        Ok(ConservativeCloneTokenV1::Syntax {
-                            syntax_kind: syntax_kind.clone(),
-                            text: Cow::Owned(take_string(&mut bytes)?),
-                        })
+        RENAME_ALIGNED => {
+            let mut renamed = Vec::new();
+            for (position, token) in conservative_tokens.iter().enumerate() {
+                match (take_u8(&mut bytes)?, token) {
+                    (RENAME_TOKEN_SAME, _) => {}
+                    (RENAME_TOKEN_TEXT, ConservativeCloneTokenV1::Syntax { .. }) => {
+                        let position = u32::try_from(position).map_err(contract_number)?;
+                        renamed.push((position, take_string(&mut bytes)?));
                     }
-                    _ => Err(corrupt("rename token difference is not canonical")),
-                })
-                .collect::<Result<Vec<_>, _>>()?
-                .into(),
-        ),
-        RENAME_STREAM => Some(take_tokens(&mut bytes, &kinds)?.into()),
+                    _ => return Err(corrupt("rename token difference is not canonical")),
+                }
+            }
+            Some(
+                conservative_tokens
+                    .renamed(
+                        renamed
+                            .iter()
+                            .map(|(position, text)| (*position, text.as_str())),
+                    )
+                    .map_err(|_| corrupt("rename token difference is not canonical"))?,
+            )
+        }
+        RENAME_STREAM => Some(take_tokens(&mut bytes, &kinds)?),
         _ => return Err(corrupt("rename stream has an unknown tag")),
     };
     if !bytes.is_empty() {
@@ -439,16 +444,11 @@ impl<'a> SyntaxKindTableV1<'a> {
     }
 }
 
-fn syntax_kind(token: &ConservativeCloneTokenV1) -> &str {
-    match token {
-        ConservativeCloneTokenV1::StructureStart { syntax_kind }
-        | ConservativeCloneTokenV1::Syntax { syntax_kind, .. }
-        | ConservativeCloneTokenV1::StructureEnd { syntax_kind } => syntax_kind,
-    }
-}
-
 /// Whether `rename` differs from `conservative` only in syntax-token text.
-fn aligned(conservative: &[ConservativeCloneTokenV1], rename: &[ConservativeCloneTokenV1]) -> bool {
+fn aligned(
+    conservative: &[ConservativeCloneTokenV1<'_>],
+    rename: &[ConservativeCloneTokenV1<'_>],
+) -> bool {
     conservative.len() == rename.len()
         && conservative
             .iter()
@@ -468,17 +468,17 @@ fn aligned(conservative: &[ConservativeCloneTokenV1], rename: &[ConservativeClon
 
 fn put_tokens(
     encoded: &mut Vec<u8>,
-    tokens: &[ConservativeCloneTokenV1],
+    tokens: &[ConservativeCloneTokenV1<'_>],
     kinds: &SyntaxKindTableV1<'_>,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     put_len(encoded, tokens.len())?;
-    for token in tokens {
+    for token in tokens.iter().copied() {
         let (tag, text) = match token {
             ConservativeCloneTokenV1::StructureStart { .. } => (TOKEN_STRUCTURE_START, None),
             ConservativeCloneTokenV1::Syntax { text, .. } => (TOKEN_SYNTAX, Some(text)),
             ConservativeCloneTokenV1::StructureEnd { .. } => (TOKEN_STRUCTURE_END, None),
         };
-        encode_varint(kinds.index(syntax_kind(token))? * 3 + tag, encoded);
+        encode_varint(kinds.index(token.syntax_kind())? * 3 + tag, encoded);
         if let Some(text) = text {
             put_str(encoded, text);
         }
@@ -489,31 +489,34 @@ fn put_tokens(
 fn take_tokens(
     bytes: &mut &[u8],
     kinds: &[String],
-) -> Result<Vec<ConservativeCloneTokenV1>, CodeLexicalArtifactErrorV1> {
+) -> Result<CloneTokenStreamV1, CodeLexicalArtifactErrorV1> {
     let count = take_len(bytes)?;
     // Every token takes at least one byte, so a count above the remaining
     // bytes is corrupt rather than an allocation to honor.
     if count > bytes.len() {
         return Err(corrupt("token count exceeds its record"));
     }
-    let mut tokens = Vec::with_capacity(count);
+    let mut records = Vec::with_capacity(count);
     for _ in 0..count {
         let header = take_varint(bytes)?;
         let kind = usize::try_from(header / 3)
             .ok()
             .and_then(|index| kinds.get(index))
             .ok_or_else(|| corrupt("token names an unknown syntax kind"))?;
-        let syntax_kind = Cow::Owned(kind.clone());
-        tokens.push(match header % 3 {
-            TOKEN_STRUCTURE_START => ConservativeCloneTokenV1::StructureStart { syntax_kind },
-            TOKEN_SYNTAX => ConservativeCloneTokenV1::Syntax {
-                syntax_kind,
-                text: Cow::Owned(take_string(bytes)?),
-            },
-            _ => ConservativeCloneTokenV1::StructureEnd { syntax_kind },
-        });
+        let text = match header % 3 {
+            TOKEN_SYNTAX => Some(take_string(bytes)?),
+            _ => None,
+        };
+        records.push((header % 3, kind.as_str(), text));
     }
-    Ok(tokens)
+    CloneTokenStreamV1::from_tokens(records.iter().map(|(tag, syntax_kind, text)| {
+        match (*tag, text) {
+            (TOKEN_STRUCTURE_START, _) => ConservativeCloneTokenV1::StructureStart { syntax_kind },
+            (TOKEN_SYNTAX, Some(text)) => ConservativeCloneTokenV1::Syntax { syntax_kind, text },
+            _ => ConservativeCloneTokenV1::StructureEnd { syntax_kind },
+        }
+    }))
+    .map_err(|_| corrupt("token stream exceeds its code space"))
 }
 
 fn put_len(encoded: &mut Vec<u8>, length: usize) -> Result<(), CodeLexicalArtifactErrorV1> {
@@ -560,13 +563,10 @@ fn corrupt(detail: &str) -> CodeLexicalArtifactErrorV1 {
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
-    use std::sync::Arc;
-
     use tracedecay_code_index::clones::{
         CloneBodyEligibilityV1, CloneBodyPayloadPartsV1, CloneBodyPayloadV1,
         CloneBodyRenameIssueV1, CloneBodyRenameStatusV1, CloneBodyTokenizationIssueV1,
-        CloneBodyTokenizationStatusV1, ConservativeCloneTokenV1,
+        CloneBodyTokenizationStatusV1, CloneTokenStreamV1, ConservativeCloneTokenV1,
     };
 
     use super::{
@@ -575,26 +575,24 @@ mod tests {
     };
     use crate::retrieval::lexical::CodeLexicalArtifactErrorV1;
 
-    fn token(kind: &'static str, text: Option<&str>) -> ConservativeCloneTokenV1 {
+    fn token(
+        syntax_kind: &'static str,
+        text: Option<&'static str>,
+    ) -> ConservativeCloneTokenV1<'static> {
         match text {
-            Some(text) => ConservativeCloneTokenV1::Syntax {
-                syntax_kind: Cow::Borrowed(kind),
-                text: Cow::Owned(text.to_owned()),
-            },
-            None => ConservativeCloneTokenV1::StructureStart {
-                syntax_kind: Cow::Borrowed(kind),
-            },
+            Some(text) => ConservativeCloneTokenV1::Syntax { syntax_kind, text },
+            None => ConservativeCloneTokenV1::StructureStart { syntax_kind },
         }
     }
 
-    fn payload(rename: Option<Vec<ConservativeCloneTokenV1>>) -> CloneBodyPayloadV1 {
+    fn payload(rename: Option<Vec<ConservativeCloneTokenV1<'_>>>) -> CloneBodyPayloadV1 {
         let conservative = vec![
             token("block", None),
             token("identifier", Some("alpha")),
             token("+", Some("+")),
             token("identifier", Some("beta")),
             ConservativeCloneTokenV1::StructureEnd {
-                syntax_kind: Cow::Borrowed("block"),
+                syntax_kind: "block",
             },
         ];
         CloneBodyPayloadV1::from_parts(CloneBodyPayloadPartsV1 {
@@ -602,11 +600,12 @@ mod tests {
             symbol_kind: "function".to_owned(),
             token_count: 3,
             conservative_normalization_revision: 1,
-            conservative_tokens: conservative.into(),
+            conservative_tokens: CloneTokenStreamV1::from_tokens(conservative).expect("stream"),
             tokenization_status: CloneBodyTokenizationStatusV1::Partial,
             tokenization_issues: vec![CloneBodyTokenizationIssueV1::ParseError],
             rename_normalization_revision: rename.as_ref().map(|_| 1),
-            rename_tokens: rename.map(Arc::from),
+            rename_tokens: rename
+                .map(|rename| CloneTokenStreamV1::from_tokens(rename).expect("stream")),
             rename_coverage: CloneBodyRenameStatusV1::Partial,
             rename_issues: vec![CloneBodyRenameIssueV1::DynamicBinding],
         })
@@ -621,7 +620,7 @@ mod tests {
             token("+", Some("+")),
             token("identifier", Some("$1")),
             ConservativeCloneTokenV1::StructureEnd {
-                syntax_kind: Cow::Borrowed("block"),
+                syntax_kind: "block",
             },
         ];
         let divergent = vec![token("call", None), token("identifier", Some("$0"))];

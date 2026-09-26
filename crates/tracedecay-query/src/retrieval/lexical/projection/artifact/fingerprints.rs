@@ -520,6 +520,8 @@ pub(super) fn read_clone_fingerprint_page(
         }
     }
 
+    let source_views = source_tokens.iter().collect::<Vec<_>>();
+    let selected_views = selected_block.map(|block| block.tokens().iter().collect::<Vec<_>>());
     let candidates = candidates
         .into_iter()
         .filter(|(_, candidate)| !candidate.anchors.is_empty())
@@ -557,16 +559,18 @@ pub(super) fn read_clone_fingerprint_page(
                 )
             })?
             .tokens;
-        let selected_block_containment =
-            selected_block.and_then(|block| containment_class(block.tokens(), candidate_tokens));
+        let candidate_tokens = candidate_tokens.iter().collect::<Vec<_>>();
+        let selected_block_containment = selected_views
+            .as_deref()
+            .and_then(|selected| containment_class(selected, &candidate_tokens));
         if selected_block.is_some() && selected_block_containment.is_none() {
             continue;
         }
         let remaining_work =
             CLONE_NEAR_MATCH_TOKEN_WORK_BUDGET_V1.saturating_sub(accounting.token_work);
         let alignment = align_clone_tokens(
-            source_tokens,
-            candidate_tokens,
+            &source_views,
+            &candidate_tokens,
             &candidate.anchors.iter().copied().collect::<Vec<_>>(),
             remaining_work,
             || control.is_cancelled() || control.is_deadline_exceeded(),
@@ -674,8 +678,8 @@ fn candidate_size_ratio_admitted(left: u32, right: u32) -> bool {
 }
 
 fn containment_class(
-    selected: &[ConservativeCloneTokenV1],
-    candidate: &[ConservativeCloneTokenV1],
+    selected: &[ConservativeCloneTokenV1<'_>],
+    candidate: &[ConservativeCloneTokenV1<'_>],
 ) -> Option<CloneSelectedBlockContainmentClassV1> {
     if selected == candidate {
         Some(CloneSelectedBlockContainmentClassV1::Equal)

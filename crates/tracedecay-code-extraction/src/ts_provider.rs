@@ -3,8 +3,7 @@
 //! All grammars are served from the bundled tree-sitter crate via a
 //! lazily-initialised lookup table.
 
-use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::LazyLock;
 use tree_sitter::{Language, Parser, Tree};
 
@@ -101,24 +100,48 @@ fn build_language_table() -> HashMap<&'static str, Language> {
     languages.collect()
 }
 
-/// Every node-kind name of every registered grammar, as the grammar's own
-/// `&'static str`.
-static GRAMMAR_NODE_KINDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    LANGUAGES
-        .values()
-        .flat_map(|language| {
-            (0..u16::try_from(language.node_kind_count()).unwrap_or(u16::MAX))
-                .filter_map(|id| language.node_kind_for_id(id))
-        })
-        .collect()
+/// Every distinct node-kind name of every registered grammar, as the grammar's
+/// own `&'static str`, numbered. The numbers are process-local: clone token
+/// streams hold them in memory and always write the name.
+struct GrammarNodeKinds {
+    ids: HashMap<&'static str, u32>,
+    names: Vec<&'static str>,
+}
+
+static GRAMMAR_NODE_KINDS: LazyLock<GrammarNodeKinds> = LazyLock::new(|| {
+    let mut kinds = GrammarNodeKinds {
+        ids: HashMap::new(),
+        names: Vec::new(),
+    };
+    for language in LANGUAGES.values() {
+        for id in 0..u16::try_from(language.node_kind_count()).unwrap_or(u16::MAX) {
+            let Some(name) = language.node_kind_for_id(id) else {
+                continue;
+            };
+            let Ok(next) = u32::try_from(kinds.names.len()) else {
+                break;
+            };
+            kinds.ids.entry(name).or_insert_with(|| {
+                kinds.names.push(name);
+                next
+            });
+        }
+    }
+    kinds
 });
 
-/// The grammar's static copy of `name` when some registered grammar names a
-/// node kind so, otherwise an owned copy.
-pub fn grammar_str(name: &str) -> Cow<'static, str> {
-    GRAMMAR_NODE_KINDS
-        .get(name)
-        .map_or_else(|| Cow::Owned(name.to_owned()), |name| Cow::Borrowed(*name))
+/// The number of the grammar node kind named `name`, when some registered
+/// grammar declares one.
+pub(crate) fn grammar_kind_id(name: &str) -> Option<u32> {
+    GRAMMAR_NODE_KINDS.ids.get(name).copied()
+}
+
+/// The grammar's static name for kind number `id`.
+pub(crate) fn grammar_kind_name(id: u32) -> Option<&'static str> {
+    usize::try_from(id)
+        .ok()
+        .and_then(|id| GRAMMAR_NODE_KINDS.names.get(id))
+        .copied()
 }
 
 /// Returns the `tree_sitter::Language` for the given extractor language key.
