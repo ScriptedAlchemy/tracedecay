@@ -338,7 +338,6 @@ impl MaintenanceCoordinator {
     #[hotpath::skip]
     pub(super) async fn spawn(
         profile_root: PathBuf,
-        profile_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         administration: StoreAdministration,
         code_index_schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         retention: tracedecay_configuration::RetentionConfig,
@@ -413,7 +412,6 @@ impl MaintenanceCoordinator {
                 task_owner
                     .run(
                         profile_root,
-                        profile_database,
                         administration,
                         code_index_schedulers,
                         retention,
@@ -495,7 +493,6 @@ impl MaintenanceCoordinator {
     async fn run(
         &self,
         profile_root: PathBuf,
-        profile_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         administration: StoreAdministration,
         code_index_schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         retention: tracedecay_configuration::RetentionConfig,
@@ -503,15 +500,41 @@ impl MaintenanceCoordinator {
         interval: Duration,
     ) {
         run_maintenance_loop(&self.cancellation, &self.wake, interval, |continuation| {
-            self.run_tick(
+            let (profile_root, administration, code_index_schedulers, retention) = (
                 &profile_root,
-                profile_database.as_ref(),
                 &administration,
                 &code_index_schedulers,
                 &retention,
-                branch_gc,
-                continuation,
-            )
+            );
+            async move {
+                // Resolved per tick: a reset-required profile authority keeps
+                // the daemon serving, and the tick after the operator's reset
+                // mounts the fresh store.
+                let profile_database = match administration.registered_profile_database().await {
+                    Ok(database) => database,
+                    Err(error) => {
+                        log_daemon_event(
+                            "retention_degraded",
+                            &[
+                                ("pass", "maintenance_tick".to_owned()),
+                                ("failure", "profile_authority_unavailable".to_owned()),
+                                ("error", error.to_string()),
+                            ],
+                        );
+                        return MaintenanceTickOutcome::Retry;
+                    }
+                };
+                self.run_tick(
+                    profile_root,
+                    profile_database.as_ref(),
+                    administration,
+                    code_index_schedulers,
+                    retention,
+                    branch_gc,
+                    continuation,
+                )
+                .await
+            }
         })
         .await;
     }

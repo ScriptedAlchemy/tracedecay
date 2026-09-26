@@ -96,8 +96,8 @@ pub use contract::{
     DaemonInvocationDeliveryAckResponseOutcome, DaemonInvocationOperation, DaemonInvocationOutcome,
     DaemonInvocationPayload, DaemonInvocationProblem, DaemonInvocationRequest,
     DaemonInvocationResponse, DaemonLspSessionAccess, HandoffApplicationInvocationV1,
-    HandoffApplicationOutcomeV1, WorkApplicationInvocationV1, WorkApplicationOutcomeV1,
-    WorkflowApplicationInvocation, WorkflowApplicationOutcome,
+    HandoffApplicationOutcomeV1, RESET_REQUIRED_STORES_META_KEY, WorkApplicationInvocationV1,
+    WorkApplicationOutcomeV1, WorkflowApplicationInvocation, WorkflowApplicationOutcome,
     parse_daemon_invocation_cancellation_request, parse_daemon_invocation_delivery_ack_request,
     parse_daemon_invocation_request,
 };

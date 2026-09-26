@@ -104,6 +104,7 @@ fn core_status_request_id(request: Option<&JsonRpcRequest>) -> Option<serde_json
 fn project_open_status_value(
     handshake: &DaemonHandshake,
     project_open: &ProjectOpenStatusV1,
+    reset_required_stores: &[tracedecay_domain::errors::StoreResetRequiredV1],
 ) -> serde_json::Value {
     json!({
         "project_root": handshake.project_path,
@@ -116,6 +117,7 @@ fn project_open_status_value(
             "status": "unavailable",
             "findings": [],
         },
+        "reset_required_stores": reset_required_stores,
     })
 }
 
@@ -598,7 +600,14 @@ where
         && project_open.state != ProjectOpenStatusStateV1::Completed
     {
         drop(setup_activity);
-        let result = doctor_runtime_tool_result(project_open_status_value(handshake, project_open));
+        let reset_required_stores = Box::pin(store_administration.session_runtime_registry())
+            .await?
+            .reset_required_stores();
+        let result = doctor_runtime_tool_result(project_open_status_value(
+            handshake,
+            project_open,
+            &reset_required_stores,
+        ));
         Box::pin(write_json_rpc_response(
             transport,
             &JsonRpcResponse::success(id, result),
@@ -612,13 +621,15 @@ where
     let report_ready = if request.doctor_report_requested() {
         match Box::pin(doctor_report_ready()).await {
             Ok(ready) => ready,
-            // Enrollment, warming, and a blocked repository walk are client
-            // states. Dropping the socket before any frame made Doctor report
-            // a closed connection and then print store-recovery guidance.
+            // Enrollment, warming, a blocked repository walk, and a
+            // reset-required store are client or operator states. Dropping
+            // the socket before any frame made Doctor report a closed
+            // connection and then print store-recovery guidance.
             Err(error)
                 if super::error_is_project_not_enrolled(&error)
                     || super::error_is_project_warming(&error)
-                    || super::error_is_repository_discovery_deferred(&error) =>
+                    || super::error_is_repository_discovery_deferred(&error)
+                    || tracedecay_mcp::reset_required_context(&error).is_some() =>
             {
                 drop(setup_activity);
                 Box::pin(write_json_rpc_response(
@@ -951,7 +962,23 @@ mod doctor_runtime_route_tests {
             output: String::new(),
             idle_before_write: false,
         };
-        let store_administration = StoreAdministration::default();
+        std::fs::create_dir_all(&profile).expect("fixture profile root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o700))
+                .expect("secure fixture profile root");
+        }
+        let store_administration = StoreAdministration::default().with_profile_identity(
+            tracedecay_daemon_identity::profile_identity::load_or_create(&profile)
+                .expect("load fixture profile identity"),
+        );
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &profile,
+            REGISTERED_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed),
+            "core-doctor-status-project-open",
+        )
+        .expect("enter daemon database scope");
         let first_request = AuthenticatedFirstRequest::new(status_request_line());
         let project_open = ProjectOpenStatusV1 {
             state: ProjectOpenStatusStateV1::Converging,
@@ -982,6 +1009,11 @@ mod doctor_runtime_route_tests {
                 .contains(r#""reason":"deferred_repository_discovery""#)
         );
         assert!(transport.output.contains(r#""retry_after_ms":250"#));
+        assert!(
+            transport.output.contains(r#""reset_required_stores":[]"#),
+            "{}",
+            transport.output
+        );
     }
 
     #[tokio::test]

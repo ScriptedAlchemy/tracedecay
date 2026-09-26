@@ -7,6 +7,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::ProjectId;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 use super::{StoreAdministration, http_application::DaemonHttpApplicationRegistry};
 pub(super) use tracedecay_global_db::{RemoteDeletionFailureCode, RemoteDeletionPhase};
@@ -29,11 +30,29 @@ pub(super) enum RemoteDeletionBootMode {
 pub(super) async fn resume_remote_account_deletion_for_boot(
     owners: &RemoteDeletionRuntimeOwners,
 ) -> tracedecay_domain::errors::Result<RemoteDeletionBootMode> {
-    let Some(tombstone) = owners
+    let tombstone = match owners
         .administration
         .remote_account_deletion_tombstone()
-        .await?
-    else {
+        .await
+    {
+        Ok(tombstone) => tombstone,
+        // A reset-required profile authority holds no readable tombstone; the
+        // daemon boots to serve that typed state, and every profile read,
+        // including the account-active guard, meets the same refusal until
+        // the operator's reset deletes the store.
+        Err(error) if error.store_reset_required("profile authority").is_some() => {
+            log_daemon_event(
+                "remote_account_deletion_resume",
+                &[
+                    ("outcome", "profile_authority_reset_required".to_owned()),
+                    ("error", error.to_string()),
+                ],
+            );
+            None
+        }
+        Err(error) => return Err(error),
+    };
+    let Some(tombstone) = tombstone else {
         return Ok(RemoteDeletionBootMode::Ordinary);
     };
     match owners

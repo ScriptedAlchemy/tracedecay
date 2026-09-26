@@ -92,6 +92,34 @@ pub(super) fn attach_initialize_route_metadata(
     result["_meta"]["tracedecayInitializeRoute"] = json!(route);
 }
 
+/// Names, in an `initialize` result, every registered store the daemon serves
+/// in its typed reset-required state, so lifecycle probes that prove the
+/// daemon ready also learn the reset the operator owes. A registry that
+/// cannot be opened turns the answer into that typed error.
+pub(super) async fn attach_reset_required_stores(
+    response: &mut JsonRpcResponse,
+    store_administration: &StoreAdministration,
+) {
+    if response.result.is_none() {
+        return;
+    }
+    match store_administration.session_runtime_registry().await {
+        Ok(registry) => {
+            if let Some(result) = response.result.as_mut() {
+                result["_meta"][tracedecay_daemon_protocol::RESET_REQUIRED_STORES_META_KEY] =
+                    json!(registry.reset_required_stores());
+            }
+        }
+        Err(error) => {
+            *response = JsonRpcResponse::error(
+                response.id.clone(),
+                ErrorCode::InternalError,
+                error.to_string(),
+            );
+        }
+    }
+}
+
 /// Returns `None` for project-dependent requests, `Some(None)` for handled
 /// notifications, and `Some(Some(response))` for static MCP bootstrap calls.
 pub(super) fn daemon_bootstrap_response(

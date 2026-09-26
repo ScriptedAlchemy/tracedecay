@@ -168,10 +168,8 @@ async fn run_foreground_loopback(
     }
     let lifecycle = DaemonLifecycle::default();
     let sync_config = tracedecay_configuration::SyncConfig::default();
-    let profile_database = store_administration.registered_profile_database().await?;
     let maintenance = maintenance::MaintenanceCoordinator::spawn(
         profile_root.clone(),
-        profile_database,
         store_administration.clone(),
         invocation.code_index_schedulers.clone(),
         sync_config.retention.clone(),
@@ -636,13 +634,8 @@ async fn run_foreground_unix(
         );
     }
     let sync_config = tracedecay_configuration::SyncConfig::default();
-    let profile_database = engine
-        .store_administration
-        .registered_profile_database()
-        .await?;
     let maintenance = maintenance::MaintenanceCoordinator::spawn(
         profile_root.clone(),
-        profile_database,
         engine.store_administration.clone(),
         engine.invocation.code_index_schedulers.clone(),
         sync_config.retention.clone(),
@@ -833,9 +826,31 @@ async fn install_profile_worker_plan(
         .profile_identity()?
         .profile_id()
         .clone();
-    let database = store_administration
+    let database = match store_administration
         .registered_profile_session_database()
-        .await?;
+        .await
+    {
+        Ok(database) => database,
+        // A reset-required profile store is served as that typed state, not a
+        // dead daemon. Its persisted worker selection is unreadable, so the
+        // plan runs on the selection a reset profile initializes to until the
+        // operator resets it.
+        Err(error) if error.store_reset_required("profile sessions").is_some() => {
+            log_daemon_event(
+                "profile_worker_plan_reset_required",
+                &[
+                    ("selection", "automatic".to_owned()),
+                    ("error", error.to_string()),
+                ],
+            );
+            invocation.install_worker_selection(
+                store_administration,
+                tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::default(),
+            )?;
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
     invocation
         .install_profile_worker_plan(store_administration, database, &profile_id)
         .await?;

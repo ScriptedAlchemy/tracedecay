@@ -11,8 +11,9 @@ use tokio::sync::Semaphore;
 use tracedecay_contracts::storage::{
     SchemaConvergenceFindingV1, SchemaConvergenceStageV1, SchemaConvergenceStateV1,
 };
+use tracedecay_domain::errors::{StoreResetRequiredV1, TraceDecayError};
 use tracedecay_global_db::schema_stages::RegisteredSchemaConvergence;
-use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1};
+use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1, StoreShardScopeV1};
 
 use super::retained_hook_tasks::RetainedHookTaskJoin;
 
@@ -544,7 +545,64 @@ impl DaemonSessionRuntimeRegistryV1 {
         runtime: StoreRuntimeClientLease,
         _operation: &'static str,
     ) -> Result<RegisteredGlobalDbOwnerV1> {
-        self.attach_registered_inner(runtime).await
+        let shard_id = runtime.binding().shard_id.clone();
+        let attached = self.attach_registered_inner(runtime).await;
+        self.record_registered_admission(shard_id, attached.as_ref().err());
+        attached
+    }
+
+    fn record_registered_admission(
+        &self,
+        shard_id: StoreShardIdV1,
+        refusal: Option<&TraceDecayError>,
+    ) {
+        let reset_required = refusal.and_then(|error| {
+            let store = match &shard_id.scope {
+                StoreShardScopeV1::Profile => "profile authority".to_owned(),
+                StoreShardScopeV1::ProfileSessions => "profile sessions".to_owned(),
+                StoreShardScopeV1::ProjectSessions { project_id } => {
+                    format!("project sessions {project_id}")
+                }
+                scope => format!("{scope:?}"),
+            };
+            error.store_reset_required(store)
+        });
+        let mut stores = self
+            .reset_required_stores
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match reset_required {
+            Some(state) => {
+                if stores.get(&shard_id) != Some(&state) {
+                    tracing::warn!(
+                        event = "store_reset_required",
+                        store = %state.store,
+                        authority = %state.authority,
+                        remedy = %state.remedy,
+                        "registered store is served in its typed reset-required state"
+                    );
+                }
+                stores.insert(shard_id, state);
+            }
+            // Any other failure says nothing about the persisted shape, so
+            // only a successful attach clears a recorded reset.
+            None if refusal.is_none() => {
+                stores.remove(&shard_id);
+            }
+            None => {}
+        }
+    }
+
+    /// Registered stores currently held in their typed reset-required state,
+    /// each with the exact command that resets it.
+    #[must_use]
+    pub fn reset_required_stores(&self) -> Vec<StoreResetRequiredV1> {
+        self.reset_required_stores
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect()
     }
 
     // Erase the inner state machine before Hotpath wraps it by value. Boxing

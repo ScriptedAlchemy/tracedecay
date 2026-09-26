@@ -110,8 +110,18 @@ pub(super) async fn bind_authenticated_profile_identity(
     let scoped_administration = store_administration
         .clone()
         .with_profile_identity(profile_identity);
-    let profile_database = scoped_administration.registered_profile_database().await?;
-    let global_db_path = authority::canonical_identity_path(profile_database.db_path())?;
+    let global_db_path = match scoped_administration.registered_profile_database().await {
+        Ok(profile_database) => authority::canonical_identity_path(profile_database.db_path())?,
+        // A reset-required profile authority keeps its registered location.
+        // Binding the connection to it lets every request on it answer the
+        // typed refusal instead of closing without a frame.
+        Err(error) if error.store_reset_required("profile authority").is_some() => {
+            authority::canonical_identity_path(
+                &profile_root.join(tracedecay_runtime_core::config::GLOBAL_DB_FILENAME),
+            )?
+        }
+        Err(error) => return Err(error),
+    };
     let supplied_global_db_path =
         authority::canonical_identity_path(&handshake.client_identity.global_db_path)?;
     if supplied_global_db_path != global_db_path {

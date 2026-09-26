@@ -280,10 +280,12 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
             "## Project Status\n\
              **active_branch:** status-proof\n\
              **code_index_freshness.status:** current\n\
+             **github_source:** {{2 field(s)}}\n\
              **graph_statistics:** {{6 field(s)}}\n\
              **memory.status:** nominal\n\
              {owner_bullets}\
              **project_root:** {root}\n\
+             **reset_required_stores:** 0 item(s)\n\
              **retrieval_serving.status:** serving\n\
              **schema_convergence.status:** completed\n\
              **server:** {{14 field(s)}}\n\
