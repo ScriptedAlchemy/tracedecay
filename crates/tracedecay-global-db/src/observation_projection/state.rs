@@ -3,8 +3,9 @@ use std::collections::{BTreeSet, HashMap};
 
 use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1, PayloadDigestV1};
 use tracedecay_store::{
-    EDITED_FILES_KEY, ObservationProjection, ProjectionCheckpoint, ProjectionStoreError,
-    ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
+    EDITED_FILES_KEY, ObservationProjection, PROJECTION_TERMINAL_RETRY_MICROS,
+    ProjectionCheckpoint, ProjectionStoreError, ProjectionStoreResult,
+    SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
     SessionMessageProjection, SessionMessageRecord, SessionRecord, message_output_digest,
 };
 
@@ -289,8 +290,10 @@ async fn rearm_projection_retry_batch(
     let rows = transaction
         .execute(
             "UPDATE projection_queue SET next_retry_at_micros = 0
-             WHERE rowid > ?1 AND rowid <= ?2 AND next_retry_at_micros > 0",
-            params![after_rowid, batch_end],
+             WHERE rowid > ?1 AND rowid <= ?2
+               AND next_retry_at_micros > 0
+               AND next_retry_at_micros < ?3",
+            params![after_rowid, batch_end, PROJECTION_TERMINAL_RETRY_MICROS],
         )
         .await
         .map_err(|error| storage(OPERATION, error))?;
@@ -1270,6 +1273,17 @@ pub(super) fn reconcile_session_rows_detailed(
     if actual.provider != expected.provider || actual.session_id != expected.session_id {
         return Err(SessionReconcileConflict("identity"));
     }
+    // LCM may insert this host session before the rollout projection, with no
+    // project. That row is not a second root: the observation replaces it.
+    if session_project_is_unscoped_placeholder(actual) {
+        return Ok(expected.clone());
+    }
+    // `expected` is the projection being applied now. A typed project id that
+    // changed (re-enroll/reset, or a cwd that now resolves to another
+    // registered project) moves this host session onto that current id.
+    // Two different directory identities used *as* the key are not a rebind:
+    // those rows name different roots and stay distinct.
+    let mut adopt_current_project = false;
     let project_key = if actual.project_key == expected.project_key {
         actual.project_key.clone()
     } else if actual.project_key == "user" {
@@ -1284,12 +1298,24 @@ pub(super) fn reconcile_session_rows_detailed(
         && expected.project_path == actual.project_path
     {
         actual.project_key.clone()
-    } else {
+    } else if project_key_is_directory(actual) && project_key_is_directory(expected) {
         return Err(SessionReconcileConflict("project_key"));
+    } else {
+        adopt_current_project = true;
+        expected.project_key.clone()
     };
     let project_path = if actual.project_path == expected.project_path {
         actual.project_path.clone()
-    } else if actual.project_path == actual.project_key {
+    } else if adopt_current_project && expected.project_path != expected.project_key {
+        // The current observation named a real cwd for the new project.
+        expected.project_path.clone()
+    } else if adopt_current_project && actual.project_path != actual.project_key {
+        // The incoming row only carries its project id as a path fallback.
+        // Keep the cwd already stored for this session.
+        actual.project_path.clone()
+    } else if adopt_current_project || actual.project_path == actual.project_key {
+        // A rebind whose paths are both project ids takes the current id.
+        // A stored path-shaped key takes the incoming path.
         expected.project_path.clone()
     } else if expected.project_path == expected.project_key {
         actual.project_path.clone()
@@ -1334,6 +1360,20 @@ pub(super) fn reconcile_session_rows_detailed(
             expected.parent_tool_use_id.as_ref(),
         )?,
     })
+}
+
+fn project_key_is_directory(session: &SessionRecord) -> bool {
+    session.project_key == session.project_path
+}
+
+/// An LCM foreign-key shell: placeholder project fields, no transcript, no metadata.
+fn session_project_is_unscoped_placeholder(session: &SessionRecord) -> bool {
+    session.transcript_path.is_none()
+        && session.metadata_json.is_none()
+        && tracedecay_lcm::compression::lcm_unscoped_session_project(
+            &session.project_key,
+            &session.project_path,
+        )
 }
 
 fn reconcile_optional<T: Clone + Eq>(
@@ -1759,6 +1799,86 @@ mod reconcile_tests {
             from_verbatim.project_path, normalized.project_path,
             "both spellings of one directory must converge on the plain form"
         );
+    }
+
+    #[test]
+    fn lcm_placeholder_project_is_replaced_by_the_rollout_session() {
+        let mut stored = record("lcm-active-context");
+        stored.title = Some("LCM active context".to_owned());
+        let mut rollout = record("/Volumes/bigssd/projects/core");
+        rollout.title = Some("rollout".to_owned());
+        rollout.transcript_path = Some("/Volumes/bigssd/projects/core/session.jsonl".to_owned());
+
+        let merged = reconcile_session_rows_detailed(&stored, &rollout)
+            .expect("an LCM placeholder must take the rollout project");
+
+        assert_eq!(merged.project_key, "/Volumes/bigssd/projects/core");
+        assert_eq!(merged.project_path, "/Volumes/bigssd/projects/core");
+        assert_eq!(merged.title.as_deref(), Some("rollout"));
+        assert_eq!(
+            merged.transcript_path.as_deref(),
+            Some("/Volumes/bigssd/projects/core/session.jsonl")
+        );
+    }
+
+    #[test]
+    fn unknown_project_placeholder_is_replaced_by_the_rollout_session() {
+        let stored = record("unknown");
+        let rollout = record("/work/repo");
+
+        let merged = reconcile_session_rows_detailed(&stored, &rollout)
+            .expect("an unknown project shell must take the rollout project");
+
+        assert_eq!(merged.project_key, "/work/repo");
+        assert_eq!(merged.project_path, "/work/repo");
+    }
+
+    #[test]
+    fn changed_typed_project_key_adopts_the_current_project() {
+        let mut stored = record("/work/repo");
+        stored.project_key = "project.alpha".to_owned();
+        stored.project_path = "/work/repo".to_owned();
+        let mut current = stored.clone();
+        current.project_key = "project.beta".to_owned();
+
+        let merged = reconcile_session_rows_detailed(&stored, &current)
+            .expect("a re-enrolled project id must replace the stored key");
+
+        assert_eq!(merged.project_key, "project.beta");
+        assert_eq!(merged.project_path, "/work/repo");
+        assert_eq!(merged.session_id, stored.session_id);
+    }
+
+    #[test]
+    fn cwd_mapped_to_another_project_adopts_the_current_binding() {
+        let mut stored = record("/work/old");
+        stored.project_key = "project.alpha".to_owned();
+        stored.project_path = "/work/old".to_owned();
+        let mut current = stored.clone();
+        current.project_key = "project.beta".to_owned();
+        current.project_path = "/work/new".to_owned();
+
+        let merged = reconcile_session_rows_detailed(&stored, &current)
+            .expect("a cwd that resolves to another project must rebind");
+
+        assert_eq!(merged.project_key, "project.beta");
+        assert_eq!(merged.project_path, "/work/new");
+    }
+
+    #[test]
+    fn project_id_fallback_does_not_erase_a_stored_cwd() {
+        let mut stored = record("/work/repo");
+        stored.project_key = "project.alpha".to_owned();
+        stored.project_path = "/work/repo".to_owned();
+        let mut current = stored.clone();
+        current.project_key = "project.beta".to_owned();
+        current.project_path = "project.beta".to_owned();
+
+        let merged = reconcile_session_rows_detailed(&stored, &current)
+            .expect("a key change without a cwd must keep the stored path");
+
+        assert_eq!(merged.project_key, "project.beta");
+        assert_eq!(merged.project_path, "/work/repo");
     }
 
     #[test]
