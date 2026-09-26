@@ -96,7 +96,7 @@ fn code_graph_evidence_names_its_served_generation_on_the_envelope() {
 }
 
 #[test]
-fn symbol_graph_pages_touch_each_symbol_file_once_in_page_order() {
+fn symbol_graph_pages_touch_each_symbol_file_once_sorted_by_path() {
     let record = |file: &str| SymbolPrimitiveRecord {
         node_id: format!("node.{file}"),
         name: "answer".to_owned(),
@@ -138,7 +138,7 @@ fn symbol_graph_pages_touch_each_symbol_file_once_in_page_order() {
         Some(3),
         None,
     );
-    assert_eq!(page.touched_files(), vec!["src/b.rs", "src/a.rs"]);
+    assert_eq!(page.touched_files(), vec!["src/a.rs", "src/b.rs"]);
 }
 
 #[test]
