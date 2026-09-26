@@ -17,7 +17,7 @@ use tracedecay_store::{
 
 use crate::{
     CheckpointControlError, CheckpointOutcome, CheckpointRequest, ExistingWriterLocator,
-    MaintenanceCheckpointRequest, OnlineBackupReceipt, PersistentWriter, RuntimeWriteAuthority,
+    MaintenanceCheckpointRequest, PersistentWriter, RuntimeWriteAuthority,
     RuntimeWriteAuthorityStage, WriterActorError, WriterStartError, WriterState,
     connection::{OpenedDatabaseFile, OpenedDatabaseFileError},
     exact_sql::{ExactSqlError, ExactSqlHandle},
@@ -618,51 +618,6 @@ impl RepositoryRuntimePhysicalAttachment {
             .wait()
             .await
             .map_err(RepositoryDispatchError::Checkpoint)
-    }
-
-    #[hotpath::skip]
-    pub async fn snapshot_to(
-        &self,
-        destination: PathBuf,
-        authority: Arc<dyn RuntimeWriteAuthority>,
-    ) -> Result<OnlineBackupReceipt, RepositoryDispatchError> {
-        let writer = {
-            let state = self.lock_state();
-            if !state.admission_open || state.closed {
-                return Err(RepositoryDispatchError::Closed);
-            }
-            state
-                .writer
-                .clone()
-                .ok_or(RepositoryDispatchError::Closed)?
-        };
-        writer
-            .snapshot_to(destination, authority)
-            .await
-            .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
-    }
-
-    #[hotpath::skip]
-    pub async fn snapshot_to_interruptible(
-        &self,
-        destination: PathBuf,
-        probe: Arc<dyn RuntimeRequestProbeV1>,
-        authority: Arc<dyn RuntimeWriteAuthority>,
-    ) -> Result<OnlineBackupReceipt, RepositoryDispatchError> {
-        let writer = {
-            let state = self.lock_state();
-            if !state.admission_open || state.closed {
-                return Err(RepositoryDispatchError::Closed);
-            }
-            state
-                .writer
-                .clone()
-                .ok_or(RepositoryDispatchError::Closed)?
-        };
-        writer
-            .snapshot_to_interruptible(destination, probe, authority)
-            .await
-            .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
     }
 
     pub fn dispatch_read(

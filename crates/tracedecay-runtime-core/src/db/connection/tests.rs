@@ -11,46 +11,7 @@ use tracedecay_graph_db::{
     GraphDbError, GraphGenerationManifest, GraphIdempotencyKey, GraphProjectionIdentity,
     VerifiedGraphSnapshot,
 };
-use tracedecay_store::{
-    FactReadControl, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1,
-    RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestProbeV1, StoreRuntimeBindingV1,
-    VerifiedStoreLocatorV1,
-};
-
-struct CancelledSnapshotProbe {
-    cancellation: RuntimeCancellationIdentityV1,
-    deadline: RuntimeDeadlineV1,
-}
-
-impl RuntimeRequestProbeV1 for CancelledSnapshotProbe {
-    fn cancellation_identity(&self) -> &RuntimeCancellationIdentityV1 {
-        &self.cancellation
-    }
-
-    fn deadline_identity(&self) -> &RuntimeDeadlineV1 {
-        &self.deadline
-    }
-
-    fn interruption(&self) -> Option<RuntimeInterruptionV1> {
-        Some(RuntimeInterruptionV1::Cancelled)
-    }
-
-    fn try_begin_commit(&self) -> bool {
-        false
-    }
-}
-
-fn cancelled_snapshot_probe() -> Arc<dyn RuntimeRequestProbeV1> {
-    Arc::new(CancelledSnapshotProbe {
-        cancellation: RuntimeCancellationIdentityV1 {
-            cancellation_id: RuntimeCancellationIdV1::new("cancellation.snapshot-test").unwrap(),
-            generation: 1,
-        },
-        deadline: RuntimeDeadlineV1 {
-            deadline_id: RuntimeDeadlineIdV1::new("deadline.snapshot-test").unwrap(),
-        },
-    })
-}
+use tracedecay_store::{FactReadControl, StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 
 macro_rules! assert_retained_purpose_adapter_blocks_one_client {
     ($owner:expr, $control:expr, $database:ident, $adapter:ident) => {{
@@ -1341,61 +1302,6 @@ async fn read_only_owner_issuance_preserves_the_published_access_policy() {
             .provision_remote_storage(purpose_test_remote_keyring())
             .is_err()
     );
-    assert!(
-        database
-            .snapshot_to(&temp.path().join("readonly.snapshot"))
-            .await
-            .is_err()
-    );
-    assert!(
-        database
-            .snapshot_to_interruptible(
-                &temp.path().join("readonly-interruptible.snapshot"),
-                cancelled_snapshot_probe(),
-            )
-            .await
-            .is_err()
-    );
-}
-
-#[tokio::test]
-async fn read_write_database_snapshot_uses_the_canonical_writer_runtime() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("snapshot-source.db");
-    let authority = DatabaseAuthority::acquire_test(&path, "database snapshot").unwrap();
-    let (database, _) = Database::publish_fixture_runtime(
-        &path,
-        &authority,
-        TestDatabaseRuntimeMode::Initialize,
-        TestRuntimeShardFamilyV1::Code,
-        None,
-    )
-    .await
-    .unwrap();
-    database
-        .set_metadata("snapshot", "canonical")
-        .await
-        .unwrap();
-
-    let destination = temp.path().join("snapshot-destination.db");
-    let receipt = database
-        .snapshot_to_interruptible(
-            &destination,
-            Arc::new(super::database_checkpoint_probe().unwrap()),
-        )
-        .await
-        .unwrap();
-    assert!(destination.is_file());
-    assert!(receipt.destination_bytes > 0);
-
-    let cancelled_destination = temp.path().join("snapshot-cancelled.db");
-    assert!(
-        database
-            .snapshot_to_interruptible(&cancelled_destination, cancelled_snapshot_probe())
-            .await
-            .is_err()
-    );
-    assert!(!cancelled_destination.exists());
 }
 
 #[tokio::test]

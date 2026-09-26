@@ -540,48 +540,6 @@ impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
         })
     }
 
-    fn snapshot_to(
-        &self,
-        destination: PathBuf,
-        authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
-    ) -> StoreRuntimeRegistryFuture<
-        '_,
-        Result<tracedecay_rusqlite_runtime::OnlineBackupReceipt, StoreRuntimeRegistryFailure>,
-    > {
-        Box::pin(async move {
-            RepositoryRuntimePhysicalAttachment::snapshot_to(self, destination, authority)
-                .await
-                .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                    operation: "snapshot repository database",
-                    message: error.to_string(),
-                })
-        })
-    }
-
-    fn snapshot_to_interruptible(
-        &self,
-        destination: PathBuf,
-        probe: Arc<dyn RuntimeRequestProbeV1>,
-        authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
-    ) -> StoreRuntimeRegistryFuture<
-        '_,
-        Result<tracedecay_rusqlite_runtime::OnlineBackupReceipt, StoreRuntimeRegistryFailure>,
-    > {
-        Box::pin(async move {
-            RepositoryRuntimePhysicalAttachment::snapshot_to_interruptible(
-                self,
-                destination,
-                probe,
-                authority,
-            )
-            .await
-            .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                operation: "snapshot repository database",
-                message: error.to_string(),
-            })
-        })
-    }
-
     fn dispatch_submit(
         &self,
         request: RuntimeSubmitRequestV1,

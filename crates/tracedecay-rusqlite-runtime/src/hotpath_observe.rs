@@ -4,7 +4,7 @@
 //! `begin_immediate` averages 10.65 ms against an 82 µs p95, a few transactions
 //! are blocking for ~200 ms while nearly all are instant. `BEGIN IMMEDIATE`
 //! takes SQLite's write lock, so something else was holding it, and the
-//! maintenance paths (checkpoint, incremental vacuum, online backup) take that
+//! maintenance paths (checkpoint, incremental vacuum) take that
 //! lock outside the normal write queue.
 //!
 //! Function timings alone cannot separate those, because every write funnels
@@ -331,9 +331,4 @@ pub(crate) fn record_exact_sql_dispatch() {
 #[inline(always)]
 pub(crate) fn record_incremental_vacuum_dispatch() {
     add("rusqlite.writer.dispatch.incremental_vacuum", 1);
-}
-
-#[inline(always)]
-pub(crate) fn record_online_backup_dispatch() {
-    add("rusqlite.writer.dispatch.online_backup", 1);
 }

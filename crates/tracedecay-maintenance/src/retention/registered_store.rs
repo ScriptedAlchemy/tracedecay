@@ -232,6 +232,66 @@ mod tests {
         assert!(report.succeeded());
     }
 
+    /// `lcm_status` reads the store the retention tick cleaned. A profile with
+    /// orphaned payloads but no sessions still reports the tick's GC record
+    /// and the payload directory it scanned.
+    #[tokio::test]
+    async fn lcm_status_reports_the_payload_gc_the_retention_tick_recorded() {
+        const NOW: i64 = 40 * 86_400;
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+            "maintenance-registered-payload-gc-status",
+        )
+        .await;
+        let storage_root = harness.registered.db_path().parent().unwrap().to_path_buf();
+        for (message_id, mtime) in [("message-stale", NOW - 86_400), ("message-fresh", NOW - 60)] {
+            let payload = tracedecay_lcm::payload::write_external_payload(
+                &storage_root,
+                "codex",
+                "session-gc",
+                message_id,
+                "message",
+                "externalized body with no remaining reference",
+                None,
+            )
+            .unwrap();
+            let path =
+                tracedecay_lcm::payload::payload_dir(&storage_root).join(payload.payload_ref);
+            filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(mtime, 0)).unwrap();
+        }
+        let status = || async {
+            let status = harness
+                .registered
+                .lcm_status_with_options("all", None, true, &LcmGcConfig::default())
+                .await
+                .unwrap();
+            (
+                status.payload_gc.last_gc_status,
+                status.payload_gc.last_reaped_refs,
+                status.payload.coverage.scanned_files,
+            )
+        };
+        let (before_status, before_reaped, _) = status().await;
+        assert_eq!((before_status, before_reaped), (None, None));
+
+        let report = run_registered_store_retention(
+            &harness.registered,
+            &LcmRetentionConfig {
+                enabled: false,
+                ..LcmRetentionConfig::default()
+            },
+            &ObservationRetentionConfig {
+                enabled: false,
+                ..ObservationRetentionConfig::default()
+            },
+            NOW,
+        )
+        .await;
+
+        assert!(report.succeeded());
+        assert_eq!(status().await, (Some("ok".to_owned()), Some(1), 1));
+    }
+
     #[tokio::test]
     async fn observability_retention_failure_preserves_typed_owner_diagnostic() {
         let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();

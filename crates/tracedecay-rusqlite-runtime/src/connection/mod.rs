@@ -79,26 +79,6 @@ impl OpenedDatabaseFile {
         Self::adopt(file)
     }
 
-    /// Creates and pins `path`, reporting a name collision as `Ok(None)` so a
-    /// staging allocator can retry under a fresh name instead of reading a
-    /// typed failure as a real filesystem fault.
-    ///
-    /// The pin keeps the creator's read/write handle. [`Self::pin`] reopens
-    /// read-only, which is all an identity fence needs, but a staging file is
-    /// also *flushed* through its pin, and Windows `FlushFileBuffers` requires
-    /// the handle to carry write access: it answers a read-only handle with
-    /// `ERROR_ACCESS_DENIED` on every call, where Unix `fsync` accepts a
-    /// read-only descriptor.
-    pub(crate) fn create_new_or_conflict(
-        path: &Path,
-    ) -> Result<Option<Self>, OpenedDatabaseFileError> {
-        match create_pinned_database(path) {
-            Ok(file) => Self::adopt(file).map(Some),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(None),
-            Err(_) => Err(OpenedDatabaseFileError::Create),
-        }
-    }
-
     /// Takes ownership of an already-open handle and records its identity.
     fn adopt(file: File) -> Result<Self, OpenedDatabaseFileError> {
         let metadata = file
@@ -196,26 +176,6 @@ impl OpenedDatabaseFile {
         _canonical_path: &Path,
     ) -> Result<PathBuf, OpenedDatabaseFileError> {
         Err(OpenedDatabaseFileError::Unsupported)
-    }
-
-    pub(crate) fn clone_file(&self) -> Result<File, OpenedDatabaseFileError> {
-        self.file
-            .try_clone()
-            .map_err(|_| OpenedDatabaseFileError::Open)
-    }
-
-    /// Flushes the pinned file through the pinned handle.
-    ///
-    /// Only a handle that carries write access can answer this on Windows, so
-    /// callers that need durability must pin through
-    /// [`Self::create_new`] or [`Self::create_new_or_conflict`] rather than
-    /// [`Self::pin`], whose handle is read-only.
-    pub(crate) fn sync_all(&self) -> Result<(), OpenedDatabaseFileError> {
-        hotpath::measure_block!("rusqlite.sync_all", {
-            self.file
-                .sync_all()
-                .map_err(|_| OpenedDatabaseFileError::Inspect)
-        })
     }
 
     pub(crate) fn verify_current_path(&self, path: &Path) -> Result<(), OpenedDatabaseFileError> {

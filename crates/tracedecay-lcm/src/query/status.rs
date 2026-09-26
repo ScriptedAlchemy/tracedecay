@@ -35,7 +35,6 @@ impl StatusQueryWork {
 }
 
 struct StatusCounts {
-    provider_count: i64,
     raw_message_count: i64,
     summary_node_count: i64,
     maintenance_debt_count: i64,
@@ -150,10 +149,6 @@ async fn aggregate_provider_status_with_work(
     let schema_version = schema::schema_version(conn).await?;
     work.record_query();
     let counts = status_counts(conn, "all", session_id).await?;
-    if counts.provider_count == 0 {
-        return Ok((empty_status(schema_version, gc_config), work));
-    }
-
     work.record_payload_health();
     let payload_health = if deep {
         payload_health_detail(conn, storage_root, "all", session_id, true, 20, gc_config).await?
@@ -198,12 +193,6 @@ fn status_counts_query(provider: &str, session_id: Option<&str>) -> (String, Vec
     let visible = schema::SUMMARY_VISIBLE_SQL;
     let sql = format!(
         "SELECT
-             CASE WHEN
-                 EXISTS (SELECT 1 FROM lcm_raw_messages {content_where})
-                 OR EXISTS (SELECT 1 FROM session_summary_nodes n WHERE {visible}{content_and})
-                 OR EXISTS (SELECT 1 FROM lcm_external_payloads {content_where})
-                 OR EXISTS (SELECT 1 FROM lcm_lifecycle_state {lifecycle_where})
-             THEN 1 ELSE 0 END,
              (SELECT COUNT(*)
                 FROM lcm_raw_messages
                 {content_where}),
@@ -249,13 +238,12 @@ fn status_counts_query(provider: &str, session_id: Option<&str>) -> (String, Vec
                        WHERE failure_code IS NOT NULL{content_and}
                        GROUP BY state, failure_code))"
     );
-    // Bound in the placeholders' textual order: the four EXISTS probes, the
-    // raw/summary counts, the debt join, both lifecycle counts, the lossy
-    // ingest count, five disjoint summary-convergence states, and their
-    // recorded reasons.
-    let scopes_in_sql_order: [&LcmScopeSql; 16] = [
-        &content, &content, &content, &lifecycle, &content, &content, &debt, &lifecycle,
-        &lifecycle, &content, &content, &content, &content, &content, &content, &content,
+    // Bound in the placeholders' textual order: the raw/summary counts, the
+    // debt join, both lifecycle counts, the lossy ingest count, five disjoint
+    // summary-convergence states, and their recorded reasons.
+    let scopes_in_sql_order: [&LcmScopeSql; 12] = [
+        &content, &content, &debt, &lifecycle, &lifecycle, &content, &content, &content, &content,
+        &content, &content, &content,
     ];
     let mut values = Vec::new();
     for scope in scopes_in_sql_order {
@@ -277,19 +265,18 @@ async fn status_counts(
         .await?
         .ok_or_else(|| LcmError::Db("status count query returned no rows".to_string()))?;
     Ok(StatusCounts {
-        provider_count: row.get(0)?,
-        raw_message_count: row.get(1)?,
-        summary_node_count: row.get(2)?,
-        maintenance_debt_count: row.get(3)?,
-        lifecycle_state_count: row.get(4)?,
-        frontier_count: row.get(5)?,
-        lossy_ingest_records: row.get(6)?,
-        summary_pending_count: row.get(7)?,
-        summary_retryable_count: row.get(8)?,
-        summary_current_count: row.get(9)?,
-        summary_unavailable_count: row.get(10)?,
-        summary_permanent_count: row.get(11)?,
-        summary_reasons: summary_convergence_reasons(&row.get::<String>(12)?)?,
+        raw_message_count: row.get(0)?,
+        summary_node_count: row.get(1)?,
+        maintenance_debt_count: row.get(2)?,
+        lifecycle_state_count: row.get(3)?,
+        frontier_count: row.get(4)?,
+        lossy_ingest_records: row.get(5)?,
+        summary_pending_count: row.get(6)?,
+        summary_retryable_count: row.get(7)?,
+        summary_current_count: row.get(8)?,
+        summary_unavailable_count: row.get(9)?,
+        summary_permanent_count: row.get(10)?,
+        summary_reasons: summary_convergence_reasons(&row.get::<String>(11)?)?,
     })
 }
 

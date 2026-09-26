@@ -110,24 +110,6 @@ struct RecordingCheckpointAuthority {
     denied_stage: Option<RuntimeWriteAuthorityStage>,
 }
 
-struct DenyThirdBeforeCommitAuthority {
-    before_commit_checks: AtomicU64,
-}
-
-impl RuntimeWriteAuthority for DenyThirdBeforeCommitAuthority {
-    fn verify(&self, stage: RuntimeWriteAuthorityStage) -> Result<(), RuntimeWriteAuthorityError> {
-        if stage == RuntimeWriteAuthorityStage::BeforeCommit
-            && self.before_commit_checks.fetch_add(1, Ordering::SeqCst) >= 2
-        {
-            Err(RuntimeWriteAuthorityError::denied(
-                "test backup authority denied before publication",
-            ))
-        } else {
-            Ok(())
-        }
-    }
-}
-
 impl RuntimeWriteAuthority for RecordingCheckpointAuthority {
     fn verify(&self, stage: RuntimeWriteAuthorityStage) -> Result<(), RuntimeWriteAuthorityError> {
         self.stages.lock().unwrap().push(stage);
@@ -765,6 +747,5 @@ fn queued_compatible_writes_commit_in_one_transaction() {
 }
 
 mod authority;
-mod backup;
 mod checkpoint;
 mod interruption;

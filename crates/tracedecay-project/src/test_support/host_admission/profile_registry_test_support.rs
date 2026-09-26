@@ -12,20 +12,24 @@ impl HostAdmissionTestRuntimeV1 {
         self.profile_database.checkpoint().await;
     }
 
+    /// Writes a standalone copy of the live profile database for inspection.
     #[doc(hidden)]
     pub async fn snapshot_profile_database_for_test(&self, destination: &Path) -> Result<()> {
-        self.profile_database.snapshot_to(destination).await
+        vacuum_into_for_test(self.profile_database.db_path(), destination).await
     }
 
+    /// Writes a standalone copy of the live session database for inspection.
     #[doc(hidden)]
     pub async fn snapshot_session_database_for_test(
         &self,
         scope: HostAdmissionScope,
         destination: &Path,
     ) -> Result<()> {
-        self.session_database_for_test(scope)?
-            .snapshot_to(destination)
-            .await
+        vacuum_into_for_test(
+            self.session_database_for_test(scope)?.db_path(),
+            destination,
+        )
+        .await
     }
 
     #[doc(hidden)]
@@ -316,4 +320,31 @@ fn registered_registry_reap_entry(
         missing_path: entry.missing_path.clone(),
         project_id: entry.project_id.clone(),
     }
+}
+
+/// `VACUUM INTO` over a read-only connection: one read transaction yields a
+/// consistent standalone image of the live WAL database without the writer.
+async fn vacuum_into_for_test(source: &Path, destination: &Path) -> Result<()> {
+    let source = source.to_path_buf();
+    let destination = destination.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let connection = rusqlite::Connection::open_with_flags(
+            &source,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        connection.execute(
+            "VACUUM INTO ?1",
+            [destination.to_string_lossy().into_owned()],
+        )?;
+        Ok::<(), rusqlite::Error>(())
+    })
+    .await
+    .map_err(|error| TraceDecayError::Database {
+        operation: "join test database copy".to_owned(),
+        message: error.to_string(),
+    })?
+    .map_err(|error| TraceDecayError::Database {
+        operation: "copy test database".to_owned(),
+        message: error.to_string(),
+    })
 }
