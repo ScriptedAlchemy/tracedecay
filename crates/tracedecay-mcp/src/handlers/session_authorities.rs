@@ -22,8 +22,6 @@ pub struct SessionAuthorities<'a> {
     pub background_cpu: Option<std::sync::Arc<ProcessBackgroundCpuV1>>,
     pub project_lcm:
         Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
-    pub profile_lcm:
-        Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
 }
 
 impl<'a> SessionAuthorities<'a> {
@@ -38,7 +36,6 @@ impl<'a> SessionAuthorities<'a> {
             profile_identity: None,
             background_cpu: None,
             project_lcm: None,
-            profile_lcm: None,
         }
     }
 
@@ -62,13 +59,11 @@ impl<'a> SessionAuthorities<'a> {
 
     #[must_use]
     #[hotpath::skip]
-    pub const fn with_lcm_authorities(
+    pub const fn with_project_lcm_authority(
         mut self,
         project: Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
-        profile: Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
     ) -> Self {
         self.project_lcm = project;
-        self.profile_lcm = profile;
         self
     }
 }

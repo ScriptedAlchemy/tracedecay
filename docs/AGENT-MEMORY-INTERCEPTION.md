@@ -198,9 +198,9 @@ What the hooks currently do (all fail-open):
   `{continue, user_message}` there; it cannot carry model context.
 - `preCompact` submits only the bounded daemon compaction event. The daemon,
   not the hook process, owns any transcript, LCM, review, or indexing work.
-  The pressure probe is read-only: Cursor exposes no authenticated native
-  summary payload, so compaction publication stays typed
-  `host_payload_unavailable` and no summary node is produced.
+  Cursor exposes no authenticated native summary payload, so the event is
+  pressure evidence only: the daemon compacts its own canonical store and
+  never accepts a host-authored summary.
 
 ### 3.2 `tracedecay install --agent codex` (`crates/tracedecay-agent-hosts/src/agents/codex.rs`)
 

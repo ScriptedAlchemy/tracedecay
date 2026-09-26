@@ -21,6 +21,7 @@
 use crate::runtime::source::STRICT_JSONL_BATCH_BYTES;
 use tracedecay_privacy::MAX_OBSERVATION_RECORD_BYTES;
 
+mod callback;
 mod coverage;
 mod ingest;
 mod observation;
@@ -30,6 +31,7 @@ mod state_db;
 #[cfg(test)]
 mod tests;
 
+pub use callback::{HermesTurnCallbackOutcome, capture_turn_callback};
 pub use ingest::ingest_user_sessions_capped_with_admission;
 pub use ingest::{
     HermesSweepOutcome, ProjectIngestDestination, ingest_for_project, ingest_for_project_capped,

@@ -25,11 +25,7 @@ use tracedecay_domain::errors::Result;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_host_admission::HostAdmissionFacade;
 use tracedecay_project::project::TraceDecay;
-use tracedecay_session_memory::session::lcm::{
-    LcmAuthorityOutcome, LcmAuthorityPayload, LcmAuthorityRequest, LcmAuthorityResponse,
-    LcmTranscriptIngestCommand,
-};
-use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionStatus};
+use tracedecay_sessions::admission::HostAdmissionStatus;
 use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_sessions::runtime::hosts::claude_observation::ClaudeObservationIngestStats;
 use tracedecay_sessions::runtime::hosts::hermes::HermesSweepOutcome;
@@ -37,8 +33,7 @@ use tracedecay_sessions::runtime::snapshot_observation::SnapshotCaptureOutcome;
 
 use super::super::{required_str, required_user_db};
 use super::{
-    admit_codex_project_rollouts, compaction_unavailable_reason,
-    drain_host_observation_projections, project_observation_id,
+    admit_codex_project_rollouts, drain_host_observation_projections, project_observation_id,
 };
 use crate::handlers::SessionAuthorities;
 use crate::{
@@ -134,12 +129,6 @@ pub(super) struct TranscriptCaptureOutcome {
     /// durable. Kept apart from `messages_upserted == 0`, which cannot tell an
     /// already-committed replay from a pass that captured nothing.
     pub(super) exact_duplicate: bool,
-    /// Set by routes that commit through the LCM authority instead of a source
-    /// scan; rendered as `authority_outcome` and `committed_state`.
-    pub(super) lcm_receipt: Option<LcmAuthorityResponse>,
-    /// Set when the route's own authority refused the pass. Replaces the
-    /// replay-completion admission so one status vocabulary reaches the host.
-    pub(super) route_admission: Option<HostAdmissionOutcome>,
 }
 
 type TranscriptCaptureFuture<'a> =
@@ -501,11 +490,10 @@ fn hermes_capture_outcome(outcome: &HermesSweepOutcome) -> Result<TranscriptCapt
 
 /// Commits one Hermes turn the host inlined in the request.
 ///
-/// The messages are already in hand, so there is no source to scan: the turn
-/// goes to the LCM authority and the authority's disposition is reported
-/// through the same outcome every scanning kernel uses. `messages_upserted`
-/// is the number of turn messages handed to the authority, which is what makes
-/// the shared assembly report a committed replay.
+/// The messages are already in hand, so there is no source to scan: each one
+/// is admitted through the observation authority a `state.db` sweep row goes
+/// through, and the scope's projection drain turns it into the raw LCM rows
+/// the temporal refresh the caller joins then projects for retrieval.
 async fn capture_hermes_callback(
     ctx: TranscriptCaptureContext<'_>,
 ) -> Result<TranscriptCaptureOutcome> {
@@ -515,69 +503,36 @@ async fn capture_hermes_callback(
         .get("messages")
         .and_then(Value::as_array)
         .filter(|messages| !messages.is_empty())
-        .ok_or_else(|| config_error("Hermes turn callback requires non-empty messages"))?
-        .clone();
-    let message_count = u64::try_from(messages.len()).unwrap_or(u64::MAX);
-    let authority = if ctx.user_scope {
-        ctx.session_authorities.profile_lcm
+        .ok_or_else(|| config_error("Hermes turn callback requires non-empty messages"))?;
+    let (scope, project_root) = if ctx.user_scope {
+        (ObservationScopeV1::Profile, None)
     } else {
-        ctx.session_authorities.project_lcm
+        let project = ctx.project()?;
+        (
+            ObservationScopeV1::Project {
+                project_id: project_observation_id(project)?,
+            },
+            Some(project.project_root()),
+        )
     };
-    let Some(authority) = authority else {
-        return Ok(lcm_authority_unavailable());
-    };
-    let event_digest = tracedecay_domain::canonical_sha256(&(&"hermes", &session_id, &messages))
-        .map_err(|error| config_error(format!("digest Hermes turn failed: {error}")))?;
-    let request = LcmAuthorityRequest::Ingest(LcmTranscriptIngestCommand {
-        preflight: tracedecay_lcm::LcmPreflightRequest {
-            provider: "hermes".to_owned(),
-            session_id: session_id.to_owned(),
-            messages,
-            current_tokens: None,
-            ignore_session_patterns: Vec::new(),
-            stateless_session_patterns: Vec::new(),
-            threshold_tokens: None,
-            max_assembly_tokens: None,
-            leaf_chunk_tokens: None,
-            max_source_messages: None,
-            summary_fan_in: None,
-            incremental_max_depth: None,
-            fresh_tail_count: None,
-            dynamic_leaf_chunk_enabled: None,
-            dynamic_leaf_chunk_max: None,
-            context_length: None,
-            reserve_tokens_floor: None,
-        },
-        protocol_revision: "hermes.turn-completed.v1".to_owned(),
-        event_digest,
-    });
-    let Some(response) = authority.execute(request).await else {
-        return Ok(lcm_authority_unavailable());
-    };
-    if response.outcome == LcmAuthorityOutcome::Ready
-        && matches!(response.payload, Some(LcmAuthorityPayload::Ingest(_)))
-    {
-        return Ok(TranscriptCaptureOutcome {
-            messages_upserted: message_count,
-            lcm_receipt: Some(response),
-            ..TranscriptCaptureOutcome::default()
-        });
-    }
-    let reason = compaction_unavailable_reason(&response.outcome);
+    let admitted = tracedecay_sessions::runtime::hosts::hermes::capture_turn_callback(
+        ctx.facade,
+        &scope,
+        project_root,
+        session_id,
+        messages,
+        ctx.cancellation,
+    )
+    .await
+    .map_err(|error| map_transcript_ingest_error(&error))?;
+    drain_host_observation_projections(ctx.facade, &scope, ctx.cancellation).await?;
     Ok(TranscriptCaptureOutcome {
-        route_admission: Some(HostAdmissionOutcome::retained_unavailable(reason)),
-        lcm_receipt: Some(response),
+        messages_upserted: admitted.committed,
+        observations_committed: admitted.committed,
+        exact_duplicate: admitted.committed == 0 && admitted.duplicates > 0,
+        admission_owns_commit: true,
         ..TranscriptCaptureOutcome::default()
     })
-}
-
-fn lcm_authority_unavailable() -> TranscriptCaptureOutcome {
-    TranscriptCaptureOutcome {
-        route_admission: Some(HostAdmissionOutcome::retained_unavailable(
-            "lcm_daemon_authority_unavailable",
-        )),
-        ..TranscriptCaptureOutcome::default()
-    }
 }
 
 async fn capture_kiro_project(
@@ -710,6 +665,5 @@ mod tests {
         };
 
         assert!(outcome.source_deferred);
-        assert!(outcome.route_admission.is_none());
     }
 }

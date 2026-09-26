@@ -11,5 +11,5 @@ pub use authority::{
     LcmAuthorityPayload, LcmAuthorityPort, LcmAuthorityReceipt, LcmAuthorityRequest,
     LcmAuthorityResponse, LcmAuthorityTarget, LcmAuthorityUnavailableReason, LcmCompactionCommand,
     LcmCompressionEvidence, LcmDoctorQuery, LcmHostProtocol, LcmStatusQuery,
-    LcmTranscriptIngestCommand, lcm_authority_operation_identity,
+    lcm_authority_operation_identity,
 };

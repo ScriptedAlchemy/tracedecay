@@ -355,7 +355,6 @@ pub struct McpServer {
         Option<std::sync::Weak<dyn tracedecay_contracts::session_sync::SessionSyncServicePort>>,
     project_application_retrieval: Option<MountedProjectApplicationRetrievalV1>,
     project_lcm_authority: Option<Arc<dyn MountedLcmAuthorityPort>>,
-    user_lcm_authority: Option<Arc<dyn MountedLcmAuthorityPort>>,
     /// Owned cancellable project replay worker (daemon-owned servers). Joined on
     /// [`Self::shutdown`] so Unix and Windows drain the same way.
     project_host_admission_replay: tokio::sync::Mutex<Option<ProjectHostAdmissionReplayTask>>,
@@ -971,18 +970,6 @@ impl McpServer {
         let project_session_root_id = project_session_retrieval_root
             .as_ref()
             .map(|root| root.identity().root_id().clone());
-        let profile_session_retrieval_root = profile_identity
-            .as_deref()
-            .zip(profile_session_db.as_ref())
-            .and_then(|(profile, registered)| {
-                let serving =
-                    tracedecay_session_runtime::retained::profile_session_retrieval_serving_identity(
-                        profile,
-                        &registered.binding().shard_id,
-                        registered.db_path(),
-                    )?;
-                DaemonSessionRetrievalRoot::profile(serving)
-            });
         let project_session_refresh_service = project_session_db
             .as_ref()
             .zip(project_session_refresh_wake.as_ref())
@@ -1029,16 +1016,6 @@ impl McpServer {
                     root.expected_runtime_shard()?,
                 )
             });
-        let user_lcm_authority = profile_session_retrieval_root
-            .as_ref()
-            .zip(profile_session_db.as_ref())
-            .and_then(|(root, database)| {
-                mount_registered_lcm_authority(
-                    database.clone(),
-                    root.identity().clone(),
-                    root.expected_runtime_shard()?,
-                )
-            });
         let server = Arc::new_cyclic(|dispatch_server| Self {
             cg: Arc::new(tokio::sync::RwLock::new(cg)),
             branch_reopen: Arc::new(tokio::sync::Mutex::new(())),
@@ -1073,7 +1050,6 @@ impl McpServer {
             session_sync_service,
             project_application_retrieval,
             project_lcm_authority,
-            user_lcm_authority,
             project_host_admission_replay: tokio::sync::Mutex::new(None),
             automation_scheduler_reconciler,
             database_owner_reconciler,

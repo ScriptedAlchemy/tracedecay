@@ -1518,10 +1518,11 @@ async fn hermes_zeroblob_content_is_covered_without_payload_leak() {
 /// Hermes' plugin syncs every turn into the profile conversation store with no
 /// project: `tracedecay tool` runs from outside any project, so the daemon
 /// serves it on the projectless route. The turn must land in the profile LCM
-/// store that user-scope LCM reads answer from.
+/// store that user-scope LCM reads answer from, and temporal retrieval must
+/// find it once the ingest call has joined the profile refresh.
 #[cfg(unix)]
 #[test]
-fn projectless_hermes_turn_sync_lands_in_the_user_scope_lcm_store() {
+fn projectless_hermes_turn_sync_is_described_and_searchable_in_the_user_scope_store() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
     let outside = tmp.path().join("general-chat");
@@ -1600,5 +1601,29 @@ fn projectless_hermes_turn_sync_lands_in_the_user_scope_lcm_store() {
             "Remember the quartz lighthouse rota for Tuesday"
         )],
         "{described}"
+    );
+
+    let searched = run_tool(
+        "tracedecay_message_search",
+        json!({
+            "query": "quartz lighthouse rota",
+            "provider": "hermes",
+            "storage_scope": "user",
+            "format": "json",
+        }),
+    );
+    let search = searched
+        .pointer("/outcome/value/payload")
+        .unwrap_or(&searched);
+    let texts = search["results"]
+        .as_array()
+        .unwrap_or_else(|| panic!("message search results: {searched}"))
+        .iter()
+        .map(|result| result["message"]["text"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        texts,
+        ["Remember the quartz lighthouse rota for Tuesday"],
+        "{searched}"
     );
 }

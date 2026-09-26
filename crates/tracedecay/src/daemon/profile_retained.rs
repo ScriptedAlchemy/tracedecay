@@ -18,11 +18,8 @@ use tracedecay_daemon_protocol::{
     DaemonInvocationResponse,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::cancellation::CancellationToken;
-use tracedecay_session_runtime::lcm_authority::{
-    MountedLcmAuthorityPort, mount_registered_lcm_authority,
-};
+use tracedecay_session_runtime::lcm_authority::mount_registered_lcm_authority;
 use tracedecay_session_runtime::retained::{
     ProfileRetainedAuthoritiesV1, ProfileRetainedConnectionAuthorityV1, ProfileRetainedTerminalV1,
     RetainedSessionRefreshPortV1, execute_profile_retained_application,
@@ -167,11 +164,10 @@ async fn execute_profile_retained(
     }
     let runtime_registry = Box::pin(store_administration.registered_runtime_registry()).await?;
     let (lcm_authority, session_refresh) = if lcm || refresh {
-        let (database, lcm_authority) = Box::pin(mount_profile_session_lcm(
-            store_administration,
-            &session_root,
-        ))
-        .await?;
+        let database = Box::pin(store_administration.registered_profile_session_database()).await?;
+        let lcm_authority = session_root.expected_runtime_shard().and_then(|shard| {
+            mount_registered_lcm_authority(database.clone(), session_root.identity().clone(), shard)
+        });
         let session_refresh =
             Box::pin(store_administration.profile_session_refresh(&database)).await;
         (lcm_authority, Some(session_refresh))
@@ -294,36 +290,6 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ProfileRetainedExe
         // Retained operations publish no feedback observations.
         Box::pin(async { Ok(()) })
     }
-}
-
-type ProfileSessionLcmV1 = (
-    RegisteredGlobalDbLeaseV1,
-    Option<Arc<dyn MountedLcmAuthorityPort>>,
-);
-
-/// The profile session store and the LCM authority user-scope transcript
-/// ingest writes through: the same mount profile-targeted LCM reads answer
-/// from, so an ingested turn is visible to them.
-pub(super) async fn profile_session_lcm(
-    store_administration: &StoreAdministration,
-) -> Result<ProfileSessionLcmV1> {
-    let (_, session_root) = profile_retained_connection(store_administration)?;
-    Box::pin(mount_profile_session_lcm(
-        store_administration,
-        &session_root,
-    ))
-    .await
-}
-
-async fn mount_profile_session_lcm(
-    store_administration: &StoreAdministration,
-    session_root: &DaemonSessionRetrievalRoot,
-) -> Result<ProfileSessionLcmV1> {
-    let database = Box::pin(store_administration.registered_profile_session_database()).await?;
-    let lcm = session_root.expected_runtime_shard().and_then(|shard| {
-        mount_registered_lcm_authority(database.clone(), session_root.identity().clone(), shard)
-    });
-    Ok((database, lcm))
 }
 
 /// The profile's retained connection authority and session retrieval root,
