@@ -302,10 +302,8 @@ fn session_directory_name_matches_pi_encoding() {
 fn ambient_agent_dir_is_honored_only_when_absolute() {
     let home = Path::new("/home/operator");
     assert_eq!(pi_agent_dir_for(home, None), home.join(".pi/agent"));
-    assert_eq!(
-        pi_agent_dir_for(home, Some(OsStr::new("/srv/pi-agent"))),
-        PathBuf::from("/srv/pi-agent")
-    );
+    let absolute = std::env::temp_dir().join("pi-agent");
+    assert_eq!(pi_agent_dir_for(home, Some(absolute.as_os_str())), absolute);
     for relative in ["relocated/agent", "./agent", "~/.pi/other", ""] {
         assert_eq!(
             pi_agent_dir_for(home, Some(OsStr::new(relative))),
