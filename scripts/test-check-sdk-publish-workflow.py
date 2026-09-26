@@ -139,8 +139,9 @@ class SdkPublishWorkflowPolicyTests(unittest.TestCase):
 
     def test_rejects_missing_sdk_registry_client_parity_gate(self) -> None:
         mutated = self.workflow.replace(
-            "      - name: Verify canonical SDK registry-client parity\n"
-            "        run: scripts/check-sdk-codegen.sh\n\n",
+            "      - name: Verify generated contracts and SDK sources\n"
+            "        working-directory: dashboard\n"
+            "        run: pnpm run contracts:check\n\n",
             "",
             1,
         )

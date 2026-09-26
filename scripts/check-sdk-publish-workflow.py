@@ -90,7 +90,7 @@ def assert_build_job(job: dict[str, Any]) -> None:
     for required in (
         "npm install -g npm@12.0.2",
         "pnpm install --frozen-lockfile",
-        "scripts/check-sdk-codegen.sh",
+        "pnpm run contracts:check",
         "pnpm run typecheck",
         "pnpm test",
         "npm pack --dry-run --json --ignore-scripts",
@@ -104,7 +104,7 @@ def assert_build_job(job: dict[str, Any]) -> None:
         if find_step(steps, required) is None:
             fail(f"'{BUILD_JOB}' is missing {required!r}")
 
-    parity_index = find_step(steps, "scripts/check-sdk-codegen.sh")
+    parity_index = find_step(steps, "pnpm run contracts:check")
     typecheck_index = find_step(steps, "pnpm run typecheck")
     tests_index = find_step(steps, "pnpm test")
     dry_run_index = find_step(steps, "npm pack --dry-run --json --ignore-scripts")

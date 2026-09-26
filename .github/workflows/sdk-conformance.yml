@@ -12,10 +12,11 @@ on:
       - "crates/tracedecay-domain/**"
       - "crates/tracedecay-sdk/**"
       - "crates/tracedecay-tool-catalog/**"
+      - "dashboard/codegen/**"
+      - "dashboard/package.json"
       - "sdks/**"
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
-      - "scripts/check-sdk-codegen.sh"
       - "scripts/check-sdk-publish-workflow.py"
       - "scripts/test-check-sdk-publish-workflow.py"
       - "scripts/check-github-hosted-runners.py"
@@ -82,7 +83,8 @@ jobs:
       # codegen workspace has its own pnpm-vendored sources and lockfile.
       - run: cargo test
         working-directory: sdks/codegen
-      - run: scripts/check-sdk-codegen.sh
+      - run: pnpm run contracts:check
+        working-directory: dashboard
       - run: cargo test --manifest-path crates/tracedecay-sdk/Cargo.toml
       - run: pnpm run typecheck
         working-directory: sdks/typescript

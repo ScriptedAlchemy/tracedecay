@@ -61,9 +61,11 @@ unauthorized external action after completing independent, authorized work.
   `-application`, `-contracts`, `-domain`, `-store`, `-hooks`, `-policy`,
   `-tool-catalog`, rusqlite parity/runtime crates).
 - `dashboard/`, the single embedded dashboard (React + rsbuild + vitest).
-  `dashboard/src/contracts/` is generated from Rust schemas via schemars.
-  Never hand-edit it; regenerate with the `contracts:generate` script and
-  verify with `contracts:check`.
+  `dashboard/src/contracts/` (from Rust schemas via schemars) and the
+  TypeScript SDK sources in `sdks/typescript/src/` (from the canonical
+  operation registry) are generated. Never hand-edit them; regenerate both
+  with the dashboard `contracts:generate` script and verify with
+  `contracts:check`.
 - `plugin/`, host bundles (Claude, Codex, Cursor, Kimi, opencode).
 - `tests/`, shared fixtures, distribution suites, and shell/Python gates that
   no single crate owns; crate-level integration suites and criterion benches

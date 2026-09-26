@@ -47,8 +47,8 @@ member directory it regenerates the whole `Cargo.lock`, and at the root it
 fails. `pnpm remove crate:` is unsupported. Unused `.pnpm/crates` directories
 stay in place after `pnpm install` and are inert once the lock stops naming
 them. Cargo reads `.cargo/config.toml` from its working directory, so run
-`sdks/codegen` cargo commands from `sdks/codegen`; `sdks/codegen/generate.sh`
-does this itself.
+`sdks/codegen` cargo commands from `sdks/codegen`; the dashboard
+`contracts:generate` and `contracts:check` scripts do this themselves.
 
 Use your current checkout; no particular absolute path or historical PR branch
 is required. See [AGENTS.md](AGENTS.md) for checkout safety and shared-work rules.
