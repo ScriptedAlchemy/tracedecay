@@ -538,56 +538,57 @@ async fn request_authoritative_reconcile(handshake: &DaemonHandshake, label: &st
     );
 }
 
+/// Longest single `wait_for` this suite issues: inside the status dispatch
+/// ceiling, so a longer overall budget is spent as consecutive waits.
+const STATUS_WAIT_SLICE: Duration = Duration::from_secs(110);
+
 async fn wait_for_current_graph(handshake: &DaemonHandshake, label: &str) {
-    let mut last = String::new();
-    tokio::time::timeout(Duration::from_secs(180), async {
-        loop {
-            match call_default_tool(
-                handshake,
-                "tracedecay_status",
-                json!({
-                    "format": "json",
-                    "include_branch_diagnostics": false,
-                    "include_storage_health": false,
-                    "include_session_ingest": false,
-                    "include_staleness": false,
-                }),
-            )
-            .await
-            {
-                Ok(result) => {
-                    let status =
-                        tracedecay::daemon::tool_json_payload(&result, "tracedecay_status")
-                            .unwrap_or_else(|error| panic!("{label} status payload: {error}"));
-                    last = status.to_string();
-                    if status["graph_statistics"]["freshness"]["state"] == "current" {
-                        return;
-                    }
-                    match status["code_index_freshness"]["status"].as_str() {
-                        Some("current" | "warming") => {
-                            tokio::time::sleep(Duration::from_millis(100)).await
-                        }
-                        Some("stale")
-                            if status["code_index_freshness"]["worktree"]["coverage"]
-                                == "partial_source_verification"
-                                && status["code_index_freshness"]["worktree"]["staleness_state"]
-                                    == "verifying" =>
-                        {
-                            tokio::time::sleep(Duration::from_millis(100)).await
-                        }
-                        actual => panic!("{label} graph readiness became {actual:?}: {status}"),
-                    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(180);
+    loop {
+        let budget = deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .min(STATUS_WAIT_SLICE);
+        match call_default_tool(
+            handshake,
+            "tracedecay_status",
+            json!({
+                "format": "json",
+                "include_branch_diagnostics": false,
+                "include_storage_health": false,
+                "include_session_ingest": false,
+                "include_staleness": false,
+                "wait_for": {
+                    "state": "ready",
+                    "timeout_ms": u64::try_from(budget.as_millis()).expect("budget fits u64"),
+                },
+            }),
+        )
+        .await
+        {
+            Ok(result) => {
+                let status = tracedecay::daemon::tool_json_payload(&result, "tracedecay_status")
+                    .unwrap_or_else(|error| panic!("{label} status payload: {error}"));
+                if status["wait"] == json!({ "outcome": "reached" }) {
+                    return;
                 }
-                Err(error) if graph_publication_retryable(&error) => {
-                    last = error.to_string();
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-                Err(error) => panic!("{label} status failed: {error}"),
+                assert!(
+                    status["wait"]["outcome"] == "timed_out"
+                        && std::time::Instant::now() < deadline,
+                    "{label} graph did not become current: {status}"
+                );
             }
+            // The restarted daemon is not accepting yet; there is no signal
+            // to wait on across the process boundary.
+            Err(error) if graph_publication_retryable(&error) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{label} graph did not become current: {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) => panic!("{label} status failed: {error}"),
         }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("{label} graph did not become current: {last}"));
+    }
 }
 
 async fn context_payload(handshake: &DaemonHandshake, task: &str, label: &str) -> Value {
