@@ -2,11 +2,13 @@
 
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_private_fs::{LockAdmissionError, lock_until};
 use tracedecay_runtime_core::storage::{
     DURABLE_REMOVAL_TOMBSTONE_PREFIX, PrivateStoreIo, reject_symlink_components,
     resolve_response_handle_root,
@@ -23,6 +25,10 @@ const HANDLE_HEX_CHARS: usize = 24;
 const HANDLE_PREFIX: &str = "rh_";
 const LOCK_SUFFIX: &str = ".lock";
 const STAGING_PREFIX: &str = ".response-handle-staging-";
+/// Concurrent writers queue on the root lock, each holding it for one durable
+/// publish, cleanup, or inventory scan. The deadline admits a deep queue of
+/// such writers and stays well inside the daemon's tool request deadline.
+const WRITER_LOCK_DEADLINE: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
 pub struct ResponseHandleRecord {
@@ -486,6 +492,14 @@ fn validate_response_handle_path(path: &Path) -> Result<()> {
 }
 
 fn with_exclusive_lock<T>(root: &Path, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    with_exclusive_lock_until(root, Instant::now() + WRITER_LOCK_DEADLINE, operation)
+}
+
+fn with_exclusive_lock_until<T>(
+    root: &Path,
+    deadline: Instant,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     validate_response_handle_path(root)?;
     let parent = root.parent().ok_or_else(|| TraceDecayError::File {
         message: "response-handle root has no stable lock parent".to_string(),
@@ -507,12 +521,14 @@ fn with_exclusive_lock<T>(root: &Path, operation: impl FnOnce() -> Result<T>) ->
         .write(true)
         .open(&path)
         .map_err(|error| file_error(&path, "open response-handle lock", error))?;
-    lock.try_lock().map_err(|error| {
-        file_error(
-            &path,
-            "acquire response-handle lock",
-            try_lock_io_error(error),
-        )
+    lock_until(&lock, deadline).map_err(|error| match error {
+        LockAdmissionError::TimedOut => TraceDecayError::SyncLock {
+            message: format!(
+                "response-handle writer lock at {} stayed contended past its admission deadline; retry the operation",
+                path.display()
+            ),
+        },
+        LockAdmissionError::Io(error) => file_error(&path, "acquire response-handle lock", error),
     })?;
     let result = operation();
     let unlock = lock
@@ -570,15 +586,6 @@ fn remove_failed_fresh_publish(path: &Path, expected: &StoredResponseHandleRecor
         .map_err(|error| file_error(path, "durably remove failed publication", error))
 }
 
-fn try_lock_io_error(error: std::fs::TryLockError) -> std::io::Error {
-    match error {
-        std::fs::TryLockError::WouldBlock => {
-            std::io::Error::new(std::io::ErrorKind::WouldBlock, "lock would block")
-        }
-        std::fs::TryLockError::Error(error) => error,
-    }
-}
-
 fn file_error(path: &Path, operation: &str, error: std::io::Error) -> TraceDecayError {
     TraceDecayError::File {
         message: format!("failed to {operation}: {error}"),
@@ -605,8 +612,7 @@ fn is_corrupt_record_error(error: &TraceDecayError) -> bool {
 mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
-    use std::sync::{Arc, Barrier, mpsc};
-    use std::time::Duration;
+    use std::sync::{Arc, Barrier};
 
     use super::*;
     use tracedecay_runtime_core::storage::{
@@ -638,16 +644,8 @@ mod tests {
                 store_response_handle_in_root(&root, "shared payload", now)
             })
         });
-        for result in workers.map(|worker| worker.join().unwrap()) {
-            if let Err(error) = result {
-                assert!(matches!(
-                    error,
-                    TraceDecayError::File { message, .. }
-                        if message.contains("acquire response-handle lock")
-                ));
-            }
-        }
-        let first = store_response_handle_in_root(&root, "shared payload", 100).unwrap();
+        let handles = workers.map(|worker| worker.join().unwrap().unwrap().handle);
+        assert_eq!(handles[0], handles[1]);
 
         assert_eq!(
             inventory_response_handles_in_root(&root)
@@ -656,7 +654,7 @@ mod tests {
             1
         );
         let ResponseHandleLookup::Found(persisted) =
-            retrieve_from_root(&root, &first.handle, 100).unwrap()
+            retrieve_from_root(&root, &handles[0], 100).unwrap()
         else {
             panic!("concurrent response handle was not retrievable");
         };
@@ -664,7 +662,47 @@ mod tests {
     }
 
     #[test]
-    fn inventory_fails_closed_when_the_root_lock_is_held() {
+    fn concurrent_distinct_writers_queue_on_the_lock_and_all_publish() {
+        const WRITERS: usize = 16;
+        let root = tempfile::tempdir().unwrap();
+        let root = Arc::new(root.path().to_path_buf());
+        let barrier = Arc::new(Barrier::new(WRITERS));
+        let workers: Vec<_> = (0..WRITERS)
+            .map(|writer| {
+                let root = Arc::clone(&root);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let content = format!("payload {writer}");
+                    barrier.wait();
+                    (
+                        content.clone(),
+                        store_response_handle_in_root(&root, &content, 100),
+                    )
+                })
+            })
+            .collect();
+
+        for (content, result) in workers.into_iter().map(|worker| worker.join().unwrap()) {
+            let stored = result.unwrap_or_else(|error| {
+                panic!("contended writer for {content:?} failed instead of waiting: {error}")
+            });
+            let ResponseHandleLookup::Found(persisted) =
+                retrieve_from_root(&root, &stored.handle, 100).unwrap()
+            else {
+                panic!("published handle for {content:?} was not retrievable");
+            };
+            assert_eq!(persisted.content, content);
+        }
+        assert_eq!(
+            inventory_response_handles_in_root(&root)
+                .unwrap()
+                .file_count,
+            WRITERS as u64
+        );
+    }
+
+    #[test]
+    fn writer_lock_held_past_the_deadline_is_a_retryable_busy_state() {
         let root = tempfile::tempdir().unwrap();
         let leaf = root.path().file_name().unwrap().to_str().unwrap();
         let lock_path = root
@@ -681,27 +719,30 @@ mod tests {
             .unwrap();
         held.lock().unwrap();
 
-        let worker_root = root.path().to_path_buf();
-        let (sent, received) = mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            let _ = sent.send(inventory_response_handles_in_root(&worker_root));
-        });
-        let early = received.recv_timeout(Duration::from_millis(250));
+        let mut ran = false;
+        let result = with_exclusive_lock_until(
+            root.path(),
+            Instant::now() + Duration::from_millis(20),
+            || {
+                ran = true;
+                Ok(())
+            },
+        );
         held.unlock().unwrap();
-        let result = match early {
-            Ok(result) => result,
-            Err(error) => {
-                worker.join().unwrap();
-                panic!("lock acquisition blocked instead of failing closed: {error}");
-            }
-        };
-        worker.join().unwrap();
 
+        assert!(!ran, "a writer admitted past the deadline must not run");
         assert!(matches!(
             result,
-            Err(TraceDecayError::File { message, .. })
-                if message.contains("acquire response-handle lock")
+            Err(TraceDecayError::SyncLock { message })
+                if message.contains("response-handle writer lock")
         ));
+        assert_eq!(
+            inventory_response_handles_in_root(root.path())
+                .unwrap()
+                .file_count,
+            0,
+            "the lock is admissible again once its holder releases it"
+        );
     }
 
     #[test]

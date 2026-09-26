@@ -8,9 +8,11 @@ use std::io;
 pub mod capability_dir;
 mod file_lease;
 pub mod framed_log;
+mod lock_admission;
 mod rename_noreplace;
 
 pub use file_lease::FileLease;
+pub use lock_admission::{LockAdmissionError, lock_until};
 #[cfg(windows)]
 pub mod windows_file;
 
