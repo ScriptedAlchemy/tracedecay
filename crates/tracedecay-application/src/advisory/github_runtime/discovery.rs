@@ -476,7 +476,7 @@ fn public_rest_get(
     config: &GitHubHttpReadConfigV1,
     request_timeout: Duration,
     control: &GitHubDiscoveryControlV1,
-) -> Result<Vec<u8>, GitHubExactCommitDiscoveryOutcomeV1> {
+) -> Result<Vec<u8>, Box<GitHubExactCommitDiscoveryOutcomeV1>> {
     let response = agent
         .get(url)
         .config()
@@ -490,15 +490,16 @@ fn public_rest_get(
         .header("User-Agent", "tracedecay-github-read")
         .call();
     if control.remaining().is_none() {
-        return Err(GitHubExactCommitDiscoveryOutcomeV1::Unavailable);
+        return Err(Box::new(GitHubExactCommitDiscoveryOutcomeV1::Unavailable));
     }
     let Ok(mut response) = response else {
-        return Err(GitHubExactCommitDiscoveryOutcomeV1::Unavailable);
+        return Err(Box::new(GitHubExactCommitDiscoveryOutcomeV1::Unavailable));
     };
     if let Some(refused) = refused_status(&response) {
-        return Err(refused);
+        return Err(Box::new(refused));
     }
-    read_bounded_body(&mut response).ok_or(GitHubExactCommitDiscoveryOutcomeV1::Unavailable)
+    read_bounded_body(&mut response)
+        .ok_or_else(|| Box::new(GitHubExactCommitDiscoveryOutcomeV1::Unavailable))
 }
 
 #[derive(Deserialize)]
@@ -563,7 +564,7 @@ fn scan_public_head_ref_pull_requests_v1(
         .append_pair("per_page", &GITHUB_DISCOVERY_PAGE_SIZE_V1.to_string());
     let body = match public_rest_get(agent, search.as_str(), config, request_timeout, control) {
         Ok(body) => body,
-        Err(outcome) => return outcome,
+        Err(outcome) => return *outcome,
     };
     let Ok(found) = serde_json::from_slice::<HeadRefSearchV1>(&body) else {
         return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
@@ -582,7 +583,7 @@ fn scan_public_head_ref_pull_requests_v1(
         );
         let body = match public_rest_get(agent, &url, config, request_timeout, control) {
             Ok(body) => body,
-            Err(outcome) => return outcome,
+            Err(outcome) => return *outcome,
         };
         let Ok(pull) = serde_json::from_slice::<RestPullRequestHeadRefV1>(&body) else {
             return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
