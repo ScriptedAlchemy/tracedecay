@@ -21,7 +21,8 @@ pub(super) use crate::exact_sql::{optional_text, text};
 use super::super::{
     EncodedProjection, RawReplay, RawReplayMetadata, RawReplayTombstone, RawVerifiedHead,
     ReplayMetadata, corrupt, decode_replay, decode_replay_metadata, decode_tombstone,
-    decode_verified_head, ensure_not_interrupted, sequence_from_i64, sequence_to_i64,
+    decode_verified_head, ensure_not_interrupted, infrastructure, sequence_from_i64,
+    sequence_to_i64,
 };
 use super::{
     ExactPublicationRead, ExactQueryAuthority, REPLAY_COLUMNS, REPLAY_METADATA_COLUMNS,
@@ -133,7 +134,10 @@ fn acquire_within_begin_budget<T>(
             }
             BeginAcquireDecision::Decline => return Ok(None),
             BeginAcquireDecision::Surface => {
-                return Err(GraphPublicationStoreErrorV1::Infrastructure);
+                return Err(infrastructure(
+                    "acquire graph publication transaction",
+                    error,
+                ));
             }
         }
     }
@@ -149,7 +153,11 @@ pub(super) fn begin(
             handle.begin_immediate()
         })
     })?
-    .ok_or(GraphPublicationStoreErrorV1::Infrastructure)
+    .ok_or_else(|| {
+        GraphPublicationStoreErrorV1::Infrastructure(
+            "the graph publication writer stayed busy through its begin budget".to_owned(),
+        )
+    })
 }
 
 pub(super) fn ensure_owner(
@@ -204,7 +212,7 @@ pub(super) fn begin_read(
         handle
             .begin_deferred()
             .map(|transaction| ExactPublicationRead::Transaction(Some(transaction)))
-            .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)
+            .map_err(|error| infrastructure("begin deferred graph publication read", error))
     })
 }
 
@@ -212,7 +220,7 @@ pub(super) fn commit(transaction: ExactSqlTransaction) -> GraphPublicationStoreR
     transaction
         .commit()
         .map(|_| ())
-        .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)
+        .map_err(|error| infrastructure("commit graph publication transaction", error))
 }
 
 pub(super) fn rollback<T>(
@@ -222,7 +230,7 @@ pub(super) fn rollback<T>(
     transaction
         .rollback()
         .map(|_| value)
-        .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)
+        .map_err(|error| infrastructure("roll back graph publication transaction", error))
 }
 
 pub(super) fn rollback_error<T>(
@@ -231,7 +239,7 @@ pub(super) fn rollback_error<T>(
 ) -> GraphPublicationStoreResultV1<T> {
     transaction
         .rollback()
-        .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)?;
+        .map_err(|rollback| infrastructure("roll back graph publication transaction", rollback))?;
     Err(error)
 }
 
@@ -240,7 +248,7 @@ pub(super) fn statement(
     params: Vec<ExactSqlValue>,
 ) -> GraphPublicationStoreResultV1<ExactSqlStatement> {
     ExactSqlStatement::new(sql.into(), params)
-        .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)
+        .map_err(|error| infrastructure("prepare graph publication statement", error))
 }
 
 pub(super) fn execute(
@@ -250,7 +258,7 @@ pub(super) fn execute(
 ) -> GraphPublicationStoreResultV1<ExactSqlExecuteResult> {
     transaction
         .execute(statement(sql, params)?)
-        .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)
+        .map_err(|error| infrastructure("execute graph publication statement", error))
 }
 
 pub(super) fn query(
@@ -261,7 +269,7 @@ pub(super) fn query(
     authority
         .exact_query(statement(sql, params)?)
         .map(|rows| rows.rows)
-        .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)
+        .map_err(|error| infrastructure("query graph publication rows", error))
 }
 
 pub(super) fn read_exact(
@@ -383,7 +391,7 @@ pub(super) fn read_projection_page(
     request: &GraphPublicationProjectionPageRequestV1,
 ) -> GraphPublicationStoreResultV1<Vec<GraphProjectionIdentityV1>> {
     let shard_id = serde_json::to_string(&request.shard_id)
-        .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)?;
+        .map_err(|error| infrastructure("encode graph projection page shard", error))?;
     let (after_namespace, after_projection) = request.after.as_ref().map_or_else(
         || (String::new(), String::new()),
         |after| {
@@ -775,8 +783,9 @@ pub(super) fn insert_verified_dependencies(
             vec![
                 ExactSqlValue::Integer(owner_sequence),
                 ExactSqlValue::Integer(
-                    i64::try_from(ordinal)
-                        .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)?,
+                    i64::try_from(ordinal).map_err(|error| {
+                        infrastructure("encode graph dependency ordinal", error)
+                    })?,
                 ),
                 ExactSqlValue::Integer(dependency_sequence),
                 text(encoded.shard_id),
@@ -1050,7 +1059,7 @@ fn read_dependencies_batch(
         )
     };
     let dependency_rank_limit = i64::try_from(MAX_GRAPH_REPLAY_DIRECT_DEPENDENCIES_V1 + 1)
-        .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)?;
+        .map_err(|error| infrastructure("encode graph dependency rank limit", error))?;
     for chunk in sequences.chunks(GRAPH_REPLAY_DEPENDENCY_BATCH) {
         let placeholders = (1..=chunk.len())
             .map(|index| format!("?{index}"))
@@ -1649,7 +1658,7 @@ mod dependency_batch_tests {
     }
 
     impl ExactQueryAuthority for QueryCounter<'_> {
-        fn exact_query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ()> {
+        fn exact_query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ExactSqlError> {
             self.hits.set(self.hits.get() + 1);
             self.inner.exact_query(statement)
         }
@@ -2120,7 +2129,11 @@ mod begin_acquire_tests {
 
         assert_eq!(
             outcome,
-            Err(GraphPublicationStoreErrorV1::Infrastructure),
+            Err(GraphPublicationStoreErrorV1::Infrastructure(
+                "acquire graph publication transaction: exact SQL reader is unavailable: \
+                 reader worker failed: worker closed"
+                    .to_owned()
+            )),
             "a reader that failed must reach the caller, not be answered by a \
              deferred read on the writer lane"
         );

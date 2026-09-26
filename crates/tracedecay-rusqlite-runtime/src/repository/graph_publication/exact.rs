@@ -18,15 +18,15 @@ use tracedecay_store::{
 };
 
 use crate::exact_sql::{
-    ExactSqlHandle, ExactSqlReadSnapshot, ExactSqlRows, ExactSqlStatement, ExactSqlTransaction,
-    ExactSqlValue,
+    ExactSqlError, ExactSqlHandle, ExactSqlReadSnapshot, ExactSqlRows, ExactSqlStatement,
+    ExactSqlTransaction, ExactSqlValue,
 };
 
 use super::{
     EncodedProjection, begin_pending_discard_commit, begin_replay_retirement_commit,
     begin_retired_cleanup_finalize_commit, begin_verified_commit,
     encode_direct_dependency_generations, encode_optional_head, ensure_not_interrupted,
-    sequence_from_i64, sequence_to_i64,
+    infrastructure, sequence_from_i64, sequence_to_i64,
 };
 
 #[path = "support.rs"]
@@ -55,7 +55,7 @@ const TOMBSTONE_COLUMNS: &str = "replay_sequence, shard_id, namespace, projectio
 const REPLAY_READER_ACQUIRE_SLICE: Duration = Duration::from_millis(10);
 
 trait ExactQueryAuthority {
-    fn exact_query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ()>;
+    fn exact_query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ExactSqlError>;
 }
 
 pub(super) enum ExactPublicationRead {
@@ -64,11 +64,11 @@ pub(super) enum ExactPublicationRead {
 }
 
 impl ExactQueryAuthority for ExactPublicationRead {
-    fn exact_query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ()> {
+    fn exact_query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ExactSqlError> {
         match self {
-            Self::Snapshot(snapshot) => snapshot.query(statement).map_err(|_| ()),
-            Self::Transaction(Some(transaction)) => transaction.query(statement).map_err(|_| ()),
-            Self::Transaction(None) => Err(()),
+            Self::Snapshot(snapshot) => snapshot.query(statement),
+            Self::Transaction(Some(transaction)) => transaction.query(statement),
+            Self::Transaction(None) => Err(ExactSqlError::TransactionClosed),
         }
     }
 }
@@ -84,14 +84,14 @@ impl Drop for ExactPublicationRead {
 }
 
 impl ExactQueryAuthority for ExactSqlTransaction {
-    fn exact_query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ()> {
-        self.query(statement).map_err(|_| ())
+    fn exact_query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ExactSqlError> {
+        self.query(statement)
     }
 }
 
 impl ExactQueryAuthority for ExactSqlReadSnapshot {
-    fn exact_query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ()> {
-        self.query(statement).map_err(|_| ())
+    fn exact_query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ExactSqlError> {
+        self.query(statement)
     }
 }
 
@@ -343,7 +343,7 @@ fn tombstone_retired_replay(
                     encode_direct_dependency_generations(&request.direct_dependency_generations)?
                         .len(),
                 )
-                .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)?,
+                .map_err(|error| infrastructure("size graph replay dependencies", error))?,
             ),
             optional_text(encode_optional_head(request.expected_prior_head.as_ref())?),
             text(request.expected_recovered_digest.as_str()),
@@ -504,7 +504,7 @@ fn append_replay_in_transaction(
                     )?
                     .len(),
                 )
-                .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure)?,
+                .map_err(|error| infrastructure("size graph replay dependencies", error))?,
             ),
             optional_text(encode_optional_head(
                 publication.expected_prior_head.as_ref(),

@@ -1,10 +1,7 @@
 use std::collections::BTreeSet;
 
 use tracedecay_sessions::admission::{HostAdmissionOutcome, HostProjectionDrainOutcome};
-use tracedecay_sessions::runtime::git_correlation::{
-    DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS, DEFAULT_GIT_EVIDENCE_PUBLICATION_REPLAY_LIMIT,
-    SystemGit,
-};
+use tracedecay_sessions::runtime::git_correlation::SystemGit;
 use tracedecay_store::ProjectionPersistOutcome;
 
 use super::*;
@@ -237,13 +234,7 @@ impl HostAdmissionFacade<'_> {
             if cancellation.is_cancelled() {
                 return Err(classify_error(&ObservationApplicationError::Cancelled));
             }
-            let convergence = database
-                .converge_session_git_evidence(
-                    &SystemGit,
-                    DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS,
-                    DEFAULT_GIT_EVIDENCE_PUBLICATION_REPLAY_LIMIT,
-                )
-                .await;
+            let convergence = database.converge_session_git_evidence(&SystemGit).await;
             if cancellation.is_cancelled() {
                 return Err(classify_error(&ObservationApplicationError::Cancelled));
             }
@@ -276,7 +267,6 @@ fn git_evidence_convergence_deferred(
     let stats = convergence.stats();
     convergence.later_failure().is_some()
         || stats.pending_publications.is_none_or(|pending| pending > 0)
-        || stats.backfill_page_saturated
         || stats.backfill.skipped_git_error > 0
 }
 
@@ -331,7 +321,7 @@ mod tests {
     fn permanent_git_exclusions_do_not_defer_host_admission() {
         let convergence = tracedecay_global_db::GitEvidenceConvergenceOutcome::Complete(
             tracedecay_global_db::GitEvidenceConvergenceStats {
-                replayed_publications: 0,
+                settled_receipts: 0,
                 pending_publications: Some(0),
                 backfill: tracedecay_sessions::runtime::git_correlation::BackfillStats {
                     skipped_no_window: 1,
@@ -341,7 +331,11 @@ mod tests {
                     frontier_advanced: true,
                     ..Default::default()
                 },
-                backfill_page_saturated: false,
+                frontier: tracedecay_sessions::runtime::git_correlation::GitHistoryIndexFrontier {
+                    activity_timestamp: 0,
+                    source_rowid: 0,
+                },
+                published: false,
                 rebuilt_pre_index_head: false,
             },
         );
@@ -350,13 +344,17 @@ mod tests {
 
         let transient = tracedecay_global_db::GitEvidenceConvergenceOutcome::Complete(
             tracedecay_global_db::GitEvidenceConvergenceStats {
-                replayed_publications: 0,
+                settled_receipts: 0,
                 pending_publications: Some(0),
                 backfill: tracedecay_sessions::runtime::git_correlation::BackfillStats {
                     skipped_git_error: 1,
                     ..Default::default()
                 },
-                backfill_page_saturated: false,
+                frontier: tracedecay_sessions::runtime::git_correlation::GitHistoryIndexFrontier {
+                    activity_timestamp: 0,
+                    source_rowid: 0,
+                },
+                published: false,
                 rebuilt_pre_index_head: false,
             },
         );

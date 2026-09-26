@@ -20,8 +20,9 @@ use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_sessions::runtime::git_correlation::{
-    BackfillOptions, BranchTimelineEntry, CommitRelationFilter, GitCorrelationError, GitRefFilter,
-    GitReflogSource, SessionsForQuery, git_commit_reference_exists, normalize_worktree,
+    BackfillOptions, BackfillStats, BranchTimelineEntry, CommitRelationFilter, GitCorrelationError,
+    GitHistoryIndexFrontier, GitRefFilter, GitReflogSource, SessionsForQuery, SystemGit,
+    git_commit_reference_exists, normalize_worktree,
 };
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
@@ -430,6 +431,13 @@ fn incremental_git(repo: &Path) -> FakeGit {
     }
 }
 
+/// One production convergence pass that must settle without a later failure.
+async fn converge(db: &HostAdmissionTestRuntimeV1, git: &FakeGit) -> BackfillStats {
+    let outcome = db.converge_git_evidence_for_test(git).await.unwrap();
+    assert_eq!(outcome.later_failure(), None);
+    outcome.stats().backfill.clone()
+}
+
 #[tokio::test]
 async fn incremental_backfill_advances_watermark_and_is_idempotent() {
     let (_base, repo, _main, _feature) = build_repo();
@@ -445,10 +453,7 @@ async fn incremental_backfill_advances_watermark_and_is_idempotent() {
     );
 
     // First pass drains both seeded sessions and writes their spans.
-    let first = db
-        .run_incremental_git_backfill_for_test(&git, 50)
-        .await
-        .unwrap();
+    let first = converge(&db, &git).await;
     assert_eq!(first.sessions_scanned, 2);
     assert!(
         first.spans_written >= 2,
@@ -465,10 +470,7 @@ async fn incremental_backfill_advances_watermark_and_is_idempotent() {
     );
 
     // A second pass finds nothing newer than the watermark: no rescans.
-    let second = db
-        .run_incremental_git_backfill_for_test(&git, 50)
-        .await
-        .unwrap();
+    let second = converge(&db, &git).await;
     assert_eq!(second.sessions_scanned, 0);
     assert_eq!(second.spans_written, 0);
 
@@ -529,28 +531,112 @@ async fn project_host_admission_drain_bootstraps_retained_git_evidence() {
     );
 }
 
-#[tokio::test]
-async fn incremental_backfill_cap_drains_history_oldest_first_across_passes() {
-    let (_base, repo, main_shas, _feature) = build_repo();
-    let (db_tmp, db, _project) = open_seeded_db(&repo).await;
-    let git = incremental_git(&repo);
+/// Rowid half of the durable history frontier, mirrored like the watermark.
+const GIT_HISTORY_ROWID_FRONTIER_KEY: &str = "git_history_session_rowid_frontier";
 
-    // A cap of one session per pass drains oldest-first. s_main's activity
-    // (last message T_BASE + 200) precedes s_switch's (T_BASE + 850).
-    let pass1 = db
-        .run_incremental_git_backfill_for_test(&git, 1)
-        .await
-        .unwrap();
-    assert_eq!(pass1.sessions_scanned, 1);
+/// A catch-up of a thousand retained sessions converges in one pass that
+/// publishes one generation. Each pass used to publish a full-projection
+/// generation per session and stop after a 50-session page, reporting deferred
+/// work, so the history scheduler re-ran it for as long as the daemon lived
+/// and never reached the next history window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn large_catch_up_converges_in_one_pass_and_then_stays_settled() {
+    const SESSIONS: i64 = 1_000;
+    let (_base, repo, _main, _feature) = build_repo();
+    let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("db tmpdir: {e}"));
+    let project_id = ProjectId::new("project.git-backfill-catch-up").unwrap();
+    let db = HostAdmissionTestRuntimeV1::project(
+        tmp.path().join(".tracedecay"),
+        &repo,
+        project_id.clone(),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("open registered sessions runtime: {error}"));
+    let project = repo.to_string_lossy().to_string();
+    for index in 0..SESSIONS {
+        let started = T_BASE + index * 60;
+        assert!(
+            db.upsert_session_for_test(
+                HostAdmissionScope::Project,
+                &session(
+                    &format!("catch-up-{index:05}"),
+                    &project,
+                    started,
+                    started + 30
+                ),
+            )
+            .await
+            .unwrap()
+        );
+    }
+    let scope = ObservationScopeV1::Project { project_id };
+
+    let first = db.converge_git_evidence_for_test(&SystemGit).await.unwrap();
+    assert_eq!(first.later_failure(), None);
+    let receipt = first.stats();
+    assert_eq!(
+        receipt.frontier,
+        GitHistoryIndexFrontier {
+            activity_timestamp: T_BASE + 59_970,
+            source_rowid: 1_000,
+        },
+        "the receipt's frontier is the last session's (activity, rowid)"
+    );
+    assert_eq!(receipt.backfill.sessions_scanned, 1_000);
+    assert_eq!(receipt.backfill.skipped_git_error, 0);
+    assert_eq!(receipt.pending_publications, Some(0));
+    assert!(receipt.published);
     assert_eq!(
         db.git_correlation_meta_for_test(AUTO_BACKFILL_WATERMARK_KEY)
             .await
             .unwrap(),
-        Some(T_BASE + 200),
-        "oldest session processed first"
+        Some(T_BASE + 59_970)
+    );
+    assert_eq!(
+        db.git_correlation_meta_for_test(GIT_HISTORY_ROWID_FRONTIER_KEY)
+            .await
+            .unwrap(),
+        Some(1_000)
+    );
+    let settled = db.git_correlation_health_for_test().await.unwrap();
+    assert_eq!(settled.span_count, 1_000);
+    // Time-overlap attribution: the main commits at T_BASE + 100 and + 700
+    // fall within the merge gap of the first 32 and 42 sessions.
+    assert_eq!(settled.commit_count, 74);
+
+    // The history pass that follows drains through the production host
+    // admission caller: nothing is deferred, so the scheduler moves on.
+    let following = db
+        .facade()
+        .drain_projection_queue("claude", &scope, &ObservationCancellation::default(), 16)
+        .await
+        .unwrap();
+    assert!(!following.deferred);
+    assert_eq!(
+        db.git_correlation_health_for_test().await.unwrap(),
+        settled,
+        "a pass without new evidence must not publish another generation"
+    );
+}
+
+#[tokio::test]
+async fn convergence_resumes_from_the_durable_frontier_after_restart() {
+    let (_base, repo, main_shas, _feature) = build_repo();
+    let (db_tmp, db, project) = open_seeded_db(&repo).await;
+    let git = incremental_git(&repo);
+
+    // One pass drains the whole retained history oldest-first: s_main (last
+    // message T_BASE + 200), then s_switch (T_BASE + 850).
+    let pass1 = converge(&db, &git).await;
+    assert_eq!(pass1.sessions_scanned, 2);
+    assert_eq!(
+        db.git_correlation_meta_for_test(AUTO_BACKFILL_WATERMARK_KEY)
+            .await
+            .unwrap(),
+        Some(T_BASE + 850)
     );
     let first_commit = main_shas.last().expect("first main commit");
-    let first_page_hits = db
+    let first_commit_hits = db
         .git_sessions_for_for_test(
             &SessionsForQuery {
                 git_ref: GitRefFilter::Commit(first_commit.clone()),
@@ -562,17 +648,16 @@ async fn incremental_backfill_cap_drains_history_oldest_first_across_passes() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        first_page_hits
-            .iter()
-            .map(|hit| hit.session_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["s_main"],
-        "the first bounded page must publish a queryable span and commit generation"
-    );
+    let mut first_commit_ids = first_commit_hits
+        .iter()
+        .map(|hit| hit.session_id.as_str())
+        .collect::<Vec<_>>();
+    first_commit_ids.sort_unstable();
+    assert_eq!(first_commit_ids, vec!["s_main", "s_switch"]);
 
-    // Release and reopen the complete registered runtime to prove that the
-    // second page resumes from the durable tuple watermark, not process state.
+    // Release and reopen the complete registered runtime: the next pass
+    // resumes from the durable tuple frontier, not process state, so only
+    // the session recorded after the restart is scanned.
     drop(db);
     let db = HostAdmissionTestRuntimeV1::project(
         db_tmp.path().join(".tracedecay"),
@@ -581,27 +666,28 @@ async fn incremental_backfill_cap_drains_history_oldest_first_across_passes() {
     )
     .await
     .unwrap_or_else(|error| panic!("restart registered sessions runtime: {error}"));
-
-    let pass2 = db
-        .run_incremental_git_backfill_for_test(&git, 1)
+    assert!(
+        db.upsert_session_for_test(
+            HostAdmissionScope::Project,
+            &session("s_late", &project, T_BASE + 900, T_BASE + 950),
+        )
         .await
-        .unwrap();
+        .unwrap()
+    );
+
+    let pass2 = converge(&db, &git).await;
     assert_eq!(pass2.sessions_scanned, 1);
     assert_eq!(
         db.git_correlation_meta_for_test(AUTO_BACKFILL_WATERMARK_KEY)
             .await
             .unwrap(),
-        Some(T_BASE + 850)
+        Some(T_BASE + 950)
     );
 
     // History fully drained: the next pass has nothing to do.
-    let pass3 = db
-        .run_incremental_git_backfill_for_test(&git, 1)
-        .await
-        .unwrap();
+    let pass3 = converge(&db, &git).await;
     assert_eq!(pass3.sessions_scanned, 0);
 
-    // Both sessions ended up attributed to main across the two passes.
     let hits = db
         .git_sessions_for_for_test(
             &SessionsForQuery {
@@ -616,7 +702,14 @@ async fn incremental_backfill_cap_drains_history_oldest_first_across_passes() {
         .unwrap();
     let mut ids: Vec<String> = hits.iter().map(|h| h.session_id.clone()).collect();
     ids.sort();
-    assert_eq!(ids, vec!["s_main".to_string(), "s_switch".to_string()]);
+    assert_eq!(
+        ids,
+        vec![
+            "s_late".to_string(),
+            "s_main".to_string(),
+            "s_switch".to_string()
+        ]
+    );
 }
 
 #[tokio::test]

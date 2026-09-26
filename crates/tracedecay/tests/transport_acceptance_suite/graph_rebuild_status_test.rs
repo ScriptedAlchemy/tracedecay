@@ -194,40 +194,48 @@ async fn wait_for_current_generation(
     expected_revision: &str,
     query: &str,
 ) -> String {
-    let mut last_status = Value::Null;
-    let mut last_search = Value::Null;
-    tokio::time::timeout(RECEIPT_TIMEOUT, async {
-        loop {
-            last_status = status(harness, project).await;
-            let worktree = &last_status["code_index_freshness"]["worktree"];
-            let generation = worktree["latest_generation_id"].as_str().map(str::to_owned);
-            if last_status["code_index_freshness"]["status"] == "current"
-                && worktree["coverage"] == "complete"
-                && worktree["staleness_state"] == "fresh"
-                && worktree["source_reference"] == "refs/heads/main"
-                && worktree["source_revision"] == expected_revision
-                && let Some(current_generation) = generation
-            {
-                last_search = search(harness, project, query).await;
-                if last_search["code_generation"].as_str() == Some(current_generation.as_str())
-                    && !result_paths(&last_search).is_empty()
-                {
-                    assert!(
-                        last_status.get("code_index_freshness_warning").is_none(),
-                        "a current generation must not carry a warming warning: {last_status}"
-                    );
-                    return current_generation;
-                }
-            }
-            tokio::time::sleep(POLL_INTERVAL).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| {
-        panic!(
-            "timed out waiting for current generation; status={last_status}; search={last_search}"
-        )
-    })
+    let status = tool_json(
+        harness,
+        project,
+        "tracedecay_status",
+        json!({
+            "format": "json",
+            "include_branch_diagnostics": false,
+            "include_storage_health": false,
+            "include_session_ingest": false,
+            "include_staleness": false,
+            "wait_for": {
+                "state": "fresh",
+                "timeout_ms": u64::try_from(RECEIPT_TIMEOUT.as_millis()).expect("budget fits u64"),
+            },
+        }),
+    )
+    .await;
+    assert_eq!(status["wait"], json!({ "outcome": "reached" }), "{status}");
+    let worktree = &status["code_index_freshness"]["worktree"];
+    assert_eq!(
+        status["code_index_freshness"]["status"], "current",
+        "{status}"
+    );
+    assert_eq!(worktree["coverage"], "complete", "{status}");
+    assert_eq!(worktree["source_reference"], "refs/heads/main", "{status}");
+    assert_eq!(worktree["source_revision"], expected_revision, "{status}");
+    assert!(
+        status.get("code_index_freshness_warning").is_none(),
+        "a current generation must not carry a warming warning: {status}"
+    );
+    let generation = worktree["latest_generation_id"]
+        .as_str()
+        .expect("a fresh index names its generation")
+        .to_owned();
+    let found = search(harness, project, query).await;
+    assert_eq!(
+        found["code_generation"].as_str(),
+        Some(generation.as_str()),
+        "{found}"
+    );
+    assert!(!result_paths(&found).is_empty(), "{found}");
+    generation
 }
 
 async fn wait_for_background_refresh(

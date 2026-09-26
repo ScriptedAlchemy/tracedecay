@@ -325,6 +325,72 @@ impl RuntimeRequestProbeV1 for GraphPublicationProbeV1 {
     }
 }
 
+/// Superseded-replay retirement commits once per retired replay and once per
+/// cleanup finalization. A request probe grants exactly one commit, which the
+/// publish that installed the head has already spent, so retirement runs
+/// under its own probe that admits each commit while it is uninterrupted.
+struct GraphRetirementProbeV1(GraphPublicationProbeV1);
+
+impl GraphRetirementProbeV1 {
+    fn new(
+        stage: &str,
+        projection: &GraphProjectionIdentityV1,
+        request_cancellation: Arc<dyn GraphCancellation>,
+        lifecycle_cancellation: Arc<dyn GraphCancellation>,
+        deadline_at: Instant,
+    ) -> std::result::Result<(RuntimeRequestControlV1, Self), GraphDbError> {
+        let label = format!("{stage}:{}", projection.projection.as_str());
+        let cancellation = RuntimeCancellationIdentityV1 {
+            cancellation_id: RuntimeCancellationIdV1::new(format!("graph-retire:{label}"))
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+            generation: 1,
+        };
+        let deadline = RuntimeDeadlineV1 {
+            deadline_id: RuntimeDeadlineIdV1::new(format!("graph-retire-deadline:{label}"))
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+        };
+        let control = RuntimeRequestControlV1 {
+            requested_at: tracedecay_contracts::clock::now_micros(),
+            deadline: deadline.clone(),
+            cancellation: cancellation.clone(),
+        };
+        Ok((
+            control,
+            Self(GraphPublicationProbeV1 {
+                request_cancellation,
+                lifecycle_cancellation,
+                deadline_at,
+                cancellation,
+                deadline,
+                commit_started: AtomicBool::new(false),
+                deadline_warned: AtomicBool::new(false),
+            }),
+        ))
+    }
+}
+
+impl RuntimeRequestProbeV1 for GraphRetirementProbeV1 {
+    fn cancellation_identity(&self) -> &RuntimeCancellationIdentityV1 {
+        self.0.cancellation_identity()
+    }
+
+    fn deadline_identity(&self) -> &RuntimeDeadlineV1 {
+        self.0.deadline_identity()
+    }
+
+    fn interruption(&self) -> Option<RuntimeInterruptionV1> {
+        self.0.interruption()
+    }
+
+    fn try_begin_commit(&self) -> bool {
+        self.0.interruption().is_none()
+    }
+
+    fn requires_isolated_commit(&self) -> bool {
+        true
+    }
+}
+
 struct CombinedAtomicGraphCancellationV1 {
     local: Arc<AtomicBool>,
     registry: Option<Arc<AtomicBool>>,
@@ -563,15 +629,26 @@ fn retire_superseded_replays(
     graph_registry: &tracedecay_graph_db::GraphDbRegistry,
     registration: GraphDbRegistration,
     storage: &mut dyn GraphPublicationStoreV1,
-    context: &GraphPublicationOperationContextV1<'_>,
     projection: &GraphProjectionIdentityV1,
 ) {
-    match graph_registry.retire_superseded_projection_replays(
-        registration,
-        storage,
-        context,
+    let retirement = GraphRetirementProbeV1::new(
+        stage,
         projection,
-    ) {
+        Arc::clone(&registration.cancellation),
+        Arc::clone(&registration.lifecycle_cancellation),
+        registration.deadline,
+    )
+    .and_then(|(control, probe)| {
+        let context = GraphPublicationOperationContextV1::new(&control, &probe)
+            .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+        graph_registry.retire_superseded_projection_replays(
+            registration,
+            storage,
+            &context,
+            projection,
+        )
+    });
+    match retirement {
         Ok(receipt) if receipt == tracedecay_graph_db::SupersededReplayRetirement::default() => {
             tracing::debug!(
                 event = "graph_superseded_replays_clean",
@@ -1037,14 +1114,25 @@ impl RetainedVerifiedGraphRuntimeV1 {
         // projection. Inline manifests have no code-index owner whose
         // retention would ever reclaim them, so this publish is their only
         // retirement path.
-        match self
-            .graph_registry
-            .retire_superseded_projection_replays_with_lease(
-                &graph,
-                &mut storage,
-                &context,
-                &relational_projection,
-            ) {
+        let retirement = GraphRetirementProbeV1::new(
+            "publish-manifest",
+            &relational_projection,
+            Arc::clone(&request_cancellation),
+            graph_lifecycle_cancellation(&self.lifecycle_cancelled, None),
+            deadline_at,
+        )
+        .and_then(|(control, probe)| {
+            let context = GraphPublicationOperationContextV1::new(&control, &probe)
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+            self.graph_registry
+                .retire_superseded_projection_replays_with_lease(
+                    &graph,
+                    &mut storage,
+                    &context,
+                    &relational_projection,
+                )
+        });
+        match retirement {
             Ok(receipt)
                 if receipt != tracedecay_graph_db::SupersededReplayRetirement::default() =>
             {
@@ -1724,7 +1812,6 @@ impl RetainedCodeGraphRuntimeV1 {
                     &graph_registry,
                     registration,
                     &mut storage,
-                    &context,
                     &projection,
                 );
                 Ok(outcome)
@@ -2639,7 +2726,6 @@ impl DaemonSessionRuntimeRegistryV1 {
                 &graph_registry,
                 registration.clone(),
                 &mut storage,
-                &context,
                 &projection,
             );
             let outcome = graph_registry.release_sealed_generation_staging_rows(

@@ -1056,7 +1056,8 @@ impl GraphDbRegistry {
                     return Err(GraphDbError::invalid(error.to_string()));
                 }
             };
-            let outcome = match authority.retire_replay(&retirement, context) {
+            // Every retirement step is its own durable commit.
+            let outcome = match authority.retire_replay(&retirement, &context.next_commit()) {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     clear_retiring_fence(database, &locator)?;
@@ -1154,7 +1155,7 @@ impl GraphDbRegistry {
             return Ok(());
         }
         match authority
-            .finalize_retired_replay_cleanup(retirement, context)
+            .finalize_retired_replay_cleanup(retirement, &context.next_commit())
             .map_err(GraphDbError::from)?
         {
             GraphRetiredReplayCleanupFinalizeOutcomeV1::Finalized(_)
@@ -2704,7 +2705,9 @@ mod historical_publication_reuse_tests {
             _request: &GraphPublicationReplayPageRequestV1,
             _context: &GraphPublicationOperationContextV1,
         ) -> GraphPublicationStoreResultV1<GraphPublicationReplayPageV1> {
-            Err(GraphPublicationStoreErrorV1::Infrastructure)
+            Err(GraphPublicationStoreErrorV1::Infrastructure(
+                "not supported by this test authority".to_owned(),
+            ))
         }
 
         fn projection_page(
@@ -2712,7 +2715,9 @@ mod historical_publication_reuse_tests {
             _request: &GraphPublicationProjectionPageRequestV1,
             _context: &GraphPublicationOperationContextV1,
         ) -> GraphPublicationStoreResultV1<GraphPublicationProjectionPageV1> {
-            Err(GraphPublicationStoreErrorV1::Infrastructure)
+            Err(GraphPublicationStoreErrorV1::Infrastructure(
+                "not supported by this test authority".to_owned(),
+            ))
         }
 
         fn retire_replay(
@@ -2720,7 +2725,9 @@ mod historical_publication_reuse_tests {
             _request: &GraphPublicationReplayRetirementV1,
             _context: &GraphPublicationOperationContextV1,
         ) -> GraphPublicationStoreResultV1<GraphReplayRetirementOutcomeV1> {
-            Err(GraphPublicationStoreErrorV1::Infrastructure)
+            Err(GraphPublicationStoreErrorV1::Infrastructure(
+                "not supported by this test authority".to_owned(),
+            ))
         }
 
         fn retire_verified_head_replay(
@@ -2729,7 +2736,9 @@ mod historical_publication_reuse_tests {
             _expected_head: &GraphVerifiedHeadV1,
             _context: &GraphPublicationOperationContextV1,
         ) -> GraphPublicationStoreResultV1<GraphReplayRetirementOutcomeV1> {
-            Err(GraphPublicationStoreErrorV1::Infrastructure)
+            Err(GraphPublicationStoreErrorV1::Infrastructure(
+                "not supported by this test authority".to_owned(),
+            ))
         }
 
         fn discard_pending_replay(
@@ -2739,7 +2748,9 @@ mod historical_publication_reuse_tests {
         ) -> GraphPublicationStoreResultV1<
             tracedecay_store::runtime::GraphPendingReplayDiscardOutcomeV1,
         > {
-            Err(GraphPublicationStoreErrorV1::Infrastructure)
+            Err(GraphPublicationStoreErrorV1::Infrastructure(
+                "not supported by this test authority".to_owned(),
+            ))
         }
 
         fn retired_cleanup_page(
@@ -2747,7 +2758,9 @@ mod historical_publication_reuse_tests {
             _request: &GraphPublicationRetiredCleanupPageRequestV1,
             _context: &GraphPublicationOperationContextV1,
         ) -> GraphPublicationStoreResultV1<GraphPublicationRetiredCleanupPageV1> {
-            Err(GraphPublicationStoreErrorV1::Infrastructure)
+            Err(GraphPublicationStoreErrorV1::Infrastructure(
+                "not supported by this test authority".to_owned(),
+            ))
         }
 
         fn finalize_retired_replay_cleanup(
@@ -2755,7 +2768,9 @@ mod historical_publication_reuse_tests {
             _request: &GraphPublicationReplayRetirementV1,
             _context: &GraphPublicationOperationContextV1,
         ) -> GraphPublicationStoreResultV1<GraphRetiredReplayCleanupFinalizeOutcomeV1> {
-            Err(GraphPublicationStoreErrorV1::Infrastructure)
+            Err(GraphPublicationStoreErrorV1::Infrastructure(
+                "not supported by this test authority".to_owned(),
+            ))
         }
 
         fn verified_head(
@@ -2775,7 +2790,11 @@ mod historical_publication_reuse_tests {
                 .records
                 .get(&request.publication_key)
                 .cloned()
-                .ok_or(GraphPublicationStoreErrorV1::Infrastructure)?;
+                .ok_or_else(|| {
+                    GraphPublicationStoreErrorV1::Infrastructure(
+                        "unstaged test publication".to_owned(),
+                    )
+                })?;
             if self.heads.get(&request.publication_key.projection)
                 != request.expected_prior_head.as_ref()
             {

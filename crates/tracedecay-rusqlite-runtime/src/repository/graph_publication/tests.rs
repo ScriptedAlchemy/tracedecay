@@ -489,7 +489,7 @@ fn replay_append_requires_the_atomic_commit_gate() {
 
     assert_eq!(
         fixture.storage().append_replay(&publication, &context),
-        Err(GraphPublicationStoreErrorV1::Infrastructure)
+        Err(GraphPublicationStoreErrorV1::CommitRefused)
     );
     assert_eq!(fixture.replay_count(), 0);
 }
