@@ -12,14 +12,14 @@ use tracedecay_code_extraction::ExtractedSchemaEvidenceV1;
 use tracedecay_code_extraction::incremental::{ParseDocumentIdentity, ParseError};
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeGenerationManifestV1,
-    CodeGenerationSourceCommitmentsV1, CodeIndexCapabilityManifestV1, ComponentVersion,
-    CoverageSummaryV1, ExtractorRevision, FileOccurrenceId, GenerationTestAttributionV1,
-    LanguageId, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId,
-    ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1,
-    ProviderEvaluationStateV1, RefId, RelationEdgeKindV1, RepositoryId, SanitizedCodeFileV1,
-    SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1,
-    SymbolOccurrenceId, TestAttributionEvidenceClassV1, UtcMicros, ValidatedCodeFileV1, WorktreeId,
-    canonical_sha256,
+    CodeGenerationSourceCommitmentsV1, CodeIndexCapabilityManifestV1, CodeSearchChunkV1,
+    ComponentVersion, CoverageSummaryV1, ExactTechnicalTermV1, ExtractorRevision, FileOccurrenceId,
+    GenerationTestAttributionV1, LanguageId, ManifestDigest, PolicyRevisionId, PrivacyDomainId,
+    ProjectId, ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1,
+    ProjectionReplayReasonV1, ProviderEvaluationStateV1, RefId, RelationEdgeKindV1, RepositoryId,
+    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityLevelV1,
+    SnapshotFileDispositionV1, SymbolOccurrenceId, TestAttributionEvidenceClassV1, UtcMicros,
+    ValidatedCodeFileV1, WorktreeId, canonical_sha256,
 };
 use tracedecay_graph_db::{
     GraphGenerationManifest, GraphProjectionIdentity, GraphProjectorRevision,
@@ -47,7 +47,10 @@ use super::{
         SanitizedCodeIntake, SanitizedSnapshotCapabilityV1,
     },
     languages::{LanguageRegistry, StaticLanguageRegistry},
-    lineage::{GenerationSymbolIndexV1, LineageResolutionErrorV1, SymbolLineageResolver},
+    lineage::{
+        GenerationSymbolIndexV1, LineageResolutionErrorV1, LineageSymbolRecordV1,
+        SymbolLineageResolver,
+    },
     projection::{
         CodeChunkProjectionSink, ProjectionPublicationErrorV1, ProjectionPublicationHandoffV1,
         expected_request_digest, project_for_publication,
@@ -798,6 +801,8 @@ pub struct CodeIndexPublishedGenerationV1 {
     /// durable graph has consumed it. The key remains first-success-wins so a
     /// foreign projection identity can never replace the canonical memo.
     graph_manifest: OnceLock<Arc<Mutex<CodeGraphManifestMemoV1>>>,
+    /// [`Self::retained_bytes`] of the immutable decode, measured once.
+    retained_bytes: OnceLock<u64>,
 }
 
 /// One successfully built code-graph publication manifest, pinned to the
@@ -985,6 +990,113 @@ impl CodeIndexPublishedGenerationV1 {
             ChunkPolicyRevisionSummaryV1::Uniform(_) => {}
         }
         compatibility
+    }
+
+    /// Bytes this decoded generation holds: the decode itself plus the test
+    /// attribution once built. The decode is summed from the lengths of its
+    /// own allocations (every chunk's text, terms, subtokens and identifiers,
+    /// every clone body's token streams, every symbol, edge and per-file
+    /// record); containers count their element slots. Allocator headers and
+    /// spare capacity are not visible here, so this is a floor of the true
+    /// resident cost, never an extrapolation above it.
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        let decode = *self
+            .retained_bytes
+            .get_or_init(|| u64::try_from(self.measure_decode_bytes()).unwrap_or(u64::MAX));
+        let attribution = self.attribution.get().map_or(
+            0,
+            PublishedGenerationTestAttributionAuthorityV1::retained_bytes,
+        );
+        decode.saturating_add(attribution)
+    }
+
+    fn measure_decode_bytes(&self) -> usize {
+        use std::mem::size_of;
+        let chunk_bytes = |chunk: &CodeSearchChunkV1| {
+            size_of::<CodeSearchChunkV1>()
+                .saturating_add(chunk.id.as_str().len())
+                .saturating_add(chunk.content_digest.as_str().len())
+                .saturating_add(chunk.sanitized_text.as_str().len())
+                .saturating_add(chunk.exact_terms.iter().fold(0, |bytes, term| {
+                    bytes
+                        .saturating_add(size_of::<ExactTechnicalTermV1>())
+                        .saturating_add(term.original_bytes().len())
+                        .saturating_add(term.canonical_bytes().len())
+                }))
+                .saturating_add(chunk.subtokens.iter().fold(0, |bytes, subtoken| {
+                    bytes
+                        .saturating_add(size_of::<String>())
+                        .saturating_add(subtoken.len())
+                }))
+        };
+        let symbol_bytes = |symbol: &LineageSymbolRecordV1| {
+            size_of::<LineageSymbolRecordV1>()
+                .saturating_add(symbol.occurrence.as_str().len())
+                .saturating_add(symbol.qualified_name.len())
+                .saturating_add(symbol.simple_name.len())
+                .saturating_add(symbol.kind.len())
+                .saturating_add(symbol.visibility.len())
+                .saturating_add(symbol.signature.as_ref().map_or(0, String::len))
+        };
+        let file_bytes = |file: &FileGenerationArtifactsV1| {
+            let artifacts = &file.artifacts;
+            size_of::<FileGenerationArtifactsV1>()
+                .saturating_add(
+                    artifacts
+                        .edges
+                        .len()
+                        .saturating_mul(size_of::<CanonicalRelationEdgeV1>()),
+                )
+                .saturating_add(
+                    artifacts
+                        .imports
+                        .len()
+                        .saturating_mul(size_of::<CodeIndexImportEvidenceV1>()),
+                )
+                .saturating_add(
+                    artifacts
+                        .unresolved_references
+                        .len()
+                        .saturating_mul(size_of::<CodeIndexUnresolvedReferenceV1>()),
+                )
+                .saturating_add(artifacts.clone_bodies.iter().fold(0, |bytes, body| {
+                    bytes
+                        .saturating_add(size_of::<CodeIndexCloneBodyV1>())
+                        .saturating_add(body.retained_owned_bytes())
+                }))
+        };
+        // Chunks and symbols are `Arc`-shared between the files and the
+        // generation-wide indices; count each allocation once, from the index.
+        self.chunks
+            .chunks()
+            .iter()
+            .fold(0_usize, |bytes, chunk| {
+                bytes.saturating_add(chunk_bytes(chunk))
+            })
+            .saturating_add(self.symbols.symbols.iter().fold(0, |bytes, symbol| {
+                bytes.saturating_add(symbol_bytes(symbol))
+            }))
+            .saturating_add(
+                self.files
+                    .iter()
+                    .fold(0, |bytes, file| bytes.saturating_add(file_bytes(file))),
+            )
+            .saturating_add(
+                self.edges
+                    .len()
+                    .saturating_mul(size_of::<CanonicalRelationEdgeV1>()),
+            )
+            .saturating_add(
+                self.lineage
+                    .len()
+                    .saturating_mul(size_of::<SymbolLineageCandidateV1>()),
+            )
+            .saturating_add(self.snapshot.files.iter().fold(0, |bytes, file| {
+                bytes
+                    .saturating_add(size_of::<SanitizedCodeFileV1>())
+                    .saturating_add(file.logical_path.len())
+            }))
     }
 
     /// Build the production generation-bound affected-test authority.
@@ -1204,9 +1316,14 @@ impl CodeIndexPublishedGenerationV1 {
         };
         let read = GenerationProviderReadV1::new(provider_state, coverage, Some(join))
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        let retained_bytes = read
+            .evidence
+            .as_ref()
+            .map_or(0, GenerationTestJoinV1::retained_bytes);
         Ok(PublishedGenerationTestAttributionAuthorityV1 {
             generation_id: self.manifest.generation_id.clone(),
             read: Arc::new(read),
+            retained_bytes,
         })
     }
 
@@ -2211,6 +2328,7 @@ where
                 attribution: OnceLock::new(),
                 chunk_policy: OnceLock::new(),
                 graph_manifest: OnceLock::new(),
+                retained_bytes: OnceLock::new(),
             };
             hotpath::measure_block!(
                 "code_index.build.assemble.validate",

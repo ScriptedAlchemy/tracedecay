@@ -2062,6 +2062,33 @@ impl DaemonCodeIndexPublicationStoreV1 {
         }
     }
 
+    fn cache_state(&self) -> MutexGuard<'_, DecodedGenerationStateV1> {
+        self.cache
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The active generation's decode, if one is held.
+    pub(super) fn decoded_active(&self) -> Option<Arc<CodeIndexPublishedGenerationV1>> {
+        self.cache_state().active.clone()
+    }
+
+    /// Drop the active decode. The durable pointer is untouched: the next
+    /// reader or publication re-decodes it, exactly as after a restart.
+    pub(super) fn release_decoded_active(&self) -> Option<Arc<CodeIndexPublishedGenerationV1>> {
+        self.cache_state().active.take()
+    }
+
+    /// Decoded non-active generations held for pinned and branch reads.
+    pub(super) fn superseded_decodes(&self) -> Vec<Arc<CodeIndexPublishedGenerationV1>> {
+        self.cache_state().decoded.iter().cloned().collect()
+    }
+
+    pub(super) fn release_superseded_decodes(&self) -> Vec<Arc<CodeIndexPublishedGenerationV1>> {
+        self.cache_state().decoded.drain(..).collect()
+    }
+
     /// Serve the active generation, decoding it at most once per publication.
     ///
     /// The first caller claims the decode lease and pays the O(store) sweep with

@@ -339,6 +339,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let wake = Arc::clone(&opened.wake);
         let epoch = Arc::clone(&opened.epoch);
         let shutting_down = Arc::clone(&opened.shutting_down);
+        let residency_publication = opened.publication.clone();
         let scheduler = Arc::new(Mutex::new(opened));
         let build_publication_lock = Arc::new(tokio::sync::Mutex::new(()));
         let ignored_dependency_admissions = Arc::new(Mutex::new(BTreeMap::new()));
@@ -2660,7 +2661,26 @@ impl CodeIndexSchedulerRegistryV1 {
             label = "daemon.code_index.scheduler_worker"
         ));
         self.register_worker_shutdown_signal(&shutting_down, &wake, &serving_generation_changed);
+        let residency = Arc::new(super::super::residency::WorktreeResidencyV1::new(
+            super::super::residency::WorktreeResidencyPartsV1 {
+                serving_generation: Arc::clone(&serving_generation),
+                serving_generation_epoch: Arc::clone(&serving_generation_epoch),
+                serving_generation_changed: serving_generation_changed.clone(),
+                complete_generation_requested: Arc::clone(&complete_generation_requested),
+                reconcile_in_progress: Arc::clone(&reconcile_in_progress),
+                publication: residency_publication,
+            },
+        ));
+        let residency_registration = Arc::clone(&residency).register(
+            &self.resident_owners,
+            tracedecay_runtime_core::resident_memory::ResidentOwnerScopeV1 {
+                project_id: project_id.clone(),
+                worktree_id: worktree_id.clone(),
+            },
+        );
         entry.insert(MountedCodeIndexWorktreeV1 {
+            residency,
+            _residency_registration: residency_registration,
             project_id,
             repository_id,
             worktree_id,

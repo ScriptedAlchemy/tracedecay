@@ -553,6 +553,7 @@ impl CodeIndexSchedulerRegistryV1 {
         ) = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&project_root)?;
+            worktree.residency.touch();
             let first_complete_demand = !worktree
                 .complete_generation_requested
                 .swap(true, Ordering::AcqRel);
@@ -705,6 +706,7 @@ impl CodeIndexSchedulerRegistryV1 {
         ) = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&project_root)?;
+            worktree.residency.touch();
             if admission == GenerationDecodeAdmissionV1::AwaitDecode
                 && !worktree
                     .complete_generation_requested
@@ -988,7 +990,11 @@ impl CodeIndexSchedulerRegistryV1 {
             "daemon.code_index.query.latest_ready_decoded.mounted_wait",
             {
                 let mounted = self.mounted.lock().await;
-                Self::serving_parts_for_root_scope(&mounted, &project_root, scope)?
+                let parts = Self::serving_parts_for_root_scope(&mounted, &project_root, scope)?;
+                if let Some(worktree) = mounted.get(&project_root) {
+                    worktree.residency.touch();
+                }
+                parts
             }
         );
         let scope = scope.clone();
@@ -1328,12 +1334,9 @@ impl CodeIndexSchedulerRegistryV1 {
     ) -> Option<LatestCompleteCodeIndexV1> {
         let serving_generation = {
             let mounted = self.mounted.lock().await;
-            Arc::clone(
-                &unique_mounted_for_scope(&mounted, scope)
-                    .unique()?
-                    .1
-                    .serving_generation,
-            )
+            let worktree = unique_mounted_for_scope(&mounted, scope).unique()?.1;
+            worktree.residency.touch();
+            Arc::clone(&worktree.serving_generation)
         };
         let latest = serving_generation
             .read()
@@ -1365,6 +1368,7 @@ impl CodeIndexSchedulerRegistryV1 {
             {
                 return None;
             }
+            worktree.residency.touch();
             Arc::clone(&worktree.serving_generation)
         };
         let latest = serving_generation

@@ -11,6 +11,11 @@ use tracedecay_contracts::code_index_freshness::{
 use tracedecay_contracts::storage::{SchemaConvergenceFindingV1, SchemaConvergenceStateV1};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{RegisteredGlobalDb, SessionIngestHealth};
+use tracedecay_runtime_core::resident_memory::{
+    RESIDENT_OWNER_SHED_ORDER_V1, ResidentMemoryPressureStateV1, ResidentMemoryPressureV1,
+    ResidentOwnerKindV1, ResidentOwnersV1, process_resident_memory_pressure_v1,
+    process_resident_owners_v1, sampled_memory_pressure_some_avg10_v1,
+};
 use tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot;
 use tracedecay_runtime_core::storage::{StorageMode, StoreKind};
 
@@ -250,6 +255,65 @@ fn attach_full_branch_status(
 /// authority for the `graph_statistics` field: this route serializes it and
 /// `tracedecay status` deserializes the same Rust type, so the two sides
 /// cannot drift.
+/// The daemon's resident memory as its one authority reports it: measured
+/// process RSS against the admission ceiling and pressure line, and every
+/// retained owner with its bytes, idle time, and whether pressure may shed it.
+pub fn daemon_memory_value() -> Value {
+    memory_value(
+        process_resident_memory_pressure_v1(),
+        process_resident_owners_v1(),
+        sampled_memory_pressure_some_avg10_v1(),
+        std::time::Instant::now(),
+    )
+}
+
+fn memory_value(
+    pressure: &ResidentMemoryPressureV1,
+    owners: &ResidentOwnersV1,
+    psi_some_avg10: Option<f64>,
+    now: std::time::Instant,
+) -> Value {
+    let (state, resident_bytes) = match pressure.state() {
+        ResidentMemoryPressureStateV1::Unobserved => ("unobserved", None),
+        ResidentMemoryPressureStateV1::Nominal { observed_bytes, .. } => {
+            ("nominal", Some(observed_bytes))
+        }
+        ResidentMemoryPressureStateV1::OverBudget { observed_bytes, .. } => {
+            ("over_budget", Some(observed_bytes))
+        }
+    };
+    let report = owners.report(now);
+    let rows = report
+        .owners
+        .iter()
+        .map(|row| {
+            json!({
+                "project_id": row.scope.project_id.as_str(),
+                "worktree_id": row.scope.worktree_id.as_str(),
+                "kind": row.kind.as_str(),
+                "generation_id": row.generation_id.as_str(),
+                "bytes": row.bytes.measured(),
+                "measured": row.bytes.measured().is_some(),
+                "idle_seconds": row.idle_for.as_secs(),
+                "protected": row.protected,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "status": state,
+        "resident_bytes": resident_bytes,
+        "limit_bytes": pressure.limit_bytes(),
+        "high_watermark_bytes": pressure.high_watermark_bytes(),
+        "low_watermark_bytes": pressure.low_watermark_bytes(),
+        "psi_some_avg10": psi_some_avg10,
+        "idle_window_seconds": report.idle_window.as_secs(),
+        "shed_order": RESIDENT_OWNER_SHED_ORDER_V1.map(ResidentOwnerKindV1::as_str),
+        "retained_bytes": report.measured_bytes,
+        "unmeasured_owners": report.unmeasured_owners,
+        "owners": rows,
+    })
+}
+
 pub fn graph_statistics_value(census: Option<&GenerationCensusSnapshot>) -> Result<Value> {
     let census = census.cloned().unwrap_or(
         GenerationCensusSnapshot::Unavailable {
@@ -300,6 +364,7 @@ pub async fn handle_status(
     let mut output = json!({
         "project_root": ctx.project_root(),
         "graph_statistics": graph_statistics,
+        "memory": daemon_memory_value(),
     });
     output["schema_convergence"] = schema_convergence_status(
         &ctx.store_runtime()
@@ -673,6 +738,13 @@ fn render_status_md(value: &Value) -> String {
                     } else {
                         md.field(k, &format!("{{{} field(s)}}", o.len()));
                     }
+                    if k == "memory"
+                        && let Some(owners) = o.get("owners").and_then(Value::as_array)
+                    {
+                        for owner in owners {
+                            md.bullet(&owner.to_string());
+                        }
+                    }
                     if k == "schema_convergence"
                         && let Some(findings) = o.get("findings").and_then(Value::as_array)
                     {
@@ -796,6 +868,84 @@ mod tests {
         SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStageV1,
         SchemaConvergenceStateV1,
     };
+
+    struct HeldDecode;
+
+    impl tracedecay_runtime_core::resident_memory::ResidentOwnerV1 for HeldDecode {
+        fn sample(
+            &self,
+        ) -> Option<tracedecay_runtime_core::resident_memory::ResidentOwnerSampleV1> {
+            Some(
+                tracedecay_runtime_core::resident_memory::ResidentOwnerSampleV1 {
+                    generation_id: tracedecay_domain::CodeGenerationId::new("generation.fixture")
+                        .expect("generation id"),
+                    bytes: tracedecay_runtime_core::resident_memory::ResidentOwnerBytesV1::Measured(
+                        4_096,
+                    ),
+                    last_used: std::time::Instant::now(),
+                    serving: true,
+                },
+            )
+        }
+
+        fn release(&self) -> tracedecay_runtime_core::resident_memory::ResidentOwnerReleaseV1 {
+            tracedecay_runtime_core::resident_memory::ResidentOwnerReleaseV1::Busy
+        }
+    }
+
+    #[test]
+    fn status_memory_reports_each_retained_owner_through_the_one_authority() {
+        use std::sync::Arc;
+        use tracedecay_runtime_core::resident_memory::{
+            ResidentMemoryPressureV1, ResidentOwnerKindV1, ResidentOwnerScopeV1, ResidentOwnerV1,
+            ResidentOwnersV1,
+        };
+        let pressure =
+            ResidentMemoryPressureV1::new(std::num::NonZeroU64::new(10_000).expect("limit"));
+        pressure.publish_observed_resident_bytes(6_000);
+        let owners = Arc::new(ResidentOwnersV1::new(std::time::Duration::from_mins(10)));
+        let owner: Arc<dyn ResidentOwnerV1> = Arc::new(HeldDecode);
+        let _registration = owners
+            .register(
+                ResidentOwnerScopeV1 {
+                    project_id: tracedecay_domain::ProjectId::new("project.fixture")
+                        .expect("project id"),
+                    worktree_id: tracedecay_domain::WorktreeId::new("worktree.fixture")
+                        .expect("worktree id"),
+                },
+                ResidentOwnerKindV1::DecodedGeneration,
+                Arc::downgrade(&owner),
+            )
+            .expect("register");
+
+        let memory = super::memory_value(&pressure, &owners, Some(1.5), std::time::Instant::now());
+
+        assert_eq!(
+            memory,
+            serde_json::json!({
+                "status": "nominal",
+                "resident_bytes": 6_000,
+                "limit_bytes": 10_000,
+                "high_watermark_bytes": 9_000,
+                "low_watermark_bytes": 7_500,
+                "psi_some_avg10": 1.5,
+                "idle_window_seconds": 600,
+                "shed_order": ["superseded_generation", "decoded_generation"],
+                "retained_bytes": 4_096,
+                "unmeasured_owners": 0,
+                "owners": [{
+                    "project_id": "project.fixture",
+                    "worktree_id": "worktree.fixture",
+                    "kind": "decoded_generation",
+                    "generation_id": "generation.fixture",
+                    "bytes": 4_096,
+                    "measured": true,
+                    "idle_seconds": 0,
+                    "protected": true,
+                }],
+            })
+        );
+    }
 
     #[test]
     fn status_markdown_exposes_nested_status_without_expanding_other_objects() {

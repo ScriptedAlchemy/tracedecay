@@ -1198,6 +1198,7 @@ pub(super) fn assemble_published_generation(
         attribution: OnceLock::new(),
         chunk_policy: OnceLock::new(),
         graph_manifest: OnceLock::new(),
+        retained_bytes: OnceLock::new(),
     };
     hotpath::measure_block!(
         "code_index.sealed_decode.corpus_validation",

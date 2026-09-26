@@ -355,6 +355,15 @@ impl MaintenanceCoordinator {
         // maintenance runs: the retention tick is hours apart, and a cold
         // index climbs from nothing to the admission watermark in minutes.
         if let Err(error) =
+            tracedecay_runtime_core::resident_memory::install_process_resident_owners_pressure_reclaimer_v1()
+        {
+            tracing::error!(
+                event = "resident_owners_pressure_reclaimer_unavailable",
+                error = %error,
+                "could not bind retained owners to the resident-memory pressure cell"
+            );
+        }
+        if let Err(error) =
             tracedecay_runtime_core::resident_memory::install_process_allocator_pressure_reclaimer_v1()
         {
             tracing::error!(
@@ -470,7 +479,10 @@ impl MaintenanceCoordinator {
         run_resident_memory_sampler_loop(
             &self.cancellation,
             RESIDENT_MEMORY_SAMPLE_INTERVAL_V1,
-            Arc::new(move || record_process_resident_memory_gauge(&log)),
+            Arc::new(move || {
+                record_process_resident_memory_gauge(&log);
+                sweep_resident_owners();
+            }),
         )
         .await;
     }
@@ -866,6 +878,30 @@ fn record_process_resident_memory_gauge(log: &std::sync::Mutex<ResidentMemoryLog
             );
         }
         _ => {}
+    }
+}
+
+/// Scope end and memory stalls both free retained owners: a worktree idle
+/// past its window gives its state back, and kernel-reported stalls above
+/// [`RESIDENT_MEMORY_PSI_SOME_AVG10_SHED_PERCENT_V1`] shed one tier even
+/// while RSS sits under the watermark.
+///
+/// [`RESIDENT_MEMORY_PSI_SOME_AVG10_SHED_PERCENT_V1`]: tracedecay_runtime_core::resident_memory::RESIDENT_MEMORY_PSI_SOME_AVG10_SHED_PERCENT_V1
+fn sweep_resident_owners() {
+    use tracedecay_runtime_core::resident_memory::{
+        RESIDENT_MEMORY_PSI_SOME_AVG10_SHED_PERCENT_V1, log_resident_owner_release_v1,
+        process_resident_owners_v1, sampled_memory_pressure_some_avg10_v1,
+    };
+    let owners = process_resident_owners_v1();
+    let now = std::time::Instant::now();
+    let mut released = owners.release_idle(now);
+    if sampled_memory_pressure_some_avg10_v1()
+        .is_some_and(|stalled| stalled >= RESIDENT_MEMORY_PSI_SOME_AVG10_SHED_PERCENT_V1)
+    {
+        released.extend(owners.shed_one_tier(now));
+    }
+    for release in &released {
+        log_resident_owner_release_v1(release);
     }
 }
 
