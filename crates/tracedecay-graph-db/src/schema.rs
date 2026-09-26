@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use grafeo_common::types::{EdgeId, NodeId, Value};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use grafeo_common::types::{EdgeId, NodeId, PropertyKey, Value};
 use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::lpg::{Edge, Node};
 use sha2::{Digest, Sha256};
@@ -94,6 +96,9 @@ const NAMESPACE_KEY_ID_BYTES: usize = 8;
 const DIGEST_BYTES: usize = 32;
 const RAW_IDENTITY_TAG: u8 = 0;
 const DIGEST_IDENTITY_TAG: u8 = 1;
+/// Leads a compact identity scalar; `validate_opaque` rejects graph
+/// identifiers that start with it.
+pub(crate) const COMPACT_IDENTITY_MARKER: char = '\u{1}';
 
 /// The short id a namespace contributes to every unique key it owns: the
 /// leading bytes of the namespace's SHA-256.
@@ -121,10 +126,7 @@ pub(crate) fn namespace_key_id(namespace: &GraphNamespace) -> NamespaceKeyId {
 pub(crate) fn stable_key(namespace_id: &NamespaceKeyId, identity: &str) -> Vec<u8> {
     let mut key = Vec::with_capacity(NAMESPACE_KEY_ID_BYTES + 1 + identity.len());
     key.extend_from_slice(namespace_id);
-    match identity
-        .rsplit_once(':')
-        .and_then(|(kind, digest)| Some((kind, decode_lower_hex_digest(digest)?)))
-    {
+    match digest_identity(identity) {
         Some((kind, digest)) => {
             key.push(DIGEST_IDENTITY_TAG);
             key.extend_from_slice(kind.as_bytes());
@@ -136,6 +138,71 @@ pub(crate) fn stable_key(namespace_id: &NamespaceKeyId, identity: &str) -> Vec<u
         }
     }
     key
+}
+
+/// The kind and digest of a `<kind>:<64 lowercase hex>` identity.
+fn digest_identity(identity: &str) -> Option<(&str, [u8; DIGEST_BYTES])> {
+    identity
+        .rsplit_once(':')
+        .and_then(|(kind, digest)| Some((kind, decode_lower_hex_digest(digest)?)))
+}
+
+/// Unpadded base64url width of a 32-byte digest.
+const DIGEST_TEXT_BYTES: usize = 43;
+
+/// The stored scalar for a relation identity, source, or target.
+///
+/// A `<kind>:<64 lowercase hex>` identity is stored as
+/// [`COMPACT_IDENTITY_MARKER`], its kind, and its digest in unpadded
+/// base64url; any other identity is stored verbatim. The value stays a
+/// string because the sealed compact store keeps `Bytes` in its string
+/// dictionary as marked hex, which would double the digest again. Only the
+/// canonical spelling compacts and no graph identifier may start with the
+/// marker, so [`decode_identity`] restores exactly the identity written.
+pub(crate) fn encode_identity(identity: &str) -> Value {
+    match digest_identity(identity) {
+        Some((kind, digest)) => Value::from(format!(
+            "{COMPACT_IDENTITY_MARKER}{kind}{}",
+            URL_SAFE_NO_PAD.encode(digest)
+        )),
+        None => Value::from(identity),
+    }
+}
+
+/// Reads back an identity written by [`encode_identity`].
+pub(crate) fn decode_identity(
+    value: Option<&Value>,
+    description: &str,
+) -> Result<String, GraphDbError> {
+    let Some(Value::String(stored)) = value else {
+        return Err(GraphDbError::Corrupt {
+            message: format!("native {description} is missing or not a string"),
+        });
+    };
+    let identity = match stored.strip_prefix(COMPACT_IDENTITY_MARKER) {
+        None => stored.to_string(),
+        Some(compact) => {
+            let digest = compact
+                .len()
+                .checked_sub(DIGEST_TEXT_BYTES)
+                .filter(|split| compact.is_char_boundary(*split))
+                .and_then(|split| {
+                    let (kind, digest) = compact.split_at(split);
+                    let mut bytes = [0; DIGEST_BYTES];
+                    let written = URL_SAFE_NO_PAD.decode_slice(digest, &mut bytes).ok()?;
+                    (written == DIGEST_BYTES).then(|| format!("{kind}:{}", hex::encode(bytes)))
+                });
+            digest.ok_or_else(|| GraphDbError::Corrupt {
+                message: format!("native {description} has a malformed compact digest"),
+            })?
+        }
+    };
+    if identity.len() > MAX_GRAPH_IDENTIFIER_BYTES {
+        return Err(GraphDbError::Corrupt {
+            message: format!("native {description} exceeds its product bound"),
+        });
+    }
+    Ok(identity)
 }
 
 /// Only the canonical lowercase spelling compacts, so every identity has
@@ -153,8 +220,11 @@ fn decode_lower_hex_digest(digest: &str) -> Option<[u8; DIGEST_BYTES]> {
     Some(bytes)
 }
 
+/// A unique key as the indexed scalar: unpadded base64url of
+/// [`stable_key`]'s bytes, a string for the same reason as
+/// [`encode_identity`].
 pub(crate) fn key_value(namespace: &GraphNamespace, identity: &str) -> Value {
-    Value::Bytes(stable_key(&namespace_key_id(namespace), identity).into())
+    Value::from(URL_SAFE_NO_PAD.encode(stable_key(&namespace_key_id(namespace), identity)))
 }
 
 /// The indexed unique-key value for one entity.
@@ -368,15 +438,15 @@ pub(crate) fn relation_properties(
         ),
         (
             RELATION_ID_PROPERTY.to_owned(),
-            Value::from(relation.identity.as_str()),
+            encode_identity(relation.identity.as_str()),
         ),
         (
             RELATION_FROM_PROPERTY.to_owned(),
-            Value::from(relation.from.as_str()),
+            encode_identity(relation.from.as_str()),
         ),
         (
             RELATION_TO_PROPERTY.to_owned(),
-            Value::from(relation.to.as_str()),
+            encode_identity(relation.to.as_str()),
         ),
         (
             RELATION_KIND_PROPERTY.to_owned(),
@@ -393,6 +463,9 @@ pub(crate) fn relation_properties(
     Ok(properties)
 }
 
+/// A native edge carries its owner scalars and payload, never the relation's
+/// identity or endpoints: those are owned by its locator node, which
+/// [`edge_locator`] resolves through the `RELATION_EDGE` index.
 pub(crate) fn edge_properties(
     namespace: &GraphNamespace,
     projection: &GraphProjectionId,
@@ -406,18 +479,6 @@ pub(crate) fn edge_properties(
         (
             PROJECTION_PROPERTY.to_owned(),
             Value::from(projection.as_str()),
-        ),
-        (
-            RELATION_ID_PROPERTY.to_owned(),
-            Value::from(relation.identity.as_str()),
-        ),
-        (
-            RELATION_FROM_PROPERTY.to_owned(),
-            Value::from(relation.from.as_str()),
-        ),
-        (
-            RELATION_TO_PROPERTY.to_owned(),
-            Value::from(relation.to.as_str()),
         ),
         (
             RELATION_KIND_PROPERTY.to_owned(),
@@ -547,17 +608,17 @@ pub(crate) fn decode_relation(locator: &Node, edge: &Edge) -> Result<GraphRelati
             message: "relation locator does not match its Grafeo edge".to_owned(),
         });
     }
-    let identity = GraphRelationId::new(required_string(
+    let identity = GraphRelationId::new(decode_identity(
         locator.get_property(RELATION_ID_PROPERTY),
         "relation identity",
     )?)
     .map_err(|error| persisted_validation_error("relation identity", error))?;
-    let from = GraphEntityId::new(required_string(
+    let from = GraphEntityId::new(decode_identity(
         locator.get_property(RELATION_FROM_PROPERTY),
         "relation source",
     )?)
     .map_err(|error| persisted_validation_error("relation source", error))?;
-    let to = GraphEntityId::new(required_string(
+    let to = GraphEntityId::new(decode_identity(
         locator.get_property(RELATION_TO_PROPERTY),
         "relation target",
     )?)
@@ -597,6 +658,7 @@ pub(crate) struct DecodedRelationIdentity {
 }
 
 pub(crate) fn decode_relation_identity(
+    store: &dyn GraphStore,
     edge: &Edge,
     namespace: &GraphNamespace,
 ) -> Result<DecodedRelationIdentity, GraphDbError> {
@@ -620,16 +682,65 @@ pub(crate) fn decode_relation_identity(
             message: "traversal relation native type and kind disagree".to_owned(),
         });
     }
-    let identity = GraphRelationId::new(required_string(
-        edge.get_property(RELATION_ID_PROPERTY),
-        "relation identity",
-    )?)
-    .map_err(|error| persisted_validation_error("relation identity", error))?;
+    let identity = edge_relation_identity(store, edge_locator(store, edge.id)?)?;
     Ok(DecodedRelationIdentity {
         identity,
         projection,
         kind,
     })
+}
+
+/// The locator node that owns `edge`'s identity and endpoints.
+///
+/// Resolved through the `RELATION_EDGE` unique index. A locator deleted in
+/// the live store keeps its index entry but loses its properties, so the
+/// re-read of the indexed scalar discards such tombstones without
+/// materializing the node.
+pub(crate) fn edge_locator(store: &dyn GraphStore, edge: EdgeId) -> Result<NodeId, GraphDbError> {
+    let value = relation_edge_value(edge)?;
+    let key = PropertyKey::new(RELATION_EDGE_PROPERTY);
+    let mut locators = store
+        .find_nodes_by_property(RELATION_EDGE_PROPERTY, &value)
+        .into_iter()
+        .filter(|node| store.get_node_property(*node, &key).as_ref() == Some(&value));
+    match (locators.next(), locators.next()) {
+        (Some(locator), None) => Ok(locator),
+        (None, _) => Err(GraphDbError::Corrupt {
+            message: "native relation edge has no locator".to_owned(),
+        }),
+        (Some(_), Some(_)) => Err(GraphDbError::Corrupt {
+            message: "native relation edge has duplicate locators".to_owned(),
+        }),
+    }
+}
+
+/// One identity scalar of a relation locator, read without materializing
+/// the node.
+pub(crate) fn locator_identity(
+    store: &dyn GraphStore,
+    locator: NodeId,
+    property: &str,
+    description: &str,
+) -> Result<String, GraphDbError> {
+    decode_identity(
+        store
+            .get_node_property(locator, &PropertyKey::new(property))
+            .as_ref(),
+        description,
+    )
+}
+
+pub(crate) fn edge_relation_identity(
+    store: &dyn GraphStore,
+    locator: NodeId,
+) -> Result<GraphRelationId, GraphDbError> {
+    GraphRelationId::new(locator_identity(
+        store,
+        locator,
+        RELATION_ID_PROPERTY,
+        "relation identity",
+    )?)
+    .map_err(|error| persisted_validation_error("relation identity", error))
 }
 
 pub(crate) fn decode_graph_properties(
@@ -885,7 +996,11 @@ mod graph_stable_identity_tests {
 mod stable_key_tests {
     use std::collections::BTreeSet;
 
-    use super::{graph_stable_identity, namespace_key_id, stable_key};
+    use grafeo_common::types::Value;
+
+    use super::{
+        decode_identity, encode_identity, graph_stable_identity, namespace_key_id, stable_key,
+    };
     use crate::GraphNamespace;
 
     #[test]
@@ -934,5 +1049,38 @@ mod stable_key_tests {
             })
             .collect();
         assert_eq!(keys.len(), 14);
+    }
+
+    #[test]
+    fn relation_identities_store_their_digest_compactly_and_read_back_exactly() {
+        let identity = graph_stable_identity("edge", "occ");
+        assert_eq!(
+            identity,
+            "edge:a92cf2a4297d812859e387e8efac97838fc420befe35fa0f8b7e94ad9a139ff5"
+        );
+        let digest = identity.strip_prefix("edge:").unwrap();
+        let stored = encode_identity(&identity);
+
+        assert_eq!(
+            stored,
+            Value::from("\u{1}edgeqSzypCl9gShZ44fo76yXg4_EIL7-NfoPi36UrZoTn_U")
+        );
+        assert_eq!(stored.as_str().unwrap().len(), 48);
+        assert_eq!(
+            decode_identity(Some(&stored), "relation").unwrap(),
+            identity
+        );
+        for verbatim in [
+            format!("edge:{}", digest.to_uppercase()),
+            "relation:a-b".to_owned(),
+            format!("edge:{digest}0"),
+        ] {
+            let stored = encode_identity(&verbatim);
+            assert_eq!(stored, Value::from(verbatim.as_str()));
+            assert_eq!(
+                decode_identity(Some(&stored), "relation").unwrap(),
+                verbatim
+            );
+        }
     }
 }

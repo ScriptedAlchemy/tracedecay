@@ -66,6 +66,7 @@ grafeo-common.workspace = true
 grafeo-core = { workspace = true, features = ["compact-store"] }
 grafeo-engine = { workspace = true, features = ["mmap", "compact-store"] }
 grafeo-storage.workspace = true
+base64 = "0.22"
 hex = "0.4"
 hotpath.workspace = true
 parking_lot = { version = "0.12", features = ["arc_lock", "send_guard"] }

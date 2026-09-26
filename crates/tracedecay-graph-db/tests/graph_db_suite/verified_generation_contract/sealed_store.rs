@@ -1483,13 +1483,14 @@ fn stable_identity_manifest(
     .unwrap()
 }
 
-/// Unique keys are written once per entity and relation locator, so their
-/// encoding sets a sealed generation's size. Hex keys that repeat the
-/// namespace sealed this 2,000-symbol generation to 3,150,837 bytes; binary
-/// namespace-id keys seal it to 1,786,870, and the rows still resolve
-/// through them.
+/// Keys and relation identities are the bulk of a sealed generation's
+/// bytes. Hex keys sealed this 2,000-symbol generation to 3,150,837 bytes,
+/// and binary keys, which the compact dictionary stores as marked hex, to
+/// 1,786,870. Base64url keys plus each relation identity, source, and target
+/// stored once, on its locator, in compact form seal it to 1,037,302, and
+/// the rows still resolve through keys and edges.
 #[test]
-fn sealed_generation_bytes_stay_within_the_binary_key_budget() {
+fn sealed_generation_bytes_stay_within_the_compact_identity_budget() {
     let temp = TempDir::new().unwrap();
     let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let mut authority = RelationalAuthority::default();
@@ -1508,7 +1509,7 @@ fn sealed_generation_bytes_stay_within_the_binary_key_budget() {
 
     let sealed_bytes = directory_bytes(&sealed_store_root(temp.path()));
     assert!(
-        sealed_bytes <= 1_900_000,
+        sealed_bytes <= 1_150_000,
         "sealed generation took {sealed_bytes} bytes"
     );
     let last = GraphEntityId::new(graph_stable_identity("symbol", "1999")).unwrap();

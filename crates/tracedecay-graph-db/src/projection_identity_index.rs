@@ -24,12 +24,11 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
-use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
 use crate::projection::check_cancelled;
 use crate::projection_read::IdentityScope;
-use crate::schema::{has_native_label, nodes_with_label};
+use crate::schema::{decode_identity, has_native_label, nodes_with_label};
 use crate::{GraphCancellation, GraphDbError};
 
 /// Identity bytes one cached index may retain. A projection whose identities
@@ -200,12 +199,7 @@ fn build_identity_index(
         if !has_native_label(&record, record_label) {
             continue;
         }
-        let identity = record
-            .get_property(identity_property)
-            .and_then(Value::as_str)
-            .ok_or_else(|| GraphDbError::Corrupt {
-                message: format!("projection query returned a non-string `{identity_property}`"),
-            })?;
+        let identity = decode_identity(record.get_property(identity_property), identity_property)?;
         identity_bytes = identity_bytes.saturating_add(identity.len());
         if identity_bytes > MAX_IDENTITY_INDEX_BYTES {
             return Ok(None);
