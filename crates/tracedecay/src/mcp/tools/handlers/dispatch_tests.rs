@@ -182,7 +182,7 @@ async fn multi_root_tools_invoke_the_closed_daemon_routes() {
 }
 
 #[tokio::test]
-async fn unmounted_files_root_dispatch_reports_a_real_orphaned_rust_source() {
+async fn unmounted_files_graph_tool_owner_reports_a_real_orphaned_rust_source() {
     let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
     let _env = SelectorEnv::new(dir.path());
@@ -206,15 +206,14 @@ async fn unmounted_files_root_dispatch_reports_a_real_orphaned_rust_source() {
     .await
     .unwrap();
 
-    let result = handle_tool_call(
+    let result = dispatch_on_graph_authority(
         &cg,
         "tracedecay_unmounted_files",
         json!({"ecosystem": "rust", "format": "json"}),
-        None,
-        None,
+        verified_graph_options(&cg, ToolCallRegistryOptions::default()),
     )
     .await
-    .expect("the production root dispatch reaches the portable unmounted-files handler");
+    .expect("the graph-tool owner computes the unmounted-files report");
     let payload: Value = serde_json::from_str(
         result.value["content"][0]["text"]
             .as_str()

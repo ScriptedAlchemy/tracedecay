@@ -6,10 +6,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::InvocationAnalyticsV1;
 use crate::retrieval::{
-    ContextResultV1, DependencyDepthResultV1, DiagnoseResultV1, DsmResultV1, GiniResultV1,
-    HealthResultV1, ImpactResultV1, NodeResultV1, PortOrderResultV1, PortStatusResultV1,
+    CircularResultV1, ComplexityReportV1, ConstructorsResultV1, ContextResultV1, CouplingResultV1,
+    DeadCodeResultV1, DependencyDepthResultV1, DiagnoseResultV1, DistributionResultV1,
+    DocCoverageResultV1, DsmResultV1, FieldSitesResultV1, GiniResultV1, GodClassResultV1,
+    HealthResultV1, HotspotsResultV1, ImpactResultV1, InheritanceDepthResultV1, LargestResultV1,
+    NodeResultV1, PortOrderResultV1, PortStatusResultV1, RankResultV1, RecursionResultV1,
     RedundancyResultV1, RenamePreviewPrimitiveOutcomeV1, SimilarResultV1, TestMapResultV1,
-    TestRiskResultV1, TodosResultV1,
+    TestRiskResultV1, TodosResultV1, UnmountedFilesResultV1, UnsafePatternsResultV1,
 };
 
 /// One graph read's typed result, tagged by its operation.
@@ -32,6 +35,22 @@ pub enum GraphToolResultV1 {
     Health(HealthResultV1),
     Dsm(DsmResultV1),
     Diagnose(DiagnoseResultV1),
+    DeadCode(DeadCodeResultV1),
+    Circular(CircularResultV1),
+    Hotspots(HotspotsResultV1),
+    UnmountedFiles(UnmountedFilesResultV1),
+    Rank(RankResultV1),
+    Largest(LargestResultV1),
+    Coupling(CouplingResultV1),
+    InheritanceDepth(InheritanceDepthResultV1),
+    Distribution(DistributionResultV1),
+    Recursion(RecursionResultV1),
+    Complexity(ComplexityReportV1),
+    DocCoverage(DocCoverageResultV1),
+    GodClass(GodClassResultV1),
+    UnsafePatterns(UnsafePatternsResultV1),
+    Constructors(ConstructorsResultV1),
+    FieldSites(FieldSitesResultV1),
 }
 
 impl GraphToolResultV1 {
@@ -58,6 +77,22 @@ impl GraphToolResultV1 {
             Operation::Health => Self::Health(serde_json::from_value(value)?),
             Operation::Dsm => Self::Dsm(serde_json::from_value(value)?),
             Operation::Diagnose => Self::Diagnose(serde_json::from_value(value)?),
+            Operation::DeadCode => Self::DeadCode(serde_json::from_value(value)?),
+            Operation::Circular => Self::Circular(serde_json::from_value(value)?),
+            Operation::Hotspots => Self::Hotspots(serde_json::from_value(value)?),
+            Operation::UnmountedFiles => Self::UnmountedFiles(serde_json::from_value(value)?),
+            Operation::Rank => Self::Rank(serde_json::from_value(value)?),
+            Operation::Largest => Self::Largest(serde_json::from_value(value)?),
+            Operation::Coupling => Self::Coupling(serde_json::from_value(value)?),
+            Operation::InheritanceDepth => Self::InheritanceDepth(serde_json::from_value(value)?),
+            Operation::Distribution => Self::Distribution(serde_json::from_value(value)?),
+            Operation::Recursion => Self::Recursion(serde_json::from_value(value)?),
+            Operation::Complexity => Self::Complexity(serde_json::from_value(value)?),
+            Operation::DocCoverage => Self::DocCoverage(serde_json::from_value(value)?),
+            Operation::GodClass => Self::GodClass(serde_json::from_value(value)?),
+            Operation::UnsafePatterns => Self::UnsafePatterns(serde_json::from_value(value)?),
+            Operation::Constructors => Self::Constructors(serde_json::from_value(value)?),
+            Operation::FieldSites => Self::FieldSites(serde_json::from_value(value)?),
             operation => {
                 return Err(serde::de::Error::custom(format!(
                     "{} is not a graph-tool operation",
@@ -86,6 +121,22 @@ impl GraphToolResultV1 {
             Self::Health(result) => serde_json::to_value(result),
             Self::Dsm(result) => serde_json::to_value(result),
             Self::Diagnose(result) => serde_json::to_value(result),
+            Self::DeadCode(result) => serde_json::to_value(result),
+            Self::Circular(result) => serde_json::to_value(result),
+            Self::Hotspots(result) => serde_json::to_value(result),
+            Self::UnmountedFiles(result) => serde_json::to_value(result),
+            Self::Rank(result) => serde_json::to_value(result),
+            Self::Largest(result) => serde_json::to_value(result),
+            Self::Coupling(result) => serde_json::to_value(result),
+            Self::InheritanceDepth(result) => serde_json::to_value(result),
+            Self::Distribution(result) => serde_json::to_value(result),
+            Self::Recursion(result) => serde_json::to_value(result),
+            Self::Complexity(result) => serde_json::to_value(result),
+            Self::DocCoverage(result) => serde_json::to_value(result),
+            Self::GodClass(result) => serde_json::to_value(result),
+            Self::UnsafePatterns(result) => serde_json::to_value(result),
+            Self::Constructors(result) => serde_json::to_value(result),
+            Self::FieldSites(result) => serde_json::to_value(result),
         }
     }
 }

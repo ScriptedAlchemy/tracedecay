@@ -865,6 +865,22 @@ pub fn application_surface_feedback_operation(
         | ApplicationSurfaceOperation::Health
         | ApplicationSurfaceOperation::Dsm
         | ApplicationSurfaceOperation::Diagnose
+        | ApplicationSurfaceOperation::DeadCode
+        | ApplicationSurfaceOperation::Circular
+        | ApplicationSurfaceOperation::Hotspots
+        | ApplicationSurfaceOperation::UnmountedFiles
+        | ApplicationSurfaceOperation::Rank
+        | ApplicationSurfaceOperation::Largest
+        | ApplicationSurfaceOperation::Coupling
+        | ApplicationSurfaceOperation::InheritanceDepth
+        | ApplicationSurfaceOperation::Distribution
+        | ApplicationSurfaceOperation::Recursion
+        | ApplicationSurfaceOperation::Complexity
+        | ApplicationSurfaceOperation::DocCoverage
+        | ApplicationSurfaceOperation::GodClass
+        | ApplicationSurfaceOperation::UnsafePatterns
+        | ApplicationSurfaceOperation::Constructors
+        | ApplicationSurfaceOperation::FieldSites
         | ApplicationSurfaceOperation::HealthRead
         | ApplicationSurfaceOperation::HealthDelta
         | ApplicationSurfaceOperation::StorageStatus

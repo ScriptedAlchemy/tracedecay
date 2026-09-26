@@ -1,9 +1,14 @@
 //! `tracedecay_unsafe_patterns`, risky-construct scan over indexed source.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
-use serde_json::{Value, json};
+use serde_json::Value;
+use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
+use tracedecay_contracts::retrieval::{
+    UnsafePatternKindV1, UnsafePatternMatchV1, UnsafePatternsResultV1,
+    UnsafePatternsSurfaceRequestV1,
+};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::VerifiedGraphQuery;
 
@@ -11,34 +16,22 @@ use super::{
     VerifiedAnalysisSymbol, enclosing_declaration, path_is_rust, verified_analysis_symbols,
     verified_analysis_unavailable,
 };
-use crate::ToolResult;
-use crate::handlers::support::{effective_path, rendered_tool_result};
-use crate::tools::render;
-
-const UNSAFE_KINDS: &[&str] = &[
-    "unwrap",
-    "expect",
-    "panic",
-    "todo",
-    "unimplemented",
-    "unsafe_block",
-];
+use crate::handlers::graph::graph_tool_completion;
+use crate::handlers::support::decode_primitive_request;
 
 /// Whether `source` could possibly contain a site of `kind`.
 ///
 /// Deliberately over-approximates: it only has to be true whenever
 /// [`line_matches_unsafe_kind`] could be true for some line, so the real
 /// per-line matcher stays the single source of truth for what counts.
-fn source_may_contain_unsafe_kind(source: &str, kind: &str) -> bool {
+fn source_may_contain_unsafe_kind(source: &str, kind: UnsafePatternKindV1) -> bool {
     match kind {
-        "unwrap" => source.contains(".unwrap"),
-        "expect" => source.contains(".expect"),
-        "panic" => source.contains("panic!("),
-        "todo" => source.contains("todo!("),
-        "unimplemented" => source.contains("unimplemented!("),
-        "unsafe_block" => source.contains("unsafe"),
-        // An unrecognised kind never matches a line either.
-        _ => false,
+        UnsafePatternKindV1::Unwrap => source.contains(".unwrap"),
+        UnsafePatternKindV1::Expect => source.contains(".expect"),
+        UnsafePatternKindV1::Panic => source.contains("panic!("),
+        UnsafePatternKindV1::Todo => source.contains("todo!("),
+        UnsafePatternKindV1::Unimplemented => source.contains("unimplemented!("),
+        UnsafePatternKindV1::UnsafeBlock => source.contains("unsafe"),
     }
 }
 
@@ -47,19 +40,18 @@ fn source_may_contain_unsafe_kind(source: &str, kind: &str) -> bool {
 /// The offset is what lets a match be attributed to the declaration that
 /// actually contains it: two declarations can share a line, so a line number
 /// alone cannot say which one a site belongs to.
-fn line_matches_unsafe_kind(line: &str, kind: &str) -> Option<usize> {
+fn line_matches_unsafe_kind(line: &str, kind: UnsafePatternKindV1) -> Option<usize> {
     let trimmed = line.trim_start();
     if trimmed.starts_with("//") || trimmed.starts_with("///") {
         return None;
     }
     match kind {
-        "unwrap" => contains_method_call(line, "unwrap", true),
-        "expect" => contains_method_call(line, "expect", false),
-        "panic" => line.find("panic!("),
-        "todo" => line.find("todo!("),
-        "unimplemented" => line.find("unimplemented!("),
-        "unsafe_block" => contains_unsafe_block_start(line),
-        _ => None,
+        UnsafePatternKindV1::Unwrap => contains_method_call(line, "unwrap", true),
+        UnsafePatternKindV1::Expect => contains_method_call(line, "expect", false),
+        UnsafePatternKindV1::Panic => line.find("panic!("),
+        UnsafePatternKindV1::Todo => line.find("todo!("),
+        UnsafePatternKindV1::Unimplemented => line.find("unimplemented!("),
+        UnsafePatternKindV1::UnsafeBlock => contains_unsafe_block_start(line),
     }
 }
 
@@ -126,33 +118,21 @@ fn path_looks_like_test(path: &str) -> bool {
 }
 
 #[hotpath::measure(future = true, label = "mcp.analysis.unsafe_patterns.total")]
-pub async fn handle_unsafe_patterns(
+pub(super) async fn compute_unsafe_patterns(
     project_root: &Path,
-    response_handle_root: &Path,
     graph: &VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
-) -> Result<ToolResult> {
-    let kinds: Vec<String> = args
-        .get("kinds")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect::<Vec<_>>()
-        })
-        .filter(|v: &Vec<String>| !v.is_empty())
-        .unwrap_or_else(|| UNSAFE_KINDS.iter().map(|s| (*s).to_string()).collect());
-
-    let path = effective_path(&args, scope_prefix);
-    let exclude_tests = args
-        .get("exclude_tests")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    let limit = args
-        .get("limit")
-        .and_then(serde_json::Value::as_u64)
-        .map_or(200, |v| v.min(2000) as usize);
+) -> Result<GraphToolCompletionV1> {
+    let request: UnsafePatternsSurfaceRequestV1 =
+        decode_primitive_request(&args, "tracedecay_unsafe_patterns")?;
+    let kinds: Vec<UnsafePatternKindV1> = request
+        .kinds
+        .filter(|kinds| !kinds.is_empty())
+        .unwrap_or_else(|| UnsafePatternKindV1::ALL.to_vec());
+    let path = request.path.as_deref().or(scope_prefix);
+    let exclude_tests = request.exclude_tests.unwrap_or(false);
+    let limit = request.limit.map_or(200, |v| v.min(2000) as usize);
 
     let symbols_by_file = hotpath::measure_block!("mcp.analysis.unsafe_patterns.graph", {
         let mut symbols_by_file = HashMap::<String, Vec<VerifiedAnalysisSymbol>>::new();
@@ -171,8 +151,8 @@ pub async fn handle_unsafe_patterns(
         tokio::task::spawn_blocking(move || -> Result<_> {
             let mut files = symbols_by_file.keys().cloned().collect::<Vec<_>>();
             files.sort();
-            let mut matches: Vec<Value> = Vec::new();
-            let mut by_kind: HashMap<String, u64> = HashMap::new();
+            let mut matches: Vec<UnsafePatternMatchV1> = Vec::new();
+            let mut by_kind: BTreeMap<String, u64> = BTreeMap::new();
             let mut touched: Vec<String> = Vec::new();
 
             'outer: for file in &files {
@@ -191,7 +171,7 @@ pub async fn handle_unsafe_patterns(
                 // expensive steps that could never produce a match.
                 if !kinds
                     .iter()
-                    .any(|kind| source_may_contain_unsafe_kind(&source, kind))
+                    .any(|kind| source_may_contain_unsafe_kind(&source, *kind))
                 {
                     continue;
                 }
@@ -240,21 +220,21 @@ pub async fn handle_unsafe_patterns(
                     if exclude_tests && in_test {
                         continue;
                     }
-                    for kind in &kinds {
+                    for &kind in &kinds {
                         if let Some(column) = line_matches_unsafe_kind(masked_line, kind) {
                             let nodes = symbols_by_file.get(file).map_or(&[][..], Vec::as_slice);
                             let enclosing =
                                 enclosing_declaration(nodes, (line_offset + column) as u64)
                                     .map(|node| node.metadata.qualified_name.clone());
-                            *by_kind.entry(kind.clone()).or_insert(0) += 1;
-                            matches.push(json!({
-                                "kind": kind,
-                                "file": file,
-                                "line": line_no,
-                                "snippet": line.trim(),
-                                "enclosing": enclosing,
-                                "in_test": in_test,
-                            }));
+                            *by_kind.entry(kind.as_str().to_owned()).or_insert(0) += 1;
+                            matches.push(UnsafePatternMatchV1 {
+                                kind,
+                                file: file.clone(),
+                                line: line_no,
+                                snippet: line.trim().to_owned(),
+                                enclosing,
+                                in_test,
+                            });
                             if !touched.contains(file) {
                                 touched.push(file.clone());
                             }
@@ -274,29 +254,21 @@ pub async fn handle_unsafe_patterns(
         message: format!("tracedecay_unsafe_patterns scan failed to join: {join_error}"),
     })??;
 
-    let payload = hotpath::measure_block!("mcp.analysis.unsafe_patterns.assemble", {
-        let counts = serde_json::to_value(&by_kind).map_err(|error| TraceDecayError::Config {
-            message: format!("failed to serialize unsafe-pattern counts: {error}"),
-        })?;
-        json!({
-            "match_count": matches.len(),
-            "by_kind": counts,
-            "matches": matches,
-        })
-    });
-    Ok(rendered_tool_result(
-        Some(response_handle_root),
-        &args,
-        &payload,
+    Ok(graph_tool_completion(
+        GraphToolResultV1::UnsafePatterns(UnsafePatternsResultV1 {
+            match_count: matches.len() as u64,
+            by_kind,
+            matches,
+        }),
         touched,
-        || render::risky_patterns_md(&payload),
     ))
 }
 
 #[cfg(test)]
 mod unsafe_pattern_detection_tests {
     use super::{
-        contains_unsafe_block_start, line_matches_unsafe_kind, source_may_contain_unsafe_kind,
+        UnsafePatternKindV1, contains_unsafe_block_start, line_matches_unsafe_kind,
+        source_may_contain_unsafe_kind,
     };
 
     /// The whole-file pre-filter exists only to skip work, so it must never be
@@ -314,62 +286,75 @@ mod unsafe_pattern_detection_tests {
             "    let y = 1 + 1;",
             "",
         ];
-        let kinds = [
-            "unwrap",
-            "expect",
-            "panic",
-            "todo",
-            "unimplemented",
-            "unsafe_block",
-        ];
-
         for line in lines {
-            for kind in kinds {
+            for kind in UnsafePatternKindV1::ALL {
                 if line_matches_unsafe_kind(line, kind).is_some() {
                     assert!(
                         source_may_contain_unsafe_kind(line, kind),
-                        "prefilter would drop a real {kind} site: {line:?}"
+                        "prefilter would drop a real {kind:?} site: {line:?}"
                     );
                 }
             }
         }
     }
 
-    /// An unrecognised kind matches nothing, so it must not force a scan.
-    #[test]
-    fn prefilter_rejects_unknown_kinds() {
-        assert!(!source_may_contain_unsafe_kind(
-            "let x = value.unwrap();",
-            "not_a_kind"
-        ));
-    }
-
     #[test]
     fn detects_unsafe_block_inside_safe_fn() {
         // An `unsafe { }` block living inside an otherwise-safe function, the
         // exact shape the audit fixture plants.
-        assert!(line_matches_unsafe_kind("    unsafe { *ptr as usize }", "unsafe_block").is_some());
+        assert!(
+            line_matches_unsafe_kind(
+                "    unsafe { *ptr as usize }",
+                UnsafePatternKindV1::UnsafeBlock
+            )
+            .is_some()
+        );
         assert!(contains_unsafe_block_start("    unsafe { *ptr as usize }").is_some());
     }
 
     #[test]
     fn detects_unsafe_fn_impl_and_trait() {
-        assert!(line_matches_unsafe_kind("pub unsafe fn raw(&self) {", "unsafe_block").is_some());
-        assert!(line_matches_unsafe_kind("unsafe impl Send for Foo {}", "unsafe_block").is_some());
-        assert!(line_matches_unsafe_kind("unsafe trait Zeroable {}", "unsafe_block").is_some());
+        assert!(
+            line_matches_unsafe_kind(
+                "pub unsafe fn raw(&self) {",
+                UnsafePatternKindV1::UnsafeBlock
+            )
+            .is_some()
+        );
+        assert!(
+            line_matches_unsafe_kind(
+                "unsafe impl Send for Foo {}",
+                UnsafePatternKindV1::UnsafeBlock
+            )
+            .is_some()
+        );
+        assert!(
+            line_matches_unsafe_kind("unsafe trait Zeroable {}", UnsafePatternKindV1::UnsafeBlock)
+                .is_some()
+        );
     }
 
     #[test]
     fn ignores_safe_code_and_comments() {
         // Plain safe code has no unsafe markers.
-        assert!(line_matches_unsafe_kind("let x = total as usize;", "unsafe_block").is_none());
+        assert!(
+            line_matches_unsafe_kind("let x = total as usize;", UnsafePatternKindV1::UnsafeBlock)
+                .is_none()
+        );
         // The word appears only in a comment/doc line: not a real unsafe site.
         assert!(
-            line_matches_unsafe_kind("// this is not unsafe { } really", "unsafe_block").is_none()
+            line_matches_unsafe_kind(
+                "// this is not unsafe { } really",
+                UnsafePatternKindV1::UnsafeBlock
+            )
+            .is_none()
         );
         assert!(
-            line_matches_unsafe_kind("/// drop the needless unsafe block", "unsafe_block")
-                .is_none()
+            line_matches_unsafe_kind(
+                "/// drop the needless unsafe block",
+                UnsafePatternKindV1::UnsafeBlock
+            )
+            .is_none()
         );
         // A substring of a longer identifier must not trip the word-boundary check.
         assert!(contains_unsafe_block_start("let unsafely = 1;").is_none());
@@ -382,11 +367,11 @@ mod unsafe_pattern_detection_tests {
     fn reports_where_on_the_line_the_site_is() {
         let line = "#[test] fn a() { Some(5).unwrap(); } pub fn b() { panic!(); }";
         assert_eq!(
-            line_matches_unsafe_kind(line, "unwrap"),
+            line_matches_unsafe_kind(line, UnsafePatternKindV1::Unwrap),
             Some(line.find(".unwrap()").expect("unwrap call"))
         );
         assert_eq!(
-            line_matches_unsafe_kind(line, "panic"),
+            line_matches_unsafe_kind(line, UnsafePatternKindV1::Panic),
             Some(line.find("panic!(").expect("panic call"))
         );
     }

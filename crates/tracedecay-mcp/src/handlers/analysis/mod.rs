@@ -1,51 +1,116 @@
-//! Portable structural-analysis report handlers.
+//! Portable structural-analysis reports, computed as their typed catalog
+//! results for the project's graph-tool owner.
 
 mod circular;
 mod complexity;
 mod constructors;
 mod dead_code;
-mod dispatch;
 mod field_sites;
 mod hotspots;
 mod metrics;
 mod recursion;
-#[cfg(feature = "source-analysis")]
 mod unmounted_files;
 mod unsafe_patterns;
 
-pub use circular::handle_circular;
-pub use complexity::{handle_complexity, handle_doc_coverage, handle_god_class};
-pub use constructors::handle_constructors;
-pub use dead_code::handle_dead_code;
-pub use dispatch::dispatch_tool;
-pub use field_sites::handle_field_sites;
-pub use hotspots::handle_hotspots;
-pub use metrics::{
-    handle_coupling, handle_distribution, handle_inheritance_depth, handle_largest, handle_rank,
-};
-pub use recursion::handle_recursion;
-#[cfg(feature = "source-analysis")]
-pub use unmounted_files::handle_unmounted_files;
-pub use unsafe_patterns::handle_unsafe_patterns;
+pub use circular::render_circular_md;
 
-use crate::handlers::graph::user_line;
-use crate::{ToolResult, is_ident_byte, line_number_at};
-use crate::{
-    effective_path, generic_tool_result, rendered_tool_result, require_object_args,
-    require_positive_limit, unique_file_paths,
+use circular::compute_circular;
+use complexity::{compute_complexity, compute_doc_coverage, compute_god_class};
+use constructors::compute_constructors;
+use dead_code::compute_dead_code;
+use field_sites::compute_field_sites;
+use hotspots::compute_hotspots;
+use metrics::{
+    compute_coupling, compute_distribution, compute_inheritance_depth, compute_largest,
+    compute_rank,
 };
+use recursion::compute_recursion;
+use unmounted_files::compute_unmounted_files;
+use unsafe_patterns::compute_unsafe_patterns;
+
+use crate::handlers::graph::{graph_tool_completion, user_line};
+use crate::handlers::support::{decode_primitive_request, unknown_tool_error};
+use crate::handlers::verified_read::{VerifiedGraphOpen, verified_read_operation as read};
+use crate::{is_ident_byte, line_number_at};
+use crate::{require_positive_limit, unique_file_paths};
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use tracedecay_code_index::lineage::LineageSymbolRecordV1;
+use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, RelationEdgeKindV1, SourceSpan, SymbolOccurrenceId,
 };
 use tracedecay_graph_query::VerifiedGraphQuery;
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
+
+/// Computes one structural-analysis report over the `health_read` verified
+/// graph opened through `open`.
+pub async fn compute_analysis_report(
+    project_root: &Path,
+    open: &VerifiedGraphOpen<'_>,
+    operation: ApplicationSurfaceOperation,
+    args: Value,
+    scope_prefix: Option<&str>,
+) -> Result<GraphToolCompletionV1> {
+    // The one analysis report that opens no graph query: its whole finding is
+    // that the graph and the compiler disagree, so taking the graph's file set
+    // as input would answer the question with the very source under suspicion.
+    if operation == ApplicationSurfaceOperation::UnmountedFiles {
+        return compute_unmounted_files(project_root, args, scope_prefix).await;
+    }
+    let graph = open(read("health_read")?).await?;
+    match operation {
+        ApplicationSurfaceOperation::DeadCode => {
+            compute_dead_code(&graph, args, scope_prefix).await
+        }
+        ApplicationSurfaceOperation::Circular => compute_circular(&graph, args).await,
+        ApplicationSurfaceOperation::Hotspots => compute_hotspots(&graph, args, scope_prefix).await,
+        ApplicationSurfaceOperation::Rank => compute_rank(&graph, args, scope_prefix).await,
+        ApplicationSurfaceOperation::Largest => compute_largest(&graph, args, scope_prefix).await,
+        ApplicationSurfaceOperation::Coupling => compute_coupling(&graph, args, scope_prefix).await,
+        ApplicationSurfaceOperation::InheritanceDepth => {
+            compute_inheritance_depth(&graph, args, scope_prefix).await
+        }
+        ApplicationSurfaceOperation::Distribution => {
+            compute_distribution(&graph, args, scope_prefix).await
+        }
+        ApplicationSurfaceOperation::Recursion => {
+            compute_recursion(&graph, args, scope_prefix).await
+        }
+        ApplicationSurfaceOperation::Complexity => {
+            compute_complexity(&graph, args, scope_prefix).await
+        }
+        ApplicationSurfaceOperation::DocCoverage => {
+            compute_doc_coverage(project_root, &graph, args, scope_prefix).await
+        }
+        ApplicationSurfaceOperation::GodClass => {
+            compute_god_class(&graph, args, scope_prefix).await
+        }
+        ApplicationSurfaceOperation::UnsafePatterns => {
+            compute_unsafe_patterns(project_root, &graph, args, scope_prefix).await
+        }
+        ApplicationSurfaceOperation::Constructors => {
+            compute_constructors(&graph, args, scope_prefix).await
+        }
+        ApplicationSurfaceOperation::FieldSites => {
+            compute_field_sites(&graph, args, scope_prefix).await
+        }
+        operation => Err(unknown_tool_error(operation.mcp_tool_name())),
+    }
+}
+
+/// A requested node kind that names no indexed kind is refused: it could
+/// never match a symbol, so filtering by it would silently answer nothing.
+fn requested_node_kind(tool_name: &str, kind: &str) -> Result<NodeKind> {
+    NodeKind::from_str(kind).ok_or_else(|| TraceDecayError::Config {
+        message: format!("invalid arguments for {tool_name}: unknown node kind `{kind}`"),
+    })
+}
 
 fn path_is_rust(path: &str) -> bool {
     Path::new(path)

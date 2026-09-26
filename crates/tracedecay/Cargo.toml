@@ -296,7 +296,7 @@ tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-framing = { path = "../tracedecay-framing" }
 tracedecay-hooks = { path = "../tracedecay-hooks" }
 tracedecay-host-admission = { path = "../tracedecay-host-admission" }
-tracedecay-mcp = { path = "../tracedecay-mcp", features = ["source-analysis"] }
+tracedecay-mcp = { path = "../tracedecay-mcp" }
 tracedecay-lsp = { path = "../tracedecay-lsp" }
 tracedecay-maintenance = { path = "../tracedecay-maintenance" }
 tracedecay-global-db = { path = "../tracedecay-global-db" }

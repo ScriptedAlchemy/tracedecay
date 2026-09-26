@@ -996,7 +996,23 @@ impl DaemonInvocationRequest {
             | ApplicationSurfaceOperation::DependencyDepth
             | ApplicationSurfaceOperation::Health
             | ApplicationSurfaceOperation::Dsm
-            | ApplicationSurfaceOperation::Diagnose => {
+            | ApplicationSurfaceOperation::Diagnose
+            | ApplicationSurfaceOperation::DeadCode
+            | ApplicationSurfaceOperation::Circular
+            | ApplicationSurfaceOperation::Hotspots
+            | ApplicationSurfaceOperation::UnmountedFiles
+            | ApplicationSurfaceOperation::Rank
+            | ApplicationSurfaceOperation::Largest
+            | ApplicationSurfaceOperation::Coupling
+            | ApplicationSurfaceOperation::InheritanceDepth
+            | ApplicationSurfaceOperation::Distribution
+            | ApplicationSurfaceOperation::Recursion
+            | ApplicationSurfaceOperation::Complexity
+            | ApplicationSurfaceOperation::DocCoverage
+            | ApplicationSurfaceOperation::GodClass
+            | ApplicationSurfaceOperation::UnsafePatterns
+            | ApplicationSurfaceOperation::Constructors
+            | ApplicationSurfaceOperation::FieldSites => {
                 unreachable!("graph-tool operations use their typed constructor")
             }
             ApplicationSurfaceOperation::FactStoreCurate

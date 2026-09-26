@@ -1645,8 +1645,10 @@ async fn test_rank_invalid_direction() {
         Err(err) => {
             let err_msg = format!("{}", err);
             assert!(
-                err_msg.contains("invalid direction"),
-                "error should mention 'invalid direction', got: {}",
+                err_msg.contains(
+                    "invalid arguments for tracedecay_rank: unknown variant `sideways`, expected `incoming` or `outgoing`"
+                ),
+                "error should refuse the direction, got: {}",
                 err_msg,
             );
         }

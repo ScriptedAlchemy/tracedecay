@@ -1,11 +1,11 @@
 //! Code-health and architecture analysis tool definitions.
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
-use super::{def, def_object, def_path_limit_tool, number_property, string_property};
+use super::def;
 use crate::ToolDefinition;
 
-pub(super) fn def_dead_code() -> ToolDefinition {
+pub(super) fn def_dead_code(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_dead_code",
         "Dead Code",
@@ -17,73 +17,29 @@ pub(super) fn def_dead_code() -> ToolDefinition {
          report only one directory prefix, which keeps a fixture or benchmark \
          corpus from consuming the whole page; the prefix is applied before \
          `limit`, and references from outside it still count as callers.",
-        json!({
-            "type": "object",
-            "properties": {
-                "path": string_property(
-                    "Filter reported symbols to files under this directory path (e.g. 'crates/tracedecay-mcp'). Omit for the entire codebase."
-                ),
-                "kinds": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Node kinds to check (default: [\"function\", \"method\"])"
-                },
-                "include_public": {
-                    "type": "boolean",
-                    "description": "When true, do NOT exclude pub items. Default false."
-                },
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum symbols to return (default: 100, max: 1000)"
-                }
-            }
-        }),
+        input_schema,
     )
 }
 
-pub(super) fn def_circular() -> ToolDefinition {
+pub(super) fn def_circular(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_circular",
         "Circular Deps",
         "Detect circular dependencies between files in the code graph.",
-        json!({
-            "type": "object",
-            "properties": {
-                "max_depth": {
-                    "type": "number",
-                    "description": "Maximum cycle detection depth (default: 10)"
-                },
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum number of cycles to report, largest first (default: 25, max: 200). The response always states the total detected and how many were omitted."
-                },
-                "member_limit": {
-                    "type": "number",
-                    "description": "Maximum member files listed per reported cycle (default: 12, max: 200). Each entry states its true member_count and omitted_member_count."
-                }
-            }
-        }),
+        input_schema,
     )
 }
 
-pub(super) fn def_hotspots() -> ToolDefinition {
+pub(super) fn def_hotspots(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_hotspots",
         "Hotspots",
         "Find symbols with the highest connectivity (most incoming + outgoing edges).",
-        json!({
-            "type": "object",
-            "properties": {
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum number of hotspots to return (default: 10)"
-                }
-            }
-        }),
+        input_schema,
     )
 }
 
-pub(super) fn def_unmounted_files() -> ToolDefinition {
+pub(super) fn def_unmounted_files(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_unmounted_files",
         "Unmounted Files",
@@ -114,167 +70,88 @@ pub(super) fn def_unmounted_files() -> ToolDefinition {
          imports, non-tsconfig bundler aliases, glob imports, `.vue`/`.svelte`/`.astro` files, \
          and HTML/CSS-only references for TypeScript. Paths listed in the workspace's \
          `[workspace.metadata.cargo-shear] ignored-paths` are excluded.",
-        json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Filter findings to files under this directory path (e.g. 'src/daemon'). The whole project is still walked, reachability is not a per-directory question."
-                },
-                "ecosystem": {
-                    "type": "string",
-                    "description": "Filter findings to one ecosystem ('rust' or 'typescript'). Every ecosystem section is still reported, so the scope of the answer stays visible."
-                },
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum unmounted files to return (default: 200, max: 2000). The response always states the true total and how many rows were omitted."
-                }
-            }
-        }),
+        input_schema,
     )
 }
 
-pub(super) fn def_rank() -> ToolDefinition {
+pub(super) fn def_rank(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_rank",
         "Rank",
         "Rank nodes by edge count for a given relationship type (calls, implements, extends, etc.).",
-        json!({
-            "type": "object",
-            "properties": {
-                "edge_kind": {
-                    "type": "string",
-                    "enum": ["implements", "extends", "calls", "uses", "contains", "annotates", "derives_macro"],
-                    "description": "The relationship type to rank by (e.g. 'implements' to find most-implemented interfaces)"
-                },
-                "direction": {
-                    "type": "string",
-                    "enum": ["incoming", "outgoing"],
-                    "description": "Edge direction: 'incoming' ranks targets (default, e.g. most-implemented interface), 'outgoing' ranks sources (e.g. class that implements the most interfaces)"
-                },
-                "node_kind": {
-                    "type": "string",
-                    "description": "Optional filter for node kind (e.g. 'interface', 'class', 'trait', 'function', 'method')"
-                },
-                "path": {
-                    "type": "string",
-                    "description": "Filter to files under this directory path (e.g. 'src/main/java')"
-                },
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum number of results to return (default: 10)"
-                }
-            },
-            "required": ["edge_kind"]
-        }),
+        input_schema,
     )
 }
 
-pub(super) fn def_largest() -> ToolDefinition {
-    def_object(
+pub(super) fn def_largest(input_schema: Value) -> ToolDefinition {
+    def(
         "tracedecay_largest",
         "Largest Symbols",
         "Rank nodes by size (line count). Find the largest classes, longest methods, biggest enums, etc.",
-        json!({
-            "node_kind": string_property("Filter by node kind (e.g. 'class', 'method', 'function', 'interface', 'enum', 'struct')"),
-            "path": string_property("Filter to files under this directory path (e.g. 'src/main/java')"),
-            "limit": number_property("Maximum number of results to return (default: 10)")
-        }),
+        input_schema,
     )
 }
 
-pub(super) fn def_coupling() -> ToolDefinition {
+pub(super) fn def_coupling(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_coupling",
         "Coupling",
         "Rank files by coupling: fan_in (most depended on) or fan_out (most dependencies).",
-        json!({
-            "type": "object",
-            "properties": {
-                "direction": {
-                    "type": "string",
-                    "enum": ["fan_in", "fan_out"],
-                    "description": "fan_in: files depended on by the most others. fan_out: files that depend on the most others (default: fan_in)"
-                },
-                "path": {
-                    "type": "string",
-                    "description": "Filter to files under this directory path (e.g. 'src/main/java')"
-                },
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum number of results to return (default: 10)"
-                }
-            }
-        }),
+        input_schema,
     )
 }
 
-pub(super) fn def_inheritance_depth() -> ToolDefinition {
-    def_path_limit_tool(
+pub(super) fn def_inheritance_depth(input_schema: Value) -> ToolDefinition {
+    def(
         "tracedecay_inheritance_depth",
         "Inheritance Depth",
         "Find the deepest class/interface inheritance hierarchies by walking extends chains.",
-        "Filter to files under this directory path (e.g. 'src/main/java')",
-        "Maximum number of results to return (default: 10)",
+        input_schema,
     )
 }
 
-pub(super) fn def_distribution() -> ToolDefinition {
-    def_object(
+pub(super) fn def_distribution(input_schema: Value) -> ToolDefinition {
+    def(
         "tracedecay_distribution",
         "Distribution",
         "Show node kind distribution (classes, methods, fields, etc.) per file or directory.",
-        json!({
-            "path": string_property("Directory or file path prefix to filter (e.g. 'src/main/java/com/example'). Omit for entire codebase."),
-            "summary": {
-                "type": "boolean",
-                "description": "If true, aggregate counts across all matching files instead of per-file breakdown (default: false)"
-            },
-            "limit": number_property("Maximum number of files in the per-file breakdown, highest node count first (default: 100, max: 1000). Ignored when summary is true; the response states total_file_count and omitted_file_count.")
-        }),
+        input_schema,
     )
 }
 
-pub(super) fn def_recursion() -> ToolDefinition {
-    def_path_limit_tool(
+pub(super) fn def_recursion(input_schema: Value) -> ToolDefinition {
+    def(
         "tracedecay_recursion",
         "Recursion",
         "Detect recursive and mutually-recursive call cycles in the call graph.",
-        "Filter to files under this directory path (e.g. 'src/main/java')",
-        "Maximum number of cycles to return (default: 10)",
+        input_schema,
     )
 }
 
-pub(super) fn def_complexity() -> ToolDefinition {
-    def_object(
+pub(super) fn def_complexity(input_schema: Value) -> ToolDefinition {
+    def(
         "tracedecay_complexity",
         "Complexity",
         "Rank functions/methods by composite complexity score (lines + fan-out + fan-in).",
-        json!({
-            "node_kind": string_property("Filter by node kind (default: function and method)"),
-            "path": string_property("Filter to files under this directory path (e.g. 'src/main/java')"),
-            "limit": number_property("Maximum number of results to return (default: 10)")
-        }),
+        input_schema,
     )
 }
 
-pub(super) fn def_doc_coverage() -> ToolDefinition {
-    def_path_limit_tool(
+pub(super) fn def_doc_coverage(input_schema: Value) -> ToolDefinition {
+    def(
         "tracedecay_doc_coverage",
         "Doc Coverage",
         "Find public symbols missing documentation (docstrings).",
-        "Directory or file path prefix to filter (e.g. 'src/main'). Omit for entire codebase.",
-        "Maximum number of results to return (default: 50)",
+        input_schema,
     )
 }
 
-pub(super) fn def_god_class() -> ToolDefinition {
-    def_path_limit_tool(
+pub(super) fn def_god_class(input_schema: Value) -> ToolDefinition {
+    def(
         "tracedecay_god_class",
         "God Classes",
         "Find classes with the most members (methods + fields).",
-        "Filter to files under this directory path (e.g. 'src/main/java')",
-        "Maximum number of results to return (default: 10)",
+        input_schema,
     )
 }
 
@@ -343,7 +220,7 @@ pub(super) fn def_todos(input_schema: Value) -> ToolDefinition {
     )
 }
 
-pub(super) fn def_unsafe_patterns() -> ToolDefinition {
+pub(super) fn def_unsafe_patterns(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_unsafe_patterns",
         "Risky Pattern Finder",
@@ -352,45 +229,30 @@ pub(super) fn def_unsafe_patterns() -> ToolDefinition {
          enclosing symbol, the source line, and an in_test flag derived from the \
          path. Use this in security/quality reviews to surface panic sites before \
          a release. Defaults to all kinds; pass `kinds` to narrow.",
-        json!({
-            "type": "object",
-            "properties": {
-                "kinds": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Subset of patterns to search. Default: ['unwrap', 'expect', 'panic', 'todo', 'unimplemented', 'unsafe_block']."
-                },
-                "path": {
-                    "type": "string",
-                    "description": "Filter to files under this directory (relative to project root)."
-                },
-                "exclude_tests": {
-                    "type": "boolean",
-                    "description": "When true, skips files whose path looks like a test (default: false)."
-                },
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum number of matches to return (default: 200, max: 2000)."
-                }
-            }
-        }),
+        input_schema,
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::def_dead_code;
+    use serde_json::json;
+
+    use crate::get_maximal_tool_definitions;
 
     /// Without an advertised `path` an agent cannot scope the report, and a
     /// fixture corpus consumes the whole page before any product source is
     /// reported.
     #[test]
     fn dead_code_advertises_an_optional_path_filter_like_its_siblings() {
-        let definition = def_dead_code();
+        let definitions = get_maximal_tool_definitions().expect("maximal catalog");
+        let definition = definitions
+            .iter()
+            .find(|definition| definition.name == "tracedecay_dead_code")
+            .expect("dead-code definition");
 
         assert_eq!(
             definition.input_schema["properties"]["path"]["type"],
-            "string"
+            json!(["string", "null"])
         );
         assert!(
             definition.input_schema.get("required").is_none(),

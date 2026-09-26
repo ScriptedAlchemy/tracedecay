@@ -1162,8 +1162,8 @@ fn first_line(s: &str) -> String {
 }
 
 /// Best-effort categorisation by tool-name prefix. Matches how the codebase
-/// already groups handlers (`graph`, `info`, `git`, `analysis`, `health`,
-/// `edit`, `memory`). Tools that don't match any prefix fall under `other`.
+/// already groups handlers (`graph`, `info`, `git`, `health`, `edit`,
+/// `memory`). Tools that don't match any prefix fall under `other`.
 fn group_for(def: &ToolDefinition) -> &'static str {
     let n = def.name.as_str();
     if ApplicationSurfaceOperation::from_tool_name(n).is_some() {
@@ -1206,25 +1206,6 @@ fn group_for(def: &ToolDefinition) -> &'static str {
         "graph"
     } else if n == "tracedecay_run_affected_tests" {
         "workflow"
-    } else if n == "tracedecay_dead_code"
-        || n == "tracedecay_unmounted_files"
-        || n == "tracedecay_module_api"
-        || n == "tracedecay_circular"
-        || n == "tracedecay_hotspots"
-        || n == "tracedecay_rank"
-        || n == "tracedecay_largest"
-        || n == "tracedecay_coupling"
-        || n == "tracedecay_inheritance_depth"
-        || n == "tracedecay_distribution"
-        || n == "tracedecay_recursion"
-        || n == "tracedecay_complexity"
-        || n == "tracedecay_doc_coverage"
-        || n == "tracedecay_god_class"
-        || n == "tracedecay_unsafe_patterns"
-        || n == "tracedecay_constructors"
-        || n == "tracedecay_field_sites"
-    {
-        "analysis"
     } else {
         "info"
     }

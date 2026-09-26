@@ -1,5 +1,9 @@
 //! `tracedecay_circular`, bounded cyclic-dependency reporting.
 
+use tracedecay_contracts::retrieval::{
+    CircularCycleV1, CircularResultV1, CircularSurfaceRequestV1,
+};
+
 use super::*;
 
 /// Default and ceiling for the number of cycles `tracedecay_circular` reports
@@ -19,30 +23,17 @@ const CIRCULAR_MAX_LIMIT: usize = 200;
 const CIRCULAR_DEFAULT_MEMBER_LIMIT: usize = 12;
 const CIRCULAR_MAX_MEMBER_LIMIT: usize = 200;
 
-/// One reported cycle: the members that fit the declared member bound, plus
-/// the component's true size so the omission is stated rather than hidden.
-#[derive(Debug, PartialEq, Eq)]
-struct BoundedCycle {
-    members: Vec<String>,
-    member_count: usize,
-    omitted_member_count: usize,
-}
-
 #[hotpath::measure(future = true, label = "mcp.analysis.circular.total")]
-pub async fn handle_circular(
-    response_handle_root: &Path,
+pub(super) async fn compute_circular(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
-) -> Result<ToolResult> {
-    let limit = args
-        .get("limit")
-        .and_then(Value::as_u64)
-        .map_or(CIRCULAR_DEFAULT_LIMIT, |limit| {
-            (limit as usize).clamp(1, CIRCULAR_MAX_LIMIT)
-        });
-    let member_limit = args
-        .get("member_limit")
-        .and_then(Value::as_u64)
+) -> Result<GraphToolCompletionV1> {
+    let request: CircularSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_circular")?;
+    let limit = request.limit.map_or(CIRCULAR_DEFAULT_LIMIT, |limit| {
+        (limit as usize).clamp(1, CIRCULAR_MAX_LIMIT)
+    });
+    let member_limit = request
+        .member_limit
         .map_or(CIRCULAR_DEFAULT_MEMBER_LIMIT, |limit| {
             (limit as usize).clamp(1, CIRCULAR_MAX_MEMBER_LIMIT)
         });
@@ -52,51 +43,52 @@ pub async fn handle_circular(
         label = "mcp.analysis.circular.graph"
     )
     .await?;
-    let cycle_count = all_cycles.len();
-    let (cycles, omitted) = hotpath::measure_block!(
+    let result = hotpath::measure_block!(
         "mcp.analysis.circular.compute",
         bound_cycles(all_cycles, limit, member_limit)
     );
-
-    let output = hotpath::measure_block!(
-        "mcp.analysis.circular.assemble",
-        circular_output(&cycles, cycle_count, omitted, limit, member_limit)
-    );
-
-    Ok(rendered_tool_result(
-        Some(response_handle_root),
-        &args,
-        &output,
-        vec![],
-        || render_circular_md(&cycles, cycle_count, omitted, limit),
+    Ok(graph_tool_completion(
+        GraphToolResultV1::Circular(result),
+        Vec::new(),
     ))
 }
 
-fn circular_output(
-    cycles: &[BoundedCycle],
-    cycle_count: usize,
-    omitted: usize,
+/// Orders cycles largest-first and bounds them to `limit` cycles of
+/// `member_limit` members each.
+///
+/// The largest strongly connected components are the ones worth breaking, so a
+/// bounded page reports the worst offenders rather than an arbitrary prefix.
+/// Ties fall back to path order so repeated calls agree. Both the omitted cycle
+/// count and each component's true member count are reported rather than
+/// dropped: the answer always states what it left out.
+fn bound_cycles(
+    mut cycles: Vec<Vec<String>>,
     limit: usize,
     member_limit: usize,
-) -> Value {
-    let items: Vec<Value> = cycles
-        .iter()
-        .map(|cycle| {
-            json!({
-                "members": cycle.members,
-                "member_count": cycle.member_count,
-                "omitted_member_count": cycle.omitted_member_count,
-            })
+) -> CircularResultV1 {
+    let cycle_count = cycles.len();
+    cycles.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
+    cycles.truncate(limit);
+    let cycles: Vec<CircularCycleV1> = cycles
+        .into_iter()
+        .map(|mut members| {
+            let member_count = members.len();
+            members.truncate(member_limit);
+            CircularCycleV1 {
+                omitted_member_count: member_count.saturating_sub(members.len()) as u64,
+                members,
+                member_count: member_count as u64,
+            }
         })
         .collect();
-    json!({
-        "cycle_count": cycle_count,
-        "reported_cycle_count": cycles.len(),
-        "omitted_cycle_count": omitted,
-        "limit": limit,
-        "member_limit": member_limit,
-        "cycles": items,
-    })
+    CircularResultV1 {
+        cycle_count: cycle_count as u64,
+        reported_cycle_count: cycles.len() as u64,
+        omitted_cycle_count: cycle_count.saturating_sub(cycles.len()) as u64,
+        limit: limit as u64,
+        member_limit: member_limit as u64,
+        cycles,
+    }
 }
 
 /// Renders file-level dependency cycles as arrow chains that preserve cycle
@@ -104,52 +96,16 @@ fn circular_output(
 /// directory tree, which destroys the cyclic relationship. Each SCC's member
 /// files are joined with ` -> ` and the first is repeated at the end to close
 /// the loop.
-/// Orders cycles largest-first and bounds them to `limit` cycles of
-/// `member_limit` members each, returning the bounded page and the number of
-/// cycles it leaves out.
-///
-/// The largest strongly connected components are the ones worth breaking, so a
-/// bounded page reports the worst offenders rather than an arbitrary prefix.
-/// Ties fall back to path order so repeated calls agree. Both the omitted cycle
-/// count and each component's true member count are returned rather than
-/// dropped: the caller always states what it left out.
-fn bound_cycles(
-    mut cycles: Vec<Vec<String>>,
-    limit: usize,
-    member_limit: usize,
-) -> (Vec<BoundedCycle>, usize) {
-    let omitted = cycles.len().saturating_sub(limit);
-    cycles.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
-    cycles.truncate(limit);
-    let bounded = cycles
-        .into_iter()
-        .map(|mut members| {
-            let member_count = members.len();
-            members.truncate(member_limit);
-            BoundedCycle {
-                omitted_member_count: member_count.saturating_sub(members.len()),
-                members,
-                member_count,
-            }
-        })
-        .collect();
-    (bounded, omitted)
-}
-
-fn render_circular_md(
-    cycles: &[BoundedCycle],
-    cycle_count: usize,
-    omitted: usize,
-    limit: usize,
-) -> String {
+pub fn render_circular_md(result: &CircularResultV1) -> String {
     use std::fmt::Write as _;
 
+    let cycle_count = result.cycle_count;
     if cycle_count == 0 {
         return "No circular dependencies found.\n".to_string();
     }
     let mut out = String::new();
     let _ = writeln!(out, "# Circular Dependencies ({cycle_count})\n");
-    for (i, cycle) in cycles.iter().enumerate() {
+    for (i, cycle) in result.cycles.iter().enumerate() {
         let Some(entry) = cycle.members.first() else {
             continue;
         };
@@ -168,7 +124,9 @@ fn render_circular_md(
         }
         let _ = writeln!(out, "{}. {chain}", i + 1);
     }
+    let omitted = result.omitted_cycle_count;
     if omitted > 0 {
+        let limit = result.limit;
         let _ = writeln!(
             out,
             "\n{omitted} further cycle(s) not shown at limit {limit}; raise `limit` (max {CIRCULAR_MAX_LIMIT}) to see more."
@@ -178,7 +136,7 @@ fn render_circular_md(
 }
 #[cfg(test)]
 mod circular_render_tests {
-    use super::{CIRCULAR_DEFAULT_MEMBER_LIMIT, bound_cycles, circular_output, render_circular_md};
+    use super::{CIRCULAR_DEFAULT_MEMBER_LIMIT, bound_cycles, render_circular_md};
     use crate::MAX_RESPONSE_CHARS;
 
     fn cycle(files: &[&str]) -> Vec<String> {
@@ -193,18 +151,24 @@ mod circular_render_tests {
             cycle(&["small-a.rs", "small-a2.rs"]),
         ];
 
-        let (page, omitted) = bound_cycles(cycles, 2, CIRCULAR_DEFAULT_MEMBER_LIMIT);
+        let page = bound_cycles(cycles, 2, CIRCULAR_DEFAULT_MEMBER_LIMIT);
 
-        assert_eq!(omitted, 1, "the omitted cycle must be counted, not dropped");
-        assert_eq!(page.len(), 2);
         assert_eq!(
-            page[0].members,
+            page.omitted_cycle_count, 1,
+            "the omitted cycle must be counted, not dropped"
+        );
+        assert_eq!(page.cycles.len(), 2);
+        assert_eq!(
+            page.cycles[0].members,
             cycle(&["big.rs", "big2.rs", "big3.rs", "big4.rs"])
         );
-        assert_eq!(page[0].member_count, 4);
-        assert_eq!(page[0].omitted_member_count, 0);
+        assert_eq!(page.cycles[0].member_count, 4);
+        assert_eq!(page.cycles[0].omitted_member_count, 0);
         // Ties resolve by path order so repeated calls agree.
-        assert_eq!(page[1].members, cycle(&["small-a.rs", "small-a2.rs"]));
+        assert_eq!(
+            page.cycles[1].members,
+            cycle(&["small-a.rs", "small-a2.rs"])
+        );
     }
 
     /// A single strongly connected component can hold hundreds of files. The
@@ -218,27 +182,26 @@ mod circular_render_tests {
                 format!("crates/tracedecay-contracts/src/deeply/nested/module_{index:04}.rs")
             })
             .collect();
-        let member_count = members.len();
+        let member_count = members.len() as u64;
 
-        let (page, omitted) = bound_cycles(vec![members], 3, CIRCULAR_DEFAULT_MEMBER_LIMIT);
+        let page = bound_cycles(vec![members], 3, CIRCULAR_DEFAULT_MEMBER_LIMIT);
 
-        assert_eq!(omitted, 0);
-        assert_eq!(page[0].member_count, member_count);
-        assert_eq!(page[0].members.len(), CIRCULAR_DEFAULT_MEMBER_LIMIT);
+        assert_eq!(page.omitted_cycle_count, 0);
+        assert_eq!(page.cycles[0].member_count, member_count);
+        assert_eq!(page.cycles[0].members.len(), CIRCULAR_DEFAULT_MEMBER_LIMIT);
         assert_eq!(
-            page[0].omitted_member_count,
-            member_count - CIRCULAR_DEFAULT_MEMBER_LIMIT
+            page.cycles[0].omitted_member_count,
+            member_count - CIRCULAR_DEFAULT_MEMBER_LIMIT as u64
         );
 
-        let payload = circular_output(&page, 1, omitted, 3, CIRCULAR_DEFAULT_MEMBER_LIMIT);
-        let serialized = serde_json::to_string_pretty(&payload).expect("payload serializes");
+        let serialized = serde_json::to_string_pretty(&page).expect("payload serializes");
         assert!(
             serialized.len() <= MAX_RESPONSE_CHARS,
             "bounded payload is {} chars, over the {MAX_RESPONSE_CHARS} budget",
             serialized.len()
         );
 
-        let markdown = render_circular_md(&page, 1, omitted, 3);
+        let markdown = render_circular_md(&page);
         assert!(
             markdown.len() <= MAX_RESPONSE_CHARS,
             "bounded markdown is {} chars, over the {MAX_RESPONSE_CHARS} budget",

@@ -434,26 +434,22 @@ async fn rank_refuses_missing_invalid_and_unpublished_relationships() {
     let server = &session.server;
 
     let missing = call_rank(server, json!({"format": "json"})).await;
-    assert_eq!(missing["error"]["code"], -32602, "{missing}");
+    assert_eq!(missing["error"]["code"], -32603, "{missing}");
     assert_eq!(
-        missing["error"]["message"], "missing required parameter: edge_kind",
+        missing["error"]["message"],
+        "tool execution failed: config error: invalid arguments for tracedecay_rank: missing field `edge_kind`",
         "{missing}"
     );
     assert_eq!(
         missing["error"]["data"]["tool"], "tracedecay_rank",
         "{missing}"
     );
-    assert_eq!(
-        missing["error"]["data"]["reason_code"], "missing_required_parameter",
-        "{missing}"
-    );
-    assert_eq!(missing["error"]["data"]["retryable"], false, "{missing}");
 
     let invalid_kind = call_rank(server, json!({"edge_kind": "inherits", "format": "json"})).await;
     assert_eq!(invalid_kind["error"]["code"], -32603, "{invalid_kind}");
     assert_eq!(
         invalid_kind["error"]["message"],
-        "tool execution failed: config error: invalid edge_kind 'inherits'. Valid values: implements, extends, calls, uses, contains, annotates, derives_macro",
+        "tool execution failed: config error: invalid arguments for tracedecay_rank: unknown variant `inherits`, expected one of `implements`, `extends`, `calls`, `uses`, `contains`, `annotates`, `derives_macro`, `type_of`, `returns`, `receives`",
         "{invalid_kind}"
     );
 
@@ -468,7 +464,7 @@ async fn rank_refuses_missing_invalid_and_unpublished_relationships() {
     );
     assert_eq!(
         invalid_direction["error"]["message"],
-        "tool execution failed: config error: invalid direction 'sideways'. Valid values: incoming, outgoing",
+        "tool execution failed: config error: invalid arguments for tracedecay_rank: unknown variant `sideways`, expected `incoming` or `outgoing`",
         "{invalid_direction}"
     );
 

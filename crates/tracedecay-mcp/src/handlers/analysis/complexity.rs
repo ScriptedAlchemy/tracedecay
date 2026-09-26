@@ -2,26 +2,28 @@
 
 use super::*;
 use tracedecay_code_index::intake::content_digest;
+use tracedecay_contracts::retrieval::{
+    ComplexityReportEntryV1, ComplexityReportV1, ComplexitySurfaceRequestV1, DocCoverageFileV1,
+    DocCoverageResultV1, DocCoverageSurfaceRequestV1, DocCoverageSymbolV1, GodClassEntryV1,
+    GodClassResultV1, GodClassSurfaceRequestV1,
+};
 use tracedecay_privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
 
 #[hotpath::measure(future = true, label = "mcp.analysis.complexity.total")]
-pub async fn handle_complexity(
-    response_handle_root: &Path,
+pub(super) async fn compute_complexity(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
-) -> Result<ToolResult> {
-    let node_kind = args
-        .get("node_kind")
-        .and_then(|v| v.as_str())
-        .and_then(NodeKind::from_str);
-
-    let limit = args
-        .get("limit")
-        .and_then(serde_json::Value::as_u64)
-        .map_or(10, |v| v.min(100) as usize);
-
-    let path_prefix = effective_path(&args, scope_prefix);
+) -> Result<GraphToolCompletionV1> {
+    let request: ComplexitySurfaceRequestV1 =
+        decode_primitive_request(&args, "tracedecay_complexity")?;
+    let node_kind = request
+        .node_kind
+        .as_deref()
+        .map(|kind| requested_node_kind("tracedecay_complexity", kind))
+        .transpose()?;
+    let limit = request.limit.map_or(10, |v| v.min(100) as usize);
+    let path_prefix = request.path.as_deref().or(scope_prefix);
 
     let (mut symbols, edges) = hotpath::measure_block!("mcp.analysis.complexity.graph", {
         let symbols = verified_analysis_symbols(graph, path_prefix)?;
@@ -49,46 +51,39 @@ pub async fn handle_complexity(
     });
 
     let touched_files = unique_file_paths(symbols.iter().map(|symbol| symbol.path.as_str()));
-    let output = hotpath::measure_block!("mcp.analysis.complexity.assemble", {
-        let items: Vec<Value> = symbols
-            .iter()
-            .map(|symbol| {
-                let metadata = &symbol.metadata;
-                let incoming = fan_in.get(&symbol.occurrence).copied().unwrap_or(0);
-                let outgoing = fan_out.get(&symbol.occurrence).copied().unwrap_or(0);
-                // Counters are published only when the bounded walk covered
-                // the body; otherwise the analysis state stands in for them.
-                let complexity = metadata.exact_complexity();
-                json!({
-                    "id": symbol.occurrence.as_str(),
-                    "name": metadata.simple_name,
-                    "kind": metadata.kind,
-                    "file": symbol.path,
-                    "line": user_line(metadata.start_line),
-                    "lines": metadata.line_span,
-                    "cyclomatic_complexity": complexity.map(|complexity| complexity.branches.saturating_add(1)),
-                    "branches": complexity.map(|complexity| complexity.branches),
-                    "loops": complexity.map(|complexity| complexity.loops),
-                    "max_nesting": complexity.map(|complexity| complexity.max_nesting),
-                    "complexity_analysis": metadata.complexity_analysis,
-                    "fan_out": outgoing,
-                    "fan_in": incoming,
-                    "score": analysis_score(symbol, &fan_in, &fan_out),
-                })
-            })
-            .collect();
-        json!({
-            "formula": "lines + (fan_out × 3) + fan_in",
-            "note": "cyclomatic_complexity = branches + 1 (computed from AST during extraction); counters are null when complexity_analysis is not complete",
-            "result_count": items.len(),
-            "ranking": items,
+    let ranking: Vec<ComplexityReportEntryV1> = symbols
+        .iter()
+        .map(|symbol| {
+            let metadata = &symbol.metadata;
+            // Counters are published only when the bounded walk covered the
+            // body; otherwise the analysis state stands in for them.
+            let complexity = metadata.exact_complexity();
+            ComplexityReportEntryV1 {
+                id: symbol.occurrence.as_str().to_owned(),
+                name: metadata.simple_name.clone(),
+                kind: metadata.kind.clone(),
+                file: symbol.path.clone(),
+                line: user_line(metadata.start_line),
+                lines: metadata.line_span,
+                cyclomatic_complexity: complexity
+                    .map(|complexity| complexity.branches.saturating_add(1)),
+                branches: complexity.map(|complexity| complexity.branches),
+                loops: complexity.map(|complexity| complexity.loops),
+                max_nesting: complexity.map(|complexity| complexity.max_nesting),
+                complexity_analysis: metadata.complexity_analysis,
+                fan_out: fan_out.get(&symbol.occurrence).copied().unwrap_or(0),
+                fan_in: fan_in.get(&symbol.occurrence).copied().unwrap_or(0),
+                score: analysis_score(symbol, &fan_in, &fan_out),
+            }
         })
-    });
-
-    Ok(generic_tool_result(
-        Some(response_handle_root),
-        &args,
-        &output,
+        .collect();
+    Ok(graph_tool_completion(
+        GraphToolResultV1::Complexity(ComplexityReportV1 {
+            formula: "lines + (fan_out × 3) + fan_in".to_owned(),
+            note: "cyclomatic_complexity = branches + 1 (computed from AST during extraction); counters are null when complexity_analysis is not complete".to_owned(),
+            result_count: ranking.len() as u64,
+            ranking,
+        }),
         touched_files,
     ))
 }
@@ -177,10 +172,8 @@ fn admitted_doc_source(project_root: &Path, path: &str) -> Result<Vec<u8>> {
 fn verify_doc_coverage_sources_current(
     project_root: &Path,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
-    args: &Value,
-    scope_prefix: Option<&str>,
+    path_prefix: Option<&str>,
 ) -> Result<()> {
-    let path_prefix = effective_path(args, scope_prefix);
     let page = graph.symbols_page(None, DOC_COVERAGE_SYMBOL_BUDGET)?;
     if page.has_more {
         return Err(doc_coverage_unavailable(
@@ -276,19 +269,17 @@ fn verify_doc_coverage_sources_current(
 }
 
 #[hotpath::measure(future = true, label = "mcp.analysis.doc_coverage.total")]
-pub async fn handle_doc_coverage(
-    response_handle_root: &Path,
+pub(super) async fn compute_doc_coverage(
     project_root: &Path,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
-) -> Result<ToolResult> {
-    verify_doc_coverage_sources_current(project_root, graph, &args, scope_prefix)?;
-    let path_prefix = effective_path(&args, scope_prefix);
-    let limit = args
-        .get("limit")
-        .and_then(serde_json::Value::as_u64)
-        .map_or(50, |value| value.min(500) as usize);
+) -> Result<GraphToolCompletionV1> {
+    let request: DocCoverageSurfaceRequestV1 =
+        decode_primitive_request(&args, "tracedecay_doc_coverage")?;
+    let path_prefix = request.path.as_deref().or(scope_prefix);
+    verify_doc_coverage_sources_current(project_root, graph, path_prefix)?;
+    let limit = request.limit.map_or(50, |value| value.min(500) as usize);
     let mut symbols = verified_analysis_symbols(graph, path_prefix)?
         .into_iter()
         .filter(|symbol| {
@@ -312,63 +303,58 @@ pub async fn handle_doc_coverage(
     let returned_count = symbols.len();
 
     let touched_files = unique_file_paths(symbols.iter().map(|symbol| symbol.path.as_str()));
-    let mut by_file = HashMap::<String, Vec<Value>>::new();
-    for symbol in &symbols {
-        by_file.entry(symbol.path.clone()).or_default().push(json!({
-            "id": symbol.occurrence.as_str(),
-            "name": symbol.metadata.simple_name,
-            "kind": symbol.metadata.kind,
-            "line": user_line(symbol.metadata.start_line),
-            "signature": symbol.metadata.signature,
-        }));
+    let mut by_file = HashMap::<String, Vec<DocCoverageSymbolV1>>::new();
+    for symbol in symbols {
+        by_file
+            .entry(symbol.path)
+            .or_default()
+            .push(DocCoverageSymbolV1 {
+                id: symbol.occurrence.as_str().to_owned(),
+                name: symbol.metadata.simple_name,
+                kind: symbol.metadata.kind,
+                line: user_line(symbol.metadata.start_line),
+                signature: symbol.metadata.signature,
+            });
     }
     let mut files = by_file
         .into_iter()
-        .map(|(file, symbols)| {
-            json!({
-                "file": file,
-                "count": symbols.len(),
-                "symbols": symbols,
-            })
+        .map(|(file, symbols)| DocCoverageFileV1 {
+            file,
+            count: symbols.len() as u64,
+            symbols,
         })
         .collect::<Vec<_>>();
     files.sort_by(|left, right| {
-        right["count"]
-            .as_u64()
-            .cmp(&left["count"].as_u64())
-            .then_with(|| left["file"].as_str().cmp(&right["file"].as_str()))
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.file.cmp(&right.file))
     });
-    let output = json!({
-        "path_filter": path_prefix,
-        "total_undocumented": total_undocumented,
-        "returned_count": returned_count,
-        "omitted_count": total_undocumented.saturating_sub(returned_count),
-        "complete": returned_count == total_undocumented,
-        "limit": limit,
-        "file_count": files.len(),
-        "files": files,
-    });
-    Ok(generic_tool_result(
-        Some(response_handle_root),
-        &args,
-        &output,
+    Ok(graph_tool_completion(
+        GraphToolResultV1::DocCoverage(DocCoverageResultV1 {
+            path_filter: path_prefix.map(str::to_owned),
+            total_undocumented: total_undocumented as u64,
+            returned_count: returned_count as u64,
+            omitted_count: total_undocumented.saturating_sub(returned_count) as u64,
+            complete: returned_count == total_undocumented,
+            limit: limit as u64,
+            file_count: files.len() as u64,
+            files,
+        }),
         touched_files,
     ))
 }
 
 #[hotpath::measure(future = true, label = "mcp.analysis.god_class.total")]
-pub async fn handle_god_class(
-    response_handle_root: &Path,
+pub(super) async fn compute_god_class(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
-) -> Result<ToolResult> {
-    let limit = args
-        .get("limit")
-        .and_then(serde_json::Value::as_u64)
-        .map_or(10, |v| v.min(100) as usize);
-
-    let path_prefix = effective_path(&args, scope_prefix);
+) -> Result<GraphToolCompletionV1> {
+    let request: GodClassSurfaceRequestV1 =
+        decode_primitive_request(&args, "tracedecay_god_class")?;
+    let limit = request.limit.map_or(10, |v| v.min(100) as usize);
+    let path_prefix = request.path.as_deref().or(scope_prefix);
 
     let (mut symbols, edges) = hotpath::measure_block!("mcp.analysis.god_class.graph", {
         let symbols = verified_analysis_symbols(graph, path_prefix)?;
@@ -409,33 +395,27 @@ pub async fn handle_god_class(
         (symbols, counts)
     });
     let touched_files = unique_file_paths(symbols.iter().map(|symbol| symbol.path.as_str()));
-    let output = hotpath::measure_block!("mcp.analysis.god_class.assemble", {
-        let items: Vec<Value> = symbols
-            .iter()
-            .map(|symbol| {
-                let (methods, fields) = counts.get(&symbol.occurrence).copied().unwrap_or_default();
-                json!({
-                    "id": symbol.occurrence.as_str(),
-                    "name": symbol.metadata.simple_name,
-                    "kind": symbol.metadata.kind,
-                    "file": symbol.path,
-                    "line": user_line(symbol.metadata.start_line),
-                    "methods": methods,
-                    "fields": fields,
-                    "total_members": methods.saturating_add(fields),
-                })
-            })
-            .collect();
-        json!({
-            "result_count": items.len(),
-            "ranking": items,
+    let ranking: Vec<GodClassEntryV1> = symbols
+        .into_iter()
+        .map(|symbol| {
+            let (methods, fields) = counts.get(&symbol.occurrence).copied().unwrap_or_default();
+            GodClassEntryV1 {
+                id: symbol.occurrence.as_str().to_owned(),
+                name: symbol.metadata.simple_name,
+                kind: symbol.metadata.kind,
+                file: symbol.path,
+                line: user_line(symbol.metadata.start_line),
+                methods,
+                fields,
+                total_members: methods.saturating_add(fields),
+            }
         })
-    });
-
-    Ok(generic_tool_result(
-        Some(response_handle_root),
-        &args,
-        &output,
+        .collect();
+    Ok(graph_tool_completion(
+        GraphToolResultV1::GodClass(GodClassResultV1 {
+            result_count: ranking.len() as u64,
+            ranking,
+        }),
         touched_files,
     ))
 }

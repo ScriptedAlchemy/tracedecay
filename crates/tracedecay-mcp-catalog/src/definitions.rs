@@ -120,10 +120,6 @@ fn required_object_schema(properties: Value, required: &[&str]) -> Value {
     schema
 }
 
-fn def_object(name: &str, title: &str, description: &str, properties: Value) -> ToolDefinition {
-    def(name, title, description, object_schema(properties))
-}
-
 fn def_required_object(
     name: &str,
     title: &str,
@@ -144,31 +140,6 @@ fn string_property(description: &str) -> Value {
         "type": "string",
         "description": description
     })
-}
-
-fn number_property(description: &str) -> Value {
-    json!({
-        "type": "number",
-        "description": description
-    })
-}
-
-fn def_path_limit_tool(
-    name: &str,
-    title: &str,
-    description: &str,
-    path_description: &str,
-    limit_description: &str,
-) -> ToolDefinition {
-    def_object(
-        name,
-        title,
-        description,
-        json!({
-            "path": string_property(path_description),
-            "limit": number_property(limit_description)
-        }),
-    )
 }
 
 fn project_selector_properties() -> Value {
@@ -384,23 +355,23 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_multi_root_execute()?,
         def_remote_status_read(),
         def_affected(),
-        def_dead_code(),
+        def_dead_code(request_schema("dead_code")?),
         def_diff_context(),
-        def_circular(),
-        def_hotspots(),
+        def_circular(request_schema("circular")?),
+        def_hotspots(request_schema("hotspots")?),
         def_similar(request_schema("similar")?),
         def_redundancy(request_schema("redundancy")?),
         def_rename_preview(request_schema("rename_preview")?),
-        def_unmounted_files(),
-        def_rank(),
-        def_largest(),
-        def_coupling(),
-        def_inheritance_depth(),
-        def_distribution(),
-        def_recursion(),
-        def_complexity(),
-        def_doc_coverage(),
-        def_god_class(),
+        def_unmounted_files(request_schema("unmounted_files")?),
+        def_rank(request_schema("rank")?),
+        def_largest(request_schema("largest")?),
+        def_coupling(request_schema("coupling")?),
+        def_inheritance_depth(request_schema("inheritance_depth")?),
+        def_distribution(request_schema("distribution")?),
+        def_recursion(request_schema("recursion")?),
+        def_complexity(request_schema("complexity")?),
+        def_doc_coverage(request_schema("doc_coverage")?),
+        def_god_class(request_schema("god_class")?),
         def_changelog(),
         def_port_status(request_schema("port_status")?),
         def_port_order(request_schema("port_order")?),
@@ -450,10 +421,10 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_lcm_describe(),
         def_lcm_expand(),
         def_lcm_expand_query(),
-        def_unsafe_patterns(),
+        def_unsafe_patterns(request_schema("unsafe_patterns")?),
         def_config(),
-        def_constructors(),
-        def_field_sites(),
+        def_constructors(request_schema("constructors")?),
+        def_field_sites(request_schema("field_sites")?),
         def_replace_symbol(),
         def_insert_at_symbol(),
         def_move_symbol(),

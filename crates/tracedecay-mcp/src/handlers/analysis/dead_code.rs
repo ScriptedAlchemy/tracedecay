@@ -1,40 +1,38 @@
 //! `tracedecay_dead_code`, symbols with no incoming edges.
 
+use tracedecay_contracts::retrieval::{
+    DeadCodeResultV1, DeadCodeSurfaceRequestV1, DeadCodeSymbolV1,
+};
+
 use super::*;
 
 #[hotpath::measure(future = true, label = "mcp.analysis.dead_code.total")]
-pub async fn handle_dead_code(
-    response_handle_root: &Path,
+pub(super) async fn compute_dead_code(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
-) -> Result<ToolResult> {
-    let kinds: Vec<NodeKind> = args.get("kinds").and_then(|v| v.as_array()).map_or_else(
-        || vec![NodeKind::Function, NodeKind::Method],
-        |arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().and_then(NodeKind::from_str))
-                .collect()
-        },
-    );
-
-    let include_public = args
-        .get("include_public")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    let limit = args
-        .get("limit")
-        .and_then(Value::as_u64)
+) -> Result<GraphToolCompletionV1> {
+    let request: DeadCodeSurfaceRequestV1 =
+        decode_primitive_request(&args, "tracedecay_dead_code")?;
+    let kinds: Vec<NodeKind> = match &request.kinds {
+        Some(kinds) => kinds
+            .iter()
+            .map(|kind| requested_node_kind("tracedecay_dead_code", kind))
+            .collect::<Result<_>>()?,
+        None => vec![NodeKind::Function, NodeKind::Method],
+    };
+    let include_public = request.include_public.unwrap_or(false);
+    let limit = request
+        .limit
         .map_or(100, |value| value.clamp(1, 1_000) as usize);
-    let path_prefix = effective_path(&args, scope_prefix);
+    let path_prefix = request.path.as_deref().or(scope_prefix);
     let dead = hotpath::future!(
         graph.find_dead_code(&kinds, include_public, path_prefix, limit),
         label = "mcp.analysis.dead_code.graph"
     )
     .await?;
-    let (items, files) = hotpath::measure_block!("mcp.analysis.dead_code.compute", {
-        let mut items = Vec::with_capacity(dead.len());
-        let mut files = Vec::with_capacity(dead.len());
+    let symbols = hotpath::measure_block!("mcp.analysis.dead_code.compute", {
+        let mut symbols = Vec::with_capacity(dead.len());
         for symbol in dead {
             let binding = symbol
                 .binding
@@ -60,31 +58,23 @@ pub async fn handle_dead_code(
                     detail: "a dead-code candidate has no extraction-attested symbol metadata"
                         .to_owned(),
                 })?;
-            files.push(file.clone());
-            items.push(json!({
-                "id": symbol.occurrence.as_str(),
-                "name": metadata.simple_name,
-                "kind": metadata.kind,
-                "file": file,
-                "line": user_line(metadata.start_line),
-                "signature": metadata.signature,
-            }));
+            symbols.push(DeadCodeSymbolV1 {
+                id: symbol.occurrence.as_str().to_owned(),
+                name: metadata.simple_name,
+                kind: metadata.kind,
+                file,
+                line: user_line(metadata.start_line),
+                signature: metadata.signature,
+            });
         }
-        (items, files)
+        symbols
     });
-    let touched_files = unique_file_paths(files.iter().map(String::as_str));
-    let output = hotpath::measure_block!(
-        "mcp.analysis.dead_code.assemble",
-        json!({
-            "dead_code_count": items.len(),
-            "symbols": items,
-        })
-    );
-
-    Ok(generic_tool_result(
-        Some(response_handle_root),
-        &args,
-        &output,
+    let touched_files = unique_file_paths(symbols.iter().map(|symbol| symbol.file.as_str()));
+    Ok(graph_tool_completion(
+        GraphToolResultV1::DeadCode(DeadCodeResultV1 {
+            dead_code_count: symbols.len() as u64,
+            symbols,
+        }),
         touched_files,
     ))
 }

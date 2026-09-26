@@ -1,28 +1,22 @@
 //! `tracedecay_field_sites`, read and write references to a named field.
 
+use tracedecay_contracts::retrieval::{
+    FieldSiteV1, FieldSitesResultV1, FieldSitesSurfaceRequestV1,
+};
+
 use super::*;
 
 #[hotpath::measure(future = true, label = "mcp.analysis.field_sites.total")]
-pub async fn handle_field_sites(
-    response_handle_root: &Path,
+pub(super) async fn compute_field_sites(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
-) -> Result<ToolResult> {
-    let raw =
-        args.get("field")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "tracedecay_field_sites requires a 'field' argument".to_string(),
-            })?;
-    let writes_only = args
-        .get("writes_only")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    let limit = args
-        .get("limit")
-        .and_then(serde_json::Value::as_u64)
-        .map_or(200, |v| v.clamp(1, 2000) as usize);
+) -> Result<GraphToolCompletionV1> {
+    let request: FieldSitesSurfaceRequestV1 =
+        decode_primitive_request(&args, "tracedecay_field_sites")?;
+    let raw = request.field.as_str();
+    let writes_only = request.writes_only.unwrap_or(false);
+    let limit = request.limit.map_or(200, |v| v.clamp(1, 2000) as usize);
 
     let (qualifier, field_name) = match raw.rsplit_once("::") {
         Some((q, f)) => (Some(q.to_string()), f.to_string()),
@@ -52,8 +46,8 @@ pub async fn handle_field_sites(
         tokio::task::spawn_blocking(move || {
             let mut files = symbols_by_file.keys().cloned().collect::<Vec<_>>();
             files.sort();
-            let mut writes: Vec<Value> = Vec::new();
-            let mut reads: Vec<Value> = Vec::new();
+            let mut writes: Vec<FieldSiteV1> = Vec::new();
+            let mut reads: Vec<FieldSiteV1> = Vec::new();
             let mut touched: Vec<String> = Vec::new();
 
             'outer: for file in &files {
@@ -124,12 +118,12 @@ pub async fn handle_field_sites(
                         }
                     }
                     let enclosing = enclosing.map(|n| n.metadata.qualified_name.clone());
-                    let entry = json!({
-                        "file": file,
-                        "line": site.line,
-                        "enclosing": enclosing,
-                        "snippet": line_text.trim(),
-                    });
+                    let entry = FieldSiteV1 {
+                        file: file.clone(),
+                        line: site.line,
+                        enclosing,
+                        snippet: line_text.trim().to_owned(),
+                    };
                     if !touched.contains(file) {
                         touched.push(file.clone());
                     }
@@ -162,31 +156,21 @@ pub async fn handle_field_sites(
     })??;
 
     let qualifier_applied = qualifier.is_some();
-    let payload = hotpath::measure_block!("mcp.analysis.field_sites.assemble", {
-        if writes_only {
-            json!({
-                "field": raw,
-                "qualifier": qualifier,
-                "qualifier_applied": qualifier_applied,
-                "write_count": writes.len(),
-                "write_sites": writes,
-            })
-        } else {
-            json!({
-                "field": raw,
-                "qualifier": qualifier,
-                "qualifier_applied": qualifier_applied,
-                "write_count": writes.len(),
-                "read_count": reads.len(),
-                "write_sites": writes,
-                "read_sites": reads,
-            })
-        }
-    });
-    Ok(generic_tool_result(
-        Some(response_handle_root),
-        &args,
-        &payload,
+    let (read_count, read_sites) = if writes_only {
+        (None, None)
+    } else {
+        (Some(reads.len() as u64), Some(reads))
+    };
+    Ok(graph_tool_completion(
+        GraphToolResultV1::FieldSites(FieldSitesResultV1 {
+            qualifier,
+            qualifier_applied,
+            write_count: writes.len() as u64,
+            read_count,
+            write_sites: writes,
+            read_sites,
+            field: request.field,
+        }),
         touched,
     ))
 }
@@ -355,7 +339,6 @@ fn qualified_type_matches(qualified_name: &str, type_name: &str) -> bool {
             .is_some_and(|prefix| prefix.ends_with("::"))
 }
 
-#[cfg(feature = "source-analysis")]
 fn rust_field_receiver_types(source: &str, field: &str) -> Result<HashMap<usize, String>> {
     let tree =
         tracedecay_code_extraction::ts_provider::parse_extractor_source("rust", "Rust", source)
@@ -372,15 +355,6 @@ fn rust_field_receiver_types(source: &str, field: &str) -> Result<HashMap<usize,
     Ok(receivers)
 }
 
-#[cfg(not(feature = "source-analysis"))]
-fn rust_field_receiver_types(_source: &str, _field: &str) -> Result<HashMap<usize, String>> {
-    Err(verified_analysis_unavailable(
-        "field-qualifier",
-        "Rust field receiver parsing is not mounted",
-    ))
-}
-
-#[cfg(feature = "source-analysis")]
 fn collect_rust_field_receiver_types(
     node: tree_sitter::Node<'_>,
     source: &str,
@@ -403,7 +377,6 @@ fn collect_rust_field_receiver_types(
     }
 }
 
-#[cfg(feature = "source-analysis")]
 fn rust_receiver_type(node: tree_sitter::Node<'_>, source: &str, receiver: &str) -> Option<String> {
     let function = rust_ancestor(node, "function_item")?;
     if receiver == "self" {
@@ -426,7 +399,6 @@ fn rust_receiver_type(node: tree_sitter::Node<'_>, source: &str, receiver: &str)
     (!rust_receiver_is_shadowed(node, function, source, receiver)).then_some(parameter_type)
 }
 
-#[cfg(feature = "source-analysis")]
 fn rust_ancestor<'tree>(
     mut node: tree_sitter::Node<'tree>,
     kind: &str,
@@ -440,7 +412,6 @@ fn rust_ancestor<'tree>(
     None
 }
 
-#[cfg(feature = "source-analysis")]
 fn rust_receiver_is_shadowed(
     node: tree_sitter::Node<'_>,
     function: tree_sitter::Node<'_>,
@@ -490,7 +461,6 @@ fn rust_receiver_is_shadowed(
     true
 }
 
-#[cfg(feature = "source-analysis")]
 fn rust_condition_binds(node: tree_sitter::Node<'_>, source: &str, name: &str) -> bool {
     if node.kind() == "let_condition" {
         return node
@@ -502,7 +472,6 @@ fn rust_condition_binds(node: tree_sitter::Node<'_>, source: &str, name: &str) -
         .any(|child| rust_condition_binds(child, source, name))
 }
 
-#[cfg(feature = "source-analysis")]
 fn rust_pattern_binds(node: tree_sitter::Node<'_>, source: &str, name: &str) -> bool {
     if node.kind() == "identifier" && node_text(source, node) == Some(name) {
         return true;
@@ -512,7 +481,6 @@ fn rust_pattern_binds(node: tree_sitter::Node<'_>, source: &str, name: &str) -> 
         .any(|child| rust_pattern_binds(child, source, name))
 }
 
-#[cfg(feature = "source-analysis")]
 fn rust_simple_type(node: tree_sitter::Node<'_>, source: &str) -> Option<String> {
     match node.kind() {
         "type_identifier" | "scoped_type_identifier" => node_text(source, node).map(str::to_owned),
@@ -523,7 +491,6 @@ fn rust_simple_type(node: tree_sitter::Node<'_>, source: &str) -> Option<String>
     }
 }
 
-#[cfg(feature = "source-analysis")]
 fn node_text<'a>(source: &'a str, node: tree_sitter::Node<'_>) -> Option<&'a str> {
     source.get(node.byte_range())
 }

@@ -200,7 +200,7 @@ async fn coupling_ranks_distinct_other_files_for_fan_in_and_fan_out() {
     assert_eq!(error.code, -32603);
     assert_eq!(
         error.message,
-        "tool execution failed: config error: invalid direction 'sideways'. Valid values: fan_in, fan_out"
+        "tool execution failed: config error: invalid arguments for tracedecay_coupling: unknown variant `sideways`, expected `fan_in` or `fan_out`"
     );
 
     fixture.harness.shutdown().await;
