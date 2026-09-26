@@ -425,6 +425,9 @@ async fn handle_branch_autotrack_action(
                         );
                     }
                 }
+                for stale in tracedecay_application::pr_tracking::load_state(&data_root)?.stale {
+                    eprintln!("Stale PR branch: {stale}; the next reconciliation resets it");
+                }
             }
         }
         BranchAutotrackAction::Enable { poll_secs, path } => {

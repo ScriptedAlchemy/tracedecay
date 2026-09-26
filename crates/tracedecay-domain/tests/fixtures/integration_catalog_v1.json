@@ -29,6 +29,10 @@
         {
           "integration_id": "kiro",
           "profile_binding": "user"
+        },
+        {
+          "integration_id": "pi",
+          "profile_binding": "user"
         }
       ]
     }

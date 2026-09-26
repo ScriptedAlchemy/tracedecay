@@ -280,3 +280,213 @@ async fn context_lexical_anchors_admit_every_exact_import_site() {
 
     production.harness.shutdown().await;
 }
+
+const UPDATE_TASK: &str =
+    "Explain how the update command coordinates daemon shutdown and restoration";
+const UPDATE_DEFINITION: &str = "src/update_cmd.rs";
+/// Every site that defines the anchor: the command and a legacy shim.
+const UPDATE_SITES: &[&str] = &[UPDATE_DEFINITION, "src/legacy/update_shim.rs"];
+const LIFECYCLE_STAGES: usize = 40;
+
+/// The #2024 shape: forty graph-linked lifecycle stages declaring symbols
+/// named for the task's ordinary words (`command`, `daemon`, `shutdown`,
+/// `update`), which the exact lane admits as exact symbol-name hits, against
+/// two rare `run_update_command` definitions and their callers that declare
+/// none of them.
+fn write_update_anchor_project(dest: &Path) {
+    let src = dest.join("src");
+    fs::create_dir_all(src.join("lifecycle")).expect("lifecycle dir");
+    for stage in 0..LIFECYCLE_STAGES {
+        let next = (stage + 1) % LIFECYCLE_STAGES;
+        fs::write(
+            src.join(format!("lifecycle/stage_{stage:02}.rs")),
+            format!(
+                "//! Stage {stage} of the daemon lifecycle.\n\n\
+                 pub struct Stage{stage} {{\n\
+                 \x20   pub command: String,\n\
+                 \x20   pub daemon: u32,\n\
+                 }}\n\n\
+                 impl Stage{stage} {{\n\
+                 \x20   /// Runs the daemon shutdown for stage {stage}, then its restoration.\n\
+                 \x20   pub fn shutdown(&self) -> u32 {{\n\
+                 \x20       self.daemon + super::stage_{next:02}::restore(self.daemon)\n\
+                 \x20   }}\n\n\
+                 \x20   /// Coordinates the update command after a daemon shutdown.\n\
+                 \x20   pub fn update(&mut self) -> u32 {{\n\
+                 \x20       self.daemon = self.shutdown();\n\
+                 \x20       self.daemon\n\
+                 \x20   }}\n\
+                 }}\n\n\
+                 /// Restores stage {stage} after a daemon shutdown.\n\
+                 pub fn restore(daemon: u32) -> u32 {{\n\
+                 \x20   daemon + {stage}\n\
+                 }}\n"
+            ),
+        )
+        .expect("lifecycle stage");
+    }
+    fs::write(
+        src.join("update_cmd.rs"),
+        "/// Refresh installed components after an upgrade.\n\
+         pub fn run_update_command(no_reinstall: bool) -> Result<(), String> {\n\
+         \x20   let plan = if no_reinstall { \"refresh\" } else { \"reinstall\" };\n\
+         \x20   apply_plan(plan)\n\
+         }\n\n\
+         fn apply_plan(plan: &str) -> Result<(), String> {\n\
+         \x20   if plan.is_empty() { Err(\"empty plan\".to_owned()) } else { Ok(()) }\n\
+         }\n",
+    )
+    .expect("update definition");
+    fs::write(
+        src.join("main.rs"),
+        "mod cli;\nmod update_cmd;\n\n\
+         fn main() {\n\
+         \x20   if let Err(error) = update_cmd::run_update_command(false) {\n\
+         \x20       eprintln!(\"{error}\");\n\
+         \x20   }\n\
+         }\n",
+    )
+    .expect("main caller");
+    fs::write(
+        src.join("cli.rs"),
+        "pub fn refresh_only() -> Result<(), String> {\n\
+         \x20   crate::update_cmd::run_update_command(true)\n\
+         }\n",
+    )
+    .expect("cli caller");
+    fs::create_dir_all(src.join("legacy")).expect("legacy dir");
+    fs::write(
+        src.join("legacy/update_shim.rs"),
+        "/// Forwards the pre-1.0 entry point to the current refresh.\n\
+         pub fn run_update_command(force: bool) -> Result<(), String> {\n\
+         \x20   crate::cli::refresh_only().map(|()| drop(force))\n\
+         }\n",
+    )
+    .expect("legacy definition");
+}
+
+/// The single anchor receipt as `(matched, admitted, dropped)`, where
+/// `dropped` is `[(reason, sites)]`.
+fn single_matched_receipt(payload: &Value) -> (u64, u64, Vec<(String, u64)>) {
+    let receipts = payload["lexical_anchors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("lexical_anchors receipt missing in {payload}"));
+    assert_eq!(receipts.len(), 1, "{payload}");
+    let receipt = &receipts[0];
+    assert_eq!(receipt["anchor"], "run_update_command", "{payload}");
+    assert_eq!(receipt["outcome"], "matched", "{payload}");
+    let dropped = receipt
+        .get("dropped")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|drop| {
+            (
+                drop["reason"].as_str().expect("drop reason").to_owned(),
+                drop["sites"].as_u64().expect("drop sites"),
+            )
+        })
+        .collect();
+    (
+        receipt["matched"].as_u64().expect("matched"),
+        receipt["admitted"].as_u64().expect("admitted"),
+        dropped,
+    )
+}
+
+#[tokio::test]
+async fn context_returns_a_rare_anchor_site_over_an_exact_word_neighborhood() {
+    let production = production_composition_fixture_with_sources(write_update_anchor_project).await;
+    let server = production
+        .harness
+        .server(&production.project_root)
+        .expect("update anchor server");
+    warm_code_index_search(&server, "run_update_command").await;
+
+    let payload = context_json(
+        &server,
+        json!({
+            "task": UPDATE_TASK,
+            "lexical_anchors": ["run_update_command"],
+            "prefer_symbol": true,
+            "include_code": true,
+            "format": "json",
+        }),
+    )
+    .await;
+    let files = matched_files(&payload);
+    let anchored: BTreeSet<&str> = UPDATE_SITES.iter().copied().collect();
+    assert!(
+        files.contains(&UPDATE_DEFINITION),
+        "the admitted anchor definition is missing from search_matches: {files:?}"
+    );
+    let (matched, admitted, dropped) = single_matched_receipt(&payload);
+    assert_eq!(
+        (admitted, dropped.as_slice()),
+        (anchored.len() as u64, &[][..]),
+        "every anchor site fits the default page, so all are returned: {payload}"
+    );
+    assert!(matched >= admitted, "{payload}");
+    let leading: BTreeSet<&str> = files[..anchored.len()].iter().copied().collect();
+    assert_eq!(
+        leading, anchored,
+        "the admitted anchor sites must lead the page ahead of every exact-word hit: {files:?}"
+    );
+    let code = payload["code"]
+        .as_array()
+        .unwrap_or_else(|| panic!("code missing in {payload}"));
+    let definition = code
+        .iter()
+        .find(|block| block["file"] == UPDATE_DEFINITION)
+        .unwrap_or_else(|| panic!("the anchor definition's code is missing: {payload}"));
+    assert!(
+        definition["code"]
+            .as_str()
+            .is_some_and(|body| body.contains("pub fn run_update_command")),
+        "{definition}"
+    );
+
+    // One seat: the best anchor site is returned and the receipt names the
+    // admitted site the page could not carry, instead of claiming it.
+    let one_seat = context_json(
+        &server,
+        json!({
+            "task": UPDATE_TASK,
+            "lexical_anchors": ["run_update_command"],
+            "max_nodes": 1,
+            "format": "json",
+        }),
+    )
+    .await;
+    let files = matched_files(&one_seat);
+    assert_eq!(files.len(), 1, "{one_seat}");
+    assert!(anchored.contains(files[0]), "{one_seat}");
+    let (_, admitted, dropped) = single_matched_receipt(&one_seat);
+    assert_eq!(
+        (admitted, dropped),
+        (
+            1,
+            vec![("outside_page".to_owned(), anchored.len() as u64 - 1)]
+        ),
+        "{one_seat}"
+    );
+
+    let markdown = handle_real_server_tool_call(
+        &server,
+        "tracedecay_context",
+        json!({
+            "task": UPDATE_TASK,
+            "lexical_anchors": ["run_update_command"],
+            "max_nodes": 1,
+            "format": "markdown",
+        }),
+    )
+    .await;
+    let markdown = extract_real_server_text(&markdown);
+    assert!(
+        markdown.contains("1 returned, dropped 1 outside this page"),
+        "markdown must name the dropped anchor sites:\n{markdown}"
+    );
+
+    production.harness.shutdown().await;
+}

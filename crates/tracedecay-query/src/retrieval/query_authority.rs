@@ -5,15 +5,16 @@
 //! evaluated replacement; this module does not choose weights, mint
 //! calibration identities, or generate key material.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use thiserror::Error;
 use tracedecay_domain::{
     CalibrationProfileId, ComponentRevision, DiversityPolicy, EphemeralSanitizedQueryViewV1,
-    FusionProfile, PrivacyDomainId, QueryDigest, QueryFallbackSubpayload, RetrievalContractError,
-    RetrievalCursor, RetrievalCursorKeyId, RetrievalError, RetrievalRequest, RetrieverBatch,
-    RetrieverKind, RetrieverOutcome, ScoreDomainCalibrationV1, ScoreDomainId,
+    FusionProfile, PrivacyDomainId, QueryDigest, QueryFallbackSubpayload, RetrievalAnchorId,
+    RetrievalContractError, RetrievalCursor, RetrievalCursorKeyId, RetrievalError,
+    RetrievalRequest, RetrieverBatch, RetrieverKind, RetrieverOutcome, ScoreDomainCalibrationV1,
+    ScoreDomainId,
 };
 use tracedecay_temporal_query::ranking::NORMALIZED_SCORE_CEILING_MICROS;
 
@@ -379,13 +380,16 @@ impl QueryAuthorityV1 {
 
     /// Compose and page the exact query lanes under the accepted immutable
     /// profile, returning the authenticated query identity and canonical
-    /// fallback subpayload together.
+    /// fallback subpayload together. `anchor_tiers` names the caller anchors
+    /// each lexical site carries; see
+    /// [`CompositionKernel::compose_with_anchor_tiers`].
     #[hotpath::measure(label = "query.authority.compose")]
     pub fn compose(
         &self,
         request: &RetrievalRequest,
         query_view: &EphemeralSanitizedQueryViewV1,
         lanes: Vec<CompositionLaneInput>,
+        anchor_tiers: &BTreeMap<RetrievalAnchorId, u32>,
         page_size: usize,
         cursor: Option<&RetrievalCursor>,
     ) -> Result<AuthorizedQueryFallbackV1, QueryAuthorityErrorV1> {
@@ -396,12 +400,13 @@ impl QueryAuthorityV1 {
         validate_lane_set(&lanes, &RetrieverKind::QUERY_FALLBACK_LANES)?;
         let query_digest = self.keyring.digest_active_query(request, query_view)?;
         let fallback_lanes = lanes.clone();
-        let composition = self.kernel.compose(
+        let composition = self.kernel.compose_with_anchor_tiers(
             &FusionStageInput {
                 profile: self.profile.clone(),
                 lanes,
             },
             &self.diversity,
+            anchor_tiers,
         )?;
         let mut page = self.kernel.paginate(
             request,

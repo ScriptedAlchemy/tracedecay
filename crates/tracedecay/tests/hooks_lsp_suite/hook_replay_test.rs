@@ -214,6 +214,31 @@ fn replays(root: &str) -> Vec<Replay> {
             })),
             tool_input_env: None,
         },
+        Replay {
+            subcommand: "hook-pi-event",
+            agent: "pi",
+            hook_name: "session_start",
+            stdin: Some(json!({
+                "hook_event_name": "session_start",
+                "id": "pi-e1",
+                "session_id": "pi-s1",
+                "cwd": root,
+                "reason": "startup",
+            })),
+            tool_input_env: None,
+        },
+        Replay {
+            subcommand: "hook-pi-event",
+            agent: "pi",
+            hook_name: "agent_end",
+            stdin: Some(json!({
+                "hook_event_name": "agent_end",
+                "id": "pi-e2",
+                "session_id": "pi-s1",
+                "cwd": root,
+            })),
+            tool_input_env: None,
+        },
     ]
 }
 

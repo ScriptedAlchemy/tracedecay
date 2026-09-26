@@ -90,9 +90,10 @@ unauthorized external action after completing independent, authorized work.
   digest from `scripts/check-dashboard-bundle.py` in
   `TRACEDECAY_DASHBOARD_BUNDLE_SHA256`; missing or stale digests fail closed.
 - Existing linked worktrees may be cleaned up only through
-  `scripts/worktree-gc.sh`, or by unlocking and removing the exact owned path.
-  Never remove another lane, select cleanup targets by name prefix, or treat a
-  clean integration-tip lane as abandoned.
+  `scripts/worktree-gc.py` (install its hourly user timer with
+  `scripts/install-worktree-gc-timer.sh`), or by unlocking and removing the
+  exact owned path. Never remove another lane, select cleanup targets by name
+  prefix, or treat a clean integration-tip lane as abandoned.
 - Never re-run tests that are known-red under another active lane; cite the
   owner instead.
 

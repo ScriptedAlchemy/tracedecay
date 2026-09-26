@@ -248,3 +248,74 @@ async fn configured_executable_is_launched_instead_of_the_path_binary() {
         "the PATH binary must stay untouched while a configured executable exists"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn configured_model_reaches_the_summarizer_in_a_private_workspace() {
+    let _trap = TrapPath::install(&[]);
+    let root = tempfile::tempdir().unwrap();
+    let project_root = root.path().join("project");
+    let project_id = ProjectId::new("project.lcm-summarizer-tuning".to_owned()).unwrap();
+    let runtime = RegisteredGlobalDbTestRuntime::project(
+        root.path().join("profile"),
+        &project_root,
+        project_id.clone(),
+    )
+    .await
+    .unwrap();
+    let database = runtime.project_database_arc().unwrap();
+
+    let configured = root.path().join("bin").join("cursor-agent");
+    let argv = root.path().join("argv.log");
+    std::fs::create_dir_all(configured.parent().unwrap()).unwrap();
+    std::fs::write(
+        &configured,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' 'tuned summary text'\n",
+            argv.display()
+        ),
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&configured).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o700);
+    std::fs::set_permissions(&configured, permissions).unwrap();
+    tracedecay_configuration::test_support::pin_lcm_summarizer_executables(
+        project_id,
+        &project_root,
+        LcmSummarizerExecutablesV1 {
+            cursor_agent: LcmSummarizerExecutableV1::configured_with(
+                configured,
+                Some("configured-summary-model".to_owned()),
+                Some(5),
+            )
+            .unwrap(),
+            codex: LcmSummarizerExecutableV1::Unconfigured,
+        },
+    )
+    .unwrap();
+
+    let summary = generate_provider_summary(
+        &database,
+        "cursor",
+        &summary_request("cursor"),
+        Duration::from_secs(30),
+    )
+    .await
+    .ok()
+    .map(|summary| summary.text);
+    assert_eq!(summary.as_deref(), Some("tuned summary text"));
+
+    let argv = std::fs::read_to_string(&argv).unwrap();
+    let args: Vec<&str> = argv.lines().collect();
+    let value_after = |flag: &str| {
+        args.iter()
+            .position(|arg| *arg == flag)
+            .and_then(|index| args.get(index + 1).copied())
+    };
+    assert_eq!(value_after("--model"), Some("configured-summary-model"));
+    let workspace = PathBuf::from(value_after("--workspace").unwrap());
+    assert_ne!(workspace, std::env::temp_dir());
+    assert!(
+        !workspace.exists(),
+        "the per-run summary workspace must be removed after the run"
+    );
+}

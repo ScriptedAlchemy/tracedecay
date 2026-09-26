@@ -139,7 +139,11 @@ fn configure_codex_summarizer(
             "value": {
                 "kind": "lcm_summarizer_executables",
                 "value": {
-                    "codex": {"state": "configured", "canonical_path": codex_bin},
+                    "codex": {
+                        "state": "configured",
+                        "canonical_path": codex_bin,
+                        "timeout_secs": 5,
+                    },
                 },
             },
             "expected_revision": expected_revision,
@@ -187,10 +191,6 @@ done
     .unwrap();
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::set_permissions(&codex_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-    // Init starts the managed daemon, so its provider environment must already
-    // hold the summary tuning before initialization captures the process
-    // environment.
-    let _summary_env = EnvVarGuard::set("TRACEDECAY_CODEX_SUMMARY_TIMEOUT_SECS", "5");
     let project_id = mark_test_project(&project);
     // The hook resolves the project root through the initialized-store gate,
     // exactly like production installs: `init` creates the project store

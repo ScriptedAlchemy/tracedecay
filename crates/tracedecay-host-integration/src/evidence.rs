@@ -189,14 +189,13 @@ pub(crate) const HOST_REGISTRATIONS: &[HostRegistrationDescriptor] = host_regist
         Cli => "plugin/pi/index.ts",
         Hook => "plugin/pi/index.ts",
     }
-    // Factory Droid's adopted lifecycle carries exactly one registration
-    // route: the `mcpServers.tracedecay` entry that `droid mcp add` writes
-    // into the host-owned `~/.factory/mcp.json`. Droid documents a hooks
-    // surface, but no checked-in native Droid fixture proves that route yet,
-    // so the hook row cites the host contract instead.
+    // Factory Droid carries two routes: the `mcpServers.tracedecay` entry
+    // that `droid mcp add` writes into the host-owned `~/.factory/mcp.json`,
+    // and the managed SessionStart / Stop merge into `~/.factory/hooks.json`
+    // whose payloads the checked-in `droid.json` fixture proves.
     FactoryDroid {
         Cli => "src/tool_command.rs",
-        Hook => "https://docs.factory.ai/harness/hooks",
+        Hook => "src/agents/droid.rs",
         Mcp => "src/agents/droid.rs",
     }
 };
@@ -428,6 +427,14 @@ pub fn stock_host_native_fixture_evidence_from_embedded_assets(
             "file.edited,tool.execute.after,session.idle/session.status,lsp.updated",
             &["saved_edit", "post_tool_use"][..],
         ),
+        // The Pi extension forwards only its session boundaries; no edit
+        // callback exists, so the edit boundary stays fixture-limited.
+        HostKindV1::Pi => (
+            "pi",
+            "crates/tracedecay-hooks/fixtures/host_events/pi.json",
+            "session_start,agent_end",
+            &["saved_edit"][..],
+        ),
         // The captured Droid fixtures prove the session boundaries the
         // integration deploys (`SessionStart`, `Stop`); no tool-lifecycle
         // event was captured, so the edit boundary stays unclaimed.
@@ -447,8 +454,7 @@ pub fn stock_host_native_fixture_evidence_from_embedded_assets(
         | HostKindV1::RooCode
         | HostKindV1::Kilo
         | HostKindV1::Gemini
-        | HostKindV1::Copilot
-        | HostKindV1::Pi => return None,
+        | HostKindV1::Copilot => return None,
     };
     let bytes = assets
         .native_fixtures
@@ -554,6 +560,7 @@ pub fn native_host_edit_stop_conformance_evidence_from_embedded_assets(
         HostKindV1::Kiro,
         HostKindV1::KimiCode,
         HostKindV1::OpenCode,
+        HostKindV1::Pi,
     ]
     .into_iter()
     .filter_map(|host| stock_host_native_fixture_evidence_from_embedded_assets(assets, host))

@@ -116,6 +116,7 @@ pub async fn run_doctor(
     eprintln!("\n\x1b[1mCurrent project\x1b[0m");
     let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     check_inert_project_config(&mut dc, &project_path);
+    check_pr_autotrack_state(&mut dc, &project_path);
     let daemon_status = daemon_project_status(&project_path).await;
     let storage_health = match daemon_status.as_ref() {
         Ok(None) => {
@@ -797,6 +798,42 @@ fn domain_symbol_rules_warning(project_path: &Path) -> Option<String> {
 fn check_inert_project_config(dc: &mut DoctorCounters, project_path: &Path) {
     if let Some(warning) = domain_symbol_rules_warning(project_path) {
         dc.warn(&warning);
+    }
+}
+
+/// Warnings name entries PR reconciliation will reset; the error names a
+/// state file that blocks reconciliation outright.
+fn pr_autotrack_state_findings(data_root: &Path) -> std::result::Result<Vec<String>, String> {
+    match tracedecay_application::pr_tracking::load_state(data_root) {
+        Ok(state) => Ok(state
+            .stale
+            .iter()
+            .map(|stale| {
+                format!(
+                    "{stale}; PR auto-tracking reconciliation drops this entry and re-tracks the PR if it is still open"
+                )
+            })
+            .collect()),
+        Err(error) => Err(format!(
+            "PR auto-tracking state {} is unreadable ({error}); reconciliation stays blocked until that file is removed, after which open PRs are re-tracked",
+            tracedecay_application::pr_tracking::state_path(data_root).display()
+        )),
+    }
+}
+
+fn check_pr_autotrack_state(dc: &mut DoctorCounters, project_path: &Path) {
+    let Ok(Some(layout)) =
+        tracedecay_runtime_core::storage::resolve_enrolled_layout_for_current_profile(project_path)
+    else {
+        return;
+    };
+    match pr_autotrack_state_findings(&layout.data_root) {
+        Ok(warnings) => {
+            for warning in warnings {
+                dc.warn(&warning);
+            }
+        }
+        Err(failure) => dc.fail(&failure),
     }
 }
 

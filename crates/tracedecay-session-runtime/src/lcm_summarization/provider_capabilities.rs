@@ -272,6 +272,15 @@ pub(super) trait AuthoritativeSummarizerV1: Sync {
 pub(super) const CURSOR_AGENT_UNCONFIGURED: &str = "cursor_agent_unconfigured";
 pub(super) const CODEX_APP_SERVER_UNCONFIGURED: &str = "codex_app_server_unconfigured";
 
+/// The configured `timeout_secs` replaces the 90-second provider default, and
+/// a provider run never outlives the caller's budget.
+fn configured_timeout(executable: &LcmSummarizerExecutableV1, caller: Duration) -> Duration {
+    executable
+        .timeout()
+        .unwrap_or(Duration::from_secs(90))
+        .min(caller)
+}
+
 struct CursorAgentSummarizerV1;
 
 impl AuthoritativeSummarizerV1 for CursorAgentSummarizerV1 {
@@ -296,8 +305,11 @@ async fn cursor_agent_summary(
             CURSOR_AGENT_UNCONFIGURED,
         ));
     };
-    let mut config = CursorAgentSummaryConfig::for_executable(cursor_agent_bin);
-    config.timeout = config.timeout.min(timeout);
+    let config = CursorAgentSummaryConfig {
+        cursor_agent_bin: cursor_agent_bin.to_path_buf(),
+        model: executable.model().map(str::to_owned),
+        timeout: configured_timeout(&executable, timeout),
+    };
     let source_range = request.source_range.clone();
     let text = tokio::task::spawn_blocking(move || summarize_with_cursor_agent(&request, &config))
         .await
@@ -336,7 +348,10 @@ async fn codex_app_server_summary(
     };
     let mut config =
         tracedecay_sessions::runtime::hosts::codex_app_server::CodexAppServerSummaryConfig::for_executable(codex_bin);
-    config.timeout = config.timeout.min(timeout);
+    if let Some(model) = executable.model() {
+        config.model = Some(model.to_owned());
+    }
+    config.timeout = configured_timeout(&executable, timeout);
     let source_range = request.source_range.clone();
     let result = tokio::task::spawn_blocking(move || {
         tracedecay_sessions::runtime::hosts::codex_app_server::summarize_with_codex_app_server(

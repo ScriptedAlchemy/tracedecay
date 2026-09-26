@@ -6,7 +6,7 @@ use super::*;
 
 const READINESS_AGGREGATION_SCHEMA_VERSION: u32 = 1;
 pub(super) const MAX_READINESS_INPUT_ROWS: usize = 10_000;
-pub(super) const READINESS_HOST_BUCKETS: usize = 6;
+pub(super) const READINESS_HOST_BUCKETS: usize = 7;
 const READINESS_DISPOSITION_CLASSES: usize = 5;
 const READINESS_DISPOSITION_STATUSES: usize = 8;
 const READINESS_RETRYABLE_STATES: usize = 3;
@@ -56,6 +56,7 @@ pub(crate) enum ReadinessHost {
     Cursor,
     Hermes,
     Kiro,
+    Pi,
     Other,
 }
 
@@ -67,6 +68,7 @@ impl ReadinessHost {
             Some(tracedecay_domain::HostIntegrationIdV1::Cursor) => Self::Cursor,
             Some(tracedecay_domain::HostIntegrationIdV1::Hermes) => Self::Hermes,
             Some(tracedecay_domain::HostIntegrationIdV1::Kiro) => Self::Kiro,
+            Some(tracedecay_domain::HostIntegrationIdV1::Pi) => Self::Pi,
             Some(_) | None => Self::Other,
         }
     }

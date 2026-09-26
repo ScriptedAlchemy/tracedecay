@@ -100,7 +100,7 @@ fn composition_sorts_once_and_keeps_one_provenance_per_fused_candidate() {
         .iter()
         .zip(&output.ranked_candidates)
     {
-        assert_eq!(*record, fusion.comparator_record(&ranked.candidate));
+        assert_eq!(*record, fusion.comparator_record(&ranked.candidate, 0));
     }
 
     for candidate in output
@@ -331,7 +331,7 @@ fn comparator_record_retains_the_actual_evidence_tie_break() {
     left.occurrences
         .extend([other, left.occurrences[0].clone()]);
     left.occurrences.reverse();
-    let record = fusion.comparator_record(&left);
+    let record = fusion.comparator_record(&left, 0);
     assert_eq!(
         record.retriever_evidence_anchors,
         vec![
@@ -341,9 +341,11 @@ fn comparator_record_retains_the_actual_evidence_tie_break() {
     );
     assert_eq!(
         compare_fused(&left, &right),
-        record
-            .retriever_evidence_anchors
-            .cmp(&fusion.comparator_record(&right).retriever_evidence_anchors)
+        record.retriever_evidence_anchors.cmp(
+            &fusion
+                .comparator_record(&right, 0)
+                .retriever_evidence_anchors
+        )
     );
     let output = compose_corpus(&no_caps());
     for (record, ranked) in output
@@ -406,7 +408,7 @@ fn saturated_scores_preserve_retriever_strength_before_identity_ties() {
 
     let fusion = DeterministicFixedPointFusion::new(id("ranking.fixture.v1"));
     assert_eq!(
-        fusion.comparator_record(&stronger).domain_scores,
+        fusion.comparator_record(&stronger, 0).domain_scores,
         vec![(
             RetrieverKind::Lexical,
             id("score.lexical"),

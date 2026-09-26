@@ -51,9 +51,11 @@ pub struct ContextSurfaceRequestV1 {
     pub memory_min_trust: Option<f64>,
     /// Exact identifiers or technical terms the answer must be about. Each
     /// runs as its own lexical route: hits carrying an anchor outrank hits
-    /// carrying none, every anchor with matches keeps at least its best sites
-    /// through the lane cap, and `lexical_anchors` in the result reports each
-    /// anchor's outcome. Bounded and validated by the retrieval kernel; a
+    /// carrying none, exact hits included, every anchor with matches keeps at
+    /// least its best sites through the lane cap, and `lexical_anchors` in the
+    /// result reports each anchor's outcome: the sites this result returns
+    /// and, by reason, the admitted sites it could not carry. Bounded and
+    /// validated by the retrieval kernel; a
     /// violation is a typed request rejection.
     pub lexical_anchors: Option<Vec<String>>,
     /// Add a symbol-name lexical route for the identifier-shaped words of the
@@ -322,17 +324,46 @@ pub struct ContextExtensionPointV1 {
     pub implementor_count: usize,
 }
 
-/// What one caller `lexical_anchors` entry contributed to the ranking, in
+/// Why a site the lexical lane admitted for a caller anchor is absent from
+/// the response.
+#[derive(
+    Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum LexicalAnchorDropReasonV1 {
+    /// Collapsed as a duplicate or held back by the per-file diversity cap.
+    DiversityCap,
+    /// Ranked, but outside the returned page: an earlier page, or behind
+    /// `next_cursor`.
+    OutsidePage,
+    /// On the page, but late hydration returned no source for it.
+    NotHydrated,
+    /// Outside the caller's scope prefix.
+    OutOfScope,
+}
+
+/// Anchor sites one serving stage removed from the response.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LexicalAnchorDropV1 {
+    pub reason: LexicalAnchorDropReasonV1,
+    pub sites: u64,
+}
+
+/// What one caller `lexical_anchors` entry contributed to the response, in
 /// caller order.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ContextLexicalAnchorV1 {
-    /// `matched` indexed rows carried the anchor; `admitted` of them ranked
-    /// into the lexical lane.
+    /// `matched` indexed rows carried the anchor; `admitted` result sites
+    /// carrying it are in this response, and `dropped` counts the sites the
+    /// lexical lane admitted that a later stage removed, by reason.
     Matched {
         anchor: String,
         matched: u64,
         admitted: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        dropped: Vec<LexicalAnchorDropV1>,
     },
     /// No indexed row carries the anchor.
     Unmatched { anchor: String },

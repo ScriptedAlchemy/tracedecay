@@ -51,6 +51,19 @@ pub(super) fn is_test_framework_call(state: &ExtractionState<'_>, call: TsNode<'
     test_call_root_callee(state, call).is_some_and(|root| TEST_CALLEES.contains(&root))
 }
 
+/// Whether a `Function` node's signature is the one [`visit_test_call`] writes:
+/// the first source line of a call rooted at a test-framework callee
+/// (`describe("fn", …`, `it.each(…`). Such a node is named by its title
+/// string, not by a declaration, so it must never be a name-resolution target:
+/// `fn()` inside `describe("fn", …)` calls the real `fn`.
+pub fn is_test_framework_call_signature(signature: &str) -> bool {
+    let root_end = signature
+        .find(|character: char| !(character.is_alphanumeric() || matches!(character, '_' | '$')))
+        .unwrap_or(signature.len());
+    let (root, rest) = signature.split_at(root_end);
+    TEST_CALLEES.contains(&root) && (rest.starts_with('(') || rest.starts_with('.'))
+}
+
 /// Find the title argument (first string / template) of a test call's
 /// argument list, stripped of quotes and truncated.
 fn test_call_title(state: &ExtractionState<'_>, args: TsNode<'_>) -> Option<String> {

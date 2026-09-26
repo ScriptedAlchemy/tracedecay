@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { resolveFixture } from '../../../stories/fixtures/data.ts';
 import { CodeDiagnostics } from './CodeDiagnostics.tsx';
 
 /**
@@ -62,6 +63,18 @@ describe('Code diagnostics panel', () => {
     // Engine states are the server's words: the crashed engine keeps its error.
     expect(screen.getByText('rust')).toBeTruthy();
     expect(screen.getByText(/tsserver exited with code 1/)).toBeTruthy();
+  });
+
+  it('decodes the visual-audit fixture as a broker reading, not an unsupported schema', async () => {
+    stubSnapshot(resolveFixture('/api/plugins/code-diagnostics'));
+    renderPanel();
+
+    expect(
+      await screen.findByText('mismatched types: expected `ManifestDigest`, found `String`'),
+    ).toBeTruthy();
+    expect(screen.getByText('in DiagnosticBroker::commit_refresh')).toBeTruthy();
+    expect(screen.getByText('pyright-langserver')).toBeTruthy();
+    expect(screen.queryByText(/does not understand/)).toBeNull();
   });
 
   it('says no engines are mounted instead of claiming zero diagnostics', async () => {

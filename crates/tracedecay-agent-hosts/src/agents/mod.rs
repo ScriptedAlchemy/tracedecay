@@ -571,8 +571,8 @@ pub trait AgentIntegration {
 pub struct DeferredUserAction {
     /// Exact operator-facing remediation.
     pub remediation: String,
-    /// Verified artifacts staged for the user to apply through the host.
-    pub staged_paths: Vec<PathBuf>,
+    /// The exact host command the operator runs to finish the operation.
+    pub command: String,
 }
 
 /// Result of preparing an install for a non-interactive caller.

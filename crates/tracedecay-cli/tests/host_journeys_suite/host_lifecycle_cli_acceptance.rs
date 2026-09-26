@@ -15,6 +15,8 @@ use tracedecay_agent_hosts::agents::load_jsonc_file_strict;
 
 #[path = "host_lifecycle_cli_acceptance/native_plugin_fixture.rs"]
 mod native_plugin_fixture;
+#[path = "host_lifecycle_cli_acceptance/sweep_outcomes.rs"]
+mod sweep_outcomes;
 #[cfg(unix)]
 use native_plugin_fixture::{
     install_current_claude_cli, install_current_codex_cli, recorded_claude_invocations,

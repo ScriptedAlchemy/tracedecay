@@ -484,8 +484,7 @@ pub struct ProductionCodeIndexQueryOwnersV1 {
 }
 
 struct CloneIndexArtifactSnapshotV1 {
-    /// `None` while the background census task has not finished.
-    census: Option<Arc<CodeLexicalCloneIndexCensusV1>>,
+    census: CodeLexicalCloneIndexCensusV1,
     format_revision: u32,
     bytes_on_disk: u64,
 }
@@ -515,16 +514,13 @@ impl ProductionCodeIndexQueryOwnersV1 {
         }
     }
 
-    fn clone_index_artifact(&self) -> Result<CloneIndexArtifactSnapshotV1, RetrievalPortError> {
-        Ok(CloneIndexArtifactSnapshotV1 {
-            census: self
-                .hydration
-                .computed_clone_index_census()
-                .transpose()
-                .map_err(|error| RetrievalPortError::AuthorityUnavailable(error.to_string()))?,
-            format_revision: self.hydration.artifact_format_revision(),
-            bytes_on_disk: self.hydration.verified_artifact().file_size_bytes(),
-        })
+    fn clone_index_artifact(&self) -> CloneIndexArtifactSnapshotV1 {
+        let artifact = self.hydration.verified_artifact();
+        CloneIndexArtifactSnapshotV1 {
+            census: artifact.clone_index_census().clone(),
+            format_revision: artifact.format_revision(),
+            bytes_on_disk: artifact.file_size_bytes(),
+        }
     }
 
     pub(super) fn occurrence_by_binding(
@@ -1634,14 +1630,7 @@ impl LatestCodeTextGenerationV1 {
                 };
             }
         };
-        let artifact = match owners.clone_index_artifact() {
-            Ok(artifact) => artifact,
-            Err(error) => {
-                return CodeCloneIndexStatusV1::Unavailable {
-                    reason: format!("clone-index census is unavailable: {error}"),
-                };
-            }
-        };
+        let artifact = owners.clone_index_artifact();
         let observation = clone_index_observation(self, &artifact, update);
         if source_is_stale {
             return CodeCloneIndexStatusV1::Stale {
@@ -1650,10 +1639,7 @@ impl LatestCodeTextGenerationV1 {
                     .to_owned(),
             };
         }
-        let Some(census) = artifact.census.as_deref() else {
-            return CodeCloneIndexStatusV1::Verifying { observation };
-        };
-        let omission_reasons = clone_index_omission_reasons(census);
+        let omission_reasons = clone_index_omission_reasons(&artifact.census);
         if omission_reasons.is_empty() {
             CodeCloneIndexStatusV1::Ready { observation }
         } else {
@@ -1678,7 +1664,7 @@ fn clone_index_observation(
     artifact: &CloneIndexArtifactSnapshotV1,
     update: Option<super::cadence::CodeIndexCloneUpdateV1>,
 ) -> CodeCloneIndexObservationV1 {
-    let census = artifact.census.as_ref();
+    let census = &artifact.census;
     let peak_scratch_memory_bytes = text
         .text_progress_state
         .lock()
@@ -1699,24 +1685,24 @@ fn clone_index_observation(
         conservative_normalization_revision: CONSERVATIVE_CLONE_NORMALIZATION_REVISION_V1,
         rename_normalization_revision: RENAME_CLONE_NORMALIZATION_REVISION_V1,
         coverage: CodeCloneIndexCoverageV1 {
-            source_bodies: census.map(|census| census.source_bodies),
-            eligible_source_bodies: census.map(|census| census.eligible_source_bodies),
-            conservative_normalized_bodies: census
-                .map(|census| census.conservative_normalized_bodies),
-            rename_normalized_bodies: census.map(|census| census.rename_normalized_bodies),
-            unique_payloads: census.map(|census| census.unique_payloads),
+            source_bodies: Some(census.source_bodies),
+            eligible_source_bodies: Some(census.eligible_source_bodies),
+            conservative_normalized_bodies: Some(census.conservative_normalized_bodies),
+            rename_normalized_bodies: Some(census.rename_normalized_bodies),
+            unique_payloads: Some(census.unique_payloads),
             payloads_reused: update.and_then(|update| update.payloads_reused),
-            exact_postings: census.map(|census| census.exact_postings),
-            near_fingerprint_bodies: census.map(|census| census.near_fingerprint_bodies),
-            near_fingerprint_postings: census.map(|census| census.near_fingerprint_postings),
-            hot_postings_skipped: census.map(|census| census.hot_postings),
-            hot_posting_rows_skipped: census.map(|census| census.hot_posting_rows),
-            excluded_too_small_bodies: census.map(|census| census.excluded_too_small_bodies),
-            excluded_too_large_bodies: census.map(|census| census.excluded_too_large_bodies),
-            excluded_incomplete_tokenization_bodies: census
-                .map(|census| census.excluded_incomplete_tokenization_bodies),
-            rename_partial_bodies: census.map(|census| census.rename_partial_bodies),
-            rename_unsupported_bodies: census.map(|census| census.rename_unsupported_bodies),
+            exact_postings: Some(census.exact_postings),
+            near_fingerprint_bodies: Some(census.near_fingerprint_bodies),
+            near_fingerprint_postings: Some(census.near_fingerprint_postings),
+            hot_postings_skipped: Some(census.hot_postings),
+            hot_posting_rows_skipped: Some(census.hot_posting_rows),
+            excluded_too_small_bodies: Some(census.excluded_too_small_bodies),
+            excluded_too_large_bodies: Some(census.excluded_too_large_bodies),
+            excluded_incomplete_tokenization_bodies: Some(
+                census.excluded_incomplete_tokenization_bodies,
+            ),
+            rename_partial_bodies: Some(census.rename_partial_bodies),
+            rename_unsupported_bodies: Some(census.rename_unsupported_bodies),
         },
         budgets: CodeCloneIndexBudgetsV1 {
             posting_rows: CLONE_FINGERPRINT_POSTING_ROW_BUDGET_V1,
@@ -3107,107 +3093,14 @@ impl LatestCodeTextGenerationV1 {
         let owners = Arc::new(ProductionCodeIndexQueryOwnersV1::artifact(
             exact,
             lexical,
-            hydration.clone(),
+            hydration,
             reader_reservation,
         ));
         *self
             .query_owners
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(owners);
-        self.spawn_clone_census(&hydration);
         Ok(())
-    }
-
-    /// Compute the installed artifact's clone census on its own thread.
-    ///
-    /// Status reports the clone index as `Verifying` until the census lands
-    /// and never computes it itself. Running it here instead would hold this
-    /// wake's head-open claim, and with it graph seating, for the whole
-    /// corpus-sized validation.
-    fn spawn_clone_census(&self, reader: &CodeLexicalArtifactReaderV1) {
-        let task = reader.clone_index_census_task();
-        #[cfg(test)]
-        let store_root = self.text_artifact_store.store_root().to_path_buf();
-        let spawned = std::thread::Builder::new()
-            .name("tracedecay-clone-census".to_owned())
-            .spawn(move || {
-                #[cfg(test)]
-                clone_census_gate::wait(&store_root);
-                task();
-            });
-        if let Err(error) = spawned {
-            tracing::warn!(
-                event = "code_index_clone_census_spawn_failed",
-                error = %error,
-                "clone census thread could not start; computing it on the installing wake"
-            );
-            reader.clone_index_census_task()();
-        }
-    }
-}
-
-/// Holds clone-census tasks for one store root so a test can observe the
-/// interval in which the census has not landed.
-#[cfg(test)]
-pub(super) mod clone_census_gate {
-    use std::collections::BTreeMap;
-    use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
-
-    type GateV1 = Arc<(Mutex<bool>, Condvar)>;
-
-    fn gates() -> &'static Mutex<BTreeMap<PathBuf, GateV1>> {
-        static GATES: OnceLock<Mutex<BTreeMap<PathBuf, GateV1>>> = OnceLock::new();
-        GATES.get_or_init(|| Mutex::new(BTreeMap::new()))
-    }
-
-    /// Census tasks for stores under `store_root` wait until this guard drops.
-    pub(in crate::code_index_scheduler) struct HeldCloneCensusV1 {
-        store_root: PathBuf,
-        gate: GateV1,
-    }
-
-    pub(in crate::code_index_scheduler) fn hold(store_root: &Path) -> HeldCloneCensusV1 {
-        let gate = GateV1::default();
-        gates()
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(store_root.to_path_buf(), Arc::clone(&gate));
-        HeldCloneCensusV1 {
-            store_root: store_root.to_path_buf(),
-            gate,
-        }
-    }
-
-    impl Drop for HeldCloneCensusV1 {
-        fn drop(&mut self) {
-            gates()
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(&self.store_root);
-            *self.gate.0.lock().unwrap_or_else(PoisonError::into_inner) = true;
-            self.gate.1.notify_all();
-        }
-    }
-
-    /// The scheduler scopes its store under the mounted root, so a hold on
-    /// the mounted root covers every store scoped beneath it.
-    pub(super) fn wait(store_root: &Path) {
-        let gate = gates()
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .iter()
-            .find(|(held, _)| store_root.starts_with(held))
-            .map(|(_, gate)| Arc::clone(gate));
-        if let Some(gate) = gate {
-            let mut released = gate.0.lock().unwrap_or_else(PoisonError::into_inner);
-            while !*released {
-                released = gate
-                    .1
-                    .wait(released)
-                    .unwrap_or_else(PoisonError::into_inner);
-            }
-        }
     }
 }
 

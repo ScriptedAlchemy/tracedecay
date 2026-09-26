@@ -1,15 +1,23 @@
 use std::collections::{HashMap, HashSet};
 
+use rayon::prelude::*;
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
 use tracedecay_code_index::clones::{
     CloneBodyEligibilityV1, CloneBodyRenameStatusV1, CloneNormalizationClassV1,
 };
+use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 
 use super::clone_codec::{decode_clone_eligibility, decode_clone_payload, digest_from_key};
 use super::format::decode_fingerprint_postings;
-use super::{CodeLexicalArtifactErrorV1, sqlite_error};
+use super::{CodeLexicalArtifactErrorV1, checkpoint, sqlite_error};
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Clone-index coverage of one sealed artifact.
+///
+/// The seal computes it once and stores it in the receipt, where the artifact
+/// digest binds it, so an open reads it without walking the clone tables.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CodeLexicalCloneIndexCensusV1 {
     pub source_bodies: u64,
     pub eligible_source_bodies: u64,
@@ -49,8 +57,13 @@ enum IncompleteRenameCoverageV1 {
 ///
 /// Only the non-`Complete` coverages are retained, because those are the only
 /// ones the per-occurrence rename counters distinguish.
+///
+/// Each validation is independent and dominates the census (~375 µs per
+/// payload), so bounded batches of stored rows are validated on the indexing
+/// pool under its background CPU admission.
 fn validate_stored_clone_payloads(
     connection: &Connection,
+    control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<HashMap<i64, IncompleteRenameCoverageV1>, CodeLexicalArtifactErrorV1> {
     let mut incomplete_rename = HashMap::new();
     let mut statement = connection
@@ -59,30 +72,94 @@ fn validate_stored_clone_payloads(
         )
         .map_err(sqlite_error)?;
     let mut rows = statement.query([]).map_err(sqlite_error)?;
-    while let Some(row) = rows.next().map_err(sqlite_error)? {
-        let ordinal: i64 = row.get(0).map_err(sqlite_error)?;
-        let digest: Vec<u8> = row.get(1).map_err(sqlite_error)?;
-        let payload_bytes: Vec<u8> = row.get(2).map_err(sqlite_error)?;
-        let payload = decode_clone_payload(&payload_bytes, digest_from_key(&digest)?.as_str())?;
-        match payload.rename_coverage {
-            CloneBodyRenameStatusV1::Complete => {}
-            CloneBodyRenameStatusV1::Partial => {
-                incomplete_rename.insert(ordinal, IncompleteRenameCoverageV1::Partial);
+    let mut batch = Vec::with_capacity(PAYLOAD_VALIDATION_BATCH_ROWS);
+    loop {
+        let row = rows.next().map_err(sqlite_error)?;
+        let exhausted = row.is_none();
+        if let Some(row) = row {
+            batch.push((
+                row.get::<_, i64>(0).map_err(sqlite_error)?,
+                row.get::<_, Vec<u8>>(1).map_err(sqlite_error)?,
+                row.get::<_, Vec<u8>>(2).map_err(sqlite_error)?,
+            ));
+        }
+        if batch.len() == PAYLOAD_VALIDATION_BATCH_ROWS || (exhausted && !batch.is_empty()) {
+            checkpoint(control)?;
+            for (ordinal, coverage) in validate_payload_batch(&batch)? {
+                match coverage {
+                    CloneBodyRenameStatusV1::Complete => {}
+                    CloneBodyRenameStatusV1::Partial => {
+                        incomplete_rename.insert(ordinal, IncompleteRenameCoverageV1::Partial);
+                    }
+                    CloneBodyRenameStatusV1::UnsupportedLanguage => {
+                        incomplete_rename
+                            .insert(ordinal, IncompleteRenameCoverageV1::UnsupportedLanguage);
+                    }
+                }
             }
-            CloneBodyRenameStatusV1::UnsupportedLanguage => {
-                incomplete_rename.insert(ordinal, IncompleteRenameCoverageV1::UnsupportedLanguage);
-            }
+            batch.clear();
+        }
+        if exhausted {
+            return Ok(incomplete_rename);
         }
     }
-    Ok(incomplete_rename)
 }
 
+/// Stored payload rows held for one parallel validation pass.
+const PAYLOAD_VALIDATION_BATCH_ROWS: usize = 4_096;
+/// Payloads validated under one background CPU permit.
+const PAYLOAD_VALIDATION_PERMIT_ROWS: usize = 64;
+
+type StoredClonePayloadRowV1 = (i64, Vec<u8>, Vec<u8>);
+
+fn validate_payload_batch(
+    batch: &[StoredClonePayloadRowV1],
+) -> Result<Vec<(i64, CloneBodyRenameStatusV1)>, CodeLexicalArtifactErrorV1> {
+    let validated = tracedecay_code_index::parallelism::install(|| {
+        batch
+            .par_chunks(PAYLOAD_VALIDATION_PERMIT_ROWS)
+            .map(|chunk| {
+                tracedecay_code_index::parallelism::with_background_cpu_permit(|| {
+                    chunk
+                        .iter()
+                        .map(|(ordinal, digest, payload)| {
+                            decode_clone_payload(payload, digest_from_key(digest)?.as_str())
+                                .map(|payload| (*ordinal, payload.rename_coverage))
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+    })
+    .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))??;
+    Ok(validated.into_iter().flatten().collect())
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static CENSUS_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Census walks this thread has started, so a test can prove a path never
+/// walks the clone tables.
+#[cfg(test)]
+pub(super) fn census_reads_on_this_thread() -> u64 {
+    CENSUS_READS.with(std::cell::Cell::get)
+}
+
+/// Walk every clone table of a staged or sealed artifact. This validates each
+/// stored payload against its digest and decodes every fingerprint posting,
+/// so it is corpus-sized: the seal runs it once, and an explicit verification
+/// re-runs it against the sealed receipt.
 pub(super) fn read_clone_index_census(
     connection: &Connection,
     hot_posting_threshold: u64,
+    control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<CodeLexicalCloneIndexCensusV1, CodeLexicalArtifactErrorV1> {
+    #[cfg(test)]
+    CENSUS_READS.with(|reads| reads.set(reads.get() + 1));
     let mut census = CodeLexicalCloneIndexCensusV1::default();
-    let incomplete_rename = validate_stored_clone_payloads(connection)?;
+    let incomplete_rename = validate_stored_clone_payloads(connection, control)?;
     // The inner join proves every counted occurrence has its verified payload
     // row; the occurrence total below proves none was dropped by it.
     let mut statement = connection
@@ -96,6 +173,9 @@ pub(super) fn read_clone_index_census(
         .map_err(sqlite_error)?;
     let mut rows = statement.query([]).map_err(sqlite_error)?;
     while let Some(row) = rows.next().map_err(sqlite_error)? {
+        if census.source_bodies.is_multiple_of(4_096) {
+            checkpoint(control)?;
+        }
         let payload_ordinal: i64 = row.get(0).map_err(sqlite_error)?;
         let eligibility = row
             .get_ref(1)
@@ -196,7 +276,12 @@ pub(super) fn read_clone_index_census(
         .prepare("SELECT postings FROM clone_fingerprint_postings")
         .map_err(sqlite_error)?;
     let mut rows = statement.query([]).map_err(sqlite_error)?;
+    let mut posting_rows = 0u64;
     while let Some(row) = rows.next().map_err(sqlite_error)? {
+        if posting_rows.is_multiple_of(4_096) {
+            checkpoint(control)?;
+        }
+        posting_rows += 1;
         let encoded = row
             .get_ref(0)
             .and_then(|value| value.as_blob().map_err(rusqlite::Error::from))
@@ -218,7 +303,7 @@ pub(super) fn read_clone_index_census(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::super::clone_codec::{digest_key, encode_clone_eligibility, encode_clone_payload};
     use super::*;
     use rusqlite::params;
@@ -228,6 +313,18 @@ mod tests {
     };
     use tracedecay_code_index::clones::CloneBodyPayloadV1;
     use tracedecay_domain::{NodeKind, SourceSpan};
+
+    struct ActiveControl;
+
+    impl CodeIndexExecutionControlV1 for ActiveControl {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+    }
 
     /// The tables the census reads. Triggers and the builder gate belong to
     /// the write path, which no census read goes through.
@@ -258,7 +355,7 @@ mod tests {
             .expect("census schema");
     }
 
-    fn payload(seed: usize) -> CloneBodyPayloadV1 {
+    pub(in super::super) fn payload(seed: usize) -> CloneBodyPayloadV1 {
         let body = ExtractedCloneBodyV1 {
             logical_path: format!("src/body_{seed}.rs"),
             language: "rust".to_owned(),
@@ -329,7 +426,7 @@ mod tests {
         store_occurrence(&connection, "symbol.present", present);
         store_occurrence(&connection, "symbol.absent", present + 1);
 
-        let error = read_clone_index_census(&connection, 8)
+        let error = read_clone_index_census(&connection, 8, &ActiveControl)
             .expect_err("an occurrence without its payload row must refuse the census");
         assert!(
             matches!(error, CodeLexicalArtifactErrorV1::Corrupt(_)),
@@ -358,7 +455,7 @@ mod tests {
         }
 
         let started = std::time::Instant::now();
-        let census = read_clone_index_census(&connection, 8).expect("census");
+        let census = read_clone_index_census(&connection, 8, &ActiveControl).expect("census");
         let elapsed = started.elapsed();
         assert_eq!(
             census.source_bodies,

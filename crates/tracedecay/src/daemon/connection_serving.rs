@@ -102,13 +102,22 @@ pub(super) async fn serve_authenticated_socket_client_with_class(
     .await
 }
 
+/// The frames the daemon handshake already consumed from a routed client, and
+/// the project route its initialize response must carry.
+///
+/// RMCP replays these before reading the live transport, so they must reach it
+/// in wire order: the first request, then everything pipelined behind it.
+pub(crate) struct RoutedRmcpReplay {
+    pub(crate) first_request_line: String,
+    pub(crate) pending_lines: VecDeque<String>,
+    pub(crate) initialize_route: Option<InitializeRouteMetadata>,
+}
+
 #[hotpath::measure(label = "daemon.engine.transport.rmcp", future = true)]
 pub(crate) async fn serve_routed_rmcp_connection(
     server: Arc<crate::mcp::McpServer>,
     transport: BrokerStreamTransport,
-    first_request_line: String,
-    pending_lines: VecDeque<String>,
-    initialize_route: Option<InitializeRouteMetadata>,
+    replay: RoutedRmcpReplay,
     timings_enabled: bool,
     lifecycle: &DaemonLifecycle,
     activity: Option<DaemonActivity>,
@@ -116,9 +125,7 @@ pub(crate) async fn serve_routed_rmcp_connection(
     serve_routed_rmcp_connection_inner(
         server,
         transport,
-        first_request_line,
-        pending_lines,
-        initialize_route,
+        replay,
         timings_enabled,
         lifecycle,
         activity,
@@ -129,9 +136,7 @@ pub(crate) async fn serve_routed_rmcp_connection(
 fn serve_routed_rmcp_connection_inner(
     server: Arc<crate::mcp::McpServer>,
     transport: BrokerStreamTransport,
-    first_request_line: String,
-    pending_lines: VecDeque<String>,
-    initialize_route: Option<InitializeRouteMetadata>,
+    replay: RoutedRmcpReplay,
     timings_enabled: bool,
     lifecycle: &DaemonLifecycle,
     activity: Option<DaemonActivity>,
@@ -139,6 +144,11 @@ fn serve_routed_rmcp_connection_inner(
     // Erase the deeply nested rmcp service future before it reaches the
     // measured wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
+        let RoutedRmcpReplay {
+            first_request_line,
+            pending_lines,
+            initialize_route,
+        } = replay;
         let initialize_response_decorator = initialize_route.map(|route| {
             Arc::new(move |response: &mut JsonRpcResponse| {
                 attach_initialize_route_metadata(response, &route);
@@ -1492,9 +1502,9 @@ fn serve_broker_socket_client_inner(
                     return Ok(());
                 }
 
-                let user_session_request = projectless_user_session_request(first_request.parsed());
+                let projectless_request = projectless_first_request(first_request.parsed());
                 let project_owner = boxed_broker_connection_phase(async {
-                    if handshake.project_path.is_some() && !user_session_request {
+                    if handshake.project_path.is_some() && !projectless_request {
                         match await_project_owner_for_first_request(
                             &mut transport,
                             first_request.parsed(),
@@ -1557,9 +1567,11 @@ fn serve_broker_socket_client_inner(
                         Box::pin(serve_routed_rmcp_connection(
                             server,
                             transport,
-                            first_request.into_raw(),
-                            pending_project_open_lines,
-                            initialize_route,
+                            RoutedRmcpReplay {
+                                first_request_line: first_request.into_raw(),
+                                pending_lines: pending_project_open_lines,
+                                initialize_route,
+                            },
                             handshake.timings,
                             &engine.lifecycle,
                             Some(setup_activity),
@@ -1579,6 +1591,7 @@ fn serve_broker_socket_client_inner(
                     Box::pin(serve_projectless_client(
                         &mut transport,
                         &handshake.client_identity,
+                        handshake.project_path.clone(),
                         handshake.timings,
                         &engine.lifecycle,
                         &engine.store_administration,
@@ -1617,8 +1630,8 @@ pub(super) async fn serve_windows_broker_client(
 }
 
 #[cfg(test)]
-// Cohesive per-connection serving context; bundling into a params struct would churn every caller.
 #[allow(clippy::too_many_arguments)]
+// Cohesive per-connection serving context; bundling into a params struct would churn every caller.
 pub(super) async fn serve_windows_broker_client_with_class(
     stream: BrokerStream,
     auth_token: &str,
@@ -1980,8 +1993,8 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
             return Ok(());
         }
     }
-    let user_session_request = projectless_user_session_request(first_request.parsed());
-    if handshake.project_path.is_some() && !user_session_request {
+    let projectless_request = projectless_first_request(first_request.parsed());
+    if handshake.project_path.is_some() && !projectless_request {
         // Heap-allocate the owner-await composition: embedded by value it
         // dominates this serve future's resident frame and overflows the
         // worker stack in perf-profile layouts.
@@ -2028,9 +2041,11 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
             Box::pin(serve_routed_rmcp_connection(
                 server,
                 transport,
-                first_request.into_raw(),
-                pending_lines,
-                initialize_route,
+                RoutedRmcpReplay {
+                    first_request_line: first_request.into_raw(),
+                    pending_lines,
+                    initialize_route,
+                },
                 handshake.timings,
                 lifecycle,
                 Some(setup_activity),
@@ -2047,6 +2062,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         Box::pin(serve_projectless_client(
             &mut transport,
             &handshake.client_identity,
+            handshake.project_path.clone(),
             handshake.timings,
             lifecycle,
             &store_administration,

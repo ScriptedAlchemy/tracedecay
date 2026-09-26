@@ -81,7 +81,8 @@ mod wire_bound_tests {
     use std::sync::Arc;
 
     use super::{
-        BrokerStreamTransport, read_line_handling_wire_oversized, serve_routed_rmcp_connection,
+        BrokerStreamTransport, RoutedRmcpReplay, read_line_handling_wire_oversized,
+        serve_routed_rmcp_connection,
     };
     use rmcp::transport::Transport;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
@@ -275,9 +276,11 @@ mod wire_bound_tests {
                 serve_routed_rmcp_connection(
                     mcp,
                     BrokerStreamTransport::new(server),
-                    initialize,
-                    pending.into_iter().collect(),
-                    None,
+                    RoutedRmcpReplay {
+                        first_request_line: initialize,
+                        pending_lines: pending.into_iter().collect(),
+                        initialize_route: None,
+                    },
                     false,
                     &lifecycle,
                     lifecycle.try_enter(),

@@ -12,9 +12,20 @@
  */
 import { http, HttpResponse, type JsonBodyType, type RequestHandler } from 'msw';
 import { setupServer, type SetupServer } from 'msw/node';
-import { resolveFixture } from './data.ts';
+import { lookupFixture } from './data.ts';
 
-/** Catch-all GET for /api/**. Resolves the pathname to its fixture payload. */
+/**
+ * The fixture for a request, or nothing. A resolver that returns nothing leaves
+ * the request unhandled, so a server listening with `onUnhandledRequest:
+ * 'error'` fails on a path no fixture models instead of answering it.
+ */
+function fixtureResponse(request: Request): Response | undefined {
+  const url = new URL(request.url);
+  const payload = lookupFixture(url.pathname, url.search);
+  return payload === undefined ? undefined : HttpResponse.json(payload as JsonBodyType);
+}
+
+/** Every modelled `/api` GET, resolved from the pathname to its fixture payload. */
 export const handlers = [
   http.get('*/api/events', () =>
     // The event stream is intentionally empty in fixtures: the app degrades to
@@ -25,12 +36,10 @@ export const handlers = [
     }),
   ),
   http.get('*/api/*', ({ request }) => {
-    const url = new URL(request.url);
-    return HttpResponse.json(resolveFixture(url.pathname, url.search) as JsonBodyType);
+    return fixtureResponse(request);
   }),
   http.post('*/api/application/retained/fact_store_curate', ({ request }) => {
-    const url = new URL(request.url);
-    return HttpResponse.json(resolveFixture(url.pathname, url.search) as JsonBodyType);
+    return fixtureResponse(request);
   }),
   // The Work routes are the one family the dashboard reads with POST. They are
   // nested onto the application router, whose reads take a request body. Scoped
@@ -38,19 +47,16 @@ export const handlers = [
   // turn every unmodelled command in every other workspace's MSW test from a
   // loud unhandled-request error into a silent empty body.
   http.post('*/api/work/*', ({ request }) => {
-    const url = new URL(request.url);
-    return HttpResponse.json(resolveFixture(url.pathname, url.search) as JsonBodyType);
+    return fixtureResponse(request);
   }),
   // The Workflow reads share the Work family's POST-read application wrapper.
   http.post('*/api/application/workflow/*', ({ request }) => {
-    const url = new URL(request.url);
-    return HttpResponse.json(resolveFixture(url.pathname, url.search) as JsonBodyType);
+    return fixtureResponse(request);
   }),
   // The Agents token frontier is the same POST-read wrapper, scoped to the
   // one mounted list route so an unmodelled handoff command still fails loudly.
   http.post('*/api/application/handoff/list-task', ({ request }) => {
-    const url = new URL(request.url);
-    return HttpResponse.json(resolveFixture(url.pathname, url.search) as JsonBodyType);
+    return fixtureResponse(request);
   }),
 ];
 

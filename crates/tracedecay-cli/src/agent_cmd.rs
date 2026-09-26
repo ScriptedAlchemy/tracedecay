@@ -29,9 +29,240 @@ pub(crate) enum HostBundleCliOperation {
     Uninstall,
 }
 
+/// Exit status of a lifecycle pass in which no host failed but at least one
+/// waits on an interactive operator step (`EX_TEMPFAIL`: act, then rerun).
+pub(crate) const PENDING_OPERATOR_ACTION_EXIT_CODE: i32 = 75;
+
+/// One host's typed result in a lifecycle pass.
 #[derive(Debug)]
-pub(crate) enum AgentReinstallOutcome {
-    Installed,
+pub(crate) enum HostLifecycleResult {
+    /// The component set committed and the host registration is current.
+    Applied,
+    /// The component set committed its staged source, but the host activates
+    /// it only through an interactive step the operator must run.
+    PendingOperatorAction {
+        command: String,
+        remediation: String,
+    },
+    /// Nothing was attempted for this host.
+    Skipped {
+        reason: HostSkipReason,
+        detail: String,
+    },
+    /// The lifecycle was refused or attempted and failed.
+    Failed {
+        cause: HostFailureCause,
+        detail: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HostSkipReason {
+    /// The host CLI is not installed and TraceDecay only detected leftover
+    /// config for it, so the host is not in use on this machine.
+    HostCliNotInstalled,
+    /// The host has no component set for this request.
+    NotApplicable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HostFailureCause {
+    /// A tracked or explicitly requested host whose CLI is not installed.
+    HostCliNotInstalled,
+    /// The lifecycle ran and failed.
+    LifecycleFailed,
+}
+
+/// How a lifecycle pass ended when no host failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HostLifecycleCompletion {
+    Complete,
+    PendingOperatorAction,
+}
+
+impl HostLifecycleCompletion {
+    pub(crate) fn exit_code(self) -> i32 {
+        match self {
+            Self::Complete => 0,
+            Self::PendingOperatorAction => PENDING_OPERATOR_ACTION_EXIT_CODE,
+        }
+    }
+}
+
+/// Why one host's lifecycle did not complete, kept typed until the pass
+/// knows whether the host was tracked or merely detected.
+#[derive(Debug)]
+pub(crate) enum HostLifecycleError {
+    HostCliNotInstalled(tracedecay_domain::errors::TraceDecayError),
+    Failed(tracedecay_domain::errors::TraceDecayError),
+}
+
+impl std::fmt::Display for HostLifecycleError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HostCliNotInstalled(error) | Self::Failed(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl From<tracedecay_domain::errors::TraceDecayError> for HostLifecycleError {
+    fn from(error: tracedecay_domain::errors::TraceDecayError) -> Self {
+        if matches!(
+            error,
+            tracedecay_domain::errors::TraceDecayError::HostCliUnavailable { .. }
+        ) {
+            Self::HostCliNotInstalled(error)
+        } else {
+            Self::Failed(error)
+        }
+    }
+}
+
+fn host_lifecycle_error(
+    agent_id: &str,
+    error: tracedecay_agent_hosts::agents::host_bundle::HostBundleError,
+) -> HostLifecycleError {
+    let cli_missing = matches!(
+        error,
+        tracedecay_agent_hosts::agents::host_bundle::HostBundleError::HostCliUnavailable { .. }
+    );
+    let error = host_bundle_error_for_agent(agent_id, error);
+    if cli_missing {
+        HostLifecycleError::HostCliNotInstalled(error)
+    } else {
+        HostLifecycleError::Failed(error)
+    }
+}
+
+/// A missing host CLI is a skip only for a host TraceDecay merely detected
+/// from leftover config; for a tracked or named host it is a failure.
+fn settle_host_lifecycle(
+    result: std::result::Result<HostLifecycleResult, HostLifecycleError>,
+    leftover_only: bool,
+) -> HostLifecycleResult {
+    match result {
+        Ok(result) => result,
+        Err(HostLifecycleError::HostCliNotInstalled(error)) if leftover_only => {
+            HostLifecycleResult::Skipped {
+                reason: HostSkipReason::HostCliNotInstalled,
+                detail: error.to_string(),
+            }
+        }
+        Err(HostLifecycleError::HostCliNotInstalled(error)) => HostLifecycleResult::Failed {
+            cause: HostFailureCause::HostCliNotInstalled,
+            detail: error.to_string(),
+        },
+        Err(HostLifecycleError::Failed(error)) => HostLifecycleResult::Failed {
+            cause: HostFailureCause::LifecycleFailed,
+            detail: error.to_string(),
+        },
+    }
+}
+
+/// Every host's typed result in one lifecycle pass; the one place a pass
+/// decides its exit status.
+#[derive(Debug)]
+pub(crate) struct HostLifecycleSummary {
+    operation: HostBundleCliOperation,
+    dry_run: bool,
+    hosts: Vec<(String, HostLifecycleResult)>,
+}
+
+impl HostLifecycleSummary {
+    fn new(operation: HostBundleCliOperation, dry_run: bool) -> Self {
+        Self {
+            operation,
+            dry_run,
+            hosts: Vec::new(),
+        }
+    }
+
+    fn record(&mut self, agent_id: &str, result: HostLifecycleResult) {
+        self.hosts.push((agent_id.to_string(), result));
+    }
+
+    /// Hosts this pass installed or staged, which the profile may track.
+    pub(crate) fn converged_hosts(&self) -> impl Iterator<Item = &str> {
+        self.hosts.iter().filter_map(|(id, result)| {
+            matches!(
+                result,
+                HostLifecycleResult::Applied | HostLifecycleResult::PendingOperatorAction { .. }
+            )
+            .then_some(id.as_str())
+        })
+    }
+
+    fn line(&self, result: &HostLifecycleResult) -> String {
+        match result {
+            HostLifecycleResult::Applied if self.dry_run => "previewed".to_string(),
+            HostLifecycleResult::Applied => match self.operation {
+                HostBundleCliOperation::Install => "installed".to_string(),
+                HostBundleCliOperation::Update | HostBundleCliOperation::Repair => {
+                    "refreshed".to_string()
+                }
+                HostBundleCliOperation::Uninstall => "uninstalled".to_string(),
+            },
+            HostLifecycleResult::PendingOperatorAction {
+                command,
+                remediation,
+            } => format!("pending operator action: `{command}`\n      {remediation}"),
+            HostLifecycleResult::Skipped {
+                reason: HostSkipReason::HostCliNotInstalled,
+                detail,
+            } => format!(
+                "skipped, host CLI not installed; only leftover TraceDecay config was detected \
+                 ({detail})"
+            ),
+            HostLifecycleResult::Skipped {
+                reason: HostSkipReason::NotApplicable,
+                detail,
+            } => format!("skipped, not applicable: {detail}"),
+            HostLifecycleResult::Failed {
+                cause: HostFailureCause::HostCliNotInstalled,
+                detail,
+            } => format!("failed, host CLI not installed: {detail}"),
+            HostLifecycleResult::Failed {
+                cause: HostFailureCause::LifecycleFailed,
+                detail,
+            } => format!("failed: {detail}"),
+        }
+    }
+
+    /// Prints the per-host summary and folds it into the pass outcome: any
+    /// failed host fails the pass, otherwise any pending host makes it
+    /// [`HostLifecycleCompletion::PendingOperatorAction`].
+    pub(crate) fn finish(&self) -> tracedecay_domain::errors::Result<HostLifecycleCompletion> {
+        if !self.hosts.is_empty() {
+            eprintln!("\nAgent {} summary:", operation_verb(self.operation));
+            for (id, result) in &self.hosts {
+                eprintln!("  {id}: {}", self.line(result));
+            }
+        }
+        let failed: Vec<&str> = self
+            .hosts
+            .iter()
+            .filter(|(_, result)| matches!(result, HostLifecycleResult::Failed { .. }))
+            .map(|(id, _)| id.as_str())
+            .collect();
+        if !failed.is_empty() {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!(
+                    "agent {} failed for: {}",
+                    operation_verb(self.operation),
+                    failed.join(", ")
+                ),
+            });
+        }
+        if self
+            .hosts
+            .iter()
+            .any(|(_, result)| matches!(result, HostLifecycleResult::PendingOperatorAction { .. }))
+        {
+            Ok(HostLifecycleCompletion::PendingOperatorAction)
+        } else {
+            Ok(HostLifecycleCompletion::Complete)
+        }
+    }
 }
 
 /// The one host lifecycle entry point behind `install`, `update-plugin`,
@@ -43,7 +274,7 @@ pub(crate) async fn handle_host_lifecycle_command(
     options: crate::cli::HostBundleCliOptions,
     no_dashboard: bool,
     automation: Option<CodexAutomationInstall>,
-) -> tracedecay_domain::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<HostLifecycleCompletion> {
     validate_codex_automation_flags(agent.as_deref(), automation)?;
     if component_mutation_still_requires_yes(
         operation,
@@ -82,7 +313,7 @@ pub(crate) async fn handle_host_lifecycle_command(
                         "{}",
                         tracedecay_agent_hosts::agents::no_detected_integrations_notice(&home)
                     );
-                    return Ok(());
+                    return Ok(HostLifecycleCompletion::Complete);
                 }
             }
         }
@@ -121,24 +352,30 @@ pub(crate) async fn handle_host_lifecycle_command(
 
     // Each agent runs independently: one host whose CLI is missing or whose
     // files conflict must not strand the others.
-    let mut failures: Vec<String> = Vec::new();
+    let tracked_before_pass = user_config.installed_agents.clone();
+    let mut summary = HostLifecycleSummary::new(operation, options.dry_run);
     let mut refreshed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for agent_id in &agent_ids {
         if !explicitly_scoped {
             if let Some(component) = options.component
                 && component_is_not_applicable(agent_id, component)
             {
-                eprintln!(
-                    "not applicable: agent {agent_id:?} does not support the requested {component:?} component; continuing sweep"
+                summary.record(
+                    agent_id,
+                    HostLifecycleResult::Skipped {
+                        reason: HostSkipReason::NotApplicable,
+                        detail: format!("no {component:?} component for this host"),
+                    },
                 );
                 continue;
             }
-            // A skipped host is a reported unavailable result, never a silent
-            // success for the sweep that contained it.
             if host_kind_for_agent(agent_id).is_err() {
-                eprintln!(
-                    "skipped: {}",
-                    unsupported_host_component_set_message(agent_id)
+                summary.record(
+                    agent_id,
+                    HostLifecycleResult::Skipped {
+                        reason: HostSkipReason::NotApplicable,
+                        detail: unsupported_host_component_set_message(agent_id),
+                    },
                 );
                 continue;
             }
@@ -159,12 +396,12 @@ pub(crate) async fn handle_host_lifecycle_command(
             &lifecycle_root,
             &ComponentSetApplyContext::resolved_with_dashboard(dashboard),
         );
-        if result.is_ok()
+        if matches!(result, Ok(HostLifecycleResult::Applied))
             && !options.dry_run
             && agent_id == "codex"
             && let Some(automation) = automation
         {
-            result = match validate_codex_automation_project_path() {
+            let automation_result = match validate_codex_automation_project_path() {
                 Ok(project_path) => {
                     hotpath::future!(
                         install_codex_daemon_automation(&project_path, &home, automation),
@@ -174,19 +411,22 @@ pub(crate) async fn handle_host_lifecycle_command(
                 }
                 Err(error) => Err(error),
             };
+            if let Err(error) = automation_result {
+                result = Err(error.into());
+            }
         }
-        if let Err(error) = result {
-            failures.push(if explicitly_scoped {
-                error.to_string()
-            } else {
-                format!("{agent_id}: {error}")
-            });
+        let leftover_only = !explicitly_scoped && !tracked_before_pass.contains(agent_id);
+        let result = settle_host_lifecycle(result, leftover_only);
+        let applied = matches!(result, HostLifecycleResult::Applied);
+        let converged =
+            applied || matches!(result, HostLifecycleResult::PendingOperatorAction { .. });
+        summary.record(agent_id, result);
+        if !converged || options.dry_run {
             continue;
         }
-        if options.dry_run {
-            continue;
+        if applied {
+            refreshed.insert(agent_id.clone());
         }
-        refreshed.insert(agent_id.clone());
         match operation {
             HostBundleCliOperation::Install => {
                 if !user_config.installed_agents.contains(agent_id) {
@@ -218,20 +458,9 @@ pub(crate) async fn handle_host_lifecycle_command(
                 message: format!("failed to save user config: {err}"),
             })?;
     }
-    if !failures.is_empty() {
-        let message = if explicitly_scoped {
-            failures.join("; ")
-        } else {
-            format!(
-                "agent {} failed for: {}",
-                operation_verb(operation),
-                failures.join("; ")
-            )
-        };
-        return Err(tracedecay_domain::errors::TraceDecayError::Config { message });
-    }
+    let completion = summary.finish()?;
     if options.dry_run {
-        return Ok(());
+        return Ok(completion);
     }
     if options.component.is_none()
         && matches!(
@@ -262,7 +491,7 @@ pub(crate) async fn handle_host_lifecycle_command(
     if operation == HostBundleCliOperation::Install {
         crate::update_cmd::deploy_managed_skills_after_lifecycle();
     }
-    Ok(())
+    Ok(completion)
 }
 
 /// The hosts an unscoped `update-plugin` / `reinstall` sweep refreshes: every
@@ -307,7 +536,7 @@ fn run_host_component_lifecycle(
     home: &Path,
     lifecycle_root: &Path,
     context: &ComponentSetApplyContext,
-) -> tracedecay_domain::errors::Result<()> {
+) -> std::result::Result<HostLifecycleResult, HostLifecycleError> {
     let now_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
@@ -332,7 +561,8 @@ fn run_host_component_lifecycle(
             home,
             lifecycle_root,
             context,
-        )
+        )?;
+        Ok(HostLifecycleResult::Applied)
     } else {
         apply_canonical_component_set(
             agent_id,
@@ -685,7 +915,7 @@ fn apply_canonical_component_set(
     home: &Path,
     lifecycle_root: &Path,
     context: &ComponentSetApplyContext,
-) -> tracedecay_domain::errors::Result<()> {
+) -> std::result::Result<HostLifecycleResult, HostLifecycleError> {
     let ComponentSetApplyContext {
         tracedecay_bin,
         dashboard,
@@ -702,7 +932,7 @@ fn apply_canonical_component_set(
             home,
             lifecycle_root,
         )
-        .map_err(|error| host_bundle_error_for_agent(agent_id, error))?;
+        .map_err(|error| host_lifecycle_error(agent_id, error))?;
     let mut transaction =
         tracedecay_agent_hosts::agents::host_bundle::HostComponentSetTransactionV1::new(
             &mut writer,
@@ -722,7 +952,7 @@ fn apply_canonical_component_set(
             component_set,
             &mut registration,
         )
-        .map_err(|error| host_bundle_error_for_agent(agent_id, error))?;
+        .map_err(|error| host_lifecycle_error(agent_id, error))?;
     // Receiptless-adoption authority is enforced inside the planner: without
     // `--adopt`, a receiptless file at a cataloged path is adopted only when
     // it matches the staged bytes, and anything else is refused as a typed
@@ -734,20 +964,22 @@ fn apply_canonical_component_set(
     // `--yes` rather than being resolved on the operator's behalf.
     if !preview.competing_extension_claims.is_empty() && options.component.is_some() && !options.yes
     {
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!(
-                "agent {agent_id:?} already has {} third-party extension claim(s) on a surface \
+        return Err(HostLifecycleError::Failed(
+            tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!(
+                    "agent {agent_id:?} already has {} third-party extension claim(s) on a surface \
                  this component set registers ({}); review `--dry-run` and re-run with `--yes` to \
                  confirm this exact plan",
-                preview.competing_extension_claims.len(),
-                preview
-                    .competing_extension_claims
-                    .iter()
-                    .map(|claim| claim.extension_id.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        });
+                    preview.competing_extension_claims.len(),
+                    preview
+                        .competing_extension_claims
+                        .iter()
+                        .map(|claim| claim.extension_id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            },
+        ));
     }
     let receipt = transaction
         .execute_confirmed(
@@ -757,7 +989,7 @@ fn apply_canonical_component_set(
             component_set,
             &mut registration,
         )
-        .map_err(|error| host_bundle_error_for_agent(agent_id, error))?;
+        .map_err(|error| host_lifecycle_error(agent_id, error))?;
     eprintln!(
         "\x1b[32m✔\x1b[0m {} {:?}: {} component(s), receipt {}",
         agent_id,
@@ -766,9 +998,10 @@ fn apply_canonical_component_set(
         hex::encode(receipt.operation_id)
     );
     // The receipt owns the staged source; the host still has to activate it.
-    if let Some(remediation) = registration.deferred_activation() {
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: remediation.to_string(),
+    if let Some(action) = registration.deferred_activation() {
+        return Ok(HostLifecycleResult::PendingOperatorAction {
+            command: action.command.clone(),
+            remediation: action.remediation.clone(),
         });
     }
     // Hook trust is the one Codex activation step that stays host-owned, so a
@@ -781,7 +1014,7 @@ fn apply_canonical_component_set(
     {
         eprintln!("  {followup}");
     }
-    Ok(())
+    Ok(HostLifecycleResult::Applied)
 }
 
 fn load_host_lifecycle_user_config() -> tracedecay_domain::errors::Result<UserConfig> {
@@ -980,54 +1213,39 @@ pub(crate) fn install_requested_git_hook() -> tracedecay_domain::errors::Result<
 /// held by post-update maintenance.
 pub(crate) async fn reinstall_agent_integrations_under_lease(
     agent_ids: &[String],
+    tracked: &[String],
     home: &Path,
     tracedecay_bin: &str,
     lifecycle: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
-) -> Vec<(
-    String,
-    tracedecay_domain::errors::Result<AgentReinstallOutcome>,
-)> {
+) -> tracedecay_domain::errors::Result<HostLifecycleSummary> {
     let _ = lifecycle;
-    reinstall_agent_integrations_with_persisted_dashboard_policies(agent_ids, home, tracedecay_bin)
-        .await
+    reinstall_agent_integrations_with_persisted_dashboard_policies(
+        agent_ids,
+        tracked,
+        home,
+        tracedecay_bin,
+    )
+    .await
 }
 
-/// The tracked-agent repair pass `reinstall` runs, one result per agent so
-/// maintenance can continue past a failing host.
+/// The tracked-agent repair pass `reinstall` runs, one typed result per
+/// agent so maintenance can continue past a failing host. `tracked` names
+/// the hosts the profile config tracks; any other id was only detected.
 async fn reinstall_agent_integrations_with_persisted_dashboard_policies(
     agent_ids: &[String],
+    tracked: &[String],
     home: &Path,
     tracedecay_bin: &str,
-) -> Vec<(
-    String,
-    tracedecay_domain::errors::Result<AgentReinstallOutcome>,
-)> {
-    let environment = load_host_lifecycle_user_config()
-        .and_then(|config| resolved_lifecycle_root().map(|root| (config, root)));
-    let (user_config, lifecycle_root) = match environment {
-        Ok(environment) => environment,
-        Err(error) => {
-            let message = error.to_string();
-            return agent_ids
-                .iter()
-                .map(|id| {
-                    (
-                        id.clone(),
-                        Err(tracedecay_domain::errors::TraceDecayError::Config {
-                            message: message.clone(),
-                        }),
-                    )
-                })
-                .collect();
-        }
-    };
+) -> tracedecay_domain::errors::Result<HostLifecycleSummary> {
+    let user_config = load_host_lifecycle_user_config()?;
+    let lifecycle_root = resolved_lifecycle_root()?;
     let options = crate::cli::HostBundleCliOptions {
         component: None,
         dry_run: false,
         yes: false,
         adopt: false,
     };
-    let mut results = Vec::new();
+    let mut summary = HostLifecycleSummary::new(HostBundleCliOperation::Repair, false);
     for id in agent_ids {
         if tracedecay_agent_hosts::agents::get_integration(id).is_err() {
             tracing::warn!(
@@ -1047,11 +1265,10 @@ async fn reinstall_agent_integrations_with_persisted_dashboard_policies(
             home,
             &lifecycle_root,
             &context,
-        )
-        .map(|()| AgentReinstallOutcome::Installed);
-        results.push((id.clone(), result));
+        );
+        summary.record(id, settle_host_lifecycle(result, !tracked.contains(id)));
     }
-    results
+    Ok(summary)
 }
 
 #[cfg(test)]
@@ -1063,8 +1280,8 @@ mod tests {
     };
 
     use super::{
-        AgentReinstallOutcome, CatalogHostComponentRegistrationAuthority, ComponentSetApplyContext,
-        HostBundleCliOperation, apply_canonical_component_set,
+        CatalogHostComponentRegistrationAuthority, ComponentSetApplyContext,
+        HostBundleCliOperation, HostLifecycleResult, apply_canonical_component_set,
         broker_codex_daemon_automation_project, canonical_host_component_set,
         canonical_host_component_set_with_tracedecay_bin, component_is_not_applicable,
         component_mutation_still_requires_yes, component_set_request,
@@ -1139,7 +1356,7 @@ mod tests {
         home: &Path,
         adopt: bool,
     ) -> tracedecay_domain::errors::Result<()> {
-        super::run_host_component_lifecycle(
+        match super::run_host_component_lifecycle(
             agent_id,
             operation,
             &crate::cli::HostBundleCliOptions {
@@ -1151,7 +1368,92 @@ mod tests {
             home,
             &super::resolved_lifecycle_root()?,
             &ComponentSetApplyContext::resolved_with_dashboard(true),
-        )
+        ) {
+            Ok(HostLifecycleResult::Applied) => Ok(()),
+            Ok(other) => panic!("{agent_id} did not apply its component set: {other:?}"),
+            Err(
+                super::HostLifecycleError::HostCliNotInstalled(error)
+                | super::HostLifecycleError::Failed(error),
+            ) => Err(error),
+        }
+    }
+
+    fn cli_missing() -> super::HostLifecycleError {
+        tracedecay_domain::errors::TraceDecayError::HostCliUnavailable {
+            program: "kiro-cli".to_string(),
+            lifecycle: "kiro MCP registry lifecycle".to_string(),
+        }
+        .into()
+    }
+
+    #[test]
+    fn missing_host_cli_skips_only_a_leftover_host() {
+        assert!(matches!(
+            super::settle_host_lifecycle(Err(cli_missing()), true),
+            HostLifecycleResult::Skipped {
+                reason: super::HostSkipReason::HostCliNotInstalled,
+                ..
+            }
+        ));
+        assert!(matches!(
+            super::settle_host_lifecycle(Err(cli_missing()), false),
+            HostLifecycleResult::Failed {
+                cause: super::HostFailureCause::HostCliNotInstalled,
+                ..
+            }
+        ));
+        let attempted = tracedecay_domain::errors::TraceDecayError::Config {
+            message: "verify failed".to_string(),
+        };
+        assert!(matches!(
+            super::settle_host_lifecycle(Err(attempted.into()), true),
+            HostLifecycleResult::Failed {
+                cause: super::HostFailureCause::LifecycleFailed,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_failed_host_fails_the_pass_and_pending_outranks_complete() {
+        let pending = || HostLifecycleResult::PendingOperatorAction {
+            command: "/plugins install /staged".to_string(),
+            remediation: "open Kimi Code".to_string(),
+        };
+        let failed = || HostLifecycleResult::Failed {
+            cause: super::HostFailureCause::LifecycleFailed,
+            detail: "verify failed".to_string(),
+        };
+
+        let mut summary = super::HostLifecycleSummary::new(HostBundleCliOperation::Update, false);
+        summary.record("cline", HostLifecycleResult::Applied);
+        summary.record(
+            "kiro",
+            super::settle_host_lifecycle(Err(cli_missing()), true),
+        );
+        assert_eq!(
+            summary.finish().unwrap(),
+            super::HostLifecycleCompletion::Complete
+        );
+
+        summary.record("kimi", pending());
+        assert_eq!(
+            summary.finish().unwrap(),
+            super::HostLifecycleCompletion::PendingOperatorAction
+        );
+        assert_eq!(
+            summary.converged_hosts().collect::<Vec<_>>(),
+            ["cline", "kimi"],
+            "a skipped leftover host is never tracked"
+        );
+
+        summary.record("cursor", failed());
+        summary.record("copilot", failed());
+        let error = summary.finish().unwrap_err().to_string();
+        assert!(
+            error.contains("agent update failed for: cursor, copilot"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -2829,24 +3131,23 @@ mod tests {
 
         let results = reinstall_agent_integrations_with_persisted_dashboard_policies(
             &["kimi".to_string()],
+            &["kimi".to_string()],
             home.path(),
             "new-tracedecay",
         )
-        .await;
+        .await
+        .unwrap()
+        .hosts;
 
-        let [(id, Err(error))] = results.as_slice() else {
-            panic!("tracked Kimi reinstall should return one typed deferral");
+        let [(id, HostLifecycleResult::PendingOperatorAction { command, .. })] = results.as_slice()
+        else {
+            panic!("tracked Kimi reinstall should return one typed deferral: {results:?}");
         };
         assert_eq!(id, "kimi");
         let staged = home
             .path()
             .join(".tracedecay/host-bundle-stage/kimi/tracedecay");
-        assert!(
-            error
-                .to_string()
-                .contains(&format!("/plugins install {}", staged.display())),
-            "{error}"
-        );
+        assert_eq!(command, &format!("/plugins install {}", staged.display()));
         assert_eq!(std::fs::read(&installed_path).unwrap(), original);
         assert!(!code_home.join("plugins/managed/tracedecay").exists());
         assert!(staged.join(".kimi-plugin/plugin.json").is_file());
@@ -2880,12 +3181,18 @@ mod tests {
             .unwrap_or_else(|| "tracedecay".to_string());
         let deferred = reinstall_agent_integrations_with_persisted_dashboard_policies(
             &["kimi".to_string()],
+            &["kimi".to_string()],
             home.path(),
             &tracedecay_bin,
         )
-        .await;
+        .await
+        .unwrap()
+        .hosts;
         assert!(
-            matches!(deferred.as_slice(), [(id, Err(_))] if id == "kimi"),
+            matches!(
+                deferred.as_slice(),
+                [(id, HostLifecycleResult::PendingOperatorAction { .. })] if id == "kimi"
+            ),
             "{deferred:?}"
         );
         let staged = home
@@ -2915,13 +3222,16 @@ mod tests {
 
         let results = reinstall_agent_integrations_with_persisted_dashboard_policies(
             &["kimi".to_string()],
+            &["kimi".to_string()],
             home.path(),
             &tracedecay_bin,
         )
-        .await;
+        .await
+        .unwrap()
+        .hosts;
         assert!(matches!(
             results.as_slice(),
-            [(id, Ok(AgentReinstallOutcome::Installed))] if id == "kimi"
+            [(id, HostLifecycleResult::Applied)] if id == "kimi"
         ));
         let lifecycle_root = resolved_host_bundle_lifecycle_root().unwrap();
         assert!(
@@ -2969,14 +3279,17 @@ mod tests {
         // personal marketplace, and drives `codex plugin add` in one pass.
         let results = reinstall_agent_integrations_with_persisted_dashboard_policies(
             &["codex".to_string()],
+            &["codex".to_string()],
             home.path(),
             &tracedecay_bin,
         )
-        .await;
+        .await
+        .unwrap()
+        .hosts;
         assert!(
             matches!(
                 results.as_slice(),
-                [(id, Ok(AgentReinstallOutcome::Installed))] if id == "codex"
+                [(id, HostLifecycleResult::Applied)] if id == "codex"
             ),
             "{results:?}"
         );
@@ -2998,14 +3311,17 @@ mod tests {
         .unwrap();
         let stale = reinstall_agent_integrations_with_persisted_dashboard_policies(
             &["codex".to_string()],
+            &["codex".to_string()],
             home.path(),
             &tracedecay_bin,
         )
-        .await;
+        .await
+        .unwrap()
+        .hosts;
         assert!(
             matches!(
                 stale.as_slice(),
-                [(id, Ok(AgentReinstallOutcome::Installed))] if id == "codex"
+                [(id, HostLifecycleResult::Applied)] if id == "codex"
             ),
             "{stale:?}"
         );
@@ -3017,14 +3333,17 @@ mod tests {
         .unwrap();
         let recovered = reinstall_agent_integrations_with_persisted_dashboard_policies(
             &["codex".to_string()],
+            &["codex".to_string()],
             home.path(),
             &tracedecay_bin,
         )
-        .await;
+        .await
+        .unwrap()
+        .hosts;
         assert!(
             matches!(
                 recovered.as_slice(),
-                [(id, Ok(AgentReinstallOutcome::Installed))] if id == "codex"
+                [(id, HostLifecycleResult::Applied)] if id == "codex"
             ),
             "{recovered:?}"
         );
@@ -3169,7 +3488,7 @@ mod tests {
             HostBundleCliOperation::Update,
             HostBundleCliOperation::Repair,
         ] {
-            let error = apply_canonical_component_set(
+            let result = apply_canonical_component_set(
                 "kimi",
                 operation,
                 &component_set,
@@ -3178,11 +3497,14 @@ mod tests {
                 lifecycle.path(),
                 &ComponentSetApplyContext::resolved(),
             )
-            .unwrap_err()
-            .to_string();
-            assert!(
-                error.contains(&format!("/plugins install {}", staged.display())),
-                "{operation:?}: {error}"
+            .unwrap();
+            let HostLifecycleResult::PendingOperatorAction { command, .. } = &result else {
+                panic!("{operation:?} must defer to Kimi's own `/plugins` flow: {result:?}");
+            };
+            assert_eq!(
+                command,
+                &format!("/plugins install {}", staged.display()),
+                "{operation:?}"
             );
         }
 
@@ -3240,18 +3562,17 @@ mod tests {
             registration.preflight(&component_set.component_set, &request),
             Ok(())
         );
-        let remediation = registration
+        let action = registration
             .deferred_activation()
             .expect("an inactive Kimi plugin defers activation to the host");
-        assert!(
-            remediation.contains(&format!(
-                "/plugins install {}",
-                home.path()
-                    .join(".tracedecay/host-bundle-stage/kimi/tracedecay")
-                    .display()
-            )),
-            "{remediation}"
+        let command = format!(
+            "/plugins install {}",
+            home.path()
+                .join(".tracedecay/host-bundle-stage/kimi/tracedecay")
+                .display()
         );
+        assert_eq!(action.command, command);
+        assert!(action.remediation.contains(&command), "{action:?}");
         assert_eq!(std::fs::read(installed_path).unwrap(), original);
     }
 

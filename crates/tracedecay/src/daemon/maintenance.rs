@@ -889,6 +889,8 @@ struct ResidentMemoryLogStateV1 {
 }
 
 /// A change in the logged resident-memory verdict.
+// Only the Linux resident-memory sampler (and tests) observe transitions.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResidentMemoryLogTransitionV1 {
     EnteredOverBudget,
@@ -896,6 +898,7 @@ enum ResidentMemoryLogTransitionV1 {
 }
 
 impl ResidentMemoryLogStateV1 {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     /// Record one verdict and return the transition it made, if any: a
     /// sustained state is logged once, when it starts and when it ends.
     fn observe(&mut self, over_budget: bool) -> Option<ResidentMemoryLogTransitionV1> {

@@ -22,10 +22,11 @@
 //! and activation then mirrors the receipt-owned bytes into it, the same shape
 //! OpenCode uses for `$XDG_CONFIG_HOME`.
 
-use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
+pub(crate) use tracedecay_sessions::runtime::hosts::pi::PI_AGENT_RELATIVE;
+use tracedecay_sessions::runtime::hosts::pi::pi_agent_dir;
 
 use super::host_bundle::{HostBundleRegistrationStateV1, HostComponentV1};
 use super::{
@@ -42,10 +43,6 @@ const PI_SKILL_SOURCE: &str = include_str!("../../../../plugin/pi/skill/SKILL.md
 
 const PI_EXTENSION_MARKER: &str = "TraceDecayPiExtension";
 const PI_VERSION_PLACEHOLDER: &str = "__TRACEDECAY_VERSION__";
-const PI_AGENT_DIR_ENV: &str = "PI_CODING_AGENT_DIR";
-/// Home-relative directory Pi loads by default, and the only place the
-/// component transaction deploys Pi artifacts.
-pub(crate) const PI_AGENT_RELATIVE: &str = ".pi/agent";
 const PI_EXTENSION_RELATIVE: &str = "extensions/tracedecay/index.ts";
 const PI_PACKAGE_RELATIVE: &str = "extensions/tracedecay/package.json";
 const PI_SCHEMAS_RELATIVE: &str = "extensions/tracedecay/schemas.json";
@@ -87,30 +84,6 @@ fn component_relative_paths(components: &[HostComponentV1]) -> Vec<&'static str>
         paths.extend(PI_AGENT_COMPONENT_RELATIVE);
     }
     paths
-}
-
-/// The agent directory Pi loads for `home`.
-fn pi_agent_dir(home: &Path) -> PathBuf {
-    pi_agent_dir_for(home, ambient_pi_agent_dir(home).as_deref())
-}
-
-/// `PI_CODING_AGENT_DIR` names *this process user's* agent directory, so it
-/// only answers for that user's home. A sandbox or `--home` root stays inside
-/// the root it named.
-fn ambient_pi_agent_dir(home: &Path) -> Option<OsString> {
-    if !super::is_process_home(home) {
-        return None;
-    }
-    std::env::var_os(PI_AGENT_DIR_ENV)
-}
-
-/// Only an absolute override relocates the directory, so a malformed value
-/// cannot quietly deploy next to whatever the working directory happens to be.
-fn pi_agent_dir_for(home: &Path, ambient: Option<&OsStr>) -> PathBuf {
-    ambient
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .unwrap_or_else(|| home.join(PI_AGENT_RELATIVE))
 }
 
 /// Receipt-owned source and relocated destination for each selected artifact.
@@ -332,29 +305,11 @@ impl AgentIntegration for PiIntegration {
 mod tests {
     use super::*;
 
-    #[test]
-    fn ambient_agent_dir_is_honored_only_when_absolute() {
-        let home = Path::new("/home/operator");
-        assert_eq!(pi_agent_dir_for(home, None), home.join(".pi/agent"));
-        assert_eq!(
-            pi_agent_dir_for(home, Some(OsStr::new("/srv/pi-agent"))),
-            PathBuf::from("/srv/pi-agent")
-        );
-        for relative in ["relocated/agent", "./agent", "~/.pi/other", ""] {
-            assert_eq!(
-                pi_agent_dir_for(home, Some(OsStr::new(relative))),
-                home.join(".pi/agent"),
-                "relative override {relative:?} must not relocate the agent directory"
-            );
-        }
-    }
-
     /// A tempdir is never the process user's home, so whatever the operator
     /// exports as `PI_CODING_AGENT_DIR` cannot redirect a sandboxed home.
     #[test]
     fn a_foreign_home_never_resolves_outside_itself() {
         let home = tempfile::tempdir().unwrap();
-        assert!(ambient_pi_agent_dir(home.path()).is_none());
         assert_eq!(pi_agent_dir(home.path()), home.path().join(".pi/agent"));
         let paths = PiIntegration.host_registration_paths(home.path());
         assert!(paths.is_empty(), "{paths:?}");

@@ -207,6 +207,9 @@ jobs:
       - name: Test bounded commit range linting
         run: python3 scripts/test-lint-commit-range.py
 
+      - name: Test worktree GC classification and build reclamation
+        run: python3 scripts/test-worktree-gc.py
+
       - name: Check Rust cache key lineage and the superseded-entry selection
         run: |
           python3 scripts/test-prune-superseded-actions-caches.py

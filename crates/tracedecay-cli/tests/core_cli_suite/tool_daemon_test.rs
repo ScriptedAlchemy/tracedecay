@@ -2505,3 +2505,47 @@ async fn daemon_reopens_retained_receipts_without_reset() {
         drop(daemon);
     }
 }
+
+/// A shell that cannot reach the systemd user manager still reads the serving
+/// daemon's own state as the headline; the manager is a separate line.
+#[cfg(target_os = "linux")]
+#[test]
+fn daemon_status_headline_is_the_daemon_when_the_service_manager_is_unreachable() {
+    let home = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+    let fake_bin = home_path.join("fake-bin");
+    std::fs::create_dir_all(&fake_bin).unwrap();
+    let systemctl = fake_bin.join("systemctl");
+    std::fs::write(
+        &systemctl,
+        "#!/bin/sh\necho 'Failed to connect to bus: No medium found' >&2\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = tracedecay_command_with_home(&home_path)
+        .args(["daemon", "status"])
+        .env("PATH", &fake_bin)
+        .env_remove("DBUS_SESSION_BUS_ADDRESS")
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.first(), Some(&"state: running"), "{stdout}");
+    assert!(
+        lines.contains(
+            &"service manager: unreachable from this shell (check XDG_RUNTIME_DIR and \
+              DBUS_SESSION_BUS_ADDRESS): systemctl --user is-active tracedecay.service reported \
+              no unit state (exit status: 1): Failed to connect to bus: No medium found"
+        ),
+        "{stdout}"
+    );
+    assert!(lines.contains(&"protocol: Ready"), "{stdout}");
+}

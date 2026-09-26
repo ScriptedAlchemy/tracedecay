@@ -3574,23 +3574,6 @@
             "reason"
           ],
           "type": "object"
-        },
-        {
-          "description": "The artifact serves, and its clone census is still being computed in\nthe background, so the coverage counts are not known yet.",
-          "properties": {
-            "observation": {
-              "$ref": "#/$defs/CodeCloneIndexObservationV1"
-            },
-            "state": {
-              "const": "verifying",
-              "type": "string"
-            }
-          },
-          "required": [
-            "state",
-            "observation"
-          ],
-          "type": "object"
         }
       ]
     },

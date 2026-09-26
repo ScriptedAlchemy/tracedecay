@@ -141,13 +141,23 @@ impl ServiceRunner {
     }
 
     pub(super) fn service_state(&self, socket_path: &Path) -> Result<DaemonServiceState> {
+        self.observe_service_state(socket_path)
+            .map_err(TraceDecayError::from)
+    }
+
+    /// Like [`Self::service_state`], but keeps an unreachable service manager
+    /// apart from a failed query so status can report the daemon regardless.
+    pub(super) fn observe_service_state(
+        &self,
+        socket_path: &Path,
+    ) -> std::result::Result<DaemonServiceState, ServiceStateError> {
         match self {
             Self::Systemd { systemctl } => {
                 let activity = systemctl_unit_query(systemctl, "is-active")?;
                 let running = match activity.as_str() {
                     "active" | "reloading" | "refreshing" => true,
                     "inactive" | "failed" | "activating" | "deactivating" | "maintenance" => false,
-                    _ => return Err(systemctl_unknown_state("is-active", &activity)),
+                    _ => return Err(systemctl_unknown_state("is-active", &activity).into()),
                 };
                 let enablement = systemctl_unit_query(systemctl, "is-enabled")?;
                 if enablement.starts_with("masked") {
@@ -162,10 +172,12 @@ impl ServiceRunner {
                     Ok(DaemonServiceState::StoppedDisabled)
                 }
             }
-            Self::Launchd { launchctl, id } => {
-                launchd_service_state(launchctl, id, daemon_socket_state(socket_path))
-            }
-            Self::WindowsTask => windows_task::service_state(),
+            Self::Launchd { launchctl, id } => Ok(launchd_service_state(
+                launchctl,
+                id,
+                daemon_socket_state(socket_path),
+            )?),
+            Self::WindowsTask => Ok(windows_task::service_state()?),
         }
     }
 
@@ -447,10 +459,58 @@ fn service_program_is_executable(_metadata: &std::fs::Metadata) -> bool {
     true
 }
 
+/// The service manager gave no answer to this process. Nothing about the unit
+/// is known: the observer lacks access, which is not a misconfiguration.
+#[derive(Debug)]
+pub(super) struct ServiceManagerUnreachable {
+    query: String,
+}
+
+impl ServiceManagerUnreachable {
+    pub(super) const REMEDY: &'static str = "check XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS";
+}
+
+impl std::fmt::Display for ServiceManagerUnreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.query)
+    }
+}
+
+#[derive(Debug)]
+pub(super) enum ServiceStateError {
+    ManagerUnreachable(ServiceManagerUnreachable),
+    Failed(TraceDecayError),
+}
+
+impl From<TraceDecayError> for ServiceStateError {
+    fn from(error: TraceDecayError) -> Self {
+        Self::Failed(error)
+    }
+}
+
+/// Lifecycle operations cannot act without the service manager, so for them
+/// an unreachable manager stays a hard error naming its remedy.
+impl From<ServiceStateError> for TraceDecayError {
+    fn from(error: ServiceStateError) -> Self {
+        match error {
+            ServiceStateError::ManagerUnreachable(unreachable) => TraceDecayError::Config {
+                message: format!(
+                    "{unreachable}; the systemd user manager may be unreachable from this environment ({})",
+                    ServiceManagerUnreachable::REMEDY
+                ),
+            },
+            ServiceStateError::Failed(error) => error,
+        }
+    }
+}
+
 /// `systemctl --user is-active`/`is-enabled` exit non-zero both for a stopped
 /// or disabled unit and when the user manager is unreachable; only the printed
 /// state tells them apart, so an empty answer is an error, not "stopped".
-fn systemctl_unit_query(systemctl: &Path, verb: &str) -> Result<String> {
+fn systemctl_unit_query(
+    systemctl: &Path,
+    verb: &str,
+) -> std::result::Result<String, ServiceStateError> {
     let output = Command::new(systemctl)
         .args(["--user", verb, crate::SERVICE_NAME])
         .output()
@@ -459,14 +519,16 @@ fn systemctl_unit_query(systemctl: &Path, verb: &str) -> Result<String> {
         })?;
     let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if state.is_empty() {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "systemctl --user {verb} {} reported no unit state ({}): {}; the systemd user manager may be unreachable from this environment (check XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS)",
-                crate::SERVICE_NAME,
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        });
+        return Err(ServiceStateError::ManagerUnreachable(
+            ServiceManagerUnreachable {
+                query: format!(
+                    "systemctl --user {verb} {} reported no unit state ({}): {}",
+                    crate::SERVICE_NAME,
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            },
+        ));
     }
     Ok(state)
 }

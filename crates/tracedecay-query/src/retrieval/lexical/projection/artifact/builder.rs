@@ -29,7 +29,9 @@ use tracedecay_domain::{
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_parent_directory};
 use tracedecay_private_fs::{create_private_file_retained, open_private_file};
 
+use super::clone_census::read_clone_index_census;
 use super::clone_codec::{digest_from_key, digest_key};
+use super::fingerprints::CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1;
 use super::format::{
     BASE_SECTION_NAMES, CodeLexicalArtifactSectionDigestV1, PostingListDecoderV1,
     PostingListEncoderV1, RECEIPT_RESERVATION_BYTES, SECTION_NAMES, SERVING_INDEX_STEP_COUNT_V11,
@@ -1593,67 +1595,70 @@ impl CodeLexicalArtifactBuilderV1 {
                 control,
             )
         )?;
-        hotpath::measure_block!("query.artifact.batch.sqlite", {
-            let _mutation_authority = BuilderMutationGuardV1::enter(&self.mutation_gate)?;
-            let transaction = self.connection.transaction().map_err(sqlite_error)?;
-            let mutation = (|| {
-                hotpath::measure_block!("query.artifact.batch.imports", {
-                    for page in pages {
-                        append_prepared_imports(&transaction, page, control)?;
-                    }
-                    Ok::<(), CodeLexicalArtifactErrorV1>(())
-                })?;
-                record_batch_import_metrics(pages);
-                hotpath::measure_block!(
-                    "query.artifact.batch.clone_bodies",
-                    append_prepared_clone_bodies(&transaction, pages, control)
-                )?;
-                hotpath::measure_block!(
-                    "query.artifact.batch.rows.stage_dictionary",
-                    stage_row_dictionary(&transaction, pages, control)
-                )?;
-                hotpath::measure_block!(
-                    "query.artifact.batch.rows",
-                    append_prepared_rows(&transaction, pages, control)
-                )?;
-                record_batch_row_metrics(pages);
-                hotpath::measure_block!(
-                    "query.artifact.batch.postings",
-                    append_prepared_postings(
-                        &transaction,
-                        pages,
-                        &term_insert_plan,
-                        &exact_insert_plan,
-                        control,
-                    )
-                )?;
-                record_batch_posting_metrics(pages);
-                hotpath::measure_block!("query.artifact.batch.receipts", {
-                    for page in pages {
-                        insert_prepared_source_page(&transaction, page)?;
-                    }
-                    Ok::<(), CodeLexicalArtifactErrorV1>(())
-                })?;
-                record_batch_receipt_metrics(pages);
-                checkpoint(control)
-            })();
-            if let Err(error) = mutation {
-                hotpath::gauge!("query.artifact.batch.rollbacks_total").inc(1u64);
-                hotpath::measure_block!(
-                    "query.artifact.batch.rollback",
-                    transaction.rollback().map_err(sqlite_error)
-                )?;
-                return Err(error);
-            }
-            hotpath::gauge!("query.artifact.batch.commit_attempts_total").inc(1u64);
-            let commit = hotpath::measure_block!(
-                "query.artifact.batch.commit",
-                transaction.commit().map_err(sqlite_error)
-            );
-            if commit.is_ok() {
-                hotpath::gauge!("query.artifact.batch.commit_succeeded_total").inc(1u64);
-            }
-            commit
+        let mutation_gate = &self.mutation_gate;
+        super::with_memory_statement_journals(&mut self.connection, |connection| {
+            hotpath::measure_block!("query.artifact.batch.sqlite", {
+                let _mutation_authority = BuilderMutationGuardV1::enter(mutation_gate)?;
+                let transaction = connection.transaction().map_err(sqlite_error)?;
+                let mutation = (|| {
+                    hotpath::measure_block!("query.artifact.batch.imports", {
+                        for page in pages {
+                            append_prepared_imports(&transaction, page, control)?;
+                        }
+                        Ok::<(), CodeLexicalArtifactErrorV1>(())
+                    })?;
+                    record_batch_import_metrics(pages);
+                    hotpath::measure_block!(
+                        "query.artifact.batch.clone_bodies",
+                        append_prepared_clone_bodies(&transaction, pages, control)
+                    )?;
+                    hotpath::measure_block!(
+                        "query.artifact.batch.rows.stage_dictionary",
+                        stage_row_dictionary(&transaction, pages, control)
+                    )?;
+                    hotpath::measure_block!(
+                        "query.artifact.batch.rows",
+                        append_prepared_rows(&transaction, pages, control)
+                    )?;
+                    record_batch_row_metrics(pages);
+                    hotpath::measure_block!(
+                        "query.artifact.batch.postings",
+                        append_prepared_postings(
+                            &transaction,
+                            pages,
+                            &term_insert_plan,
+                            &exact_insert_plan,
+                            control,
+                        )
+                    )?;
+                    record_batch_posting_metrics(pages);
+                    hotpath::measure_block!("query.artifact.batch.receipts", {
+                        for page in pages {
+                            insert_prepared_source_page(&transaction, page)?;
+                        }
+                        Ok::<(), CodeLexicalArtifactErrorV1>(())
+                    })?;
+                    record_batch_receipt_metrics(pages);
+                    checkpoint(control)
+                })();
+                if let Err(error) = mutation {
+                    hotpath::gauge!("query.artifact.batch.rollbacks_total").inc(1u64);
+                    hotpath::measure_block!(
+                        "query.artifact.batch.rollback",
+                        transaction.rollback().map_err(sqlite_error)
+                    )?;
+                    return Err(error);
+                }
+                hotpath::gauge!("query.artifact.batch.commit_attempts_total").inc(1u64);
+                let commit = hotpath::measure_block!(
+                    "query.artifact.batch.commit",
+                    transaction.commit().map_err(sqlite_error)
+                );
+                if commit.is_ok() {
+                    hotpath::gauge!("query.artifact.batch.commit_succeeded_total").inc(1u64);
+                }
+                commit
+            })
         })?;
         // Do not observe cancellation between durable COMMIT and publishing
         // its exact progress. The source callback must be able to advance its
@@ -1885,6 +1890,14 @@ impl CodeLexicalArtifactBuilderV1 {
         let mut transaction_metrics = FinalizationTransactionMetricsV1::new();
         let sections = state.completed_sections;
         verify_final_sections_against_source(&sections, source)?;
+        let clone_index_census = hotpath::measure_block!(
+            "query.artifact.finalization.clone_census",
+            read_clone_index_census(
+                &transaction,
+                CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1,
+                control
+            )
+        )?;
         // The resume state binds the building worktree's source; the sealed
         // file keeps none of it, not even the space its row occupied.
         transaction
@@ -1896,6 +1909,7 @@ impl CodeLexicalArtifactBuilderV1 {
             self.metadata_digest.clone(),
             source,
             sections,
+            clone_index_census,
             file_size_bytes,
         )?;
         transaction
@@ -6803,6 +6817,16 @@ fn verify_finalized_artifact(
             "finalized lexical artifact content digest does not verify".to_owned(),
         ));
     }
+    if &read_clone_index_census(
+        connection,
+        CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1,
+        control,
+    )? != receipt.clone_index_census()
+    {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "finalized lexical artifact clone census does not verify".to_owned(),
+        ));
+    }
     let actual_size = path
         .metadata()
         .map_err(|error| {
@@ -6839,7 +6863,14 @@ fn require_integrity(
 
 #[cfg(test)]
 mod tests {
-    use super::super::format::decode_term_lists;
+    use super::super::clone_census::census_reads_on_this_thread;
+    use super::super::clone_census::tests::payload;
+    use super::super::clone_codec::encode_clone_payload;
+    use super::super::format::{decode_term_lists, sourceless_test_receipt};
+    use super::super::{
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactReaderV1,
+        CodeLexicalCloneIndexCensusV1,
+    };
     use super::*;
     use rusqlite::StatementStatus;
     use rusqlite::hooks::{AuthAction, Authorization};
@@ -7209,6 +7240,94 @@ mod tests {
                 .map(|section| section.name.as_str())
                 .collect::<Vec<_>>(),
             SECTION_NAMES
+        );
+    }
+
+    /// The seal binds its clone census into the receipt, so an open serves
+    /// that census without walking a clone table. Here the one stored payload
+    /// is not the payload its digest names, which any recomputation refuses;
+    /// the open must still serve the sealed census, and an explicit
+    /// verification must still find the corruption.
+    #[test]
+    fn open_serves_the_sealed_clone_census_and_verification_recomputes_it() {
+        let directory = tempfile::tempdir().expect("artifact directory");
+        let path = directory.path().join("sealed.sqlite");
+        let metadata = test_metadata();
+        let metadata_digest = metadata_digest(&metadata).expect("metadata digest");
+        let connection = Connection::open(&path).expect("artifact database");
+        {
+            let _mutation_authority = create_mutable_test_schema(&connection);
+            connection
+                .execute(
+                    "INSERT INTO artifact_state(singleton, format_revision, metadata, metadata_digest, receipt) VALUES (1, ?1, ?2, ?3, ?4)",
+                    params![
+                        i64::from(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1),
+                        content_metadata_bytes(&metadata).expect("metadata bytes"),
+                        metadata_digest.as_str(),
+                        vec![0u8; RECEIPT_RESERVATION_BYTES],
+                    ],
+                )
+                .expect("stage artifact state");
+            let (stored, _) = encode_clone_payload(&payload(0)).expect("payload bytes");
+            connection
+                .execute(
+                    "INSERT INTO clone_body_payloads(payload_digest, payload) VALUES (?1, ?2)",
+                    params![
+                        digest_key(&payload(1).payload_digest).expect("digest key"),
+                        stored
+                    ],
+                )
+                .expect("stage a payload under another payload's digest");
+        }
+        let sealed_census = CodeLexicalCloneIndexCensusV1 {
+            unique_payloads: 1,
+            ..CodeLexicalCloneIndexCensusV1::default()
+        };
+        let receipt = sourceless_test_receipt(
+            metadata_digest,
+            compute_section_digests(&connection, &ActiveControl).expect("section digests"),
+            sealed_census.clone(),
+            sqlite_file_size(&connection).expect("file size"),
+        )
+        .expect("sealed receipt");
+        connection
+            .execute(
+                "UPDATE artifact_state SET receipt = ?1 WHERE singleton = 1",
+                [padded_receipt(&receipt).expect("padded receipt")],
+            )
+            .expect("seal the receipt");
+        drop(connection);
+
+        let census_reads = census_reads_on_this_thread();
+        let reader = CodeLexicalArtifactReaderV1::open_with_control(
+            &path,
+            &receipt,
+            &metadata,
+            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+            &ActiveControl,
+        )
+        .expect("open the sealed artifact");
+        assert_eq!(
+            reader.verified_artifact().clone_index_census(),
+            &sealed_census
+        );
+        assert_eq!(
+            census_reads_on_this_thread(),
+            census_reads,
+            "opening a sealed artifact must not recompute its clone census"
+        );
+        drop(reader);
+
+        let connection = Connection::open(&path).expect("reopen for verification");
+        let error = read_clone_index_census(
+            &connection,
+            CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1,
+            &ActiveControl,
+        )
+        .expect_err("verification recomputes the census and refuses the payload");
+        assert!(
+            matches!(error, CodeLexicalArtifactErrorV1::Corrupt(_)),
+            "expected a corruption refusal, got {error:?}"
         );
     }
 

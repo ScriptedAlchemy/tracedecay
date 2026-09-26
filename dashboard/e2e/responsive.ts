@@ -164,6 +164,8 @@ export interface OverflowOffender {
  * name. The plan permits "labeled code/table/graph regions" to do this. */
 export interface InternalScroller {
   readonly selector: string;
+  /** Lower-case tag name; `aside` is a side rail. */
+  readonly tag: string;
   readonly label: string;
   readonly role: string;
 }
@@ -275,6 +277,7 @@ export const REFLOW_PROBE = `(function () {${PROBE_PRELUDE}
         el.scrollWidth > el.clientWidth + 1) {
       scrollers.push({
         selector: describe(el),
+        tag: el.tagName.toLowerCase(),
         label: (el.getAttribute('aria-label') || el.getAttribute('aria-labelledby') ||
                 el.getAttribute('title') || '').trim(),
         role: el.getAttribute('role') || '',
@@ -354,6 +357,26 @@ export function clippedContentFailures(report: ReflowReport, tag: string): strin
       `while holding ${s.scrollHeight}px of content, so none of it can be reached and no ` +
       `scrollbar offers to. Trapped: "${s.hidden}"`,
   );
+}
+
+/**
+ * A side rail scrolls vertically and never sideways, at any width.
+ *
+ * Rails are the readouts beside a workspace's main field. Unlike the code,
+ * table and graph regions the plan lets scroll internally, nothing in a rail is
+ * meant to be panned to: when one scrolls sideways, some child sized itself
+ * to its unwrapped content and every row after it is clipped at the rail's
+ * right edge. The Brain registry rail did exactly this on a registry with one
+ * long checkout path, by 16 CSS pixels, with no page-level overflow to report.
+ */
+export function sidewaysRailFailures(report: ReflowReport, tag: string): string[] {
+  return report.internalScrollers
+    .filter((s) => s.tag === 'aside')
+    .map(
+      (s) =>
+        `${tag}: the side rail ${s.label === '' ? s.selector : `"${s.label}"`} scrolls ` +
+        `horizontally (scrollWidth > clientWidth), so its rows are clipped at the right edge`,
+    );
 }
 
 /* ==========================================================================

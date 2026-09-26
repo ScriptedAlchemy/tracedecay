@@ -46,10 +46,10 @@ pub struct CatalogHostComponentRegistrationAuthority {
     /// genuinely foreign edit invalidates the transaction.
     staged_foreign_registration_revision: Option<[u8; 32]>,
     staged: Option<StagedRegistration>,
-    /// Remediation for a host whose only activation route is interactive:
-    /// the transaction commits the staged source that route consumes and
-    /// leaves the host registration untouched.
-    deferred_activation: Option<String>,
+    /// The operator step for a host whose only activation route is
+    /// interactive: the transaction commits the staged source that route
+    /// consumes and leaves the host registration untouched.
+    deferred_activation: Option<crate::agents::DeferredUserAction>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,8 +128,8 @@ impl CatalogHostComponentRegistrationAuthority {
 
     /// The host action still required after this transaction committed its
     /// staged source, or `None` when the registration was fully applied.
-    pub fn deferred_activation(&self) -> Option<&str> {
-        self.deferred_activation.as_deref()
+    pub fn deferred_activation(&self) -> Option<&crate::agents::DeferredUserAction> {
+        self.deferred_activation.as_ref()
     }
 
     fn registration_error(
@@ -780,7 +780,7 @@ impl crate::agents::host_bundle::HostComponentSetRegistrationV1
                         // it; the registration stays untouched.
                         crate::agents::NonInteractiveInstallOutcome::DeferredUserAction(action) => {
                             self.should_apply = false;
-                            self.deferred_activation = Some(action.remediation);
+                            self.deferred_activation = Some(action);
                             return Ok(());
                         }
                     }

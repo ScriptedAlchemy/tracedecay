@@ -1266,6 +1266,7 @@ mod tests {
 
     #[cfg(unix)]
     mod version_probe {
+        #[cfg(target_os = "linux")]
         use std::fs;
         use std::path::{Path, PathBuf};
         use std::time::{Duration, Instant};

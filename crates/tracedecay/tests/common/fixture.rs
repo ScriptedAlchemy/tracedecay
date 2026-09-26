@@ -919,3 +919,94 @@ pub fn write_typescript_diagnostics_fixture(project: &Path, compiler: TypeScript
     .unwrap();
     fs::set_permissions(&tsc, fs::Permissions::from_mode(0o755)).unwrap();
 }
+
+/// The package file the monorepo fixture's `TS4023` is reported on.
+pub const TYPESCRIPT_MONOREPO_APP_FILE: &str = "packages/app/src/index.ts";
+
+/// A TypeScript file in the monorepo fixture that no tsconfig owns.
+pub const TYPESCRIPT_MONOREPO_UNOWNED_FILE: &str = "scripts/release.ts";
+
+/// The issue #2025 layout: a pnpm workspace whose packages each carry a
+/// `tsconfig.json` extending a root `tsconfig.base.json`, with no root
+/// `tsconfig.json`. `packages/app` has the same genuine `TS4023` sources as
+/// [`write_typescript_diagnostics_fixture`]; `packages/lib` is clean.
+///
+/// With [`TypeScriptFixtureCompiler::Present`] the workspace root's
+/// `node_modules/.bin/tsc` (pnpm hoists the binary of a root dev dependency)
+/// logs every invocation to [`TYPESCRIPT_FIXTURE_TSC_INVOCATIONS`] and reports
+/// the finding only when pointed at `packages/app/tsconfig.json`, so a record
+/// on [`TYPESCRIPT_MONOREPO_APP_FILE`] proves the producer checked that
+/// package's own tsconfig.
+#[cfg(unix)]
+pub fn write_typescript_monorepo_diagnostics_fixture(
+    project: &Path,
+    compiler: TypeScriptFixtureCompiler,
+) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let files = [
+        (
+            "package.json",
+            "{\n  \"name\": \"monorepo-fixture\",\n  \"private\": true,\n  \"devDependencies\": { \"typescript\": \"5.6.3\" }\n}\n",
+        ),
+        ("pnpm-workspace.yaml", "packages:\n  - 'packages/*'\n"),
+        ("pnpm-lock.yaml", "lockfileVersion: '9.0'\n"),
+        (".gitignore", "node_modules/\n"),
+        (
+            "tsconfig.base.json",
+            "{\n  // shared by every package\n  \"compilerOptions\": {\n    \"strict\": true,\n    \"declaration\": true,\n    \"module\": \"es2022\",\n    \"target\": \"es2022\",\n  },\n}\n",
+        ),
+        (
+            "packages/app/package.json",
+            "{ \"name\": \"@fixture/app\", \"private\": true }\n",
+        ),
+        (
+            "packages/app/tsconfig.json",
+            "{ \"extends\": \"../../tsconfig.base.json\", \"include\": [\"src\"] }\n",
+        ),
+        (
+            "packages/app/src/dep.ts",
+            "interface Hidden {\n  a: number;\n}\n\nexport function make(): Hidden {\n  return { a: 1 };\n}\n",
+        ),
+        (
+            TYPESCRIPT_MONOREPO_APP_FILE,
+            "import { make } from \"./dep\";\n\nexport const value = make();\n",
+        ),
+        (
+            "packages/lib/package.json",
+            "{ \"name\": \"@fixture/lib\", \"private\": true }\n",
+        ),
+        (
+            "packages/lib/tsconfig.json",
+            "{ \"extends\": \"../../tsconfig.base.json\", \"include\": [\"src\"] }\n",
+        ),
+        (
+            "packages/lib/src/lib.ts",
+            "export function add(a: number, b: number): number {\n  return a + b;\n}\n",
+        ),
+        (
+            TYPESCRIPT_MONOREPO_UNOWNED_FILE,
+            "export const release = \"v1\";\n",
+        ),
+    ];
+    for (path, contents) in files {
+        let path = project.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+    if compiler == TypeScriptFixtureCompiler::Missing {
+        return;
+    }
+    let bin = project.join("node_modules/.bin");
+    fs::create_dir_all(&bin).unwrap();
+    let tsc = bin.join("tsc");
+    fs::write(
+        &tsc,
+        format!(
+            "#!/bin/sh\nprintf '%s %s\\n' \"$(pwd)\" \"$*\" >> \"{}\"\ncase \"$2\" in\n  */packages/app/tsconfig.json)\n    echo \"{TYPESCRIPT_MONOREPO_APP_FILE}(3,14): error TS4023: Exported variable 'value' has or is using name 'Hidden' from external module \\\"./dep\\\" but cannot be named.\"\n    exit 2 ;;\nesac\nexit 0\n",
+            project.join(TYPESCRIPT_FIXTURE_TSC_INVOCATIONS).display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&tsc, fs::Permissions::from_mode(0o755)).unwrap();
+}

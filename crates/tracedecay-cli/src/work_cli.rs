@@ -69,6 +69,10 @@ pub struct WorkCliDelivery {
 }
 
 impl WorkCliDelivery {
+    pub(crate) fn new(delivery: DaemonInvocationDelivery) -> Self {
+        Self { delivery }
+    }
+
     /// Acknowledge only after the caller's output write and flush succeeded.
     #[hotpath::skip]
     pub async fn acknowledge_delivered(self) -> Result<()> {
@@ -444,19 +448,23 @@ pub async fn invoke_work_cli_with_delivery(
         )?),
     };
     let delivery = if delivery_eligible {
-        Some(WorkCliDelivery {
-            delivery: delivery.ok_or_else(|| TraceDecayError::Config {
+        Some(WorkCliDelivery::new(delivery.ok_or_else(|| {
+            TraceDecayError::Config {
                 message: "daemon Work response omitted its connection-bound delivery authority"
                     .to_owned(),
-            })?,
-        })
+            }
+        })?))
     } else {
         None
     };
     Ok(WorkCliResponse { outcome, delivery })
 }
 
-fn work_delivery_is_eligible(operation: WorkOperation, outcome: &WorkApplicationOutcomeV1) -> bool {
+/// Whether the daemon holds this Work terminal open for a delivery ACK.
+pub(crate) fn work_delivery_is_eligible(
+    operation: WorkOperation,
+    outcome: &WorkApplicationOutcomeV1,
+) -> bool {
     match (operation, outcome) {
         (WorkOperation::StartAttempt, WorkApplicationOutcomeV1::StartAttempt(outcome))
         | (WorkOperation::AttemptStatus, WorkApplicationOutcomeV1::AttemptStatus(outcome))

@@ -88,6 +88,7 @@ pub(super) const USER_CATCH_UP_PROVIDERS: &[SessionProvider] = &[
     SessionProvider::Kiro,
     SessionProvider::Kimi,
     SessionProvider::OpenCode,
+    SessionProvider::Pi,
     SessionProvider::Cline,
     SessionProvider::RooCode,
     SessionProvider::Kilo,

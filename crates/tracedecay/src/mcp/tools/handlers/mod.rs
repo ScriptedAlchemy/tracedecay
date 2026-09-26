@@ -624,15 +624,11 @@ pub fn handle_tool_call_with_registry_options<'a>(
             .await;
         }
         if dispatch_group == Some(McpToolDispatchGroup::Work) {
-            // Work routes through the same canonical owner as HTTP rather than
-            // entering compatibility dispatch below.
             ensure_mcp_dispatch_available(tool_name)?;
-            return boxed_send(handle_work(
+            return boxed_send(execute_work_tool_surface(
                 tool_name,
                 args,
-                options.application_invocation_executor.map(|executor| {
-                    move |request| invoke_admitted_work_operation(executor, request)
-                }),
+                options.application_invocation_executor,
                 options.application_request_id,
                 options.application_deadline,
                 options.application_cancellation,
@@ -640,18 +636,11 @@ pub fn handle_tool_call_with_registry_options<'a>(
             .await;
         }
         if dispatch_group == Some(McpToolDispatchGroup::Workflow) {
-            // Workflow is Work's sibling closed family and reaches the same
-            // canonical owner HTTP and the CLI reach, for the same reason.
             ensure_mcp_dispatch_available(tool_name)?;
-            return boxed_send(handle_workflow(
+            return boxed_send(execute_workflow_tool_surface(
                 tool_name,
                 args,
-                |request| {
-                    invoke_admitted_workflow_operation(
-                        options.application_invocation_executor,
-                        request,
-                    )
-                },
+                options.application_invocation_executor,
                 options.application_request_id,
                 options.application_deadline,
                 options.application_cancellation,
@@ -799,6 +788,49 @@ pub fn handle_tool_call_with_registry_options<'a>(
         }
     };
     Box::pin(hotpath::future!(dispatch, label = "mcp.tool_call"))
+}
+
+/// Runs one Work tool through the canonical Work owner on `executor`: the
+/// daemon's project server for MCP, the daemon socket client for
+/// `tracedecay tool`. Both surfaces therefore return the same typed envelope
+/// HTTP serves, bound to the Work executable registry's result contract.
+pub async fn execute_work_tool_surface(
+    tool_name: &str,
+    args: Value,
+    executor: Option<&dyn DaemonInvocationExecutor>,
+    request_id: Option<tracedecay_contracts::RequestId>,
+    deadline: Option<tracedecay_contracts::Deadline>,
+    cancellation: Option<tracedecay_contracts::CancellationSignal>,
+) -> Result<ToolResult> {
+    handle_work(
+        tool_name,
+        args,
+        executor.map(|executor| move |request| invoke_admitted_work_operation(executor, request)),
+        request_id,
+        deadline,
+        cancellation,
+    )
+    .await
+}
+
+/// Workflow's counterpart of [`execute_work_tool_surface`].
+pub async fn execute_workflow_tool_surface(
+    tool_name: &str,
+    args: Value,
+    executor: Option<&dyn DaemonInvocationExecutor>,
+    request_id: Option<tracedecay_contracts::RequestId>,
+    deadline: Option<tracedecay_contracts::Deadline>,
+    cancellation: Option<tracedecay_contracts::CancellationSignal>,
+) -> Result<ToolResult> {
+    handle_workflow(
+        tool_name,
+        args,
+        |request| invoke_admitted_workflow_operation(executor, request),
+        request_id,
+        deadline,
+        cancellation,
+    )
+    .await
 }
 
 /// Reads the canonical Work HTTP envelope the daemon owner already produced.

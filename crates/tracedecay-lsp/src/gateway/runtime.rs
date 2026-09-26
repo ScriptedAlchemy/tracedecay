@@ -223,13 +223,6 @@ impl SemanticProviderAdapter {
                     detail: None,
                 };
             }
-            OperationPoll::Busy => {
-                return SemanticProviderOutcome::Partial {
-                    value: empty_semantic_response(request),
-                    coverage: "semantic-runtime-busy".to_owned(),
-                    detail: None,
-                };
-            }
             OperationPoll::Missing => {}
         }
 
@@ -248,11 +241,6 @@ impl SemanticProviderAdapter {
             OperationAdmission::Existing(_) => SemanticProviderOutcome::Partial {
                 value: empty_semantic_response(request),
                 coverage: "semantic-request-correlation-mismatch".to_owned(),
-                detail: None,
-            },
-            OperationAdmission::Busy => SemanticProviderOutcome::Partial {
-                value: empty_semantic_response(request),
-                coverage: "semantic-runtime-busy".to_owned(),
                 detail: None,
             },
             OperationAdmission::Saturated => SemanticProviderOutcome::Partial {

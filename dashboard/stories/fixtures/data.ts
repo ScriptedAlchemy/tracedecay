@@ -20,6 +20,7 @@
  * `TD_FIXTURE_NOW_MS` pins one. The visual audit pins it, together with the
  * page clock, so its captures are pixel-stable between runs.
  */
+import { topologyMeasurement, topologyMetricsModel } from '../../src/test/workTopologyMetricsFixture.ts';
 
 const nowMs = Number(globalThis.process?.env?.['TD_FIXTURE_NOW_MS']) || Date.now();
 const nowSecs = Math.floor(nowMs / 1000);
@@ -251,13 +252,16 @@ const projectTree: ReadonlyArray<Record<string, unknown>> = [
       branches: ['master', 'codex/tracedecay-total-redesign-plan'],
       projects: [
         { ...projectEntry('tracedecay', 'tracedecay', '/fast/projects/tracedecay', 900), kind: 'primary' },
+        // Linked worktrees on a real registry carry long lane names and paths;
+        // this one is wider than the Brain rail at every audited width.
         {
           ...projectEntry(
             'tracedecay-wt',
-            'tracedecay (worktree)',
-            '/fast/projects/tracedecay-wt',
+            'tracedecay-fleet-mcp-typed-work-workflow-integration',
+            '/fast/tmp/fleet-mcp-typed-work-workflow-integration/tracedecay',
             6 * DAY,
           ),
+          default_branch: 'fleet/mcp-typed-work-workflow-integration',
           kind: 'worktree',
         },
       ],
@@ -3418,6 +3422,132 @@ const settings: Record<string, unknown> = envelope(settingsPayload, 'ready', [
   { kind: 'refresh', operation: 'configuration_list' },
 ]);
 
+/**
+ * `GET /api/plugins/code-diagnostics` (code_diagnostics_api.rs
+ * `snapshot_response`): the broker's `DiagnosticsSnapshot` serialized bare, not
+ * in a dashboard envelope, plus the settings compare-and-set token. Engine
+ * rows are every built-in adapter the broker reports, with the commands and
+ * install options a live daemon served: Rust and TypeScript analyzers ran,
+ * JavaScript files are present but unanalyzed, PHP is switched off by the
+ * operator, and every language absent from the project is `inactive`.
+ */
+function codeDiagnosticsSnapshot(): Record<string, unknown> {
+  const npm = (packages: string) => [{ command: `npm install -g ${packages}`, label: 'npm', notes: null }];
+  const clangd = [
+    {
+      command: 'sudo apt install clangd',
+      label: 'system package',
+      notes: 'Use your platform package manager on non-Debian systems.',
+    },
+  ];
+  const engine = (
+    language: string,
+    command: string,
+    args: string[],
+    installOptions: ReadonlyArray<Record<string, unknown>>,
+    state = 'inactive',
+    lastUpdate: number | null = null,
+    languageId = language,
+  ) => ({
+    language,
+    language_id: languageId,
+    command,
+    default_command: command,
+    args,
+    enabled: state !== 'disabled',
+    state,
+    install_options: installOptions,
+    last_error: null,
+    last_diagnostic_update: lastUpdate,
+  });
+  const diagnostic = (
+    language: string,
+    source: string,
+    file: string,
+    line: number,
+    severity: string,
+    code: string | null,
+    message: string,
+    enclosing: string | null,
+  ) => ({
+    language,
+    source,
+    file,
+    line_start: line,
+    line_end: line,
+    character_start: 8,
+    character_end: 24,
+    severity,
+    code,
+    message,
+    enclosing_node: enclosing,
+    updated_at: nowSecs - 140,
+  });
+  return {
+    summary: {
+      total_errors: 1,
+      total_warnings: 2,
+      pending_refreshes: 0,
+      last_refresh_age_seconds: 140,
+    },
+    engines: [
+      engine('rust', 'rust-analyzer', [], [{ command: 'rustup component add rust-analyzer', label: 'rustup', notes: null }], 'ready', nowSecs - 140),
+      engine('typescript', 'typescript-language-server', ['--stdio'], npm('typescript typescript-language-server'), 'ready', nowSecs - 610),
+      engine('javascript', 'typescript-language-server', ['--stdio'], npm('typescript typescript-language-server'), 'available'),
+      engine('python', 'pyright-langserver', ['--stdio'], npm('pyright')),
+      engine('go', 'gopls', [], [{ command: 'go install golang.org/x/tools/gopls@latest', label: 'go', notes: null }]),
+      engine('c', 'clangd', [], clangd),
+      engine('cpp', 'clangd', [], clangd),
+      engine('objc', 'clangd', [], clangd, 'inactive', null, 'objective-c'),
+      engine('zig', 'zls', [], [{ command: 'brew install zls', label: 'package manager', notes: 'Use your platform package manager or the zigtools/zls release for non-macOS systems.' }]),
+      engine('lua', 'lua-language-server', [], [{ command: 'brew install lua-language-server', label: 'system package', notes: 'Use your platform package manager on non-macOS systems.' }]),
+      engine('php', 'intelephense', ['--stdio'], npm('intelephense'), 'disabled'),
+    ],
+    diagnostics: [
+      diagnostic(
+        'rust',
+        'rust-analyzer',
+        'crates/tracedecay-dashboard-api/src/code_diagnostics_api.rs',
+        137,
+        'error',
+        'E0308',
+        'mismatched types: expected `ManifestDigest`, found `String`',
+        'snapshot_response',
+      ),
+      diagnostic(
+        'rust',
+        'rust-analyzer',
+        'crates/tracedecay-lsp/src/analyzer/broker.rs',
+        412,
+        'warning',
+        'unused_variables',
+        'unused variable: `generation`',
+        'DiagnosticBroker::commit_refresh',
+      ),
+      diagnostic(
+        'typescript',
+        'typescript',
+        'dashboard/src/workspaces/code/CodeDiagnostics.tsx',
+        88,
+        'warning',
+        '6133',
+        "'engine' is declared but its value is never read.",
+        null,
+      ),
+    ],
+    backfill: {
+      rust: { queued_files: 0, opened_files: 214, files_with_diagnostics: 2, last_completed_sweep: nowSecs - 900 },
+      typescript: { queued_files: 12, opened_files: 388, files_with_diagnostics: 1, last_completed_sweep: null },
+    },
+    settings: {
+      idle_backfill: 'idle',
+      languages: { php: { enabled: false, command_override: null } },
+      custom_adapters: [],
+    },
+    settings_revision: `sha256:${'5c'.repeat(32)}`,
+  };
+}
+
 const capabilities: Record<string, unknown> = {
   name: 'tracedecay-dashboard',
   version: '2.0.0',
@@ -4486,7 +4616,8 @@ export const CODE_INDEX_FRESHNESS_FIXTURES = {
 
 /**
  * Exact-path fixture map. Keys are the pathname (query string stripped by the
- * resolver). Anything not listed resolves to the prefix table, then to {}.
+ * resolver). A path that is not listed here or matched by `lookupFixture`'s
+ * dynamic routes has no fixture.
  */
 export const FIXTURES: Readonly<Record<string, unknown>> = {
   '/api/projects': envelope(projectsPayload),
@@ -4553,6 +4684,7 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   // the state the audit needs to shoot. The unattached case is a state chip
   // with no reading behind it.
   '/api/code-index/freshness': CODE_INDEX_FRESHNESS_FIXTURES.ready_absent,
+  '/api/plugins/code-diagnostics': codeDiagnosticsSnapshot(),
   '/api/remote/status': remoteOperationalStatusEnvelope(),
   // Work. The two mounted read routes. Unlike every other fixture here these
   // are wrapped in the application's `HttpJsonEnvelope` rather than
@@ -4578,6 +4710,8 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   // application envelope as Work/Workflow reads; payload is the generated
   // `ListTaskHandoffsResultV1`.
   '/api/application/handoff/list-task': workEnvelope(listTaskHandoffsPayload()),
+  '/api/work/topology-metrics': workEnvelope(workTopologyMetricsPayload()),
+  '/api/feedback/proximity': workEnvelope(feedbackProximityPayload()),
 };
 
 /** Two registered workflow definitions with real step graphs, so the audited
@@ -4762,6 +4896,88 @@ function workflowRunPayload(): Record<string, unknown> {
   };
 }
 
+/** `operation.work.topology_metrics`: one measured concurrency width and one
+ * duplicate-effect cell withheld below its support floor, so the Work
+ * inspector draws a reading beside an honest gap. */
+function workTopologyMetricsPayload(): Record<string, unknown> {
+  const horizon = { since_micros: nowMicros - 3_600_000_000, until_micros: nowMicros };
+  return topologyMetricsModel({
+    horizon,
+    measurements: [
+      topologyMeasurement({
+        metric: 'work_execution_concurrency_width',
+        value: 27_000,
+        unit: 'microseconds',
+        denominator: 'duration_weighted_topology_samples',
+        dimensions: [{ dimension: 'concurrency_phase', value: 'active' }],
+        coverage: { eligible: 12, observed: 12, completed: 12, state: 'known' },
+        horizon,
+      }),
+      topologyMeasurement({
+        metric: 'work_duplicate_effects_total',
+        value: null,
+        unit: 'effects',
+        denominator: 'observed_duplicate_effects',
+        dimensions: [{ dimension: 'duplicate_outcome', value: 'committed' }],
+        unavailable: 'support_floor_unmet',
+        horizon,
+      }),
+    ],
+  });
+}
+
+/** `operation.feedback.proximity`: two Loom sessions writing the same symbol
+ * in one worktree an hour ago, which is the encounter the weave marks. */
+function feedbackProximityPayload(): Record<string, unknown> {
+  const scope = {
+    project_id: 'project.tracedecay',
+    repository_id: 'repository.tracedecay',
+    worktree_id: 'worktree.primary',
+    branch_ref: 'refs/heads/master',
+    head_commit_id: 'a1c3f0'.padEnd(40, '0'),
+  };
+  const [first, second] = loomSessionRows(2);
+  const start = (nowSecs - 3_900) * 1_000_000;
+  const end = (nowSecs - 3_300) * 1_000_000;
+  const participant = (session: Record<string, unknown>, agent: string) => ({
+    source: { provider: session['provider'], session_id: session['session_id'], source_key: null },
+    agent_id: agent,
+    worktree_id: scope.worktree_id,
+    worktree_root: '/fast/projects/tracedecay',
+    branch_ref: scope.branch_ref,
+    head_revision: scope.head_commit_id,
+    access: 'write',
+    activity: { start, end },
+    address: {
+      scope,
+      file: 'dashboard/src/workspaces/brain/BrainPage.tsx',
+      span: { start_byte: 14_210, end_byte: 14_388 },
+      symbol: 'RegistryList',
+    },
+  });
+  return {
+    state: 'complete',
+    page: {
+      scope,
+      source_generation: 'generation.proximity.fixture',
+      observed_at: nowMicros,
+      expires_at: nowMicros + 30_000_000,
+      encounters: [
+        {
+          encounter_id: `sha256:${'ab'.repeat(32)}`,
+          scope,
+          interval: { start, end },
+          participants: [participant(first!, 'agent.first'), participant(second!, 'agent.second')],
+          relation: { relation_kind: 'overlapping_edit', warning_class: 'same_file' },
+          observed_at: nowMicros,
+          expires_at: nowMicros + 30_000_000,
+          coverage: 'complete',
+        },
+      ],
+    },
+  };
+}
+
 /** Outstanding and dropped tokens for the newest tree session the Agents
  * page actually names (`session.cursor.solo`). Counts match the rows. */
 function listTaskHandoffsPayload(): Record<string, unknown> {
@@ -4809,20 +5025,6 @@ function listTaskHandoffsPayload(): Record<string, unknown> {
     ],
   };
 }
-
-/** Prefix fixtures for query-bearing / dynamic routes. The resolver falls back
- * to these when there is no exact-path match. */
-export const FIXTURE_PREFIXES: ReadonlyArray<readonly [string, unknown]> = [
-  ['/api/plugins/graph/search', FIXTURES['/api/plugins/graph/search']],
-  // Ahead of the generic `/api/plugins/graph` fallback below, which serves the
-  // OVERVIEW payload: a path request resolving to an overview body would reach
-  // the panel as `unsupported_schema` and be audited as a broken surface.
-  ['/api/plugins/graph/path', FIXTURES['/api/plugins/graph/path']],
-  ['/api/plugins/hermes-lcm/search', FIXTURES['/api/plugins/hermes-lcm/search']],
-  ['/api/plugins/holographic', envelope(memoryPayload())],
-  ['/api/plugins/graph', envelope(graphOverviewPayload())],
-  ['/api/plugins/savings', envelope(savingsPayload())],
-];
 
 /* ==========================================================================
  * Work product graph (`/api/work/views`).
@@ -5778,9 +5980,6 @@ function observatoryReadModel(): Record<string, unknown> {
   };
 }
 
-/** Empty-but-valid fallback for any unmapped /api route. */
-export const EMPTY_FIXTURE: Record<string, unknown> = {};
-
 /**
  * GET /api/projects/{project_id}. The registry backbone (src/dashboard/
  * projects.rs `context`). Resolves for every registered project regardless of
@@ -5824,12 +6023,27 @@ function projectContextPayload(projectId: string): Record<string, unknown> {
 }
 
 /**
- * Resolve a request pathname to its fixture payload. `search` is the raw query
- * string (e.g. `?node_id=sym-0`); it is used only for routes whose response
- * body legitimately varies by query (the graph subgraph neighborhood), and is
- * otherwise ignored so all other routes resolve by pathname alone.
+ * Resolve a request pathname to its fixture payload, throwing for a path no
+ * fixture models. For direct readers of a route they know is modelled.
  */
 export function resolveFixture(pathname: string, search = ''): unknown {
+  const payload = lookupFixture(pathname, search);
+  if (payload === undefined) throw new Error(`no fixture models GET ${pathname}${search}`);
+  return payload;
+}
+
+/**
+ * The fixture payload for a request pathname, or `undefined` when no fixture
+ * models that exact route. `search` is the raw query string (e.g.
+ * `?node_id=sym-0`); it is used only for routes whose response body
+ * legitimately varies by query (the graph subgraph neighborhood), and is
+ * otherwise ignored so all other routes resolve by pathname alone.
+ *
+ * Matching is exact on purpose. A prefix fallback answered any path under a
+ * known route, which is how `/api/plugins/holographic/` (a path the daemon
+ * 404s) rendered a healthy Knowledge surface under audit.
+ */
+export function lookupFixture(pathname: string, search = ''): unknown {
   // The project-scoped gateway. The daemon binds `/api/projects/{id}/{tail}`
   // and serves `/api/{tail}` against that project's own state
   // (src/dashboard/mod.rs `project_scoped_api_gateway`), so the fixture layer
@@ -5839,7 +6053,7 @@ export function resolveFixture(pathname: string, search = ''): unknown {
   // with no tail is a different route (`projects::context`) and is handled
   // below, not here.
   const scoped = /^\/api\/projects\/([^/]+)\/(.+)$/.exec(pathname);
-  if (scoped) return resolveFixture(`/api/${scoped[2]}`, search);
+  if (scoped) return lookupFixture(`/api/${scoped[2]}`, search);
   const contextMatch = /^\/api\/projects\/([^/]+)$/.exec(pathname);
   if (contextMatch) return projectContextPayload(contextMatch[1]!);
 
@@ -5868,8 +6082,8 @@ export function resolveFixture(pathname: string, search = ''): unknown {
   if (pathname === '/api/doctor/findings' && new URLSearchParams(search).get('family') === 'storage') {
     return storageFindings;
   }
-  // Must also precede the prefix sweep: the family read is keyed by match class
-  // and cursor, and each class is a separate digest group on the wire.
+  // The family read is keyed by match class and cursor, and each class is a
+  // separate digest group on the wire.
   if (pathname === '/api/plugins/graph/shared-code/family') {
     const params = new URLSearchParams(search);
     const payload = sharedCodeFamilyPayload(
@@ -5880,10 +6094,6 @@ export function resolveFixture(pathname: string, search = ''): unknown {
     const coverage = payload['coverage'] as { status: string };
     return envelope(payload, coverage.status === 'partial' ? 'partial' : 'ready');
   }
-  // Must precede the FIXTURE_PREFIXES sweep: `/api/plugins/graph` is a prefix
-  // fixture, so without this branch every neighbors read would resolve to the
-  // overview payload and the TRACE drill-in would be audited against a shape
-  // the daemon never sends on this route.
   const neighbors = /^\/api\/plugins\/graph\/node\/([^/]+)\/neighbors$/.exec(pathname);
   if (neighbors) {
     // `coerce_limit(params.limit, 50, 200)` in graph_api.rs: default 50, hard
@@ -5892,10 +6102,6 @@ export function resolveFixture(pathname: string, search = ''): unknown {
     const limit = Number.isFinite(raw) && raw > 0 ? Math.min(200, Math.trunc(raw)) : 50;
     return envelope(neighborsPayload(decodeURIComponent(neighbors[1]!), limit));
   }
-  // Dynamic memory reads, ahead of the `/api/plugins/holographic` prefix: the
-  // prefix serves the OVERVIEW envelope, which the detail and audit schemas
-  // reject, so without these the inspector would be audited against
-  // `unsupported_schema` for every selected fact.
   const trustHistory = /^\/api\/plugins\/holographic\/fact\/([^/]+)\/trust-history$/.exec(pathname);
   if (trustHistory) return memoryTrustHistoryPayload(decodeURIComponent(trustHistory[1]!));
   const factDetail = /^\/api\/plugins\/holographic\/fact\/([^/]+)$/.exec(pathname);
@@ -5921,11 +6127,7 @@ export function resolveFixture(pathname: string, search = ''): unknown {
   ) {
     return subagentTreeFixture('dense-fanout');
   }
-  if (pathname in FIXTURES) return FIXTURES[pathname];
-  for (const [prefix, payload] of FIXTURE_PREFIXES) {
-    if (pathname.startsWith(prefix)) return payload;
-  }
-  return EMPTY_FIXTURE;
+  return FIXTURES[pathname];
 }
 
 /* ==========================================================================

@@ -974,9 +974,6 @@ export const CodeCloneIndexStatusV1Schema = z.discriminatedUnion("state", [z.obj
 }), z.object({
   reason: z.string(),
   state: z.literal("unavailable"),
-}), z.object({
-  observation: z.lazy(() => CodeCloneIndexObservationV1Schema),
-  state: z.literal("verifying"),
 })]);
 export type CodeCloneIndexStatusV1 = z.infer<typeof CodeCloneIndexStatusV1Schema>;
 

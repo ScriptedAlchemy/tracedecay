@@ -532,6 +532,54 @@ impl RegisteredGlobalDbHarness {
     pub(crate) fn revoke(&mut self) {
         drop(self._scope.take());
     }
+
+    /// Remounts through daemon admission, which defers historical convergence
+    /// to the returned background plan.
+    #[cfg(test)]
+    pub(crate) async fn restart_for_daemon(
+        self,
+    ) -> (Self, crate::schema_stages::RegisteredSchemaConvergence) {
+        let Self {
+            registered,
+            _database,
+            _directory,
+            _scope,
+        } = self;
+        let path = registered.db_path().to_path_buf();
+        drop(registered);
+        drop(_database);
+        let authority = tracedecay_runtime_core::db::DatabaseAuthority::for_owned_runtime(
+            &path,
+            "restart registered global-db daemon test runtime",
+        )
+        .expect("daemon test runtime authority");
+        let (database_owner, _runtime, _retirement) =
+            tracedecay_runtime_core::db::Database::publish_registered_daemon_test_runtime_with_retirement_control(
+                &path,
+                &authority,
+                tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Existing,
+                tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
+            )
+            .await
+            .expect("publish daemon test runtime")
+            .into_parts();
+        let (database, convergence) = RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
+            database_owner,
+            Arc::new(tracedecay_runtime_core::RuntimeOperationTaskOwnerV1::new()),
+        )
+        .await
+        .expect("daemon admission");
+        let registered = database.issue_lease().expect("issue daemon test lease");
+        (
+            Self {
+                registered,
+                _database: database,
+                _directory,
+                _scope,
+            },
+            convergence,
+        )
+    }
 }
 
 #[doc(hidden)]
