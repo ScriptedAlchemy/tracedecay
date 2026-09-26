@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 # Behavior of the stable macOS ad-hoc identity: the install helper, the manual
-# signer, and the link wrapper. Runs on Linux with a mocked codesign.
+# signer, the link wrapper, and the post-rustc wrapper. Runs on Linux with a
+# mocked codesign. Release strip is a stub that re-signs with the filename.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALLER="$ROOT/install.sh"
 LINKER="$ROOT/scripts/macos-sign-linker.sh"
 SIGNER="$ROOT/scripts/macos-stable-codesign.sh"
+RUSTC_WRAPPER="$ROOT/scripts/macos-rustc-wrapper.sh"
 
 bash -n "$INSTALLER"
 bash -n "$LINKER"
 bash -n "$SIGNER"
+bash -n "$RUSTC_WRAPPER"
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
@@ -198,5 +201,110 @@ if grep -Fq -- "$other" "$tmpdir/codesign.log"; then
   echo "signed a non-product output" >&2
   exit 1
 fi
+
+# Release strip re-signs the linked product with its filename, then the
+# rustc wrapper signs that same file as dev.tracedecay.cli. Cargo copies
+# this `-o` path to target/release/tracedecay after the wrapper returns.
+fake_rustc=$tmpdir/fake-rustc
+cat >"$fake_rustc" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ ${FAKE_RUSTC_STATUS:-0} -ne 0 ]]; then
+  exit "$FAKE_RUSTC_STATUS"
+fi
+prev=
+out=
+for arg in "$@"; do
+  if [[ $prev == -o ]]; then
+    out=$arg
+    prev=
+    continue
+  fi
+  case $arg in
+    -o) prev=-o ;;
+  esac
+done
+if [[ ${FAKE_RUSTC_SKIP_OUTPUT:-} == 1 ]]; then
+  exit 0
+fi
+[[ -n $out ]] || exit 3
+mkdir -p "$(dirname "$out")"
+printf '\xcf\xfa\xed\xfe' >"$out"
+printf 'rest' >>"$out"
+if [[ -n ${FAKE_RUSTC_STRIP:-} ]]; then
+  "$FAKE_RUSTC_STRIP" "$out"
+fi
+EOF
+chmod +x "$fake_rustc"
+
+fake_strip=$tmpdir/fake-strip
+cat >"$fake_strip" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+base=$(basename -- "$1")
+codesign --force --sign - --identifier "$base" "$1"
+EOF
+chmod +x "$fake_strip"
+
+product=$tmpdir/release/deps/tracedecay-$HASH
+mock_codesign "$tmpdir/mock-bin"
+: >"$tmpdir/codesign.log"
+PATH="$tmpdir/mock-bin:$PATH" \
+  TRACEDECAY_ASSUME_DARWIN=1 \
+  CODESIGN_REPORT=$'Identifier=tracedecay-'"$HASH"$'\nSignature=adhoc\nTeamIdentifier=not set\n' \
+  CODESIGN_LOG="$tmpdir/codesign.log" \
+  FAKE_RUSTC_STRIP="$fake_strip" \
+  "$RUSTC_WRAPPER" "$fake_rustc" --crate-name tracedecay --crate-type bin -o "$product"
+strip_line=$(head -n 1 "$tmpdir/codesign.log")
+stable_line=$(tail -n 1 "$tmpdir/codesign.log")
+[[ $strip_line == "--force --sign - --identifier tracedecay-${HASH} ${product}" ]]
+[[ $stable_line == "--force --sign - --identifier ${IDENTIFIER} ${product}" ]]
+[[ $strip_line != "$stable_line" ]]
+
+# A non-product output is left with the strip identifier.
+other=$tmpdir/release/deps/libother.dylib
+: >"$tmpdir/codesign.log"
+PATH="$tmpdir/mock-bin:$PATH" \
+  TRACEDECAY_ASSUME_DARWIN=1 \
+  CODESIGN_REPORT=$'Identifier=libother.dylib\nSignature=adhoc\nTeamIdentifier=not set\n' \
+  CODESIGN_LOG="$tmpdir/codesign.log" \
+  FAKE_RUSTC_STRIP="$fake_strip" \
+  "$RUSTC_WRAPPER" "$fake_rustc" --crate-name other -o "$other"
+[[ $(cat "$tmpdir/codesign.log") == "--force --sign - --identifier libother.dylib ${other}" ]]
+
+# Metadata rustc names an -o it does not write. That must not fail the build.
+: >"$tmpdir/codesign.log"
+PATH="$tmpdir/mock-bin:$PATH" \
+  TRACEDECAY_ASSUME_DARWIN=1 \
+  CODESIGN_LOG="$tmpdir/codesign.log" \
+  FAKE_RUSTC_SKIP_OUTPUT=1 \
+  "$RUSTC_WRAPPER" "$fake_rustc" --emit metadata -o "$tmpdir/metadata/deps/tracedecay-$HASH"
+assert_not_signed "$tmpdir/codesign.log"
+
+# rustc's status is the wrapper's status, and a failed compile is not signed.
+: >"$tmpdir/codesign.log"
+if PATH="$tmpdir/mock-bin:$PATH" \
+  TRACEDECAY_ASSUME_DARWIN=1 \
+  CODESIGN_LOG="$tmpdir/codesign.log" \
+  FAKE_RUSTC_STATUS=9 \
+  "$RUSTC_WRAPPER" "$fake_rustc" -o "$product"
+then
+  echo "failing rustc was treated as success" >&2
+  exit 1
+else
+  status=$?
+  [[ $status -eq 9 ]]
+fi
+assert_not_signed "$tmpdir/codesign.log"
+
+# Off Darwin the wrapper execs rustc and does not sign, even when strip did.
+: >"$tmpdir/codesign.log"
+off=$tmpdir/off/deps/tracedecay-$HASH
+PATH="$tmpdir/mock-bin:$PATH" \
+  TRACEDECAY_ASSUME_DARWIN= \
+  CODESIGN_LOG="$tmpdir/codesign.log" \
+  FAKE_RUSTC_STRIP="$fake_strip" \
+  "$RUSTC_WRAPPER" "$fake_rustc" -o "$off"
+[[ $(cat "$tmpdir/codesign.log") == "--force --sign - --identifier tracedecay-${HASH} ${off}" ]]
 
 echo "macos stable codesign: ok"

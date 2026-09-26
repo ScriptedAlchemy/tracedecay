@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Link driver for Apple targets. Forwards to cc (or TRACEDECAY_MACOS_LD), then
 # gives the tracedecay executable a stable ad-hoc codesign identifier.
+# Release strip runs after this script returns and rewrites that identifier;
+# scripts/macos-rustc-wrapper.sh signs the product again after rustc exits.
 #
 # rustc sometimes passes a single @response-file when the link line exceeds
 # ARG_MAX. The product binary's -o path is in that file, named

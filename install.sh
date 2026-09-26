@@ -3,9 +3,11 @@ set -euo pipefail
 
 # Stable ad-hoc identifier for local macOS installs. TCC keys removable-volume
 # and file grants on it. The linker default is the hashed deps filename
-# (`tracedecay-<hash>`), so every rebuild is a new app and the daemon blocks
-# in open() until the prompt is answered. A Developer ID or other team
-# signature is preserved.
+# (`tracedecay-<hash>`). Release strip runs after the link and writes that
+# same filename back into the ad-hoc signature, so every rebuild is a new
+# app and the daemon blocks in open() until the prompt is answered. This
+# runs on the final installed file, after that strip. A Developer ID or
+# other team signature is preserved.
 TRACEDECAY_MACOS_CODE_SIGN_IDENTIFIER=dev.tracedecay.cli
 
 # Re-sign `target` when it is an unsigned or ad-hoc Mach-O. No-op off Darwin
