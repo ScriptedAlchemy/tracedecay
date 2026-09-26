@@ -373,10 +373,18 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
                 .unwrap(),
             )
             .unwrap();
-            assert!(
+            let tool = |name: &str| {
                 schemas
                     .as_array()
-                    .is_some_and(|entries| entries.len() > 100),
+                    .and_then(|entries| entries.iter().find(|entry| entry["name"] == name))
+                    .map(|entry| entry["read_only"].clone())
+            };
+            assert_eq!(
+                (tool("tracedecay_context"), tool("tracedecay_rename_symbol")),
+                (
+                    Some(serde_json::Value::Bool(true)),
+                    Some(serde_json::Value::Bool(false))
+                ),
                 "{} schemas.json did not carry the generated catalog",
                 case.id
             );
