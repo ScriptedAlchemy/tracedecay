@@ -2671,6 +2671,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 complete_generation_requested: Arc::clone(&complete_generation_requested),
                 reconcile_in_progress: Arc::clone(&reconcile_in_progress),
                 publication: residency_publication,
+                text_generation: Arc::clone(&text_generation),
             },
         ));
         let residency_registration = Arc::clone(&residency).register(

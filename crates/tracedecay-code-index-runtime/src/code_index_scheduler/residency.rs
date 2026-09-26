@@ -4,15 +4,17 @@
 //! The decoded generation a worktree serves was held until the daemon exited:
 //! the first read that needed the whole generation set a latch that nothing
 //! cleared. Here that residency is a lease renewed by those reads. Once it
-//! lapses, or under pressure, the inventory releases the decode and the
-//! worktree returns to the state a restart leaves it in: exact, lexical and
-//! graph reads keep serving from the text artifact and the durable graph, and
-//! the next read that needs the whole generation re-decodes it.
+//! lapses, or under pressure, the inventory releases the decode and the graph
+//! engine, and the worktree returns to the state a restart leaves it in:
+//! exact and lexical reads keep serving from the text artifact, graph reads
+//! answer warming while the engine reopens from the durable graph, and the
+//! next read that needs the whole generation re-decodes it.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Instant;
 
+use tracedecay_code_index::graph_projection::CodeGraphEngineReleaseV1;
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_domain::CodeGenerationId;
 use tracedecay_runtime_core::resident_memory::{
@@ -20,9 +22,9 @@ use tracedecay_runtime_core::resident_memory::{
     ResidentOwnerSampleV1, ResidentOwnerScopeV1, ResidentOwnerV1, ResidentOwnersV1,
 };
 
-use super::DaemonCodeIndexPublicationStoreV1;
 use super::reconcile::ReconcilePassesV1;
 use super::registry::ServingGenerationSlot;
+use super::{DaemonCodeIndexPublicationStoreV1, LatestCodeTextGenerationV1};
 
 pub(super) struct WorktreeResidencyV1 {
     serving_generation: Arc<ServingGenerationSlot>,
@@ -31,6 +33,7 @@ pub(super) struct WorktreeResidencyV1 {
     complete_generation_requested: Arc<AtomicBool>,
     reconcile_in_progress: Arc<ReconcilePassesV1>,
     publication: DaemonCodeIndexPublicationStoreV1,
+    text_generation: Arc<RwLock<Option<LatestCodeTextGenerationV1>>>,
     last_used: Mutex<Instant>,
     /// The generation the seat held when the inventory released it. The
     /// worktree still serves it from disk, so freshness keeps reporting it
@@ -45,6 +48,7 @@ pub(super) struct WorktreeResidencyPartsV1 {
     pub(super) complete_generation_requested: Arc<AtomicBool>,
     pub(super) reconcile_in_progress: Arc<ReconcilePassesV1>,
     pub(super) publication: DaemonCodeIndexPublicationStoreV1,
+    pub(super) text_generation: Arc<RwLock<Option<LatestCodeTextGenerationV1>>>,
 }
 
 impl WorktreeResidencyV1 {
@@ -56,6 +60,7 @@ impl WorktreeResidencyV1 {
             complete_generation_requested: parts.complete_generation_requested,
             reconcile_in_progress: parts.reconcile_in_progress,
             publication: parts.publication,
+            text_generation: parts.text_generation,
             last_used: Mutex::new(Instant::now()),
             released_seat: Mutex::new(None),
         }
@@ -103,10 +108,13 @@ impl WorktreeResidencyV1 {
         scope: ResidentOwnerScopeV1,
     ) -> WorktreeResidencyRegistrationV1 {
         let serving: Arc<dyn ResidentOwnerV1> = Arc::new(ServingDecodeOwnerV1(Arc::clone(&self)));
-        let superseded: Arc<dyn ResidentOwnerV1> = Arc::new(SupersededDecodesOwnerV1(self));
+        let superseded: Arc<dyn ResidentOwnerV1> =
+            Arc::new(SupersededDecodesOwnerV1(Arc::clone(&self)));
+        let graph_engine: Arc<dyn ResidentOwnerV1> = Arc::new(GraphEngineOwnerV1(self));
         let registrations = [
             (ResidentOwnerKindV1::DecodedGeneration, &serving),
             (ResidentOwnerKindV1::SupersededGeneration, &superseded),
+            (ResidentOwnerKindV1::GraphEngine, &graph_engine),
         ]
         .into_iter()
         .filter_map(|(kind, owner)| {
@@ -124,7 +132,7 @@ impl WorktreeResidencyV1 {
         })
         .collect();
         WorktreeResidencyRegistrationV1 {
-            _owners: [serving, superseded],
+            _owners: [serving, superseded, graph_engine],
             _registrations: registrations,
         }
     }
@@ -132,7 +140,7 @@ impl WorktreeResidencyV1 {
 
 /// Keeps a mount's owners registered until the mount drops.
 pub(super) struct WorktreeResidencyRegistrationV1 {
-    _owners: [Arc<dyn ResidentOwnerV1>; 2],
+    _owners: [Arc<dyn ResidentOwnerV1>; 3],
     _registrations: Vec<ResidentOwnerRegistrationV1>,
 }
 
@@ -230,6 +238,64 @@ impl ResidentOwnerV1 for SupersededDecodesOwnerV1 {
         }
         ResidentOwnerReleaseV1::Released {
             bytes: ResidentOwnerBytesV1::Measured(distinct_bytes(&released)),
+        }
+    }
+}
+
+/// The native graph engine pinned for the worktree's serving text generation.
+struct GraphEngineOwnerV1(Arc<WorktreeResidencyV1>);
+
+impl GraphEngineOwnerV1 {
+    fn serving_text(&self) -> Option<LatestCodeTextGenerationV1> {
+        self.0
+            .text_generation
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl ResidentOwnerV1 for GraphEngineOwnerV1 {
+    fn sample(&self) -> Option<ResidentOwnerSampleV1> {
+        let text = self.serving_text()?;
+        let store = text.interactive_graph_store().ok()?;
+        let bytes = match store.serving_engine_bytes() {
+            Ok(None) => return None,
+            Ok(Some(bytes)) => ResidentOwnerBytesV1::Measured(bytes),
+            Err(_) => ResidentOwnerBytesV1::Unmeasured,
+        };
+        Some(ResidentOwnerSampleV1 {
+            generation_id: text.metadata().manifest().generation_id.clone(),
+            bytes,
+            last_used: self.0.last_used(),
+            serving: true,
+        })
+    }
+
+    fn release(&self) -> ResidentOwnerReleaseV1 {
+        let Some(store) = self
+            .serving_text()
+            .and_then(|text| text.interactive_graph_store().ok())
+        else {
+            return ResidentOwnerReleaseV1::Empty;
+        };
+        match store.release_serving_engine() {
+            Ok(CodeGraphEngineReleaseV1::Released { bytes }) => ResidentOwnerReleaseV1::Released {
+                bytes: bytes.map_or(
+                    ResidentOwnerBytesV1::Unmeasured,
+                    ResidentOwnerBytesV1::Measured,
+                ),
+            },
+            Ok(CodeGraphEngineReleaseV1::Busy) => ResidentOwnerReleaseV1::Busy,
+            Ok(CodeGraphEngineReleaseV1::NotPinned) => ResidentOwnerReleaseV1::Empty,
+            Err(error) => {
+                tracing::warn!(
+                    event = "code_graph_engine_release_failed",
+                    error = %error,
+                    "the serving graph engine could not be released; it stays resident"
+                );
+                ResidentOwnerReleaseV1::Busy
+            }
         }
     }
 }

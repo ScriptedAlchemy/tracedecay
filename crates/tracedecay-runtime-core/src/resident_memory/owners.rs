@@ -38,12 +38,17 @@ pub enum ResidentOwnerKindV1 {
     /// serving exact, lexical and graph reads from disk and re-decodes on the
     /// next read that needs the whole generation.
     DecodedGeneration,
+    /// The native graph engine a worktree serves graph reads from. Released,
+    /// its durable graph and verified head stay; the next graph read answers
+    /// the typed warming state while the engine reopens in the background.
+    GraphEngine,
 }
 
 /// Pressure releases owners in this order.
-pub const RESIDENT_OWNER_SHED_ORDER_V1: [ResidentOwnerKindV1; 2] = [
+pub const RESIDENT_OWNER_SHED_ORDER_V1: [ResidentOwnerKindV1; 3] = [
     ResidentOwnerKindV1::SupersededGeneration,
     ResidentOwnerKindV1::DecodedGeneration,
+    ResidentOwnerKindV1::GraphEngine,
 ];
 
 impl ResidentOwnerKindV1 {
@@ -52,6 +57,7 @@ impl ResidentOwnerKindV1 {
         match self {
             Self::SupersededGeneration => "superseded_generation",
             Self::DecodedGeneration => "decoded_generation",
+            Self::GraphEngine => "graph_engine",
         }
     }
 }
