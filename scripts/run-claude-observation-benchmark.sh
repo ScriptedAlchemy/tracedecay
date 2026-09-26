@@ -114,12 +114,13 @@ export TRACEDECAY_BENCHMARK_BUILD_RUSTC_WORKSPACE_WRAPPER="$(wrapper_identity "$
 export TRACEDECAY_BENCHMARK_BUILD_CARGO_CONFIG_IDENTITY=$config_identity
 
 # A fresh Git archive intentionally contains no generated dashboard assets.
-# Generate them before freezing the source tree, then prove npm did not mutate
+# Generate them before freezing the source tree, then prove pnpm did not mutate
 # any tracked input. The measured Cargo build can remain fully read-only.
 (
-  cd "$build_root/dashboard"
-  npm ci
-  npm run build
+  cd "$build_root"
+  pnpm install --frozen-lockfile
+  cd dashboard
+  pnpm run build
 )
 post_dashboard_manifest="$build_root/.tracedecay-benchmark-source-manifest.post-dashboard"
 write_source_manifest "$post_dashboard_manifest"

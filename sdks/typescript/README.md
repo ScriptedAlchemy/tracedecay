@@ -47,9 +47,9 @@ Malformed or unavailable contracts fail closed.
 
 ## Publishing
 
-`npm test` runs the fast, mock-server unit suite only; it does not by itself
+`pnpm test` runs the fast, mock-server unit suite only; it does not by itself
 demonstrate that the built package works against a real daemon. `npm publish`
-runs `prepublishOnly`, which additionally requires `npm run test:installed`,
+runs `prepublishOnly`, which additionally requires `pnpm run test:installed`,
 a check that requires a prebuilt production `tracedecay` executable at
 `target/debug/tracedecay`, or at the absolute path supplied through
 `TRACEDECAY_TEST_BIN`; the check does not build the daemon. It starts that

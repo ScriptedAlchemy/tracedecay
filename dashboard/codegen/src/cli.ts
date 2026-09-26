@@ -73,7 +73,7 @@ function run(): number {
       }
     }
     if (stale) {
-      process.stderr.write("Run `npm run contracts:generate` and commit the result.\n");
+      process.stderr.write("Run `pnpm run contracts:generate` and commit the result.\n");
       return 1;
     }
     process.stdout.write("contracts up to date\n");
