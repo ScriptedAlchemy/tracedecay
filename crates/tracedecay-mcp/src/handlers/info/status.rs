@@ -34,7 +34,7 @@ pub fn status_readiness_wait(args: &Value) -> Result<Option<CodeIndexReadinessWa
             .map(Some)
             .map_err(|error| TraceDecayError::Config {
                 message: format!(
-                    "tracedecay_status wait_for must be {{\"state\": \"fresh\"|\"ready\", \"timeout_ms\": <u64>}}: {error}"
+                    "tracedecay_status wait_for must be {{\"state\": \"fresh\"|\"ready\"|\"graph_ready\", \"timeout_ms\": <u64>}}: {error}"
                 ),
             }),
     }
@@ -1093,6 +1093,21 @@ mod tests {
             Some(CodeIndexReadinessWaitV1 {
                 state:
                     tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::Ready,
+                timeout_ms: 5,
+            })
+        );
+    }
+
+    #[test]
+    fn wait_for_accepts_graph_ready() {
+        assert_eq!(
+            status_readiness_wait(
+                &serde_json::json!({ "wait_for": { "state": "graph_ready", "timeout_ms": 5 } })
+            )
+            .expect("graph_ready is a wait state"),
+            Some(CodeIndexReadinessWaitV1 {
+                state:
+                    tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::GraphReady,
                 timeout_ms: 5,
             })
         );

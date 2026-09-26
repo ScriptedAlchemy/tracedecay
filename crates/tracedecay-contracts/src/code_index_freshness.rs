@@ -549,6 +549,10 @@ pub enum CodeIndexReadinessTargetV1 {
     Fresh,
     /// `fresh`, and the generation's native code graph also serves.
     Ready,
+    /// A published generation's native code graph serves and no convergence
+    /// park is set, whatever the source freshness. Waiting for it never
+    /// sweeps the source, so it cannot arm the reconcile it would observe.
+    GraphReady,
 }
 
 /// `tracedecay_status` `wait_for`: hold the status read until the worktree
@@ -605,7 +609,7 @@ impl CodeIndexWorktreeFreshnessV1 {
                 reason: "code_index_convergence_parked".to_owned(),
             };
         }
-        if target == CodeIndexReadinessTargetV1::Ready {
+        if target != CodeIndexReadinessTargetV1::Fresh {
             match &self.code_graph_serving {
                 Some(CodeGraphServingReadinessV1::Refused { reason }) => {
                     return CodeIndexReadinessV1::Unreachable {
@@ -622,9 +626,15 @@ impl CodeIndexWorktreeFreshnessV1 {
                 _ => {}
             }
         }
-        let graph_ready = target == CodeIndexReadinessTargetV1::Fresh
-            || self.code_graph_serving == Some(CodeGraphServingReadinessV1::Ready);
-        if self.is_authoritative() && graph_ready {
+        let graph_serving = self.code_graph_serving == Some(CodeGraphServingReadinessV1::Ready);
+        let reached = match target {
+            CodeIndexReadinessTargetV1::Fresh => self.is_authoritative(),
+            CodeIndexReadinessTargetV1::Ready => self.is_authoritative() && graph_serving,
+            CodeIndexReadinessTargetV1::GraphReady => {
+                self.latest_generation_id.is_some() && graph_serving && self.parked.is_none()
+            }
+        };
+        if reached {
             CodeIndexReadinessV1::Reached
         } else {
             CodeIndexReadinessV1::Pending
@@ -959,6 +969,67 @@ mod tests {
         assert_eq!(
             observed.coverage,
             CodeIndexFreshnessCoverageV1::PartialRefreshInProgress
+        );
+    }
+
+    /// `graph_ready` is reached by a published generation whose native graph
+    /// serves even while the source is stale, where `fresh` and `ready` still
+    /// wait; it waits for a pending graph and a set convergence park.
+    #[test]
+    fn graph_ready_is_graph_serving_whatever_the_freshness() {
+        let stale_serving = CodeIndexWorktreeFreshnessV1 {
+            worktree_root: "/project".to_owned(),
+            latest_generation_id: Some("generation.fixture".to_owned()),
+            staleness_state: Some(CodeIndexStalenessStateV1::Stale),
+            coverage: CodeIndexFreshnessCoverageV1::PartialUnverifiedRestore,
+            code_graph_serving: Some(CodeGraphServingReadinessV1::Ready),
+            ..Default::default()
+        };
+        let graph_pending = CodeIndexWorktreeFreshnessV1 {
+            code_graph_serving: Some(CodeGraphServingReadinessV1::Pending),
+            ..stale_serving.clone()
+        };
+        let parked = CodeIndexWorktreeFreshnessV1 {
+            parked: Some(CodeIndexConvergenceParkedV1 {
+                reason: "mode".to_owned(),
+                blocked_reason: None,
+                remediation: "chmod".to_owned(),
+                parked_at_micros: 1,
+                observed_passes: 1,
+                retries_on_wake: true,
+            }),
+            ..stale_serving.clone()
+        };
+        let refused = CodeIndexWorktreeFreshnessV1 {
+            code_graph_serving: Some(CodeGraphServingReadinessV1::Refused {
+                reason: "shape".to_owned(),
+            }),
+            ..stale_serving.clone()
+        };
+        let readiness = |freshness: &CodeIndexWorktreeFreshnessV1| {
+            [
+                CodeIndexReadinessTargetV1::GraphReady,
+                CodeIndexReadinessTargetV1::Fresh,
+                CodeIndexReadinessTargetV1::Ready,
+            ]
+            .map(|target| freshness.readiness(target))
+        };
+
+        assert_eq!(
+            readiness(&stale_serving),
+            [
+                CodeIndexReadinessV1::Reached,
+                CodeIndexReadinessV1::Pending,
+                CodeIndexReadinessV1::Pending,
+            ]
+        );
+        assert_eq!(readiness(&graph_pending)[0], CodeIndexReadinessV1::Pending);
+        assert_eq!(readiness(&parked)[0], CodeIndexReadinessV1::Pending);
+        assert_eq!(
+            readiness(&refused)[0],
+            CodeIndexReadinessV1::Unreachable {
+                reason: "code_graph_refused: shape".to_owned(),
+            }
         );
     }
 }
