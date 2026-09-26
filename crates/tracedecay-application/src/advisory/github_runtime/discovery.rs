@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tracedecay_contracts::GitHubSourceStateV1;
 use tracedecay_domain::feedback::{GitHubPullRequestIdV1, GitHubReviewRateLimitCheckpointV1};
 use tracedecay_domain::{CommitId, UtcMicros};
 use url::Url;
@@ -166,47 +167,18 @@ struct HeadRefBaseRepositoryV1 {
     owner: HeadRefLoginV1,
 }
 
-/// How this project's GitHub source is read.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum GitHubSourceStateV1 {
-    /// A credential authorizes the reads.
-    Bound,
-    /// No credential is available; the repository is read anonymously as a
-    /// public repository.
-    UnauthenticatedPublic,
-    /// No credential is available and GitHub refused the anonymous read, so
-    /// the repository is private or absent.
-    DeniedNoCredential,
-}
-
-impl GitHubSourceStateV1 {
-    /// The state a discovery with `credential` settled in. `None` is a
-    /// discovery that was not attempted.
-    pub fn observed(
-        credential: &GitHubReadOnlyCredentialV1,
-        discovery: Option<&GitHubExactCommitDiscoveryOutcomeV1>,
-    ) -> Self {
-        if !credential.is_anonymous() {
-            Self::Bound
-        } else if discovery == Some(&GitHubExactCommitDiscoveryOutcomeV1::Denied) {
-            Self::DeniedNoCredential
-        } else {
-            Self::UnauthenticatedPublic
-        }
-    }
-
-    /// What the operator does to reach [`Self::Bound`], if anything.
-    pub const fn remedy(self) -> Option<&'static str> {
-        match self {
-            Self::Bound => None,
-            Self::UnauthenticatedPublic => Some(
-                "reads are anonymous (60 requests/hour); run `gh auth login` or set GH_TOKEN to read with a credential",
-            ),
-            Self::DeniedNoCredential => Some(
-                "GitHub refused an anonymous read of this repository; run `gh auth login` or set GH_TOKEN with read access, then reopen the project",
-            ),
-        }
+/// The source state a discovery with `credential` settled in. `None` is a
+/// discovery that was not attempted.
+pub fn github_source_state_v1(
+    credential: &GitHubReadOnlyCredentialV1,
+    discovery: Option<&GitHubExactCommitDiscoveryOutcomeV1>,
+) -> GitHubSourceStateV1 {
+    if !credential.is_anonymous() {
+        GitHubSourceStateV1::Bound
+    } else if discovery == Some(&GitHubExactCommitDiscoveryOutcomeV1::Denied) {
+        GitHubSourceStateV1::DeniedNoCredential
+    } else {
+        GitHubSourceStateV1::UnauthenticatedPublic
     }
 }
 
@@ -245,7 +217,7 @@ impl GitHubSourceStatusV1 {
         credential: &GitHubReadOnlyCredentialV1,
         discovery: Option<&GitHubExactCommitDiscoveryOutcomeV1>,
     ) -> Self {
-        let state = GitHubSourceStateV1::observed(credential, discovery);
+        let state = github_source_state_v1(credential, discovery);
         let (kind, found) = match discovery {
             None => (GitHubPullRequestDiscoveryKindV1::NotAttempted, None),
             Some(GitHubExactCommitDiscoveryOutcomeV1::Found(pull)) => {
@@ -995,7 +967,7 @@ mod tests {
         ));
         assert_eq!(found, anyhow_463());
         assert_eq!(
-            GitHubSourceStateV1::observed(&credential, Some(&found)),
+            github_source_state_v1(&credential, Some(&found)),
             GitHubSourceStateV1::Bound
         );
         assert_eq!(
@@ -1025,7 +997,7 @@ mod tests {
         server.join().unwrap();
         assert_eq!(refused, GitHubExactCommitDiscoveryOutcomeV1::Denied);
         assert_eq!(
-            GitHubSourceStateV1::observed(&anonymous, Some(&refused)),
+            github_source_state_v1(&anonymous, Some(&refused)),
             GitHubSourceStateV1::DeniedNoCredential
         );
     }

@@ -406,6 +406,7 @@ async fn composed_report_carries_real_states_and_enumerates_coverage() {
         },
         host: HostIntegrationReadV1::Denied,
         advisory_feedback: AdvisoryFeedbackReadV1::Absent,
+        github_source: GitHubSourceReadV1::Absent,
         language_server: LanguageServerReadV1::Observed {
             state: LanguageServerStateV1::Ready,
             coverage: DoctorCoverageCompletenessV1::Complete,

@@ -998,6 +998,105 @@ pub fn advisory_feedback_findings(
 }
 
 /// Narrow Doctor port owned by the mounted canonical feedback read model.
+/// How a project's GitHub source is read. Status and Doctor both render this
+/// state with its [`Self::remedy`], the one authority for that text.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitHubSourceStateV1 {
+    /// A credential authorizes the reads.
+    Bound,
+    /// No credential is available; the repository is read anonymously as a
+    /// public repository.
+    UnauthenticatedPublic,
+    /// No credential is available and GitHub refused the anonymous read, so
+    /// the repository is private or absent.
+    DeniedNoCredential,
+}
+
+impl GitHubSourceStateV1 {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Bound => "bound",
+            Self::UnauthenticatedPublic => "unauthenticated_public",
+            Self::DeniedNoCredential => "denied_no_credential",
+        }
+    }
+
+    /// What the operator does to reach [`Self::Bound`], if anything.
+    pub const fn remedy(self) -> Option<&'static str> {
+        match self {
+            Self::Bound => None,
+            Self::UnauthenticatedPublic => Some(
+                "reads are anonymous (60 requests/hour); run `gh auth login` or set GH_TOKEN to read with a credential",
+            ),
+            Self::DeniedNoCredential => Some(
+                "GitHub refused an anonymous read of this repository; run `gh auth login` or set GH_TOKEN with read access, then reopen the project",
+            ),
+        }
+    }
+}
+
+/// The GitHub source the daemon observed for this project.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum GitHubSourceReadV1 {
+    Observed {
+        /// `owner/name` of the checkout's `origin` remote.
+        repository: String,
+        state: GitHubSourceStateV1,
+    },
+    /// No GitHub source was observed: the checkout has no GitHub `origin`,
+    /// or its advisory owner has not mounted in this daemon.
+    Absent,
+}
+
+/// The Advisory-family finding for an observed GitHub source; `None` when
+/// the project has none, which is not a Doctor concern.
+#[hotpath::measure(label = "application.doctor_sources.github_source")]
+pub fn github_source_finding(
+    read: &GitHubSourceReadV1,
+) -> Result<Option<DoctorFindingV1>, ApplicationContractError> {
+    let GitHubSourceReadV1::Observed { repository, state } = read else {
+        return Ok(None);
+    };
+    let family = DoctorFindingFamilyV1::Advisory;
+    let statement = match state.remedy() {
+        Some(remedy) => format!("GitHub source {repository}: {}; {remedy}", state.as_str()),
+        None => format!("GitHub source {repository}: {}", state.as_str()),
+    };
+    let finding = match state {
+        GitHubSourceStateV1::Bound => clean_finding(
+            family,
+            "github.source.bound",
+            DoctorCoverageCompletenessV1::Complete,
+            &statement,
+        ),
+        GitHubSourceStateV1::UnauthenticatedPublic => source_finding(
+            family,
+            DoctorEvidenceStateV1::Partial,
+            "github.source.unauthenticated-public",
+            DoctorCoverageCompletenessV1::Partial,
+            &statement,
+        ),
+        GitHubSourceStateV1::DeniedNoCredential => source_finding(
+            family,
+            DoctorEvidenceStateV1::Degraded,
+            "github.source.denied-no-credential",
+            DoctorCoverageCompletenessV1::Complete,
+            &statement,
+        ),
+    }?;
+    Ok(Some(finding))
+}
+
+/// Narrow source port for the observed GitHub source.
+pub trait GitHubSourceDoctorPort: Send + Sync {
+    fn github_source<'a>(
+        &'a self,
+        context: &'a RequestContext,
+    ) -> DoctorSourceFuture<'a, GitHubSourceReadV1>;
+}
+
 pub trait AdvisoryFeedbackDoctorPort: Send + Sync {
     fn advisory_feedback<'a>(
         &'a self,

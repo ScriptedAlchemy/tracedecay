@@ -11,6 +11,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tracedecay_application::advisory::github_runtime::github_source_status_v1;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::code_index_scheduler::identity::repository_id_for;
 use tracedecay_configuration::config::PinnedRuntimeConfiguration;
@@ -19,13 +20,13 @@ use tracedecay_contracts::doctor::{
     CodeIndexMountReadV1, CodeIndexMountStateV1, ConfigurationAuthorityDoctorPort,
     ConfigurationAuthorityReadV1, ConfigurationDriftV1, DaemonRuntimeHealthSignalV1,
     DoctorCoverageCompletenessV1, DoctorKernelInputsV1, DoctorReportComposerV1, DoctorReportV1,
-    DoctorSourceFuture, DoctorStorageFamilyReadV1, HostConformanceV1, HostIntegrationDoctorPort,
-    HostIntegrationReadV1, IngestRefusalCensusReadV1, LanguageServerAnalyzerStateV1,
-    LanguageServerAnalyzerV1, LanguageServerDoctorPort, LanguageServerReadV1,
-    ObservabilityDoctorPort, ObservabilityReadV1, ObservabilityStateV1, OperationalAuditDoctorPort,
-    OperationalAuditReadV1, ProfileAuthorityReadV1, RemoteOperationalReadV1,
-    ResidentMemoryDoctorPort, ResidentMemoryOwnerReadV1, ResidentMemoryReadV1,
-    RuntimeHealthDoctorPort, RuntimeHealthReadV1, StorageDoctorPort,
+    DoctorSourceFuture, DoctorStorageFamilyReadV1, GitHubSourceDoctorPort, GitHubSourceReadV1,
+    HostConformanceV1, HostIntegrationDoctorPort, HostIntegrationReadV1, IngestRefusalCensusReadV1,
+    LanguageServerAnalyzerStateV1, LanguageServerAnalyzerV1, LanguageServerDoctorPort,
+    LanguageServerReadV1, ObservabilityDoctorPort, ObservabilityReadV1, ObservabilityStateV1,
+    OperationalAuditDoctorPort, OperationalAuditReadV1, ProfileAuthorityReadV1,
+    RemoteOperationalReadV1, ResidentMemoryDoctorPort, ResidentMemoryOwnerReadV1,
+    ResidentMemoryReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1, StorageDoctorPort,
     advisory_feedback_read_from_publication, merge_storage_reads, runtime_health_read,
     storage_family_read,
 };
@@ -839,6 +840,16 @@ impl AdvisoryFeedbackDoctorPort for KernelDoctorSources<'_> {
     }
 }
 
+impl GitHubSourceDoctorPort for KernelDoctorSources<'_> {
+    fn github_source<'b>(
+        &'b self,
+        _context: &'b RequestContext,
+    ) -> DoctorSourceFuture<'b, GitHubSourceReadV1> {
+        let read = self.inputs.github_source.clone();
+        Box::pin(async move { read })
+    }
+}
+
 impl LanguageServerDoctorPort for KernelDoctorSources<'_> {
     fn language_server_health<'b>(
         &'b self,
@@ -906,6 +917,7 @@ pub async fn compose_doctor_report(
         .with_operational_audit(&sources)
         .with_host(&sources)
         .with_advisory_feedback(&sources)
+        .with_github_source(&sources)
         .with_language_server(&sources)
         .with_code_index(&sources)
         .with_observability(&sources)
@@ -1189,6 +1201,13 @@ pub fn production_doctor_report_reader(
                 },
                 host,
                 advisory_feedback,
+                github_source: match github_source_status_v1(&project_root) {
+                    Some(source) => GitHubSourceReadV1::Observed {
+                        repository: source.repository,
+                        state: source.state,
+                    },
+                    None => GitHubSourceReadV1::Absent,
+                },
                 language_server,
                 code_index,
                 observability,

@@ -15,9 +15,9 @@ use crate::feedback::FeedbackPublicationV1;
 use super::sources::{
     AdvisoryFeedbackFindingReadV1, AdvisoryFeedbackReadV1, AdvisoryFeedbackSummaryReadV1,
     CodeIndexMountReadV1, ConfigurationAuthorityReadV1, DoctorStorageFamilyReadV1,
-    DoctorStorageIncompleteReasonV1, HostIntegrationReadV1, IngestRefusalCensusReadV1,
-    LanguageServerReadV1, ObservabilityReadV1, OperationalAuditReadV1, RuntimeHealthReadV1,
-    RuntimeLivenessV1,
+    DoctorStorageIncompleteReasonV1, GitHubSourceReadV1, HostIntegrationReadV1,
+    IngestRefusalCensusReadV1, LanguageServerReadV1, ObservabilityReadV1, OperationalAuditReadV1,
+    RuntimeHealthReadV1, RuntimeLivenessV1,
 };
 use super::types::{DoctorCoverageCompletenessV1, DoctorStorageFindingV1};
 
@@ -266,6 +266,8 @@ pub struct DoctorKernelInputsV1 {
     pub host: HostIntegrationReadV1,
     /// Mounted canonical feedback-owner read (Advisory family).
     pub advisory_feedback: AdvisoryFeedbackReadV1,
+    /// Observed GitHub source (Advisory family).
+    pub github_source: GitHubSourceReadV1,
     /// Live language-server/analyzer read (`LanguageServer` family).
     pub language_server: LanguageServerReadV1,
     /// Code-index mount read (`CodeIndex` family).

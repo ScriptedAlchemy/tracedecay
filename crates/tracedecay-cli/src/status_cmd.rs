@@ -7,7 +7,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
 use tracedecay_application::advisory::github_runtime::{
-    GitHubPullRequestDiscoveryKindV1, GitHubSourceStateV1, GitHubSourceStatusV1,
+    GitHubPullRequestDiscoveryKindV1, GitHubSourceStatusV1,
 };
 use tracedecay_contracts::project_open::{
     ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
@@ -188,11 +188,7 @@ fn compact_status_tool_args() -> Value {
 /// One status line naming how the project's GitHub source is read, followed
 /// by the operator remedy when it is not credential-bound.
 fn github_source_line(source: &GitHubSourceStatusV1) -> String {
-    let state = match source.state {
-        GitHubSourceStateV1::Bound => "bound",
-        GitHubSourceStateV1::UnauthenticatedPublic => "unauthenticated_public",
-        GitHubSourceStateV1::DeniedNoCredential => "denied_no_credential",
-    };
+    let state = source.state.as_str();
     let discovery = match (source.pull_request_discovery, source.pull_request) {
         (GitHubPullRequestDiscoveryKindV1::Found, Some(number)) => format!(
             "PR #{number} found (head {})",
