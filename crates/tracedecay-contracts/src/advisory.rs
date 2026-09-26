@@ -32,6 +32,10 @@ pub use tracedecay_domain::feedback::{
     ProximityRiskInputsV1, ProximityTierV1, ProximityWarningClassV1,
 };
 
+/// The window of one advisory cycle. It opens when the cycle starts and
+/// admits evidence observed before it and evidence the cycle's own provider
+/// reads observe while it runs; only evidence observed at or after expiry
+/// belongs to a later cycle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AdvisoryFindingValidityWindowV1 {
     pub valid_at: UtcMicros,
@@ -40,7 +44,7 @@ pub struct AdvisoryFindingValidityWindowV1 {
 
 impl AdvisoryFindingValidityWindowV1 {
     fn validate_for(self, observed_at: UtcMicros) -> Result<(), ApplicationContractError> {
-        if observed_at.0 > self.valid_at.0 || self.valid_at.0 >= self.expires_at.0 {
+        if observed_at.0 >= self.expires_at.0 || self.valid_at.0 >= self.expires_at.0 {
             return Err(inconsistent("advisory finding validity window"));
         }
         Ok(())
