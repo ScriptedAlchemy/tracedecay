@@ -608,11 +608,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
                 std::time::Duration::ZERO,
             ));
         };
-        // The lease is cloned out of `options` (one field, not the whole
-        // struct) so the dispatch arms below can take `options` by value.
-        let project_session_db_lease = options.registered_project_session_db.clone();
         let served_code_graph = options.served_code_graph.clone();
-        let project_session_db = project_session_db_lease.as_ref();
         let dispatched = async {
             match dispatch_group {
                 Some(McpToolDispatchGroup::Graph) => {
@@ -632,8 +628,6 @@ pub fn handle_tool_call_with_registry_options<'a>(
                         args,
                         server_stats,
                         scope_prefix,
-                        selected_scope_prefix,
-                        project_session_db,
                         options,
                     ))
                     .await

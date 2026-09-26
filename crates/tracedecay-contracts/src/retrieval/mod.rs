@@ -10,6 +10,7 @@ mod graph_report_surface;
 pub mod grep_analysis;
 mod ports;
 mod primitive_surface;
+mod project_file_surface;
 mod requests;
 mod service;
 mod source_read;
@@ -173,6 +174,10 @@ pub use primitive_surface::{
     RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1, RenamePreviewTextOnlyMatchV1,
     SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1, SimilarOccurrenceV1, SimilarResultV1,
     SimilarSurfaceRequestV1, SimilarTargetV1, TodoMarkerV1, TodosResultV1, TodosSurfaceRequestV1,
+};
+pub use project_file_surface::{
+    ConfigKeyFoundV1, ConfigKeyMissingV1, ConfigMatchV1, ConfigParseErrorV1, ConfigResultV1,
+    ConfigSurfaceRequestV1, FilesLayoutV1, FilesResultV1, FilesSurfaceRequestV1, IndexedFileV1,
 };
 pub use requests::{
     AffectedTestAttributionV1, AffectedTestsRequest, AffectedTestsResult, AnchorExpandRequest,

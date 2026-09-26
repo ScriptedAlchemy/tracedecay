@@ -9,10 +9,10 @@ use crate::InvocationAnalyticsV1;
 use crate::retrieval::{
     AffectedResultV1, AstGrepSearchResultV1, BranchDiffResultV1, BranchListResultV1,
     BranchSearchResultV1, ByQualifiedNameResultV1, ChangelogResultV1, CircularResultV1,
-    CommitContextResultV1, ComplexityReportV1, ConstructorsResultV1, ContextResultV1,
-    CouplingResultV1, DeadCodeResultV1, DependencyDepthResultV1, DerivesResultV1, DiagnoseResultV1,
-    DiffContextResultV1, DistributionResultV1, DocCoverageResultV1, DsmResultV1,
-    FieldSitesResultV1, FindExactSymbolResultV1, GiniResultV1, GodClassResultV1,
+    CommitContextResultV1, ComplexityReportV1, ConfigResultV1, ConstructorsResultV1,
+    ContextResultV1, CouplingResultV1, DeadCodeResultV1, DependencyDepthResultV1, DerivesResultV1,
+    DiagnoseResultV1, DiffContextResultV1, DistributionResultV1, DocCoverageResultV1, DsmResultV1,
+    FieldSitesResultV1, FilesResultV1, FindExactSymbolResultV1, GiniResultV1, GodClassResultV1,
     GrepSearchResultV1, HealthResultV1, HotspotsResultV1, ImpactResultV1, InheritanceDepthResultV1,
     LargestResultV1, NodeResultV1, PortOrderResultV1, PortStatusResultV1, PrContextResultV1,
     RankResultV1, RecursionResultV1, RedundancyResultV1, RenamePreviewPrimitiveOutcomeV1,
@@ -70,6 +70,8 @@ pub enum GraphToolResultV1 {
     BranchSearch(BranchSearchResultV1),
     BranchDiff(BranchDiffResultV1),
     BranchList(BranchListResultV1),
+    Files(FilesResultV1),
+    Config(ConfigResultV1),
 }
 
 impl GraphToolResultV1 {
@@ -126,6 +128,8 @@ impl GraphToolResultV1 {
             Operation::BranchSearch => Self::BranchSearch(serde_json::from_value(value)?),
             Operation::BranchDiff => Self::BranchDiff(serde_json::from_value(value)?),
             Operation::BranchList => Self::BranchList(serde_json::from_value(value)?),
+            Operation::Files => Self::Files(serde_json::from_value(value)?),
+            Operation::Config => Self::Config(serde_json::from_value(value)?),
             operation => {
                 return Err(serde::de::Error::custom(format!(
                     "{} is not a graph-tool operation",
@@ -184,6 +188,8 @@ impl GraphToolResultV1 {
             Self::BranchSearch(result) => serde_json::to_value(result),
             Self::BranchDiff(result) => serde_json::to_value(result),
             Self::BranchList(result) => serde_json::to_value(result),
+            Self::Files(result) => serde_json::to_value(result),
+            Self::Config(result) => serde_json::to_value(result),
         }
     }
 }

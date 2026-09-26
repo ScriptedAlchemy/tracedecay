@@ -4,7 +4,6 @@
 //! more than one sibling, and the re-exports the handler dispatcher calls.
 
 mod config;
-mod dispatch;
 mod files;
 mod port_order;
 mod port_status;
@@ -14,9 +13,9 @@ mod status;
 mod todos;
 mod verified;
 
-pub use config::handle_config;
-pub use dispatch::dispatch_tool;
-pub use files::handle_files;
+pub use config::compute_config;
+pub use files::compute_files;
+pub(crate) use files::render_files_md;
 pub use port_order::compute_port_order;
 pub use port_status::compute_port_status;
 pub use registry::{handle_project_context, handle_project_list, handle_project_search};

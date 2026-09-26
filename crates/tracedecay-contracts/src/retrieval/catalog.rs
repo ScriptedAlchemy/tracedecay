@@ -58,6 +58,9 @@ use crate::retrieval::primitive_surface::{
     RenamePreviewPrimitiveOutcomeV1, RenamePreviewPrimitiveRequestV1, SimilarResultV1,
     SimilarSurfaceRequestV1, TodosResultV1, TodosSurfaceRequestV1,
 };
+use crate::retrieval::project_file_surface::{
+    ConfigResultV1, ConfigSurfaceRequestV1, FilesResultV1, FilesSurfaceRequestV1,
+};
 use crate::retrieval::requests::{
     CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticsPrimitiveRequest,
     DiagnosticsPrimitiveResult, FileDependentsPrimitiveRequest, FileDependentsPrimitiveResult,
@@ -231,6 +234,8 @@ const PRIMITIVE_READ_SPECS: &[PrimitiveReadSpec] = &[
     graph_report_spec("derives"),
     graph_report_spec("grep"),
     graph_report_spec("ast_grep_search"),
+    graph_report_spec("files"),
+    graph_report_spec("config"),
     git_context_spec("affected"),
     git_context_spec("diff_context"),
     git_context_spec("changelog"),
@@ -280,7 +285,7 @@ fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface
         | "god_class" | "unsafe_patterns" | "constructors" | "field_sites"
         | "find_exact_symbol" | "by_qualified_name" | "signature" | "derives" | "grep"
         | "ast_grep_search" | "affected" | "diff_context" | "changelog" | "commit_context"
-        | "pr_context" | "branch_search" | "branch_diff" | "branch_list" => {
+        | "pr_context" | "branch_search" | "branch_diff" | "branch_list" | "files" | "config" => {
             &CLI_MCP_PRIMITIVE_SURFACES
         }
         "health_read" | "storage_status" | "diagnostics_read" => &DASHBOARD_PRIMITIVE_SURFACES,
@@ -470,6 +475,12 @@ fn primitive_read_description(operation: &str) -> &'static str {
         }
         "branch_list" => {
             "List a bounded page of exact local branch refs and their current commit and tree identities."
+        }
+        "files" => {
+            "List indexed project files with their symbol counts and sizes, filtered by directory or glob."
+        }
+        "config" => {
+            "Query TOML or JSON config files by dotted key path, reporting each file's value and defining line."
         }
         _ => "Read bounded data from the admitted project's current retained state.",
     }
@@ -910,6 +921,8 @@ fn primitive_executable_schemas(
         BranchListSurfaceRequestV1,
         BranchListResultV1
     );
+    add!("files", FilesSurfaceRequestV1, FilesResultV1);
+    add!("config", ConfigSurfaceRequestV1, ConfigResultV1);
     Ok(schemas)
 }
 
