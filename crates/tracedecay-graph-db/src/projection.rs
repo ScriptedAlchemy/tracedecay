@@ -12,6 +12,7 @@ use crate::limits::{
     MAX_GRAPH_IDENTIFIER_BYTES, MAX_GRAPH_PROPERTIES, MAX_GRAPH_PROPERTY_AGGREGATE_BYTES,
     MAX_GRAPH_PROPERTY_VALUE_BYTES,
 };
+use crate::schema::COMPACT_IDENTITY_MARKER;
 use crate::{GraphBudgetKind, GraphDbError};
 
 const RESERVED_PREFIX: &str = "__tracedecay_graph_db_";
@@ -96,6 +97,11 @@ fn validate_opaque(kind: &str, value: &str) -> Result<(), GraphDbError> {
     if value.len() > MAX_GRAPH_IDENTIFIER_BYTES {
         return Err(GraphDbError::invalid(format!(
             "{kind} exceeds {MAX_GRAPH_IDENTIFIER_BYTES} bytes"
+        )));
+    }
+    if value.starts_with(COMPACT_IDENTITY_MARKER) {
+        return Err(GraphDbError::invalid(format!(
+            "{kind} starts with the reserved compact identity marker"
         )));
     }
     if value.starts_with(RESERVED_PREFIX) {

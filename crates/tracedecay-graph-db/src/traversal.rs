@@ -13,9 +13,10 @@ use crate::adjacency_id_index::{AdjacencyIdIndexCache, AdjacencyIndexKey, page_i
 use crate::epoch_cache::LabelKeyCache;
 use crate::schema::{
     ENTITY_ID_PROPERTY, ENTITY_KEY_PROPERTY, ENTITY_LABEL, NAMESPACE_PROPERTY, PROJECTION_PROPERTY,
-    RELATION_FROM_PROPERTY, RELATION_ID_PROPERTY, RELATION_KIND_PROPERTY, RELATION_TO_PROPERTY,
-    decode_entity, decode_graph_properties, decode_relation_identity, entity_key_value,
-    entity_projection_label, label_keys, relation_kind_from_type, relation_type_for_kind,
+    RELATION_FROM_PROPERTY, RELATION_KIND_PROPERTY, RELATION_TO_PROPERTY, decode_entity,
+    decode_graph_properties, decode_relation_identity, edge_locator, edge_relation_identity,
+    entity_key_value, entity_projection_label, label_keys, locator_identity,
+    relation_kind_from_type, relation_type_for_kind,
 };
 use crate::{
     GraphBudgetKind, GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphNamespace,
@@ -136,14 +137,22 @@ pub(crate) fn traverse(
 
     let store = database.graph_store();
     let start = node_for_entity(store.as_ref(), &request.namespace, &request.start)?;
-    let projected = relation_projection(store, &request.relation_kinds);
+    let projected = relation_projection(Arc::clone(&store), &request.relation_kinds);
     match request.direction {
-        GraphTraversalDirection::Outgoing => {
-            native_outgoing_traversal(&projected, start, &request, ensure_projection_readable)
-        }
-        GraphTraversalDirection::Incoming | GraphTraversalDirection::Both => {
-            directional_traversal(&projected, start, &request, ensure_projection_readable)
-        }
+        GraphTraversalDirection::Outgoing => native_outgoing_traversal(
+            &projected,
+            store.as_ref(),
+            start,
+            &request,
+            ensure_projection_readable,
+        ),
+        GraphTraversalDirection::Incoming | GraphTraversalDirection::Both => directional_traversal(
+            &projected,
+            store.as_ref(),
+            start,
+            &request,
+            ensure_projection_readable,
+        ),
     }
 }
 
@@ -184,7 +193,7 @@ pub(crate) fn outgoing_relation_targets(
                 })?;
             let target = decode_entity(&target)?;
             let relation = relation_for_edge(
-                &projected,
+                store.as_ref(),
                 edge,
                 namespace,
                 ensure_projection_readable,
@@ -240,7 +249,7 @@ pub(crate) fn visit_outgoing_relation_targets(
             })?;
         let target = decode_entity(&target)?;
         let relation = relation_for_edge(
-            &projected,
+            store.as_ref(),
             edge,
             namespace,
             ensure_projection_readable,
@@ -431,7 +440,7 @@ fn collect_relation_ids(
         let stored = store.get_edge(edge).ok_or_else(|| GraphDbError::Corrupt {
             message: "outgoing relation references a missing native edge".to_owned(),
         })?;
-        let decoded = decode_relation_identity(&stored, namespace)?;
+        let decoded = decode_relation_identity(store.as_ref(), &stored, namespace)?;
         if !relation_kinds.is_empty() && !relation_kinds.contains(&decoded.kind) {
             return Err(GraphDbError::Corrupt {
                 message: "relation kind escaped its projection filter".to_owned(),
@@ -522,7 +531,7 @@ pub(crate) fn directed_relations(
                 }
             }
             relations.push(relation_for_edge(
-                &projected,
+                store.as_ref(),
                 edge,
                 namespace,
                 ensure_projection_readable,
@@ -631,6 +640,7 @@ fn projection_relation_projection(
 #[hotpath::measure(label = "graph_db.compact.native_outgoing")]
 fn native_outgoing_traversal(
     store: &dyn GraphStore,
+    owners: &dyn GraphStore,
     start: NodeId,
     request: &TraversalRequest,
     ensure_projection_readable: &dyn Fn(
@@ -709,7 +719,7 @@ fn native_outgoing_traversal(
                     )));
                 };
                 let relation = match cached_relation_identity(
-                    store,
+                    owners,
                     edge,
                     &request.namespace,
                     ensure_projection_readable,
@@ -745,7 +755,7 @@ fn native_outgoing_traversal(
                 };
                 if source_depth.checked_add(1) == Some(target_depth) {
                     let relation = match cached_relation_identity(
-                        store,
+                        owners,
                         edge,
                         &request.namespace,
                         ensure_projection_readable,
@@ -835,6 +845,7 @@ enum NativeTraversalStop {
 #[hotpath::measure(label = "graph_db.compact.directional")]
 fn directional_traversal(
     store: &dyn GraphStore,
+    owners: &dyn GraphStore,
     start: NodeId,
     request: &TraversalRequest,
     ensure_projection_readable: &dyn Fn(
@@ -886,7 +897,7 @@ fn directional_traversal(
                     return Err(GraphDbError::Cancelled);
                 }
                 let relation = cached_relation_identity(
-                    store,
+                    owners,
                     edge,
                     &request.namespace,
                     ensure_projection_readable,
@@ -1160,15 +1171,7 @@ fn relation_identity(
             message: "traversal relation native type and kind disagree".to_owned(),
         });
     }
-    let identity = stored
-        .get_property(RELATION_ID_PROPERTY)
-        .and_then(Value::as_str)
-        .ok_or_else(|| GraphDbError::Corrupt {
-            message: "traversal relation has no native identity".to_owned(),
-        })?;
-    GraphRelationId::new(identity).map_err(|error| GraphDbError::Corrupt {
-        message: format!("traversal relation has an invalid native identity: {error}"),
-    })
+    edge_relation_identity(store, edge_locator(store, edge)?)
 }
 
 enum RelationEndpointCheck<'a> {
@@ -1220,21 +1223,18 @@ fn relation_for_edge(
             message: "traversal relation native type and kind disagree".to_owned(),
         });
     }
-    let identity = stored
-        .get_property(RELATION_ID_PROPERTY)
-        .and_then(Value::as_str)
-        .ok_or_else(|| GraphDbError::Corrupt {
-            message: "traversal relation has no native identity".to_owned(),
-        })?;
-    let identity = GraphRelationId::new(identity).map_err(|error| GraphDbError::Corrupt {
-        message: format!("traversal relation has an invalid native identity: {error}"),
-    })?;
-    let from = required_entity_property(
-        stored.get_property(RELATION_FROM_PROPERTY),
+    let locator = edge_locator(store, edge)?;
+    let identity = edge_relation_identity(store, locator)?;
+    let from = locator_entity(
+        store,
+        locator,
+        RELATION_FROM_PROPERTY,
         "outgoing relation source",
     )?;
-    let to = required_entity_property(
-        stored.get_property(RELATION_TO_PROPERTY),
+    let to = locator_entity(
+        store,
+        locator,
+        RELATION_TO_PROPERTY,
         "outgoing relation target",
     )?;
     let endpoints_match = match endpoint_check {
@@ -1265,11 +1265,13 @@ fn relation_for_edge(
     })
 }
 
-fn required_entity_property(
-    value: Option<&Value>,
+fn locator_entity(
+    store: &dyn GraphStore,
+    locator: NodeId,
+    property: &str,
     description: &str,
 ) -> Result<GraphEntityId, GraphDbError> {
-    GraphEntityId::new(required_string_property(value, description)?).map_err(|error| {
+    GraphEntityId::new(locator_identity(store, locator, property, description)?).map_err(|error| {
         GraphDbError::Corrupt {
             message: format!("{description} is invalid: {error}"),
         }

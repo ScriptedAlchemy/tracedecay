@@ -3,13 +3,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use grafeo_common::types::Value;
 use tempfile::TempDir;
 use tracedecay_graph_db::{
     GraphBudgetKind, GraphCancellation, GraphDbError, GraphDbLeaseV1, GraphDbOwner, GraphEntity,
-    GraphEntityId, GraphFormatVersion, GraphIdempotencyKey, GraphLabel, GraphMutation,
-    GraphNamespace, GraphProjectionId, GraphPublication, GraphPublicationInputDigest,
-    GraphRelation, GraphRelationId, GraphRelationKind, GraphTraversalDirection, GraphWatermark,
-    GraphWriteBatch, NeverCancelled, ProjectionReplacement, SourceGeneration, TraversalRequest,
+    GraphEntityId, GraphIdempotencyKey, GraphLabel, GraphMutation, GraphNamespace,
+    GraphProjectionId, GraphPublication, GraphPublicationInputDigest, GraphRelation,
+    GraphRelationId, GraphRelationKind, GraphTraversalDirection, GraphWatermark, GraphWriteBatch,
+    NeverCancelled, ProjectionReplacement, SourceGeneration, TraversalRequest,
 };
 
 use crate::support;
@@ -1010,7 +1011,9 @@ fn wrong_tracedecay_format_requires_reset() {
 fn superseded_format_store_is_rebuilt_fresh_with_its_sealed_generations_discarded() {
     let temp = TempDir::new().unwrap();
     let path = graph_path(temp.path());
-    let previous_format = i64::from(GraphFormatVersion::current().get() - 1);
+    // Format 3 stored relation identities as strings on both the locator and
+    // the native edge; the row below is keyed the way format 3 keyed it.
+    let previous_format = 3_i64;
     let raw = grafeo_engine::GrafeoDB::with_config(
         grafeo_engine::Config::persistent(&path)
             .with_storage_format(grafeo_engine::config::StorageFormat::SingleFile),
@@ -1032,7 +1035,15 @@ fn superseded_format_store_is_rebuilt_fresh_with_its_sealed_generations_discarde
             [
                 (
                     "__tracedecay_graph_db_entity_key",
-                    "70726f6a656374:61".into(),
+                    // sha256("project")[..8], the raw-identity tag, "stale".
+                    Value::Bytes(
+                        [
+                            &[0x24, 0x42, 0x10, 0xe4, 0x84, 0x37, 0xb6, 0x55, 0x00][..],
+                            b"stale",
+                        ]
+                        .concat()
+                        .into(),
+                    ),
                 ),
                 ("__tracedecay_graph_db_namespace", "project".into()),
                 ("__tracedecay_graph_db_projection", "code".into()),
@@ -1045,7 +1056,7 @@ fn superseded_format_store_is_rebuilt_fresh_with_its_sealed_generations_discarde
     std::fs::create_dir_all(&sealed_generation).unwrap();
     std::fs::write(
         sealed_generation.join("generation.grafeo"),
-        b"format 2 bytes",
+        b"format 3 bytes",
     )
     .unwrap();
 
