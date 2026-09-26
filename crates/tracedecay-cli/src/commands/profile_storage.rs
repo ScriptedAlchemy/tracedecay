@@ -3,6 +3,9 @@ use std::time::Duration;
 
 use crate::cli::ProfileStorageAction;
 use tracedecay_global_db::profile_registry_maintenance::remove_store_directory;
+use tracedecay_runtime_core::lifecycle_lease::{
+    ExclusiveLeaseAttempt, try_acquire_exclusive_for_profile,
+};
 use tracedecay_runtime_core::text::format_bytes;
 
 #[hotpath::measure(label = "cli.profile_storage.dispatch", future = true)]
@@ -39,6 +42,15 @@ fn handle_reset_project_store(
     assume_yes: bool,
 ) -> tracedecay_domain::errors::Result<()> {
     let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
+    reset_project_store(&profile_root, project_root, project_id, assume_yes)
+}
+
+fn reset_project_store(
+    profile_root: &Path,
+    project_root: Option<String>,
+    project_id: Option<String>,
+    assume_yes: bool,
+) -> tracedecay_domain::errors::Result<()> {
     let (project_id, retired_checkout) = match (project_root, project_id) {
         (Some(root), None) => {
             let root = PathBuf::from(root);
@@ -80,17 +92,40 @@ fn handle_reset_project_store(
             ),
         });
     }
-    let lifecycle_lease = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
-        &profile_root,
-        "reset-project-store",
-    )?;
+    let lifecycle_lease =
+        match try_acquire_exclusive_for_profile(profile_root, "reset-project-store")? {
+            ExclusiveLeaseAttempt::Acquired(lease) => lease,
+            ExclusiveLeaseAttempt::Busy {
+                owner_operation: Some(owner),
+            } => {
+                return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                    message: format!(
+                        "cannot reset the project store for '{project_id}' while {owner} is \
+                         active; retry after it finishes"
+                    ),
+                });
+            }
+            // The daemon holds a shared lease for its whole lifetime and owns every
+            // store handle, so the reset can only run with it stopped.
+            ExclusiveLeaseAttempt::Busy {
+                owner_operation: None,
+            } => {
+                return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                    message: format!(
+                        "cannot reset the project store for '{project_id}' while the TraceDecay \
+                         daemon holds the profile; run `tracedecay daemon stop`, re-run this \
+                         command, then `tracedecay daemon start`"
+                    ),
+                });
+            }
+        };
     let _database_scope = tracedecay_runtime_core::db::enter_maintenance_database_scope(
         &lifecycle_lease,
-        &profile_root,
+        profile_root,
         "reset-project-store",
     )?;
     let outcome =
-        reset_refused_project_graph_store(&profile_root, &project_id, retired_checkout.is_some())?;
+        reset_refused_project_graph_store(profile_root, &project_id, retired_checkout.is_some())?;
     if let Some(dir) = &retired_checkout {
         remove_store_directory(dir)?;
         println!(
@@ -690,6 +725,44 @@ mod reset_project_store_tests {
         assert!(
             error.to_string().contains("nothing to reset"),
             "unexpected refusal: {error}"
+        );
+    }
+
+    #[test]
+    fn reset_while_the_daemon_holds_the_profile_names_daemon_stop() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("profile");
+        let daemon = tracedecay_runtime_core::lifecycle_lease::acquire_shared_for_profile(
+            &profile_root,
+            "daemon",
+        )
+        .unwrap();
+
+        let refused =
+            reset_project_store(&profile_root, None, Some("proj_absent".to_owned()), true)
+                .unwrap_err();
+
+        assert_eq!(
+            refused.to_string(),
+            "config error: cannot reset the project store for 'proj_absent' while the \
+             TraceDecay daemon holds the profile; run `tracedecay daemon stop`, re-run this \
+             command, then `tracedecay daemon start`"
+        );
+        drop(daemon);
+        let admitted =
+            reset_project_store(&profile_root, None, Some("proj_absent".to_owned()), true)
+                .unwrap_err();
+        assert_eq!(
+            admitted.to_string(),
+            format!(
+                "config error: no project graph store exists at {}; nothing to reset",
+                tracedecay_runtime_core::storage::profile_sharded_data_root(
+                    &profile_root,
+                    "proj_absent"
+                )
+                .join(tracedecay_runtime_core::config::DB_FILENAME)
+                .display()
+            )
         );
     }
 

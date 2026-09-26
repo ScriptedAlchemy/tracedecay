@@ -8,7 +8,7 @@
 pub use tracedecay_domain::source_path_policy::is_generated_dir_segment;
 #[cfg(test)]
 pub use tracedecay_global_db::configuration::{registry, resolver};
-pub use tracedecay_runtime_core::config::{TRACEDECAY_DIR, is_ambient_project_root};
+pub use tracedecay_runtime_core::config::is_ambient_project_root;
 
 /// Path-level generated/vendored check used by the scheduler snapshot filter.
 ///
