@@ -18,6 +18,7 @@ use tracedecay_domain::{
     ObservationId, ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceRangeV1,
     ProjectId, RetentionClass,
 };
+use tracedecay_store::ParseOffset;
 use tracedecay_store::cursor_dispatch::{
     cursor_dispatch_model, cursor_model_string, dispatch_text, is_subagent_dispatch_tool,
 };
@@ -37,6 +38,7 @@ use crate::runtime::shared::{
     append_tool_calls_metadata, append_tool_event_metadata, append_usage_metadata,
     content_storage_text_and_tools, paths_equal, title_from_messages,
 };
+use crate::runtime::snapshot_observation::host_admission_error;
 use crate::runtime::source::{
     HostProviderCoverage, ParsedTranscript, SessionDraft, TranscriptDiscoveryBounds,
     TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
@@ -54,6 +56,7 @@ const MAX_CURSOR_PROJECTIONS_PER_PASS: usize = 256;
 
 mod parent_dispatch_index;
 pub(in crate::runtime) mod projection;
+mod sweep_page;
 use parent_dispatch_index::record_dispatch_scan_gauges;
 pub use parent_dispatch_index::{
     DispatchScanReceipt, parent_dispatch_model_for_subagent,
@@ -66,6 +69,8 @@ pub use projection::{
     try_ingest_cursor_user_sweep_capped_with_admission,
 };
 pub(super) use projection::{cursor_ingest_or_default, drain_cursor_observation_projections};
+pub(in crate::runtime) use sweep_page::CursorSweepCoverage;
+use sweep_page::{CURSOR_SWEEP_FRONTIER_KEY, CursorSweepPage, list_cursor_sweep_corpus};
 
 #[derive(Clone)]
 struct CursorObservationContext {
@@ -900,52 +905,84 @@ async fn admit_cursor_sweep_observations_with_session_ids(
         Some(limit) => IngestByteBudget::bounded(limit),
         None => IngestByteBudget::unbounded(),
     };
-    let paths = hotpath::measure_block!(
+    let frontier = admission
+        .get_parse_offset(&scope, CURSOR_SWEEP_FRONTIER_KEY)
+        .await
+        .map_err(|outcome| host_admission_error("cursor", outcome))?
+        .unwrap_or_default();
+    let page = hotpath::measure_block!(
         "sessions.hosts.cursor.discover_blocking",
-        run_blocking_transcript_section(|| source.transcript_paths(project_root))
+        run_blocking_transcript_section(|| source.sweep_page(project_root, frontier.byte_offset))
     );
     let mut admitted = CursorSourceAdmissionTally::default();
-    for path in paths {
-        if cancellation.is_cancelled() {
-            return Err(TranscriptIngestError::Cancelled { provider: "cursor" });
-        }
-        let Some(parent_session_id) = sweep_parent_session_id(&path) else {
-            continue;
-        };
-        let event = cursor_sweep_event(
-            &parent_session_id,
-            project_root,
-            matches!(&scope, ObservationScopeV1::Profile),
-        );
-        let context = cursor_observation_context(
-            &event,
-            &path,
-            matches!(&scope, ObservationScopeV1::Profile),
-        );
-        let admit_file = || {
-            admit_cursor_jsonl_observations(
+    let mut unfinished = None;
+    for (offset, files) in page.sessions.iter().enumerate() {
+        for path in files {
+            if cancellation.is_cancelled() {
+                return Err(TranscriptIngestError::Cancelled { provider: "cursor" });
+            }
+            let Some(parent_session_id) = sweep_parent_session_id(path) else {
+                continue;
+            };
+            let event = cursor_sweep_event(
                 &parent_session_id,
-                &path,
-                &context,
-                admission,
-                &scope,
-                budget.remaining(),
-                cancellation,
-            )
-        };
-        // A lost compare-and-swap fails this file before any later file is
-        // scanned. One rescan starts from the peer's durable cursor. If that
-        // also loses, the file's cursor is unchanged and the next pass retries
-        // it. Do not fail the rest of the sweep.
-        let progress = match admit_file().await {
-            Err(error) if retryable_cursor_conflict(&error) => match admit_file().await {
-                Err(error) if retryable_cursor_conflict(&error) => continue,
+                project_root,
+                matches!(&scope, ObservationScopeV1::Profile),
+            );
+            let context = cursor_observation_context(
+                &event,
+                path,
+                matches!(&scope, ObservationScopeV1::Profile),
+            );
+            let admit_file = || {
+                admit_cursor_jsonl_observations(
+                    &parent_session_id,
+                    path,
+                    &context,
+                    admission,
+                    &scope,
+                    budget.remaining(),
+                    cancellation,
+                )
+            };
+            // A lost compare-and-swap fails this file before any later file is
+            // scanned. One rescan starts from the peer's durable cursor. If that
+            // also loses, the file's cursor is unchanged and the next pass resumes
+            // at its session. Do not fail the rest of the sweep.
+            let progress = match admit_file().await {
+                Err(error) if retryable_cursor_conflict(&error) => match admit_file().await {
+                    Err(error) if retryable_cursor_conflict(&error) => {
+                        unfinished.get_or_insert(page.start + offset);
+                        continue;
+                    }
+                    other => other?,
+                },
                 other => other?,
-            },
-            other => other?,
-        };
-        admitted.record(&progress);
-        budget.record_progress(progress.bytes_consumed, progress.source_deferred);
+            };
+            if progress.source_deferred {
+                unfinished.get_or_insert(page.start + offset);
+            }
+            admitted.record(&progress);
+            budget.record_progress(progress.bytes_consumed, progress.source_deferred);
+        }
+    }
+    let coverage = page.coverage(unfinished);
+    let next_frontier = ParseOffset {
+        byte_offset: coverage.next_position(),
+        ..ParseOffset::default()
+    };
+    if next_frontier != frontier {
+        admission
+            .replace_parse_offset(&scope, CURSOR_SWEEP_FRONTIER_KEY, frontier, next_frontier)
+            .await
+            .map_err(|outcome| host_admission_error("cursor", outcome))?;
+    }
+    if let CursorSweepCoverage::Continuing { resume_at, total } = coverage {
+        tracing::debug!(
+            resume_at,
+            total,
+            "Cursor transcript sweep covered part of the corpus; the next pass continues"
+        );
     }
     if cancellation.is_cancelled() {
         return Err(TranscriptIngestError::Cancelled { provider: "cursor" });
@@ -956,7 +993,7 @@ async fn admit_cursor_sweep_observations_with_session_ids(
         cancellation,
     )
     .await
-    .map(|stats| stats.into_sweep_outcome(budget.consumed(), budget.deferred()))?;
+    .map(|stats| stats.into_sweep_outcome(budget.consumed(), budget.deferred(), coverage))?;
     outcome.stats.observations_committed = admitted.observations_committed;
     persist_host_provider_coverage(
         admission,
@@ -967,7 +1004,9 @@ async fn admit_cursor_sweep_observations_with_session_ids(
         } else {
             HostProviderCoverage::Complete
         },
-        u64::from(outcome.stats.source_deferred),
+        coverage
+            .deferred_sessions()
+            .max(u64::from(outcome.stats.source_deferred)),
     )
     .await?;
     Ok(outcome)
@@ -1077,23 +1116,43 @@ impl CursorSweepSource {
         );
         self
     }
-}
 
-impl TranscriptSource for CursorSweepSource {
-    fn provider(&self) -> &'static str {
-        "cursor"
+    /// The bounded sweep page that starts at corpus position `resume_at`.
+    #[hotpath::measure(label = "sessions.hosts.cursor.sweep_discover")]
+    fn sweep_page(&self, project_root: &Path, resume_at: u64) -> CursorSweepPage {
+        let corpus = list_cursor_sweep_corpus(&self.transcripts_dirs(project_root));
+        let user_scope = self.user_registered_slugs.is_some();
+        let mut page = corpus.page(
+            resume_at,
+            TranscriptDiscoveryBounds::default_walk(),
+            |path| {
+                // Composer-owned sessions are ingested (richer) by the composer
+                // sweep; skip the JSONL copy so neither path double-ingests.
+                user_scope
+                    || self.skip_session_ids.is_empty()
+                    || path
+                        .file_stem()
+                        .and_then(std::ffi::OsStr::to_str)
+                        .is_none_or(|stem| !self.skip_session_ids.contains(stem))
+            },
+        );
+        if user_scope {
+            for files in &mut page.sessions {
+                *files = select_cursor_session_authorities(std::mem::take(files));
+            }
+        }
+        page
     }
 
-    #[hotpath::measure(label = "sessions.hosts.cursor.sweep_discover")]
-    fn transcript_paths(&self, project_root: &Path) -> Vec<PathBuf> {
+    /// `agent-transcripts` directories swept for `project_root`: every
+    /// unregistered project in user scope, otherwise the project's own
+    /// directory when its slug attributes it unambiguously.
+    fn transcripts_dirs(&self, project_root: &Path) -> Vec<PathBuf> {
         if let Some(registered_slugs) = &self.user_registered_slugs {
             let Ok(entries) = std::fs::read_dir(&self.cursor_projects_dir) else {
                 return Vec::new();
             };
-            let default_bounds = TranscriptDiscoveryBounds::default_walk();
-            let mut paths = Vec::new();
-            let mut remaining_bytes = default_bounds.max_discovery_bytes;
-            for entry in entries
+            return entries
                 .filter_map(std::result::Result::ok)
                 .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
                 .filter(|entry| {
@@ -1102,30 +1161,8 @@ impl TranscriptSource for CursorSweepSource {
                         .to_str()
                         .is_some_and(|slug| !registered_slugs.contains(slug))
                 })
-            {
-                let remaining_files = default_bounds.max_files.saturating_sub(paths.len());
-                if remaining_files == 0 || remaining_bytes == 0 {
-                    break;
-                }
-                let bounds = TranscriptDiscoveryBounds {
-                    max_files: remaining_files,
-                    max_discovery_bytes: remaining_bytes,
-                    ..default_bounds
-                };
-                let transcripts_dir = entry.path().join("agent-transcripts");
-                let report = collect_files_with_ext_bounded(
-                    &transcripts_dir,
-                    "jsonl",
-                    MAX_SWEEP_SCAN_DEPTH,
-                    bounds,
-                );
-                remaining_bytes = remaining_bytes.saturating_sub(report.bytes_charged);
-                paths.extend(without_top_level_subagent_copies(
-                    &transcripts_dir,
-                    report.paths,
-                ));
-            }
-            return select_cursor_session_authorities(paths);
+                .map(|entry| entry.path().join("agent-transcripts"))
+                .collect();
         }
         let Some(slug) = cursor_project_slug(project_root) else {
             return Vec::new();
@@ -1145,35 +1182,31 @@ impl TranscriptSource for CursorSweepSource {
             Some(candidates)
                 if candidates
                     .iter()
-                    .all(|candidate| paths_equal(candidate, project_root)) => {}
+                    .all(|candidate| paths_equal(candidate, project_root)) =>
+            {
+                vec![transcripts_dir]
+            }
             _ => {
                 tracing::warn!(
                     project_root = %project_root.display(),
                     %slug,
                     "skipping Cursor transcript sweep because project slug is ambiguous"
                 );
-                return Vec::new();
+                Vec::new()
             }
         }
-        let files = collect_files_with_ext_bounded(
-            &transcripts_dir,
-            "jsonl",
-            MAX_SWEEP_SCAN_DEPTH,
-            TranscriptDiscoveryBounds::default_walk(),
-        )
-        .paths;
-        without_top_level_subagent_copies(&transcripts_dir, files)
-            .into_iter()
-            .filter(|path| {
-                // Composer-owned sessions are ingested (richer) by the composer
-                // sweep; skip the JSONL copy so neither path double-ingests.
-                self.skip_session_ids.is_empty()
-                    || path
-                        .file_stem()
-                        .and_then(std::ffi::OsStr::to_str)
-                        .is_none_or(|stem| !self.skip_session_ids.contains(stem))
-            })
-            .collect()
+    }
+}
+
+impl TranscriptSource for CursorSweepSource {
+    fn provider(&self) -> &'static str {
+        "cursor"
+    }
+
+    /// The first sweep page; production passes resume from their durable
+    /// frontier through [`CursorSweepSource::sweep_page`].
+    fn transcript_paths(&self, project_root: &Path) -> Vec<PathBuf> {
+        self.sweep_page(project_root, 0).into_paths()
     }
 
     fn parse_new(
@@ -1211,45 +1244,6 @@ impl TranscriptSource for CursorSweepSource {
             self.parse_new(path, prev, project_root, max_new_bytes)
         })
     }
-}
-
-/// Cursor materializes some subagent sessions twice: under their parent's
-/// `subagents/` dir and again as a top-level `<id>/<id>.jsonl` copy whose
-/// content drifts slightly. Both copies share one native session identity, so
-/// ingesting both duplicates observations, overwrites the parent linkage, and
-/// refuses byte-identical repeated lines as identity collisions. The subagent
-/// copy is the authority (it carries parentage, and the live hook path ingests
-/// it); drop every top-level duplicate of it.
-///
-/// Subagent stems are read from disk rather than from `files`: the bounded
-/// walk can retain a top-level copy while its subagent copy falls past the
-/// discovery cap, and the copy is a duplicate either way.
-fn without_top_level_subagent_copies(transcripts_dir: &Path, files: Vec<PathBuf>) -> Vec<PathBuf> {
-    let subagent_stems: std::collections::HashSet<std::ffi::OsString> =
-        std::fs::read_dir(transcripts_dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|session| session.file_type().is_ok_and(|kind| kind.is_dir()))
-            .filter_map(|session| std::fs::read_dir(session.path().join("subagents")).ok())
-            .flatten()
-            .flatten()
-            .filter_map(|child| {
-                let name = PathBuf::from(child.file_name());
-                (name.extension().and_then(std::ffi::OsStr::to_str) == Some("jsonl"))
-                    .then(|| name.file_stem().map(std::ffi::OsStr::to_os_string))
-                    .flatten()
-            })
-            .collect();
-    files
-        .into_iter()
-        .filter(|path| {
-            is_subagent_transcript(path)
-                || path
-                    .file_stem()
-                    .is_none_or(|stem| !subagent_stems.contains(stem))
-        })
-        .collect()
 }
 
 fn select_cursor_session_authorities(paths: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -1893,6 +1887,9 @@ fn dispatch_message_metadata(
 
 #[cfg(test)]
 mod cancellation_tests;
+
+#[cfg(test)]
+mod sweep_page_tests;
 
 #[cfg(test)]
 mod tests;

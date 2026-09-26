@@ -5,7 +5,7 @@ use crate::common::{
     GLOBAL_DB_ENV_LOCK, TraceDecayStorageEnvGuard, canonicalize_test_dir, create_runtime, get_json,
     http_agent, pick_free_port, tempdir_or_panic, wait_for_dashboard,
 };
-use crate::dashboard_api_support::write_file;
+use crate::dashboard_api_support::{post_json_body, write_file};
 use crate::runtime::DashboardTestRuntimeV1;
 use serde_json::Value;
 use tempfile::TempDir;
@@ -704,6 +704,11 @@ fn compose_graph_authority(
             .verified_store(&generation)
             .unwrap_or_else(|error| panic!("verify fixture graph: {error}")),
     );
+    // Production activation warms (or installs) the catalog before graph
+    // serving; a fixture must not charge that one-time build to a request.
+    store
+        .warm_interactive_catalog_with_cancellation(Arc::new(NeverCancelled))
+        .unwrap_or_else(|error| panic!("warm fixture graph catalog: {error}"));
     (
         Arc::new(
             tracedecay_daemon_service::DaemonCodeGraphReadAdmission::production(
@@ -760,14 +765,6 @@ async fn start_dashboard_fixture_full(
     with_neighbor_symmetry_fixture: bool,
     freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
 ) -> DashboardFixture {
-    let tmp = tempdir_or_panic();
-    // Canonicalize before the first project-session registration: later
-    // composers canonicalize again, and the in-process resolver treats
-    // `/var/folders` vs `/private/var/folders` as DuplicateProjectAuthority.
-    let storage = TraceDecayStorageEnvGuard::for_tempdir(&tmp);
-    let project_root = canonicalize_test_dir(&tmp.path().join("project"));
-    let profile_root = storage.profile_root().to_path_buf();
-    let (cg, host_runtime) = setup_project(&project_root, &profile_root).await;
     let mut graph_seed = seed_graph_fixture();
     if with_orphan {
         seed_orphan_node(&mut graph_seed);
@@ -778,6 +775,21 @@ async fn start_dashboard_fixture_full(
     if with_neighbor_symmetry_fixture {
         seed_neighbor_symmetry_fixture(&mut graph_seed);
     }
+    start_dashboard_fixture_seeded(graph_seed, freshness).await
+}
+
+async fn start_dashboard_fixture_seeded(
+    graph_seed: GraphFixtureSeedV1,
+    freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
+) -> DashboardFixture {
+    let tmp = tempdir_or_panic();
+    // Canonicalize before the first project-session registration: later
+    // composers canonicalize again, and the in-process resolver treats
+    // `/var/folders` vs `/private/var/folders` as DuplicateProjectAuthority.
+    let storage = TraceDecayStorageEnvGuard::for_tempdir(&tmp);
+    let project_root = canonicalize_test_dir(&tmp.path().join("project"));
+    let profile_root = storage.profile_root().to_path_buf();
+    let (cg, host_runtime) = setup_project(&project_root, &profile_root).await;
     let (code_graph_admission, code_graph_projection) =
         compose_graph_authority(&cg, graph_seed, freshness);
 
@@ -1133,6 +1145,207 @@ fn code_read_api_returns_verified_families_and_one_revision_union_layout() {
                 .is_some_and(|reasons| reasons
                     .iter()
                     .any(|reason| reason == "invalid_request"))
+        );
+    });
+}
+
+/// More symbols than any whole-census page the dashboard could load: every
+/// code read must be answered from bounded catalog reads.
+const LARGE_GENERATION_BULK_SYMBOLS: usize = 60_000;
+const LARGE_GENERATION_HUB_CALLERS: usize = 300;
+
+/// The base fixture plus a generated bulk of symbols across 600 files, with
+/// one hub called by `LARGE_GENERATION_HUB_CALLERS` of them.
+fn seed_large_generation_fixture() -> GraphFixtureSeedV1 {
+    let mut seed = seed_graph_fixture();
+    seed.nodes.push(make_node(
+        "n-hub",
+        NodeKind::Function,
+        "bulk_hub",
+        "src/bulk/hub.rs",
+        1,
+    ));
+    seed.files.push("src/bulk/hub.rs".to_owned());
+    for file in 0..600 {
+        seed.files.push(format!("src/bulk/file_{file:03}.rs"));
+    }
+    for index in 0..LARGE_GENERATION_BULK_SYMBOLS {
+        let id = format!("n-bulk-{index:05}");
+        seed.nodes.push(make_node(
+            &id,
+            NodeKind::Function,
+            &format!("bulk_symbol_{index}"),
+            &format!("src/bulk/file_{:03}.rs", index % 600),
+            u32::try_from(index / 600 * 8 + 1).expect("fixture line"),
+        ));
+        if index < LARGE_GENERATION_HUB_CALLERS {
+            seed.edges.push(Edge {
+                source: id,
+                target: "n-hub".to_owned(),
+                kind: EdgeKind::Calls,
+                line: Some(u32::try_from(index + 1).expect("fixture line")),
+            });
+        }
+    }
+    seed
+}
+
+#[test]
+fn graph_reads_answer_a_generation_larger_than_a_whole_census_page() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture_seeded(
+            seed_large_generation_fixture(),
+            tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
+        )
+        .await;
+        let agent = http_agent();
+        let symbols = 4 + 1 + LARGE_GENERATION_BULK_SYMBOLS;
+        let edges = 3 + LARGE_GENERATION_HUB_CALLERS;
+
+        let (status, overview) = get_json(
+            &agent,
+            &format!("{}/api/plugins/graph/overview", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        assert_ready_verified_generation(&overview);
+        let payload = &overview["payload"];
+        assert_eq!(payload["totals"]["nodes"], symbols, "{overview}");
+        assert_eq!(payload["totals"]["edges"], edges);
+        assert_eq!(payload["totals"]["files"], 2 + 1 + 600);
+        assert!(
+            payload["nodes_by_kind"].as_array().is_some_and(|rows| rows
+                .iter()
+                .any(|row| row["kind"] == "function" && row["count"] == symbols - 1)),
+            "kind counts cover the whole generation: {payload}"
+        );
+        assert_eq!(payload["top_connected"][0]["id"], "n-hub");
+        assert_eq!(
+            payload["top_connected"][0]["degree"],
+            LARGE_GENERATION_HUB_CALLERS
+        );
+        assert_eq!(payload["top_connected"].as_array().map(Vec::len), Some(12));
+        assert_eq!(payload["largest_files"][0]["node_count"], 100);
+
+        let (status, exact) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/search?q=bulk_symbol_4242&limit=20",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_ready_verified_generation(&exact);
+        assert_eq!(
+            exact["payload"]["results"][0]["id"], "n-bulk-04242",
+            "the exact simple-name hit leads the page: {exact}"
+        );
+        assert_eq!(exact["payload"]["total"], 11, "4242 and 42420..=42429");
+        assert_eq!(exact["payload"]["has_more"], false);
+
+        let (status, page) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/search?q=bulk_symbol&limit=50&offset=100",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_ready_verified_generation(&page);
+        assert_eq!(page["payload"]["count"], 50);
+        assert_eq!(page["payload"]["has_more"], true);
+        assert_eq!(
+            page["payload"]["total"],
+            Value::Null,
+            "a page-bounded search does not claim a total it never counted"
+        );
+
+        let (status, browse) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/search?q=&limit=50&offset=59000",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_ready_verified_generation(&browse);
+        assert_eq!(browse["payload"]["total"], symbols);
+        assert_eq!(browse["payload"]["count"], 50);
+
+        let (status, default_slice) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/subgraph?limit_nodes=40&limit_edges=500",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_ready_verified_generation(&default_slice);
+        assert_eq!(default_slice["payload"]["mode"], "default");
+        assert_eq!(default_slice["payload"]["capped"]["nodes"], true);
+        assert_eq!(
+            default_slice["payload"]["nodes"].as_array().map(Vec::len),
+            Some(40)
+        );
+        assert_eq!(default_slice["payload"]["nodes"][0]["id"], "n-hub");
+
+        let (status, seeded) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/subgraph?q=bulk_symbol_7&limit_nodes=10&limit_edges=10",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_ready_verified_generation(&seeded);
+        assert_eq!(seeded["payload"]["seed_id"], "n-bulk-00007");
+        assert!(
+            seeded["payload"]["nodes"]
+                .as_array()
+                .is_some_and(|nodes| nodes.iter().any(|node| node["id"] == "n-hub")),
+            "the seeded slice reaches the seed's callee: {seeded}"
+        );
+
+        let (status, accepted) = post_json_body(
+            &agent,
+            &format!("{}/api/explorer/queries", fixture.base_url),
+            &serde_json::json!({"query": "bulk_symbol", "limit": 25, "offset": 0}),
+        );
+        assert_eq!(status, 202, "{accepted}");
+        let run_id = accepted["payload"]["run_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("accepted query needs a run id: {accepted}"))
+            .to_owned();
+        let code_lane = (0..500)
+            .find_map(|_| {
+                let (status, body) = get_json(
+                    &agent,
+                    &format!("{}/api/explorer/queries/{run_id}", fixture.base_url),
+                );
+                assert_eq!(status, 200, "{body}");
+                let lane = body["payload"]["sources"]
+                    .as_array()
+                    .and_then(|sources| {
+                        sources
+                            .iter()
+                            .find(|source| source["source_id"] == "code_graph")
+                    })
+                    .filter(|source| source["phase"] == "completed")
+                    .cloned();
+                if lane.is_none() {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                lane
+            })
+            .unwrap_or_else(|| panic!("explorer code lane never completed"));
+        assert_eq!(code_lane["outcome"], "ready", "{code_lane}");
+        assert_eq!(
+            code_lane["page"]["rows"].as_array().map(Vec::len),
+            Some(25),
+            "{code_lane}"
         );
     });
 }

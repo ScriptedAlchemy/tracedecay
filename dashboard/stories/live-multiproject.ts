@@ -109,7 +109,7 @@ function overviewCounts(payload: unknown): {
       ? (rows as Record<string, unknown>[]).reduce((acc, r) => acc + num(r['count']), 0)
       : 0;
   const nodes = num(totals['nodes']) || sum(p['nodes_by_kind']);
-  const edges = num(totals['edges']) || sum(p['edges_by_kind']);
+  const edges = num(totals['edges']);
   const files = num(totals['files']) || sum(byLanguage);
   const topLanguages = byLanguage
     .slice()

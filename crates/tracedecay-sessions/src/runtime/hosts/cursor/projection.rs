@@ -11,7 +11,7 @@ use crate::observation::ObservationCancellation;
 use crate::runtime::snapshot_observation::host_admission_error;
 use crate::runtime::source::{TranscriptIngestError, TranscriptIngestResult};
 
-use super::MAX_CURSOR_PROJECTIONS_PER_PASS;
+use super::{CursorSweepCoverage, MAX_CURSOR_PROJECTIONS_PER_PASS};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CursorTranscriptIngestStats {
@@ -37,6 +37,7 @@ pub struct CursorTranscriptIngestStats {
 pub(in crate::runtime) struct CursorSweepIngestOutcome {
     pub stats: CursorTranscriptIngestStats,
     pub session_ids: BTreeSet<String>,
+    pub coverage: CursorSweepCoverage,
 }
 
 pub async fn try_ingest_cursor_project_sweep_capped<S: BuildHasher>(
@@ -175,12 +176,17 @@ impl CursorProjectionDrainStats {
         self,
         bytes_consumed: u64,
         deferred: bool,
+        coverage: CursorSweepCoverage,
     ) -> CursorSweepIngestOutcome {
         let session_ids = self.session_ids.iter().cloned().collect();
         let mut stats = self.into_transcript_stats();
         stats.bytes_consumed = bytes_consumed;
-        stats.source_deferred |= deferred;
-        CursorSweepIngestOutcome { stats, session_ids }
+        stats.source_deferred |= deferred || coverage.is_continuing();
+        CursorSweepIngestOutcome {
+            stats,
+            session_ids,
+            coverage,
+        }
     }
 }
 

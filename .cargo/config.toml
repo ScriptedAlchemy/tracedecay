@@ -47,6 +47,14 @@ TRACEDECAY_DISABLE_GLOBAL_DB = { value = "1", force = false }
 # Enforced by crates/tracedecay-cli/tests/core_cli_suite/test_profile_isolation_test.rs.
 TRACEDECAY_DATA_DIR = { value = "target/test-profile/.tracedecay", force = true, relative = true }
 
+# pnpm links vendored crates from `.pnpm/crates` into its store, so rustc's
+# working directory for a dependency resolves outside the checkout and kache
+# cannot match it to this workspace. Naming the checkout root as kache's base
+# directory gives vendored sources the same cache key in every worktree.
+# Workspace member artifacts then record `/kache/base-dir/...` source paths;
+# debuggers map them back with `set substitute-path /kache/base-dir <checkout>`.
+KACHE_BASE_DIR = { value = ".", relative = true }
+
 # Cheaper Linux debuginfo handling, scoped to the gnu triples so Windows
 # (MSVC supports only packed split-debuginfo) and macOS (already defaults to
 # unpacked) keep their platform defaults. `split-debuginfo=unpacked` leaves
