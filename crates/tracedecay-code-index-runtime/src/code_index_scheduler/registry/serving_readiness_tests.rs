@@ -11,6 +11,7 @@ use tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1;
 use tracedecay_domain::ProjectId;
 
 use super::super::graph_activation::install_injected_activation_gate;
+use super::super::tests::move_git_metadata;
 use super::{
     CodeIndexCadenceOutcomeV1, CodeIndexSchedulerRegistryV1, dashboard_generation_is_ready,
     serving_seat_matches_advertised_generation,
@@ -252,27 +253,14 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
             .any(|symbol| symbol.simple_name == "branch_probe")
     );
     let canonical_project = canonical_existing_identity(&project).expect("canonical project");
-    let freshness = {
-        let mounted = registry.mounted.lock().await;
-        mounted
-            .get(&canonical_project)
-            .expect("mounted worktree")
-            .source_freshness
-            .clone()
-    };
     let parked_worker = quiesced_background_reconcile_admission(&registry, &project).await;
-    {
-        let mut state = freshness.state.lock().expect("freshness state");
-        state.last_reconciled_at = std::time::Instant::now()
-            .checked_sub(state.staleness_threshold + Duration::from_secs(1))
-            .expect("age the readiness proof");
-    }
+    move_git_metadata(&project);
     changes.borrow_and_update();
-    let serving_seat_before_expiry = *serving_seats.borrow_and_update();
+    let serving_seat_before_move = *serving_seats.borrow_and_update();
     // One sample at millisecond zero cannot tell a parked worker from a pass
     // that advertised itself idle and is still about to publish its seat and
     // renew the source proof. Sample the whole window.
-    let expiry_window = Instant::now() + Duration::from_millis(250);
+    let unproven_window = Instant::now() + Duration::from_millis(250);
     loop {
         assert!(
             tokio::time::timeout(
@@ -280,19 +268,19 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
                 registry.latest_complete_ready(&project)
             )
             .await
-            .expect("expired readiness returns without walking source")
+            .expect("moved-metadata readiness returns without walking source")
             .is_none(),
-            "an expired proof cannot be promoted current before the worker renews it"
+            "moved Git metadata cannot be promoted current before the worker renews the proof"
         );
-        if Instant::now() >= expiry_window {
+        if Instant::now() >= unproven_window {
             break;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     assert_eq!(
         *serving_seats.borrow(),
-        serving_seat_before_expiry,
-        "expired readiness admission cannot install another serving generation"
+        serving_seat_before_move,
+        "moved-metadata readiness admission cannot install another serving generation"
     );
     assert!(
         registry
@@ -350,7 +338,7 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
     }
     assert!(
         registry.latest_complete_ready(&project).await.is_none(),
-        "a true source hint invalidates the seated proof even inside the fresh clock window"
+        "a true source hint invalidates the seated proof"
     );
     drop(parked_worker);
     let revalidated = tokio::time::timeout(Duration::from_secs(5), async {
@@ -403,15 +391,10 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
         "pub fn changed_branch_probe() {}\n",
     )
     .expect("drift source after the retained generation");
-    {
-        let mut state = freshness.state.lock().expect("freshness state");
-        state.last_reconciled_at = std::time::Instant::now()
-            .checked_sub(state.staleness_threshold + Duration::from_secs(1))
-            .expect("age the readiness proof");
-    }
+    move_git_metadata(&project);
     assert!(
         registry.latest_complete_ready(&project).await.is_none(),
-        "expired proof must not admit a source that changed"
+        "moved Git metadata must not admit a source that changed"
     );
     assert_eq!(
         registry

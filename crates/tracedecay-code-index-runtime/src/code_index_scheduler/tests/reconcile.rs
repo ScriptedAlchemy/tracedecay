@@ -26,8 +26,8 @@ use super::{
     ALPHA_LIB_V1, GitFixture, OwnerSignals, RETAINED_REVISION_0, SERVING_SEAT_FAILURE_CEILING,
     advance_pointer_to_unseated_successor, application_context, clear_pending_wake_until_quiet,
     committed_capture_corpus_files, core_search_request, git, git_stdout, hold_scheduler_for_root,
-    mounted_core_query_worktree, mounted_core_query_worktree_with_one_permit, published,
-    query_authority, query_meta, quiesced_background_reconcile_admission,
+    mounted_core_query_worktree, mounted_core_query_worktree_with_one_permit, move_git_metadata,
+    published, query_authority, query_meta, quiesced_background_reconcile_admission,
     replace_scheduler_chunker_revision, replace_scheduler_policy_revision,
     rewrite_active_rust_extractor_revision, rewrite_preserving_stat, scheduler,
     scheduler_with_policy, served_lexical_texts, settle_text_projection,
@@ -2626,26 +2626,14 @@ async fn graph_read_during_reconcile_records_a_busy_follow_up() {
     // The permit and the pass guard leave the graph tail's renewals free to
     // run (see `hold_scheduler_for_root`).
     let scheduler = hold_scheduler_for_root(&registry, fixture.path()).await;
-    let source_freshness = registry
-        .source_freshness_for_root(fixture.path())
-        .await
-        .expect("mounted worktree source fence");
-    {
-        let mut state = source_freshness
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.last_reconciled_at = Instant::now()
-            .checked_sub(state.staleness_threshold + Duration::from_secs(1))
-            .expect("age the source proof");
-    }
+    move_git_metadata(fixture.path());
 
     assert!(
         registry
             .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
             .await
             .is_none(),
-        "an expired graph proof abstains while the owner pass is in flight"
+        "a moved Git metadata sample abstains while the owner pass is in flight"
     );
     scheduler.release().await;
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
@@ -2681,9 +2669,10 @@ async fn graph_read_during_reconcile_records_a_busy_follow_up() {
 }
 
 /// A publication can finish source capture long before its text artifact is
-/// ready. The serving swap must reverify after that projection, otherwise the
-/// exact active generation seats after its bounded proof expires and every
-/// graph readiness probe keeps an unchanged-source Noop loop alive.
+/// ready. The serving swap must reverify source evidence that landed during
+/// that projection, otherwise the exact active generation seats without a
+/// witness and every graph readiness probe keeps an unchanged-source Noop
+/// loop alive.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_settles() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
@@ -2715,19 +2704,7 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
         identity.head_ref().cloned(),
     )
     .expect("resolved scope");
-    let source_freshness = registry
-        .source_freshness_for_root(fixture.path())
-        .await
-        .expect("mounted source fence");
-    {
-        let mut state = source_freshness
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.last_reconciled_at = Instant::now()
-            .checked_sub(state.staleness_threshold + Duration::from_secs(1))
-            .expect("age the pre-projection proof");
-    }
+    move_git_metadata(fixture.path());
     release_projection
         .send(())
         .expect("release publication projection");
@@ -2741,24 +2718,16 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
     // source-verification Noop alone.
     settle_text_projection(&registry, fixture.path()).await;
 
-    // Exercise the ordinary expiry path too. The existing seat keeps its exact
+    // Exercise the ordinary seated path too. The existing seat keeps its exact
     // witness while the source-verification Noop renews the proof.
     //
-    // A pass that re-proves the seat rebinds the admission clock, so an
-    // unfenced window between ageing the proof and reading it is a race with
-    // the worker, not an expiry test. The admission permit alone does not
-    // close it (see `hold_scheduler_for_root`).
+    // A pass that re-proves the seat rebinds the Git metadata sample, so an
+    // unfenced window between moving that metadata and reading it is a race
+    // with the worker. The admission permit alone does not close it (see
+    // `hold_scheduler_for_root`).
     let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
     let scheduler = hold_scheduler_for_root(&registry, fixture.path()).await;
-    {
-        let mut state = source_freshness
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.last_reconciled_at = Instant::now()
-            .checked_sub(state.staleness_threshold + Duration::from_secs(1))
-            .expect("age the seated proof");
-    }
+    move_git_metadata(fixture.path());
     registry.clear_pending_wake_for_scope(&scope).await;
     let receipts_before = registry.event_to_ready_receipts().len();
     assert!(
@@ -2766,7 +2735,7 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
             .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
             .await
             .is_none(),
-        "the expired proof declines before the worker renews it"
+        "moved Git metadata declines before the worker renews the proof"
     );
     scheduler.release().await;
     drop(admission);
@@ -3004,14 +2973,14 @@ async fn ignored_dependency_waits_for_global_admission_before_publication_gate()
     registry.shutdown().await;
 }
 
-/// Busy-read proof reuse is explicitly bounded, but the bound belongs to the
-/// freshness fence, not to a per-read worktree sweep: an ordinary read never
-/// walks the checkout. An out-of-band write that moves no Git metadata and
-/// reaches no hint authority is therefore served from the live proof until
-/// that proof expires. The first read after it does declines the seat and
-/// hands the exact stat-plus-sealed-digest comparison to the retained worker,
-/// whose pass is the only authority that may withdraw the witness from the
-/// disproved generation.
+/// An ordinary read never walks the checkout and never treats the proof's
+/// age as evidence. An out-of-band write that moves no Git metadata and
+/// reaches no hint authority is therefore served from the live proof, however
+/// old, until a source probe proves the movement: the read-refresh probe
+/// sweeps the stat signature and sealed digests and posts the observed
+/// change. Reads then decline the seat, and the retained worker's pass is the
+/// only authority that may withdraw the witness from the disproved
+/// generation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_disproving_exact_source_probe_withdraws_the_busy_read_witness() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
@@ -3065,30 +3034,45 @@ async fn a_disproving_exact_source_probe_withdraws_the_busy_read_witness() {
         "an unhinted raw write reuses the live proof; a read never walks the checkout"
     );
 
-    // Expire that proof exactly as its own bound does, without waiting it out.
-    {
-        let mut state = source_freshness
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.last_reconciled_at = Instant::now()
-            .checked_sub(state.staleness_threshold + Duration::from_secs(1))
-            .expect("age the source proof past its own bound");
-    }
+    // Age the proof past the probe window, without waiting it out. Age alone
+    // is not evidence: the read still serves and schedules nothing.
+    source_freshness.age_probe_clock_past_for_test(super::super::DEFAULT_STALENESS_THRESHOLD);
     registry.clear_pending_wake_for_scope(&scope).await;
+    assert_eq!(
+        (
+            registry
+                .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+                .await
+                .map(|served| served.generation().manifest().generation_id.clone()),
+            registry.pending_wake_micros_for_scope(&scope).await,
+        ),
+        (Some(disproved_generation_id.clone()), Some(0)),
+        "an aged proof keeps serving and posts no verification wake"
+    );
+
+    // The read-refresh probe sweeps the aged witness and proves the drift.
+    scheduler.release().await;
+    assert!(
+        registry
+            .diagnostics_change_generation(fixture.path())
+            .await
+            .is_some(),
+        "the mounted worktree answers the source probe"
+    );
+    let scheduler = hold_scheduler_for_root(&registry, fixture.path()).await;
     assert!(
         registry
             .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
             .await
             .is_none(),
-        "an expired proof disproves the seated generation's currency"
+        "a probe-proven drift disproves the seated generation's currency"
     );
     assert!(
         registry
             .pending_wake_micros_for_scope(&scope)
             .await
             .is_some_and(|pending| pending != 0),
-        "the declining read hands the exact source proof to the retained worker"
+        "the probe hands the proven change to the retained worker"
     );
     assert_eq!(
         witness
@@ -3843,10 +3827,10 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
 }
 
 /// A query that cannot join the owner must not schedule the verification the
-/// dashboard would then report as `Verifying`. The in-flight pass renews an
-/// expired proof before it releases the scheduler; a read that posts
-/// `BusyFollowUp` while that pass holds the lock is taken and immediately
-/// replaced by the next poll, so the ladder never settles to `Fresh`.
+/// dashboard would then report as `Verifying`, however old the proof is. A
+/// read that posted `BusyFollowUp` while a pass holds the lock would be taken
+/// and immediately replaced by the next poll, so the ladder would never
+/// settle to `Fresh`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn busy_query_does_not_rearm_dashboard_verification() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
@@ -3883,12 +3867,7 @@ async fn busy_query_does_not_rearm_dashboard_verification() {
         .source_freshness_for_root(fixture.path())
         .await
         .expect("mounted freshness fence");
-    {
-        let mut state = freshness.state.lock().expect("freshness state");
-        state.last_reconciled_at = Instant::now()
-            .checked_sub(state.staleness_threshold + Duration::from_secs(1))
-            .expect("age the readiness proof");
-    }
+    freshness.age_probe_clock_past_for_test(super::super::DEFAULT_STALENESS_THRESHOLD);
     let scheduler = {
         let mounted = registry.mounted.lock().await;
         Arc::clone(
@@ -3934,48 +3913,98 @@ async fn busy_query_does_not_rearm_dashboard_verification() {
         .await
         .expect("scheduler mutex holder joined");
 
-    assert!(
-        registry
-            .latest_complete_fresh(fixture.path())
-            .await
-            .is_some(),
-        "the seated generation remains servable once the owner releases the scheduler"
-    );
-    assert!(
-        registry
-            .pending_wake_micros_for_root(fixture.path())
-            .await
-            .is_some_and(|pending| pending != 0),
-        "an uncontended read of an expired proof still requests one verification"
+    assert_eq!(
+        (
+            registry
+                .latest_complete_fresh(fixture.path())
+                .await
+                .is_some(),
+            registry.pending_wake_micros_for_root(fixture.path()).await,
+        ),
+        (true, Some(0)),
+        "an uncontended read of an aged proof serves and requests no verification"
     );
     drop(admission);
-    let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
-    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
-        loop {
-            let settled = registry
-                .dashboard_freshness(fixture.path())
-                .await
-                .is_some_and(|freshness| {
-                    freshness.staleness_state
-                        == Some(
-                            tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh,
-                        )
-                })
-                && registry
-                    .pending_wake_micros_for_root(fixture.path())
-                    .await
-                    == Some(0)
-                && !registry
-                    .reconcile_in_progress_for_test(fixture.path())
-                    .await;
-            if settled {
-                break;
-            }
-            signals.changed().await;
-        }
-    })
-    .await
-    .expect("the single verification settles back to Fresh");
+    registry.shutdown().await;
+}
+
+/// A status read never schedules work. On a settled, unchanged tree whose
+/// proof clock has aged past the probe window, every read a `tracedecay
+/// status` or query call makes (graph census, query admission, dashboard
+/// freshness) serves the seat, reports `fresh`, and leaves the worker idle.
+/// An unhinted raw write is found by the read-refresh probe, which sweeps the
+/// sealed digests and posts the one wake that rebuilds it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_reads_on_an_unchanged_tree_schedule_no_verification() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
+    let seated = wait_for_live_complete_generation(&registry, fixture.path())
+        .await
+        .generation()
+        .manifest()
+        .generation_id
+        .clone();
+    wait_for_dashboard_ready(&registry, fixture.path()).await;
+    settle_text_projection(&registry, fixture.path()).await;
+    settled_owner_with_idle_admission(&registry, fixture.path()).await;
+    clear_pending_wake_until_quiet(&registry, &scope).await;
+    registry
+        .source_freshness_for_root(fixture.path())
+        .await
+        .expect("mounted source fence")
+        .age_probe_clock_past_for_test(super::super::DEFAULT_STALENESS_THRESHOLD);
+    let receipts_before = registry.event_to_ready_receipts().len();
+
+    let mut reads = Vec::new();
+    for _ in 0..5 {
+        let census = registry
+            .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+            .await
+            .map(|latest| latest.generation().manifest().generation_id.clone());
+        let admitted = registry
+            .latest_complete_fresh(fixture.path())
+            .await
+            .map(|latest| latest.generation().manifest().generation_id.clone());
+        let staleness = registry
+            .dashboard_freshness(fixture.path())
+            .await
+            .and_then(|freshness| freshness.staleness_state);
+        let pending = registry.pending_wake_micros_for_root(fixture.path()).await;
+        reads.push((census, admitted, staleness, pending));
+    }
+    assert_eq!(
+        reads,
+        vec![
+            (
+                Some(seated.clone()),
+                Some(seated.clone()),
+                Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh),
+                Some(0),
+            );
+            5
+        ],
+        "every status read serves the seat as fresh and schedules nothing"
+    );
+    assert_eq!(
+        registry.event_to_ready_receipts().len(),
+        receipts_before,
+        "status reads ran no verification pass"
+    );
+
+    fixture.edit("src/main.rs", "fn main() { moved(); }\n");
+    assert!(
+        matches!(
+            registry.probe_freshness_admission(fixture.path()).await,
+            super::super::CodeIndexDemandAdmissionV1::Queued
+        ),
+        "the read-refresh probe admits the proven change"
+    );
+    let rebuilt = wait_for_generation_change(&registry, fixture.path(), &seated).await;
+    assert_ne!(
+        rebuilt, seated,
+        "the probe-proven raw write publishes a successor"
+    );
     registry.shutdown().await;
 }
 
@@ -8708,11 +8737,13 @@ fn predecessor_freshness_witness_keeps_the_sealed_generation() {
     );
 }
 
-/// Clone backfill and the seal itself outlive the 30s admission window. Expiry
-/// is a request to re-check the sealed digests, not a reason to drop the
-/// generation those digests already name. A byte change after expiry still drops it.
+/// Clone backfill and the seal itself can outlast the probe window, and a
+/// seal can move the Git index it samples. Neither age nor a moved Git
+/// metadata sample is a reason to drop the generation the sealed digests
+/// already name: age is not evidence, and moved metadata re-checks those
+/// digests. A byte change behind moved metadata still drops it.
 #[test]
-fn expired_proof_keeps_the_sealed_generation_until_bytes_move() {
+fn moved_git_metadata_keeps_the_sealed_generation_until_bytes_move() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
     let store = TempDir::new().expect("store root");
     let mut scheduler = scheduler(
@@ -8721,28 +8752,29 @@ fn expired_proof_keeps_the_sealed_generation_until_bytes_move() {
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
     let seeded = published(scheduler.reconcile_now().expect("seed retained generation"));
-    scheduler.expire_source_proof_for_test();
-    assert_eq!(
+    let witnessed = |scheduler: &CodeIndexWorktreeSchedulerV1| {
         scheduler
             .currency_witness_for_sealed_snapshot(
                 &seeded.generation_id,
                 &seeded.snapshot_content_identity,
             )
-            .map(|witness| witness.generation_id),
-        Some(seeded.generation_id.clone()),
-        "an expired proof must keep the generation whose sealed bytes still match"
-    );
-
+            .map(|witness| witness.generation_id)
+    };
+    scheduler.expire_source_proof_for_test();
+    let aged = witnessed(&scheduler);
+    move_git_metadata(fixture.path());
+    let moved_metadata = witnessed(&scheduler);
     fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 9 }\n");
-    scheduler.expire_source_proof_for_test();
-    assert!(
-        scheduler
-            .currency_witness_for_sealed_snapshot(
-                &seeded.generation_id,
-                &seeded.snapshot_content_identity,
-            )
-            .is_none(),
-        "an expired proof must drop the generation once its sealed bytes moved"
+    move_git_metadata(fixture.path());
+    let moved_bytes = witnessed(&scheduler);
+    assert_eq!(
+        (aged, moved_metadata, moved_bytes),
+        (
+            Some(seeded.generation_id.clone()),
+            Some(seeded.generation_id.clone()),
+            None,
+        ),
+        "age keeps the proof, moved metadata re-checks the sealed digests, and moved bytes drop it"
     );
 }
 

@@ -613,9 +613,10 @@ impl CodeIndexSchedulerRegistryV1 {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
             if let Some(latest) = servable {
-                // The bounded proof is the only source-currentness work a
-                // read performs. An expired proof leaves the immutable owner
-                // servable and hands exact verification to the retained worker.
+                // The proof is the only source-currentness work a read
+                // performs. A proof that source evidence moved leaves the
+                // immutable owner servable and hands exact verification to the
+                // retained worker.
                 if !source_freshness.ready_without_stat(&freshness_root, &shutting_down) {
                     Self::note_wake_if_idle(
                         &pending_wake,
@@ -1243,8 +1244,8 @@ impl CodeIndexSchedulerRegistryV1 {
     /// decision made by the same scheduler observation. A ready text artifact
     /// is not inherently stale merely because native graph activation is off.
     ///
-    /// Currency is judged from the shared fence's bounded proof of the exact
-    /// sealed source. Once that proof expires, the immutable owner remains
+    /// Currency is judged from the shared fence's proof of the exact sealed
+    /// source. Once source evidence moves, the immutable owner remains
     /// available as stale while one coalesced wake asks the retained worker to
     /// run the exact stat/content proof. The read never performs that work or
     /// waits for the scheduler mutex, the pass counter is read only to
@@ -1300,7 +1301,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 (!require_serving_ready || latest.query_owners_are_ready())
                     && text_matches_scope_identity(latest, &scope)
             })?;
-        let current = source_freshness.serves_recently_verified_source(
+        let current = source_freshness.serves_verified_source(
             &latest.metadata().snapshot().content_identity,
             &root,
             &shutting_down,
@@ -1527,8 +1528,8 @@ impl CodeIndexSchedulerRegistryV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .is_some_and(LatestCodeTextGenerationV1::text_projection_needs_work);
-        let proof_expired = !source_freshness.ready_without_stat(&root, &shutting_down);
-        if !nothing_servable && !text_owners_are_warming && !proof_expired {
+        let proof_moved = !source_freshness.ready_without_stat(&root, &shutting_down);
+        if !nothing_servable && !text_owners_are_warming && !proof_moved {
             return CodeIndexReconcileAdmissionV1::Unavailable;
         }
         if nothing_servable {

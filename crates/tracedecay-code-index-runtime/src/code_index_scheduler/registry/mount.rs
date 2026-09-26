@@ -1975,14 +1975,16 @@ impl CodeIndexSchedulerRegistryV1 {
                                     &worker_wake,
                                 );
                             }
-                            // Large text projections can outlive the bounded
-                            // source proof established before publication. The
-                            // serving swap must bind to source truth observed
-                            // after that work, otherwise an exact current
-                            // generation seats without a witness and every
-                            // readiness read schedules another identical Noop.
+                            // Source evidence (a hint, an observed change, or a
+                            // Git metadata move) can land during a large text
+                            // projection, after the proof established before
+                            // publication. The serving swap must bind to source
+                            // truth observed after that work, otherwise an
+                            // exact current generation seats without a witness
+                            // and every readiness read schedules another
+                            // identical Noop.
                             let proof_is_current = graph_text.as_ref().is_some_and(|text| {
-                                worker_source_freshness.serves_recently_verified_source(
+                                worker_source_freshness.serves_verified_source(
                                     &text.metadata().snapshot().content_identity,
                                     &worker_project_root,
                                     &worker_shutting_down,
@@ -2097,8 +2099,8 @@ impl CodeIndexSchedulerRegistryV1 {
                             // proofs to the seat. Asking the fence whether it
                             // has verified *this* sealed snapshot is what makes
                             // the binding truthful for a seat this pass did not
-                            // publish. An expired clock, or a git-index sample
-                            // this seal moved, is not a different snapshot.
+                            // publish. A git-index sample this seal moved is
+                            // not a different snapshot.
                             // Dropping the witness here cleared the newer
                             // generation. The lexical full-copy is not decided
                             // on this swap.
