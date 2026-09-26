@@ -882,7 +882,7 @@ async fn run_one_repetition(repetition: usize) -> BenchResult<RepetitionMeasurem
     let execution = RegisteredGlobalDbSessionTemporalExecution::new(prepared.registered.as_ref());
     let retrieval = SessionRetrievalService::new(
         AllowAuthorizer,
-        &execution,
+        execution,
         Words("words-v1"),
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );

@@ -5,8 +5,7 @@ use tracedecay_query::retrieval::evidence_lanes::TaskSessionBindingV1;
 use tracedecay_session_temporal_store::execution::{
     AuthorizedTaskSessionExecutionRequestV1, TaskSessionExecutionOmissionV1,
     TaskSessionRankSelectorV1, TaskSessionSelectionCallbackErrorV1,
-    TaskSessionTemporalExecutionOutcomeV1, TaskSessionTemporalExecutionPortV1,
-    TaskSessionTemporalExecutionReportV1,
+    TaskSessionTemporalExecutionOutcomeV1, TaskSessionTemporalExecutionReportV1,
 };
 
 use crate::session::SessionRetrievalBudgetStageV1;
@@ -36,13 +35,13 @@ pub enum TaskSessionRetrievalOutcomeV1 {
     Cancelled,
 }
 
-pub(super) struct AdmittedSessionTemporalExecution {
-    pub(super) execution: AuthorizedTemporalExecutionRequest,
+pub(crate) struct AdmittedSessionTemporalExecution {
+    pub(crate) execution: AuthorizedTemporalExecutionRequest,
     pub(super) cancellation_control: ExecutionControl,
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum SessionExecutionAdmissionFailure {
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SessionExecutionAdmissionFailure {
     WrongScope,
     Denied,
     Unavailable,
@@ -66,13 +65,14 @@ impl SessionExecutionAdmissionFailure {
     }
 }
 
-impl<A, P, E> SessionRetrievalService<A, P, E>
+impl<A, D, E> SessionRetrievalService<'_, A, D, E>
 where
     A: SessionScopeAuthorizer,
+    D: SessionTemporalRegisteredDb,
     E: VersionedTokenEstimator + Sync,
 {
     #[hotpath::measure(label = "usecases.session.admit")]
-    pub(super) fn admit_execution(
+    pub(crate) fn admit_execution(
         &self,
         context: &RequestContext,
         binding: &SessionRequestBinding,
@@ -205,10 +205,10 @@ fn map_authorization_failure(error: SessionAuthorizationError) -> SessionExecuti
     }
 }
 
-impl<A, P, E> SessionRetrievalService<A, P, E>
+impl<A, D, E> SessionRetrievalService<'_, A, D, E>
 where
     A: SessionScopeAuthorizer,
-    P: SessionTemporalExecutionPort + TaskSessionTemporalExecutionPortV1,
+    D: SessionTemporalRegisteredDb + Sync,
     E: VersionedTokenEstimator + Sync,
 {
     #[allow(clippy::too_many_arguments)]
@@ -247,8 +247,10 @@ where
             run_application_request_interruptible(
                 context,
                 session_binding.cancellation(),
-                self.execution
-                    .execute_task_session(request, selector, &self.estimator),
+                Box::pin(
+                    self.execution
+                        .execute_task_session(request, selector, &self.estimator)
+                ),
                 || admitted.cancellation_control.cancel(),
             ),
             label = "usecases.session.task_session.execute"

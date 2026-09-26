@@ -28,7 +28,7 @@ pub use tracedecay_contracts::retrieval::{
 };
 pub use tracedecay_session_temporal_store::execution::{
     AuthorizedTemporalExecutionRequest, SessionTemporalExecutionError,
-    SessionTemporalExecutionPort, SessionTemporalExecutionReport, TemporalExecutionFuture,
+    SessionTemporalExecutionReport,
 };
 pub use types::{
     AuthorizationGrantId, AuthorizedSessionScope, SessionAccess, SessionAuthorizationError,

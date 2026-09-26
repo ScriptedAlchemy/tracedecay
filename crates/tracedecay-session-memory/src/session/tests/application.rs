@@ -71,7 +71,7 @@ async fn registered_root_scope_isolated_and_provider_filtered() {
     let execution = RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
     let service = SessionRetrievalService::new(
         AllowAuthorizer,
-        &execution,
+        execution,
         Words,
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );
@@ -179,7 +179,7 @@ async fn registered_root_cursor_survives_service_restart_and_rejects_scope_drift
     let execution = RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
     let service = SessionRetrievalService::new(
         AllowAuthorizer,
-        &execution,
+        execution,
         Words,
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );
@@ -201,7 +201,7 @@ async fn registered_root_cursor_survives_service_restart_and_rejects_scope_drift
         RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
     let restarted = SessionRetrievalService::new(
         AllowAuthorizer,
-        &restarted_execution,
+        restarted_execution,
         Words,
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );
@@ -268,7 +268,7 @@ async fn registered_occurrence_hydrates_inline_and_external_payloads_without_wri
     let execution = RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
     let service = SessionRetrievalService::new(
         AllowAuthorizer,
-        &execution,
+        execution,
         Words,
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );
@@ -334,7 +334,7 @@ async fn registered_complete_zero_preserves_the_authoritative_store() {
     let execution = RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
     let service = SessionRetrievalService::new(
         AllowAuthorizer,
-        &execution,
+        execution,
         Words,
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );
