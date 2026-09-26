@@ -73,6 +73,11 @@ impl SessionRefreshBeginOrJoinRequestV1 {
         }
     }
 
+    pub fn with_target_frontier(mut self, target_frontier: SessionRefreshFrontierV1) -> Self {
+        self.target_frontier = target_frontier;
+        self
+    }
+
     pub fn with_refresh_key(mut self, refresh_key: SessionRefreshKeyV1) -> Self {
         self.refresh_key = Some(refresh_key);
         self
