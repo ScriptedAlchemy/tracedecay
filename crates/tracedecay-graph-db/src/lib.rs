@@ -22,6 +22,8 @@ mod runtime;
 mod schema;
 mod sealed_store;
 mod state;
+#[cfg(test)]
+mod thread_allocation;
 mod traversal;
 mod verified_marker;
 

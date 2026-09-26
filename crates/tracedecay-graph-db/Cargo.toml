@@ -82,11 +82,13 @@ tracedecay-store = { path = "../tracedecay-store" }
 # is least able to notice from the inside: it is silent, correct, and
 # slow. The fallback paths say so out loud.
 tracing = "0.1"
+# The sealed build's column spool: an anonymous file in the staging
+# directory that the OS removes even when the process is killed.
+tempfile = "3"
 
 [dev-dependencies]
 criterion = "0.5"
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
-tempfile = "3"
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime" }
 
 [[bench]]
