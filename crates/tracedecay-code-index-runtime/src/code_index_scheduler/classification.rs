@@ -112,13 +112,6 @@ impl WorktreeChangeClassificationV1 {
         for item in status {
             let item = item.map_err(|error| ClassificationErrorV1::Git(error.to_string()))?;
             let path = item.location().to_str_lossy().into_owned();
-            // TraceDecay's own project-local private store is daemon-written
-            // state, never checkout content. Counting it as a worktree change
-            // would make every enrolled checkout permanently "dirty", see
-            // [`is_tracedecay_owned_state_path`].
-            if is_tracedecay_owned_state_path(&path) {
-                continue;
-            }
             if let Some(class) = classify_item(&item) {
                 changes.push(ClassifiedChangeV1 { path, class });
             }
@@ -181,32 +174,6 @@ impl WorktreeChangeClassificationV1 {
     }
 }
 
-/// Whether `path` (repository-relative, forward-slash) names a retired
-/// project-local `TraceDecay` state directory or something inside it.
-///
-/// `TraceDecay` no longer writes anything into a checkout, but projects enrolled
-/// before the working-tree cutover may still carry a legacy
-/// `.tracedecay/` directory (e.g. `enrollment.json`). Those bytes were
-/// produced by `TraceDecay`, are never checkout content, and are not
-/// indexable source. Unless the user happens to ignore
-/// `.tracedecay/`, gix reports them as untracked, so treating them as a
-/// worktree change makes *every* legacy checkout look permanently dirty: no
-/// capture can then seal an exact HEAD tree, no published generation carries a
-/// `source_revision`, and exact-scope admission refuses forever with
-/// `lsp-code-index-source-revision-unavailable`.
-///
-/// The legacy indexing lane already applies this rule
-/// (`crate::tracedecay::indexing::is_tracedecay_state_path`); it is private to
-/// that module, so the code-index classifier states it independently rather
-/// than widening a legacy surface.
-fn is_tracedecay_owned_state_path(path: &str) -> bool {
-    let normalized = path.replace('\\', "/");
-    normalized == crate::config::TRACEDECAY_DIR
-        || normalized
-            .strip_prefix(crate::config::TRACEDECAY_DIR)
-            .is_some_and(|suffix| suffix.starts_with('/'))
-}
-
 /// Map one gix status item to a truthful class, or `None` for items that carry
 /// no indexing signal on their own.
 ///
@@ -249,124 +216,4 @@ fn classify_item(item: &gix::status::Item) -> Option<WorktreeChangeClassV1> {
             IndexWorktreeItem::Rewrite { .. } => return None,
         },
     })
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-    use std::path::Path;
-    use std::process::Command;
-    use tempfile::TempDir;
-
-    fn git(root: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .current_dir(root)
-            .args(args)
-            .status()
-            .expect("run git");
-        assert!(status.success(), "git failed: {args:?}");
-    }
-
-    /// A committed checkout with no ambient ignore rules. The operator's global
-    /// excludes file is deliberately pointed at a path that does not exist, so
-    /// this test observes the same untracked set a user without a
-    /// `.tracedecay/` ignore entry would.
-    fn committed_repo() -> TempDir {
-        let root = TempDir::new().expect("root");
-        git(root.path(), &["init", "-q"]);
-        git(root.path(), &["config", "user.name", "T"]);
-        git(root.path(), &["config", "user.email", "t@example.invalid"]);
-        git(
-            root.path(),
-            &[
-                "config",
-                "core.excludesFile",
-                root.path().join("absent-global-excludes").to_str().unwrap(),
-            ],
-        );
-        std::fs::create_dir_all(root.path().join("src")).unwrap();
-        std::fs::write(root.path().join("src/lib.rs"), "pub fn a() {}\n").unwrap();
-        git(root.path(), &["add", "."]);
-        git(root.path(), &["commit", "-qm", "init"]);
-        root
-    }
-
-    #[test]
-    fn tracedecay_state_paths_are_recognised() {
-        assert!(is_tracedecay_owned_state_path(".tracedecay"));
-        assert!(is_tracedecay_owned_state_path(
-            ".tracedecay/enrollment.json"
-        ));
-        assert!(is_tracedecay_owned_state_path(
-            ".tracedecay/code-index/generation-0.json"
-        ));
-        assert!(!is_tracedecay_owned_state_path(".tracedecay-notes/a.rs"));
-        assert!(!is_tracedecay_owned_state_path("src/.tracedecay/a.rs"));
-        assert!(!is_tracedecay_owned_state_path("src/lib.rs"));
-    }
-
-    /// Enrolling a project writes `.tracedecay/enrollment.json` into the
-    /// checkout. That is `TraceDecay`'s own state, so a checkout that is
-    /// otherwise clean must stay classified clean, otherwise no capture can
-    /// seal an exact HEAD tree and exact-scope admission refuses forever with
-    /// `lsp-code-index-source-revision-unavailable`.
-    #[test]
-    fn enrollment_state_does_not_make_a_committed_checkout_dirty() {
-        let repo = committed_repo();
-        let repository =
-            tracedecay_runtime_core::git_open::open(repo.path()).expect("open repository");
-        assert!(
-            WorktreeChangeClassificationV1::classify(&repository)
-                .expect("classify committed checkout")
-                .changes()
-                .is_empty(),
-            "a committed checkout starts clean"
-        );
-
-        std::fs::create_dir_all(repo.path().join(".tracedecay")).unwrap();
-        std::fs::write(
-            repo.path().join(".tracedecay/enrollment.json"),
-            "{\"project_id\":\"project.test\",\"storage_mode\":\"profile_sharded\"}\n",
-        )
-        .unwrap();
-
-        let classification = WorktreeChangeClassificationV1::classify(&repository)
-            .expect("classify enrolled checkout");
-        assert!(
-            classification.changes().is_empty(),
-            "TraceDecay's own private store is not a worktree change: {:?}",
-            classification.changes()
-        );
-        assert!(
-            !classification
-                .candidate_paths()
-                .iter()
-                .any(|path| path.starts_with(".tracedecay/")),
-            "TraceDecay's own private store is never an indexing candidate"
-        );
-    }
-
-    /// The exclusion is scoped to `TraceDecay`'s own directory only; real
-    /// untracked source still classifies the worktree as dirty.
-    #[test]
-    fn untracked_source_still_classifies_as_a_change() {
-        let repo = committed_repo();
-        std::fs::create_dir_all(repo.path().join(".tracedecay")).unwrap();
-        std::fs::write(repo.path().join(".tracedecay/enrollment.json"), "{}\n").unwrap();
-        std::fs::write(repo.path().join("src/extra.rs"), "pub fn b() {}\n").unwrap();
-
-        let repository =
-            tracedecay_runtime_core::git_open::open(repo.path()).expect("open repository");
-        let classification =
-            WorktreeChangeClassificationV1::classify(&repository).expect("classify");
-        assert_eq!(
-            classification
-                .changed_paths()
-                .into_iter()
-                .collect::<Vec<_>>(),
-            vec!["src/extra.rs".to_owned()],
-            "only the untracked source file is a change"
-        );
-    }
 }

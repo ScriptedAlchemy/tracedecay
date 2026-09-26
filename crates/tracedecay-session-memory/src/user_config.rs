@@ -11,13 +11,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::canonical_sha256;
 use tracedecay_domain::canonical_text::default_true;
 
 use tracedecay_automation::config::AutomationConfig;
 use tracedecay_runtime_core::storage::{append_lock_path, retry_transient_file_op};
-
-const USER_CONFIG_REVISION_DOMAIN: &str = "tracedecay.user-config-revision.v1";
 
 /// Keys canonical `user.*` configuration settings own. They are never read
 /// from this file.
@@ -152,7 +149,7 @@ pub enum ConfigSaveError {
     /// The existing config file is present but could not be read.
     ExistingUnreadable { path: PathBuf, source: io::Error },
     /// The existing config file is present but is not valid TOML. It is left
-    /// untouched (never clobbered) unless recovery was requested.
+    /// in place untouched and nothing is copied beside it.
     CorruptExisting {
         path: PathBuf,
         line: Option<usize>,
@@ -160,10 +157,6 @@ pub enum ConfigSaveError {
     },
     /// Serializing the in-memory config to TOML failed.
     Serialize { message: String },
-    /// Computing the canonical content revision failed.
-    Digest { message: String },
-    /// The persisted user config changed since the caller read it.
-    RevisionConflict { expected: String, actual: String },
     /// Creating the parent directory, writing the temp file, or renaming it
     /// over the target failed.
     Io {
@@ -173,14 +166,6 @@ pub enum ConfigSaveError {
     },
     /// Acquiring the sidecar write lock failed.
     Lock { path: PathBuf, source: io::Error },
-}
-
-impl ConfigSaveError {
-    /// True when the failure is a corrupt existing file that was left intact.
-    #[must_use]
-    pub fn is_corrupt(&self) -> bool {
-        matches!(self, Self::CorruptExisting { .. })
-    }
 }
 
 impl std::fmt::Display for ConfigSaveError {
@@ -205,27 +190,18 @@ impl std::fmt::Display for ConfigSaveError {
                 Some(line) => write!(
                     f,
                     "config file {} is corrupt at line {line}: {message}. \
-                     Back it up or delete it to regenerate",
+                     Fix it, or delete it to regenerate defaults",
                     path.display()
                 ),
                 None => write!(
                     f,
                     "config file {} is corrupt: {message}. \
-                     Back it up or delete it to regenerate",
+                     Fix it, or delete it to regenerate defaults",
                     path.display()
                 ),
             },
             Self::Serialize { message } => {
                 write!(f, "failed to serialize config to TOML: {message}")
-            }
-            Self::Digest { message } => {
-                write!(f, "failed to compute user config revision: {message}")
-            }
-            Self::RevisionConflict { expected, actual } => {
-                write!(
-                    f,
-                    "user config revision conflict (expected {expected}, actual {actual})"
-                )
             }
             Self::Io {
                 path,
@@ -254,14 +230,6 @@ impl std::error::Error for ConfigSaveError {
     }
 }
 
-#[derive(Debug)]
-pub struct UserConfigMutation<T> {
-    pub config: UserConfig,
-    pub output: T,
-    pub backup: Option<PathBuf>,
-    pub revision_id: String,
-}
-
 /// Sibling temp path in the same directory as `path`, used for the atomic
 /// write-then-rename. Includes pid and a nanosecond stamp so a stale temp from
 /// a crashed writer never collides with a live one.
@@ -275,20 +243,6 @@ fn temp_write_path(path: &Path) -> PathBuf {
         std::ffi::OsStr::to_os_string,
     );
     name.push(format!(".tmp-{pid}-{unique}"));
-    path.with_file_name(name)
-}
-
-/// Quarantine path (`config.toml.corrupt-<unix-ts>`) for a corrupt config file
-/// preserved during the explicit configuration recovery operation.
-fn corrupt_backup_path(path: &Path) -> PathBuf {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let mut name = path.file_name().map_or_else(
-        || std::ffi::OsString::from("config.toml"),
-        std::ffi::OsStr::to_os_string,
-    );
-    name.push(format!(".corrupt-{now}"));
     path.with_file_name(name)
 }
 
@@ -392,15 +346,6 @@ impl UserConfig {
             })
     }
 
-    /// Canonical content revision for compare-and-swap callers.
-    pub fn revision_id(&self) -> std::result::Result<String, ConfigSaveError> {
-        canonical_sha256(&(USER_CONFIG_REVISION_DOMAIN, self))
-            .map(|digest| digest.as_str().to_owned())
-            .map_err(|error| ConfigSaveError::Digest {
-                message: error.to_string(),
-            })
-    }
-
     /// Saves the user-level config file atomically.
     ///
     /// The in-memory config is serialized up front so a serialize failure never
@@ -412,99 +357,11 @@ impl UserConfig {
     /// in the same directory and renamed over `config.toml`, so a concurrent
     /// reader never observes a torn write.
     ///
-    /// If the existing file is present but unparseable it is left untouched and
+    /// If the existing file is present but unparseable,
     /// [`ConfigSaveError::CorruptExisting`] is returned (carrying the path and
-    /// the parse error's line). Use [`UserConfig::save_with_recovery`] from
-    /// explicit config-set commands to quarantine a corrupt file and regenerate.
+    /// the parse error's line) before anything is created or written: the
+    /// corrupt file stays in place for the operator and nothing is copied.
     pub fn save(&self) -> std::result::Result<(), ConfigSaveError> {
-        self.save_inner(false).map(|_| ())
-    }
-
-    /// Like [`UserConfig::save`], but self-heals a corrupt existing file.
-    ///
-    /// When the existing file is unparseable it is renamed to
-    /// `config.toml.corrupt-<unix-ts>` (preserving the evidence) and the fresh
-    /// in-memory config is written in its place. Returns `Ok(Some(backup_path))`
-    /// when a corrupt file was quarantined, `Ok(None)` for an ordinary save.
-    ///
-    /// Only call this from explicit, user-driven config-set entry points.
-    /// Because [`UserConfig::load`] silently returns defaults for a corrupt
-    /// file, a background saver's in-memory config after a corrupt load is
-    /// mostly defaults, so clobbering there would discard real user data
-    /// (upload counters, installed agents, version markers). Config-set commands
-    /// set the value the user just asked for, so regenerating is the safe,
-    /// unbricking choice.
-    pub fn save_with_recovery(&self) -> std::result::Result<Option<PathBuf>, ConfigSaveError> {
-        self.save_inner(true)
-    }
-
-    /// Atomically reloads, revision-checks, mutates, and saves the user config.
-    ///
-    /// The sidecar lock covers both the revision check and the replacement, so
-    /// two writers holding the same revision cannot both commit.
-    pub fn mutate_with_recovery_if_revision<T>(
-        expected_revision_id: &str,
-        mutate: impl FnOnce(&mut Self) -> T,
-    ) -> std::result::Result<UserConfigMutation<T>, ConfigSaveError> {
-        let Some(path) = config_path() else {
-            return Err(ConfigSaveError::PathUnavailable);
-        };
-        if let Some(parent) = path.parent() {
-            tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(parent).map_err(
-                |source| ConfigSaveError::Io {
-                    path: parent.to_path_buf(),
-                    message: "failed to create config directory".to_string(),
-                    source,
-                },
-            )?;
-        }
-
-        let lock_path = append_lock_path(&path);
-        let lock_file = tracedecay_runtime_core::storage::acquire_sidecar_lock_blocking(&lock_path)
-            .map_err(|source| ConfigSaveError::Lock {
-                path: lock_path.clone(),
-                source,
-            })?;
-        let result = (|| {
-            let mut config = match fs::read_to_string(&path) {
-                Ok(contents) => toml::from_str::<Self>(&contents)
-                    .unwrap_or_default()
-                    .without_retired_keys(),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => Self::default(),
-                Err(source) => {
-                    return Err(ConfigSaveError::ExistingUnreadable {
-                        path: path.clone(),
-                        source,
-                    });
-                }
-            };
-            let actual_revision_id = config.revision_id()?;
-            if expected_revision_id != actual_revision_id {
-                return Err(ConfigSaveError::RevisionConflict {
-                    expected: expected_revision_id.to_owned(),
-                    actual: actual_revision_id,
-                });
-            }
-
-            let output = mutate(&mut config);
-            let contents =
-                toml::to_string_pretty(&config).map_err(|error| ConfigSaveError::Serialize {
-                    message: error.to_string(),
-                })?;
-            let backup = Self::write_locked(&path, &contents, true)?;
-            let revision_id = config.revision_id()?;
-            Ok(UserConfigMutation {
-                config,
-                output,
-                backup,
-                revision_id,
-            })
-        })();
-        drop(lock_file);
-        result
-    }
-
-    fn save_inner(&self, recover: bool) -> std::result::Result<Option<PathBuf>, ConfigSaveError> {
         let Some(path) = config_path() else {
             return Err(ConfigSaveError::PathUnavailable);
         };
@@ -514,6 +371,11 @@ impl UserConfig {
         let contents = toml::to_string_pretty(self).map_err(|err| ConfigSaveError::Serialize {
             message: err.to_string(),
         })?;
+
+        // Checked outside the lock: every writer holds it and renames a whole
+        // parseable file into place, so only an outside editor, which no lock
+        // excludes, can corrupt the file between this check and the rename.
+        Self::refuse_unparseable_existing(&path)?;
 
         if let Some(parent) = path.parent() {
             tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(parent).map_err(
@@ -535,49 +397,32 @@ impl UserConfig {
                 source,
             })?;
 
-        let result = Self::write_locked(&path, &contents, recover);
+        let result = Self::write_locked(&path, &contents);
         drop(lock_file);
         result
     }
 
-    fn write_locked(
-        path: &Path,
-        contents: &str,
-        recover: bool,
-    ) -> std::result::Result<Option<PathBuf>, ConfigSaveError> {
-        let mut backup: Option<PathBuf> = None;
-        if path.exists() {
-            match fs::read_to_string(path) {
-                Ok(existing) => {
-                    if let Err(err) = toml::from_str::<Self>(&existing) {
-                        if recover {
-                            let backup_path = corrupt_backup_path(path);
-                            fs::rename(path, &backup_path).map_err(|source| {
-                                ConfigSaveError::Io {
-                                    path: backup_path.clone(),
-                                    message: "failed to quarantine corrupt config file".to_string(),
-                                    source,
-                                }
-                            })?;
-                            backup = Some(backup_path);
-                        } else {
-                            return Err(ConfigSaveError::CorruptExisting {
-                                path: path.to_path_buf(),
-                                line: parse_error_line(&existing, &err),
-                                message: err.to_string(),
-                            });
-                        }
-                    }
-                }
-                Err(source) => {
-                    return Err(ConfigSaveError::ExistingUnreadable {
-                        path: path.to_path_buf(),
-                        source,
-                    });
-                }
+    fn refuse_unparseable_existing(path: &Path) -> std::result::Result<(), ConfigSaveError> {
+        let existing = match fs::read_to_string(path) {
+            Ok(existing) => existing,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(source) => {
+                return Err(ConfigSaveError::ExistingUnreadable {
+                    path: path.to_path_buf(),
+                    source,
+                });
             }
-        }
+        };
+        toml::from_str::<Self>(&existing)
+            .map(|_| ())
+            .map_err(|err| ConfigSaveError::CorruptExisting {
+                path: path.to_path_buf(),
+                line: parse_error_line(&existing, &err),
+                message: err.to_string(),
+            })
+    }
 
+    fn write_locked(path: &Path, contents: &str) -> std::result::Result<(), ConfigSaveError> {
         // Atomic replace: write a temp file in the same directory, then rename
         // it over the target. `rename` is atomic on POSIX and Windows, so a
         // concurrent reader always sees either the old or the new file whole.
@@ -593,9 +438,7 @@ impl UserConfig {
                 message: "failed to write config file".to_string(),
                 source,
             }
-        })?;
-
-        Ok(backup)
+        })
     }
 
     /// Saves only when the user-level config file already exists.
@@ -700,92 +543,45 @@ mod tests {
     }
 
     #[test]
-    fn save_preserves_existing_corrupt_config_file() {
+    fn corrupt_config_is_a_typed_error_left_in_place_with_nothing_copied() {
         let _lock = lock_user_data_dir_test_env();
         let temp = TempDir::new().unwrap();
         let _env = EnvRestore::set(USER_DATA_DIR_ENV, temp.path());
         let path = config_path().expect("config path should resolve");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let original = "installed_agents = [\"claude\"]\nautomation =";
-        std::fs::write(&path, original).unwrap();
-
-        let mut config = UserConfig::load();
-        config.pending_upload = 1;
-
-        let err = config
-            .save()
-            .expect_err("saving must fail when the existing file is corrupt");
-        assert!(
-            err.is_corrupt(),
-            "expected a corrupt-file error, got: {err}"
-        );
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
-    }
-
-    #[test]
-    fn save_reports_torn_line_with_path_and_line_number() {
-        let _lock = lock_user_data_dir_test_env();
-        let temp = TempDir::new().unwrap();
-        let _env = EnvRestore::set(USER_DATA_DIR_ENV, temp.path());
-        let path = config_path().expect("config path should resolve");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        // Reproduce the exact torn-write seen in the wild: a valid line followed
-        // by a bare " true" orphan with no key.
+        // The torn write seen in the wild: a valid line followed by a bare
+        // " true" orphan with no key.
         let torn = "pending_upload = 0\n true";
         std::fs::write(&path, torn).unwrap();
+        let entries = || {
+            let mut names = std::fs::read_dir(path.parent().unwrap())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+        let config = UserConfig {
+            pending_upload: 7,
+            ..UserConfig::default()
+        };
 
-        let config = UserConfig::load();
-        let err = config
-            .save()
-            .expect_err("torn config must not save via the plain path");
-        assert!(err.is_corrupt(), "expected corrupt error, got: {err}");
-        let message = err.to_string();
-        assert!(
-            message.contains(&path.display().to_string()),
-            "error should name the file path: {message}"
-        );
-        assert!(
-            message.contains("line 2") || message.contains("line "),
-            "error should carry a line number: {message}"
-        );
-        // The corrupt file is preserved untouched.
+        let save_error = config.save().expect_err("a corrupt config must not save");
+
+        assert_eq!(entries(), vec!["config.toml".to_owned()]);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), torn);
-    }
-
-    #[test]
-    fn save_with_recovery_backs_up_and_regenerates() {
-        let _lock = lock_user_data_dir_test_env();
-        let temp = TempDir::new().unwrap();
-        let _env = EnvRestore::set(USER_DATA_DIR_ENV, temp.path());
-        let path = config_path().expect("config path should resolve");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let torn = "pending_upload = 0\n true";
-        std::fs::write(&path, torn).unwrap();
-
-        let mut config = UserConfig::load();
-        config.pending_upload = 7;
-        let backup = config
-            .save_with_recovery()
-            .expect("recovery save should succeed")
-            .expect("a corrupt file should have been quarantined");
-
-        // The corrupt content is preserved at the backup path.
-        assert!(
-            backup
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("config.toml.corrupt-")),
-            "backup should be config.toml.corrupt-<ts>: {backup:?}"
+        let expected = format!(
+            "config file {} is corrupt at line 2: TOML parse error at line 2, column 6\n  |\n2 |  true\n  |      ^\nkey with no value, expected `=`\n. Fix it, or delete it to regenerate defaults",
+            path.display()
         );
-        assert_eq!(std::fs::read_to_string(&backup).unwrap(), torn);
+        assert_eq!(save_error.to_string(), expected);
+        let load_error = UserConfig::load_strict().expect_err("a corrupt config must not load");
+        assert_eq!(load_error.to_string(), expected);
+        assert_eq!(entries(), vec!["config.toml".to_owned()]);
 
-        // The regenerated file parses and reflects the in-memory value.
-        let saved = std::fs::read_to_string(&path).unwrap();
-        let reparsed: UserConfig = toml::from_str(&saved).expect("regenerated config parses");
-        assert_eq!(reparsed.pending_upload, 7);
-
-        // A subsequent ordinary save now succeeds (no longer bricked).
-        config.save().expect("save after recovery should succeed");
+        std::fs::write(&path, "pending_upload = 0\n").unwrap();
+        config.save().expect("a parseable config saves");
+        assert_eq!(UserConfig::load_strict().unwrap().pending_upload, 7);
     }
 
     #[test]
@@ -831,58 +627,6 @@ mod tests {
         assert!(
             matches!(err, ConfigSaveError::ExistingUnreadable { .. }),
             "expected ExistingUnreadable, got: {err}"
-        );
-    }
-
-    #[test]
-    fn concurrent_revision_guarded_mutations_reject_one_stale_writer() {
-        let _lock = lock_user_data_dir_test_env();
-        let temp = TempDir::new().unwrap();
-        let _env = EnvRestore::set(USER_DATA_DIR_ENV, temp.path());
-        UserConfig::default().save().expect("initial config saves");
-        let expected_revision = UserConfig::load()
-            .revision_id()
-            .expect("initial revision is available");
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
-
-        let upload_writer = {
-            let expected_revision = expected_revision.clone();
-            let barrier = barrier.clone();
-            std::thread::spawn(move || {
-                barrier.wait();
-                UserConfig::mutate_with_recovery_if_revision(&expected_revision, |config| {
-                    config.pending_upload = 1;
-                })
-            })
-        };
-        let debounce_writer = {
-            let barrier = barrier.clone();
-            std::thread::spawn(move || {
-                barrier.wait();
-                UserConfig::mutate_with_recovery_if_revision(&expected_revision, |config| {
-                    config.cached_latest_version = "9.9.9".to_owned();
-                })
-            })
-        };
-
-        barrier.wait();
-        let outcomes = [
-            upload_writer.join().unwrap(),
-            debounce_writer.join().unwrap(),
-        ];
-        assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
-        assert_eq!(
-            outcomes
-                .iter()
-                .filter(|result| matches!(result, Err(ConfigSaveError::RevisionConflict { .. })))
-                .count(),
-            1
-        );
-        let saved = UserConfig::load();
-        assert_ne!(
-            (saved.pending_upload, saved.cached_latest_version.as_str()),
-            (1, "9.9.9"),
-            "the stale writer must not overwrite the winning mutation"
         );
     }
 
