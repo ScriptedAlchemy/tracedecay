@@ -390,6 +390,106 @@ async fn prompt_index_preserves_user_content_and_routes_full_body_through_mcp() 
 }
 
 #[tokio::test]
+async fn released_unslugged_prompt_index_is_a_typed_reset_until_deleted() {
+    let temp = tempdir();
+    let profile_root = temp.path().join("profile");
+    let prompt_path = temp.path().join("AGENTS.md");
+    create_managed_skill(
+        &profile_root,
+        targeted_draft(
+            "repo-hygiene",
+            "Repository hygiene",
+            vec![SkillInstallTarget::Agents],
+        ),
+    )
+    .await
+    .unwrap();
+    let fixtures = [
+        (
+            concat!(
+                "# User rules\n\nKeep this line.\n\n",
+                "<!-- TRACEDECAY MANAGED SKILLS START -->\n",
+                "## TraceDecay managed skills\n\n",
+                "- `repo-hygiene`: Repository hygiene\n",
+                "<!-- TRACEDECAY MANAGED SKILLS END -->\n",
+            ),
+            "<!-- TRACEDECAY MANAGED SKILLS START -->",
+        ),
+        (
+            concat!(
+                "# User rules\n\nKeep this line.\n\n",
+                "<!-- TRACEDECAY MANAGED SKILLS START -->\n",
+                "- `repo-hygiene`: Repository hygiene\n",
+            ),
+            "<!-- TRACEDECAY MANAGED SKILLS START -->",
+        ),
+        (
+            concat!(
+                "# User rules\n\nKeep this line.\n\n",
+                "- `repo-hygiene`: Repository hygiene\n",
+                "<!-- TRACEDECAY MANAGED SKILLS END -->\n",
+            ),
+            "<!-- TRACEDECAY MANAGED SKILLS END -->",
+        ),
+    ];
+    for (released, marker) in fixtures {
+        std::fs::write(&prompt_path, released).unwrap();
+        let expected_reason = format!(
+            "'{}' carries the released unslugged managed-skill index marker `{marker}`",
+            prompt_path.display()
+        );
+        for (path, error) in [
+            (
+                "export",
+                export_prompt_skill_index(
+                    &host_io(),
+                    &profile_root,
+                    SkillInstallTarget::Agents,
+                    &prompt_path,
+                )
+                .unwrap_err(),
+            ),
+            (
+                "removal",
+                remove_prompt_skill_index_for_target(
+                    &host_io(),
+                    &prompt_path,
+                    SkillInstallTarget::Agents,
+                )
+                .unwrap_err(),
+            ),
+            (
+                "stale detection",
+                stale_prompt_index_ids(&profile_root, &prompt_path, SkillInstallTarget::Agents)
+                    .unwrap_err(),
+            ),
+        ] {
+            assert_eq!(
+                error.reset_required_context(),
+                Some(("managed skill prompt index", expected_reason.as_str())),
+                "{path} over {marker}: {error:?}"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&prompt_path).unwrap(), released);
+    }
+
+    std::fs::write(&prompt_path, "# User rules\n\nKeep this line.\n").unwrap();
+    let summary = export_prompt_skill_index(
+        &host_io(),
+        &profile_root,
+        SkillInstallTarget::Agents,
+        &prompt_path,
+    )
+    .unwrap();
+    assert_eq!(summary.exported_count, 1);
+    assert!(
+        std::fs::read_to_string(&prompt_path)
+            .unwrap()
+            .contains("<!-- TRACEDECAY MANAGED SKILLS START agents -->")
+    );
+}
+
+#[tokio::test]
 async fn prompt_index_repairs_slugged_orphan_end_without_claiming_user_text() {
     let temp = tempdir();
     let profile_root = temp.path().join("profile");

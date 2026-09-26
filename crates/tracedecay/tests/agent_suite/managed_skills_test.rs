@@ -641,6 +641,50 @@ async fn automatic_managed_skill_update_rejects_no_op_patch() {
 }
 
 #[tokio::test]
+async fn released_monolithic_skill_usage_ledger_is_a_typed_reset() {
+    for released in [
+        std::path::Path::new("skill_usage.json"),
+        std::path::Path::new("skill_usage/legacy-imported-events.json"),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let profile_root = temp.path().join("profile");
+        let skill = draft().materialize().unwrap();
+        save_managed_skill(&profile_root, &skill).await.unwrap();
+        let released_path = profile_root.join("agent_managed").join(released);
+        std::fs::create_dir_all(released_path.parent().unwrap()).unwrap();
+        let bytes = br#"{"schema_version":1,"records":{"repo-hygiene":{"view_count":3}}}"#;
+        std::fs::write(&released_path, bytes).unwrap();
+        let record_path = skill_usage_record_path(&profile_root, "repo-hygiene");
+        let record_before = std::fs::read(&record_path).ok();
+
+        for error in [
+            load_skill_usage_records(&profile_root, None)
+                .await
+                .unwrap_err(),
+            record_skill_usage(
+                &profile_root,
+                &skill,
+                SkillUsageAction::View,
+                "dashboard",
+                Vec::new(),
+                None,
+                None,
+            )
+            .await
+            .unwrap_err(),
+        ] {
+            let (authority, reason) = error
+                .reset_required_context()
+                .unwrap_or_else(|| panic!("monolithic ledger must be a typed reset: {error:?}"));
+            assert_eq!(authority, "managed skill store");
+            assert!(reason.contains("monolithic"), "{reason}");
+        }
+        assert_eq!(std::fs::read(&released_path).unwrap(), bytes);
+        assert_eq!(std::fs::read(&record_path).ok(), record_before);
+    }
+}
+
+#[tokio::test]
 async fn managed_skill_usage_ledger_records_views_uses_and_patches() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
