@@ -6,8 +6,10 @@ target-dir = "target"
 # implicitly pass `-C strip=debuginfo` (no profile in Cargo.toml sets
 # `strip`, and nothing in a release build requests debuginfo), and rustc
 # then runs `rust-objcopy`. On Mach-O that regenerates the ad-hoc
-# identifier from the deps filename. Off Darwin the script execs rustc
-# and returns. See the apple target comment.
+# identifier from the deps filename. Cargo's bin line has no `-o`; the
+# file is `<--out-dir>/<crate-name><extra-filename>`, and Cargo hardlinks
+# it into place after rustc exits. Off Darwin the script execs rustc and
+# returns. See the apple target comment.
 rustc-workspace-wrapper = "scripts/macos-rustc-wrapper.sh"
 
 [env]

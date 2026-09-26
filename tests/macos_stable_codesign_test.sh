@@ -203,8 +203,10 @@ if grep -Fq -- "$other" "$tmpdir/codesign.log"; then
 fi
 
 # Release strip re-signs the linked product with its filename, then the
-# rustc wrapper signs that same file as dev.tracedecay.cli. Cargo copies
-# this `-o` path to target/release/tracedecay after the wrapper returns.
+# rustc wrapper signs that same deps file as dev.tracedecay.cli. Cargo
+# hardlinks the deps file into target/release after the wrapper returns.
+# The fake rustc speaks Cargo's bin argv: --out-dir and -C extra-filename,
+# with no -o. It also still honors an explicit -o.
 fake_rustc=$tmpdir/fake-rustc
 cat >"$fake_rustc" <<'EOF'
 #!/usr/bin/env bash
@@ -212,20 +214,63 @@ set -euo pipefail
 if [[ ${FAKE_RUSTC_STATUS:-0} -ne 0 ]]; then
   exit "$FAKE_RUSTC_STATUS"
 fi
+
+args=()
+for arg in "$@"; do
+  if [[ $arg == @* && -f ${arg#@} ]]; then
+    while IFS= read -r line || [[ -n $line ]]; do
+      line=${line%$'\r'}
+      args+=("$line")
+    done <"${arg#@}"
+  else
+    args+=("$arg")
+  fi
+done
+
 prev=
 out=
-for arg in "$@"; do
+out_dir=
+crate_name=
+extra=
+for arg in "${args[@]}"; do
   if [[ $prev == -o ]]; then
     out=$arg
     prev=
     continue
   fi
+  if [[ $prev == --out-dir ]]; then
+    out_dir=$arg
+    prev=
+    continue
+  fi
+  if [[ $prev == --crate-name ]]; then
+    crate_name=$arg
+    prev=
+    continue
+  fi
+  if [[ $prev == -C ]]; then
+    case $arg in
+      extra-filename=*) extra=${arg#extra-filename=} ;;
+    esac
+    prev=
+    continue
+  fi
   case $arg in
     -o) prev=-o ;;
+    --out-dir) prev=--out-dir ;;
+    --out-dir=*) out_dir=${arg#--out-dir=} ;;
+    --crate-name) prev=--crate-name ;;
+    --crate-name=*) crate_name=${arg#--crate-name=} ;;
+    -C) prev=-C ;;
+    -Cextra-filename=*) extra=${arg#-Cextra-filename=} ;;
   esac
 done
+
 if [[ ${FAKE_RUSTC_SKIP_OUTPUT:-} == 1 ]]; then
   exit 0
+fi
+if [[ -z $out && -n $out_dir && -n $crate_name ]]; then
+  out="${out_dir%/}/${crate_name}${extra}"
 fi
 [[ -n $out ]] || exit 3
 mkdir -p "$(dirname "$out")"
@@ -254,12 +299,96 @@ PATH="$tmpdir/mock-bin:$PATH" \
   CODESIGN_REPORT=$'Identifier=tracedecay-'"$HASH"$'\nSignature=adhoc\nTeamIdentifier=not set\n' \
   CODESIGN_LOG="$tmpdir/codesign.log" \
   FAKE_RUSTC_STRIP="$fake_strip" \
-  "$RUSTC_WRAPPER" "$fake_rustc" --crate-name tracedecay --crate-type bin -o "$product"
+  "$RUSTC_WRAPPER" "$fake_rustc" \
+  --crate-name tracedecay \
+  --crate-type bin \
+  --out-dir "$tmpdir/release/deps" \
+  -C extra-filename=-"$HASH"
 strip_line=$(head -n 1 "$tmpdir/codesign.log")
 stable_line=$(tail -n 1 "$tmpdir/codesign.log")
 [[ $strip_line == "--force --sign - --identifier tracedecay-${HASH} ${product}" ]]
 [[ $stable_line == "--force --sign - --identifier ${IDENTIFIER} ${product}" ]]
 [[ $strip_line != "$stable_line" ]]
+
+# Glued spellings: --out-dir= and -Cextra-filename=.
+glued=$tmpdir/glued/deps/tracedecay-$HASH
+: >"$tmpdir/codesign.log"
+PATH="$tmpdir/mock-bin:$PATH" \
+  TRACEDECAY_ASSUME_DARWIN=1 \
+  CODESIGN_REPORT=$'Identifier=tracedecay-'"$HASH"$'\nSignature=adhoc\nTeamIdentifier=not set\n' \
+  CODESIGN_LOG="$tmpdir/codesign.log" \
+  FAKE_RUSTC_STRIP="$fake_strip" \
+  "$RUSTC_WRAPPER" "$fake_rustc" \
+  --crate-name=tracedecay \
+  --crate-type=bin \
+  --out-dir="$tmpdir/glued/deps" \
+  -Cextra-filename=-"$HASH"
+strip_line=$(head -n 1 "$tmpdir/codesign.log")
+stable_line=$(tail -n 1 "$tmpdir/codesign.log")
+[[ $strip_line == "--force --sign - --identifier tracedecay-${HASH} ${glued}" ]]
+[[ $stable_line == "--force --sign - --identifier ${IDENTIFIER} ${glued}" ]]
+
+# The same Cargo argv inside an @response-file.
+response=$tmpdir/rustc-args
+printf '%s\n' \
+  --crate-name tracedecay \
+  --crate-type bin \
+  --out-dir "$tmpdir/response/deps" \
+  -C "extra-filename=-${HASH}" \
+  >"$response"
+responded=$tmpdir/response/deps/tracedecay-$HASH
+: >"$tmpdir/codesign.log"
+PATH="$tmpdir/mock-bin:$PATH" \
+  TRACEDECAY_ASSUME_DARWIN=1 \
+  CODESIGN_REPORT=$'Identifier=tracedecay-'"$HASH"$'\nSignature=adhoc\nTeamIdentifier=not set\n' \
+  CODESIGN_LOG="$tmpdir/codesign.log" \
+  FAKE_RUSTC_STRIP="$fake_strip" \
+  "$RUSTC_WRAPPER" "$fake_rustc" "@$response"
+strip_line=$(head -n 1 "$tmpdir/codesign.log")
+stable_line=$(tail -n 1 "$tmpdir/codesign.log")
+[[ $strip_line == "--force --sign - --identifier tracedecay-${HASH} ${responded}" ]]
+[[ $stable_line == "--force --sign - --identifier ${IDENTIFIER} ${responded}" ]]
+
+# An explicit -o is still signed.
+direct=$tmpdir/direct/tracedecay-$HASH
+: >"$tmpdir/codesign.log"
+PATH="$tmpdir/mock-bin:$PATH" \
+  TRACEDECAY_ASSUME_DARWIN=1 \
+  CODESIGN_REPORT=$'Identifier=tracedecay-'"$HASH"$'\nSignature=adhoc\nTeamIdentifier=not set\n' \
+  CODESIGN_LOG="$tmpdir/codesign.log" \
+  FAKE_RUSTC_STRIP="$fake_strip" \
+  "$RUSTC_WRAPPER" "$fake_rustc" -o "$direct"
+strip_line=$(head -n 1 "$tmpdir/codesign.log")
+stable_line=$(tail -n 1 "$tmpdir/codesign.log")
+[[ $strip_line == "--force --sign - --identifier tracedecay-${HASH} ${direct}" ]]
+[[ $stable_line == "--force --sign - --identifier ${IDENTIFIER} ${direct}" ]]
+
+# A tracedecay lib, and a different bin, keep the strip identifier.
+lib_product=$tmpdir/lib/deps/tracedecay-$HASH
+: >"$tmpdir/codesign.log"
+PATH="$tmpdir/mock-bin:$PATH" \
+  TRACEDECAY_ASSUME_DARWIN=1 \
+  CODESIGN_LOG="$tmpdir/codesign.log" \
+  FAKE_RUSTC_STRIP="$fake_strip" \
+  "$RUSTC_WRAPPER" "$fake_rustc" \
+  --crate-name tracedecay \
+  --crate-type lib \
+  --out-dir "$tmpdir/lib/deps" \
+  -C extra-filename=-"$HASH"
+[[ $(cat "$tmpdir/codesign.log") == "--force --sign - --identifier tracedecay-${HASH} ${lib_product}" ]]
+
+other_bin=$tmpdir/other-bin/deps/other-$HASH
+: >"$tmpdir/codesign.log"
+PATH="$tmpdir/mock-bin:$PATH" \
+  TRACEDECAY_ASSUME_DARWIN=1 \
+  CODESIGN_LOG="$tmpdir/codesign.log" \
+  FAKE_RUSTC_STRIP="$fake_strip" \
+  "$RUSTC_WRAPPER" "$fake_rustc" \
+  --crate-name other \
+  --crate-type bin \
+  --out-dir "$tmpdir/other-bin/deps" \
+  -C extra-filename=-"$HASH"
+[[ $(cat "$tmpdir/codesign.log") == "--force --sign - --identifier other-${HASH} ${other_bin}" ]]
 
 # A non-product output is left with the strip identifier.
 other=$tmpdir/release/deps/libother.dylib
