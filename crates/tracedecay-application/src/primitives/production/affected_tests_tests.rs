@@ -668,7 +668,7 @@ fn complete_read(generation: CodeGenerationId) -> GenerationProviderReadV1<Gener
         records: vec![GenerationTestJoinRecordV1 {
             attribution,
             test_occurrence: Some(test_occurrence),
-            covered_occurrences: vec![source_occurrence],
+            covered_occurrences: vec![Arc::new(source_occurrence)],
             disposition: GenerationTestJoinDispositionV1::Current {
                 evidence_class: TestAttributionEvidenceClassV1::ConservativeDependencyCandidates,
             },

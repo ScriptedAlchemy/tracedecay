@@ -360,7 +360,7 @@ pub(super) mod tests {
                 (0..8)
                     .map(|index| ConservativeCloneTokenV1::Syntax {
                         syntax_kind: "identifier".into(),
-                        text: format!("token_{seed}_{index}"),
+                        text: format!("token_{seed}_{index}").into(),
                     })
                     .collect::<Vec<_>>(),
             ),
