@@ -23,6 +23,8 @@ mod code_index_ignored_dependencies_test;
 #[cfg(unix)]
 mod code_index_journey;
 #[cfg(unix)]
+mod code_index_park_test;
+#[cfg(unix)]
 mod dirty_worktree_symbol_reads_test;
 #[cfg(target_os = "linux")]
 mod fixture_daemon_lifetime_test;

@@ -392,7 +392,17 @@ where
             if let Some(unavailable_graph) = graph_evidence.unavailable() {
                 output["verified_graph_evidence"] = unavailable_graph.clone();
             }
-            let failure = format!("code-index search unavailable: {reason}");
+            let failure = match freshness
+                .indexing
+                .as_ref()
+                .and_then(|indexing| indexing.parked.as_ref())
+            {
+                Some(parked) => format!(
+                    "code-index search unavailable: parked: {}; remedy: {}",
+                    parked.reason, parked.remediation
+                ),
+                None => format!("code-index search unavailable: {reason}"),
+            };
             Ok(rendered_tool_result(ctx, &args, &output, Vec::new(), || {
                 format!(
                     "{}{}",

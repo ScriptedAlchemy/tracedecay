@@ -824,6 +824,22 @@ impl ApplicationProblem {
         })
     }
 
+    /// The refusal for a query whose code index is parked: the same request
+    /// cannot succeed until the operator applies the park's remedy, which
+    /// `message` names, so it is never retried and names reconcile as the way
+    /// forward.
+    pub fn code_index_parked(message: String) -> Self {
+        Self::Unavailable {
+            classification: ApplicationUnavailableClassV1::Authority,
+            diagnostic: SafeDiagnostic {
+                code: "application.code-index.parked".to_owned(),
+                message,
+            },
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::Reconcile],
+        }
+    }
+
     pub fn admitted_unavailable(
         classification: ApplicationUnavailableClassV1,
         diagnostic: SafeDiagnostic,

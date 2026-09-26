@@ -53,6 +53,7 @@ pub(super) async fn open_and_register_project_primitive_runtime(
                     ignored_dependency_admission: Some(ignored_dependency_admission),
                     code_index: Arc::new(invocation.code_index_schedulers.clone()),
                     diagnostic_identity: Arc::new(invocation.code_index_schedulers.clone()),
+                    convergence_park: Arc::new(invocation.code_index_schedulers.clone()),
                 },
                 session_db,
                 temporal,
