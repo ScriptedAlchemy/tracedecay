@@ -265,12 +265,6 @@ pub(super) struct AutomationSchedulerHandle {
     termination: Arc<MaintenanceTaskTermination>,
 }
 
-impl AutomationSchedulerHandle {
-    pub(super) fn request_stop(&self) {
-        self.stop_requested.request();
-    }
-}
-
 #[cfg(test)]
 impl AutomationSchedulerHandle {
     pub(super) fn for_test(task: JoinHandle<()>) -> Self {
@@ -284,6 +278,12 @@ impl AutomationSchedulerHandle {
             termination: Arc::new(MaintenanceTaskTermination::pending()),
         }
     }
+}
+
+/// One automation loop's early-stop handles, registered when it starts.
+pub(super) struct AutomationSchedulerSignal {
+    stop: AutomationSchedulerStop,
+    wake: std::sync::Weak<tokio::sync::Notify>,
 }
 
 pub(super) struct AutomationSchedulerRetirement {
@@ -781,6 +781,18 @@ impl DaemonEngine {
             scheduler_loop,
             label = "daemon.scheduler.loop"
         ));
+        {
+            let mut signals = self
+                .store_administration
+                .automation_scheduler_signals()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            signals.retain(|signal| signal.wake.strong_count() > 0);
+            signals.push(AutomationSchedulerSignal {
+                stop: stop_requested.clone(),
+                wake: Arc::downgrade(&wake),
+            });
+        }
         schedulers.insert(
             key,
             AutomationSchedulerHandle {
@@ -960,16 +972,21 @@ impl DaemonEngine {
         Some(AutomationSchedulerRetirement { termination })
     }
 
-    /// Request every automation loop to stop without awaiting the scheduler
-    /// map. Prepare-time cancel must be synchronous; `try_lock` skips a
-    /// contended map and the join still retires those owners.
+    /// Request every automation loop to stop. Prepare-time cancel must be
+    /// synchronous, so it signals through the registered early-stop handles
+    /// and never waits for the async scheduler map.
     pub(super) fn cancel_automation_schedulers(&self) {
-        let Ok(schedulers) = self.store_administration.automation_schedulers().try_lock() else {
-            return;
-        };
-        for handle in schedulers.values() {
-            handle.request_stop();
-            handle.wake.notify_one();
+        let signals = self
+            .store_administration
+            .automation_scheduler_signals()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for signal in signals.iter() {
+            let Some(wake) = signal.wake.upgrade() else {
+                continue;
+            };
+            signal.stop.request();
+            wake.notify_one();
         }
     }
 
@@ -1128,7 +1145,12 @@ async fn run_automation_scheduler_loop(
     #[cfg(test)] exit_barrier: Option<Arc<AutomationSchedulerExitBarrier>>,
 ) {
     let mut consecutive_open_failures: u32 = 0;
-    loop {
+    'scheduler: loop {
+        // A stop request (retirement, daemon cancel, draining) ends the loop
+        // at its next wake instead of leaving it for the shutdown join.
+        if run_control.read_control().interrupted() {
+            break;
+        }
         let observed_generation = generation.load(std::sync::atomic::Ordering::Acquire);
         match automation_scheduler_has_work_for_project(&cg).await {
             Ok(true) => {
@@ -1281,6 +1303,9 @@ async fn run_automation_scheduler_loop(
         tokio::select! {
             () = tokio::time::sleep(Duration::from_secs(tick_secs)) => {}
             () = wake.notified() => {
+                if run_control.read_control().interrupted() {
+                    break 'scheduler;
+                }
                 // Receipts arrive at tool cadence. Wait for a short quiet
                 // period and reset it for every later receipt, producing one
                 // review for the burst rather than one review per command.

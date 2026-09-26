@@ -932,3 +932,64 @@ async fn disabled_scheduler_reconcile_cannot_acknowledge_an_owner_that_then_exit
         "the acknowledged scheduler owner must still be live"
     );
 }
+
+/// Daemon shutdown cancels automation loops synchronously while scheduler
+/// reconcile or retirement may hold the async scheduler map. The stop must
+/// still reach the loop: it ends as soon as that map is released, instead of
+/// sleeping out its tick until the shutdown join aborts it.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancel_stops_the_automation_loop_while_the_scheduler_map_is_held() {
+    let dir = TempDir::new().expect("temp dir");
+    let project = dir.path().canonicalize().expect("canonical temp dir");
+    let client_identity = test_client_identity_for(project.join("profile"));
+    std::fs::create_dir_all(project.join("src")).expect("src dir");
+    std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    initialize_test_project(&project, &handshake.client_identity).await;
+    let engine = test_daemon_engine_for_profile(&handshake.client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &handshake.client_identity.profile_root,
+        "scheduler-cancel-held-map-test",
+    );
+    let server = engine
+        .project_server(&handshake)
+        .await
+        .expect("open scheduler fixture through the daemon owner");
+    let cg = server.cg().await;
+    let key =
+        super::super::ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
+    engine
+        .ensure_automation_scheduler(key.clone(), project, handshake)
+        .await;
+
+    let schedulers = engine
+        .store_administration
+        .automation_schedulers()
+        .lock()
+        .await;
+    let automation_loop = schedulers
+        .get(&key)
+        .and_then(|handle| handle.task.as_ref())
+        .expect("started automation loop")
+        .abort_handle();
+    engine.cancel_automation_schedulers();
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    drop(schedulers);
+    let mut waited = tokio::time::Duration::ZERO;
+    while !automation_loop.is_finished() && waited < tokio::time::Duration::from_secs(2) {
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        waited += tokio::time::Duration::from_millis(10);
+    }
+    let stopped_before_join = automation_loop.is_finished();
+    engine.shutdown_all().await;
+
+    assert!(
+        stopped_before_join,
+        "a cancel issued while the scheduler map was held must still end the loop"
+    );
+}

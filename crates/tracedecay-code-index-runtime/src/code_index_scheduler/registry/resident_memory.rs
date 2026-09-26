@@ -73,6 +73,7 @@ impl CodeIndexSchedulerRegistryV1 {
             test_attribution_authorities: Arc::new(std::sync::RwLock::new(
                 std::collections::BTreeMap::new(),
             )),
+            worker_shutdown_signals: Arc::default(),
         }
     }
 
