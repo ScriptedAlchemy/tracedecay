@@ -38,6 +38,10 @@ pub enum ResidentOwnerKindV1 {
     /// Decoded generations other than the one a worktree serves, kept so
     /// pinned and branch reads do not re-decode. Always re-decodable.
     SupersededGeneration,
+    /// The interactive catalog (name, file and import indices) built over a
+    /// worktree's graph. Released, the next catalog read rebuilds it from the
+    /// durable projection.
+    GraphCatalog,
     /// The decoded generation a worktree serves, with the derivations built
     /// from it (record index, test attribution). Released, the worktree keeps
     /// serving exact, lexical and graph reads from disk and re-decodes on the
@@ -50,8 +54,9 @@ pub enum ResidentOwnerKindV1 {
 }
 
 /// Pressure releases owners in this order.
-pub const RESIDENT_OWNER_SHED_ORDER_V1: [ResidentOwnerKindV1; 3] = [
+pub const RESIDENT_OWNER_SHED_ORDER_V1: [ResidentOwnerKindV1; 4] = [
     ResidentOwnerKindV1::SupersededGeneration,
+    ResidentOwnerKindV1::GraphCatalog,
     ResidentOwnerKindV1::DecodedGeneration,
     ResidentOwnerKindV1::GraphEngine,
 ];
@@ -61,6 +66,7 @@ impl ResidentOwnerKindV1 {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::SupersededGeneration => "superseded_generation",
+            Self::GraphCatalog => "graph_catalog",
             Self::DecodedGeneration => "decoded_generation",
             Self::GraphEngine => "graph_engine",
         }

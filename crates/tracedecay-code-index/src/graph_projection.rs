@@ -36,11 +36,12 @@ pub use self::builder::build_published_code_graph_manifest_checked;
 use self::builder::{ProductionCodeGraphInputs, build_projection};
 use self::interactive::InteractiveCatalogCache;
 pub use self::interactive::{
-    CodeGraphCensusV1, CodeGraphDegreeRankingV1, CodeGraphEdgeKindCountsV1,
-    CodeGraphFileSymbolCountV1, CodeGraphImpactBatchV1, CodeGraphImpactedSymbolV1,
-    CodeGraphInteractiveReader, CodeGraphPathSearchV1, CodeGraphRankedSymbolV1,
-    CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1,
-    CodeGraphSymbolPredicate, CodeGraphSymbolSearchPageV1, CodeGraphSymbolSummaryV1,
+    CodeGraphCatalogReleaseV1, CodeGraphCensusV1, CodeGraphDegreeRankingV1,
+    CodeGraphEdgeKindCountsV1, CodeGraphFileSymbolCountV1, CodeGraphImpactBatchV1,
+    CodeGraphImpactedSymbolV1, CodeGraphInteractiveReader, CodeGraphPathSearchV1,
+    CodeGraphRankedSymbolV1, CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1,
+    CodeGraphSymbolPageV1, CodeGraphSymbolPredicate, CodeGraphSymbolSearchPageV1,
+    CodeGraphSymbolSummaryV1,
 };
 use self::schema::{
     SYMBOL_LABEL, SYMBOL_RECORD_PROPERTY, deserialize_property, has_label, record_property,
@@ -294,6 +295,17 @@ impl CodeGraphProjectionStore {
             return Ok(None);
         }
         Ok(self.snapshot.resident_serving_engine_bytes()?)
+    }
+
+    /// Bytes the interactive catalog holds, or `None` when none is ready.
+    pub fn interactive_catalog_bytes(&self) -> Option<u64> {
+        self.interactive_catalog.ready_bytes()
+    }
+
+    /// Drop a ready interactive catalog; the next catalog read rebuilds it
+    /// from the durable projection.
+    pub fn release_interactive_catalog(&self) -> CodeGraphCatalogReleaseV1 {
+        self.interactive_catalog.release()
     }
 
     /// Unpin the engine and close it if no reader holds it. The durable
