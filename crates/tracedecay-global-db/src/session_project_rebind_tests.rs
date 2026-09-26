@@ -1,7 +1,7 @@
-//! A host session is keyed by provider and session id. Its project id can
-//! change after a re-enroll or when the cwd resolves to a different project.
-//! Catch-up must move that session onto the current project and keep
-//! projecting every later session.
+//! A host session is keyed by provider and session id. LCM may insert that
+//! row before the rollout projection, and a later project binding must replace
+//! the placeholder. A genuine collision stays on that queue row and must not
+//! stop later sessions.
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -308,4 +308,242 @@ async fn changed_project_key_rebinds_without_blocking_other_sessions() {
             .is_none(),
         "catch-up must consume the rebinding observation instead of retrying it"
     );
+}
+
+#[tokio::test]
+async fn lcm_ensure_session_then_rollout_keeps_the_real_project() {
+    let tmp = TempDir::new().unwrap();
+    let profile = tmp.path().join("profile");
+    let project_root = tmp.path().join("repo");
+    std::fs::create_dir_all(&project_root).unwrap();
+    let cwd = project_root.to_string_lossy().into_owned();
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        &profile,
+        &project_root,
+        ProjectId::new("project.core").unwrap(),
+    )
+    .await
+    .unwrap();
+    let database = runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+    let transaction = database
+        .runtime_database()
+        .begin_write_transaction("ensure lcm session before rollout projection")
+        .await
+        .unwrap();
+    tracedecay_lcm::compression::ensure_session(&transaction, "codex", CODEX_SESSION)
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let (project_key, project_path) =
+        session_project_binding(database, "codex", CODEX_SESSION).await;
+    assert_eq!(
+        project_key,
+        tracedecay_lcm::compression::LCM_UNKNOWN_PROJECT_KEY,
+        "LCM must not store a fake project key"
+    );
+    assert_eq!(
+        project_path,
+        tracedecay_lcm::compression::LCM_UNKNOWN_PROJECT_KEY
+    );
+    assert!(
+        session_title(database, "codex", CODEX_SESSION)
+            .await
+            .is_none(),
+        "the foreign-key shell must not invent a session title"
+    );
+
+    let store = runtime
+        .observation_store(HostAdmissionScope::Project)
+        .unwrap();
+    let rollout = observation(
+        "codex",
+        CODEX_SESSION,
+        project_scope("project.core"),
+        "record.codex.rollout",
+        ORIGINAL_TEXT,
+        "receipt.codex.rollout",
+        Some(session_fact(&cwd)),
+    );
+    persist(&store, rollout).await;
+    persist(
+        &store,
+        observation(
+            "cursor",
+            CURSOR_SESSION,
+            project_scope("project.core"),
+            "record.cursor.after-lcm",
+            CURSOR_TEXT,
+            "receipt.cursor.after-lcm",
+            None,
+        ),
+    )
+    .await;
+    drain_projection_queue(&store).await;
+
+    let (project_key, project_path) =
+        session_project_binding(database, "codex", CODEX_SESSION).await;
+    assert_eq!(project_key, "project.core");
+    assert_eq!(project_path, durable_project_path_key(&cwd));
+    assert!(
+        projected_text_contains(database, "codex", CODEX_SESSION, ORIGINAL_TEXT).await,
+        "the rollout message must project onto the placeholder session"
+    );
+    assert!(
+        projected_text_contains(database, "cursor", CURSOR_SESSION, CURSOR_TEXT).await,
+        "a later session must project after the placeholder is replaced"
+    );
+    assert!(
+        store.next_queued_observation().await.unwrap().is_none(),
+        "catch-up must finish both observations"
+    );
+}
+
+#[tokio::test]
+async fn genuine_session_collision_is_recorded_and_later_sessions_project() {
+    let tmp = TempDir::new().unwrap();
+    let profile = tmp.path().join("profile");
+    let project_root = tmp.path().join("repo");
+    std::fs::create_dir_all(&project_root).unwrap();
+    let cwd = project_root.to_string_lossy().into_owned();
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        &profile,
+        &project_root,
+        ProjectId::new("project.collision").unwrap(),
+    )
+    .await
+    .unwrap();
+    let database = runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+    let durable_cwd = durable_project_path_key(&cwd);
+    let transaction = database
+        .runtime_database()
+        .begin_write_transaction("seed a real session that will collide")
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            "INSERT INTO sessions (
+                provider, session_id, project_key, project_path, transcript_path, started_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+            params![
+                "codex",
+                CODEX_SESSION,
+                "project.collision",
+                durable_cwd.as_str(),
+                "/private/old-transcript.jsonl",
+            ],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let store = runtime
+        .observation_store(HostAdmissionScope::Project)
+        .unwrap();
+    let collided = observation(
+        "codex",
+        CODEX_SESSION,
+        project_scope("project.collision"),
+        "record.codex.collide",
+        ORIGINAL_TEXT,
+        "receipt.codex.collide",
+        Some(session_fact_with_transcript(
+            &cwd,
+            "/private/new-transcript.jsonl",
+        )),
+    );
+    let collided_id = collided.observation_id().clone();
+    persist(&store, collided).await;
+    persist(
+        &store,
+        observation(
+            "cursor",
+            CURSOR_SESSION,
+            project_scope("project.collision"),
+            "record.cursor.after-collision",
+            CURSOR_TEXT,
+            "receipt.cursor.after-collision",
+            None,
+        ),
+    )
+    .await;
+    drain_projection_queue(&store).await;
+
+    let error = queue_last_error(database, collided_id.as_str()).await;
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|text| text.contains("transcript_path")),
+        "the collided observation must keep its error on the queue row, got {error:?}"
+    );
+    let (project_key, project_path) =
+        session_project_binding(database, "codex", CODEX_SESSION).await;
+    assert_eq!(project_key, "project.collision");
+    assert_eq!(project_path, durable_cwd);
+    assert!(
+        projected_text_contains(database, "cursor", CURSOR_SESSION, CURSOR_TEXT).await,
+        "a later session must project after the collided one is isolated"
+    );
+    assert!(
+        store.next_queued_observation().await.unwrap().is_none(),
+        "the terminal collision must not stay at the head of the queue"
+    );
+}
+
+fn session_fact_with_transcript(cwd: &str, transcript_path: &str) -> CanonicalObservationFactV1 {
+    CanonicalObservationFactV1::Session {
+        project_path: Some(cwd.to_owned()),
+        location_path: Some(cwd.to_owned()),
+        transcript_path: Some(transcript_path.to_owned()),
+        title: None,
+        started_at: None,
+        ended_at: None,
+        source: Some("codex_rollout".to_owned()),
+        native_source: None,
+        profile: None,
+        location_provenance: None,
+    }
+}
+
+async fn drain_projection_queue(store: &GlobalDbObservationStore) {
+    while let Some(observation_id) = store.next_queued_observation().await.unwrap() {
+        store
+            .project_observation(&observation_id)
+            .await
+            .expect("one session collision must not abort catch-up");
+    }
+}
+
+async fn session_title(
+    database: &RegisteredGlobalDb,
+    provider: &str,
+    session_id: &str,
+) -> Option<String> {
+    let snapshot = database.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT title FROM sessions WHERE provider = ?1 AND session_id = ?2",
+            params![provider, session_id],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    row.get(0).unwrap()
+}
+
+async fn queue_last_error(database: &RegisteredGlobalDb, observation_id: &str) -> Option<String> {
+    let snapshot = database.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT last_error FROM projection_queue WHERE observation_id = ?1",
+            params![observation_id],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    row.get(0).unwrap()
 }
