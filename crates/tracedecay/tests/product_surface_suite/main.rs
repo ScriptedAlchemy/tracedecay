@@ -15,6 +15,4 @@ mod native_integration_surface_mount;
 // tests do not link it.
 #[cfg(feature = "search-eval")]
 mod packaged_search_evaluator;
-mod profile_backup_rehearsal_test;
-mod verified_profile_backup;
 mod work_views_route;

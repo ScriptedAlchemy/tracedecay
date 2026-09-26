@@ -78,12 +78,10 @@ fn load_optional_authority_state(
 }
 
 /// Read-only summary of the durable recovery journal for one node store:
-/// whether the most recent backup completed verification, whether a promotion
-/// is currently executing, and whether any recovery operation requires
-/// forward recovery.
+/// whether a promotion is currently executing, and whether any recovery
+/// operation requires forward recovery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RemoteRecoveryOperationalSnapshotV1 {
-    pub current_backup_verified: bool,
     pub failover_in_progress: bool,
     pub recovery_required: bool,
 }
@@ -95,9 +93,6 @@ impl RemoteSqliteStorageV1 {
         let rows = query(
             self.handle(),
             "SELECT
-                (SELECT state FROM remote_recovery_operations
-                 WHERE operation_kind = 'backup'
-                 ORDER BY updated_at DESC, operation_id DESC LIMIT 1),
                 EXISTS(
                     SELECT 1 FROM remote_recovery_operations
                     WHERE operation_kind = 'promotion' AND state = 'executing'
@@ -109,15 +104,9 @@ impl RemoteSqliteStorageV1 {
             Vec::new(),
         )?;
         let row = one_row(rows)?;
-        let current_backup_verified = match row.values.first() {
-            Some(ExactSqlValue::Text(state)) => state == "completed",
-            Some(ExactSqlValue::Null) => false,
-            _ => return Err(RemoteSqliteStorageErrorV1::Corruption),
-        };
         Ok(RemoteRecoveryOperationalSnapshotV1 {
-            current_backup_verified,
-            failover_in_progress: count(&row, 1)? != 0,
-            recovery_required: count(&row, 2)? != 0,
+            failover_in_progress: count(&row, 0)? != 0,
+            recovery_required: count(&row, 1)? != 0,
         })
     }
 }

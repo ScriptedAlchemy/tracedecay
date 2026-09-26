@@ -20937,9 +20937,6 @@
             "coverage": {
               "$ref": "#/$defs/DoctorCoverageCompletenessV1"
             },
-            "current_backup_verified": {
-              "type": "boolean"
-            },
             "enrollment_configured": {
               "type": "boolean"
             },
@@ -20978,7 +20975,6 @@
             "authority",
             "spool",
             "replay_coverage_complete",
-            "current_backup_verified",
             "failover_in_progress",
             "recovery_required",
             "observed_at"

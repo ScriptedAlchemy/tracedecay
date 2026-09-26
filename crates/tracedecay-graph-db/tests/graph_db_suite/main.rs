@@ -15,7 +15,6 @@
 #[path = "../support/mod.rs"]
 mod support;
 
-mod backup_contract;
 mod cross_projection_contract;
 mod durability_crash_contract;
 mod open_error_contract;

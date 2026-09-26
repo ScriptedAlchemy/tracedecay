@@ -291,7 +291,6 @@ fn doctor_report_exposes_remote_and_profile_authority_truth_without_replacing_ru
             pending_spool_items: 2,
             quarantined_spool_items: 1,
             replay_coverage_complete: false,
-            backup_verified: true,
             failover_in_progress: false,
             recovery_required: true,
             coverage: DoctorCoverageCompletenessV1::Complete,

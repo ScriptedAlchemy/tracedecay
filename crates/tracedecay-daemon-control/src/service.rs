@@ -209,19 +209,6 @@ impl QuiescedDaemonLifecycle {
         )
     }
 
-    fn acquire_with_runner(
-        operation: &str,
-        expected_version: &str,
-        runner: ServiceRunner,
-    ) -> Result<Self> {
-        Self::acquire_with_runner_and_timeout(
-            operation,
-            expected_version,
-            runner,
-            QUIESCED_LEASE_RELEASE_TIMEOUT,
-        )
-    }
-
     fn acquire_with_runner_and_timeout(
         operation: &str,
         expected_version: &str,
@@ -422,37 +409,6 @@ impl Drop for QuiescedDaemonLifecycle {
             );
         }
     }
-}
-
-pub fn with_quiesced_installed_service<T>(
-    operation: &str,
-    expected_version: &str,
-    action: impl FnOnce(&tracedecay_runtime_core::lifecycle_lease::LifecycleLease) -> Result<T>,
-) -> Result<T> {
-    with_quiesced_installed_service_with_runner(
-        ServiceRunner::current()?,
-        operation,
-        expected_version,
-        |lease, _runner| action(lease),
-    )
-}
-
-fn with_quiesced_installed_service_with_runner<T>(
-    runner: ServiceRunner,
-    operation: &str,
-    expected_version: &str,
-    action: impl FnOnce(
-        &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
-        &ServiceRunner,
-    ) -> Result<T>,
-) -> Result<T> {
-    let mut guard =
-        QuiescedDaemonLifecycle::acquire_with_runner(operation, expected_version, runner)?;
-    let operation_result = guard
-        .lifecycle_lease()
-        .and_then(|lease| action(lease, &guard.runner));
-    let restore_result = guard.restore();
-    combine_operation_and_restore(operation, operation_result, restore_result)
 }
 
 /// What a maintenance-window action reports back to the surrounding guard:

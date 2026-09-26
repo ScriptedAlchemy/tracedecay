@@ -5753,7 +5753,6 @@ function remoteOperationalStatusEnvelope(): Record<string, unknown> {
       },
       spool: { pending_count: 0, quarantined_count: 0, has_sequence_gap: false },
       replay_coverage_complete: true,
-      current_backup_verified: true,
       failover_in_progress: false,
       recovery_required: false,
       observed_at: nowMicros,

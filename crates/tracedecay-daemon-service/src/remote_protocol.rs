@@ -27,9 +27,8 @@ use tracedecay_contracts::remote::protocol::{
 };
 use tracedecay_contracts::remote::protocol_owner::RemoteOperationProtocolPortsV1;
 use tracedecay_contracts::remote::recovery::{
-    BackupOperationStateV1, BackupRequestV1, PromotionCasReceiptV1, PromotionConfirmationV1,
-    RemoteRecoveryControlPortV1, RemoteRecoveryInterruptionV1, RemoteRecoveryProtocolOwnerV1,
-    StagedRestoreConfirmationV1, StagedRestoreProgressV1,
+    PromotionCasReceiptV1, PromotionConfirmationV1, RemoteRecoveryControlPortV1,
+    RemoteRecoveryInterruptionV1, RemoteRecoveryProtocolOwnerV1,
 };
 use tracedecay_contracts::remote::replay::{
     RemoteReplayOutcomeV1, RemoteReplayProtocolAdapterV1, RemoteReplayRequestV1,
@@ -255,8 +254,6 @@ impl RemoteRecoveryControlPortV1 for DaemonRemoteRecoveryControlV1 {
 
 struct DaemonRemoteRecoveryProtocolPortV1 {
     credentials: Arc<DaemonRemoteCredentialAuthorityV1>,
-    backup_contract: ResultContractRef,
-    restore_contract: ResultContractRef,
     promotion_contract: ResultContractRef,
 }
 
@@ -342,8 +339,6 @@ pub fn build_daemon_remote_protocol_router(
 ) -> Result<Router> {
     let recovery = Arc::new(DaemonRemoteRecoveryProtocolPortV1 {
         credentials: Arc::clone(&credentials),
-        backup_contract: remote_result_contract("remote.backup.result")?,
-        restore_contract: remote_result_contract("remote.restore.result")?,
         promotion_contract: remote_result_contract("remote.promotion.result")?,
     });
     let enrollment = Arc::new(DaemonRemoteEnrollmentProtocolPortV1 {
@@ -365,8 +360,6 @@ pub fn build_daemon_remote_protocol_router(
             transaction,
             invocation,
         )),
-        backup: recovery.clone(),
-        restore: recovery.clone(),
         promotion: recovery,
     };
     let admission = Arc::new(RemoteCredentialAdmissionServiceV1::new(
@@ -380,12 +373,6 @@ pub fn build_daemon_remote_protocol_router(
     ))
 }
 
-impl_daemon_remote_recovery_protocol!(BackupRequestV1, BackupOperationStateV1, backup_contract);
-impl_daemon_remote_recovery_protocol!(
-    StagedRestoreConfirmationV1,
-    StagedRestoreProgressV1,
-    restore_contract
-);
 impl_daemon_remote_recovery_protocol!(
     PromotionConfirmationV1,
     PromotionCasReceiptV1,

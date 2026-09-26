@@ -634,14 +634,14 @@ install --agent codex --automation (enable at install), tracedecay dashboard
 
 pub(crate) const STORAGE_LONG_ABOUT: &str = "\
 Profile-storage maintenance: read-only per-store size and retention reporting, \
-complete profile backup, and backup restore rehearsal. TraceDecay V2 stores are \
-created at their final shape, so there is no cross-version migration workflow.";
+and scoped reset of a project graph store refused for an incompatible schema. \
+TraceDecay V2 stores are created at their final shape, so there is no \
+cross-version migration workflow.";
 
 pub(crate) const STORAGE_AFTER_HELP: &str = "\
 Examples:
   tracedecay storage report                      Per-store size / free-page ratio (read-only)
-  tracedecay storage backup --to <dir> --backup-id <id>
-  tracedecay storage rehearse-backup --backup <dir> --restore <dir>
+  tracedecay storage reset-project-store --project-root <dir> --yes
 
 Related: tracedecay projects (registry view), tracedecay wipe.";
 
@@ -683,7 +683,7 @@ status (one project's statistics).";
 pub(crate) const REMOTE_LONG_ABOUT: &str = "\
 Operates the Remote Brain production journey from the shell: live mounted \
 status from the running daemon, plus enrolled enroll/capture/query/\
-transfer-frame/replay/backup/restore/failover against an authenticated \
+transfer-frame/replay/failover against an authenticated \
 authority endpoint. `status` never probes local stores; it reads the \
 daemon's in-memory remote mount. `capture` spools one observation on a node \
 whose authority is unreachable, `transfer-frame` moves one encrypted spool \
@@ -708,11 +708,6 @@ Examples:
       --credential-file cred.bin --request-file frame.json --json
   tracedecay remote replay --endpoint https://brain.example/remote/ \\
       --credential-file cred.bin --request-file replay.json
-  tracedecay remote backup --endpoint https://brain.example/remote/ \\
-      --credential-file cred.bin --request-file backup.json --json
-  tracedecay remote restore --endpoint https://brain.example/remote/ \\
-      --credential-file cred.bin --trust-root-file root.pem \\
-      --request-file restore.json --timeout-secs 60
   tracedecay remote failover --endpoint https://brain.example/remote/ \\
       --credential-file cred.bin --request-file failover.json
 

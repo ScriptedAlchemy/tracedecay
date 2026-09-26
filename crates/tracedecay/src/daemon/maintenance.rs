@@ -133,6 +133,7 @@ async fn run_registered_store_retention(
         ),
         Ok(_) => {}
     }
+    log_payload_gc_outcome(&report.payload_gc);
     let mut succeeded = report.succeeded();
     if let Some(compaction) = &config.compaction {
         let outcome = tracedecay_maintenance::retention::live_compaction::compact_registered_store(
@@ -142,6 +143,33 @@ async fn run_registered_store_retention(
         succeeded &= record_live_compaction_outcome("mounted_sessions", outcome);
     }
     succeeded
+}
+
+fn log_payload_gc_outcome(
+    outcome: &Result<
+        tracedecay_lcm::LcmGcReport,
+        tracedecay_maintenance::retention::registered_store::RegisteredStoreRetentionErrorV1,
+    >,
+) {
+    match outcome {
+        Ok(gc) if gc.totals.files > 0 || !gc.errors.is_empty() => log_daemon_event(
+            "retention_lcm_payload_gc",
+            &[
+                ("store", "mounted_sessions".to_owned()),
+                ("reaped_files", gc.totals.files.to_string()),
+                ("bytes_reclaimed", gc.totals.bytes.to_string()),
+                ("errors", gc.errors.len().to_string()),
+            ],
+        ),
+        Err(error) => log_daemon_event(
+            "retention_degraded",
+            &[
+                ("pass", "lcm_payload_gc".to_owned()),
+                ("failure", error.diagnostic().to_owned()),
+            ],
+        ),
+        Ok(_) => {}
+    }
 }
 
 #[hotpath::measure(

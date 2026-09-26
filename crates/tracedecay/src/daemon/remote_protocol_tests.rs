@@ -173,7 +173,6 @@ async fn remote_operational_read_observes_mounted_authorities_and_fails_typed_wh
     assert_eq!(status.spool.pending_count, 0);
     assert_eq!(status.spool.quarantined_count, 0);
     assert!(!status.spool.has_sequence_gap);
-    assert!(!status.current_backup_verified);
     assert!(!status.failover_in_progress);
     assert!(!status.recovery_required);
     assert!(

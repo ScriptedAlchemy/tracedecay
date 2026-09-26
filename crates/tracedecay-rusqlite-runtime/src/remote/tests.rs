@@ -301,7 +301,7 @@ fn enrollment_grant(secret: &[u8]) -> EnrollmentGrantV1 {
         revoked_at: None,
         capabilities: std::collections::BTreeSet::from([
             RemoteCapabilityV1::Replay,
-            RemoteCapabilityV1::PublishRestore,
+            RemoteCapabilityV1::Promote,
         ]),
         scope: writer().scope,
     }
@@ -632,11 +632,7 @@ fn durable_revocation_wins_publication_reauthorization() {
     let service = RemoteCredentialAdmissionServiceV1::new(storage.clone());
     let credential = OpaqueRemoteCredential::new(secret).unwrap();
     let session = service
-        .admit_before_body(
-            &credential,
-            RemoteCredentialUseV1::PublishRestore,
-            UtcMicros(20),
-        )
+        .admit_before_body(&credential, RemoteCredentialUseV1::Promote, UtcMicros(20))
         .unwrap();
     let (revoked, revocation_receipt) =
         revoke_credential(&enrollment, enrollment.revision, UtcMicros(21)).unwrap();
@@ -802,10 +798,9 @@ fn operational_status_reads_report_typed_absence_gaps_and_recovery_truth() {
         }
     );
 
-    // An empty recovery journal cannot claim a verified backup, an executing
-    // promotion, or required recovery.
+    // An empty recovery journal cannot claim an executing promotion or
+    // required recovery.
     let recovery = storage.recovery_operational_snapshot().unwrap();
-    assert!(!recovery.current_backup_verified);
     assert!(!recovery.failover_in_progress);
     assert!(!recovery.recovery_required);
 
@@ -843,43 +838,32 @@ fn operational_status_reads_report_typed_absence_gaps_and_recovery_truth() {
     assert_eq!(snapshot.quarantined_spool_items, 1);
     assert!(snapshot.has_sequence_gap);
 
-    // The recovery journal drives backup, failover, and recovery truth from
-    // its exact persisted operation states.
-    for (operation, kind, state) in [
-        ("recovery.backup.old", "backup", "rolled_back"),
-        ("recovery.backup.current", "backup", "completed"),
-        ("recovery.promotion.live", "promotion", "executing"),
-    ] {
-        fixture
-            .handle
-            .execute(
-                ExactSqlStatement::new(
-                    "INSERT INTO remote_recovery_operations (
-                        operation_id, operation_kind, request_digest,
-                        expected_authority_key, pre_state_digest, context_json,
-                        state, output_json, receipt_json, started_at, updated_at
-                     ) VALUES (?1, ?2, 'sha256:request', 'authority-key',
-                        'sha256:pre', '{}', ?3, NULL, NULL, ?4, ?4)"
-                        .to_owned(),
-                    vec![
-                        text(operation),
-                        text(kind),
-                        text(state),
-                        ExactSqlValue::Integer(match state {
-                            "completed" => 30,
-                            _ => 20,
-                        }),
-                    ],
-                )
-                .unwrap(),
+    // The recovery journal drives failover and recovery truth from its exact
+    // persisted operation states, and records promotions only: the node store
+    // refuses a backup or restore operation outright.
+    let insert_operation = |operation: &str, kind: &str| {
+        fixture.handle.execute(
+            ExactSqlStatement::new(
+                "INSERT INTO remote_recovery_operations (
+                    operation_id, operation_kind, request_digest,
+                    expected_authority_key, pre_state_digest, context_json,
+                    state, output_json, receipt_json, started_at, updated_at
+                 ) VALUES (?1, ?2, 'sha256:request', 'authority-key',
+                    'sha256:pre', '{}', 'executing', NULL, NULL, 20, 20)"
+                    .to_owned(),
+                vec![text(operation), text(kind)],
             )
-            .unwrap();
+            .unwrap(),
+        )
+    };
+    for kind in ["backup", "restore"] {
+        assert!(
+            insert_operation("recovery.copy", kind).is_err(),
+            "the recovery journal must refuse a {kind} operation"
+        );
     }
+    insert_operation("recovery.promotion.live", "promotion").unwrap();
     let recovery = storage.recovery_operational_snapshot().unwrap();
-    assert!(
-        recovery.current_backup_verified,
-        "the most recent backup operation completed verification"
-    );
     assert!(recovery.failover_in_progress);
     assert!(!recovery.recovery_required);
 

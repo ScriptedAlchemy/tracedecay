@@ -490,10 +490,6 @@ pub struct LcmGcConfig {
     pub reap_missing_enabled: bool,
     #[serde(default = "default_lcm_gc_max_batch_size")]
     pub max_batch_size: usize,
-    #[serde(default = "default_lcm_gc_interval_seconds")]
-    pub interval_seconds: u64,
-    #[serde(default = "default_lcm_gc_enabled")]
-    pub gc_enabled: bool,
 }
 
 impl LcmGcConfig {
@@ -517,8 +513,6 @@ impl Default for LcmGcConfig {
             reap_missing_after: default_lcm_gc_reap_missing_after(),
             reap_missing_enabled: default_lcm_gc_reap_missing_enabled(),
             max_batch_size: default_lcm_gc_max_batch_size(),
-            interval_seconds: default_lcm_gc_interval_seconds(),
-            gc_enabled: default_lcm_gc_enabled(),
         }
         .normalized()
     }
@@ -538,14 +532,6 @@ fn default_lcm_gc_reap_missing_enabled() -> bool {
 
 fn default_lcm_gc_max_batch_size() -> usize {
     500
-}
-
-fn default_lcm_gc_interval_seconds() -> u64 {
-    21_600
-}
-
-fn default_lcm_gc_enabled() -> bool {
-    true
 }
 
 fn deserialize_lcm_gc_grace_seconds<'de, D>(deserializer: D) -> Result<u64, D::Error>
@@ -815,14 +801,12 @@ mod tests {
 
     #[test]
     fn gc_config_clamps_grace_floor_from_serde() {
-        let config: LcmGcConfig = serde_json::from_str(
-            r#"{"grace_seconds":10,"reap_missing_after":0,"gc_enabled":false}"#,
-        )
-        .expect("gc config should deserialize");
+        let config: LcmGcConfig =
+            serde_json::from_str(r#"{"grace_seconds":10,"reap_missing_after":0}"#)
+                .expect("gc config should deserialize");
 
         assert_eq!(config.grace_seconds, 300);
         assert_eq!(config.reap_missing_after, 0);
-        assert!(!config.gc_enabled);
     }
 
     #[test]

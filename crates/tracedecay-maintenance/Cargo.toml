@@ -4,7 +4,7 @@ version = "0.1.0"
 publish = false
 edition.workspace = true
 license = "MIT"
-description = "Offline retention, backups, and storage reports for TraceDecay"
+description = "Offline retention and storage reports for TraceDecay"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [features]
@@ -43,6 +43,7 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 
 [dev-dependencies]
 filetime = "0.2"
+tracedecay-lcm = { path = "../tracedecay-lcm", features = ["test-helpers"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 tracedecay-global-db = { path = "../tracedecay-global-db", features = ["test-helpers"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }

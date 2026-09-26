@@ -670,7 +670,7 @@ pub enum Commands {
         #[command(subcommand)]
         action: AutomationAction,
     },
-    /// Inspect and preserve exact-final profile storage
+    /// Inspect exact-final profile storage
     #[command(long_about = STORAGE_LONG_ABOUT, after_help = STORAGE_AFTER_HELP)]
     Storage {
         #[command(subcommand)]
@@ -811,16 +811,6 @@ pub enum RemoteAction {
         #[command(flatten)]
         authority: RemoteAuthorityArgs,
     },
-    /// Create a verified Remote Brain backup
-    Backup {
-        #[command(flatten)]
-        authority: RemoteAuthorityArgs,
-    },
-    /// Restore a verified backup into isolated staging
-    Restore {
-        #[command(flatten)]
-        authority: RemoteAuthorityArgs,
-    },
     /// Fail over to a standby under a higher installed fence
     Failover {
         #[command(flatten)]
@@ -849,12 +839,6 @@ impl From<RemoteAction> for crate::remote_command::RemoteCommand {
                 args: authority.into(),
             },
             RemoteAction::Replay { authority } => Self::Replay {
-                args: authority.into(),
-            },
-            RemoteAction::Backup { authority } => Self::Backup {
-                args: authority.into(),
-            },
-            RemoteAction::Restore { authority } => Self::Restore {
                 args: authority.into(),
             },
             RemoteAction::Failover { authority } => Self::Failover {
@@ -1266,26 +1250,6 @@ pub enum ProfileStorageAction {
         /// Output as JSON.
         #[arg(long)]
         json: bool,
-    },
-    /// Create a complete checksummed profile backup under a quiesced exclusive lease.
-    #[command(name = "backup")]
-    BackupProfile {
-        /// Backup parent outside the TraceDecay profile.
-        #[arg(long)]
-        to: String,
-        /// Stable backup directory name.
-        #[arg(long = "backup-id")]
-        backup_id: String,
-    },
-    /// Restore and verify a complete backup in an isolated destination.
-    #[command(name = "rehearse-backup")]
-    RehearseProfileBackup {
-        /// Complete backup directory containing `backup-manifest.json`.
-        #[arg(long)]
-        backup: String,
-        /// New isolated restore directory.
-        #[arg(long)]
-        restore: String,
     },
     /// Reset a project graph store whose open failed with the typed
     /// ResetRequired state (an incompatible schema this binary cannot upgrade

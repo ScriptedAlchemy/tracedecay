@@ -2,20 +2,16 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::path::Path;
 use std::pin::Pin;
 #[cfg(feature = "hotpath")]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 
-use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tracedecay_domain::BrainNodeId;
 use tracedecay_sessions::observation::ObservationCancellation;
-use tracedecay_store::{
-    AdmissionConfigV1, ProjectId, StoreIncarnationV1, StoreShardIdV1, StoreShardScopeV1,
-};
+use tracedecay_store::{AdmissionConfigV1, ProjectId, StoreIncarnationV1, StoreShardIdV1};
 
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -77,19 +73,6 @@ impl RemoteRecoveryAdmission {
     }
 }
 
-/// RAII hold for a root-owned remote-recovery project quiescence fence.
-pub struct RemoteRecoveryQuiescence {
-    _hold: Box<dyn Send + Sync>,
-}
-
-impl RemoteRecoveryQuiescence {
-    pub fn hold<T: Send + Sync + 'static>(value: T) -> Self {
-        Self {
-            _hold: Box::new(value),
-        }
-    }
-}
-
 /// Operations the composition root installs after opening a registry.
 ///
 /// The concrete `RemoteRecoveryProjectLifecycleV1` stays in root because it
@@ -100,12 +83,6 @@ pub trait RemoteRecoveryProjectLifecycle: Send + Sync {
         &'a self,
         project_id: &'a ProjectId,
     ) -> Pin<Box<dyn Future<Output = Result<RemoteRecoveryAdmission>> + Send + 'a>>;
-
-    fn quiesce<'a>(
-        &'a self,
-        project_id: &'a ProjectId,
-        database: &'a RegisteredGlobalDbLeaseV1,
-    ) -> Pin<Box<dyn Future<Output = Result<RemoteRecoveryQuiescence>> + Send + 'a>>;
 }
 
 /// Sanity ceiling on concurrently mounted project runtime owners, not a bound
@@ -527,92 +504,6 @@ impl ProjectRuntimeOwnerRegistryV1 {
             armed: true,
         }))
     }
-
-    #[hotpath::measure(label = "daemon.session_registry.reserve_session_recovery")]
-    fn reserve_session_recovery(
-        &self,
-        project_id: &ProjectId,
-    ) -> Result<Option<ProjectSessionRecoveryReservationV1>> {
-        let mut entries = self.lock().map_err(|_| {
-            session_registry_error(
-                "reserve project session recovery",
-                "project runtime owner map lock is poisoned".to_owned(),
-            )
-        })?;
-        let Some(state) = entries.remove(project_id) else {
-            return Ok(None);
-        };
-        let ProjectRuntimeOwnerStateV1::RecoveryRequired(recovery) = state else {
-            let diagnostic = match &state {
-                ProjectRuntimeOwnerStateV1::Faulted(faulted) => Some(faulted.recovery_inspection()),
-                _ => None,
-            };
-            entries.insert(project_id.clone(), state);
-            return Err(TraceDecayError::project_route(
-                "project_runtime_recovery",
-                true,
-                diagnostic.map_or_else(
-                    || "Project session runtime has no resumable recovery state".to_owned(),
-                    |diagnostic| {
-                        format!(
-                            "Project session runtime is faulted and retained for typed recovery inspection: {}",
-                            diagnostic.description(),
-                        )
-                    },
-                ),
-            ));
-        };
-        entries.insert(project_id.clone(), ProjectRuntimeOwnerStateV1::Recovering);
-        Ok(Some(ProjectSessionRecoveryReservationV1 {
-            owners: self.clone(),
-            project_id: project_id.clone(),
-            recovery: Some(recovery),
-            armed: true,
-        }))
-    }
-
-    /// Rebuilds the fail-closed post-restart recovery record. The durable
-    /// quarantine receipt is written only after the old paired owners have
-    /// closed; it never reconstructs or remounts that terminal owner.
-    #[hotpath::measure(label = "daemon.session_registry.reconstruct_terminal_recovery")]
-    fn reconstruct_durable_terminal_recovery(
-        &self,
-        project_id: &ProjectId,
-        proof: ProjectSessionTerminalVacancyAuthorityV1,
-    ) -> Result<()> {
-        if !proof.matches_project(project_id) {
-            return Err(session_registry_error(
-                "rebuild terminal remote recovery vacancy",
-                "durable remote restore proof does not belong to this project session shard"
-                    .to_owned(),
-            ));
-        }
-        let mut entries = self.lock().map_err(|_| {
-            session_registry_error(
-                "rebuild terminal remote recovery vacancy",
-                "project runtime owner map lock is poisoned".to_owned(),
-            )
-        })?;
-        if entries.contains_key(project_id) {
-            return Err(TraceDecayError::project_route(
-                "project_runtime_recovery",
-                true,
-                "Project session runtime already has an owner or recovery reservation",
-            ));
-        }
-        entries.insert(
-            project_id.clone(),
-            ProjectRuntimeOwnerStateV1::RecoveryRequired(ProjectSessionRecoveryRequiredV1 {
-                sessions: None,
-                candidate_sessions: None,
-                memory: None,
-                phase: ProjectSessionRecoveryPhaseV1::Terminal(
-                    ProjectSessionTerminalProofV1::Durable(Box::new(proof)),
-                ),
-            }),
-        );
-        Ok(())
-    }
 }
 
 #[hotpath::measure(label = "daemon.session_registry.bind_memory_graph")]
@@ -922,10 +813,28 @@ enum ProjectRuntimeOwnerStateV1 {
     Opening,
     Ready(ProjectRuntimeOwnersV1),
     ReplacingSessions,
-    Recovering,
     RecoveryRequired(ProjectSessionRecoveryRequiredV1),
     Retiring,
     Faulted(ProjectRuntimeFaultedOwnersV1),
+}
+
+impl ProjectRuntimeOwnerStateV1 {
+    /// Typed route denial for a project whose runtime cannot serve, carrying
+    /// the retained recovery or fault inspection when there is one.
+    fn unavailable_route_error(&self) -> TraceDecayError {
+        let inspection = match self {
+            Self::RecoveryRequired(recovery) => Some(recovery.phase.inspection().description()),
+            Self::Faulted(faulted) => Some(faulted.recovery_inspection().description()),
+            Self::Opening | Self::Ready(_) | Self::ReplacingSessions | Self::Retiring => None,
+        };
+        let message = match inspection {
+            Some(inspection) => {
+                format!("Project runtime is unavailable while retirement is terminal: {inspection}")
+            }
+            None => "Project runtime is unavailable while retirement is in progress".to_owned(),
+        };
+        TraceDecayError::project_route("project_runtime_retiring", true, message)
+    }
 }
 
 /// Terminal or abandoned replacement state retains the exact old owners until
@@ -1014,60 +923,18 @@ impl ProjectSessionClosedRetirementProofV1 {
                 if target.binding() == &self.binding
         )
     }
-
-    fn durable_authority(&self) -> ProjectSessionTerminalVacancyAuthorityV1 {
-        ProjectSessionTerminalVacancyAuthorityV1 {
-            binding: self.binding.clone(),
-            locator: self.locator.clone(),
-        }
-    }
 }
 
-/// The durable, identity-only portion of an exact paired-close receipt. It is
-/// persisted in the remote restore journal after `verify()` has accepted the
-/// live Graph and Store terminal receipts, so restart recovery may open only
-/// a fresh candidate in the same terminal vacancy.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ProjectSessionTerminalVacancyAuthorityV1 {
-    binding: tracedecay_store::StoreRuntimeBindingV1,
-    locator: tracedecay_store::VerifiedStoreLocatorV1,
-}
-
-impl ProjectSessionTerminalVacancyAuthorityV1 {
-    fn valid(&self) -> bool {
-        self.binding.shard_id == self.locator.shard_id
-            && self.binding.incarnation == self.locator.incarnation
-    }
-
-    fn matches_project(&self, project_id: &ProjectId) -> bool {
-        self.valid()
-            && matches!(
-                &self.binding.shard_id.scope,
-                StoreShardScopeV1::ProjectSessions { project_id: bound } if bound == project_id
-            )
-    }
-}
-
-/// A terminal vacancy is proven either by the live, non-cloneable Graph/Store
-/// receipts or by their durable journal authority after process restart.
+/// A terminal vacancy is proven by the live, non-cloneable Graph/Store
+/// receipts.
 enum ProjectSessionTerminalProofV1 {
     Live(Box<ProjectSessionClosedRetirementProofV1>),
-    Durable(Box<ProjectSessionTerminalVacancyAuthorityV1>),
 }
 
 impl ProjectSessionTerminalProofV1 {
     fn verify(&self) -> bool {
         match self {
             Self::Live(proof) => proof.verify(),
-            Self::Durable(authority) => authority.valid(),
-        }
-    }
-
-    fn durable_authority(&self) -> ProjectSessionTerminalVacancyAuthorityV1 {
-        match self {
-            Self::Live(proof) => proof.durable_authority(),
-            Self::Durable(authority) => authority.as_ref().clone(),
         }
     }
 }
@@ -1893,65 +1760,6 @@ impl ProjectSessionReplacementVacancyV1 {
         }
     }
 
-    pub fn durable_terminal_authority(&self) -> Result<ProjectSessionTerminalVacancyAuthorityV1> {
-        self.require_verified_proof()?;
-        self.proof
-            .as_ref()
-            .map(ProjectSessionTerminalProofV1::durable_authority)
-            .ok_or_else(|| {
-                session_registry_error(
-                    "persist terminal remote recovery vacancy",
-                    "project session replacement lost its terminal close proof".to_owned(),
-                )
-            })
-    }
-
-    /// Makes an opened candidate map-owned before an async replay or sync
-    /// bind. Once this returns, cancellation may only leave the candidate in
-    /// `RecoveryRequired`; it cannot drop the sole owner after a downstream
-    /// service has retained one of its counted leases.
-    fn begin_candidate_activation(
-        mut self,
-        sessions: RegisteredSessionOwnerV1,
-    ) -> Result<ProjectSessionCandidateActivationV1> {
-        self.require_verified_proof()?;
-        let mut entries = self.owners.lock().map_err(|_| {
-            session_registry_error(
-                "begin recovered project session activation",
-                "project runtime owner map lock is poisoned".to_owned(),
-            )
-        })?;
-        if !matches!(
-            entries.get(&self.project_id),
-            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions)
-        ) {
-            return Err(session_registry_error(
-                "begin recovered project session activation",
-                "project session replacement map fence disappeared".to_owned(),
-            ));
-        }
-        let proof = self.proof.take().ok_or_else(|| {
-            session_registry_error(
-                "begin recovered project session activation",
-                "project session replacement lost its terminal close proof".to_owned(),
-            )
-        })?;
-        entries.insert(
-            self.project_id.clone(),
-            ProjectRuntimeOwnerStateV1::RecoveryRequired(ProjectSessionRecoveryRequiredV1 {
-                sessions: None,
-                candidate_sessions: Some(sessions),
-                memory: self.memory.take(),
-                phase: ProjectSessionRecoveryPhaseV1::Terminal(proof),
-            }),
-        );
-        self.armed = false;
-        Ok(ProjectSessionCandidateActivationV1 {
-            owners: self.owners.clone(),
-            project_id: self.project_id.clone(),
-        })
-    }
-
     fn commit_without_sessions(mut self) -> Result<()> {
         self.require_verified_proof()?;
         let mut entries = self.owners.lock().map_err(|_| {
@@ -1980,179 +1788,6 @@ impl ProjectSessionReplacementVacancyV1 {
         self.armed = false;
         Ok(())
     }
-
-    fn retain_candidate_for_recovery(mut self, sessions: RegisteredSessionOwnerV1) -> Result<()> {
-        self.require_verified_proof()?;
-        let mut entries = self.owners.lock().map_err(|_| {
-            session_registry_error(
-                "retain recovered project session owner candidate",
-                "project runtime owner map lock is poisoned".to_owned(),
-            )
-        })?;
-        if !matches!(
-            entries.get(&self.project_id),
-            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions)
-        ) {
-            return Err(session_registry_error(
-                "retain recovered project session owner candidate",
-                "project session replacement map fence disappeared".to_owned(),
-            ));
-        }
-        let proof = self.proof.take().ok_or_else(|| {
-            session_registry_error(
-                "retain recovered project session owner candidate",
-                "project session replacement lost its terminal close proof".to_owned(),
-            )
-        })?;
-        entries.insert(
-            self.project_id.clone(),
-            ProjectRuntimeOwnerStateV1::RecoveryRequired(ProjectSessionRecoveryRequiredV1 {
-                sessions: None,
-                candidate_sessions: Some(sessions),
-                memory: self.memory.take(),
-                phase: ProjectSessionRecoveryPhaseV1::Terminal(proof),
-            }),
-        );
-        self.armed = false;
-        Ok(())
-    }
-}
-
-/// Map-owned activation of a post-close replacement candidate. This guard
-/// intentionally owns no database, graph, or Store target itself: its sole
-/// authority is the `RecoveryRequired` map entry installed before any await.
-struct ProjectSessionCandidateActivationV1 {
-    owners: ProjectRuntimeOwnerRegistryV1,
-    project_id: ProjectId,
-}
-
-impl ProjectSessionCandidateActivationV1 {
-    fn issue_lease_with_replay_descriptor(
-        &self,
-    ) -> Result<(
-        RegisteredGlobalDbLeaseV1,
-        tracedecay_global_db::RegisteredGlobalDbWeakLeaseIssuerV1,
-        tracedecay_store::StoreRuntimeBindingV1,
-        tracedecay_store::VerifiedStoreLocatorV1,
-    )> {
-        let entries = self.owners.lock().map_err(|_| {
-            session_registry_error(
-                "issue recovered project session candidate lease",
-                "project runtime owner map lock is poisoned".to_owned(),
-            )
-        })?;
-        let Some(ProjectRuntimeOwnerStateV1::RecoveryRequired(recovery)) =
-            entries.get(&self.project_id)
-        else {
-            return Err(session_registry_error(
-                "issue recovered project session candidate lease",
-                "project session candidate activation lost its recovery fence".to_owned(),
-            ));
-        };
-        if recovery.sessions.is_some() {
-            return Err(session_registry_error(
-                "issue recovered project session candidate lease",
-                "project session candidate recovery still retains a nonterminal owner".to_owned(),
-            ));
-        }
-        let Some(candidate) = recovery.candidate_sessions.as_ref() else {
-            return Err(session_registry_error(
-                "issue recovered project session candidate lease",
-                "project session candidate activation lost its owner".to_owned(),
-            ));
-        };
-        let ProjectSessionRecoveryPhaseV1::Terminal(proof) = &recovery.phase else {
-            return Err(session_registry_error(
-                "issue recovered project session candidate lease",
-                "project session candidate activation lacks a terminal close proof".to_owned(),
-            ));
-        };
-        if !proof.verify() {
-            return Err(session_registry_error(
-                "issue recovered project session candidate lease",
-                "project session candidate activation terminal proof is invalid".to_owned(),
-            ));
-        }
-        let database = candidate.issue_lease(SessionRelationScope::project_sessions(
-            self.project_id.clone(),
-        ))?;
-        Ok((
-            database,
-            candidate.database.weak_lease_issuer(),
-            candidate.database.registered_binding().clone(),
-            candidate.database.registered_verified_locator().clone(),
-        ))
-    }
-
-    fn publish(self) -> Result<()> {
-        let mut entries = self.owners.lock().map_err(|_| {
-            session_registry_error(
-                "publish recovered project session owner",
-                "project runtime owner map lock is poisoned".to_owned(),
-            )
-        })?;
-        let Some(state) = entries.remove(&self.project_id) else {
-            return Err(session_registry_error(
-                "publish recovered project session owner",
-                "project session candidate activation lost its recovery fence".to_owned(),
-            ));
-        };
-        let ProjectRuntimeOwnerStateV1::RecoveryRequired(mut recovery) = state else {
-            entries.insert(self.project_id.clone(), state);
-            return Err(session_registry_error(
-                "publish recovered project session owner",
-                "project session candidate activation state changed before publication".to_owned(),
-            ));
-        };
-        let Some(candidate) = recovery.candidate_sessions.take() else {
-            entries.insert(
-                self.project_id.clone(),
-                ProjectRuntimeOwnerStateV1::RecoveryRequired(recovery),
-            );
-            return Err(session_registry_error(
-                "publish recovered project session owner",
-                "project session candidate activation lost its owner".to_owned(),
-            ));
-        };
-        let ProjectSessionRecoveryPhaseV1::Terminal(proof) = &recovery.phase else {
-            recovery.candidate_sessions = Some(candidate);
-            entries.insert(
-                self.project_id.clone(),
-                ProjectRuntimeOwnerStateV1::RecoveryRequired(recovery),
-            );
-            return Err(session_registry_error(
-                "publish recovered project session owner",
-                "project session candidate activation lacks a terminal close proof".to_owned(),
-            ));
-        };
-        if !proof.verify() || recovery.sessions.is_some() {
-            recovery.candidate_sessions = Some(candidate);
-            entries.insert(
-                self.project_id.clone(),
-                ProjectRuntimeOwnerStateV1::RecoveryRequired(recovery),
-            );
-            return Err(session_registry_error(
-                "publish recovered project session owner",
-                "project session candidate activation terminal proof is invalid".to_owned(),
-            ));
-        }
-        entries.insert(
-            self.project_id.clone(),
-            ProjectRuntimeOwnerStateV1::Ready(ProjectRuntimeOwnersV1 {
-                sessions: Some(candidate),
-                memory: recovery.memory,
-            }),
-        );
-        Ok(())
-    }
-}
-
-impl Drop for ProjectSessionCandidateActivationV1 {
-    fn drop(&mut self) {
-        // The candidate and exact terminal proof were stored in
-        // `RecoveryRequired` before this guard became observable. Dropping the
-        // guard therefore deliberately preserves that map-owned state.
-    }
 }
 
 impl Drop for ProjectSessionReplacementVacancyV1 {
@@ -2180,285 +1815,6 @@ impl Drop for ProjectSessionReplacementVacancyV1 {
                     memory: self.memory.take(),
                     phase,
                 }),
-            );
-        }
-        self.armed = false;
-    }
-}
-
-/// Atomically moves one fail-closed terminal recovery record out of the map.
-/// Its drop path restores the exact record, including terminal receipts and a
-/// candidate owner, so cancellation cannot turn recovery into a replacement.
-struct ProjectSessionRecoveryReservationV1 {
-    owners: ProjectRuntimeOwnerRegistryV1,
-    project_id: ProjectId,
-    recovery: Option<ProjectSessionRecoveryRequiredV1>,
-    armed: bool,
-}
-
-impl ProjectSessionRecoveryReservationV1 {
-    fn has_candidate(&self) -> bool {
-        self.recovery
-            .as_ref()
-            .is_some_and(|recovery| recovery.candidate_sessions.is_some())
-    }
-
-    fn into_candidate_replacement(mut self) -> Result<ProjectSessionReplacementReservationV1> {
-        let recovery = self.recovery.take().ok_or_else(|| {
-            session_registry_error(
-                "retire recovered project session candidate",
-                "project session recovery reservation was already consumed".to_owned(),
-            )
-        })?;
-        let ProjectSessionRecoveryRequiredV1 {
-            sessions,
-            candidate_sessions,
-            memory,
-            phase,
-        } = recovery;
-        let candidate = match candidate_sessions {
-            Some(candidate) => candidate,
-            None => {
-                self.recovery = Some(ProjectSessionRecoveryRequiredV1 {
-                    sessions,
-                    candidate_sessions: None,
-                    memory,
-                    phase,
-                });
-                return Err(session_registry_error(
-                    "retire recovered project session candidate",
-                    "project recovery does not retain a candidate owner".to_owned(),
-                ));
-            }
-        };
-        if sessions.is_some() {
-            self.recovery = Some(ProjectSessionRecoveryRequiredV1 {
-                sessions,
-                candidate_sessions: Some(candidate),
-                memory,
-                phase,
-            });
-            return Err(session_registry_error(
-                "retire recovered project session candidate",
-                "recovery still retains a nonterminal old owner".to_owned(),
-            ));
-        }
-        let proof = match phase {
-            ProjectSessionRecoveryPhaseV1::Terminal(proof) if proof.verify() => proof,
-            phase => {
-                let inspection = phase.inspection();
-                self.recovery = Some(ProjectSessionRecoveryRequiredV1 {
-                    sessions,
-                    candidate_sessions: Some(candidate),
-                    memory,
-                    phase,
-                });
-                return Err(session_registry_error(
-                    "retire recovered project session candidate",
-                    format!(
-                        "recovery does not retain exact closed proofs for the prior owner: {}",
-                        inspection.description(),
-                    ),
-                ));
-            }
-        };
-        let mut entries = match self.owners.lock() {
-            Ok(entries) => entries,
-            Err(_) => {
-                self.recovery = Some(ProjectSessionRecoveryRequiredV1 {
-                    sessions,
-                    candidate_sessions: Some(candidate),
-                    memory,
-                    phase: ProjectSessionRecoveryPhaseV1::Terminal(proof),
-                });
-                return Err(session_registry_error(
-                    "retire recovered project session candidate",
-                    "project runtime owner map lock is poisoned".to_owned(),
-                ));
-            }
-        };
-        if !matches!(
-            entries.get(&self.project_id),
-            Some(ProjectRuntimeOwnerStateV1::Recovering)
-        ) {
-            drop(entries);
-            self.recovery = Some(ProjectSessionRecoveryRequiredV1 {
-                sessions,
-                candidate_sessions: Some(candidate),
-                memory,
-                phase: ProjectSessionRecoveryPhaseV1::Terminal(proof),
-            });
-            return Err(session_registry_error(
-                "retire recovered project session candidate",
-                "project session recovery map fence disappeared".to_owned(),
-            ));
-        }
-        let candidate = match ProjectSessionRetirementOwnerV1::from_ready(candidate) {
-            Ok(candidate) => candidate,
-            Err(candidate) => {
-                entries.insert(
-                    self.project_id.clone(),
-                    ProjectRuntimeOwnerStateV1::Recovering,
-                );
-                drop(entries);
-                self.recovery = Some(ProjectSessionRecoveryRequiredV1 {
-                    sessions,
-                    candidate_sessions: Some(candidate),
-                    memory,
-                    phase: ProjectSessionRecoveryPhaseV1::Terminal(proof),
-                });
-                return Err(session_registry_error(
-                    "retire recovered project session candidate",
-                    "recovered candidate relation graph is not attached".to_owned(),
-                ));
-            }
-        };
-        entries.insert(
-            self.project_id.clone(),
-            ProjectRuntimeOwnerStateV1::ReplacingSessions,
-        );
-        drop(entries);
-        self.armed = false;
-        Ok(ProjectSessionReplacementReservationV1 {
-            owners: self.owners.clone(),
-            project_id: self.project_id.clone(),
-            sessions: Some(candidate),
-            memory,
-            recovery_proof: Some(proof),
-            armed: true,
-        })
-    }
-
-    fn into_terminal_vacancy(
-        mut self,
-    ) -> Result<(
-        ProjectSessionReplacementVacancyV1,
-        Option<RegisteredSessionOwnerV1>,
-    )> {
-        let recovery = self.recovery.take().ok_or_else(|| {
-            session_registry_error(
-                "resume project session recovery",
-                "project session recovery reservation was already consumed".to_owned(),
-            )
-        })?;
-        let ProjectSessionRecoveryRequiredV1 {
-            sessions,
-            candidate_sessions,
-            memory,
-            phase,
-        } = recovery;
-        if sessions.is_some() {
-            self.recovery = Some(ProjectSessionRecoveryRequiredV1 {
-                sessions,
-                candidate_sessions,
-                memory,
-                phase,
-            });
-            return Err(session_registry_error(
-                "resume project session recovery",
-                "old project session owner is not terminal and cannot enter vacancy".to_owned(),
-            ));
-        }
-        let proof = match phase {
-            ProjectSessionRecoveryPhaseV1::Terminal(proof) => proof,
-            phase => {
-                let inspection = phase.inspection();
-                self.recovery = Some(ProjectSessionRecoveryRequiredV1 {
-                    sessions,
-                    candidate_sessions,
-                    memory,
-                    phase,
-                });
-                return Err(session_registry_error(
-                    "resume project session recovery",
-                    format!(
-                        "project session recovery does not retain exact closed graph and Store proofs: {}",
-                        inspection.description(),
-                    ),
-                ));
-            }
-        };
-        if !proof.verify() {
-            self.recovery = Some(ProjectSessionRecoveryRequiredV1 {
-                sessions,
-                candidate_sessions,
-                memory,
-                phase: ProjectSessionRecoveryPhaseV1::Terminal(proof),
-            });
-            return Err(session_registry_error(
-                "resume project session recovery",
-                "project session terminal recovery proof is not exact and closed".to_owned(),
-            ));
-        }
-        let mut entries = match self.owners.lock() {
-            Ok(entries) => entries,
-            Err(_) => {
-                self.recovery = Some(ProjectSessionRecoveryRequiredV1 {
-                    sessions,
-                    candidate_sessions,
-                    memory,
-                    phase: ProjectSessionRecoveryPhaseV1::Terminal(proof),
-                });
-                return Err(session_registry_error(
-                    "resume project session recovery",
-                    "project runtime owner map lock is poisoned".to_owned(),
-                ));
-            }
-        };
-        if !matches!(
-            entries.get(&self.project_id),
-            Some(ProjectRuntimeOwnerStateV1::Recovering)
-        ) {
-            drop(entries);
-            self.recovery = Some(ProjectSessionRecoveryRequiredV1 {
-                sessions,
-                candidate_sessions,
-                memory,
-                phase: ProjectSessionRecoveryPhaseV1::Terminal(proof),
-            });
-            return Err(session_registry_error(
-                "resume project session recovery",
-                "project session recovery map fence disappeared".to_owned(),
-            ));
-        }
-        entries.insert(
-            self.project_id.clone(),
-            ProjectRuntimeOwnerStateV1::ReplacingSessions,
-        );
-        drop(entries);
-        self.armed = false;
-        Ok((
-            ProjectSessionReplacementVacancyV1 {
-                owners: self.owners.clone(),
-                project_id: self.project_id.clone(),
-                memory,
-                proof: Some(proof),
-                armed: true,
-            },
-            candidate_sessions,
-        ))
-    }
-}
-
-impl Drop for ProjectSessionRecoveryReservationV1 {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        let Some(recovery) = self.recovery.take() else {
-            return;
-        };
-        let mut entries = self
-            .owners
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if matches!(
-            entries.get(&self.project_id),
-            Some(ProjectRuntimeOwnerStateV1::Recovering)
-        ) {
-            entries.insert(
-                self.project_id.clone(),
-                ProjectRuntimeOwnerStateV1::RecoveryRequired(recovery),
             );
         }
         self.armed = false;
@@ -2684,10 +2040,6 @@ impl Drop for ProjectSessionNativeRetirementV1 {
 
 static LONG_LIVED_SESSION_MAINTENANCE: AtomicBool = AtomicBool::new(false);
 
-fn remote_restore_quarantine_fence_path(database: &Path) -> std::path::PathBuf {
-    database.with_extension("remote-restore-quarantine.json")
-}
-
 pub fn mark_process_long_lived_for_session_maintenance() {
     LONG_LIVED_SESSION_MAINTENANCE.store(true, Ordering::Relaxed);
 }
@@ -2843,7 +2195,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             }
             Some(
                 ProjectRuntimeOwnerStateV1::ReplacingSessions
-                | ProjectRuntimeOwnerStateV1::Recovering
                 | ProjectRuntimeOwnerStateV1::RecoveryRequired(_),
             ) => {
                 return Err(TraceDecayError::project_route(
@@ -3197,13 +2548,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         }
     }
 
-    fn session_sync_service(
-        &self,
-    ) -> Arc<OnceLock<Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>>>
-    {
-        Arc::clone(&self.session_sync_service)
-    }
-
     fn active_session_sync_service(
         &self,
         operation: &'static str,
@@ -3342,33 +2686,6 @@ async fn open_runtime(
         profile_pin,
         database_authority,
         initialize_if_missing,
-        false,
-        None,
-        operation,
-    )
-    .await
-    .map(|(runtime, _)| runtime)
-}
-
-async fn open_runtime_during_remote_restore(
-    registry: &StoreRuntimeRegistry,
-    resolver: &LocalStoreRuntimeResolverV1,
-    shard_id: StoreShardIdV1,
-    incarnation: StoreIncarnationV1,
-    profile_pin: Option<ProfileAuthorityPin>,
-    expected_opened_file_identity: u64,
-    operation: &'static str,
-) -> Result<StoreRuntimeClientLease> {
-    open_runtime_with_presence(
-        registry,
-        resolver,
-        shard_id,
-        incarnation,
-        profile_pin,
-        None,
-        false,
-        true,
-        Some(expected_opened_file_identity),
         operation,
     )
     .await
@@ -3384,8 +2701,6 @@ async fn open_runtime_with_presence(
     profile_pin: Option<ProfileAuthorityPin>,
     database_authority: Option<DatabaseAuthority>,
     initialize_if_missing: bool,
-    allow_remote_restore_fence: bool,
-    required_opened_file_identity: Option<u64>,
     operation: &'static str,
 ) -> Result<(StoreRuntimeClientLease, bool)> {
     let key = StoreRuntimeKey::new(shard_id.clone(), incarnation);
@@ -3423,18 +2738,6 @@ async fn open_runtime_with_presence(
             ),
         ));
     }
-    let expected_opened_file_identity = if let Some(expected) = required_opened_file_identity {
-        Some(expected)
-    } else if !allow_remote_restore_fence
-        && matches!(&shard_id.scope, StoreShardScopeV1::ProjectSessions { .. })
-    {
-        hotpath::measure_block!(
-            "daemon.session_registry.store_open.restore_fence_check",
-            remote_recovery::remote_restore_activated_open_identity(locator.locator().path())
-        )?
-    } else {
-        None
-    };
     let exists = locator
         .locator()
         .path()
@@ -3449,10 +2752,6 @@ async fn open_runtime_with_presence(
         )
     } else {
         StoreRuntimeOpenRequest::new_authorized(shard_id, incarnation, profile_pin, authority)
-    };
-    let request = match expected_opened_file_identity {
-        Some(expected) => request.require_opened_file_identity(expected),
-        None => request,
     };
     match hotpath::future!(
         registry.open(request),
@@ -3488,84 +2787,6 @@ fn session_registry_error(operation: &'static str, message: String) -> TraceDeca
     TraceDecayError::Database {
         operation: operation.to_owned(),
         message,
-    }
-}
-
-#[cfg(test)]
-mod durable_terminal_vacancy_tests {
-    use tracedecay_domain::{BrainId, LocatorDigest, UserProfileId};
-    use tracedecay_store::{StoreAuthorityEpochV1, StoreIncarnationV1, VerifiedStoreLocatorV1};
-
-    use super::*;
-
-    fn durable_authority(project_id: &ProjectId) -> ProjectSessionTerminalVacancyAuthorityV1 {
-        let shard_id = StoreShardIdV1::project_sessions(
-            BrainId::new("brain.durable-terminal-vacancy").expect("brain identity"),
-            UserProfileId::new("profile.durable-terminal-vacancy").expect("profile identity"),
-            project_id.clone(),
-        );
-        let incarnation = StoreIncarnationV1::new(17).expect("store incarnation");
-        ProjectSessionTerminalVacancyAuthorityV1 {
-            binding: tracedecay_store::StoreRuntimeBindingV1::new(
-                shard_id.clone(),
-                incarnation,
-                StoreAuthorityEpochV1::new(23).expect("authority epoch"),
-            ),
-            locator: VerifiedStoreLocatorV1::new(
-                shard_id,
-                incarnation,
-                LocatorDigest::new(format!("sha256:{}", "b".repeat(64))).expect("locator digest"),
-            ),
-        }
-    }
-
-    #[test]
-    fn durable_terminal_journal_reconstructs_fail_closed_recovery_before_resume() {
-        let project_id =
-            ProjectId::new("project.durable-terminal-vacancy").expect("project identity");
-        let owners = ProjectRuntimeOwnerRegistryV1::default();
-        owners
-            .reconstruct_durable_terminal_recovery(&project_id, durable_authority(&project_id))
-            .expect("rebuild terminal recovery from durable journal");
-        {
-            let entries = owners.lock().expect("project owner map");
-            let Some(ProjectRuntimeOwnerStateV1::RecoveryRequired(recovery)) =
-                entries.get(&project_id)
-            else {
-                panic!("durable journal must reconstruct RecoveryRequired before resume");
-            };
-            assert!(recovery.sessions.is_none());
-            assert!(recovery.candidate_sessions.is_none());
-            assert!(matches!(
-                &recovery.phase,
-                ProjectSessionRecoveryPhaseV1::Terminal(proof) if proof.verify()
-            ));
-        }
-
-        // Resuming may enter the temporary vacancy, but dropping it before a
-        // candidate is activated must return to the same durable recovery
-        // record rather than synthesize Ready or resurrect the terminal owner.
-        let recovery = owners
-            .reserve_session_recovery(&project_id)
-            .expect("reserve reconstructed recovery")
-            .expect("reconstructed recovery record");
-        let (vacancy, candidate) = recovery
-            .into_terminal_vacancy()
-            .expect("resume durable terminal vacancy");
-        assert!(candidate.is_none());
-        drop(vacancy);
-
-        let entries = owners.lock().expect("project owner map");
-        let Some(ProjectRuntimeOwnerStateV1::RecoveryRequired(recovery)) = entries.get(&project_id)
-        else {
-            panic!("durable vacancy restart must remain fail-closed");
-        };
-        assert!(recovery.sessions.is_none());
-        assert!(recovery.candidate_sessions.is_none());
-        assert!(matches!(
-            &recovery.phase,
-            ProjectSessionRecoveryPhaseV1::Terminal(proof) if proof.verify()
-        ));
     }
 }
 
