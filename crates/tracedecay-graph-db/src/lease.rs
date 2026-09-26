@@ -303,6 +303,19 @@ impl VerifiedGraphSnapshot {
         self.with_head_database(crate::GraphDb::native_engine_open)
     }
 
+    /// Bytes the resident serving engine reports holding, or `None` when no
+    /// engine is resident. Never opens one.
+    pub fn resident_serving_engine_bytes(&self) -> Result<Option<u64>, GraphDbError> {
+        self.with_head_database(crate::GraphDb::resident_engine_bytes)
+    }
+
+    /// Release the serving engine if no reader holds it and no pin keeps it,
+    /// keeping the registry identity to reopen it. `Ok(false)` leaves it
+    /// resident and serving.
+    pub fn release_serving_engine_when_idle(&self) -> Result<bool, GraphDbError> {
+        self.with_head_database(crate::GraphDb::hibernate_if_lazy_when_idle)
+    }
+
     #[must_use]
     pub fn generation(&self) -> &GraphGenerationId {
         &self.head.locator.generation

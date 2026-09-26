@@ -1373,6 +1373,20 @@ impl GraphDb {
         }
     }
 
+    /// Heap bytes the resident engine attributes to its stores, indexes,
+    /// versions, caches and string pools, or `None` when it is not resident.
+    pub(crate) fn resident_engine_bytes(&self) -> Result<Option<u64>, GraphDbError> {
+        self.inner
+            .database
+            .read()
+            .map(|database| {
+                database.as_ref().map(|database| {
+                    u64::try_from(database.memory_usage().total_bytes).unwrap_or(u64::MAX)
+                })
+            })
+            .map_err(|_| GraphDbError::unavailable("graph database read lock is poisoned"))
+    }
+
     /// Reports whether the native staging engine is already resident without
     /// exercising lazy-open authority.
     pub(crate) fn native_engine_open(&self) -> Result<bool, GraphDbError> {

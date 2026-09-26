@@ -1169,6 +1169,87 @@ async fn graph_reads_during_engine_warm_up_are_typed_pending_and_warmed_reads_su
     read().expect("the last sweep must leave the warmed serving engine open for the next read");
 }
 
+/// A released serving engine gives its memory back and comes back on its own:
+/// the store reports the engine's bytes while pinned, none once released,
+/// the first read after release is the typed re-warming answer, and a later
+/// read is served again without anyone re-running activation.
+///
+/// Fails if release leaves the engine open, or if a released generation
+/// needs activation (or a restart) before its graph serves again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_released_serving_engine_closes_and_rewarms_on_the_next_read() {
+    use tracedecay_code_index::graph_projection::{
+        CodeGraphEngineReleaseV1, CodeGraphProjectionError, CodeGraphProjectionStore,
+    };
+
+    let fixture = sealed_generation_fixture(
+        "project.graph-engine-release",
+        "pub fn released_value() -> usize { 11 }\n",
+    )
+    .await;
+    let snapshot = fixture
+        .runtime
+        .publish_verified_snapshot(
+            fixture.latest.generation(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("seal the code graph");
+    let store =
+        CodeGraphProjectionStore::from_verified_snapshot(snapshot, fixture.generation_id.clone())
+            .expect("projection store over the sealed snapshot");
+    let read = || {
+        store.interactive_reader_with_cancellation(
+            &fixture.generation_id,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+    };
+    assert_eq!(
+        store.serving_engine_bytes().expect("engine bytes"),
+        None,
+        "nothing is pinned before the warm"
+    );
+    store.warm_serving_engine().expect("background warm");
+    read().expect("the warmed engine serves");
+    let pinned_bytes = store
+        .serving_engine_bytes()
+        .expect("engine bytes")
+        .expect("a pinned engine reports its bytes");
+
+    assert_eq!(
+        store.release_serving_engine().expect("release"),
+        CodeGraphEngineReleaseV1::Released {
+            bytes: Some(pinned_bytes)
+        }
+    );
+    assert_eq!(store.serving_engine_bytes().expect("engine bytes"), None);
+    assert!(matches!(
+        read(),
+        Err(CodeGraphProjectionError::Unavailable(detail)) if detail.contains("re-warming")
+    ));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if read().is_ok() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the released engine re-warms on its own"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        store.serving_engine_bytes().expect("engine bytes"),
+        Some(pinned_bytes),
+        "the re-warmed engine is pinned again with the same contents"
+    );
+    assert_eq!(
+        store.release_serving_engine().expect("second release"),
+        CodeGraphEngineReleaseV1::Released {
+            bytes: Some(pinned_bytes)
+        }
+    );
+}
+
 /// Stage 1 of `docs/plans/tracedecay-v2/40`: cold activation decodes the sealed
 /// payload once to serve queries, and graph hydration reuses that decode
 /// instead of reading and parsing the identical bytes a second time.

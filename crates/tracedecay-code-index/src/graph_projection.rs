@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 use std::sync::RwLock;
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -209,9 +210,29 @@ pub struct CodeGraphProjectionStore {
     /// The state lock is never held across the projection scan, so
     /// occurrence-seeded reads remain independent while catalog warming runs.
     interactive_catalog: Arc<InteractiveCatalogCache>,
-    /// Keeps this generation's graph engine resident for the store's
-    /// lifetime once [`Self::warm_serving_engine`] opened it.
-    serving_engine: Arc<OnceLock<GraphServingEnginePin>>,
+    /// Keeps this generation's graph engine resident once
+    /// [`Self::warm_serving_engine`] opened it, until
+    /// [`Self::release_serving_engine`] gives it back.
+    serving_engine: Arc<Mutex<Option<GraphServingEnginePin>>>,
+    /// Set once the engine was released; the next read that finds it cold
+    /// re-warms it in the background instead of waiting on activation, which
+    /// already ran for this generation.
+    released: Arc<AtomicBool>,
+    rewarming: Arc<AtomicBool>,
+    /// Why the last background re-warm failed, answered to readers until a
+    /// later re-warm succeeds.
+    rewarm_failure: Arc<Mutex<Option<String>>>,
+}
+
+/// Outcome of [`CodeGraphProjectionStore::release_serving_engine`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodeGraphEngineReleaseV1 {
+    /// The engine was closed; it had reported `bytes` while resident.
+    Released { bytes: Option<u64> },
+    /// A reader holds the engine; it stays pinned and serving.
+    Busy,
+    /// No engine was pinned.
+    NotPinned,
 }
 
 impl fmt::Debug for CodeGraphProjectionStore {
@@ -240,22 +261,63 @@ impl CodeGraphProjectionStore {
             projection,
             generation,
             interactive_catalog: Arc::new(InteractiveCatalogCache::new()),
-            serving_engine: Arc::new(OnceLock::new()),
+            serving_engine: Arc::new(Mutex::new(None)),
+            released: Arc::new(AtomicBool::new(false)),
+            rewarming: Arc::new(AtomicBool::new(false)),
+            rewarm_failure: Arc::new(Mutex::new(None)),
         })
     }
 
-    /// Opens this generation's graph engine once and keeps it resident for as
-    /// long as the store lives. Corpus-sized on a cold engine, so background
+    /// Opens this generation's graph engine once and keeps it resident until
+    /// it is released. Corpus-sized on a cold engine, so background
     /// activation calls it before the store serves; readers never pay it.
     #[hotpath::measure(label = "code_graph.store.warm_serving_engine")]
     pub fn warm_serving_engine(&self) -> Result<(), CodeGraphProjectionError> {
-        if self.serving_engine.get().is_none() {
-            let pin = self.snapshot.pin_serving_engine()?;
-            // A concurrent warm that won the slot pinned the same engine; this
-            // pin's drop only releases its own count.
-            let _ = self.serving_engine.set(pin);
+        let mut pin = self
+            .serving_engine
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if pin.is_none() {
+            *pin = Some(self.snapshot.pin_serving_engine()?);
         }
         Ok(())
+    }
+
+    /// Bytes the pinned engine reports holding, or `None` when none is pinned.
+    pub fn serving_engine_bytes(&self) -> Result<Option<u64>, CodeGraphProjectionError> {
+        let pinned = self
+            .serving_engine
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some();
+        if !pinned {
+            return Ok(None);
+        }
+        Ok(self.snapshot.resident_serving_engine_bytes()?)
+    }
+
+    /// Unpin the engine and close it if no reader holds it. The durable
+    /// graph and its verified head stay; the next read re-warms the engine in
+    /// the background and answers the typed warming state meanwhile.
+    pub fn release_serving_engine(
+        &self,
+    ) -> Result<CodeGraphEngineReleaseV1, CodeGraphProjectionError> {
+        let mut slot = self
+            .serving_engine
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(pin) = slot.take() else {
+            return Ok(CodeGraphEngineReleaseV1::NotPinned);
+        };
+        let bytes = self.snapshot.resident_serving_engine_bytes()?;
+        drop(pin);
+        if self.snapshot.release_serving_engine_when_idle()? {
+            self.released.store(true, AtomicOrdering::Release);
+            return Ok(CodeGraphEngineReleaseV1::Released { bytes });
+        }
+        // Still open under a reader, so re-pinning costs no open.
+        *slot = Some(self.snapshot.pin_serving_engine()?);
+        Ok(CodeGraphEngineReleaseV1::Busy)
     }
 
     /// Readers are latency bounded: a cold engine is warmed in background
@@ -263,11 +325,52 @@ impl CodeGraphProjectionStore {
     /// answer instead of waiting on the open.
     fn require_resident_engine(&self) -> Result<(), CodeGraphProjectionError> {
         if self.snapshot.serving_engine_resident()? {
-            Ok(())
-        } else {
-            Err(CodeGraphProjectionError::Unavailable(
+            return Ok(());
+        }
+        if !self.released.load(AtomicOrdering::Acquire) {
+            return Err(CodeGraphProjectionError::Unavailable(
                 "code graph engine is warming in the background".to_owned(),
-            ))
+            ));
+        }
+        let failure = self
+            .rewarm_failure
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        self.rewarm_in_background();
+        Err(CodeGraphProjectionError::Unavailable(match failure {
+            Some(failure) => format!("code graph engine re-warm failed and is retrying: {failure}"),
+            None => "code graph engine was released and is re-warming in the background".to_owned(),
+        }))
+    }
+
+    fn rewarm_in_background(&self) {
+        if self.rewarming.swap(true, AtomicOrdering::AcqRel) {
+            return;
+        }
+        let store = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("code-graph-rewarm".to_owned())
+            .spawn(move || {
+                let failure = store
+                    .warm_serving_engine()
+                    .err()
+                    .map(|error| error.to_string());
+                if failure.is_none() {
+                    store.released.store(false, AtomicOrdering::Release);
+                }
+                *store
+                    .rewarm_failure
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = failure;
+                store.rewarming.store(false, AtomicOrdering::Release);
+            });
+        if let Err(error) = spawned {
+            *self
+                .rewarm_failure
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(error.to_string());
+            self.rewarming.store(false, AtomicOrdering::Release);
         }
     }
 
