@@ -765,6 +765,12 @@ pub struct CodeIndexWorktreeSchedulerV1 {
     /// refused. Standalone opens get a private empty inventory; the registry
     /// rebinds its inventory at mount.
     resident_owners: Arc<ResidentOwnersV1>,
+    /// This scheduler's own worker runtime when no composition root installed
+    /// the process plan. In-process test schedulers are separate owners, so
+    /// none may meter its work against another's plan.
+    #[cfg(any(test, feature = "test-helpers"))]
+    owned_worker_runtime:
+        std::sync::OnceLock<tracedecay_code_index::parallelism::CodeIndexWorkerRuntimeV1>,
     pub(super) publication: DaemonCodeIndexPublicationStoreV1,
     pub(super) production_config: CodeIndexProductionConfigV1,
     pub(super) owner: ProductionOwner,
@@ -1085,6 +1091,8 @@ impl CodeIndexWorktreeSchedulerV1 {
                 detected_process_resident_memory_limit_v1(),
             )),
             resident_owners: Arc::new(ResidentOwnersV1::new(RESIDENT_OWNER_IDLE_WINDOW_V1)),
+            #[cfg(any(test, feature = "test-helpers"))]
+            owned_worker_runtime: std::sync::OnceLock::new(),
             publication,
             production_config,
             owner,
@@ -1123,6 +1131,18 @@ impl CodeIndexWorktreeSchedulerV1 {
 
     pub fn bind_resident_owners(&mut self, resident_owners: Arc<ResidentOwnersV1>) {
         self.resident_owners = resident_owners;
+    }
+
+    /// Give this scheduler the worker runtime its builds run under.
+    #[cfg(test)]
+    pub(super) fn bind_worker_runtime(
+        &self,
+        runtime: tracedecay_code_index::parallelism::CodeIndexWorkerRuntimeV1,
+    ) {
+        assert!(
+            self.owned_worker_runtime.set(runtime).is_ok(),
+            "a scheduler binds one worker runtime"
+        );
     }
 
     pub fn bind_progress_incarnations(
@@ -1175,7 +1195,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     pub(super) fn reserve_worker_memory(
         &self,
     ) -> Result<ResidentMemoryReservationV1, CodeIndexSchedulerErrorV1> {
-        self.ensure_worker_plan()?;
+        let _workers = self.ensure_worker_plan()?;
         let planned_workers = tracedecay_code_index::parallelism::indexing_workers();
         let snapshot = self.resident_memory.snapshot();
         let remaining = snapshot.limit_bytes.saturating_sub(snapshot.used_bytes);
@@ -1290,22 +1310,38 @@ impl CodeIndexWorktreeSchedulerV1 {
         Ok(())
     }
 
-    pub(super) fn ensure_worker_plan(&self) -> Result<(), CodeIndexSchedulerErrorV1> {
+    /// The worker runtime this scheduler's build runs under, entered on the
+    /// calling thread for the returned guard's lifetime. Production uses the
+    /// composition root's process plan and enters nothing.
+    pub(super) fn ensure_worker_plan(
+        &self,
+    ) -> Result<
+        Option<tracedecay_code_index::parallelism::EnteredCodeIndexWorkerRuntimeV1>,
+        CodeIndexSchedulerErrorV1,
+    > {
+        #[cfg(any(test, feature = "test-helpers"))]
+        {
+            if let Some(runtime) = self.owned_worker_runtime.get() {
+                return Ok(Some(runtime.enter()));
+            }
+        }
         if tracedecay_code_index::parallelism::installed_worker_status().is_some() {
-            return Ok(());
+            return Ok(None);
         }
         // The shared scheduler test sources also compile into the composition
         // root's test binary, where this crate is a dependency built with
         // `test-helpers` instead of `cfg(test)`; both spellings are the same
-        // fixture surface, so the auto-install fallback must cover both.
+        // fixture surface, so the owned-runtime fallback must cover both.
         #[cfg(any(test, feature = "test-helpers"))]
         {
             let snapshot = self.resident_memory.snapshot();
-            tracedecay_code_index::parallelism::install_worker_plan(
+            let runtime = tracedecay_code_index::parallelism::CodeIndexWorkerRuntimeV1::build(
                 tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::Automatic {},
                 snapshot.limit_bytes.saturating_sub(snapshot.used_bytes),
             )?;
-            Ok(())
+            Ok(Some(
+                self.owned_worker_runtime.get_or_init(|| runtime).enter(),
+            ))
         }
         #[cfg(not(any(test, feature = "test-helpers")))]
         {
@@ -2600,7 +2636,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
-        self.ensure_worker_plan()?;
+        let _workers = self.ensure_worker_plan()?;
         let _worker_memory = self.reserve_worker_memory()?;
         let _reconcile_guard = ReconcilePassGuard::enter(&self.reconcile_in_progress);
         // Re-resolve exact identity before indexing (tier-3 backstop). The

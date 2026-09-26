@@ -5,6 +5,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use tempfile::TempDir;
+use tracedecay_code_index::parallelism::CodeIndexWorkerRuntimeV1;
 use tracedecay_domain::{ProjectId, configuration::CodeIndexWorkerSelectionV1};
 use tracedecay_runtime_core::resident_memory::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentMemoryPressureV1,
@@ -48,19 +49,28 @@ fn fixture() -> TempDir {
     root
 }
 
-fn worker_reservation_bytes() -> u64 {
-    let installed = tracedecay_code_index::parallelism::install_worker_plan(
+/// The automatic plan a scheduler builds against the default authority,
+/// bound to `scheduler` so its reservations use exactly this plan.
+fn bind_default_worker_runtime(
+    scheduler: &CodeIndexWorktreeSchedulerV1,
+) -> CodeIndexWorkerRuntimeV1 {
+    let runtime = CodeIndexWorkerRuntimeV1::build(
         CodeIndexWorkerSelectionV1::Automatic {},
         DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
     )
-    .expect("install automatic worker plan");
+    .expect("build automatic worker runtime");
+    scheduler.bind_worker_runtime(runtime.clone());
+    runtime
+}
+
+fn worker_reservation_bytes(runtime: &CodeIndexWorkerRuntimeV1) -> u64 {
     tracedecay_code_index::parallelism::worker_reservation_bytes(usize::from(
-        installed.status.effective_workers,
+        runtime.status().effective_workers,
     ))
 }
 
-fn expected_worker_reservation_on(remaining_bytes: u64) -> u64 {
-    let planned_workers = tracedecay_code_index::parallelism::indexing_workers();
+fn expected_worker_reservation_on(runtime: &CodeIndexWorkerRuntimeV1, remaining_bytes: u64) -> u64 {
+    let planned_workers = usize::from(runtime.status().effective_workers);
     let affordable = tracedecay_code_index::parallelism::memory_safe_worker_count(remaining_bytes);
     tracedecay_code_index::parallelism::worker_reservation_bytes(
         planned_workers.min(affordable).max(1),
@@ -252,7 +262,7 @@ fn worker_memory_reservation_is_charged_and_released_by_raii() {
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     )
     .expect("open scheduler");
-    let _installed = worker_reservation_bytes();
+    let runtime = bind_default_worker_runtime(&scheduler);
     let authority = Arc::new(ProcessResidentMemoryV1::new(
         DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
     ));
@@ -262,7 +272,7 @@ fn worker_memory_reservation_is_charged_and_released_by_raii() {
         .expect("reserve worker memory");
     assert_eq!(
         authority.snapshot().used_bytes,
-        expected_worker_reservation_on(DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get())
+        expected_worker_reservation_on(&runtime, DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get())
     );
     drop(reservation);
     assert_eq!(authority.snapshot().used_bytes, 0);
@@ -274,7 +284,6 @@ fn worker_memory_reservation_is_charged_and_released_by_raii() {
 /// `reserve_worker_memory` had reserved `remaining / 128MiB` and used==limit.
 #[test]
 fn default_authority_worker_reserve_leaves_typed_snapshot_headroom() {
-    let _installed = worker_reservation_bytes();
     let project = fixture();
     let project_id = ProjectId::new("project.code-index-worker-headroom").expect("valid project");
     let store = TempDir::new().expect("store root");
@@ -285,6 +294,7 @@ fn default_authority_worker_reserve_leaves_typed_snapshot_headroom() {
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     )
     .expect("open scheduler");
+    let runtime = bind_default_worker_runtime(&scheduler);
     let authority = Arc::new(ProcessResidentMemoryV1::new(
         DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
     ));
@@ -295,7 +305,7 @@ fn default_authority_worker_reserve_leaves_typed_snapshot_headroom() {
         .expect("6 GiB authority admits a memory-safe worker slab");
     let used = authority.snapshot().used_bytes;
     let limit = DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get();
-    assert_eq!(used, expected_worker_reservation_on(limit));
+    assert_eq!(used, expected_worker_reservation_on(&runtime, limit));
     assert!(
         used < limit,
         "worker reserve must leave the typed non-worker headroom: used={used} limit={limit}"
@@ -326,7 +336,7 @@ fn worker_memory_reservation_refusal_is_typed() {
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     )
     .expect("open scheduler");
-    let _installed = worker_reservation_bytes();
+    bind_default_worker_runtime(&scheduler);
     let authority = Arc::new(ProcessResidentMemoryV1::new(
         NonZeroU64::new(
             tracedecay_code_index::parallelism::INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1 - 1,
@@ -395,8 +405,9 @@ fn measured_rss_pressure_refuses_worker_admission_and_readmits_as_it_falls() {
 
     // A limit with ample room for the worker plan, so the only thing that can
     // refuse admission below is the injected measurement.
-    let limit =
-        NonZeroU64::new(worker_reservation_bytes().saturating_mul(4)).expect("positive test limit");
+    let runtime = bind_default_worker_runtime(&scheduler);
+    let limit = NonZeroU64::new(worker_reservation_bytes(&runtime).saturating_mul(4))
+        .expect("positive test limit");
     let pressure = Arc::new(ResidentMemoryPressureV1::new(limit));
     scheduler.bind_resident_memory(Arc::new(ProcessResidentMemoryV1::with_pressure(
         limit,

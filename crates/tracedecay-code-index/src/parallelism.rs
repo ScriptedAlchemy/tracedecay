@@ -1,13 +1,15 @@
-//! Process-wide code-index worker policy and its dedicated Rayon pool.
+//! Code-index worker policy: each owner's Rayon pool and CPU authority.
 //!
 //! Automatic sizing races small machines at full width and reserves half of a
 //! larger host for serving. A conservative per-worker resident budget then
 //! caps that CPU target. Exact profile or environment selections are never
 //! silently narrowed: an unsafe count is a typed startup refusal.
 
+use std::cell::RefCell;
 use std::fmt;
+use std::marker::PhantomData;
 use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use tracedecay_domain::configuration::{
     CodeIndexWorkerLimitingReasonV1, CodeIndexWorkerSelectionV1, CodeIndexWorkerStatusV1,
@@ -212,10 +214,125 @@ pub struct InstalledCodeIndexWorkerPlanV1 {
     pub background_cpu: Arc<ProcessBackgroundCpuV1>,
 }
 
-static WORKER_RUNTIME: OnceLock<InstalledCodeIndexWorkerRuntimeV1> = OnceLock::new();
+/// The composition root's plan. A process that runs one owner (the daemon)
+/// installs it once; owners that coexist in one process (in-process test
+/// schedulers) enter their own [`CodeIndexWorkerRuntimeV1`] instead, so one
+/// owner's plan never meters another owner's work.
+static WORKER_RUNTIME: OnceLock<CodeIndexWorkerRuntimeV1> = OnceLock::new();
 static WORKER_RUNTIME_INSTALL: Mutex<()> = Mutex::new(());
 static STANDALONE_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
 static STANDALONE_POOL_INSTALL: Mutex<()> = Mutex::new(());
+
+/// One owner's worker runtime: its plan, pool, and background CPU authority.
+///
+/// Work reaches the runtime its caller entered with [`Self::enter`]; the
+/// runtime's pool threads carry it for every job they run, so fan-outs meter
+/// against the owner that started them.
+#[derive(Clone)]
+pub struct CodeIndexWorkerRuntimeV1(Arc<InstalledCodeIndexWorkerRuntimeV1>);
+
+/// Scope in which [`install`] and the leaf admission helpers on this thread
+/// use the entered runtime. Restores the previous scope on drop.
+pub struct EnteredCodeIndexWorkerRuntimeV1 {
+    previous: Option<Arc<InstalledCodeIndexWorkerRuntimeV1>>,
+    _thread_bound: PhantomData<*const ()>,
+}
+
+thread_local! {
+    static ENTERED_RUNTIME: RefCell<Option<Arc<InstalledCodeIndexWorkerRuntimeV1>>> =
+        const { RefCell::new(None) };
+    static POOL_RUNTIME: RefCell<Option<Arc<OnceLock<Weak<InstalledCodeIndexWorkerRuntimeV1>>>>> =
+        const { RefCell::new(None) };
+}
+
+impl CodeIndexWorkerRuntimeV1 {
+    /// Build a runtime for one owner without touching the process plan.
+    pub fn build(
+        configured: CodeIndexWorkerSelectionV1,
+        available_memory_bytes: u64,
+    ) -> Result<Self, CodeIndexWorkerPlanInstallErrorV1> {
+        let environment_override = environment_override_value()?;
+        let plan = worker_plan_from(
+            configured,
+            detected_cores(),
+            available_memory_bytes,
+            environment_override.as_deref(),
+        )?;
+        Self::from_plan(plan)
+    }
+
+    fn from_plan(plan: CodeIndexWorkerPlanV1) -> Result<Self, CodeIndexWorkerPlanInstallErrorV1> {
+        let owner = Arc::new(OnceLock::<Weak<InstalledCodeIndexWorkerRuntimeV1>>::new());
+        let pool_owner = Arc::clone(&owner);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(plan.effective_workers)
+            .thread_name(|index| format!("tracedecay-index-{index}"))
+            .start_handler(move |_| {
+                POOL_RUNTIME.with(|slot| *slot.borrow_mut() = Some(Arc::clone(&pool_owner)));
+            })
+            .build()
+            .map_err(|error| CodeIndexWorkerPlanInstallErrorV1::PoolBuild {
+                message: error.to_string(),
+            })?;
+        let runtime = Arc::new(InstalledCodeIndexWorkerRuntimeV1 {
+            plan,
+            pool,
+            background_cpu: Arc::new(ProcessBackgroundCpuV1::new(
+                NonZeroUsize::new(plan.effective_workers).unwrap_or(NonZeroUsize::MIN),
+            )),
+        });
+        owner.set(Arc::downgrade(&runtime)).map_err(|_| {
+            CodeIndexWorkerPlanInstallErrorV1::PoolBuild {
+                message: "worker pool owner was bound twice".to_owned(),
+            }
+        })?;
+        Ok(Self(runtime))
+    }
+
+    #[must_use]
+    pub fn status(&self) -> CodeIndexWorkerStatusV1 {
+        self.0.plan.status()
+    }
+
+    #[must_use]
+    pub fn background_cpu(&self) -> Arc<ProcessBackgroundCpuV1> {
+        Arc::clone(&self.0.background_cpu)
+    }
+
+    /// Route this thread's code-index work to this runtime until the guard
+    /// drops.
+    #[must_use]
+    pub fn enter(&self) -> EnteredCodeIndexWorkerRuntimeV1 {
+        let previous = ENTERED_RUNTIME.with(|slot| slot.borrow_mut().replace(Arc::clone(&self.0)));
+        EnteredCodeIndexWorkerRuntimeV1 {
+            previous,
+            _thread_bound: PhantomData,
+        }
+    }
+}
+
+impl Drop for EnteredCodeIndexWorkerRuntimeV1 {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        ENTERED_RUNTIME.with(|slot| *slot.borrow_mut() = previous);
+    }
+}
+
+/// The runtime this thread's work belongs to: the entered owner, the owner
+/// of the pool thread running it, or the composition root's plan.
+fn current_runtime() -> Option<Arc<InstalledCodeIndexWorkerRuntimeV1>> {
+    ENTERED_RUNTIME
+        .with(|slot| slot.borrow().clone())
+        .or_else(|| {
+            POOL_RUNTIME.with(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .and_then(|owner| owner.get())
+                    .and_then(Weak::upgrade)
+            })
+        })
+        .or_else(|| WORKER_RUNTIME.get().map(|runtime| Arc::clone(&runtime.0)))
+}
 
 /// Automatic CPU target: use every logical CPU through eight, then floor half.
 #[must_use]
@@ -410,11 +527,11 @@ pub fn install_worker_plan(
     let environment_override = environment_override_value()?;
     let environment_override_workers = parse_environment_override(environment_override.as_deref())?;
     if let Some(installed) = WORKER_RUNTIME.get()
-        && installed.plan.configured == configured
-        && installed.plan.environment_override_workers == environment_override_workers
+        && installed.0.plan.configured == configured
+        && installed.0.plan.environment_override_workers == environment_override_workers
     {
-        record_plan(installed.plan);
-        return Ok(installed.installed_plan());
+        record_plan(installed.0.plan);
+        return Ok(installed.0.installed_plan());
     }
     let requested = worker_plan_from(
         configured,
@@ -422,46 +539,26 @@ pub fn install_worker_plan(
         available_memory_bytes,
         environment_override.as_deref(),
     )?;
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(requested.effective_workers)
-        .thread_name(|index| format!("tracedecay-index-{index}"))
-        .build()
-        .map_err(|error| CodeIndexWorkerPlanInstallErrorV1::PoolBuild {
-            message: error.to_string(),
-        })?;
-    let background_cpu = Arc::new(ProcessBackgroundCpuV1::new(
-        NonZeroUsize::new(requested.effective_workers).unwrap_or(NonZeroUsize::MIN),
-    ));
-    let installed_plan = InstalledCodeIndexWorkerPlanV1 {
-        status: requested.status(),
-        background_cpu: Arc::clone(&background_cpu),
-    };
-    match WORKER_RUNTIME.set(InstalledCodeIndexWorkerRuntimeV1 {
-        plan: requested,
-        pool,
-        background_cpu,
-    }) {
-        Ok(()) => {
-            record_plan(requested);
-            Ok(installed_plan)
-        }
-        Err(_) => {
-            let Some(existing) = WORKER_RUNTIME.get() else {
-                return Err(CodeIndexWorkerPlanInstallErrorV1::PoolBuild {
-                    message: "worker runtime installation did not settle".to_owned(),
-                });
-            };
-            compare_installed_plan(&existing.plan, &requested)?;
-            record_plan(existing.plan);
-            Ok(existing.installed_plan())
-        }
+    if let Some(existing) = WORKER_RUNTIME.get() {
+        compare_installed_plan(&existing.0.plan, &requested)?;
+        record_plan(existing.0.plan);
+        return Ok(existing.0.installed_plan());
     }
+    let runtime = CodeIndexWorkerRuntimeV1::from_plan(requested)?;
+    let installed = runtime.0.installed_plan();
+    WORKER_RUNTIME
+        .set(runtime)
+        .map_err(|_| CodeIndexWorkerPlanInstallErrorV1::PoolBuild {
+            message: "worker runtime installation did not settle".to_owned(),
+        })?;
+    record_plan(requested);
+    Ok(installed)
 }
 
 /// Canonical runtime status for configuration/dashboard projection.
 #[must_use]
 pub fn installed_worker_status() -> Option<CodeIndexWorkerStatusV1> {
-    WORKER_RUNTIME.get().map(|runtime| runtime.plan.status())
+    current_runtime().map(|runtime| runtime.plan.status())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -537,7 +634,7 @@ pub fn indexing_workers() -> usize {
     if let forced @ 1.. = FORCED_WORKERS.with(std::cell::Cell::get) {
         return forced;
     }
-    WORKER_RUNTIME.get().map_or_else(
+    current_runtime().map_or_else(
         || indexing_worker_target(detected_cores()),
         |runtime| runtime.plan.effective_workers,
     )
@@ -571,7 +668,7 @@ pub(crate) fn force_install_failure_for_test(force: bool) {
 /// CPU authority. Standalone callers without an installed daemon plan run
 /// directly.
 pub fn with_background_cpu_permits<R>(requested_units: usize, operation: impl FnOnce() -> R) -> R {
-    match WORKER_RUNTIME.get() {
+    match current_runtime() {
         Some(runtime) => runtime.with_permits(requested_units, operation),
         None => operation(),
     }
@@ -608,7 +705,7 @@ where
             message: "forced code-index worker pool failure for test".to_owned(),
         });
     }
-    if let Some(runtime) = WORKER_RUNTIME.get() {
+    if let Some(runtime) = current_runtime() {
         return Ok(runtime.install(operation));
     }
     let pool = standalone_pool()?;
@@ -653,6 +750,39 @@ fn standalone_pool() -> Result<&'static rayon::ThreadPool, CodeIndexParallelismE
 mod tests {
     use super::*;
     use tracedecay_domain::configuration::CodeIndexWorkerSelectionV1;
+
+    /// Two owners in one process run concurrently, each under its own plan:
+    /// its width, its pool, and the width its pool's leaves report.
+    #[test]
+    fn two_owners_in_one_process_each_run_under_their_own_plan() {
+        let available = 64 * 1024 * 1024 * 1024;
+        let one = CodeIndexWorkerRuntimeV1::build(
+            CodeIndexWorkerSelectionV1::Exact { workers: 1 },
+            available,
+        )
+        .expect("one-worker owner");
+        let two = CodeIndexWorkerRuntimeV1::build(
+            CodeIndexWorkerSelectionV1::Exact { workers: 2 },
+            available,
+        )
+        .expect("two-worker owner");
+        let barrier = std::sync::Barrier::new(2);
+        let observed = std::thread::scope(|scope| {
+            [&one, &two]
+                .map(|owner| {
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        let _entered = owner.enter();
+                        barrier.wait();
+                        let pooled = install(|| (rayon::current_num_threads(), indexing_workers()))
+                            .expect("owner pool");
+                        (indexing_workers(), pooled)
+                    })
+                })
+                .map(|worker| worker.join().expect("owner thread"))
+        });
+        assert_eq!(observed, [(1, (1, 1)), (2, (2, 2))]);
+    }
 
     #[test]
     fn install_runs_the_caller_on_an_admitted_rayon_worker() {

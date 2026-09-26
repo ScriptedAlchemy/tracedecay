@@ -211,7 +211,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         previous_roster: Vec<CodeIndexIgnoredSourceAdmissionV1>,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CodeIndexIgnoredDependencyBuildV1, CodeIndexSchedulerErrorV1> {
-        self.ensure_worker_plan()?;
+        let _workers = self.ensure_worker_plan()?;
         let _worker_memory = match self.reserve_worker_memory() {
             Ok(reservation) => reservation,
             Err(error) => {

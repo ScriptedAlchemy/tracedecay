@@ -691,7 +691,8 @@ impl CodeIndexWorktreeSchedulerV1 {
         source: &ExactGitTreeSourceV1,
         control: &branch_generations::BranchGenerationReadControlV1,
     ) -> Result<LatestCompleteCodeIndexV1, CodeIndexSearchUnavailableReasonV1> {
-        self.ensure_worker_plan()
+        let _workers = self
+            .ensure_worker_plan()
             .map_err(|_| CodeIndexSearchUnavailableReasonV1::Internal)?;
         let _worker_memory = self.reserve_worker_memory().map_err(|error| match error {
             CodeIndexSchedulerErrorV1::WorkerMemoryAdmission(_) => {
@@ -870,7 +871,8 @@ impl CodeIndexWorktreeSchedulerV1 {
         let merge_base = self.exact_git_tree_generation(&sources.merge_base, control)?;
         let source = self.exact_git_tree_generation(&sources.source, control)?;
         let destination = self.exact_git_tree_generation(&sources.destination, control)?;
-        self.ensure_worker_plan()
+        let _workers = self
+            .ensure_worker_plan()
             .map_err(|_| CodeIndexSearchUnavailableReasonV1::Internal)?;
         let _worker_memory = self.reserve_worker_memory().map_err(|error| match error {
             CodeIndexSchedulerErrorV1::WorkerMemoryAdmission(_) => {
