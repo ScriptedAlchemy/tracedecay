@@ -400,7 +400,11 @@ impl CodeIndexSchedulerRegistryV1 {
                     );
                     let clone_index = text.as_ref().map_or_else(Default::default, |text| {
                         text.clone_index_status(
-                            hook_hint_count != Some(0) || observation.rebuild_in_flight,
+                            clone_census_source_is_stale(
+                                source_change_pending,
+                                None,
+                                hook_hint_count,
+                            ),
                             clone_update,
                         )
                     });
@@ -427,7 +431,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
             };
             let verified = scheduler.verified_against_source();
-            let stale = !verified;
             let latest = serving_generation
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -471,7 +474,14 @@ impl CodeIndexSchedulerRegistryV1 {
                 },
             );
             let clone_index = text.as_ref().map_or_else(Default::default, |text| {
-                text.clone_index_status(stale || observation.rebuild_in_flight, clone_update)
+                text.clone_index_status(
+                    clone_census_source_is_stale(
+                        source_change_pending,
+                        Some(verified),
+                        hook_hint_count,
+                    ),
+                    clone_update,
+                )
             });
             let identity = if text.is_some() {
                 dashboard_text_freshness_identity(text.as_ref())
@@ -1553,6 +1563,23 @@ impl CodeIndexSchedulerRegistryV1 {
         wake_claim.settle();
         CodeIndexReconcileAdmissionV1::Accepted
     }
+}
+
+/// Whether source evidence proves the text owner's sealed clone census lags
+/// the checkout.
+///
+/// The census belongs to the text owner's own generation, so it is judged by
+/// source evidence only: an observed change, an outstanding hook hint, or a
+/// restore no pass has verified yet. A graph seat that has not caught up to
+/// the text owner leaves the worktree non-terminal, but it does not make the
+/// sealed census stale. `source_verified` is `None` when the scheduler lock
+/// was held by the pass this read could not join.
+fn clone_census_source_is_stale(
+    source_change_pending: bool,
+    source_verified: Option<bool>,
+    hook_hint_count: Option<u64>,
+) -> bool {
+    source_change_pending || source_verified == Some(false) || hook_hint_count != Some(0)
 }
 
 impl tracedecay_application::primitives::CodeIndexConvergenceParkPortV1

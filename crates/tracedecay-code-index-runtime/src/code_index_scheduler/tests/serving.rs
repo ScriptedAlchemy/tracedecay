@@ -915,7 +915,7 @@ async fn dashboard_freshness_reports_the_sealed_clone_census_across_a_restart() 
     )]);
     let store = TempDir::new().expect("store root");
     let mut reported = Vec::new();
-    for _incarnation in 0..2 {
+    for incarnation in 0..2 {
         let registry = CodeIndexSchedulerRegistryV1::new(1);
         registry
             .mount_worktree(
@@ -938,11 +938,10 @@ async fn dashboard_freshness_reports_the_sealed_clone_census_across_a_restart() 
             .expect("mounted dashboard freshness");
         let Some(tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Ready {
             observation,
-        }) = freshness.clone_index
+        }) = freshness.clone_index.clone()
         else {
             panic!(
-                "the sealed census must be ready on the first status read, got {:?}",
-                freshness.clone_index
+                "incarnation {incarnation}: the sealed census must be ready on the first status read, got {freshness:?}"
             );
         };
         reported.push((
