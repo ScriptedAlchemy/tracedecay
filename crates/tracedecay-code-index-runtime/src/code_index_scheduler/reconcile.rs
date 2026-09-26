@@ -39,8 +39,9 @@ use tracedecay_graph_db::GraphConflictContextV1;
 use tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1,
-    ResidentMemoryAdmissionFailureV1, ResidentMemoryComponentIdV1, ResidentMemoryKeyV1,
-    ResidentMemoryReservationV1, detected_process_resident_memory_limit_v1,
+    RESIDENT_OWNER_IDLE_WINDOW_V1, ResidentMemoryAdmissionFailureV1, ResidentMemoryComponentIdV1,
+    ResidentMemoryKeyV1, ResidentMemoryReservationV1, ResidentOwnersV1,
+    detected_process_resident_memory_limit_v1,
 };
 
 use crate::code_index::{
@@ -760,6 +761,10 @@ pub struct CodeIndexWorktreeSchedulerV1 {
     /// through. Standalone opens get a private default-limit authority; the
     /// registry rebinds its shared process authority at mount.
     resident_memory: Arc<ProcessResidentMemoryV1>,
+    /// Retained owners an artifact build sheds before its reservation is
+    /// refused. Standalone opens get a private empty inventory; the registry
+    /// rebinds its inventory at mount.
+    resident_owners: Arc<ResidentOwnersV1>,
     /// This scheduler's own worker runtime when no composition root installed
     /// the process plan. In-process test schedulers are separate owners, so
     /// none may meter its work against another's plan.
@@ -830,6 +835,7 @@ pub struct HistoricalCodeIndexGenerationOwnerV1 {
     pub(super) publication: DaemonCodeIndexPublicationStoreV1,
     store_root: PathBuf,
     resident_memory: Arc<ProcessResidentMemoryV1>,
+    resident_owners: Arc<ResidentOwnersV1>,
     pub(super) project_id: ProjectId,
     worktree_id: WorktreeId,
     shutting_down: Arc<AtomicBool>,
@@ -866,6 +872,7 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
                 &self.store_root,
                 &self.publication,
                 &self.resident_memory,
+                &self.resident_owners,
                 &self.project_id,
                 &self.worktree_id,
             ),
@@ -1083,6 +1090,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             resident_memory: Arc::new(ProcessResidentMemoryV1::new(
                 detected_process_resident_memory_limit_v1(),
             )),
+            resident_owners: Arc::new(ResidentOwnersV1::new(RESIDENT_OWNER_IDLE_WINDOW_V1)),
             #[cfg(any(test, feature = "test-helpers"))]
             owned_worker_runtime: std::sync::OnceLock::new(),
             publication,
@@ -1119,6 +1127,10 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// this scheduler's private standalone authority.
     pub fn bind_resident_memory(&mut self, resident_memory: Arc<ProcessResidentMemoryV1>) {
         self.resident_memory = resident_memory;
+    }
+
+    pub fn bind_resident_owners(&mut self, resident_owners: Arc<ResidentOwnersV1>) {
+        self.resident_owners = resident_owners;
     }
 
     /// Give this scheduler the worker runtime its builds run under.
@@ -1168,6 +1180,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             publication: self.publication.clone(),
             store_root: self.store_root.clone(),
             resident_memory: Arc::clone(&self.resident_memory),
+            resident_owners: Arc::clone(&self.resident_owners),
             project_id: self.project_id.clone(),
             worktree_id: self.worktree_id.clone(),
             shutting_down: Arc::clone(&self.shutting_down),
@@ -2359,6 +2372,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             &self.store_root,
             &self.publication,
             &self.resident_memory,
+            &self.resident_owners,
             &self.project_id,
             &self.worktree_id,
         );
@@ -3505,6 +3519,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                     &self.store_root,
                     &self.publication,
                     &self.resident_memory,
+                    &self.resident_owners,
                     &self.project_id,
                     &self.worktree_id,
                 ),

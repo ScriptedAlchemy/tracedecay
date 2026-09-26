@@ -54,6 +54,10 @@ pub enum RetrievalPortError {
     GenerationMismatch,
     #[error("lane authority is unavailable: {0}")]
     AuthorityUnavailable(String),
+    /// The process resident-memory authority refused the work's reservation.
+    /// Retrying before memory is given back reproduces the refusal.
+    #[error("resident memory refused the work: {0}")]
+    ResidentMemoryRefused(String),
     #[error("lane projection is incompatible with the request profile")]
     IncompatibleProjection,
     #[error("the read port observed stale evidence")]
@@ -83,7 +87,10 @@ impl From<RetrievalPortError> for RetrievalError {
         match error {
             RetrievalPortError::CapabilityManifestRejected => Self::CapabilityManifestRejected,
             RetrievalPortError::GenerationMismatch => Self::GenerationMismatch,
-            RetrievalPortError::AuthorityUnavailable(detail) => Self::AuthorityUnavailable(detail),
+            RetrievalPortError::AuthorityUnavailable(detail)
+            | RetrievalPortError::ResidentMemoryRefused(detail) => {
+                Self::AuthorityUnavailable(detail)
+            }
             RetrievalPortError::IncompatibleProjection => Self::IncompatibleProjection,
             RetrievalPortError::StaleEvidence => Self::StaleEvidence,
             RetrievalPortError::Cancelled => Self::Cancelled,

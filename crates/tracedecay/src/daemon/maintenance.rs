@@ -876,6 +876,7 @@ fn record_process_resident_memory_gauge(log: &std::sync::Mutex<ResidentMemoryLog
                 low_watermark_bytes = pressure.low_watermark_bytes(),
                 "measured process RSS fell back under the admission low watermark"
             );
+            tracedecay_runtime_core::resident_memory::process_resident_owners_v1().note_headroom();
         }
         _ => {}
     }

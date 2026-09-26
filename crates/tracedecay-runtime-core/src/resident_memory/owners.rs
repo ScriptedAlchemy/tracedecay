@@ -12,12 +12,17 @@
 //! and graph artifacts. Pressure frees owners earlier, in
 //! [`RESIDENT_OWNER_SHED_ORDER_V1`], and never the generation a worktree is
 //! actively serving.
+//!
+//! Every release, and every return of process RSS to nominal, bumps one
+//! headroom epoch. Work refused for memory subscribes to it and retries then,
+//! instead of waiting for an unrelated wake.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
+use tokio::sync::watch;
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 
 /// How long a worktree keeps its retained state after its last use.
@@ -184,6 +189,7 @@ struct LiveOwnerV1 {
 pub struct ResidentOwnersV1 {
     idle_window: Duration,
     state: Mutex<OwnersStateV1>,
+    headroom: watch::Sender<u64>,
 }
 
 impl fmt::Debug for ResidentOwnersV1 {
@@ -201,7 +207,31 @@ impl ResidentOwnersV1 {
         Self {
             idle_window,
             state: Mutex::new(OwnersStateV1::default()),
+            headroom: watch::Sender::new(0),
         }
+    }
+
+    /// Changes each time memory is given back: an owner released, or the
+    /// process returned below its reclaim line.
+    #[must_use]
+    pub fn subscribe_headroom(&self) -> watch::Receiver<u64> {
+        self.headroom.subscribe()
+    }
+
+    /// Record that memory was given back outside this inventory.
+    pub fn note_headroom(&self) {
+        self.headroom
+            .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+    }
+
+    fn note_released(
+        &self,
+        released: Vec<ResidentOwnerReleasedV1>,
+    ) -> Vec<ResidentOwnerReleasedV1> {
+        if !released.is_empty() {
+            self.note_headroom();
+        }
+        released
     }
 
     #[must_use]
@@ -233,11 +263,13 @@ impl ResidentOwnersV1 {
 
     /// Release every owner whose last use is older than the idle window.
     pub fn release_idle(&self, now: Instant) -> Vec<ResidentOwnerReleasedV1> {
-        self.live_owners()
+        let released = self
+            .live_owners()
             .into_iter()
             .filter(|live| self.idle(&live.sample, now))
             .filter_map(|live| Self::release_one(live, ResidentOwnerReleaseCauseV1::Idle))
-            .collect()
+            .collect();
+        self.note_released(released)
     }
 
     /// Release unprotected owners in shed order, least recently used first
@@ -262,7 +294,7 @@ impl ResidentOwnersV1 {
                 released.push(release);
             }
         }
-        released
+        self.note_released(released)
     }
 
     /// Release the first shed tier that holds an unprotected owner. Used when
@@ -276,11 +308,12 @@ impl ResidentOwnersV1 {
         let Some(tier) = candidates.iter().map(|live| live.kind).min() else {
             return Vec::new();
         };
-        candidates
+        let released = candidates
             .into_iter()
             .filter(|live| live.kind == tier)
             .filter_map(|live| Self::release_one(live, ResidentOwnerReleaseCauseV1::Pressure))
-            .collect()
+            .collect();
+        self.note_released(released)
     }
 
     #[must_use]
@@ -667,6 +700,36 @@ mod tests {
         assert_eq!(released_generations(&released), ["generation.idle"]);
         assert_eq!(released[0].cause, ResidentOwnerReleaseCauseV1::Idle);
         assert_eq!(owners.report(now).measured_bytes, 4_000);
+    }
+
+    #[test]
+    fn only_a_release_moves_the_headroom_epoch() {
+        let start = Instant::now();
+        let owners = Arc::new(ResidentOwnersV1::new(Duration::from_mins(5)));
+        let mut headroom = owners.subscribe_headroom();
+        let owner = FixtureOwner::new("generation.idle", 3_000, start, false);
+        let _registration = register(
+            &owners,
+            "worktree.a",
+            ResidentOwnerKindV1::DecodedGeneration,
+            &owner,
+        );
+
+        assert!(owners.release_idle(start).is_empty());
+        assert!(
+            !headroom.has_changed().unwrap(),
+            "a sweep that frees nothing"
+        );
+
+        assert_eq!(
+            owners.release_idle(start + Duration::from_secs(301)).len(),
+            1
+        );
+        assert!(headroom.has_changed().unwrap());
+        assert_eq!(*headroom.borrow_and_update(), 1);
+
+        owners.note_headroom();
+        assert_eq!(*headroom.borrow_and_update(), 2);
     }
 
     #[test]

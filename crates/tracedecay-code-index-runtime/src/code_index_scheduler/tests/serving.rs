@@ -1897,7 +1897,7 @@ fn reader_reservation_refusal_precedes_missing_artifact_access() {
     assert!(
         matches!(
             latest.advance_text_serving(1),
-            Err(tracedecay_query::retrieval::RetrievalPortError::AuthorityUnavailable(_))
+            Err(tracedecay_query::retrieval::RetrievalPortError::ResidentMemoryRefused(_))
         ),
         "the reservation gate must win before the missing path is inspected"
     );
@@ -1985,7 +1985,7 @@ fn text_build_budget_shrinks_to_available_headroom_without_dropping_below_its_fl
             watermark_headroom,
         ),
         Err(
-            tracedecay_query::retrieval::RetrievalPortError::AuthorityUnavailable(format!(
+            tracedecay_query::retrieval::RetrievalPortError::ResidentMemoryRefused(format!(
                 "text-artifact build needs at least {minimum} bytes; {} bytes are available below the resident-memory watermark",
                 limit - 22 * GIB - watermark_headroom
             ))
@@ -2020,9 +2020,9 @@ fn text_artifact_ceilings_reserve_through_process_resident_memory() {
         assert!(
             matches!(
                 denied,
-                Err(tracedecay_query::retrieval::RetrievalPortError::AuthorityUnavailable(_))
+                Err(tracedecay_query::retrieval::RetrievalPortError::ResidentMemoryRefused(_))
             ),
-            "an unreservable build ceiling must refuse as typed availability: {denied:?}"
+            "an unreservable build ceiling must refuse as a typed memory refusal: {denied:?}"
         );
         assert_eq!(
             tight.snapshot().used_bytes,
@@ -2054,7 +2054,7 @@ fn text_artifact_ceilings_reserve_through_process_resident_memory() {
         assert!(
             matches!(
                 latest.advance_text_serving(1),
-                Err(tracedecay_query::retrieval::RetrievalPortError::AuthorityUnavailable(_))
+                Err(tracedecay_query::retrieval::RetrievalPortError::ResidentMemoryRefused(_))
             ),
             "fresh RSS plus the minimum build ceiling exceeds the process authority"
         );

@@ -45,7 +45,8 @@ use tracedecay_domain::{
 use tracedecay_private_fs::{open_private_file, validate_private_directory};
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, ResidentMemoryComponentIdV1, ResidentMemoryKeyV1,
-    ResidentMemoryReservationV1, sampled_process_resident_bytes_v1,
+    ResidentMemoryReservationV1, ResidentOwnersV1, log_resident_owner_release_v1,
+    release_process_allocator_memory_v1, sampled_process_resident_bytes_v1,
 };
 
 use crate::{
@@ -912,6 +913,9 @@ pub struct DaemonCodeTextArtifactStoreV1 {
     /// ceilings are reserved here before they are allocated, so the
     /// advertised budgets are admission-controlled, not just documented.
     resident_memory: Arc<ProcessResidentMemoryV1>,
+    /// Retained state other worktrees and generations hold. A build sheds it
+    /// before refusing, so a stale decode never outranks a fresh index.
+    resident_owners: Arc<ResidentOwnersV1>,
     project_id: ProjectId,
     worktree_id: WorktreeId,
 }
@@ -965,7 +969,7 @@ pub(super) fn text_artifact_admitted_build_budget(
         .saturating_sub(watermark_headroom);
     let admitted_bytes = preferred_bytes.min(available_for_growth);
     if admitted_bytes < minimum_bytes {
-        return Err(RetrievalPortError::AuthorityUnavailable(format!(
+        return Err(RetrievalPortError::ResidentMemoryRefused(format!(
             "text-artifact build needs at least {minimum_bytes} bytes; \
              {available_for_growth} bytes are available below the resident-memory watermark"
         )));
@@ -978,6 +982,7 @@ impl DaemonCodeTextArtifactStoreV1 {
         store_root: &Path,
         publication: &DaemonCodeIndexPublicationStoreV1,
         resident_memory: &Arc<ProcessResidentMemoryV1>,
+        resident_owners: &Arc<ResidentOwnersV1>,
         project_id: &ProjectId,
         worktree_id: &WorktreeId,
     ) -> Self {
@@ -985,6 +990,7 @@ impl DaemonCodeTextArtifactStoreV1 {
             store_root: store_root.to_path_buf(),
             publication: publication.clone(),
             resident_memory: Arc::clone(resident_memory),
+            resident_owners: Arc::clone(resident_owners),
             project_id: project_id.clone(),
             worktree_id: worktree_id.clone(),
         }
@@ -1007,6 +1013,44 @@ impl DaemonCodeTextArtifactStoreV1 {
     ) -> Result<ResidentMemoryReservationV1, RetrievalPortError> {
         self.reserve_resident_memory_up_to(generation_id, component, bytes, bytes)
             .map(|(reservation, _)| reservation)
+    }
+
+    /// Measure headroom and size the build: `(observed, unmodeled live,
+    /// watermark headroom, admitted)` bytes.
+    fn text_artifact_admission(
+        &self,
+        preferred: NonZeroU64,
+        minimum: NonZeroU64,
+    ) -> Result<(u64, u64, u64, u64), RetrievalPortError> {
+        let snapshot = self.resident_memory.snapshot();
+        let observed_bytes = sampled_process_resident_bytes_v1().map_or(0, |observed| {
+            self.resident_memory
+                .pressure()
+                .publish_observed_resident_bytes(observed)
+                .observed_bytes()
+                .unwrap_or(observed)
+        });
+        let unmodeled_live_bytes = observed_bytes.saturating_sub(snapshot.used_bytes);
+        let admission_watermark = self
+            .resident_memory
+            .pressure()
+            .high_watermark_bytes()
+            .min(snapshot.limit_bytes);
+        let watermark_headroom = snapshot.limit_bytes.saturating_sub(admission_watermark);
+        let admitted_bytes = text_artifact_admitted_build_budget(
+            preferred.get(),
+            minimum.get(),
+            snapshot.limit_bytes,
+            snapshot.used_bytes,
+            observed_bytes,
+            watermark_headroom,
+        )?;
+        Ok((
+            observed_bytes,
+            unmodeled_live_bytes,
+            watermark_headroom,
+            admitted_bytes,
+        ))
     }
 
     fn reserve_resident_memory_up_to(
@@ -1034,29 +1078,29 @@ impl DaemonCodeTextArtifactStoreV1 {
                     "text-artifact minimum resident-memory reservation must be nonzero".to_owned(),
                 )
             })?;
-        let snapshot = self.resident_memory.snapshot();
-        let observed_bytes = sampled_process_resident_bytes_v1().map_or(0, |observed| {
-            self.resident_memory
-                .pressure()
-                .publish_observed_resident_bytes(observed)
-                .observed_bytes()
-                .unwrap_or(observed)
-        });
-        let unmodeled_live_bytes = observed_bytes.saturating_sub(snapshot.used_bytes);
-        let admission_watermark = self
-            .resident_memory
-            .pressure()
-            .high_watermark_bytes()
-            .min(snapshot.limit_bytes);
-        let watermark_headroom = snapshot.limit_bytes.saturating_sub(admission_watermark);
-        let admitted_bytes = text_artifact_admitted_build_budget(
-            preferred.get(),
-            minimum.get(),
-            snapshot.limit_bytes,
-            snapshot.used_bytes,
-            observed_bytes,
-            watermark_headroom,
-        )?;
+        let (observed_bytes, unmodeled_live_bytes, watermark_headroom, admitted_bytes) =
+            match self.text_artifact_admission(preferred, minimum) {
+                Err(RetrievalPortError::ResidentMemoryRefused(detail)) => {
+                    let released = self
+                        .resident_owners
+                        .shed(minimum.get(), std::time::Instant::now());
+                    if released.is_empty() {
+                        return Err(RetrievalPortError::ResidentMemoryRefused(detail));
+                    }
+                    for release in &released {
+                        log_resident_owner_release_v1(release);
+                    }
+                    let trim = release_process_allocator_memory_v1();
+                    tracing::info!(
+                        event = "code_text_artifact_build_shed_retained_state",
+                        released_owners = released.len(),
+                        trimmed_bytes = trim.released_bytes(),
+                        "text-artifact build shed retained state before re-measuring headroom"
+                    );
+                    self.text_artifact_admission(preferred, minimum)
+                }
+                admission => admission,
+            }?;
         let admitted = NonZeroU64::new(admitted_bytes).ok_or_else(|| {
             RetrievalPortError::Contract(
                 "text-artifact admitted resident-memory reservation must be nonzero".to_owned(),
@@ -1089,7 +1133,7 @@ impl DaemonCodeTextArtifactStoreV1 {
                 accounted,
             )
             .map_err(|error| {
-                RetrievalPortError::AuthorityUnavailable(format!(
+                RetrievalPortError::ResidentMemoryRefused(format!(
                     "text-artifact resident-memory admission was refused: {error}"
                 ))
             })?;
