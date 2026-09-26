@@ -280,6 +280,8 @@ fn finalize_arrays_splits_csv() {
 
 #[test]
 fn explicit_project_lcm_dispatch_allows_first_touch_init() {
+    let profile_home = tempfile::tempdir().unwrap();
+    let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(profile_home.path());
     // An explicit absolute --project must pass through untouched; a bare
     // `/tmp/project` is drive-relative on Windows and would be re-rooted on
     // the current drive, which is not the property under test.
@@ -288,8 +290,11 @@ fn explicit_project_lcm_dispatch_allows_first_touch_init() {
     } else {
         "/tmp/project"
     };
-    let dispatch =
-        DaemonToolDispatch::project_scoped(Some(project.to_string()), "tracedecay_lcm_status");
+    let dispatch = DaemonToolDispatch::project_scoped(
+        profile,
+        Some(project.to_string()),
+        "tracedecay_lcm_status",
+    );
 
     assert!(dispatch.allow_init);
     assert_eq!(dispatch.project_path, Some(PathBuf::from(project)));
@@ -297,7 +302,10 @@ fn explicit_project_lcm_dispatch_allows_first_touch_init() {
 
 #[test]
 fn user_storage_scope_dispatch_never_invents_a_project_from_cwd() {
+    let profile_home = tempfile::tempdir().unwrap();
+    let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(profile_home.path());
     let dispatch = DaemonToolDispatch::for_tool(
+        profile,
         None,
         "tracedecay_lcm_status",
         &mut json!({
@@ -326,10 +334,13 @@ fn mark_initialised_project(root: &Path) {
 
 #[test]
 fn registry_read_dispatch_stays_projectless_without_an_initialised_project() {
+    let profile_home = tempfile::tempdir().unwrap();
+    let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(profile_home.path());
     let uninitialised = tempfile::tempdir().expect("tempdir");
     let uninitialised_arg = uninitialised.path().to_string_lossy().into_owned();
     for tool_name in REGISTRY_READ_TOOLS {
         let dispatch = DaemonToolDispatch::for_tool(
+            profile,
             Some(uninitialised_arg.clone()),
             tool_name,
             &mut json!({}),
@@ -348,6 +359,7 @@ fn registry_read_dispatch_stays_projectless_without_an_initialised_project() {
     // A project-bound tool keeps the explicit project and the daemon's
     // typed refusal for an uninitialised root.
     let project_bound = DaemonToolDispatch::for_tool(
+        profile,
         Some(uninitialised_arg.clone()),
         "tracedecay_status",
         &mut json!({}),
@@ -364,6 +376,7 @@ fn registry_read_dispatch_stays_projectless_without_an_initialised_project() {
     let initialised = tempfile::tempdir().expect("tempdir");
     mark_initialised_project(initialised.path());
     let dispatch = DaemonToolDispatch::for_tool(
+        profile,
         Some(initialised.path().to_string_lossy().into_owned()),
         "tracedecay_project_list",
         &mut json!({}),
@@ -378,6 +391,8 @@ fn registry_read_dispatch_stays_projectless_without_an_initialised_project() {
 
 #[test]
 fn registry_read_dispatch_hands_a_missing_explicit_project_to_the_daemon() {
+    let profile_home = tempfile::tempdir().unwrap();
+    let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(profile_home.path());
     // (a) A `--project` that does not exist is not "no project": it travels
     // verbatim so the daemon returns its typed project-route refusal, exactly
     // as it does for every project-scoped tool.
@@ -387,7 +402,7 @@ fn registry_read_dispatch_hands_a_missing_explicit_project_to_the_daemon() {
     for tool_name in REGISTRY_READ_TOOLS {
         let mut args = json!({});
         let dispatch =
-            DaemonToolDispatch::for_tool(Some(missing_arg.clone()), tool_name, &mut args);
+            DaemonToolDispatch::for_tool(profile, Some(missing_arg.clone()), tool_name, &mut args);
         assert_eq!(
             dispatch.project_path,
             Some(tracedecay_configuration::resolve_path(Some(
@@ -403,14 +418,20 @@ fn registry_read_dispatch_hands_a_missing_explicit_project_to_the_daemon() {
         );
     }
     let project_bound = DaemonToolDispatch::for_tool(
+        profile,
         Some(missing_arg.clone()),
         "tracedecay_status",
         &mut json!({}),
     );
     assert_eq!(
         project_bound.project_path,
-        DaemonToolDispatch::for_tool(Some(missing_arg), "tracedecay_project_list", &mut json!({}))
-            .project_path,
+        DaemonToolDispatch::for_tool(
+            profile,
+            Some(missing_arg),
+            "tracedecay_project_list",
+            &mut json!({})
+        )
+        .project_path,
         "registry reads and project-scoped tools must agree on a missing --project"
     );
 }
@@ -419,26 +440,21 @@ fn registry_read_dispatch_hands_a_missing_explicit_project_to_the_daemon() {
 fn registry_read_dispatch_honours_an_explicit_ambient_root_verbatim() {
     // (b) The ambient-root filter protects cwd discovery from walking into the
     // user profile; it must not erase a project the caller named explicitly.
-    let _guard = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
     let home = tempfile::tempdir().expect("tempdir");
     mark_initialised_project(home.path());
+    let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
     let home_arg = home.path().to_string_lossy().into_owned();
-    let previous_home = std::env::var_os("HOME");
-    // SAFETY: the test env lock serialises every test that mutates
-    // process-wide profile discovery variables, and HOME is restored below.
-    unsafe { std::env::set_var("HOME", home.path()) };
     assert!(
-        tracedecay_runtime_core::config::is_ambient_project_root(home.path()),
-        "fixture HOME must be an ambient root"
+        profile.is_ambient_project_root(home.path()),
+        "the profile home must be an ambient root"
     );
-    let discovered = tracedecay_runtime_core::config::discover_project_root(home.path());
-    let explicit =
-        DaemonToolDispatch::for_tool(Some(home_arg), "tracedecay_project_list", &mut json!({}));
-    match previous_home {
-        // SAFETY: still under the test env lock; restores the prior value.
-        Some(previous) => unsafe { std::env::set_var("HOME", previous) },
-        None => unsafe { std::env::remove_var("HOME") },
-    }
+    let discovered = profile.discover_project_root(home.path());
+    let explicit = DaemonToolDispatch::for_tool(
+        profile,
+        Some(home_arg),
+        "tracedecay_project_list",
+        &mut json!({}),
+    );
 
     assert_eq!(
         discovered, None,
@@ -454,6 +470,8 @@ fn registry_read_dispatch_honours_an_explicit_ambient_root_verbatim() {
 
 #[test]
 fn registry_context_dispatch_seeds_path_from_an_uninitialised_explicit_project() {
+    let profile_home = tempfile::tempdir().unwrap();
+    let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(profile_home.path());
     // (c) `project_context --project <uninitialised dir>` names the project to
     // describe: it becomes the `path` selector instead of a missing-parameter
     // refusal. Callers who already chose a selector keep it.
@@ -465,6 +483,7 @@ fn registry_context_dispatch_seeds_path_from_an_uninitialised_explicit_project()
 
     let mut seeded = json!({});
     let dispatch = DaemonToolDispatch::for_tool(
+        profile,
         Some(uninitialised_arg.clone()),
         "tracedecay_project_context",
         &mut seeded,
@@ -475,6 +494,7 @@ fn registry_context_dispatch_seeds_path_from_an_uninitialised_explicit_project()
 
     let mut explicit_path = json!({ "path": "/srv/other" });
     DaemonToolDispatch::for_tool(
+        profile,
         Some(uninitialised_arg.clone()),
         "tracedecay_project_context",
         &mut explicit_path,
@@ -483,6 +503,7 @@ fn registry_context_dispatch_seeds_path_from_an_uninitialised_explicit_project()
 
     let mut explicit_selector = json!({ "project_selector": { "project_id": "p1" } });
     DaemonToolDispatch::for_tool(
+        profile,
         Some(uninitialised_arg.clone()),
         "tracedecay_project_context",
         &mut explicit_selector,
@@ -496,7 +517,12 @@ fn registry_context_dispatch_seeds_path_from_an_uninitialised_explicit_project()
     // untouched.
     for tool_name in ["tracedecay_project_list", "tracedecay_project_search"] {
         let mut args = json!({});
-        DaemonToolDispatch::for_tool(Some(uninitialised_arg.clone()), tool_name, &mut args);
+        DaemonToolDispatch::for_tool(
+            profile,
+            Some(uninitialised_arg.clone()),
+            tool_name,
+            &mut args,
+        );
         assert_eq!(args, json!({}), "{tool_name}");
     }
 
@@ -506,6 +532,7 @@ fn registry_context_dispatch_seeds_path_from_an_uninitialised_explicit_project()
     mark_initialised_project(initialised.path());
     let mut args = json!({});
     let dispatch = DaemonToolDispatch::for_tool(
+        profile,
         Some(initialised.path().to_string_lossy().into_owned()),
         "tracedecay_project_context",
         &mut args,
@@ -516,12 +543,15 @@ fn registry_context_dispatch_seeds_path_from_an_uninitialised_explicit_project()
 
 #[test]
 fn profile_scoped_session_refresh_dispatch_is_projectless() {
+    let profile_home = tempfile::tempdir().unwrap();
+    let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(profile_home.path());
     for tool_name in [
         "tracedecay_session_refresh_begin",
         "tracedecay_session_refresh_status",
         "tracedecay_session_refresh_cancel",
     ] {
         let dispatch = DaemonToolDispatch::for_tool(
+            profile,
             Some("/explicit/project".to_owned()),
             tool_name,
             &mut json!({ "scope": { "kind": "profile" } }),
@@ -530,6 +560,7 @@ fn profile_scoped_session_refresh_dispatch_is_projectless() {
         assert!(!dispatch.allow_init, "{tool_name}");
 
         let project_scoped = DaemonToolDispatch::for_tool(
+            profile,
             Some("/explicit/project".to_owned()),
             tool_name,
             &mut json!({ "scope": { "kind": "project" } }),
@@ -545,6 +576,7 @@ fn profile_scoped_session_refresh_dispatch_is_projectless() {
     // A non-refresh tool with an object `scope` is not a profile request: it
     // keeps its explicit project.
     let dispatch = DaemonToolDispatch::for_tool(
+        profile,
         Some("/explicit/project".to_owned()),
         "tracedecay_message_search",
         &mut json!({ "scope": { "kind": "profile" } }),
@@ -1138,6 +1170,8 @@ fn application_error_without_a_json_message_still_exits_nonzero() {
 
 #[test]
 fn application_problem_makes_the_tool_command_fail() {
+    let profile_home = tempfile::tempdir().unwrap();
+    let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(profile_home.path());
     let request_id = RequestId::new("request.cli.configuration-conflict").unwrap();
     let result = ApplicationSurfaceInvocationResult {
         operation: ApplicationSurfaceOperation::ConfigurationSet,
@@ -1157,7 +1191,7 @@ fn application_problem_makes_the_tool_command_fail() {
         requested_format: RequestedOutputFormat::Json,
     };
 
-    let error = print_cli_application_surface(None, result, true)
+    let error = print_cli_application_surface(profile, None, result, true)
         .expect_err("a canonical application problem must fail the CLI process");
     assert!(
         error

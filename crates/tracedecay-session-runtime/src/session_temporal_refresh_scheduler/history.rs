@@ -4,6 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_contracts::ProfileIdentityReadPort;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -76,7 +77,7 @@ pub struct ProjectSessionHistoricalIngestor {
     profile_identity: Arc<dyn ProfileIdentityReadPort>,
     project_root: PathBuf,
     project_id: tracedecay_domain::ProjectId,
-    transcript_source_home: Option<PathBuf>,
+    transcript_source_profile: ProfileRoot,
     cancellation: ObservationCancellation,
     codex_discovery: Arc<tracedecay_sessions::runtime::hosts::codex::CodexDiscoveryHub>,
     background_cpu: Arc<ProcessBackgroundCpuV1>,
@@ -91,12 +92,12 @@ impl ProjectSessionHistoricalIngestor {
         profile_identity: Arc<dyn ProfileIdentityReadPort>,
         project_root: PathBuf,
         project_id: tracedecay_domain::ProjectId,
-        transcript_source_home: Option<PathBuf>,
+        transcript_source_profile: ProfileRoot,
         codex_discovery: Arc<tracedecay_sessions::runtime::hosts::codex::CodexDiscoveryHub>,
         background_cpu: Arc<ProcessBackgroundCpuV1>,
     ) -> Self {
-        let source_home = transcript_source_home
-            .as_deref()
+        let source_home = transcript_source_profile
+            .home()
             .map_or_else(String::new, |path| path.to_string_lossy().into_owned());
         let codex_consumer = codex_consumer_key(
             "project",
@@ -105,13 +106,13 @@ impl ProjectSessionHistoricalIngestor {
             project_id.as_str(),
             &source_home,
         );
-        codex_discovery.register(&codex_consumer, transcript_source_home.as_deref());
+        codex_discovery.register(&codex_consumer, transcript_source_profile.home());
         Self {
             database,
             profile_identity,
             project_root,
             project_id,
-            transcript_source_home,
+            transcript_source_profile,
             cancellation: ObservationCancellation::default(),
             codex_discovery,
             background_cpu,
@@ -148,12 +149,11 @@ impl SessionHistoricalIngestor for ProjectSessionHistoricalIngestor {
                     &self.codex_consumer,
                 ),
             );
-            let outcome = match self.transcript_source_home.clone() {
-                Some(home) => {
-                    tracedecay_sessions::runtime::with_transcript_source_home(home, pass).await
-                }
-                None => pass.await,
-            };
+            let outcome = tracedecay_sessions::runtime::with_transcript_source_profile(
+                self.transcript_source_profile.clone(),
+                pass,
+            )
+            .await;
             let progress = SessionHistoricalIngestProgress {
                 stats: outcome.stats,
                 committed: outcome.scheduling_state_written || outcome.made_progress(),
@@ -184,7 +184,7 @@ pub struct ProfileSessionHistoricalIngestor {
     database: RegisteredGlobalDbLeaseV1,
     registry_database: RegisteredGlobalDbLeaseV1,
     profile_identity: Arc<dyn ProfileIdentityReadPort>,
-    transcript_source_home: Option<PathBuf>,
+    transcript_source_profile: ProfileRoot,
     cancellation: ObservationCancellation,
     codex_discovery: Arc<tracedecay_sessions::runtime::hosts::codex::CodexDiscoveryHub>,
     background_cpu: Arc<ProcessBackgroundCpuV1>,
@@ -199,13 +199,13 @@ impl ProfileSessionHistoricalIngestor {
         database: RegisteredGlobalDbLeaseV1,
         registry_database: RegisteredGlobalDbLeaseV1,
         profile_identity: Arc<dyn ProfileIdentityReadPort>,
-        transcript_source_home: Option<PathBuf>,
+        transcript_source_profile: ProfileRoot,
         codex_discovery: Arc<tracedecay_sessions::runtime::hosts::codex::CodexDiscoveryHub>,
         background_cpu: Arc<ProcessBackgroundCpuV1>,
         session_review: SessionReviewPort,
     ) -> Self {
-        let source_home = transcript_source_home
-            .as_deref()
+        let source_home = transcript_source_profile
+            .home()
             .map_or_else(String::new, |path| path.to_string_lossy().into_owned());
         let codex_consumer = codex_consumer_key(
             "profile",
@@ -214,12 +214,12 @@ impl ProfileSessionHistoricalIngestor {
             "",
             &source_home,
         );
-        codex_discovery.register(&codex_consumer, transcript_source_home.as_deref());
+        codex_discovery.register(&codex_consumer, transcript_source_profile.home());
         Self {
             database,
             registry_database,
             profile_identity,
-            transcript_source_home,
+            transcript_source_profile,
             cancellation: ObservationCancellation::default(),
             codex_discovery,
             background_cpu,
@@ -276,12 +276,11 @@ impl SessionHistoricalIngestor for ProfileSessionHistoricalIngestor {
                     (self.codex_discovery.as_ref(), &self.codex_consumer),
                 ),
             );
-            let outcome = match self.transcript_source_home.clone() {
-                Some(home) => {
-                    tracedecay_sessions::runtime::with_transcript_source_home(home, pass).await
-                }
-                None => pass.await,
-            };
+            let outcome = tracedecay_sessions::runtime::with_transcript_source_profile(
+                self.transcript_source_profile.clone(),
+                pass,
+            )
+            .await;
             let progress = SessionHistoricalIngestProgress {
                 stats: outcome.stats,
                 committed: outcome.scheduling_state_written || outcome.made_progress(),

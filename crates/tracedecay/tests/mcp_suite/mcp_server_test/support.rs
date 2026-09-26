@@ -30,7 +30,7 @@ pub(crate) async fn setup_server() -> (Arc<McpServer>, TempDir) {
         "fn main() { let x = helper(); }\nfn helper() -> i32 { 42 }\n",
     )
     .unwrap();
-    let cg = crate::fixture::init_project_from_template(project)
+    let cg = Box::pin(tracedecay_project::project::TraceDecay::init(project))
         .await
         .unwrap();
     // Boxed server-construction future: the production composition layout
@@ -187,9 +187,6 @@ impl McpTransport for ReadErrorTransport {
         Ok(())
     }
 }
-
-/// Serializes tests that mutate process-wide global-accounting environment.
-pub(crate) static SAVINGS_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// A server whose accounting and analytics writes are actually observable.
 ///

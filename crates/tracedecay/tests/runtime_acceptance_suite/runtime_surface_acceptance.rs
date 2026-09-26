@@ -83,7 +83,7 @@ struct RuntimeFixture {
     client: DaemonInvocationClient,
     handshake: DaemonHandshake,
     project: PathBuf,
-    _environment: common::IsolatedEnv,
+    _environment: common::IsolatedHome,
 }
 
 impl RuntimeFixture {
@@ -92,10 +92,13 @@ impl RuntimeFixture {
     }
 
     fn response_handle_root(&self) -> PathBuf {
-        tracedecay_runtime_core::storage::resolve_enrolled_layout_for_current_profile(&self.project)
-            .expect("resolve admitted project store")
-            .expect("admitted project is enrolled")
-            .response_handle_root
+        tracedecay_runtime_core::storage::resolve_persisted_layout(
+            &self.project,
+            self._environment.profile_root(),
+        )
+        .expect("resolve admitted project store")
+        .expect("admitted project is enrolled")
+        .response_handle_root
     }
 
     /// The path an LSP client addresses the admitted project through.
@@ -137,7 +140,7 @@ impl RuntimeFixture {
 }
 
 async fn runtime_fixture() -> RuntimeFixture {
-    let (environment, project) = common::IsolatedEnv::acquire().await;
+    let (environment, project) = common::IsolatedHome::new();
     let daemon_log = std::fs::File::create(environment.scratch().join("runtime-daemon.log"))
         .expect("create isolated runtime daemon log");
     let daemon = common::spawn_tracedecay_daemon_with(environment.home(), |command| {
@@ -145,9 +148,14 @@ async fn runtime_fixture() -> RuntimeFixture {
     });
     initialize_project(environment.home(), &project);
     await_published_code_index(environment.home(), &project);
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
-            .expect("daemon handshake");
+    let handshake = tracedecay::daemon::handshake_for_current_client(
+        environment.profile(),
+        Some(project.clone()),
+        None,
+        false,
+        false,
+    )
+    .expect("daemon handshake");
     let client = tracedecay_daemon_identity::invocation_client_for_current(handshake.clone())
         .expect("daemon client");
     let mounted = admitted_mcp_invocation(
@@ -174,7 +182,7 @@ async fn runtime_fixture() -> RuntimeFixture {
 }
 
 async fn lsp_runtime_fixture() -> RuntimeFixture {
-    let (environment, project) = common::IsolatedEnv::acquire().await;
+    let (environment, project) = common::IsolatedHome::new();
     copy_dir(
         &common::repository_path("tests/fixtures/context_eval_project"),
         &project,
@@ -208,9 +216,14 @@ async fn lsp_runtime_fixture() -> RuntimeFixture {
     assert_command_success("open indexed LSP project", &storage);
     await_published_code_index(environment.home(), &project);
     await_analyzer_backed_lsp_owner(&daemon_events);
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
-            .expect("daemon handshake");
+    let handshake = tracedecay::daemon::handshake_for_current_client(
+        environment.profile(),
+        Some(project.clone()),
+        None,
+        false,
+        false,
+    )
+    .expect("daemon handshake");
     let client = tracedecay_daemon_identity::invocation_client_for_current(handshake.clone())
         .expect("daemon client");
     RuntimeFixture {
@@ -263,7 +276,7 @@ fn await_analyzer_backed_lsp_owner(daemon_events: &Path) {
 
 #[cfg(all(unix, feature = "test-transport"))]
 async fn git_runtime_fixture() -> RuntimeFixture {
-    let (environment, project) = common::IsolatedEnv::acquire().await;
+    let (environment, project) = common::IsolatedHome::new();
     copy_dir(
         &common::repository_path("tests/fixtures/context_eval_project"),
         &project,
@@ -308,9 +321,14 @@ async fn git_runtime_fixture() -> RuntimeFixture {
     .expect("write staged Git change");
     git(&project, &["add", "src/main.rs"]);
 
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
-            .expect("daemon handshake");
+    let handshake = tracedecay::daemon::handshake_for_current_client(
+        environment.profile(),
+        Some(project.clone()),
+        None,
+        false,
+        false,
+    )
+    .expect("daemon handshake");
     let client = tracedecay_daemon_identity::invocation_client_for_current(handshake.clone())
         .expect("daemon client");
     RuntimeFixture {
@@ -1083,8 +1101,8 @@ async fn dashboard_user_settings_replay_through_application_restart() {
         initial_revision.as_str(),
         "project and profile settings must share the control-plane revision"
     );
-    let legacy_user_config = tracedecay_session_memory::user_config::config_path()
-        .expect("pinned profile user config path");
+    let legacy_user_config =
+        tracedecay_session_memory::user_config::config_path(fixture._environment.profile_root());
     let legacy_user_config_before = std::fs::read(&legacy_user_config).ok();
     let legal_actions = envelope["legal_actions"]
         .as_array()
@@ -2971,6 +2989,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         .expect("cross-scope project root URI")
         .to_string();
     let other_handshake = tracedecay::daemon::handshake_for_current_client(
+        fixture._environment.profile(),
         Some(other_project.path().to_path_buf()),
         None,
         false,

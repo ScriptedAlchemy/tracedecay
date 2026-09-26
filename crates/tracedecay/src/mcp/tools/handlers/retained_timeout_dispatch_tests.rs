@@ -24,9 +24,8 @@ use tracedecay_domain::{
 };
 use tracedecay_tool_catalog::EffectClass;
 
-use super::dispatch_test_support::SelectorEnv;
+use super::dispatch_test_support::SelectorProfile;
 use super::*;
-use tracedecay_project::config::lock_user_data_dir_test_env;
 use tracedecay_project::project::TraceDecay;
 
 use tracedecay_domain::test_fixtures::digest;
@@ -373,14 +372,14 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ExpiredDeadlineExe
 
 #[tokio::test]
 async fn fact_store_curate_forwards_only_bounds_and_preserves_canonical_success() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("fixture directory");
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("fact-store-curate-success");
     std::fs::create_dir_all(project.join("src")).expect("fixture source directory");
     std::fs::write(project.join("src/lib.rs"), "pub fn curate_success() {}\n")
         .expect("fixture source");
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.mcp-fact-store-curate-success",
     )
@@ -438,14 +437,14 @@ async fn fact_store_curate_forwards_only_bounds_and_preserves_canonical_success(
 
 #[tokio::test]
 async fn fact_store_curate_expired_deadline_does_not_mutate() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("fixture directory");
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("fact-store-curate-deadline");
     std::fs::create_dir_all(project.join("src")).expect("fixture source directory");
     std::fs::write(project.join("src/lib.rs"), "pub fn curate_deadline() {}\n")
         .expect("fixture source");
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.mcp-fact-store-curate-deadline",
     )
@@ -660,14 +659,14 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for PreCommitInterrupt
 
 #[tokio::test]
 async fn fact_store_curate_rejects_a_partial_receipt_from_another_scope() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("fixture directory");
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("fact-store-curate-scope-mismatch");
     std::fs::create_dir_all(project.join("src")).expect("fixture source directory");
     std::fs::write(project.join("src/lib.rs"), "pub fn curate_scope() {}\n")
         .expect("fixture source");
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.mcp-fact-store-curate-scope-mismatch",
     )
@@ -714,14 +713,14 @@ async fn fact_store_curate_rejects_a_partial_receipt_from_another_scope() {
 
 #[tokio::test]
 async fn fact_store_curate_pre_commit_cancellation_does_not_mutate() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("fixture directory");
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("fact-store-curate-cancelled");
     std::fs::create_dir_all(project.join("src")).expect("fixture source directory");
     std::fs::write(project.join("src/lib.rs"), "pub fn retained_cancel() {}\n")
         .expect("fixture source");
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.mcp-fact-store-curate-cancelled",
     )
@@ -830,13 +829,13 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for WireProblemExecuto
 
 #[tokio::test]
 async fn a_stale_refresh_frontier_reaches_mcp_as_typed_detail() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("fixture directory");
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("session-refresh-stale-frontier");
     std::fs::create_dir_all(project.join("src")).expect("fixture source directory");
     std::fs::write(project.join("src/lib.rs"), "pub fn refresh() {}\n").expect("fixture source");
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.mcp-session-refresh-stale-frontier",
     )

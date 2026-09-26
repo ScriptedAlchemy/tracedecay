@@ -24,9 +24,7 @@ use super::{
     RestoreSettlement,
 };
 use tracedecay_daemon_protocol::SOCKET_ENV;
-use tracedecay_runtime_core::config::{
-    USER_DATA_DIR_ENV, lock_user_data_dir_test_env, user_data_dir,
-};
+use tracedecay_runtime_core::config::{ProfileRoot, USER_DATA_DIR_ENV};
 
 pub(super) const TEST_BUILD_VERSION: &str = "0.1.0-test+service-probe";
 
@@ -35,6 +33,7 @@ fn refresh_in_quiesced_window(
     spec: &DaemonServiceSpec,
 ) -> tracedecay_domain::errors::Result<Option<PathBuf>> {
     let mut guard = QuiescedDaemonLifecycle::acquire_with_runner_and_timeout(
+        &spec.profile,
         "daemon service refresh",
         TEST_BUILD_VERSION,
         runner,
@@ -50,7 +49,32 @@ fn refresh_in_quiesced_window(
     super::combine_operation_and_restore("daemon service refresh", refreshed, restored)
 }
 
-use super::isolated_profile::EnvVarGuard;
+/// The profile a service fixture under `dir` runs for: data under
+/// `dir/profile`, home `dir/home`, XDG config home `dir/config`.
+fn fixture_profile(dir: &std::path::Path) -> ProfileRoot {
+    ProfileRoot::new(dir.join("profile"))
+        .with_home(dir.join("home"))
+        .with_xdg_config_home(dir.join("config"))
+}
+
+/// A profile whose existing data directory is `data_dir`, so its default
+/// daemon socket is `data_dir/daemon.sock`.
+#[cfg(unix)]
+fn profile_with_data_dir(data_dir: &std::path::Path) -> ProfileRoot {
+    std::fs::create_dir_all(data_dir).expect("profile data dir");
+    ProfileRoot::new(data_dir)
+}
+
+/// A fake program script whose `$NAME` references are baked to fixture
+/// paths, so the program reads nothing from the test process environment.
+#[cfg(target_os = "linux")]
+pub(super) fn bake_script_paths(script: &str, paths: &[(&str, &std::path::Path)]) -> String {
+    paths
+        .iter()
+        .fold(script.to_owned(), |script, (name, path)| {
+            script.replace(&format!("${name}"), &path.display().to_string())
+        })
+}
 
 #[cfg(target_os = "linux")]
 pub(super) fn systemctl_log_contains_sequence(log: &str, expected: &[&str]) -> bool {
@@ -89,6 +113,7 @@ impl Drop for CurrentDirGuard {
 fn released_windows_replacement_lease_is_reacquired_shared_before_restore() {
     let profile = TempDir::new().expect("profile");
     let mut guard = QuiescedDaemonLifecycle {
+        profile: ProfileRoot::new(profile.path()),
         previous_state: DaemonServiceState::RunningEnabled,
         lifecycle_lease: None,
         expected_version: TEST_BUILD_VERSION.to_owned(),
@@ -182,9 +207,8 @@ const FALLBACK_RESTORE_FAILED: &str = "quiesced daemon lifecycle fallback restor
 #[cfg(target_os = "linux")]
 struct FailingRestoreFixture {
     _dir: TempDir,
-    _env: Vec<EnvVarGuard>,
     runner: ServiceRunner,
-    profile: PathBuf,
+    profile: ProfileRoot,
     log: PathBuf,
 }
 
@@ -195,28 +219,25 @@ impl FailingRestoreFixture {
         let config_home = dir.path().join("config");
         let fake_bin = dir.path().join("bin");
         let home = dir.path().join("home");
-        let profile = dir.path().join("profile");
         std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
         std::fs::create_dir_all(&home).expect("home dir");
-        std::fs::create_dir_all(&profile).expect("profile dir");
+        std::fs::create_dir_all(dir.path().join("profile")).expect("profile dir");
+        let profile = fixture_profile(dir.path());
 
         let systemctl = fake_bin.join("systemctl");
         let log = dir.path().join("systemctl.log");
         std::fs::write(
             &systemctl,
+            bake_script_paths(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = start ] && exit 7\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
+            &[("TRACEDECAY_SYSTEMCTL_LOG", &log)],
+        ),
         )
         .expect("fake systemctl");
         std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
             .expect("systemctl permissions");
         let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
 
-        let env = vec![
-            EnvVarGuard::set("XDG_CONFIG_HOME", &config_home),
-            EnvVarGuard::set("HOME", &home),
-            EnvVarGuard::set(USER_DATA_DIR_ENV, &profile),
-            EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log),
-        ];
         let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
         std::fs::create_dir_all(service_path.parent().expect("service parent"))
             .expect("service dir");
@@ -230,7 +251,6 @@ impl FailingRestoreFixture {
         .expect("existing service unit");
         Self {
             _dir: dir,
-            _env: env,
             runner,
             profile,
             log,
@@ -242,11 +262,12 @@ impl FailingRestoreFixture {
     fn quiesced_guard(&self) -> QuiescedDaemonLifecycle {
         let lifecycle_lease =
             tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
-                &self.profile,
+                self.profile.data_dir(),
                 "fallback restore fixture",
             )
             .expect("exclusive maintenance lease");
         QuiescedDaemonLifecycle {
+            profile: self.profile.clone(),
             previous_state: DaemonServiceState::RunningEnabled,
             lifecycle_lease: Some(lifecycle_lease),
             expected_version: TEST_BUILD_VERSION.to_owned(),
@@ -267,7 +288,6 @@ impl FailingRestoreFixture {
 #[cfg(target_os = "linux")]
 #[test]
 fn unwinding_before_finish_reports_the_failed_fallback_restore_once() {
-    let _env_lock = lock_user_data_dir_test_env();
     let fixture = FailingRestoreFixture::new();
     let guard = fixture.quiesced_guard();
 
@@ -309,7 +329,6 @@ fn unwinding_before_finish_reports_the_failed_fallback_restore_once() {
 #[cfg(target_os = "linux")]
 #[test]
 fn explicit_finish_returns_the_restore_failure_without_a_drop_report() {
-    let _env_lock = lock_user_data_dir_test_env();
     let fixture = FailingRestoreFixture::new();
     let guard = fixture.quiesced_guard();
 
@@ -575,11 +594,10 @@ pub(super) fn serve_identity_probes(
 #[cfg(unix)]
 #[test]
 fn daemon_protocol_probe_requires_current_tracedecay_identity() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let profile = TempDir::new().expect("profile temp dir");
-    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, profile.path());
+    let profile_dir = TempDir::new().expect("profile temp dir");
+    let profile = ProfileRoot::new(profile_dir.path());
 
-    let ready_socket = profile.path().join("ready.sock");
+    let ready_socket = profile_dir.path().join("ready.sock");
     let mut authority = seed_socket_authority(&ready_socket);
     let ready_listener = UnixListener::bind(&ready_socket).expect("bind ready socket");
     let ready_server = serve_probe_response(
@@ -590,6 +608,7 @@ fn daemon_protocol_probe_requires_current_tracedecay_identity() {
     );
     assert_eq!(
         super::probe::daemon_readiness_probe(
+            &profile,
             &ready_socket,
             TEST_BUILD_VERSION,
             std::time::Duration::from_secs(10),
@@ -599,7 +618,7 @@ fn daemon_protocol_probe_requires_current_tracedecay_identity() {
     );
     ready_server.join().expect("join ready server");
 
-    let stale_socket = profile.path().join("stale.sock");
+    let stale_socket = profile_dir.path().join("stale.sock");
     authority
         .publish_endpoint(&tracedecay_daemon_protocol::DaemonEndpoint::Unix(
             stale_socket.clone(),
@@ -614,6 +633,7 @@ fn daemon_protocol_probe_requires_current_tracedecay_identity() {
     );
     assert_eq!(
         super::probe::daemon_readiness_probe(
+            &profile,
             &stale_socket,
             TEST_BUILD_VERSION,
             std::time::Duration::from_secs(10),
@@ -631,11 +651,11 @@ fn daemon_protocol_probe_requires_current_tracedecay_identity() {
 #[cfg(unix)]
 #[test]
 fn daemon_readiness_probe_classifies_connect_and_protocol_failures() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let profile = TempDir::new().expect("profile temp dir");
-    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, profile.path());
-    let missing_socket = profile.path().join("missing.sock");
+    let profile_dir = TempDir::new().expect("profile temp dir");
+    let profile = ProfileRoot::new(profile_dir.path());
+    let missing_socket = profile_dir.path().join("missing.sock");
     let missing = super::probe::daemon_readiness_probe(
+        &profile,
         &missing_socket,
         TEST_BUILD_VERSION,
         std::time::Duration::from_millis(50),
@@ -646,9 +666,10 @@ fn daemon_readiness_probe_classifies_connect_and_protocol_failures() {
         super::probe::DaemonProtocolState::Unresponsive(_)
     ));
 
-    let stale_socket = profile.path().join("stale.sock");
+    let stale_socket = profile_dir.path().join("stale.sock");
     drop(UnixListener::bind(&stale_socket).expect("bind stale socket"));
     let stale = super::probe::daemon_readiness_probe(
+        &profile,
         &stale_socket,
         TEST_BUILD_VERSION,
         std::time::Duration::from_millis(50),
@@ -659,10 +680,11 @@ fn daemon_readiness_probe_classifies_connect_and_protocol_failures() {
         super::probe::DaemonProtocolState::Unresponsive(_)
     ));
 
-    let connectable_socket = profile.path().join("connectable.sock");
+    let connectable_socket = profile_dir.path().join("connectable.sock");
     let _authority = seed_socket_authority(&connectable_socket);
     let _listener = UnixListener::bind(&connectable_socket).expect("bind connectable socket");
     let connectable = super::probe::daemon_readiness_probe(
+        &profile,
         &connectable_socket,
         TEST_BUILD_VERSION,
         std::time::Duration::from_millis(20),
@@ -679,9 +701,9 @@ fn daemon_readiness_probe_classifies_connect_and_protocol_failures() {
 #[cfg(unix)]
 #[test]
 fn connectable_socket_is_not_a_live_daemon_until_initialize_answers() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let profile = TempDir::new().expect("profile temp dir");
-    let silent_socket = profile.path().join("silent.sock");
+    let profile_dir = TempDir::new().expect("profile temp dir");
+    let profile = ProfileRoot::new(profile_dir.path());
+    let silent_socket = profile_dir.path().join("silent.sock");
     let mut authority = seed_socket_authority(&silent_socket);
     let token = authority.auth_token().to_owned();
     let mut serve_next = |socket: &std::path::Path| {
@@ -694,6 +716,7 @@ fn connectable_socket_is_not_a_live_daemon_until_initialize_answers() {
     };
     let _listener = UnixListener::bind(&silent_socket).expect("bind silent socket");
     let silent = super::probe::probe_daemon_process_with_timeout(
+        &profile,
         &silent_socket,
         TEST_BUILD_VERSION,
         std::time::Duration::from_millis(50),
@@ -704,7 +727,7 @@ fn connectable_socket_is_not_a_live_daemon_until_initialize_answers() {
     );
     assert!(!silent.names_tracedecay());
 
-    let ready_socket = profile.path().join("ready.sock");
+    let ready_socket = profile_dir.path().join("ready.sock");
     let server = serve_probe_response(
         serve_next(&ready_socket),
         "tracedecay",
@@ -712,6 +735,7 @@ fn connectable_socket_is_not_a_live_daemon_until_initialize_answers() {
         token.clone(),
     );
     let ready = super::probe::probe_daemon_process_with_timeout(
+        &profile,
         &ready_socket,
         env!("CARGO_PKG_VERSION"),
         std::time::Duration::from_secs(2),
@@ -721,7 +745,7 @@ fn connectable_socket_is_not_a_live_daemon_until_initialize_answers() {
     assert!(ready.names_tracedecay());
     assert!(ready.version_matches());
 
-    let stale_socket = profile.path().join("stale-version.sock");
+    let stale_socket = profile_dir.path().join("stale-version.sock");
     let stale_server = serve_probe_response(
         serve_next(&stale_socket),
         "tracedecay",
@@ -729,6 +753,7 @@ fn connectable_socket_is_not_a_live_daemon_until_initialize_answers() {
         token.clone(),
     );
     let stale = super::probe::probe_daemon_process_with_timeout(
+        &profile,
         &stale_socket,
         env!("CARGO_PKG_VERSION"),
         std::time::Duration::from_secs(2),
@@ -739,7 +764,7 @@ fn connectable_socket_is_not_a_live_daemon_until_initialize_answers() {
         "an older TraceDecay process is running, but not this binary: {stale:?}"
     );
 
-    let foreign_socket = profile.path().join("foreign.sock");
+    let foreign_socket = profile_dir.path().join("foreign.sock");
     let foreign_server = serve_probe_response(
         serve_next(&foreign_socket),
         "not-tracedecay",
@@ -747,6 +772,7 @@ fn connectable_socket_is_not_a_live_daemon_until_initialize_answers() {
         token,
     );
     let foreign = super::probe::probe_daemon_process_with_timeout(
+        &profile,
         &foreign_socket,
         env!("CARGO_PKG_VERSION"),
         std::time::Duration::from_secs(2),
@@ -761,17 +787,15 @@ fn connectable_socket_is_not_a_live_daemon_until_initialize_answers() {
 #[cfg(unix)]
 #[test]
 fn daemon_reachable_requires_an_initialize_answer() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let profile = TempDir::new().expect("profile temp dir");
-    let missing = profile.path().join("missing.sock");
-    let missing_guard = EnvVarGuard::set(SOCKET_ENV, &missing);
+    let root = TempDir::new().expect("profile temp dir");
+    let missing = profile_with_data_dir(&root.path().join("missing"));
     assert!(
-        !super::daemon_reachable(),
+        !super::daemon_reachable(&missing),
         "a missing socket is not a running daemon"
     );
-    drop(missing_guard);
 
-    let ready_socket = profile.path().join("ready.sock");
+    let ready = profile_with_data_dir(&root.path().join("ready"));
+    let ready_socket = ready.data_dir().join("daemon.sock");
     let authority = seed_socket_authority(&ready_socket);
     let listener = UnixListener::bind(&ready_socket).expect("bind ready socket");
     let server = serve_probe_response(
@@ -780,61 +804,53 @@ fn daemon_reachable_requires_an_initialize_answer() {
         env!("CARGO_PKG_VERSION"),
         authority.auth_token().to_owned(),
     );
-    let ready_guard = EnvVarGuard::set(SOCKET_ENV, &ready_socket);
     assert!(
-        super::daemon_reachable(),
+        super::daemon_reachable(&ready),
         "initialize naming tracedecay is the reachability proof"
     );
-    drop(ready_guard);
     server.join().expect("join initialize server");
 }
 
 #[cfg(unix)]
 #[test]
 fn daemon_socket_connectable_separates_a_slow_daemon_from_no_daemon() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let profile = TempDir::new().expect("profile temp dir");
+    let root = TempDir::new().expect("profile temp dir");
 
-    let missing = profile.path().join("missing.sock");
-    let missing_guard = EnvVarGuard::set(SOCKET_ENV, &missing);
+    let missing = profile_with_data_dir(&root.path().join("missing"));
     assert!(
-        !super::daemon_socket_connectable(),
+        !super::daemon_socket_connectable(&missing),
         "a missing socket has no listener to broker through"
     );
-    drop(missing_guard);
 
-    let stale = profile.path().join("stale.sock");
-    drop(UnixListener::bind(&stale).expect("bind stale socket"));
-    let stale_guard = EnvVarGuard::set(SOCKET_ENV, &stale);
+    let stale = profile_with_data_dir(&root.path().join("stale"));
+    drop(UnixListener::bind(stale.data_dir().join("daemon.sock")).expect("bind stale socket"));
     assert!(
-        !super::daemon_socket_connectable(),
+        !super::daemon_socket_connectable(&stale),
         "a socket file whose listener is gone has no listener to broker through"
     );
-    drop(stale_guard);
 
     // The cold-start case: a daemon is accepting but has not answered
     // initialize inside the one-second reachability probe.
-    let silent = profile.path().join("silent.sock");
-    let _authority = seed_socket_authority(&silent);
-    let _listener = UnixListener::bind(&silent).expect("bind silent socket");
-    let silent_guard = EnvVarGuard::set(SOCKET_ENV, &silent);
+    let silent = profile_with_data_dir(&root.path().join("silent"));
+    let silent_socket = silent.data_dir().join("daemon.sock");
+    let _authority = seed_socket_authority(&silent_socket);
+    let _listener = UnixListener::bind(&silent_socket).expect("bind silent socket");
     assert!(
-        !super::daemon_reachable(),
+        !super::daemon_reachable(&silent),
         "the identity proof is still absent while the daemon is starting"
     );
     assert!(
-        super::daemon_socket_connectable(),
+        super::daemon_socket_connectable(&silent),
         "a daemon that has not answered initialize yet is still a running daemon"
     );
-    drop(silent_guard);
 }
 
 #[cfg(unix)]
 #[test]
 fn daemon_status_reports_the_initialize_proof_not_only_the_socket() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let profile = TempDir::new().expect("profile temp dir");
-    let socket = profile.path().join("status.sock");
+    let profile_dir = TempDir::new().expect("profile temp dir");
+    let profile = ProfileRoot::new(profile_dir.path());
+    let socket = profile_dir.path().join("status.sock");
     let authority = seed_socket_authority(&socket);
     let listener = UnixListener::bind(&socket).expect("bind status socket");
     let server = serve_probe_response(
@@ -843,7 +859,7 @@ fn daemon_status_reports_the_initialize_proof_not_only_the_socket() {
         env!("CARGO_PKG_VERSION"),
         authority.auth_token().to_owned(),
     );
-    let status = super::service_status(&socket, env!("CARGO_PKG_VERSION"));
+    let status = super::service_status(&profile, &socket, env!("CARGO_PKG_VERSION"));
     server.join().expect("join status server");
     assert!(
         status.contains("protocol: Ready"),
@@ -858,14 +874,13 @@ fn daemon_status_reports_the_initialize_proof_not_only_the_socket() {
 #[cfg(unix)]
 #[test]
 fn daemon_readiness_probe_classifies_authentication_denial() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let profile = TempDir::new().expect("profile temp dir");
-    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, profile.path());
-    let socket_path = profile.path().join("daemon.sock");
+    let profile_dir = TempDir::new().expect("profile temp dir");
+    let profile = ProfileRoot::new(profile_dir.path());
+    let socket_path = profile_dir.path().join("daemon.sock");
     let listener = UnixListener::bind(&socket_path).expect("bind readiness socket");
     let endpoint = tracedecay_daemon_protocol::DaemonEndpoint::Unix(socket_path.clone());
     let authority = tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
-        profile.path(),
+        profile_dir.path(),
         &endpoint,
         TEST_BUILD_VERSION,
     )
@@ -895,6 +910,7 @@ fn daemon_readiness_probe_classifies_authentication_denial() {
     });
 
     let readiness = super::probe::daemon_readiness_probe(
+        &profile,
         &socket_path,
         TEST_BUILD_VERSION,
         std::time::Duration::from_secs(1),
@@ -963,28 +979,25 @@ fn enabled_service_runner(bin: &std::path::Path) -> ServiceRunner {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn running_service_snapshot_uses_one_authenticated_connection() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("temp dir");
-    let config_home = dir.path().join("config");
     let home = dir.path().join("home");
     let fake_bin = dir.path().join("bin");
     std::fs::create_dir_all(&home).expect("home dir");
     std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
     let runner = enabled_service_runner(&fake_bin);
-    let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
-    let _home_guard = EnvVarGuard::set("HOME", &home);
-    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
+    let profile = fixture_profile(dir.path());
     let socket_path = dir.path().join("daemon.sock");
     let unit = DaemonServiceSpec {
         tracedecay_bin: PathBuf::from("/old/tracedecay"),
         socket_path: socket_path.clone(),
         data_dir_override: None,
+        profile: profile.clone(),
         remote_tls: None,
         memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
     }
     .render_unit()
     .expect("installed service unit");
-    let service_path = super::service_unit_path().expect("service unit path");
+    let service_path = super::service_unit_path(&profile).expect("service unit path");
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     std::fs::write(&service_path, unit).expect("service unit");
     let listener = UnixListener::bind(&socket_path).expect("bind readiness socket");
@@ -998,7 +1011,7 @@ fn running_service_snapshot_uses_one_authenticated_connection() {
     let (server, accepts) =
         serve_counted_authenticated_probe(listener, authority.auth_token().to_owned());
 
-    let snapshot = super::installed_service_status_snapshot(&runner, TEST_BUILD_VERSION)
+    let snapshot = super::installed_service_status_snapshot(&profile, &runner, TEST_BUILD_VERSION)
         .expect("running service snapshot");
     server.join().expect("join readiness server");
 
@@ -1039,10 +1052,12 @@ fn service_memory_limits_scale_with_physical_memory_under_a_fixed_kill_line() {
 
 #[test]
 fn systemd_unit_declares_memory_high_max_and_swap_cap() {
+    let profile = ProfileRoot::under_home("/home/fixture");
     let spec = DaemonServiceSpec {
         tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
         socket_path: PathBuf::from("/run/user/1000/tracedecay.sock"),
         data_dir_override: None,
+        profile: profile.clone(),
         remote_tls: None,
         memory: DaemonServiceMemoryLimitsV1::for_physical_memory(128 << 30),
     };
@@ -1068,15 +1083,14 @@ fn systemd_unit_declares_memory_high_max_and_swap_cap() {
 
 #[test]
 fn launchd_plist_hands_the_memory_budget_to_the_daemon_authority() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let profile = tempfile::TempDir::new().expect("profile temp dir");
+    let profile_dir = tempfile::TempDir::new().expect("profile temp dir");
     let home = tempfile::TempDir::new().expect("home temp dir");
-    let _home_guard = EnvVarGuard::set("HOME", home.path());
-    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, profile.path());
+    let profile = ProfileRoot::new(profile_dir.path()).with_home(home.path());
     let spec = DaemonServiceSpec {
         tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
-        socket_path: profile.path().join("daemon.sock"),
+        socket_path: profile_dir.path().join("daemon.sock"),
         data_dir_override: None,
+        profile: profile.clone(),
         remote_tls: None,
         memory: DaemonServiceMemoryLimitsV1::for_physical_memory(16 << 30),
     };
@@ -1094,10 +1108,12 @@ fn launchd_plist_hands_the_memory_budget_to_the_daemon_authority() {
 
 #[test]
 fn systemd_unit_quotes_exec_start_paths_that_systemd_would_misparse() {
+    let profile = ProfileRoot::under_home("/home/fixture");
     let spec = DaemonServiceSpec {
         tracedecay_bin: PathBuf::from("/opt/trace decay/bin/tracedecay"),
         socket_path: PathBuf::from("/run/user/1000/trace decay%50.sock"),
         data_dir_override: None,
+        profile: profile.clone(),
         remote_tls: None,
         memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
     };
@@ -1118,10 +1134,12 @@ fn systemd_unit_quotes_exec_start_paths_that_systemd_would_misparse() {
 /// without bounding RSS, so the unit leaves the allocator alone.
 #[test]
 fn systemd_unit_does_not_cap_malloc_arenas() {
+    let profile = ProfileRoot::under_home("/home/fixture");
     let spec = DaemonServiceSpec {
         tracedecay_bin: PathBuf::from("/usr/local/bin/tracedecay"),
         socket_path: PathBuf::from("/run/user/1000/tracedecay.sock"),
         data_dir_override: None,
+        profile: profile.clone(),
         remote_tls: None,
         memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
     };
@@ -1180,9 +1198,13 @@ fn partial_systemd_remote_tls_arguments_fail_closed() {
 fn managed_service_rejects_relative_remote_tls_paths() {
     let remote_tls = remote_tls_config("192.0.2.10:7443", "server.pem", "server-key.pem");
 
-    let error =
-        super::service_spec_with_remote_tls("/usr/local/bin/tracedecay", None, Some(remote_tls))
-            .expect_err("relative TLS paths must not depend on a service working directory");
+    let error = super::service_spec_with_remote_tls(
+        &ProfileRoot::under_home("/home/fixture"),
+        "/usr/local/bin/tracedecay",
+        None,
+        Some(remote_tls),
+    )
+    .expect_err("relative TLS paths must not depend on a service working directory");
 
     assert!(error.to_string().contains("must be absolute"));
 }
@@ -1203,6 +1225,7 @@ fn managed_service_rejects_remote_tls_path_control_characters() {
     );
 
     let error = super::service_spec_with_remote_tls(
+        &ProfileRoot::under_home("/home/fixture"),
         fixture.path().join("tracedecay"),
         None,
         Some(remote_tls),
@@ -1242,9 +1265,13 @@ fn managed_service_rejects_non_unicode_remote_tls_paths() {
         "/etc/server-key.pem",
     );
 
-    let error =
-        super::service_spec_with_remote_tls("/usr/local/bin/tracedecay", None, Some(remote_tls))
-            .expect_err("non-Unicode TLS paths must not be rendered lossily");
+    let error = super::service_spec_with_remote_tls(
+        &ProfileRoot::under_home("/home/fixture"),
+        "/usr/local/bin/tracedecay",
+        None,
+        Some(remote_tls),
+    )
+    .expect_err("non-Unicode TLS paths must not be rendered lossily");
 
     assert!(error.to_string().contains("valid Unicode"));
 }
@@ -1260,16 +1287,15 @@ fn parsed_launchd_remote_tls_paths_are_validated_before_refresh() {
 #[cfg(unix)]
 #[test]
 fn render_launchd_plist_escapes_xml_and_parser_unescapes_socket_path() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let profile = tempfile::TempDir::new().expect("profile temp dir");
+    let profile_dir = tempfile::TempDir::new().expect("profile temp dir");
     let home = tempfile::TempDir::new().expect("home temp dir");
-    let _home_guard = EnvVarGuard::set("HOME", home.path());
-    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, profile.path());
+    let profile = ProfileRoot::new(profile_dir.path()).with_home(home.path());
     let socket_path = PathBuf::from("/tmp/trace<decay>&\"socket'.sock");
     let spec = DaemonServiceSpec {
         tracedecay_bin: PathBuf::from("/opt/trace&decay/bin/tracedecay"),
         socket_path: socket_path.clone(),
         data_dir_override: None,
+        profile: profile.clone(),
         remote_tls: None,
         memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
     };
@@ -1301,14 +1327,14 @@ fn socket_path_from_launchd_plist_returns_none_for_malformed_input() {
 #[cfg(unix)]
 #[test]
 fn launchd_plist_env_value_round_trips_data_dir_override() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let profile = tempfile::TempDir::new().expect("profile temp dir");
+    let profile_dir = tempfile::TempDir::new().expect("profile temp dir");
     let home = tempfile::TempDir::new().expect("home temp dir");
-    let _home_guard = EnvVarGuard::set("HOME", home.path());
+    let profile = ProfileRoot::under_home(home.path());
     let spec = DaemonServiceSpec {
         tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
-        socket_path: profile.path().join("daemon.sock"),
-        data_dir_override: Some(profile.path().to_path_buf()),
+        socket_path: profile_dir.path().join("daemon.sock"),
+        data_dir_override: Some(profile_dir.path().to_path_buf()),
+        profile: profile.clone(),
         remote_tls: None,
         memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
     };
@@ -1317,7 +1343,7 @@ fn launchd_plist_env_value_round_trips_data_dir_override() {
 
     assert_eq!(
         super::unit_file::launchd_plist_env_value(&plist, USER_DATA_DIR_ENV),
-        Some(profile.path().display().to_string())
+        Some(profile_dir.path().display().to_string())
     );
     assert_eq!(
         super::unit_file::launchd_plist_env_value(&plist, "MISSING_VAR"),
@@ -1609,7 +1635,6 @@ fn atomic_service_write_sets_permissions_and_orders_durability_steps() {
 #[cfg(target_os = "linux")]
 #[test]
 fn refresh_installed_service_skips_missing_unit() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("temp dir");
     let config_home = dir.path().join("config");
     let fake_bin = dir.path().join("bin");
@@ -1622,13 +1647,12 @@ fn refresh_installed_service_skips_missing_unit() {
         .expect("systemctl permissions");
     let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
 
-    let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
-    let _home_guard = EnvVarGuard::set("HOME", &home);
-    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
+    let profile = fixture_profile(dir.path());
     let spec = DaemonServiceSpec {
         tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
         socket_path: PathBuf::from("/run/user/1000/tracedecay.sock"),
         data_dir_override: None,
+        profile: profile.clone(),
         remote_tls: None,
         memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
     };
@@ -1643,18 +1667,15 @@ fn refresh_installed_service_skips_missing_unit() {
 #[cfg(target_os = "linux")]
 #[test]
 fn post_update_rejects_reachable_unmanaged_daemon() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("temp dir");
     let data_dir = dir.path().join("profile");
     let config_home = dir.path().join("config");
     std::fs::create_dir_all(&data_dir).expect("data dir");
-    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &data_dir);
-    let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
-    let _socket_guard = EnvVarGuard::unset(SOCKET_ENV);
-    let socket_path = super::default_socket_path().expect("default socket");
+    let profile = ProfileRoot::new(&data_dir).with_xdg_config_home(&config_home);
+    let socket_path = super::default_socket_path(profile.data_dir()).expect("default socket");
     let _listener = std::os::unix::net::UnixListener::bind(&socket_path).expect("bind socket");
 
-    let error = super::quiesce_installed_service_before_lease(TEST_BUILD_VERSION)
+    let error = super::quiesce_installed_service_before_lease(&profile, TEST_BUILD_VERSION)
         .expect_err("unmanaged daemon must block post-update mutations");
 
     assert!(error.to_string().contains("unmanaged daemon"));
@@ -1664,7 +1685,6 @@ fn post_update_rejects_reachable_unmanaged_daemon() {
 #[cfg(target_os = "linux")]
 #[test]
 fn refresh_installed_service_preserves_existing_socket_path() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("temp dir");
     let config_home = dir.path().join("config");
     let fake_bin = dir.path().join("bin");
@@ -1677,18 +1697,17 @@ fn refresh_installed_service_preserves_existing_socket_path() {
     let stopped = dir.path().join("systemctl.stopped");
     std::fs::write(
             &systemctl,
+            bake_script_paths(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && [ -f \"$TRACEDECAY_SYSTEMCTL_STOPPED\" ] && { echo inactive; exit 3; }\n[ \"$2\" = stop ] && touch \"$TRACEDECAY_SYSTEMCTL_STOPPED\"\n[ \"$2\" = start ] && rm -f \"$TRACEDECAY_SYSTEMCTL_STOPPED\"\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
+            &[("TRACEDECAY_SYSTEMCTL_LOG", &log), ("TRACEDECAY_SYSTEMCTL_STOPPED", &stopped)],
+        ),
         )
         .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
         .expect("systemctl permissions");
     let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
 
-    let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
-    let _home_guard = EnvVarGuard::set("HOME", &home);
-    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
-    let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
-    let _stopped_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_STOPPED", &stopped);
+    let profile = fixture_profile(dir.path());
 
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
@@ -1710,13 +1729,17 @@ fn refresh_installed_service_preserves_existing_socket_path() {
         tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
         socket_path: PathBuf::from("/run/user/1000/tracedecay.sock"),
         data_dir_override: None,
+        profile: profile.clone(),
         remote_tls: None,
         memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
     };
 
-    let previous_state =
-        super::quiesce_installed_service_before_lease_with_runner(&runner, TEST_BUILD_VERSION)
-            .expect("quiesce installed service");
+    let previous_state = super::quiesce_installed_service_before_lease_with_runner(
+        &profile,
+        &runner,
+        TEST_BUILD_VERSION,
+    )
+    .expect("quiesce installed service");
     let outcome = super::refresh_installed_service_with_state_and_runner(
         &runner,
         &spec,
@@ -1732,6 +1755,7 @@ fn refresh_installed_service_preserves_existing_socket_path() {
         authority.auth_token().to_owned(),
     );
     super::restore_installed_service_after_update_with_runner(
+        &profile,
         &runner,
         previous_state,
         TEST_BUILD_VERSION,
@@ -1769,7 +1793,6 @@ fn refresh_installed_service_preserves_existing_socket_path() {
 #[cfg(target_os = "linux")]
 #[test]
 fn restore_quiesced_service_starts_existing_unit_without_rewriting_it() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("temp dir");
     let config_home = dir.path().join("config");
     let fake_bin = dir.path().join("bin");
@@ -1781,17 +1804,17 @@ fn restore_quiesced_service_starts_existing_unit_without_rewriting_it() {
     let log = dir.path().join("systemctl.log");
     std::fs::write(
         &systemctl,
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
+        bake_script_paths(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
+            &[("TRACEDECAY_SYSTEMCTL_LOG", &log)],
+        ),
     )
     .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
         .expect("systemctl permissions");
     let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
 
-    let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
-    let _home_guard = EnvVarGuard::set("HOME", &home);
-    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
-    let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
+    let profile = fixture_profile(dir.path());
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     let custom_socket = dir.path().join("custom-tracedecay.sock");
@@ -1809,6 +1832,7 @@ fn restore_quiesced_service_starts_existing_unit_without_rewriting_it() {
     );
 
     super::restore_installed_service_after_update_with_runner(
+        &profile,
         &runner,
         DaemonServiceState::RunningEnabled,
         TEST_BUILD_VERSION,
@@ -1843,7 +1867,6 @@ fn restore_quiesced_service_starts_existing_unit_without_rewriting_it() {
 #[cfg(target_os = "linux")]
 #[test]
 fn restore_after_update_does_not_activate_a_held_stopped_unit() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("temp dir");
     let config_home = dir.path().join("config");
     let fake_bin = dir.path().join("bin");
@@ -1855,17 +1878,17 @@ fn restore_after_update_does_not_activate_a_held_stopped_unit() {
     let log = dir.path().join("systemctl.log");
     std::fs::write(
         &systemctl,
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
+        bake_script_paths(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
+            &[("TRACEDECAY_SYSTEMCTL_LOG", &log)],
+        ),
     )
     .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
         .expect("systemctl permissions");
     let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
 
-    let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
-    let _home_guard = EnvVarGuard::set("HOME", &home);
-    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
-    let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
+    let profile = fixture_profile(dir.path());
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     let custom_socket = dir.path().join("custom-tracedecay.sock");
@@ -1875,6 +1898,7 @@ fn restore_after_update_does_not_activate_a_held_stopped_unit() {
     );
     std::fs::write(&service_path, &original_unit).expect("existing service unit");
     super::restore_installed_service_after_update_with_runner(
+        &profile,
         &runner,
         DaemonServiceState::StoppedDisabled,
         TEST_BUILD_VERSION,
@@ -1898,7 +1922,6 @@ fn restore_after_update_does_not_activate_a_held_stopped_unit() {
 #[cfg(target_os = "linux")]
 #[test]
 fn no_start_install_then_refresh_and_restore_has_no_activation_commands() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("temp dir");
     let config_home = dir.path().join("config");
     let fake_bin = dir.path().join("bin");
@@ -1910,17 +1933,17 @@ fn no_start_install_then_refresh_and_restore_has_no_activation_commands() {
     let log = dir.path().join("systemctl.log");
     std::fs::write(
         &systemctl,
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\ncase \"$2\" in start|restart|enable) exit 99;; esac\nexit 0\n",
+        bake_script_paths(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\ncase \"$2\" in start|restart|enable) exit 99;; esac\nexit 0\n",
+            &[("TRACEDECAY_SYSTEMCTL_LOG", &log)],
+        ),
     )
     .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
         .expect("systemctl permissions");
     let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
 
-    let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
-    let _home_guard = EnvVarGuard::set("HOME", &home);
-    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
-    let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
+    let profile = fixture_profile(dir.path());
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     std::fs::write(
@@ -1932,12 +1955,19 @@ fn no_start_install_then_refresh_and_restore_has_no_activation_commands() {
         tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
         socket_path: PathBuf::from("/custom/tracedecay.sock"),
         data_dir_override: None,
+        profile: profile.clone(),
         remote_tls: None,
         memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
     };
 
     runner
-        .install(&service_path, false, &spec.socket_path, TEST_BUILD_VERSION)
+        .install(
+            &profile,
+            &service_path,
+            false,
+            &spec.socket_path,
+            TEST_BUILD_VERSION,
+        )
         .expect("install service without starting it");
     super::refresh_installed_service_with_state_and_runner(
         &runner,
@@ -1947,6 +1977,7 @@ fn no_start_install_then_refresh_and_restore_has_no_activation_commands() {
     )
     .expect("refresh held service");
     super::restore_installed_service_after_update_with_runner(
+        &profile,
         &runner,
         DaemonServiceState::StoppedDisabled,
         TEST_BUILD_VERSION,
@@ -1964,7 +1995,6 @@ fn no_start_install_then_refresh_and_restore_has_no_activation_commands() {
 #[cfg(target_os = "linux")]
 #[test]
 fn restore_after_update_waits_for_authenticated_daemon_identity() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("temp dir");
     let config_home = dir.path().join("config");
     let fake_bin = dir.path().join("bin");
@@ -1979,9 +2009,7 @@ fn restore_after_update_waits_for_authenticated_daemon_identity() {
     .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
         .expect("systemctl permissions");
-    let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
-    let _home_guard = EnvVarGuard::set("HOME", &home);
-    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
+    let profile = fixture_profile(dir.path());
     let _path_guard = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(&fake_bin);
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
@@ -2006,6 +2034,7 @@ fn restore_after_update_waits_for_authenticated_daemon_identity() {
     );
 
     super::restore_installed_service_after_update(
+        &profile,
         DaemonServiceState::RunningEnabled,
         TEST_BUILD_VERSION,
     )
@@ -2027,7 +2056,6 @@ fn restore_after_update_waits_for_authenticated_daemon_identity() {
 #[cfg(target_os = "linux")]
 #[test]
 fn start_service_reloads_units_and_requires_authenticated_identity() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("temp dir");
     let config_home = dir.path().join("config");
     let fake_bin = dir.path().join("bin");
@@ -2042,17 +2070,16 @@ fn start_service_reloads_units_and_requires_authenticated_identity() {
     let started = dir.path().join("systemctl.started");
     std::fs::write(
             &systemctl,
+            bake_script_paths(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && [ ! -f \"$TRACEDECAY_SYSTEMCTL_STARTED\" ] && { echo inactive; exit 3; }\n[ \"$2\" = start ] && : > \"$TRACEDECAY_SYSTEMCTL_STARTED\"\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
+            &[("TRACEDECAY_SYSTEMCTL_LOG", &log), ("TRACEDECAY_SYSTEMCTL_STARTED", &started)],
+        ),
         )
         .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
         .expect("systemctl permissions");
-    let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
-    let _home_guard = EnvVarGuard::set("HOME", &home);
-    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
+    let profile = fixture_profile(dir.path());
     let _path_guard = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(&fake_bin);
-    let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
-    let _started_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_STARTED", &started);
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     let socket_path = dir.path().join("daemon.sock");
@@ -2072,7 +2099,7 @@ fn start_service_reloads_units_and_requires_authenticated_identity() {
         authority.auth_token().to_owned(),
     );
 
-    super::start_service(TEST_BUILD_VERSION).expect("start service");
+    super::start_service(&profile, TEST_BUILD_VERSION).expect("start service");
 
     acknowledged
         .recv_timeout(std::time::Duration::from_secs(10))
@@ -2094,7 +2121,6 @@ fn start_service_reloads_units_and_requires_authenticated_identity() {
 #[cfg(target_os = "linux")]
 #[test]
 fn wait_for_installed_service_state_rejects_identity_mismatch_at_the_deadline() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("temp dir");
     let config_home = dir.path().join("config");
     let fake_bin = dir.path().join("bin");
@@ -2110,9 +2136,7 @@ fn wait_for_installed_service_state_rejects_identity_mismatch_at_the_deadline() 
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
         .expect("systemctl permissions");
     let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
-    let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
-    let _home_guard = EnvVarGuard::set("HOME", &home);
-    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
+    let profile = fixture_profile(dir.path());
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     let socket_path = dir.path().join("daemon.sock");
@@ -2133,6 +2157,7 @@ fn wait_for_installed_service_state_rejects_identity_mismatch_at_the_deadline() 
     );
 
     let error = super::wait_for_installed_service_state_with(
+        &profile,
         &runner,
         DaemonServiceState::RunningEnabled,
         TEST_BUILD_VERSION,
@@ -2153,7 +2178,6 @@ fn wait_for_installed_service_state_rejects_identity_mismatch_at_the_deadline() 
 #[cfg(target_os = "linux")]
 #[test]
 fn wait_for_installed_service_state_rejects_unresponsive_socket_at_the_deadline() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("temp dir");
     let config_home = dir.path().join("config");
     let fake_bin = dir.path().join("bin");
@@ -2169,9 +2193,7 @@ fn wait_for_installed_service_state_rejects_unresponsive_socket_at_the_deadline(
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
         .expect("systemctl permissions");
     let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
-    let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
-    let _home_guard = EnvVarGuard::set("HOME", &home);
-    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
+    let profile = fixture_profile(dir.path());
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     let socket_path = dir.path().join("daemon.sock");
@@ -2189,6 +2211,7 @@ fn wait_for_installed_service_state_rejects_unresponsive_socket_at_the_deadline(
     drop(UnixListener::bind(&socket_path).expect("bind managed daemon socket"));
 
     let error = super::wait_for_installed_service_state_with(
+        &profile,
         &runner,
         DaemonServiceState::RunningEnabled,
         TEST_BUILD_VERSION,
@@ -2205,7 +2228,6 @@ fn wait_for_installed_service_state_rejects_unresponsive_socket_at_the_deadline(
 #[cfg(target_os = "linux")]
 #[test]
 fn restore_after_update_leaves_masked_and_missing_units_untouched() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("temp dir");
     let config_home = dir.path().join("config");
     let fake_bin = dir.path().join("bin");
@@ -2217,19 +2239,20 @@ fn restore_after_update_leaves_masked_and_missing_units_untouched() {
     let log = dir.path().join("systemctl.log");
     std::fs::write(
         &systemctl,
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\nexit 0\n",
+        bake_script_paths(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\nexit 0\n",
+            &[("TRACEDECAY_SYSTEMCTL_LOG", &log)],
+        ),
     )
     .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
         .expect("systemctl permissions");
     let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
 
-    let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
-    let _home_guard = EnvVarGuard::set("HOME", &home);
-    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
-    let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
+    let profile = fixture_profile(dir.path());
 
     super::restore_installed_service_after_update_with_runner(
+        &profile,
         &runner,
         DaemonServiceState::Missing,
         TEST_BUILD_VERSION,
@@ -2252,6 +2275,7 @@ fn restore_after_update_leaves_masked_and_missing_units_untouched() {
     .expect("masked unit");
 
     super::restore_installed_service_after_update_with_runner(
+        &profile,
         &runner,
         DaemonServiceState::Masked,
         TEST_BUILD_VERSION,
@@ -2269,7 +2293,6 @@ fn restore_after_update_leaves_masked_and_missing_units_untouched() {
 #[cfg(target_os = "linux")]
 #[test]
 fn refresh_installed_service_preserves_stopped_state() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("temp dir");
     let config_home = dir.path().join("config");
     let fake_bin = dir.path().join("bin");
@@ -2280,16 +2303,16 @@ fn refresh_installed_service_preserves_stopped_state() {
     let log = dir.path().join("systemctl.log");
     std::fs::write(
             &systemctl,
+            bake_script_paths(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-active ] && { echo inactive; exit 3; }\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
+            &[("TRACEDECAY_SYSTEMCTL_LOG", &log)],
+        ),
         )
         .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
         .expect("systemctl permissions");
     let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
-    let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
-    let _home_guard = EnvVarGuard::set("HOME", &home);
-    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
-    let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
+    let profile = fixture_profile(dir.path());
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     std::fs::write(
@@ -2301,6 +2324,7 @@ fn refresh_installed_service_preserves_stopped_state() {
         tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
         socket_path: PathBuf::from("/run/user/1000/tracedecay.sock"),
         data_dir_override: None,
+        profile: profile.clone(),
         remote_tls: None,
         memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
     };
@@ -2319,7 +2343,6 @@ fn refresh_installed_service_preserves_stopped_state() {
 #[cfg(target_os = "linux")]
 #[test]
 fn systemd_service_state_detects_runtime_mask() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("temp dir");
     let fake_bin = dir.path().join("bin");
     std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
@@ -2344,13 +2367,11 @@ fn systemd_service_state_detects_runtime_mask() {
 #[cfg(target_os = "linux")]
 #[test]
 fn refresh_preserves_persistent_systemd_mask_symlink() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("temp dir");
     let config_home = dir.path().join("config");
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).expect("home dir");
-    let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
-    let _home_guard = EnvVarGuard::set("HOME", &home);
+    let profile = fixture_profile(dir.path());
     let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     std::os::unix::fs::symlink("/dev/null", &service_path).expect("mask service");
@@ -2358,6 +2379,7 @@ fn refresh_preserves_persistent_systemd_mask_symlink() {
         tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
         socket_path: PathBuf::from("/run/user/1000/tracedecay.sock"),
         data_dir_override: None,
+        profile: profile.clone(),
         remote_tls: None,
         memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
     };
@@ -2378,35 +2400,48 @@ fn refresh_preserves_persistent_systemd_mask_symlink() {
 
 #[test]
 fn default_socket_path_is_profile_scoped_not_project_scoped() {
-    let _env_lock = lock_user_data_dir_test_env();
+    const OVERRIDE_CHILD: &str = "TRACEDECAY_TEST_SOCKET_OVERRIDE_CHILD";
     let profile = tempfile::TempDir::new().expect("profile temp dir");
+    let data_dir = profile.path().join(".tracedecay");
+    if let Some(override_socket) = std::env::var_os(OVERRIDE_CHILD) {
+        assert_eq!(
+            super::default_socket_path(&data_dir).expect("override socket path"),
+            PathBuf::from(override_socket)
+        );
+        return;
+    }
     let project_a = tempfile::TempDir::new().expect("project a temp dir");
     let project_b = tempfile::TempDir::new().expect("project b temp dir");
     let override_socket = profile.path().join("override.sock");
-    let _socket_guard = EnvVarGuard::unset(SOCKET_ENV);
-    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, profile.path().join(".tracedecay"));
-    let expected_socket = user_data_dir().expect("user data dir").join("daemon.sock");
+    let expected_socket = data_dir.join("daemon.sock");
 
     {
         let _cwd_guard = CurrentDirGuard::set(project_a.path());
         assert_eq!(
-            super::default_socket_path().expect("default socket path"),
+            super::default_socket_path(&data_dir).expect("default socket path"),
             expected_socket
         );
     }
     {
         let _cwd_guard = CurrentDirGuard::set(project_b.path());
         assert_eq!(
-            super::default_socket_path().expect("default socket path"),
+            super::default_socket_path(&data_dir).expect("default socket path"),
             expected_socket
         );
     }
 
-    let _override_guard = EnvVarGuard::set(SOCKET_ENV, &override_socket);
-    assert_eq!(
-        super::default_socket_path().expect("override socket path"),
-        override_socket
-    );
+    // The operator socket override is process environment; a child isolates
+    // it from concurrently running tests.
+    let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "service::tests::default_socket_path_is_profile_scoped_not_project_scoped",
+        ])
+        .env(OVERRIDE_CHILD, &override_socket)
+        .env(SOCKET_ENV, &override_socket)
+        .status()
+        .expect("run socket override child");
+    assert!(status.success(), "the operator socket override must win");
 }
 
 /// A profile rooted deep enough to overflow `sockaddr_un` (macOS `SUN_LEN`)
@@ -2416,22 +2451,16 @@ fn default_socket_path_is_profile_scoped_not_project_scoped() {
 #[cfg(unix)]
 #[test]
 fn over_long_profile_socket_path_falls_back_to_a_short_deterministic_path() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let _socket_guard = EnvVarGuard::unset(SOCKET_ENV);
     let root = tempfile::TempDir::new().expect("profile temp dir");
     let deep_profile = root.path().join("p".repeat(120)).join(".tracedecay");
     let sibling_profile = root.path().join("q".repeat(120)).join(".tracedecay");
 
-    let first = {
-        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &deep_profile);
-        let first = super::default_socket_path().expect("fallback socket path");
-        assert_eq!(
-            first,
-            super::default_socket_path().expect("repeat lookup"),
-            "clients and daemon must derive the same endpoint independently"
-        );
-        first
-    };
+    let first = super::default_socket_path(&deep_profile).expect("fallback socket path");
+    assert_eq!(
+        first,
+        super::default_socket_path(&deep_profile).expect("repeat lookup"),
+        "clients and daemon must derive the same endpoint independently"
+    );
     assert!(
         tracedecay_daemon_protocol::unix_socket_path_within_limit(&first),
         "fallback endpoint must satisfy the platform socket path limit: {}",
@@ -2443,10 +2472,8 @@ fn over_long_profile_socket_path_falls_back_to_a_short_deterministic_path() {
         first.display()
     );
 
-    let sibling = {
-        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &sibling_profile);
-        super::default_socket_path().expect("sibling fallback socket path")
-    };
+    let sibling =
+        super::default_socket_path(&sibling_profile).expect("sibling fallback socket path");
     assert_ne!(
         first, sibling,
         "distinct profiles must keep distinct daemon endpoints"
@@ -2456,15 +2483,12 @@ fn over_long_profile_socket_path_falls_back_to_a_short_deterministic_path() {
 #[cfg(unix)]
 #[test]
 fn short_socket_derivation_uses_the_installed_profile_not_the_shell_profile() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let _socket_guard = EnvVarGuard::unset(SOCKET_ENV);
     let root = tempfile::TempDir::new().expect("profile temp dir");
     let installed_profile = root.path().join("i".repeat(120)).join(".tracedecay");
     let shell_profile = root.path().join("shell-profile");
-    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &shell_profile);
 
     let installed_socket = super::default_socket_path_for_profile(&installed_profile);
-    let shell_socket = super::default_socket_path().expect("shell socket path");
+    let shell_socket = super::default_socket_path(&shell_profile).expect("shell socket path");
 
     assert!(
         tracedecay_daemon_protocol::unix_socket_path_within_limit(&installed_socket),

@@ -117,6 +117,7 @@ pub async fn hook_claude_post_compact(runtime: &HookRuntimeV1) -> i32 {
         tracing::warn!(%error, "Claude PostCompact daemon call failed");
     }
     if !super::write_hook_output(
+        &runtime.profile,
         root.as_deref(),
         tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
         &event,
@@ -137,6 +138,7 @@ pub async fn hook_claude_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
     let (root, response) = claude_post_tool_use_response(runtime, &event, started).await;
     if let Some(response) = response
         && !super::write_hook_output(
+            &runtime.profile,
             root.as_deref(),
             tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
             &event,
@@ -223,6 +225,7 @@ async fn claude_guidance_hook(runtime: &HookRuntimeV1, hook_name: &'static str) 
         |guidance| additional_context_json(hook_name, &guidance),
     );
     if !super::write_hook_output(
+        &runtime.profile,
         root.as_deref(),
         tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
         &event,

@@ -325,8 +325,8 @@ async fn queued_jsonl_projection_does_not_hide_new_message_from_the_same_session
     assert_eq!(composer.sessions_upserted, 1);
     assert!(composer.owned_session_ids.is_empty());
 
-    let jsonl = crate::runtime::with_transcript_source_home(
-        home.path().to_path_buf(),
+    let jsonl = crate::runtime::with_transcript_source_profile(
+        tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
         crate::runtime::hosts::cursor::try_ingest_cursor_project_sweep_capped(
             project.path(),
             &admission,
@@ -477,8 +477,8 @@ async fn capture_admission_failure_defers_owned_session_before_jsonl_handoff() {
             .contains("capture-deferred-composer")
     );
     assert_eq!(outcome.messages_upserted, 0);
-    let jsonl = crate::runtime::with_transcript_source_home(
-        home.path().to_path_buf(),
+    let jsonl = crate::runtime::with_transcript_source_profile(
+        tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
         crate::runtime::hosts::cursor::try_ingest_cursor_project_sweep_capped(
             project.path(),
             &admission,

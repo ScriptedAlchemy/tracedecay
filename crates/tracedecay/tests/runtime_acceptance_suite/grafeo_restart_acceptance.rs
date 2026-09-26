@@ -106,8 +106,9 @@ fn admitted_project_id(home: &Path, project: &Path) -> String {
         .to_owned()
 }
 
-fn project_handshake(project: &Path) -> DaemonHandshake {
+fn project_handshake(environment: &common::IsolatedHome, project: &Path) -> DaemonHandshake {
     tracedecay::daemon::handshake_for_current_client(
+        environment.profile(),
         Some(project.to_path_buf()),
         None,
         false,
@@ -675,7 +676,7 @@ async fn memory_relation_graph_survives_physical_daemon_restart_and_isolates_pro
     const DENIED_SELECTED_CONTENT: &str = "Selected project writes stay denied";
     const DENIED_SELECTED_ENTITY: &str = "DeniedSelectedProjectWrite";
 
-    let (environment, project_a) = common::IsolatedEnv::acquire().await;
+    let (environment, project_a) = common::IsolatedHome::new();
     let project_b = environment.scratch().join("project-b");
     std::fs::create_dir_all(&project_b).expect("project B root");
     let mut daemon = common::spawn_tracedecay_daemon(environment.home());
@@ -685,8 +686,8 @@ async fn memory_relation_graph_survives_physical_daemon_restart_and_isolates_pro
     let project_b_id = admitted_project_id(environment.home(), &project_b);
     assert_ne!(project_a_id, project_b_id);
 
-    let first_a = project_handshake(&project_a);
-    let first_b = project_handshake(&project_b);
+    let first_a = project_handshake(&environment, &project_a);
+    let first_b = project_handshake(&environment, &project_b);
     let first_a_client = tracedecay_daemon_identity::invocation_client_for_current(first_a.clone())
         .expect("project A client");
     let first_b_client = tracedecay_daemon_identity::invocation_client_for_current(first_b.clone())
@@ -870,8 +871,8 @@ async fn memory_relation_graph_survives_physical_daemon_restart_and_isolates_pro
     daemon = common::spawn_tracedecay_daemon(environment.home());
     assert_ne!(daemon.id(), first_daemon_pid);
 
-    let restarted_a = project_handshake(&project_a);
-    let restarted_b = project_handshake(&project_b);
+    let restarted_a = project_handshake(&environment, &project_a);
+    let restarted_b = project_handshake(&environment, &project_b);
     let restarted_a_client =
         tracedecay_daemon_identity::invocation_client_for_current(restarted_a.clone())
             .expect("restarted A client");

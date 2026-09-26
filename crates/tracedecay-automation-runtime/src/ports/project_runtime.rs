@@ -14,6 +14,8 @@ pub struct AutomationProjectContext {
     pub project_root: PathBuf,
     pub dashboard_root: PathBuf,
     pub host_io: HostIo,
+    /// Home of the owning profile's user, where managed skills deploy.
+    pub host_home: Option<PathBuf>,
     pub project_id: ProjectId,
     pub profile_id: UserProfileId,
     pub profile_database: RegisteredGlobalDbLeaseV1,

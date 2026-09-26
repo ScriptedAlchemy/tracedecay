@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use crate::cli::ProfileStorageAction;
 use tracedecay_global_db::profile_registry_maintenance::remove_store_directory;
@@ -10,6 +11,7 @@ use tracedecay_runtime_core::text::format_bytes;
 
 #[hotpath::measure(label = "cli.profile_storage.dispatch", future = true)]
 pub(crate) async fn handle_profile_storage_action(
+    profile: &ProfileRoot,
     action: ProfileStorageAction,
     assume_yes: bool,
 ) -> tracedecay_domain::errors::Result<()> {
@@ -19,11 +21,11 @@ pub(crate) async fn handle_profile_storage_action(
             project_id,
             project_root,
             json,
-        } => handle_storage_report(profile_root, project_id, project_root, json).await,
+        } => handle_storage_report(profile, profile_root, project_id, project_root, json).await,
         ProfileStorageAction::ResetProjectStore {
             project_root,
             project_id,
-        } => handle_reset_project_store(project_root, project_id, assume_yes),
+        } => handle_reset_project_store(profile, project_root, project_id, assume_yes),
     }
 }
 
@@ -37,12 +39,12 @@ pub(crate) async fn handle_profile_storage_action(
 /// With `--project-root`, the checkout's retired `.tracedecay/` layout is
 /// deleted too, after the store verification succeeds.
 fn handle_reset_project_store(
+    profile: &ProfileRoot,
     project_root: Option<String>,
     project_id: Option<String>,
     assume_yes: bool,
 ) -> tracedecay_domain::errors::Result<()> {
-    let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
-    reset_project_store(&profile_root, project_root, project_id, assume_yes)
+    reset_project_store(profile.data_dir(), project_root, project_id, assume_yes)
 }
 
 fn reset_project_store(
@@ -54,8 +56,7 @@ fn reset_project_store(
     let (project_id, retired_checkout) = match (project_root, project_id) {
         (Some(root), None) => {
             let root = PathBuf::from(root);
-            let layout =
-                tracedecay_runtime_core::storage::resolve_layout_for_current_profile(&root)?;
+            let layout = tracedecay_runtime_core::storage::resolve_layout(&root, profile_root)?;
             let project_id = layout.identity.project_id.ok_or_else(|| {
                 tracedecay_domain::errors::TraceDecayError::Config {
                     message: format!(
@@ -296,6 +297,7 @@ fn reset_refused_project_graph_store(
 }
 
 async fn brokered_storage_report(
+    profile: &ProfileRoot,
     project_id: Option<&str>,
     project_root: Option<&Path>,
 ) -> tracedecay_domain::errors::Result<
@@ -311,6 +313,7 @@ async fn brokered_storage_report(
         // walked, which is what makes a slow storage report diagnosable.
         let request = hotpath::future!(
             super::daemon::daemon_tool_json(
+                profile,
                 None,
                 "tracedecay_admin_cli",
                 serde_json::json!({
@@ -374,20 +377,21 @@ fn merge_storage_report_page(
 /// (plan 38 §7). The active profile routes through the daemon's retained
 /// authority; explicit offline profiles retain the bounded read-only path.
 async fn handle_storage_report(
+    profile: &ProfileRoot,
     profile_root: Option<String>,
     project_id: Option<String>,
     project_root: Option<String>,
     json: bool,
 ) -> tracedecay_domain::errors::Result<()> {
-    let default_profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
+    let default_profile_root = profile.data_dir().to_path_buf();
     let profile_root = match profile_root {
         Some(path) => PathBuf::from(path),
         None => default_profile_root.clone(),
     };
     let daemon_owns_profile = profile_root == default_profile_root;
     let project_root = project_root.map(PathBuf::from);
-    let report = if daemon_owns_profile && tracedecay_daemon_control::daemon_reachable() {
-        brokered_storage_report(project_id.as_deref(), project_root.as_deref()).await?
+    let report = if daemon_owns_profile && tracedecay_daemon_control::daemon_reachable(profile) {
+        brokered_storage_report(profile, project_id.as_deref(), project_root.as_deref()).await?
     } else {
         let offline = match (&project_id, &project_root) {
             (Some(project_id), Some(project_root)) => {

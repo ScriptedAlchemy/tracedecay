@@ -2,9 +2,6 @@ use crate::dashboard_api_support::*;
 
 #[test]
 fn storage_telemetry_endpoint_reports_observed_or_typed_budget_states() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture_without_memory().await;
@@ -63,9 +60,6 @@ fn storage_telemetry_endpoint_reports_observed_or_typed_budget_states() {
 
 #[test]
 fn storage_doctor_findings_report_every_producer_source_honestly() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture_without_memory().await;

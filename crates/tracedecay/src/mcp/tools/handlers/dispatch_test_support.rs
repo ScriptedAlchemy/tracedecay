@@ -3,7 +3,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::*;
-use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
 
 #[derive(Clone)]
 struct FixtureCodeGraphProjection {
@@ -312,8 +311,7 @@ pub(super) async fn init_sibling_registered_fixture(
     TraceDecay,
     Arc<tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1>,
 ) {
-    let profile_root =
-        tracedecay_runtime_core::storage::default_profile_root().expect("sibling profile root");
+    let profile_root = runtime.profile_root_for_test().to_path_buf();
     let project_id =
         tracedecay_domain::ProjectId::new(project_id).expect("typed sibling project identity");
     let sibling = Arc::new(
@@ -335,29 +333,32 @@ pub(super) async fn init_sibling_registered_fixture(
     (graph, sibling)
 }
 
-use crate::isolated_profile::EnvVarGuard;
-
-pub(super) struct SelectorEnv {
-    _home: EnvVarGuard,
-    _userprofile: EnvVarGuard,
-    _data_dir: EnvVarGuard,
-    _global_db: EnvVarGuard,
+/// The isolated profile `<root>/home/.tracedecay` a dispatch fixture hands to
+/// every API it drives.
+pub(super) struct SelectorProfile {
+    profile: tracedecay_runtime_core::config::ProfileRoot,
 }
 
-impl SelectorEnv {
+impl SelectorProfile {
     pub(super) fn new(root: &Path) -> Self {
         let home = root.join("home");
-        let profile_root = home.join(".tracedecay");
-        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile_root).unwrap();
-        let home = home.canonicalize().unwrap();
-        let profile_root = home.join(".tracedecay");
-        let global_db_path = profile_root.join("global.db");
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(
+            &home.join(tracedecay_runtime_core::config::TRACEDECAY_DIR),
+        )
+        .unwrap();
         Self {
-            _home: EnvVarGuard::set("HOME", &home),
-            _userprofile: EnvVarGuard::set("USERPROFILE", &home),
-            _data_dir: EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root),
-            _global_db: EnvVarGuard::set("TRACEDECAY_GLOBAL_DB", &global_db_path),
+            profile: tracedecay_runtime_core::config::ProfileRoot::under_home(
+                home.canonicalize().unwrap(),
+            ),
         }
+    }
+
+    pub(super) fn profile(&self) -> &tracedecay_runtime_core::config::ProfileRoot {
+        &self.profile
+    }
+
+    pub(super) fn data_dir(&self) -> &Path {
+        self.profile.data_dir()
     }
 }
 

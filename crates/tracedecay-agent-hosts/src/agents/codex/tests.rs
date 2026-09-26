@@ -675,6 +675,7 @@ fn codex_marketplace_identity_rejects_path_and_trust_key_injection() {
 
 fn install_ctx(home: &Path) -> InstallContext {
     InstallContext {
+        profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home),
         home: home.to_path_buf(),
         tracedecay_bin: TEST_BIN.to_string(),
         project_root: None,
@@ -721,6 +722,7 @@ fn write_exact_native_activation(home: &Path, tracedecay_bin: &str) {
 #[test]
 fn native_activation_binds_enabled_key_to_exact_marketplace_and_cache() {
     let home = tempfile::tempdir().unwrap();
+    let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
     write_exact_native_activation(home.path(), TEST_BIN);
     assert_eq!(
         codex_plugin_install_dir(home.path()),
@@ -737,31 +739,33 @@ fn native_activation_binds_enabled_key_to_exact_marketplace_and_cache() {
             .and_then(serde_json::Value::as_str),
         Some("./.codex/plugins/tracedecay")
     );
-    assert!(codex_plugin_activation_state(home.path(), Some(TEST_BIN)).unwrap());
+    assert!(codex_plugin_activation_state(profile, home.path(), Some(TEST_BIN)).unwrap());
 
     std::fs::write(
         codex_config_path(home.path()),
         "[plugins.\"tracedecay@other\"]\nenabled = true\n",
     )
     .unwrap();
-    assert!(!codex_plugin_activation_state(home.path(), Some(TEST_BIN)).unwrap());
+    assert!(!codex_plugin_activation_state(profile, home.path(), Some(TEST_BIN)).unwrap());
 }
 
 #[test]
 fn native_activation_rejects_cache_from_another_marketplace() {
     let home = tempfile::tempdir().unwrap();
+    let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
     write_exact_native_activation(home.path(), TEST_BIN);
     let exact = codex_plugin_current_cached_install_dir(home.path());
     let other = codex_plugin_cached_root(home.path(), "other").join(crate::PRODUCT_VERSION);
     std::fs::create_dir_all(other.parent().unwrap()).unwrap();
     std::fs::rename(exact, other).unwrap();
 
-    assert!(!codex_plugin_activation_state(home.path(), Some(TEST_BIN)).unwrap());
+    assert!(!codex_plugin_activation_state(profile, home.path(), Some(TEST_BIN)).unwrap());
 }
 
 #[test]
 fn native_activation_rejects_marketplace_source_path_drift() {
     let home = tempfile::tempdir().unwrap();
+    let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
     write_exact_native_activation(home.path(), TEST_BIN);
     let marketplace_path = codex_personal_marketplace_path(home.path());
     let mut marketplace: serde_json::Value =
@@ -773,43 +777,45 @@ fn native_activation_rejects_marketplace_source_path_drift() {
     )
     .unwrap();
 
-    assert!(!codex_plugin_activation_state(home.path(), Some(TEST_BIN)).unwrap());
+    assert!(!codex_plugin_activation_state(profile, home.path(), Some(TEST_BIN)).unwrap());
 }
 
 #[test]
 fn native_cache_content_drift_and_binary_relocation_require_refresh() {
     let home = tempfile::tempdir().unwrap();
+    let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
     let old_bin = "/old/bin/tracedecay";
     let new_bin = "/relocated/bin/tracedecay";
     write_exact_native_activation(home.path(), old_bin);
-    assert!(codex_plugin_is_natively_active(home.path(), Some(old_bin)).unwrap());
+    assert!(codex_plugin_is_natively_active(profile, home.path(), Some(old_bin)).unwrap());
 
     let retired_skill =
         codex_plugin_current_cached_install_dir(home.path()).join("skills/retired/SKILL.md");
     std::fs::create_dir_all(retired_skill.parent().unwrap()).unwrap();
     std::fs::write(&retired_skill, "# stale auto-discovered skill\n").unwrap();
-    assert!(!codex_plugin_is_natively_active(home.path(), Some(old_bin)).unwrap());
+    assert!(!codex_plugin_is_natively_active(profile, home.path(), Some(old_bin)).unwrap());
     std::fs::remove_file(retired_skill).unwrap();
-    assert!(codex_plugin_is_natively_active(home.path(), Some(old_bin)).unwrap());
+    assert!(codex_plugin_is_natively_active(profile, home.path(), Some(old_bin)).unwrap());
 
     std::fs::write(
         codex_plugin_current_cached_install_dir(home.path()).join(".mcp.json"),
         "{}\n",
     )
     .unwrap();
-    assert!(!codex_plugin_is_natively_active(home.path(), Some(old_bin)).unwrap());
+    assert!(!codex_plugin_is_natively_active(profile, home.path(), Some(old_bin)).unwrap());
     copy_rendered_bundle_to_native_cache(home.path(), old_bin);
-    assert!(codex_plugin_is_natively_active(home.path(), Some(old_bin)).unwrap());
+    assert!(codex_plugin_is_natively_active(profile, home.path(), Some(old_bin)).unwrap());
 
     install_codex_personal_bootstrap(home.path(), new_bin).unwrap();
-    assert!(!codex_plugin_is_natively_active(home.path(), Some(new_bin)).unwrap());
+    assert!(!codex_plugin_is_natively_active(profile, home.path(), Some(new_bin)).unwrap());
     copy_rendered_bundle_to_native_cache(home.path(), new_bin);
-    assert!(codex_plugin_is_natively_active(home.path(), Some(new_bin)).unwrap());
+    assert!(codex_plugin_is_natively_active(profile, home.path(), Some(new_bin)).unwrap());
 }
 
 #[test]
 fn redeploy_preserves_foreign_discovery_and_support_bytes() {
     let home = tempfile::tempdir().unwrap();
+    let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
     write_exact_native_activation(home.path(), TEST_BIN);
     let source = codex_plugin_install_dir(home.path());
     let operator_skill = source.join("skills/operator-owned/SKILL.md");
@@ -831,7 +837,7 @@ fn redeploy_preserves_foreign_discovery_and_support_bytes() {
     let helper = source.join("hooks/helper.py");
     let helper_bytes = b"# operator helper for tracedecay_lcm_describe\n";
     std::fs::write(&helper, helper_bytes).unwrap();
-    assert!(!codex_plugin_is_natively_active(home.path(), Some(TEST_BIN)).unwrap());
+    assert!(!codex_plugin_is_natively_active(profile, home.path(), Some(TEST_BIN)).unwrap());
 
     install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
     assert_eq!(
@@ -848,7 +854,7 @@ fn redeploy_preserves_foreign_discovery_and_support_bytes() {
     );
     assert_eq!(std::fs::read(&reference).unwrap(), reference_bytes);
     assert_eq!(std::fs::read(&helper).unwrap(), helper_bytes);
-    assert!(!codex_plugin_is_natively_active(home.path(), Some(TEST_BIN)).unwrap());
+    assert!(!codex_plugin_is_natively_active(profile, home.path(), Some(TEST_BIN)).unwrap());
 }
 
 /// `skills/tracedecay-find-impact/SKILL.md` exactly as a released bundle
@@ -858,13 +864,14 @@ const RELEASED_RETIRED_SKILL: &str = "---\nname: tracedecay-find-impact\ndescrip
 #[test]
 fn activation_retires_released_skill_files_and_converges() {
     let home = tempfile::tempdir().unwrap();
+    let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
     let cli_dir = tempfile::tempdir().unwrap();
     let _codex_cli = install_fake_codex_cli(cli_dir.path());
     write_exact_native_activation(home.path(), TEST_BIN);
     let retired_dir = codex_plugin_install_dir(home.path()).join("skills/tracedecay-find-impact");
     std::fs::create_dir_all(&retired_dir).unwrap();
     std::fs::write(retired_dir.join("SKILL.md"), RELEASED_RETIRED_SKILL).unwrap();
-    assert!(!codex_plugin_is_natively_active(home.path(), Some(TEST_BIN)).unwrap());
+    assert!(!codex_plugin_is_natively_active(profile, home.path(), Some(TEST_BIN)).unwrap());
 
     CodexIntegration
         .activate_deployed_host_registration(&install_ctx(home.path()))
@@ -875,7 +882,7 @@ fn activation_retires_released_skill_files_and_converges() {
         "activation must delete the retired skill and its emptied directory"
     );
     copy_rendered_bundle_to_native_cache(home.path(), TEST_BIN);
-    assert!(codex_plugin_is_natively_active(home.path(), Some(TEST_BIN)).unwrap());
+    assert!(codex_plugin_is_natively_active(profile, home.path(), Some(TEST_BIN)).unwrap());
 }
 
 #[test]
@@ -923,7 +930,11 @@ fn install_preview_refuses_foreign_entrypoints_as_ownership_conflict() {
     std::fs::write(&operator_skill, "---\nname: operator-owned\n---\n").unwrap();
     assert_eq!(
         CodexIntegration
-            .foreign_bundle_entrypoints(&[HostComponentV1::ContextMcp], home.path())
+            .foreign_bundle_entrypoints(
+                &[HostComponentV1::ContextMcp],
+                home.path(),
+                &home.path().join(".tracedecay"),
+            )
             .unwrap(),
         Vec::<PathBuf>::new(),
         "an MCP-only set never loads the plugin source"
@@ -952,6 +963,7 @@ fn install_preview_refuses_foreign_entrypoints_as_ownership_conflict() {
     let mut writer =
         HostBundleWriterV1::open_with_lifecycle_root(home.path(), lifecycle.path()).unwrap();
     let mut registration = crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
+        &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
         "codex",
         home.path(),
         request.lifecycle.operation,

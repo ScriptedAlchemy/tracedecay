@@ -4,10 +4,9 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use super::dispatch_test_support::{
-    SelectorEnv, dispatch_on_graph_authority, verified_graph_options,
+    SelectorProfile, dispatch_on_graph_authority, verified_graph_options,
 };
 use super::*;
-use tracedecay_project::config::lock_user_data_dir_test_env;
 
 fn graph_handlers_that_await_query() -> &'static [&'static str] {
     &[
@@ -67,14 +66,14 @@ fn graph_handlers_that_await_query() -> &'static [&'static str] {
 /// never the graph-port unavailable reason the waiter inventory would imply.
 #[tokio::test]
 async fn clone_family_tools_refuse_absent_executors_without_awaiting_graph_query() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("authority isolation");
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("clone-family-absent-executor");
     fs::create_dir_all(project.join("src")).expect("fixture sources");
     fs::write(project.join("src/lib.rs"), "pub fn widget() {}\n").expect("write fixture");
     init_committed_git_fixture(&project);
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.clone-family-absent-executor",
     )
@@ -205,14 +204,14 @@ fn query_authority_probe_args(tool_name: &str) -> serde_json::Value {
 
 #[tokio::test]
 async fn absent_query_port_fails_closed_for_every_awaiting_graph_handler() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("authority isolation");
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("query-port-absent");
     fs::create_dir_all(project.join("src")).expect("fixture sources");
     fs::write(project.join("src/lib.rs"), "pub fn widget() {}\n").expect("write fixture");
     init_committed_git_fixture(&project);
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.query-port-absent",
     )
@@ -255,14 +254,14 @@ async fn absent_query_port_fails_closed_for_every_awaiting_graph_handler() {
 /// handlers in `graph_handlers_that_await_query` return.
 #[tokio::test]
 async fn changelog_reports_absent_query_port_as_typed_coverage() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("authority isolation");
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("query-port-absent-changelog");
     fs::create_dir_all(project.join("src")).expect("fixture sources");
     fs::write(project.join("src/lib.rs"), "pub fn widget() {}\n").expect("write fixture");
     init_committed_git_fixture(&project);
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.query-port-absent-changelog",
     )
@@ -296,13 +295,13 @@ async fn changelog_reports_absent_query_port_as_typed_coverage() {
 
 #[tokio::test]
 async fn search_and_context_report_absent_query_port_as_typed_evidence() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("authority isolation");
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("query-port-absent-search");
     fs::create_dir_all(project.join("src")).expect("fixture sources");
     fs::write(project.join("src/lib.rs"), "pub fn widget() {}\n").expect("write fixture");
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.query-port-absent-search",
     )

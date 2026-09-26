@@ -112,9 +112,12 @@ async fn project_context_returns_the_project_the_caller_named() {
         .expect("seed served project");
 
     let server = tracedecay::mcp::McpServer::new_with_host_admission_test_runtime_for_test(
-        tracedecay_project::project::TraceDecay::open(cg.project_root())
-            .await
-            .expect("open served project"),
+        tracedecay_project::project::TraceDecay::open_with_options(
+            cg.project_root(),
+            crate::support::graph_open_options(&cg),
+        )
+        .await
+        .expect("open served project"),
         None,
         runtime,
     )
@@ -279,9 +282,12 @@ async fn project_context_returns_the_project_the_caller_named() {
 async fn project_context_reports_an_unmounted_registry_as_unavailable() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let server = tracedecay::mcp::McpServer::new(
-        tracedecay_project::project::TraceDecay::open(cg.project_root())
-            .await
-            .expect("open served project"),
+        tracedecay_project::project::TraceDecay::open_with_options(
+            cg.project_root(),
+            crate::support::graph_open_options(&cg),
+        )
+        .await
+        .expect("open served project"),
         None,
     )
     .await;
@@ -336,9 +342,12 @@ async fn project_context_reports_a_broken_registry_read_as_a_tool_error() {
         .execute_batch("DROP TABLE project_aliases")
         .expect("drop aliases");
     let server = tracedecay::mcp::McpServer::new_with_host_admission_test_runtime_for_test(
-        tracedecay_project::project::TraceDecay::open(cg.project_root())
-            .await
-            .expect("open served project"),
+        tracedecay_project::project::TraceDecay::open_with_options(
+            cg.project_root(),
+            crate::support::graph_open_options(&cg),
+        )
+        .await
+        .expect("open served project"),
         None,
         runtime,
     )

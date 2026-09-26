@@ -95,12 +95,12 @@ pub struct AdmittedDoctorNetworkProbes {
 /// Runs a comprehensive health check of the tracedecay installation.
 #[hotpath::measure(label = "doctor.run", future = true)]
 pub async fn run_doctor(
-    profile_root: &std::path::Path,
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
     network: AdmittedDoctorNetworkProbes,
 ) -> tracedecay_domain::errors::Result<()> {
     let _lifecycle_lease =
         match tracedecay_runtime_core::lifecycle_lease::acquire_shared_or_inherited(
-            profile_root,
+            profile.data_dir(),
             "doctor",
         ) {
             Ok(lease) => lease,
@@ -115,13 +115,13 @@ pub async fn run_doctor(
     eprintln!("\n\x1b[1mtracedecay doctor v{build_version}\x1b[0m\n");
 
     check_binary(&mut dc, build_version);
-    check_daemon_service(&mut dc, build_version);
+    check_daemon_service(&mut dc, profile, build_version);
 
     eprintln!("\n\x1b[1mCurrent project\x1b[0m");
     let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     check_inert_project_config(&mut dc, &project_path);
-    check_pr_autotrack_state(&mut dc, &project_path);
-    let daemon_status = daemon_project_status(&project_path).await;
+    check_pr_autotrack_state(&mut dc, profile.data_dir(), &project_path);
+    let daemon_status = daemon_project_status(profile, &project_path).await;
     let storage_health = match daemon_status.as_ref() {
         Ok(None) => {
             // The daemon answered, so the sole owner is reachable; it simply
@@ -145,29 +145,32 @@ pub async fn run_doctor(
                 }
             }
         }
-        Err(error) => classify_daemon_status_error(&mut dc, &project_path, error),
+        Err(error) => {
+            classify_daemon_status_error(&mut dc, profile.data_dir(), &project_path, error)
+        }
     };
-    check_watcher(&mut dc);
-    let upload_enabled = configured_upload_enabled(&project_path).await;
-    check_user_config(&mut dc, upload_enabled.as_ref());
+    check_watcher(&mut dc, profile);
+    let upload_enabled = configured_upload_enabled(profile, &project_path).await;
+    check_user_config(&mut dc, profile.data_dir(), upload_enabled.as_ref());
     check_external_tools(&mut dc);
 
-    if let Some(ref home) = agents::home_dir() {
+    if let Some(home) = profile.home() {
         // Host integration health is read-only: every `healthcheck` only reads
         // the host's own on-disk registration and reports findings. Doctor
         // never repairs them, remediation stays with `tracedecay install`.
         let hctx = HealthcheckContext {
-            home: home.clone(),
+            home: home.to_path_buf(),
+            profile: profile.clone(),
             project_path: project_path.clone(),
         };
         for agent in agents::all_integrations() {
-            if should_run_host_healthcheck(agent.as_ref(), home) {
+            if should_run_host_healthcheck(agent.as_ref(), home, profile) {
                 agent.healthcheck_with_daemon_status(
                     &mut dc,
                     &hctx,
                     daemon_status.as_ref().ok().and_then(Option::as_ref),
                 );
-            } else if let Some(surface) = agent.detected_host_surface(home) {
+            } else if let Some(surface) = agent.detected_host_surface(home, profile) {
                 // The host itself is on this machine but carries no tracedecay
                 // integration. Silence here read as "nothing to say", which
                 // hid exactly the hosts an operator most likely wants wired
@@ -259,8 +262,12 @@ fn render_schema_convergences(
     Ok(())
 }
 
-fn should_run_host_healthcheck(agent: &dyn agents::AgentIntegration, home: &Path) -> bool {
-    agent.reports_absence_to_doctor() || agent.has_tracedecay(home)
+fn should_run_host_healthcheck(
+    agent: &dyn agents::AgentIntegration,
+    home: &Path,
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
+) -> bool {
+    agent.reports_absence_to_doctor() || agent.has_tracedecay(home, profile)
 }
 
 fn render_canonical_doctor_report(
@@ -414,9 +421,11 @@ fn doctor_result(
 
 #[hotpath::measure(label = "doctor.daemon_status", future = true)]
 async fn daemon_project_status(
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
     project_path: &Path,
 ) -> tracedecay_domain::errors::Result<Option<serde_json::Value>> {
     let handshake = crate::daemon::handshake_for_current_client(
+        profile,
         Some(project_path.to_path_buf()),
         None,
         false,
@@ -449,9 +458,10 @@ async fn daemon_project_status(
 /// `Ok(None)` is the warming state where the daemon answered but has not
 /// published this project's telemetry yet.
 pub async fn daemon_language_server_read(
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
     project_path: &Path,
 ) -> tracedecay_domain::errors::Result<Option<tracedecay_contracts::doctor::LanguageServerReadV1>> {
-    let Some(status) = daemon_project_status(project_path).await? else {
+    let Some(status) = daemon_project_status(profile, project_path).await? else {
         return Ok(None);
     };
     let read = status
@@ -563,6 +573,7 @@ impl DatabaseHealth {
 /// repository walk blocked on one path, is a retryable state.
 fn classify_daemon_status_error(
     dc: &mut DoctorCounters,
+    profile_root: &Path,
     project_path: &Path,
     error: &tracedecay_domain::errors::TraceDecayError,
 ) -> DatabaseHealth {
@@ -576,7 +587,7 @@ fn classify_daemon_status_error(
     }
     report_daemon_diagnostics_unavailable(
         dc,
-        fallback_database_path(project_path).as_deref(),
+        fallback_database_path(profile_root, project_path).as_deref(),
         error,
     );
     DatabaseHealth::unknown("canonical_doctor_report_unavailable")
@@ -640,8 +651,8 @@ fn report_daemon_diagnostics_unavailable(
     }
 }
 
-fn fallback_database_path(project_path: &Path) -> Option<PathBuf> {
-    tracedecay_runtime_core::storage::resolve_enrolled_layout_for_current_profile(project_path)
+fn fallback_database_path(profile_root: &Path, project_path: &Path) -> Option<PathBuf> {
+    tracedecay_runtime_core::storage::resolve_persisted_layout(project_path, profile_root)
         .ok()
         .flatten()
         .map(|layout| layout.graph_db_path)
@@ -686,22 +697,27 @@ fn print_database_recovery_guidance(dc: &DoctorCounters, db_path: &Path) {
 ///
 /// A stopped or disabled unit is visible without treating it as permission to
 /// activate the service; it may be an intentional operator hold.
-fn check_daemon_service(dc: &mut DoctorCounters, build_version: &str) {
+fn check_daemon_service(
+    dc: &mut DoctorCounters,
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
+    build_version: &str,
+) {
     eprintln!("\n\x1b[1mDaemon service\x1b[0m");
-    let state = match tracedecay_daemon_control::installed_service_state() {
+    let state = match tracedecay_daemon_control::installed_service_state(profile) {
         Ok(state) => state,
         Err(error) => {
             dc.warn(&format!("Daemon service state could not be read: {error}"));
             return;
         }
     };
-    let proof = match tracedecay_daemon_control::installed_service_process_proof(build_version) {
-        Ok(proof) => proof,
-        Err(error) => {
-            dc.warn(&format!("Daemon process proof could not be read: {error}"));
-            return;
-        }
-    };
+    let proof =
+        match tracedecay_daemon_control::installed_service_process_proof(profile, build_version) {
+            Ok(proof) => proof,
+            Err(error) => {
+                dc.warn(&format!("Daemon process proof could not be read: {error}"));
+                return;
+            }
+        };
     let message = daemon_service_doctor_message(state, &proof);
     match daemon_service_doctor_verdict(state, &proof) {
         DaemonServiceDoctorVerdict::Pass => dc.pass(&message),
@@ -779,17 +795,17 @@ fn check_binary(dc: &mut DoctorCounters, build_version: &str) {
 /// bounded scheduler reconciliation. Absent telemetry is reported as info, not
 /// a failure, activation comes from each project's pinned configuration.
 #[hotpath::measure(label = "doctor.check.watcher")]
-fn check_watcher(dc: &mut DoctorCounters) {
+fn check_watcher(dc: &mut DoctorCounters, profile: &tracedecay_runtime_core::config::ProfileRoot) {
     eprintln!("\n\x1b[1mWatcher\x1b[0m");
 
-    if !tracedecay_daemon_control::daemon_reachable() {
+    if !tracedecay_daemon_control::daemon_reachable(profile) {
         dc.info("Daemon not running, watcher inactive; sync happens on hook/read events");
         return;
     }
 
     #[cfg(unix)]
     {
-        let events = recent_watcher_events(2000);
+        let events = recent_watcher_events(profile.data_dir(), 2000);
         if events.is_empty() {
             dc.info("Daemon running; no recent watcher telemetry in the log yet");
             return;
@@ -879,9 +895,9 @@ fn pr_autotrack_state_findings(data_root: &Path) -> std::result::Result<Vec<Stri
     }
 }
 
-fn check_pr_autotrack_state(dc: &mut DoctorCounters, project_path: &Path) {
+fn check_pr_autotrack_state(dc: &mut DoctorCounters, profile_root: &Path, project_path: &Path) {
     let Ok(Some(layout)) =
-        tracedecay_runtime_core::storage::resolve_enrolled_layout_for_current_profile(project_path)
+        tracedecay_runtime_core::storage::resolve_persisted_layout(project_path, profile_root)
     else {
         return;
     };
@@ -896,7 +912,10 @@ fn check_pr_autotrack_state(dc: &mut DoctorCounters, project_path: &Path) {
 }
 
 #[hotpath::measure(label = "doctor.config.upload", future = true)]
-async fn configured_upload_enabled(project_path: &Path) -> tracedecay_domain::errors::Result<bool> {
+async fn configured_upload_enabled(
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
+    project_path: &Path,
+) -> tracedecay_domain::errors::Result<bool> {
     let operation = ApplicationSurfaceOperation::ConfigurationGet;
     let key = SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY).map_err(|error| {
         tracedecay_domain::errors::TraceDecayError::Config {
@@ -910,6 +929,7 @@ async fn configured_upload_enabled(project_path: &Path) -> tracedecay_domain::er
             }
         })?;
     let handshake = crate::daemon::handshake_for_current_client(
+        profile,
         Some(project_path.to_path_buf()),
         None,
         false,
@@ -968,6 +988,7 @@ async fn configured_upload_enabled(project_path: &Path) -> tracedecay_domain::er
 /// Check canonical user configuration and pending upload state.
 fn check_user_config(
     dc: &mut DoctorCounters,
+    profile_root: &Path,
     upload_enabled: Result<&bool, &tracedecay_domain::errors::TraceDecayError>,
 ) {
     eprintln!("\n\x1b[1mUser config\x1b[0m");
@@ -978,10 +999,8 @@ fn check_user_config(
             "Worldwide counter upload setting unavailable from canonical configuration: {error}"
         )),
     }
-    if let Some(config_path) = tracedecay_session_memory::user_config::config_path()
-        && config_path.exists()
-    {
-        let config = tracedecay_session_memory::user_config::UserConfig::load();
+    if tracedecay_session_memory::user_config::config_path(profile_root).exists() {
+        let config = tracedecay_session_memory::user_config::UserConfig::load(profile_root);
         if config.pending_upload > 0 {
             dc.info(&format!("Pending upload: {} tokens", config.pending_upload));
         }

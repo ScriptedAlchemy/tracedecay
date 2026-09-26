@@ -10,10 +10,10 @@ use std::sync::{Arc, OnceLock};
 
 use tracedecay_configuration::config::RuntimeTraceDecayConfig;
 use tracedecay_contracts::context_scout::ContextScoutAddressV1;
-use tracedecay_domain::errors::Result;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::SourceReadContext;
 use tracedecay_runtime_core::db::{Database, DatabaseStorageTelemetryHandle};
-use tracedecay_runtime_core::storage::{self, StoreLayout};
+use tracedecay_runtime_core::storage::StoreLayout;
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
 mod automation_context;
@@ -279,6 +279,14 @@ pub struct TraceDecayOpenOptions {
 }
 
 impl TraceDecayOpenOptions {
+    /// Options that open stores of `profile`.
+    pub fn for_profile(profile: &tracedecay_runtime_core::config::ProfileRoot) -> Self {
+        Self {
+            profile_root: Some(profile.data_dir().to_path_buf()),
+            global_db_path: Some(profile.global_db_path()),
+        }
+    }
+
     fn resolved_profile_root(&self) -> Result<PathBuf> {
         if let Some(profile_root) = &self.profile_root {
             return Ok(profile_root.clone());
@@ -290,6 +298,8 @@ impl TraceDecayOpenOptions {
         {
             return Ok(parent.to_path_buf());
         }
-        storage::default_profile_root()
+        Err(TraceDecayError::Config {
+            message: "project open requires an explicit profile root".to_owned(),
+        })
     }
 }

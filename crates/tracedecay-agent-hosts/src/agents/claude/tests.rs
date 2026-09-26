@@ -132,6 +132,7 @@ fn missing_manifest_with_stale_registration_is_repairable() {
     let state = ClaudeIntegration.host_component_registration(
         HostComponentV1::Core,
         &HealthcheckContext {
+            profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             home: home.path().to_path_buf(),
             project_path: project.path().to_path_buf(),
         },
@@ -154,6 +155,7 @@ fn project_only_legacy_residue_does_not_claim_plugin_registration() {
     let state = ClaudeIntegration.host_component_registration(
         HostComponentV1::Core,
         &HealthcheckContext {
+            profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             home: home.path().to_path_buf(),
             project_path: project.path().to_path_buf(),
         },
@@ -654,6 +656,7 @@ fn activation_adds_wildcard_permission_without_replacing_user_settings() {
     });
     safe_write_json_file(&settings_path, &existing).unwrap();
     let ctx = InstallContext {
+        profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
         home: home.path().to_path_buf(),
         tracedecay_bin: tracedecay_bin.to_string(),
         project_root: None,
@@ -687,10 +690,19 @@ fn activation_adds_wildcard_permission_without_replacing_user_settings() {
 #[test]
 fn detected_host_surface_reports_claude_home() {
     let home = tempfile::tempdir().unwrap();
-    assert_eq!(ClaudeIntegration.detected_host_surface(home.path()), None);
+    assert_eq!(
+        ClaudeIntegration.detected_host_surface(
+            home.path(),
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path())
+        ),
+        None
+    );
     std::fs::create_dir_all(home.path().join(".claude")).unwrap();
     assert_eq!(
-        ClaudeIntegration.detected_host_surface(home.path()),
+        ClaudeIntegration.detected_host_surface(
+            home.path(),
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path())
+        ),
         Some(home.path().join(".claude"))
     );
 }

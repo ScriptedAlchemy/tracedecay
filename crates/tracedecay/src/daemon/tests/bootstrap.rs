@@ -184,14 +184,13 @@ fn daemon_project_route_rejects_the_user_profile_root() {
     // Portable production path: `project_route_for_handshake` is the Windows
     // and Unix authority. `DaemonEngine::project_route` is only a unix wrapper
     // around it and must not be referenced from this un-gated contract test.
-    let _profile = tracedecay_project::config::PinnedUserDataDir::new();
-    let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("pinned HOME"));
+    let home = TempDir::new().expect("owner home");
     let handshake = DaemonHandshake {
-        project_path: Some(home),
+        project_path: Some(home.path().to_path_buf()),
         ..test_handshake_defaults()
     };
 
-    let error = super::super::project_route_for_handshake(&handshake)
+    let error = super::super::project_route_for_handshake(&handshake, Some(home.path()))
         .expect_err("ambient home route must fail before project open");
 
     assert!(error.to_string().contains("ambient user/filesystem root"));
@@ -208,7 +207,7 @@ fn daemon_project_route_uses_the_product_root_identity() {
     handshake.project_path = Some(project.path().join("nested").join(".."));
 
     let (project_root, route) =
-        super::super::project_route_for_handshake(&handshake).expect("resolve project route");
+        super::super::project_route_for_handshake(&handshake, None).expect("resolve project route");
 
     let real = std::fs::canonicalize(project.path()).expect("real project path");
     #[cfg(windows)]
@@ -2305,8 +2304,9 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
         );
     }
 
-    let (_, route) =
-        super::super::DaemonEngine::project_route(&ordinary_handshake).expect("project route");
+    let (_, route) = engine
+        .project_route(&ordinary_handshake)
+        .expect("project route");
     let tasks = super::super::project_open_tasks(&engine.project_open_gates).await;
     // The terminal watch value is visible before the spawned route task's
     // JoinHandle necessarily reports finished. Let pruning observe both
@@ -2853,6 +2853,9 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
         tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
             .expect("load test profile identity");
     let store_administration = StoreAdministration::with_project_servers(Arc::clone(&owners))
+        .with_owner_profile(tracedecay_runtime_core::config::ProfileRoot::new(
+            &profile_root,
+        ))
         .with_profile_identity(profile_identity);
     store_administration
         .registered_profile_database()
@@ -3171,6 +3174,9 @@ async fn portable_project_warmup_rejects_after_shutdown_snapshot() {
         tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
             .expect("load test profile identity");
     let store_administration = StoreAdministration::with_project_servers(Arc::clone(&owners))
+        .with_owner_profile(tracedecay_runtime_core::config::ProfileRoot::new(
+            &profile_root,
+        ))
         .with_profile_identity(profile_identity);
     let project_open_gates = Arc::new(tokio::sync::Mutex::new(
         super::super::ProjectOpenGates::default(),

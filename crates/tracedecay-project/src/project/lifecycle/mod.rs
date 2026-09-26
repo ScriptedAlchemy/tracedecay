@@ -324,13 +324,14 @@ impl TraceDecay {
     #[cfg(any(test, feature = "test-helpers"))]
     #[hotpath::skip]
     pub async fn init_test_fixture_with_registered_runtime(
+        profile_root: &Path,
         project_root: &Path,
         project_id: &str,
     ) -> Result<(
         Self,
         Arc<crate::test_support::host_admission::HostAdmissionTestRuntimeV1>,
     )> {
-        let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
+        let profile_root = profile_root.to_path_buf();
         let project_id = tracedecay_domain::ProjectId::new(project_id).map_err(|error| {
             TraceDecayError::Config {
                 message: format!("invalid test fixture project identity: {error}"),
@@ -386,7 +387,8 @@ impl TraceDecay {
         )
         .await?
         .into_parts();
-        let (configuration_runtime, _) = ProjectConfigurationRuntime::open(opened)?;
+        let (configuration_runtime, _) =
+            ProjectConfigurationRuntime::open(opened, &open_options.resolved_profile_root()?)?;
         let configuration_runtime = Arc::new(configuration_runtime);
         storage::write_store_manifest(&store_layout)?;
 
@@ -421,7 +423,11 @@ impl TraceDecay {
         // refuses to advertise an identity-bearing project whose Context
         // Scout owner is absent, so init must start it too.
         tracedecay_agent_hosts::hooks::publish_hook_bindings(
-            &crate::runtime_ports::hook_runtime()?,
+            &crate::runtime_ports::hook_runtime(
+                tracedecay_runtime_core::config::ProfileRoot::new(
+                    ts.open_options.resolved_profile_root()?,
+                ),
+            )?,
             &ts.store_layout,
         )?;
         if let Some(project_id) =
@@ -620,7 +626,8 @@ impl TraceDecay {
         )
         .await?
         .into_parts();
-        let (configuration_runtime, _) = ProjectConfigurationRuntime::open(opened)?;
+        let (configuration_runtime, _) =
+            ProjectConfigurationRuntime::open(opened, &open_options.resolved_profile_root()?)?;
         let configuration_runtime = Arc::new(configuration_runtime);
         let ts = Self {
             db,
@@ -642,7 +649,11 @@ impl TraceDecay {
         };
 
         tracedecay_agent_hosts::hooks::publish_hook_bindings(
-            &crate::runtime_ports::hook_runtime()?,
+            &crate::runtime_ports::hook_runtime(
+                tracedecay_runtime_core::config::ProfileRoot::new(
+                    ts.open_options.resolved_profile_root()?,
+                ),
+            )?,
             &ts.store_layout,
         )?;
         if let Some(project_id) =
@@ -810,7 +821,8 @@ impl TraceDecay {
         )
         .await?
         .into_parts();
-        let (configuration_runtime, _) = ProjectConfigurationRuntime::open(opened)?;
+        let (configuration_runtime, _) =
+            ProjectConfigurationRuntime::open(opened, &open_options.resolved_profile_root()?)?;
         let configuration_runtime = Arc::new(configuration_runtime);
         Ok(Self {
             db,

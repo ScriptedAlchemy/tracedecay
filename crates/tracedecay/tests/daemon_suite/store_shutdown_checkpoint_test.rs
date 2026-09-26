@@ -17,7 +17,7 @@ use crate::code_index_journey::{
     stop_daemon_gracefully, wait_for_terminal_generation,
 };
 use crate::common::{
-    EnvVarGuard, IsolatedEnv, daemon_socket_path, spawn_tracedecay_daemon_with,
+    IsolatedHome, daemon_socket_path, spawn_tracedecay_daemon_logged, spawn_tracedecay_daemon_with,
     tracedecay_command_with_home,
 };
 
@@ -103,7 +103,7 @@ fn assert_clean_shutdown_log(log: &str) {
 
 #[tokio::test]
 async fn graceful_stop_truncates_profile_and_project_store_wals() {
-    let (environment, project) = IsolatedEnv::acquire().await;
+    let (environment, project) = IsolatedHome::new();
     let project = project.canonicalize().expect("canonical fixture project");
     let revision = initialize_repository(&project);
 
@@ -111,9 +111,14 @@ async fn graceful_stop_truncates_profile_and_project_store_wals() {
     let mut daemon = spawn_tracedecay_daemon_with(environment.home(), |_| {});
     let project_id = initialize_tracedecay(environment.home(), &project);
     tracedecay_project::product_runtime::register_fixture_product_runtime();
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
-            .expect("production daemon handshake");
+    let handshake = tracedecay::daemon::handshake_for_current_client(
+        environment.profile(),
+        Some(project.clone()),
+        None,
+        false,
+        false,
+    )
+    .expect("production daemon handshake");
     // Indexing starts only after the project open has registered its owners,
     // so a sealed generation proves the open settled before the stop.
     wait_for_terminal_generation(
@@ -153,13 +158,12 @@ async fn graceful_stop_truncates_profile_and_project_store_wals() {
 
 #[tokio::test]
 async fn stop_during_project_open_truncates_project_store_wals() {
-    let (environment, project) = IsolatedEnv::acquire().await;
+    let (environment, project) = IsolatedHome::new();
     let project = project.canonicalize().expect("canonical fixture project");
     initialize_repository(&project);
     let log_path = environment.scratch().join("stop-during-open.log");
-    let _daemon_log = EnvVarGuard::set("TRACEDECAY_TEST_DAEMON_LOG", &log_path);
     let socket = daemon_socket_path(environment.home());
-    let mut daemon = spawn_tracedecay_daemon_with(environment.home(), |_| {});
+    let mut daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |_| {});
 
     // Both project stores are mounted here while the open still has its full
     // server and owner registration ahead of it.
@@ -188,13 +192,12 @@ async fn stop_during_project_open_truncates_project_store_wals() {
 
 #[tokio::test]
 async fn stop_cancels_an_admitted_project_open() {
-    let (environment, project) = IsolatedEnv::acquire().await;
+    let (environment, project) = IsolatedHome::new();
     let project = project.canonicalize().expect("canonical fixture project");
     initialize_repository(&project);
     let log_path = environment.scratch().join("cancelled-open.log");
-    let _daemon_log = EnvVarGuard::set("TRACEDECAY_TEST_DAEMON_LOG", &log_path);
     let socket = daemon_socket_path(environment.home());
-    let mut daemon = spawn_tracedecay_daemon_with(environment.home(), |_| {});
+    let mut daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |_| {});
 
     // The graph store is admitted; core and full construction, each behind a
     // cancellation boundary, are still ahead of the open.

@@ -25,6 +25,7 @@
 //! <https://www.kimi.com/code/docs/en/kimi-code-cli/customization/mcp.html>.
 
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::json;
 
@@ -119,7 +120,7 @@ impl AgentIntegration for KimiIntegration {
         )?;
         install_prompt_rules(&agents_md)?;
         super::install_managed_skill_prompt_index(
-            &ctx.home,
+            ctx.profile.data_dir(),
             &agents_md,
             tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Kimi,
         )
@@ -129,6 +130,7 @@ impl AgentIntegration for KimiIntegration {
         &self,
         _components: &[super::host_bundle::HostComponentV1],
         _home: &Path,
+        _profile_root: &Path,
         project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
         Ok(vec![
@@ -170,7 +172,7 @@ impl AgentIntegration for KimiIntegration {
         // default, so that one file is this host's whole index set.
         super::doctor_check_managed_skill_prompt_indexes(
             dc,
-            &ctx.home,
+            ctx.profile.data_dir(),
             &[ctx.project_path.join("AGENTS.md")],
             tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Kimi,
         );
@@ -241,11 +243,15 @@ impl AgentIntegration for KimiIntegration {
         kimi_code_home(home).is_dir()
     }
 
-    fn primary_config_path(&self, home: &Path) -> Option<std::path::PathBuf> {
+    fn primary_config_path(
+        &self,
+        home: &Path,
+        _profile: &ProfileRoot,
+    ) -> Option<std::path::PathBuf> {
         Some(kimi_installed_json_path(&kimi_code_home(home)))
     }
 
-    fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
+    fn host_registration_paths(&self, home: &Path, _profile: &ProfileRoot) -> Vec<PathBuf> {
         let code_home = kimi_code_home(home);
         vec![
             kimi_installed_json_path(&code_home),
@@ -275,7 +281,7 @@ impl AgentIntegration for KimiIntegration {
         }
     }
 
-    fn has_tracedecay(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
         installed_json_has_tracedecay(&kimi_code_home(home))
     }
 
@@ -683,6 +689,7 @@ mod tests {
         )
         .unwrap();
         let ctx = InstallContext {
+            profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             home: home.path().to_path_buf(),
             tracedecay_bin: "/new/tracedecay".to_string(),
             project_root: None,
@@ -696,6 +703,7 @@ mod tests {
             NonInteractiveInstallOutcome::DeferredUserAction(_)
         ));
         let health_ctx = HealthcheckContext {
+            profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             home: home.path().to_path_buf(),
             project_path: home.path().join("project"),
         };
@@ -830,6 +838,7 @@ mod tests {
         .unwrap();
         let original_config = std::fs::read(kimi_user_mcp_path(&code_home)).unwrap();
         let install = InstallContext {
+            profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             home: home.path().to_path_buf(),
             tracedecay_bin: tracedecay_bin.to_string(),
             project_root: None,
@@ -863,6 +872,7 @@ mod tests {
             operation_id: [41; 16],
         };
         let mut registration = crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             "kimi",
             home.path(),
             HostBundleLifecycleOpV1::Install,
@@ -909,6 +919,7 @@ mod tests {
             operation_id: [42; 16],
         };
         let mut uninstall = crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             "kimi",
             home.path(),
             HostBundleLifecycleOpV1::Uninstall,

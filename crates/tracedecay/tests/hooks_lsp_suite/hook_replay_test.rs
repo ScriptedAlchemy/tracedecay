@@ -6,8 +6,7 @@
 //! callbacks additionally persist delivery receipts; that durable spool journey
 //! is covered by the lifecycle suite.
 //!
-//! Uses only child-process env (no process-global mutation), so it does not
-//! need `GLOBAL_DB_ENV_LOCK`.
+//! Uses only child-process env (no process-global mutation).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

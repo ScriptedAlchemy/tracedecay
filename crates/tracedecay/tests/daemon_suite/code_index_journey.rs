@@ -585,8 +585,13 @@ pub async fn wait_for_terminal_generation(
     }
 }
 
-pub async fn deliver_save(project: &Path, paths: &[&str]) {
+pub async fn deliver_save(
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
+    project: &Path,
+    paths: &[&str],
+) {
     let outcome = notify_hook_event(
+        profile,
         project,
         DaemonHookEvent::post_tool_use_edit(
             HostIntegrationIdV1::Codex,

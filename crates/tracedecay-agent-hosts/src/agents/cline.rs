@@ -8,6 +8,7 @@
 //! until a real installed-runtime fixture proves their event contract.
 
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_domain::errors::Result;
 
@@ -59,7 +60,7 @@ impl AgentIntegration for ClineIntegration {
         home.join(".cline").is_dir()
     }
 
-    fn primary_config_path(&self, home: &Path) -> Option<PathBuf> {
+    fn primary_config_path(&self, home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         Some(cline_mcp_settings_path(home))
     }
 
@@ -67,6 +68,7 @@ impl AgentIntegration for ClineIntegration {
         &self,
         components: &[super::host_bundle::HostComponentV1],
         home: &Path,
+        _profile: &ProfileRoot,
     ) -> Vec<PathBuf> {
         if components == [super::host_bundle::HostComponentV1::ContextMcp] {
             vec![cline_mcp_settings_path(home)]
@@ -115,7 +117,7 @@ impl AgentIntegration for ClineIntegration {
         Ok(())
     }
 
-    fn has_tracedecay(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
         settings_have_tracedecay(&cline_mcp_settings_path(home))
     }
 }

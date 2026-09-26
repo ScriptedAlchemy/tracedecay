@@ -69,6 +69,7 @@ mod workflow_command;
 
 use cli::*;
 use tracedecay_daemon_service::logging::StderrTracingDefault;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 pub(crate) fn current_unix_timestamp() -> i64 {
     tracedecay_runtime_core::tracedecay::current_timestamp()
@@ -683,24 +684,6 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
             }
         })?;
     }
-    if let Some(Commands::Daemon {
-        action:
-            DaemonAction::Run {
-                profile_root: Some(profile_root),
-                ..
-            },
-    }) = cli.command.as_ref()
-    {
-        // The foreground daemon is the only long-lived owner in this process.
-        // Pin its profile before Tokio starts worker threads so every canonical
-        // configuration authority observes the Task Scheduler argument.
-        unsafe {
-            std::env::set_var(
-                tracedecay_runtime_core::config::USER_DATA_DIR_ENV,
-                profile_root,
-            );
-        }
-    }
     // Route tracing events (degradation causes, ingest warnings) to stderr.
     // without a subscriber every `tracing::warn!` in the runtime is silently
     // dropped, which hid the causes behind typed catch-up reason codes. The
@@ -847,27 +830,45 @@ async fn run(cli: Cli) -> tracedecay_domain::errors::Result<CommandOutcome> {
         yes: cli.yes,
         adopt: cli.adopt,
     };
+    let profile = command_profile(cli.command.as_ref())?;
     let command = match cli.command {
         Some(cmd) => cmd,
         None => {
-            commands::handle_no_command().await?;
+            commands::handle_no_command(&profile).await?;
             return Ok(CommandOutcome::Success);
         }
     };
 
-    run_startup_preamble(&command).await;
-    dispatch_command(command, host_bundle).await
+    run_startup_preamble(&profile, &command).await;
+    dispatch_command(&profile, command, host_bundle).await
+}
+
+/// The one profile this process serves, resolved from its environment. The
+/// foreground daemon launched with `--profile-root` (the Windows task shape)
+/// serves that data directory instead of the environment's.
+fn command_profile(command: Option<&Commands>) -> tracedecay_domain::errors::Result<ProfileRoot> {
+    match command {
+        Some(Commands::Daemon {
+            action:
+                DaemonAction::Run {
+                    profile_root: Some(profile_root),
+                    ..
+                },
+        }) => Ok(ProfileRoot::from_env_with_data_dir(profile_root)),
+        _ => ProfileRoot::from_env(),
+    }
 }
 
 #[hotpath::measure(label = "cli.startup.preamble", future = true)]
-async fn run_startup_preamble(command: &Commands) {
+async fn run_startup_preamble(profile: &ProfileRoot, command: &Commands) {
     let startup_policy = CommandStartupPolicy::for_command(command);
 
     // Check first-run before any config save creates the file.
-    let is_first_run = !tracedecay_session_memory::user_config::UserConfig::exists();
+    let profile_root = profile.data_dir();
+    let is_first_run = !tracedecay_session_memory::user_config::UserConfig::exists(profile_root);
 
     let is_force_flush = matches!(command, Commands::Sync { .. } | Commands::Status { .. });
-    let mut user_config = tracedecay_session_memory::user_config::UserConfig::load();
+    let mut user_config = tracedecay_session_memory::user_config::UserConfig::load(profile_root);
     // Skip the worldwide-counter flush on hot startup paths. `try_flush`
     // makes a synchronous HTTP call which can add seconds to
     // `tracedecay serve` startup on slow networks, long enough to blow the
@@ -885,9 +886,9 @@ async fn run_startup_preamble(command: &Commands) {
         && user_config.pending_upload > 0
         && let Ok(cwd) = std::env::current_dir()
         && let Some(project_root) =
-            tracedecay_project::config::discover_project_root_with_identity(&cwd).await
+            tracedecay_project::config::discover_project_root_with_identity(profile, &cwd).await
     {
-        match commands::canonical_upload_enabled(&project_root).await {
+        match commands::canonical_upload_enabled(profile, &project_root).await {
             Ok(upload_enabled) => {
                 global::try_flush(&mut user_config, is_force_flush, upload_enabled);
             }
@@ -906,7 +907,7 @@ async fn run_startup_preamble(command: &Commands) {
         }
     }
     if !is_local_install_command(command)
-        && let Err(err) = user_config.save_if_exists()
+        && let Err(err) = user_config.save_if_exists(profile_root)
     {
         eprintln!("warning: could not save tracedecay config: {err}");
     }
@@ -918,12 +919,15 @@ async fn run_startup_preamble(command: &Commands) {
         );
     }
 
-    if startup_policy.runs_agent_install_check() {
-        tracedecay_agent_hosts::agents::claude::check_install_stale();
+    if startup_policy.runs_agent_install_check()
+        && let Some(home) = profile.home()
+    {
+        tracedecay_agent_hosts::agents::claude::check_install_stale(home);
     }
 }
 
 async fn resolve_registered_project_root(
+    profile: &ProfileRoot,
     project_id: Option<String>,
     project_path: Option<String>,
 ) -> tracedecay_domain::errors::Result<Option<PathBuf>> {
@@ -933,6 +937,7 @@ async fn resolve_registered_project_root(
         (None, None) => return Ok(None),
     };
     let context = commands::daemon_tool_json(
+        profile,
         None,
         "tracedecay_admin_cli",
         serde_json::json!({
@@ -975,14 +980,17 @@ pub(crate) fn registered_project_path_selector(
 }
 
 pub(crate) async fn resolve_cli_project_root(
+    profile: &ProfileRoot,
     path: Option<String>,
     project_id: Option<String>,
     project_path: Option<String>,
 ) -> tracedecay_domain::errors::Result<PathBuf> {
-    if let Some(root) = resolve_registered_project_root(project_id, project_path).await? {
+    if let Some(root) = resolve_registered_project_root(profile, project_id, project_path).await? {
         return Ok(root);
     }
-    Ok(tracedecay_configuration::resolve_path_with_discovery(path))
+    Ok(tracedecay_configuration::resolve_path_with_discovery(
+        profile, path,
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1186,6 +1194,7 @@ fn validate_host_bundle_options(
 }
 
 async fn dispatch_command(
+    profile: &ProfileRoot,
     command: Commands,
     host_bundle: HostBundleCliOptions,
 ) -> tracedecay_domain::errors::Result<CommandOutcome> {
@@ -1193,36 +1202,38 @@ async fn dispatch_command(
     validate_host_bundle_options(&command, family, &host_bundle)?;
     match family {
         CommandFamily::Project => {
-            dispatch_project_command(command, host_bundle.yes, host_bundle.dry_run).await?;
+            dispatch_project_command(profile, command, host_bundle.yes, host_bundle.dry_run)
+                .await?;
             Ok(CommandOutcome::Success)
         }
         CommandFamily::Runtime => {
-            dispatch_runtime_command(command).await?;
+            dispatch_runtime_command(profile, command).await?;
             Ok(CommandOutcome::Success)
         }
-        CommandFamily::Agent => dispatch_agent_command(command, host_bundle)
+        CommandFamily::Agent => dispatch_agent_command(profile, command, host_bundle)
             .await
             .map(lifecycle_command_outcome),
-        CommandFamily::Hook => dispatch_hook_command(command).await,
-        CommandFamily::Update => dispatch_update_command(command)
+        CommandFamily::Hook => dispatch_hook_command(profile, command).await,
+        CommandFamily::Update => dispatch_update_command(profile, command)
             .await
             .map(lifecycle_command_outcome),
         CommandFamily::Configuration => {
-            dispatch_configuration_command(command).await?;
+            dispatch_configuration_command(profile, command).await?;
             Ok(CommandOutcome::Success)
         }
         CommandFamily::Diagnostics => {
-            dispatch_diagnostics_command(command).await?;
+            dispatch_diagnostics_command(profile, command).await?;
             Ok(CommandOutcome::Success)
         }
         CommandFamily::Knowledge => {
-            dispatch_knowledge_command(command).await?;
+            dispatch_knowledge_command(profile, command).await?;
             Ok(CommandOutcome::Success)
         }
     }
 }
 
 async fn dispatch_project_command(
+    profile: &ProfileRoot,
     command: Commands,
     assume_yes: bool,
     dry_run: bool,
@@ -1238,6 +1249,7 @@ async fn dispatch_project_command(
         } => {
             // clap enforces that at most one of these is present.
             commands::handle_init(
+                profile,
                 path.or(path_flag),
                 skip_folders,
                 include_folders,
@@ -1254,7 +1266,15 @@ async fn dispatch_project_command(
             doctor,
             verbose,
         } => {
-            commands::handle_sync(path, skip_folders, include_folders, doctor, verbose).await?;
+            commands::handle_sync(
+                profile,
+                path,
+                skip_folders,
+                include_folders,
+                doctor,
+                verbose,
+            )
+            .await?;
         }
         Commands::Status {
             path,
@@ -1264,26 +1284,34 @@ async fn dispatch_project_command(
             short,
             runtime,
         } => {
-            status_cmd::handle_status_command(path, project_id, project_path, json, short, runtime)
-                .await?;
+            status_cmd::handle_status_command(
+                profile,
+                path,
+                project_id,
+                project_path,
+                json,
+                short,
+                runtime,
+            )
+            .await?;
         }
         Commands::Projects { action } => {
-            project_cmd::handle_projects_action(action, assume_yes, dry_run).await?;
+            project_cmd::handle_projects_action(profile, action, assume_yes, dry_run).await?;
         }
         Commands::Branch { action } => {
-            commands::handle_branch_action(action).await?;
+            commands::handle_branch_action(profile, action).await?;
         }
         Commands::Memory { action } => {
-            dispatch_memory_command(action).await?;
+            dispatch_memory_command(profile, action).await?;
         }
         Commands::Storage { action } => {
-            commands::handle_profile_storage_action(action, assume_yes).await?;
+            commands::handle_profile_storage_action(profile, action, assume_yes).await?;
         }
         Commands::Wipe { all } => {
-            commands::handle_wipe(all, assume_yes).await?;
+            commands::handle_wipe(profile, all, assume_yes).await?;
         }
         Commands::List { all } => {
-            commands::handle_list(all).await?;
+            commands::handle_list(profile, all).await?;
         }
         _ => unreachable!("non-project command passed to project dispatcher"),
     }
@@ -1291,7 +1319,10 @@ async fn dispatch_project_command(
 }
 
 #[hotpath::measure(label = "cli.memory.status", future = true)]
-async fn dispatch_memory_command(action: MemoryAction) -> tracedecay_domain::errors::Result<()> {
+async fn dispatch_memory_command(
+    profile: &ProfileRoot,
+    action: MemoryAction,
+) -> tracedecay_domain::errors::Result<()> {
     match action {
         MemoryAction::Status {
             json,
@@ -1299,8 +1330,10 @@ async fn dispatch_memory_command(action: MemoryAction) -> tracedecay_domain::err
             project_id,
             project_path,
         } => {
-            let project_path = resolve_cli_project_root(path, project_id, project_path).await?;
+            let project_path =
+                resolve_cli_project_root(profile, path, project_id, project_path).await?;
             let result = commands::daemon_tool_json(
+                profile,
                 Some(&project_path),
                 "tracedecay_memory_status",
                 serde_json::json!({ "format": "json" }),
@@ -1343,22 +1376,28 @@ fn open_dashboard_url(url: &str) -> std::io::Result<()> {
     }
 }
 
-async fn dispatch_runtime_command(command: Commands) -> tracedecay_domain::errors::Result<()> {
+async fn dispatch_runtime_command(
+    profile: &ProfileRoot,
+    command: Commands,
+) -> tracedecay_domain::errors::Result<()> {
     match command {
         Commands::Tool {
             project,
             name,
             args,
         } => {
-            tool_command::run(project, name, args).await?;
+            tool_command::run(profile, project, name, args).await?;
         }
-        Commands::Work { invocation } => work_command::run(invocation).await?,
-        Commands::Workflow { invocation } => workflow_command::run(invocation).await?,
+        Commands::Work { invocation } => work_command::run(profile, invocation).await?,
+        Commands::Workflow { invocation } => workflow_command::run(profile, invocation).await?,
         Commands::Remote { action } => {
-            hotpath::measure_block!("cli.remote.run", crate::remote_command::run(action.into()))?;
+            hotpath::measure_block!(
+                "cli.remote.run",
+                crate::remote_command::run(profile, action.into())
+            )?;
         }
         Commands::Lsp { action } => {
-            lsp_cmd::handle_lsp_action(action).await?;
+            lsp_cmd::handle_lsp_action(profile, action).await?;
         }
         Commands::Dashboard {
             path,
@@ -1366,9 +1405,10 @@ async fn dispatch_runtime_command(command: Commands) -> tracedecay_domain::error
             port,
             open,
         } => {
-            let project_path = tracedecay_configuration::resolve_path_with_discovery(path);
+            let project_path = tracedecay_configuration::resolve_path_with_discovery(profile, path);
             let result = hotpath::future!(
                 commands::daemon_tool_json(
+                    profile,
                     Some(&project_path),
                     "tracedecay_dashboard",
                     serde_json::json!({
@@ -1448,17 +1488,24 @@ async fn dispatch_runtime_command(command: Commands) -> tracedecay_domain::error
             // structured-row backfill sweep; one-shot CLI/hook processes never
             // do (they would drop the sweep mid-parse on exit).
             tracedecay_store_runtime::mark_process_long_lived_for_session_maintenance();
-            hotpath::future!(serve_cmd::run_serve(path, timings), label = "cli.serve.run").await?;
+            hotpath::future!(
+                serve_cmd::run_serve(profile, path, timings),
+                label = "cli.serve.run"
+            )
+            .await?;
         }
         Commands::Daemon { action } => {
-            dispatch_daemon_command(action).await?;
+            dispatch_daemon_command(profile, action).await?;
         }
         _ => unreachable!("non-runtime command passed to runtime dispatcher"),
     }
     Ok(())
 }
 
-async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay_domain::errors::Result<()> {
+async fn dispatch_daemon_command(
+    profile: &ProfileRoot,
+    action: DaemonAction,
+) -> tracedecay_domain::errors::Result<()> {
     match action {
         DaemonAction::Run {
             socket,
@@ -1469,7 +1516,8 @@ async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay_domain::err
         } => {
             // Long-lived host: allowed to run the structured-row sweep.
             tracedecay_store_runtime::mark_process_long_lived_for_session_maintenance();
-            let socket_path = tracedecay_daemon_control::socket_path_or_default(socket)?;
+            let socket_path =
+                tracedecay_daemon_control::socket_path_or_default(profile.data_dir(), socket)?;
             let remote_tls = tracedecay_daemon_control::RemoteBrainTlsConfig::from_optional_parts(
                 remote_listen,
                 remote_tls_cert.map(PathBuf::from),
@@ -1481,7 +1529,7 @@ async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay_domain::err
             // overflows the main thread's stack at startup (measured tonight;
             // same class as the 37MB serve_broker_socket_client machine).
             Box::pin(hotpath::future!(
-                tracedecay::daemon::run_foreground(socket_path, remote_tls),
+                tracedecay::daemon::run_foreground(profile.clone(), socket_path, remote_tls),
                 label = "cli.daemon.run"
             ))
             .await?;
@@ -1503,6 +1551,7 @@ async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay_domain::err
                 remote_tls_key.map(PathBuf::from),
             )?;
             let spec = tracedecay_daemon_control::service_spec_with_remote_tls(
+                profile,
                 tracedecay_bin,
                 socket,
                 remote_tls,
@@ -1520,12 +1569,13 @@ async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay_domain::err
                 service_path.display()
             );
             if cfg!(windows) {
-                let profile_root = tracedecay_daemon_control::installed_service_socket_path()?
-                    .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
-                    .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-                        message: "installed Windows daemon task has no absolute profile root"
-                            .to_string(),
-                    })?;
+                let profile_root =
+                    tracedecay_daemon_control::installed_service_socket_path(profile)?
+                        .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
+                        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+                            message: "installed Windows daemon task has no absolute profile root"
+                                .to_string(),
+                        })?;
                 eprintln!("Daemon profile root: {}", profile_root.display());
                 eprintln!("Daemon endpoint: authenticated loopback (authority-discovered)");
             } else {
@@ -1536,6 +1586,7 @@ async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay_domain::err
             let service_path = hotpath::measure_block!(
                 "cli.daemon.uninstall_service",
                 tracedecay_daemon_control::uninstall_service(
+                    profile,
                     !no_stop,
                     crate::product_runtime::PRODUCT_BUILD_VERSION,
                 )
@@ -1549,6 +1600,7 @@ async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay_domain::err
             hotpath::measure_block!(
                 "cli.daemon.start",
                 tracedecay_daemon_control::start_service(
+                    profile,
                     crate::product_runtime::PRODUCT_BUILD_VERSION
                 )
             )?;
@@ -1558,21 +1610,27 @@ async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay_domain::err
             hotpath::measure_block!(
                 "cli.daemon.stop",
                 tracedecay_daemon_control::stop_service(
+                    profile,
                     crate::product_runtime::PRODUCT_BUILD_VERSION
                 )
             )?;
             eprintln!("Stopped TraceDecay daemon service");
         }
         DaemonAction::Restart => {
-            hotpath::measure_block!("cli.daemon.restart", update_cmd::restart_daemon_service())?;
+            hotpath::measure_block!(
+                "cli.daemon.restart",
+                update_cmd::restart_daemon_service(profile)
+            )?;
         }
         DaemonAction::Status => {
-            let socket_path = tracedecay_daemon_control::socket_path_or_default(None)?;
+            let socket_path =
+                tracedecay_daemon_control::socket_path_or_default(profile.data_dir(), None)?;
             hotpath::measure_block!(
                 "cli.daemon.status",
                 print!(
                     "{}",
                     tracedecay_daemon_control::service_status(
+                        profile,
                         &socket_path,
                         crate::product_runtime::PRODUCT_BUILD_VERSION,
                     )
@@ -1595,6 +1653,7 @@ fn lifecycle_command_outcome(completion: agent_cmd::HostLifecycleCompletion) -> 
 }
 
 async fn dispatch_agent_command(
+    profile: &ProfileRoot,
     command: Commands,
     host_bundle: HostBundleCliOptions,
 ) -> tracedecay_domain::errors::Result<agent_cmd::HostLifecycleCompletion> {
@@ -1615,7 +1674,7 @@ async fn dispatch_agent_command(
                 }
                 crate::cli::FeedbackRollbackAction::DryRun { .. } => {}
             }
-            agent_cmd::handle_feedback_rollback_command(action).await?;
+            agent_cmd::handle_feedback_rollback_command(profile, action).await?;
             return Ok(agent_cmd::HostLifecycleCompletion::Complete);
         }
         Commands::Install {
@@ -1652,10 +1711,11 @@ async fn dispatch_agent_command(
         let agent_id = agent.ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
             message: "--local requires a project-capable --agent".to_string(),
         })?;
-        agent_cmd::handle_project_local_lifecycle_command(agent_id, operation).await?;
+        agent_cmd::handle_project_local_lifecycle_command(profile, agent_id, operation).await?;
         agent_cmd::HostLifecycleCompletion::Complete
     } else {
         agent_cmd::handle_host_lifecycle_command(
+            profile,
             agent,
             operation,
             host_bundle,
@@ -1665,14 +1725,17 @@ async fn dispatch_agent_command(
         .await?
     };
     if git_hook {
-        agent_cmd::install_requested_git_hook()?;
-    } else if operation == Operation::Install {
-        tracedecay_agent_hosts::agents::report_git_post_commit_hook_status();
+        agent_cmd::install_requested_git_hook(profile)?;
+    } else if operation == Operation::Install
+        && let Some(home) = profile.home()
+    {
+        tracedecay_agent_hosts::agents::report_git_post_commit_hook_status(home);
     }
     Ok(completion)
 }
 
 async fn dispatch_hook_command(
+    profile: &ProfileRoot,
     command: Commands,
 ) -> tracedecay_domain::errors::Result<CommandOutcome> {
     let code = match command {
@@ -1707,27 +1770,31 @@ async fn dispatch_hook_command(
         | Commands::HookOpenCodeEvent
         | Commands::HookOpenCodeToolAfter
         | Commands::HookPiEvent
-        | Commands::HookDroidEvent) => hook_cmd::handle_hook_command(hook_command).await?,
+        | Commands::HookDroidEvent) => {
+            hook_cmd::handle_hook_command(profile.clone(), hook_command).await?
+        }
         _ => unreachable!("non-hook command passed to hook dispatcher"),
     };
     Ok(CommandOutcome::Exit(code))
 }
 
 async fn dispatch_update_command(
+    profile: &ProfileRoot,
     command: Commands,
 ) -> tracedecay_domain::errors::Result<agent_cmd::HostLifecycleCompletion> {
     match command {
         Commands::Upgrade { no_reinstall } => {
-            update_cmd::run_upgrade_command(no_reinstall).await?;
+            update_cmd::run_upgrade_command(profile, no_reinstall).await?;
         }
         Commands::Update { no_reinstall } => {
-            return update_cmd::run_update_command(no_reinstall).await;
+            return update_cmd::run_update_command(profile, no_reinstall).await;
         }
         Commands::PostUpdate {
             no_reinstall,
             lifecycle_lease_token,
         } => {
             return update_cmd::run_post_update_command(
+                profile,
                 no_reinstall,
                 lifecycle_lease_token.as_deref(),
             )
@@ -1767,7 +1834,7 @@ async fn dispatch_update_command(
             Some(target) => {
                 hotpath::measure_block!(
                     "cli.channel.switch",
-                    crate::upgrade::switch_channel(&target)
+                    crate::upgrade::switch_channel(profile, &target)
                 )?;
             }
             None => {
@@ -1780,6 +1847,7 @@ async fn dispatch_update_command(
 }
 
 async fn dispatch_configuration_command(
+    profile: &ProfileRoot,
     command: Commands,
 ) -> tracedecay_domain::errors::Result<()> {
     match command {
@@ -1787,6 +1855,7 @@ async fn dispatch_configuration_command(
             let project_path = tracedecay_configuration::resolve_path(path);
             let result = hotpath::future!(
                 commands::daemon_tool_json(
+                    profile,
                     Some(&project_path),
                     "tracedecay_admin_project",
                     serde_json::json!({ "action": "counter_get" }),
@@ -1805,6 +1874,7 @@ async fn dispatch_configuration_command(
         Commands::ResetCounter { path } => {
             let project_path = tracedecay_configuration::resolve_path(path);
             let result = commands::daemon_tool_json(
+                profile,
                 Some(&project_path),
                 "tracedecay_admin_project",
                 serde_json::json!({ "action": "counter_get" }),
@@ -1818,6 +1888,7 @@ async fn dispatch_configuration_command(
                 })?;
             hotpath::future!(
                 commands::daemon_tool_json(
+                    profile,
                     Some(&project_path),
                     "tracedecay_admin_project",
                     serde_json::json!({ "action": "counter_reset" }),
@@ -1828,27 +1899,27 @@ async fn dispatch_configuration_command(
             eprintln!("Local counter reset (was {prev})");
         }
         Commands::DisableUploadCounter => {
-            commands::handle_upload_counter(false).await?;
+            commands::handle_upload_counter(profile, false).await?;
         }
         Commands::EnableUploadCounter => {
-            commands::handle_upload_counter(true).await?;
+            commands::handle_upload_counter(profile, true).await?;
         }
         Commands::Gitignore { path, action } => {
-            commands::handle_gitignore(path, action).await?;
+            commands::handle_gitignore(profile, path, action).await?;
         }
         _ => unreachable!("non-configuration command passed to configuration dispatcher"),
     }
     Ok(())
 }
 
-async fn dispatch_diagnostics_command(command: Commands) -> tracedecay_domain::errors::Result<()> {
+async fn dispatch_diagnostics_command(
+    profile: &ProfileRoot,
+    command: Commands,
+) -> tracedecay_domain::errors::Result<()> {
     match command {
         Commands::Doctor => {
             hotpath::future!(
-                tracedecay::doctor::run_doctor(
-                    &tracedecay_runtime_core::storage::default_profile_root()?,
-                    crate::cloud::doctor_network_probes(),
-                ),
+                tracedecay::doctor::run_doctor(profile, crate::cloud::doctor_network_probes(),),
                 label = "cli.doctor.run"
             )
             .await?;
@@ -1858,7 +1929,7 @@ async fn dispatch_diagnostics_command(command: Commands) -> tracedecay_domain::e
             by_model,
             export,
         } => {
-            cost_cmd::handle_cost(range, by_model, export).await?;
+            cost_cmd::handle_cost(profile, range, by_model, export).await?;
         }
         Commands::Bench {
             queries,
@@ -1866,7 +1937,7 @@ async fn dispatch_diagnostics_command(command: Commands) -> tracedecay_domain::e
             path,
             max_nodes,
         } => {
-            commands::handle_bench(queries, json, path, max_nodes).await?;
+            commands::handle_bench(profile, queries, json, path, max_nodes).await?;
         }
         Commands::Gain {
             all,
@@ -1874,42 +1945,45 @@ async fn dispatch_diagnostics_command(command: Commands) -> tracedecay_domain::e
             range,
             json,
         } => {
-            commands::handle_gain(all, history, &range, json).await?;
+            commands::handle_gain(profile, all, history, &range, json).await?;
         }
         Commands::Monitor => {
-            hotpath::measure_block!("cli.monitor.run", monitor_cmd::run())?;
+            hotpath::measure_block!("cli.monitor.run", monitor_cmd::run(profile))?;
         }
         _ => unreachable!("non-diagnostics command passed to diagnostics dispatcher"),
     }
     Ok(())
 }
 
-async fn dispatch_knowledge_command(command: Commands) -> tracedecay_domain::errors::Result<()> {
+async fn dispatch_knowledge_command(
+    profile: &ProfileRoot,
+    command: Commands,
+) -> tracedecay_domain::errors::Result<()> {
     match command {
         Commands::Git { action } => {
-            git_cmd::handle_git_action(action).await?;
+            git_cmd::handle_git_action(profile, action).await?;
         }
         Commands::Sessions { action } => {
-            sessions_cmd::handle_sessions_action(action).await?;
+            sessions_cmd::handle_sessions_action(profile, action).await?;
         }
         Commands::Analytics { action } => match action {
             AnalyticsAction::Diagnostics { all, no_sync } => {
                 hotpath::future!(
-                    analytics_cmd::run_analytics_diagnostics(all, no_sync),
+                    analytics_cmd::run_analytics_diagnostics(profile, all, no_sync),
                     label = "cli.analytics.diagnostics"
                 )
                 .await?;
             }
             AnalyticsAction::Sync => {
                 hotpath::future!(
-                    analytics_cmd::run_analytics_sync(),
+                    analytics_cmd::run_analytics_sync(profile),
                     label = "cli.analytics.sync"
                 )
                 .await?;
             }
         },
         Commands::Automation { action } => {
-            automation_cli::handle_automation_command(action).await?;
+            automation_cli::handle_automation_command(profile, action).await?;
         }
         _ => unreachable!("non-knowledge command passed to knowledge dispatcher"),
     }

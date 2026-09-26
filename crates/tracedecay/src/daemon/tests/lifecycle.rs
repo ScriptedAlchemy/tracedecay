@@ -746,6 +746,9 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
         tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
             .expect("load test profile identity");
     let store_administration = StoreAdministration::with_project_servers(Arc::clone(&owners))
+        .with_owner_profile(tracedecay_runtime_core::config::ProfileRoot::new(
+            &profile_root,
+        ))
         .with_profile_identity(profile_identity);
     // Daemon bootstrap installs the profile-scoped code-index worker plan
     // before it binds and publishes any transport endpoint
@@ -860,7 +863,7 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
                 return Ok(());
             }
             if let Some(failure) =
-                super::super::portable_cached_project_open_failure(gates.as_ref(), &handshake)
+                super::super::portable_cached_project_open_failure(gates.as_ref(), &handshake, None)
                     .await?
             {
                 return Err(failure.to_error());

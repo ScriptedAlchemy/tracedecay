@@ -897,7 +897,15 @@ impl McpServer {
                 None => self
                     .application_surface_client
                     .get_or_try_init(|| async {
+                        let profile =
+                            self.owner_profile()
+                                .ok_or_else(|| TraceDecayError::Config {
+                                    message:
+                                        "application surface client requires an owning profile"
+                                            .to_owned(),
+                                })?;
                         let handshake = crate::daemon::handshake_for_current_client(
+                            profile,
                             Some(cg.project_root().to_path_buf()),
                             self.scope_prefix.clone(),
                             false,

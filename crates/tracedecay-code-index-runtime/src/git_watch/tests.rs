@@ -708,15 +708,27 @@ async fn disabled_watcher_never_registers() {
 
 #[tokio::test]
 async fn ambient_user_profile_root_is_never_watched() {
-    let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-    let home = PathBuf::from(std::env::var_os("HOME").expect("pinned HOME"));
-    let watcher = GitWatcher::new(fast_watch_config());
+    let home = temp_repo();
+    let owner = GitWatcher::from_parts(
+        fast_watch_config(),
+        true,
+        Some(home.path().to_path_buf()),
+        MaintenanceCoordinator::default(),
+        Some(crate::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(32)),
+    );
+    let other_owner = GitWatcher::new(fast_watch_config());
 
     assert_eq!(
-        watcher.ensure_watching(&home).await,
+        owner.ensure_watching(home.path()).await,
         GitWatcherAdmission::NotRepository
     );
-    assert!(watcher.health_report().await.is_empty());
+    assert!(owner.health_report().await.is_empty());
+    assert_eq!(
+        other_owner.ensure_watching(home.path()).await,
+        GitWatcherAdmission::Ready,
+        "a repository is ambient only for the owner whose home it is"
+    );
+    other_owner.shutdown().await;
 }
 
 #[tokio::test]

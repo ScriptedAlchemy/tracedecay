@@ -2,9 +2,6 @@ use crate::dashboard_api_support::*;
 
 #[test]
 fn automation_config_uses_revisioned_current_contract() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_configuration_fixture().await;
@@ -102,9 +99,6 @@ fn automation_config_uses_revisioned_current_contract() {
 
 #[test]
 fn automation_config_rejects_retired_policy_fields() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_configuration_fixture().await;

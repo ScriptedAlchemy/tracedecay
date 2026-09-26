@@ -380,7 +380,9 @@ async fn deployment_reports_the_given_bundle_export_failures_as_partial_not_comp
     let temp = tempfile::tempdir().unwrap();
     let profile_root = profile_with_skill(temp.path(), "repo-hygiene").await;
     let _serial = serial();
-    let receipt = deploy_managed_skills_to_project(&bundle_b(), &profile_root, temp.path());
+    let home = temp.path().join("home");
+    let receipt =
+        deploy_managed_skills_to_project(&bundle_b(), Some(&home), &profile_root, temp.path());
     assert_eq!(drain(&B_LOG), ["export_hosts"]);
     assert!(drain(&A_LOG).is_empty());
     assert_eq!(receipt.status, ManagedSkillDeploymentStatus::PartialFailure);

@@ -10,6 +10,7 @@ mod profile_config;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use crate::ports::mcp_tools::{AdvertisedToolV1, advertised_tool_schemas_json, advertised_tools};
 use profile_config::{disable_plugin, enable_plugin};
@@ -48,7 +49,7 @@ impl AgentIntegration for HermesIntegration {
         _component: super::host_bundle::HostComponentV1,
         ctx: &HealthcheckContext,
     ) -> super::host_bundle::HostBundleRegistrationStateV1 {
-        hermes_registration_state(&ctx.home, None)
+        hermes_registration_state(&ctx.home, ctx.profile.data_dir(), None)
     }
 
     fn host_component_registration_for_lifecycle(
@@ -57,18 +58,18 @@ impl AgentIntegration for HermesIntegration {
         ctx: &HealthcheckContext,
         install: &InstallContext,
     ) -> super::host_bundle::HostBundleRegistrationStateV1 {
-        hermes_registration_state(&ctx.home, Some(install.dashboard))
+        hermes_registration_state(&ctx.home, ctx.profile.data_dir(), Some(install.dashboard))
     }
 
     fn is_detected(&self, home: &Path) -> bool {
         hermes_home(home).is_dir()
     }
 
-    fn primary_config_path(&self, home: &Path) -> Option<PathBuf> {
+    fn primary_config_path(&self, home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         Some(hermes_home(home).join("config.yaml"))
     }
 
-    fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
+    fn host_registration_paths(&self, home: &Path, _profile: &ProfileRoot) -> Vec<PathBuf> {
         let default_plugin = hermes_home(home).join("plugins/tracedecay");
         let mut paths = Vec::new();
         for plugin_dir in profile_plugin_dirs(home) {
@@ -90,27 +91,27 @@ impl AgentIntegration for HermesIntegration {
         &self,
         _components: &[super::host_bundle::HostComponentV1],
         home: &Path,
+        profile: &ProfileRoot,
     ) -> Result<Vec<PathBuf>> {
-        let mut paths = self.host_registration_paths(home);
-        let profile_root =
-            tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(
-                home,
-            );
+        let mut paths = self.host_registration_paths(home, profile);
         for plugin_dir in profile_plugin_dirs(home) {
-            paths.extend(managed_skill_overlay_paths(&profile_root, &plugin_dir)?);
+            paths.extend(managed_skill_overlay_paths(
+                profile.data_dir(),
+                &plugin_dir,
+            )?);
         }
         paths.sort();
         paths.dedup();
         Ok(paths)
     }
 
-    fn has_tracedecay(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
         detected_plugin_dirs(home)
             .into_iter()
             .any(|dir| dir.is_dir())
     }
 
-    fn detected_host_surface(&self, home: &Path) -> Option<PathBuf> {
+    fn detected_host_surface(&self, home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         let root = hermes_home(home);
         root.is_dir().then_some(root)
     }
@@ -118,9 +119,10 @@ impl AgentIntegration for HermesIntegration {
     fn export_managed_skills(
         &self,
         home: &Path,
-        profile_root: &Path,
+        profile: &ProfileRoot,
     ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
     {
+        let profile_root = profile.data_dir();
         let mut exports = Vec::new();
         for plugin_dir in detected_plugin_dirs(home) {
             exports.push(tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
@@ -136,6 +138,7 @@ impl AgentIntegration for HermesIntegration {
 
 fn hermes_registration_state(
     home: &Path,
+    profile_root: &Path,
     expected_dashboard: Option<bool>,
 ) -> super::host_bundle::HostBundleRegistrationStateV1 {
     use super::host_bundle::HostBundleRegistrationStateV1 as State;
@@ -160,13 +163,11 @@ fn hermes_registration_state(
     if !dashboard_wrapper::matches_policy(&default_plugin, dashboard_enabled) {
         return State::Repairable;
     }
-    let profile_root =
-        tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(home);
     for plugin_dir in plugin_dirs {
         let Some(profile_dir) = plugin_dir.parent().and_then(Path::parent) else {
             return State::Corrupt;
         };
-        let overlay_current = match managed_skill_overlay_is_current(&profile_root, &plugin_dir) {
+        let overlay_current = match managed_skill_overlay_is_current(profile_root, &plugin_dir) {
             Ok(current) => current,
             Err(_) => return State::Corrupt,
         };
@@ -708,6 +709,7 @@ mod registration_tests {
             .host_component_registration_paths_checked(
                 &[super::super::host_bundle::HostComponentV1::Core],
                 home.path(),
+                &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             )
             .unwrap();
 

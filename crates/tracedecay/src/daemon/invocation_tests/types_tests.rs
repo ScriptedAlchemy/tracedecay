@@ -996,12 +996,12 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
         FeedbackCycleInput,
     }
 
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let profile = tempfile::tempdir().expect("profile root");
     let project = tempfile::tempdir().expect("project root");
     let project_id = ProjectId::new("project.feedback.atomic-publication").expect("project id");
     let host =
         tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
-            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+            profile.path(),
             project.path(),
             project_id.clone(),
         )
@@ -1010,7 +1010,10 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
     let graph = host
         .initialize_project_graph_for_test(
             project.path(),
-            tracedecay_project::project::TraceDecayOpenOptions::default(),
+            tracedecay_project::project::TraceDecayOpenOptions {
+                profile_root: Some(profile.path().to_path_buf()),
+                global_db_path: None,
+            },
         )
         .await
         .expect("initialized project graph");

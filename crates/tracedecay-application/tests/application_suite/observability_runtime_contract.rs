@@ -92,22 +92,23 @@ async fn runtime() -> (
     tempfile::TempDir,
     tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime,
 ) {
-    let project = tempfile::tempdir().expect("project");
+    let root = tempfile::tempdir().expect("test root");
+    let project = root.path().join("project");
+    std::fs::create_dir_all(&project).expect("project");
     let project_id =
         tracedecay_domain::ProjectId::new("project.observability.v2").expect("project identifier");
     let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
-        project.path(),
+        root.path().join("profile"),
+        &project,
         project_id,
     )
     .await
     .expect("registered runtime");
-    (project, runtime)
+    (root, runtime)
 }
 
 #[tokio::test]
 async fn bounded_producer_persists_through_registered_authority_and_cancels_closed() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, runtime) = runtime().await;
     let db = runtime.project_database_arc().expect("project database");
     let scope = "project.observability.v2".to_owned();
@@ -147,7 +148,6 @@ async fn bounded_producer_persists_through_registered_authority_and_cancels_clos
 
 #[tokio::test]
 async fn bounded_producer_stamps_its_mounted_identity_and_preserves_delayed_evidence() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, runtime) = runtime().await;
     let db = runtime.project_database_arc().expect("project database");
     let scope = "project.observability.v2".to_owned();
@@ -203,7 +203,6 @@ async fn bounded_producer_stamps_its_mounted_identity_and_preserves_delayed_evid
 
 #[tokio::test]
 async fn durable_owner_replay_reuses_the_exact_delivery_across_producer_restart() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, runtime) = runtime().await;
     let db = runtime.project_database_arc().expect("project database");
     let scope = "project.observability.v2".to_owned();
@@ -274,7 +273,6 @@ async fn durable_owner_replay_reuses_the_exact_delivery_across_producer_restart(
 
 #[tokio::test]
 async fn live_queued_owner_claim_is_not_recovered_as_delayed_work() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, runtime) = runtime().await;
     let db = runtime.project_database_arc().expect("project database");
     let scope = "project.observability.v2".to_owned();
@@ -348,7 +346,6 @@ async fn live_queued_owner_claim_is_not_recovered_as_delayed_work() {
 
 #[tokio::test]
 async fn producer_idle_worker_rebuilds_a_dirty_daily_rollup_without_a_request() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, runtime) = runtime().await;
     let db = runtime.project_database_arc().expect("project database");
     let scope = "project.observability.v2".to_owned();
@@ -415,7 +412,6 @@ async fn producer_idle_worker_rebuilds_a_dirty_daily_rollup_without_a_request() 
 
 #[tokio::test]
 async fn persisted_topology_wakes_idle_rollup_after_unrelated_queue_tail() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, runtime) = runtime().await;
     let db = runtime.project_database_arc().expect("project database");
     let scope = "project.observability.v2".to_owned();
@@ -474,7 +470,6 @@ async fn persisted_topology_wakes_idle_rollup_after_unrelated_queue_tail() {
 
 #[tokio::test]
 async fn stale_daily_projection_releases_its_claim_and_leaves_the_day_dirty() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, runtime) = runtime().await;
     let db = runtime.project_database_arc().expect("project database");
     let scope = "project.observability.v2".to_owned();
@@ -529,7 +524,6 @@ async fn stale_daily_projection_releases_its_claim_and_leaves_the_day_dirty() {
 
 #[tokio::test]
 async fn restart_recovers_pending_owner_delivery_without_allocating_a_new_carrier_identity() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, runtime) = runtime().await;
     let db = runtime.project_database_arc().expect("project database");
     let scope = "project.observability.v2".to_owned();
@@ -600,7 +594,6 @@ async fn restart_recovers_pending_owner_delivery_without_allocating_a_new_carrie
 
 #[tokio::test]
 async fn nonblocking_owner_offer_is_claimed_by_worker_and_replay_keeps_first_delivery() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, runtime) = runtime().await;
     let db = runtime.project_database_arc().expect("project database");
     let scope = "project.observability.v2".to_owned();
@@ -682,7 +675,6 @@ async fn nonblocking_owner_offer_is_claimed_by_worker_and_replay_keeps_first_del
 }
 #[tokio::test]
 async fn drops_carried_by_a_later_normal_event_remain_explicit_and_counted() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, runtime) = runtime().await;
     let db = runtime.project_database_arc().expect("project database");
     let scope = "project.observability.v2".to_owned();
@@ -802,7 +794,6 @@ async fn drops_carried_by_a_later_normal_event_remain_explicit_and_counted() {
 
 #[tokio::test]
 async fn cancellation_is_bounded_when_the_registered_writer_is_blocked() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, runtime) = runtime().await;
     let db = runtime.project_database_arc().expect("project database");
     let scope = "project.observability.v2".to_owned();
@@ -847,7 +838,6 @@ async fn cancellation_is_bounded_when_the_registered_writer_is_blocked() {
 
 #[tokio::test]
 async fn aggregate_share_export_suppresses_identity_and_small_contributions() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, runtime) = runtime().await;
     let db = runtime.project_database_arc().expect("project database");
     let scope = "project.observability.v2".to_owned();
@@ -901,7 +891,6 @@ async fn aggregate_share_export_suppresses_identity_and_small_contributions() {
 
 #[tokio::test]
 async fn registered_retention_expires_detail_but_preserves_product_receipts() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, runtime) = runtime().await;
     let db = runtime.project_database_arc().expect("project database");
     let scope = "project.observability.v2".to_owned();
@@ -1033,7 +1022,7 @@ pub mod work_rollup_harness {
     }
 
     struct PreparedWorkRollupCase {
-        _pin: tracedecay_runtime_core::config::PinnedUserDataDir,
+        _profile: tempfile::TempDir,
         _runtime: RegisteredGlobalDbTestRuntime,
         database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         producer: BoundedObservabilityProducerV1,
@@ -1487,12 +1476,10 @@ pub mod work_rollup_harness {
 
     async fn prepare_work_rollup_case() -> PreparedWorkRollupCase {
         let setup_started = Instant::now();
-        let pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-        let runtime = RegisteredGlobalDbTestRuntime::profile(
-            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
-        )
-        .await
-        .expect("registered fresh-store runtime");
+        let profile = tempfile::tempdir().expect("profile");
+        let runtime = RegisteredGlobalDbTestRuntime::profile(profile.path().to_path_buf())
+            .await
+            .expect("registered fresh-store runtime");
         let database = runtime.profile_database_arc();
         let producer = BoundedObservabilityProducerV1::start(
             database.clone(),
@@ -1562,7 +1549,7 @@ pub mod work_rollup_harness {
         }
 
         PreparedWorkRollupCase {
-            _pin: pin,
+            _profile: profile,
             _runtime: runtime,
             database,
             producer,
@@ -1808,7 +1795,7 @@ pub mod work_rollup_harness {
     pub async fn run_work_rollup_case() -> WorkRollupReport {
         let total_started = Instant::now();
         let PreparedWorkRollupCase {
-            _pin,
+            _profile,
             _runtime,
             database,
             producer,
@@ -1957,7 +1944,7 @@ pub mod work_rollup_harness {
             .checked_mul(repetitions_per_window)
             .expect("bounded settled Work rollup repetition count");
         let PreparedWorkRollupCase {
-            _pin,
+            _profile,
             _runtime,
             database,
             producer,

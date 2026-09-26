@@ -3,9 +3,17 @@ use serde_json::json;
 
 #[test]
 fn settings_dashboard_api_aggregates_and_updates_config() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // The environment panel reports the serving process's own variables, so
+    // the journey runs in a child test process that pins the global DB.
+    if !crate::common::in_child_test() {
+        let pinned = tempdir_or_panic();
+        let global_db = pinned.path().join("global.db");
+        crate::common::rerun_test_in_child(
+            "settings::settings_dashboard_api_aggregates_and_updates_config",
+            &[("TRACEDECAY_GLOBAL_DB", Some(global_db.as_os_str()))],
+        );
+        return;
+    }
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(false).await;
@@ -59,8 +67,9 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             user_revision, revision,
             "project and profile values must share one configuration revision"
         );
-        let user_legacy_config_path = tracedecay_session_memory::user_config::config_path()
-            .expect("pinned profile user config path");
+        let user_legacy_config_path = tracedecay_session_memory::user_config::config_path(
+            fixture.host_runtime.profile_root(),
+        );
         let user_legacy_config_before = std::fs::read(&user_legacy_config_path).ok();
         assert!(settings["user"].get("legacy_config_path").is_none());
         assert!(
@@ -423,9 +432,6 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
 
 #[test]
 fn settings_dashboard_api_round_trips_profile_worker_selection_after_reviewed_patch() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_configuration_fixture().await;
@@ -514,9 +520,6 @@ fn settings_dashboard_api_round_trips_profile_worker_selection_after_reviewed_pa
 
 #[test]
 fn settings_patch_rejects_unreadable_pr_state_before_mutation() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     create_runtime().block_on(async {
         let fixture = start_dashboard_configuration_fixture().await;
         let agent = http_agent();

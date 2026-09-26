@@ -21,6 +21,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 /// Project-level `OpenCode` configuration file the installer writes.
 ///
@@ -121,17 +122,20 @@ impl HostAnalyzerOwnership {
         Self::from_opencode_config(&config)
     }
 
-    /// Reads the home-level `OpenCode` configuration of the running process
-    /// user (`$XDG_CONFIG_HOME/opencode/opencode.json`, else
+    /// Reads the home-level `OpenCode` configuration of the profile's user
+    /// (`$XDG_CONFIG_HOME/opencode/opencode.json`, else
     /// `~/.config/opencode/opencode.json`).
     ///
     /// The installer writes the same registration to both the project and the
     /// home level; a host that was only registered at the home level still
     /// declared its analyzer ownership, so the broker has to honor it. A
-    /// process without a resolvable home declares nothing.
-    pub fn from_opencode_process_home() -> Self {
-        match process_home_opencode_config_path() {
-            Some(path) => Self::from_opencode_config_file(&path),
+    /// profile without a home declares nothing.
+    pub fn from_opencode_profile_home(profile: &ProfileRoot) -> Self {
+        match profile.home() {
+            Some(home) => Self::from_opencode_config_file(&opencode_home_config_path(
+                home,
+                profile.xdg_config_home().map(Path::as_os_str),
+            )),
             None => Self::default(),
         }
     }
@@ -204,18 +208,6 @@ pub fn opencode_home_config_path(home: &Path, xdg_config_home: Option<&OsStr>) -
         .unwrap_or_else(|| home.join(".config"))
         .join("opencode")
         .join("opencode.json")
-}
-
-/// Resolves the running process user's home-level `OpenCode` configuration
-/// path from the ambient environment, or `None` without a resolvable home.
-fn process_home_opencode_config_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)?;
-    Some(opencode_home_config_path(
-        &home,
-        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
-    ))
 }
 
 /// Normalizes `".RS"`, `"rs"`, and `".rs"` to `"rs"`.

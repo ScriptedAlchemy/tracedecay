@@ -432,8 +432,10 @@ const REMOTE_STATUS_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// The CLI must not open a local store or construct a fresh in-process
 /// registry; this is the daemon's live mounted operational state.
-pub fn live_remote_operational_status() -> Result<RemoteOperationalStatusReadV1> {
-    let connection = tracedecay_daemon_identity::current_daemon_connection()?;
+pub fn live_remote_operational_status(
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
+) -> Result<RemoteOperationalStatusReadV1> {
+    let connection = tracedecay_daemon_identity::current_daemon_connection(profile.data_dir())?;
     let Some(endpoint) = connection.http_application_endpoint() else {
         return Err(TraceDecayError::Config {
             message: "TraceDecay daemon HTTP application endpoint is not published. Start or restart the daemon.".to_owned(),
@@ -455,7 +457,7 @@ pub fn live_remote_operational_status() -> Result<RemoteOperationalStatusReadV1>
         .header("Authorization", format!("Bearer {auth_token}"))
         .header("Origin", origin)
         .call()
-        .map_err(|_| remote_status_daemon_unavailable())?;
+        .map_err(|_| remote_status_daemon_unavailable(profile))?;
     if response.status().as_u16() != 200 {
         return Err(TraceDecayError::Config {
             message: format!(
@@ -476,9 +478,11 @@ pub fn live_remote_operational_status() -> Result<RemoteOperationalStatusReadV1>
     })
 }
 
-fn remote_status_daemon_unavailable() -> TraceDecayError {
-    match tracedecay_daemon_control::default_socket_path() {
-        Ok(socket_path) => unavailable_error(&socket_path),
+fn remote_status_daemon_unavailable(
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
+) -> TraceDecayError {
+    match tracedecay_daemon_control::default_socket_path(profile.data_dir()) {
+        Ok(socket_path) => unavailable_error(profile, &socket_path),
         Err(error) => error,
     }
 }

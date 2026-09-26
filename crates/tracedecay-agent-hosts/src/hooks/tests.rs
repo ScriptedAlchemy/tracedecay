@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use super::{hook_output_owner_event_id, run_with_test_env_lock, schedule_user_session_review};
+use super::{block_on_hook_test_runtime, hook_output_owner_event_id, schedule_user_session_review};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 fn canonical(path: &Path) -> PathBuf {
     tracedecay_runtime_core::path_safety::canonical_root_identity(path)
@@ -169,14 +170,16 @@ fn direct_hook_owner_identity_is_stable_across_retry_time() {
 #[cfg(unix)]
 #[test]
 fn session_review_hint_routes_exact_identity_to_the_daemon() {
-    run_with_test_env_lock(async {
+    block_on_hook_test_runtime(async {
+        let profile_home = tempfile::tempdir().unwrap();
+        let profile = ProfileRoot::under_home(profile_home.path());
         let daemon = super::TestDaemonHookActionGuard::install([serde_json::json!({
             "action": "user_review",
             "status": "accepted",
         })]);
 
         schedule_user_session_review(
-            &crate::ports::hook_runtime::crate_test_runtime(),
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             "claude",
             Some("session-native-17"),
         )

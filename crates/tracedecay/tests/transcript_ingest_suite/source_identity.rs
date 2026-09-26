@@ -14,7 +14,6 @@ use tracedecay_sessions::runtime::hosts::cursor::ingest_cursor_transcript_event;
 
 use crate::cline_like::{parse_offset_for_task_history, vscode_storage_root, write_task};
 use crate::codex::write_codex_rollout_with_structured_events;
-use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::{
     ingest_global_sources_for_provider, mark_test_project, observation_source_cursor,
     observation_source_cursor_for_key, open_project_session_db, try_ingest_source,
@@ -63,14 +62,9 @@ async fn cline_parse_offset_lookup_uses_path_identity_not_display_text() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn cline_registered_ingest_keeps_api_and_ui_cursors_on_their_own_sources() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
     let session_id = "cline-source-split";
@@ -81,7 +75,7 @@ async fn cline_registered_ingest_keeps_api_and_ui_cursors_on_their_own_sources()
     );
 
     let db = open_project_session_db(&project).await.unwrap();
-    ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cline)).await;
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cline)).await;
 
     let api_cursor = observation_source_cursor(&db, "cline", session_id, &project)
         .await
@@ -108,21 +102,16 @@ async fn cline_registered_ingest_keeps_api_and_ui_cursors_on_their_own_sources()
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn codex_registered_ingest_uses_the_host_v2_source_identity() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
     let session_id = "codex-source-v2";
     write_codex_rollout_with_structured_events(&home, &project, session_id);
 
     let db = open_project_session_db(&project).await.unwrap();
-    ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Codex)).await;
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Codex)).await;
 
     let expected =
         tracedecay_sessions::runtime::hosts::codex::codex_observation_source_v2(session_id)
@@ -151,18 +140,9 @@ async fn codex_registered_ingest_uses_the_host_v2_source_identity() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn cursor_search_uses_path_identity_for_the_selected_project() {
     let tmp = TempDir::new().unwrap();
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
     let profile = tmp.path().join("profile");
-    let _env_guards = [
-        EnvVarGuard::set("TRACEDECAY_DATA_DIR", &profile),
-        EnvVarGuard::set("HOME", tmp.path().join("home")),
-        EnvVarGuard::set("USERPROFILE", tmp.path().join("home")),
-    ];
     let project = tmp.path().join("project");
     crate::support::init_project_at(&project);
     init_git_repo(&project);

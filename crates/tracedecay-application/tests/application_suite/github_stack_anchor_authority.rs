@@ -58,7 +58,6 @@ fn record(
 
 #[tokio::test]
 async fn degraded_capability_persists_through_the_git_topology_authority() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let profile = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     let project_id = ProjectId::new("project.github-stack-anchor.degraded").unwrap();

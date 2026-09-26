@@ -19,8 +19,8 @@ use crate::code_index_journey::{
     RECEIPT_TIMEOUT, commit_all, git, initialize_tracedecay, search, stop_daemon_gracefully, tool,
 };
 use crate::common::{
-    EnvVarGuard, IsolatedEnv, daemon_authority_path, daemon_socket_path, http_agent_with_timeout,
-    response_to_json, spawn_tracedecay_daemon_with, tracedecay_command_with_home,
+    IsolatedHome, daemon_authority_path, daemon_socket_path, http_agent_with_timeout,
+    response_to_json, spawn_tracedecay_daemon_logged, tracedecay_command_with_home,
 };
 
 const CAUSE: &str = "code-index repository status failed: code-index classification: IO error \
@@ -32,7 +32,7 @@ const REMEDY: &str = "indexing this worktree fails the same way on every pass ov
 
 #[tokio::test]
 async fn parked_worktree_queries_carry_the_park_and_are_not_retryable() {
-    let (environment, project) = IsolatedEnv::acquire().await;
+    let (environment, project) = IsolatedHome::new();
     let project = project.canonicalize().expect("canonical fixture project");
     fs::create_dir_all(project.join("src")).expect("fixture source directory");
     fs::write(
@@ -53,13 +53,17 @@ async fn parked_worktree_queries_carry_the_park_and_are_not_retryable() {
 
     let socket = daemon_socket_path(environment.home());
     let log_path = environment.scratch().join("code-index-park-daemon.log");
-    let _daemon_log = EnvVarGuard::set("TRACEDECAY_TEST_DAEMON_LOG", &log_path);
-    let mut daemon = spawn_tracedecay_daemon_with(environment.home(), |_| {});
+    let mut daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |_| {});
     let project_id = initialize_tracedecay(environment.home(), &project);
     tracedecay_project::product_runtime::register_fixture_product_runtime();
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
-            .expect("production daemon handshake");
+    let handshake = tracedecay::daemon::handshake_for_current_client(
+        environment.profile(),
+        Some(project.clone()),
+        None,
+        false,
+        false,
+    )
+    .expect("production daemon handshake");
 
     let deadline = Instant::now() + RECEIPT_TIMEOUT;
     let searched = loop {

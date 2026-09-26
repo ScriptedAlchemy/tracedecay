@@ -21,6 +21,7 @@
 //! <https://antigravity.google/docs/cli/plugins>.
 
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::json;
 
@@ -99,7 +100,7 @@ impl AgentIntegration for AntigravityIntegration {
         home.join(".gemini/antigravity").is_dir() || home.join(".gemini/antigravity-cli").is_dir()
     }
 
-    fn primary_config_path(&self, home: &Path) -> Option<PathBuf> {
+    fn primary_config_path(&self, home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         Some(mcp_config_path(home))
     }
 
@@ -107,6 +108,7 @@ impl AgentIntegration for AntigravityIntegration {
         &self,
         components: &[HostComponentV1],
         home: &Path,
+        _profile: &ProfileRoot,
     ) -> Vec<PathBuf> {
         if components != [HostComponentV1::ContextMcp] {
             return Vec::new();
@@ -135,7 +137,7 @@ impl AgentIntegration for AntigravityIntegration {
         true
     }
 
-    fn has_tracedecay(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
         antigravity_registration_state(home, None) == HostBundleRegistrationStateV1::Current
     }
 }
@@ -323,6 +325,7 @@ mod tests {
 
     fn install_context(home: &Path, binary: &str) -> InstallContext {
         InstallContext {
+            profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home),
             home: home.to_path_buf(),
             tracedecay_bin: binary.to_string(),
             project_root: None,

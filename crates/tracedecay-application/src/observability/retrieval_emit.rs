@@ -424,22 +424,25 @@ mod tests {
     const WINDOWS: i64 = 100;
 
     struct Harness {
+        _profile: tempfile::TempDir,
         _project: tempfile::TempDir,
         runtime: tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime,
         scope: String,
     }
 
     async fn harness(scope: &str) -> Harness {
+        let profile = tempfile::tempdir().expect("profile");
         let project = tempfile::tempdir().expect("project");
         let project_id = tracedecay_domain::ProjectId::new(scope).expect("project id");
         let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+            profile.path().to_path_buf(),
             project.path(),
             project_id.clone(),
         )
         .await
         .expect("registered runtime");
         Harness {
+            _profile: profile,
             _project: project,
             runtime,
             scope: project_id.as_str().to_owned(),
@@ -519,7 +522,6 @@ mod tests {
 
     #[tokio::test]
     async fn planner_admission_reaches_the_rollup_with_requested_as_its_denominator() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = harness("project.retrieval.planner").await;
         let cells = rollup_cells(&harness, |day| {
             // Half the windows admit one of three requested lanes; the rest
@@ -571,7 +573,6 @@ mod tests {
 
     #[tokio::test]
     async fn retriever_contributions_are_denominated_by_what_the_lane_returned() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = harness("project.retrieval.retriever").await;
         let cells = rollup_cells(&harness, |day| {
             retriever_envelope(
@@ -608,7 +609,6 @@ mod tests {
 
     #[tokio::test]
     async fn unhydrated_synthesis_publishes_no_point_value() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = harness("project.retrieval.synthesis").await;
         // Token accounting is unavailable before hydration, so the projection
         // reports partial coverage. The rollup must refuse a point value
@@ -645,7 +645,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_denied_source_is_censored_in_the_rollup_and_never_a_zero_match() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = harness("project.retrieval.source").await;
         // Two eligible sources per window: one searched, one denied. The
         // denied one must land in `censored`, leaving the searched numerator
@@ -686,7 +685,6 @@ mod tests {
 
     #[tokio::test]
     async fn only_independently_observed_context_use_enters_the_numerator() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = harness("project.retrieval.context").await;
         // One window in three is an independently verified use, one is a
         // censored linkage, one is a cited-but-unverified use. Only the first
@@ -731,7 +729,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_full_queue_accounts_the_drop_instead_of_losing_it_silently() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = harness("project.retrieval.bounded").await;
         let db = harness
             .runtime
@@ -802,7 +799,6 @@ mod tests {
 
     #[tokio::test]
     async fn opting_in_is_shared_and_opting_out_is_retained_locally_only() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let consent_for = |scope: &str, previous, current, day: i64| {
             consent_envelope(
                 &LaneIdentity::direct(

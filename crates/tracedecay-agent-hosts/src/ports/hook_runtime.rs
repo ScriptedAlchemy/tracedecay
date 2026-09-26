@@ -32,12 +32,15 @@ use serde_json::Value;
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::ProjectId;
 use tracedecay_hooks::DaemonHookEvent;
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_runtime_core::storage::StoreLayout;
 
 use tracedecay_domain::errors::Result;
 
-/// Invokes one daemon tool by name and yields its single JSON payload.
+/// Invokes one daemon tool of a profile by name and yields its single JSON
+/// payload.
 pub type DaemonToolInvoker = for<'a> fn(
+    &'a ProfileRoot,
     Option<&'a Path>,
     &'a str,
     Value,
@@ -45,16 +48,24 @@ pub type DaemonToolInvoker = for<'a> fn(
 )
     -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>>;
 
-/// Resolves a checkout through the root's registered identity authority.
+/// Resolves a checkout in one profile through the root's registered identity
+/// authority.
 pub type ProjectRootResolver =
-    for<'a> fn(&'a Path) -> Pin<Box<dyn Future<Output = Option<PathBuf>> + Send + 'a>>;
+    for<'a> fn(
+        &'a ProfileRoot,
+        &'a Path,
+    ) -> Pin<Box<dyn Future<Output = Option<PathBuf>> + Send + 'a>>;
 
 /// Resolves the typed project/repository/worktree scope used by Hook bindings.
 pub type HookScopeResolver = fn(&Path, &ProjectId) -> std::result::Result<ResolvedScope, String>;
 
-/// Publishes one legacy daemon hook event through the root daemon runtime.
-pub type HookEventNotifier =
-    for<'a> fn(&'a Path, DaemonHookEvent) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+/// Publishes one legacy daemon hook event of a profile through the root
+/// daemon runtime.
+pub type HookEventNotifier = for<'a> fn(
+    &'a ProfileRoot,
+    &'a Path,
+    DaemonHookEvent,
+) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
 /// Reads the daemon-published telemetry timing decision without store I/O.
 ///
@@ -62,20 +73,26 @@ pub type HookEventNotifier =
 /// published no authoritative override for this checkout.
 pub type HookTimingGate = fn(&Path) -> Option<bool>;
 
-/// Reports whether one checkout has an initialized canonical store.
-pub type ProjectInitializationGate = fn(&Path) -> bool;
+/// Reports whether one checkout has an initialized canonical store in a
+/// profile.
+pub type ProjectInitializationGate = fn(&ProfileRoot, &Path) -> bool;
 
-/// Resolves the canonical store layout through registered project identity.
+/// Resolves the canonical store layout in a profile through registered
+/// project identity.
 pub type StoreLayoutResolver =
-    for<'a> fn(&'a Path) -> Pin<Box<dyn Future<Output = Result<StoreLayout>> + Send + 'a>>;
+    for<'a> fn(
+        &'a ProfileRoot,
+        &'a Path,
+    ) -> Pin<Box<dyn Future<Output = Result<StoreLayout>> + Send + 'a>>;
 
-/// The root-owned capabilities every hook path needs, as one value.
+/// The root-owned capabilities every hook path needs, as one value: the
+/// profile the hook process serves and plain function pointers into the root.
 ///
-/// Plain function pointers, so the handle is `Copy` and the root can build it
-/// wherever a hook path starts; no field can be missing while the others are
-/// present.
-#[derive(Clone, Copy)]
+/// The root builds it wherever a hook path starts; no field can be missing
+/// while the others are present.
+#[derive(Clone)]
 pub struct HookRuntimeV1 {
+    pub profile: ProfileRoot,
     pub daemon_tool: DaemonToolInvoker,
     pub project_root_resolver: ProjectRootResolver,
     pub scope_resolver: HookScopeResolver,
@@ -90,7 +107,7 @@ pub(crate) use test_runtime::crate_test_runtime;
 
 #[cfg(test)]
 mod test_runtime {
-    use super::{HookRuntimeV1, Result, StoreLayout, Value};
+    use super::{HookRuntimeV1, ProfileRoot, Result, StoreLayout, Value};
     use std::future::Future;
     use std::path::{Path, PathBuf};
     use std::pin::Pin;
@@ -103,6 +120,7 @@ mod test_runtime {
     }
 
     fn daemon_tool<'a>(
+        _: &'a ProfileRoot,
         _: Option<&'a Path>,
         tool_name: &'a str,
         _: Value,
@@ -111,7 +129,10 @@ mod test_runtime {
         Box::pin(async move { Err(unavailable(&format!("daemon tool '{tool_name}'"))) })
     }
 
-    fn project_root(_: &Path) -> Pin<Box<dyn Future<Output = Option<PathBuf>> + Send + '_>> {
+    fn project_root<'a>(
+        _: &'a ProfileRoot,
+        _: &'a Path,
+    ) -> Pin<Box<dyn Future<Output = Option<PathBuf>> + Send + 'a>> {
         Box::pin(async { None })
     }
 
@@ -122,10 +143,11 @@ mod test_runtime {
         Err("crate test hook runtime has no scope resolver".to_owned())
     }
 
-    fn notify(
-        _: &Path,
+    fn notify<'a>(
+        _: &'a ProfileRoot,
+        _: &'a Path,
         _: tracedecay_hooks::DaemonHookEvent,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async {})
     }
 
@@ -136,21 +158,26 @@ mod test_runtime {
     /// The kernel's durable local markers. Production answers this through the
     /// registered identity authority; this crate's tests seed the markers
     /// directly, so the fixture reads them.
-    fn initialized(project_root: &Path) -> bool {
+    fn initialized(_: &ProfileRoot, project_root: &Path) -> bool {
         tracedecay_runtime_core::storage::has_repository_identity_marker(project_root)
     }
 
-    fn layout(_: &Path) -> Pin<Box<dyn Future<Output = Result<StoreLayout>> + Send + '_>> {
+    fn layout<'a>(
+        _: &'a ProfileRoot,
+        _: &'a Path,
+    ) -> Pin<Box<dyn Future<Output = Result<StoreLayout>> + Send + 'a>> {
         Box::pin(async { Err(unavailable("store layout resolver")) })
     }
 
-    /// This crate's explicit test handle: no daemon, no registry, no layout.
+    /// This crate's explicit test handle for `profile`: no daemon, no
+    /// registry, no layout.
     ///
     /// Tests that reach a hook-runtime reader pass this in, so their
     /// dependency is stated at the call rather than inferred from a global
     /// being absent. Every field answers the same way for every caller.
-    pub(crate) fn crate_test_runtime() -> HookRuntimeV1 {
+    pub(crate) fn crate_test_runtime(profile: ProfileRoot) -> HookRuntimeV1 {
         HookRuntimeV1 {
+            profile,
             daemon_tool,
             project_root_resolver: project_root,
             scope_resolver: scope,

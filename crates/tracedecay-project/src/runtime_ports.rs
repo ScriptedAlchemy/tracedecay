@@ -19,8 +19,10 @@
 
 use std::future::Future;
 use std::path::Path;
+
 use std::pin::Pin;
 use std::sync::OnceLock;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::Value;
 
@@ -112,8 +114,8 @@ fn register_agent_host_ports() {
 ///
 /// Project open publishes hook bindings through this handle. Hook entry
 /// points hold an explicit handle from [`hook_runtime_with`] instead.
-pub fn hook_runtime() -> Result<HookRuntimeV1> {
-    Ok(hook_runtime_with(require_runtime_ports()?))
+pub fn hook_runtime(profile: ProfileRoot) -> Result<HookRuntimeV1> {
+    Ok(hook_runtime_with(profile, require_runtime_ports()?))
 }
 
 /// The hook runtime handle: every capability a hook path needs, as one `Copy`
@@ -126,14 +128,18 @@ pub fn hook_runtime() -> Result<HookRuntimeV1> {
 /// own function and constant round-tripped through the root, and their
 /// readers now call them directly.
 #[must_use]
-pub fn hook_runtime_with(daemon_client: DaemonClientPortsV1) -> HookRuntimeV1 {
+pub fn hook_runtime_with(
+    profile: ProfileRoot,
+    daemon_client: DaemonClientPortsV1,
+) -> HookRuntimeV1 {
     HookRuntimeV1 {
+        profile,
         daemon_tool: daemon_client.daemon_tool,
         project_root_resolver: resolve_project_root_with_identity,
         scope_resolver: resolve_hook_scope,
         event_notifier: daemon_client.event_notifier,
         timing_gate: hook_timings_enabled,
-        project_initialization_gate: crate::project::TraceDecay::is_initialized,
+        project_initialization_gate: crate::project::TraceDecay::is_initialized_in_profile,
         store_layout_resolver: resolve_hook_store_layout,
     }
 }
@@ -156,6 +162,7 @@ pub fn fixture_daemon_client_ports() -> DaemonClientPortsV1 {
 
 #[cfg(any(test, feature = "test-helpers"))]
 fn fixture_daemon_tool<'a>(
+    _profile: &'a ProfileRoot,
     _project_root: Option<&'a Path>,
     tool_name: &'a str,
     _arguments: Value,
@@ -171,10 +178,11 @@ fn fixture_daemon_tool<'a>(
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
-fn fixture_notify_hook_event(
-    _project_root: &Path,
+fn fixture_notify_hook_event<'a>(
+    _profile: &'a ProfileRoot,
+    _project_root: &'a Path,
     _event: tracedecay_hooks::DaemonHookEvent,
-) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
     Box::pin(async {})
 }
 
@@ -215,11 +223,12 @@ fn run_codex_app_server_prompt(
         .map_err(|error| error.to_string())
 }
 
-fn resolve_project_root_with_identity(
-    start: &Path,
-) -> Pin<Box<dyn Future<Output = Option<std::path::PathBuf>> + Send + '_>> {
+fn resolve_project_root_with_identity<'a>(
+    profile: &'a ProfileRoot,
+    start: &'a Path,
+) -> Pin<Box<dyn Future<Output = Option<std::path::PathBuf>> + Send + 'a>> {
     Box::pin(hotpath::future!(
-        crate::config::discover_project_root_with_identity(start),
+        crate::config::discover_project_root_with_identity(profile, start),
         label = "runtime_ports.resolve_project_root"
     ))
 }
@@ -239,12 +248,19 @@ fn hook_timings_enabled(project_root: &Path) -> Option<bool> {
         .map(|telemetry| telemetry.timings)
 }
 
-fn resolve_hook_store_layout(
-    project_root: &Path,
-) -> Pin<Box<dyn Future<Output = Result<tracedecay_runtime_core::storage::StoreLayout>> + Send + '_>>
+fn resolve_hook_store_layout<'a>(
+    profile: &'a ProfileRoot,
+    project_root: &'a Path,
+) -> Pin<Box<dyn Future<Output = Result<tracedecay_runtime_core::storage::StoreLayout>> + Send + 'a>>
 {
     Box::pin(hotpath::future!(
-        crate::project::TraceDecay::resolve_store_layout_for_identity(project_root),
+        async move {
+            crate::project::TraceDecay::resolve_store_layout_for_identity_with_options(
+                project_root,
+                &crate::project::TraceDecayOpenOptions::for_profile(profile),
+            )
+            .await
+        },
         label = "runtime_ports.resolve_store_layout"
     ))
 }
@@ -256,18 +272,12 @@ mod tests {
     /// Registration is process-global and every slot is a `OnceLock`, so the
     /// whole suite shares one installation. Doing it once here keeps the
     /// assertions below independent of test order.
-    ///
-    /// The returned guard pins profile discovery at an empty tempdir: several
-    /// of these adapters read the owner's real profile, which no test may
-    /// touch.
-    fn registered() -> crate::config::PinnedUserDataDir {
+    fn registered() {
         static ONCE: std::sync::Once = std::sync::Once::new();
-        let pinned = crate::config::PinnedUserDataDir::new();
         ONCE.call_once(|| {
             register_runtime_ports(fixture_daemon_client_ports())
                 .expect("runtime port registration");
         });
-        pinned
     }
 
     /// The hook runtime is one explicit handle of adapters, so this is the
@@ -276,8 +286,10 @@ mod tests {
     /// checkout) instead of through a slot that may be empty.
     #[tokio::test]
     async fn the_hook_runtime_handle_answers_through_project_adapters() {
-        let _pinned = registered();
-        let runtime = hook_runtime().expect("registered daemon client");
+        registered();
+        let profile_home = tempfile::tempdir().expect("profile home");
+        let profile = ProfileRoot::under_home(profile_home.path());
+        let runtime = hook_runtime(profile.clone()).expect("registered daemon client");
         let unregistered = tempfile::tempdir().expect("tempdir");
         // The layout keeps the caller's spelling of the root, so hand it the
         // canonical form up front: macOS temp roots live behind the
@@ -287,13 +299,17 @@ mod tests {
             .canonicalize()
             .expect("canonical checkout");
 
-        assert!(!(runtime.project_initialization_gate)(&checkout));
-        assert!((runtime.project_root_resolver)(&checkout).await.is_none());
+        assert!(!(runtime.project_initialization_gate)(&profile, &checkout));
+        assert!(
+            (runtime.project_root_resolver)(&profile, &checkout)
+                .await
+                .is_none()
+        );
         assert!(
             (runtime.timing_gate)(&checkout).is_none(),
             "an unregistered checkout has no published telemetry override"
         );
-        let layout = (runtime.store_layout_resolver)(&checkout)
+        let layout = (runtime.store_layout_resolver)(&profile, &checkout)
             .await
             .expect("the root resolves a canonical layout for any checkout");
         assert_eq!(layout.project_root, checkout);
@@ -301,7 +317,7 @@ mod tests {
             .identity
             .project_id
             .expect("the layout carries a project identity");
-        let again = (runtime.store_layout_resolver)(&checkout)
+        let again = (runtime.store_layout_resolver)(&profile, &checkout)
             .await
             .expect("the same checkout resolves again");
         assert_eq!(

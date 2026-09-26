@@ -298,7 +298,6 @@ mod tests {
 
     #[tokio::test]
     async fn authenticated_stack_graphql_and_compare_publish_restart_safe_v3_lineage() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let mut scope = scope("stack-anchor-http");
         scope.head_commit_id = CommitId::new("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap();
         let context = context(&scope);

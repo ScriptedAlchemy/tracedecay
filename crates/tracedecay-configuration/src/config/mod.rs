@@ -12,8 +12,6 @@ pub mod topology;
 pub mod work_executable_binding;
 
 pub use tracedecay_global_db::configuration::{registry, resolver};
-#[cfg(test)]
-pub use tracedecay_runtime_core::config::PinnedUserDataDir;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};

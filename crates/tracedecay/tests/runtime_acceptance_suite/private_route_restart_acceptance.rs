@@ -54,8 +54,9 @@ fn admitted_project_id(home: &Path, project: &Path) -> String {
         .to_owned()
 }
 
-fn project_handshake(project: &Path) -> DaemonHandshake {
+fn project_handshake(environment: &common::IsolatedHome, project: &Path) -> DaemonHandshake {
     tracedecay::daemon::handshake_for_current_client(
+        environment.profile(),
         Some(project.to_path_buf()),
         None,
         false,
@@ -106,7 +107,7 @@ async fn selected_project_source_route_survives_physical_daemon_restart() {
     const CALLER_MARKER: &str = "private-route-caller-alpha";
     const TARGET_MARKER: &str = "private-route-target-beta";
 
-    let (environment, project_a) = common::IsolatedEnv::acquire().await;
+    let (environment, project_a) = common::IsolatedHome::new();
     let project_b = environment.scratch().join("project-b");
     let mut daemon = common::spawn_tracedecay_daemon(environment.home());
     initialize_project(environment.home(), &project_a, CALLER_MARKER);
@@ -114,7 +115,7 @@ async fn selected_project_source_route_survives_physical_daemon_restart() {
     let project_a_id = admitted_project_id(environment.home(), &project_a);
     let project_b_id = admitted_project_id(environment.home(), &project_b);
     assert_ne!(project_a_id, project_b_id);
-    let caller = project_handshake(&project_a);
+    let caller = project_handshake(&environment, &project_a);
 
     assert_selected_target_source(&caller, &project_b_id, TARGET_MARKER, CALLER_MARKER).await;
 

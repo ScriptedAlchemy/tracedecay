@@ -174,6 +174,7 @@ fn receipt_backed_doctor_checks_deployed_digests_registration_and_repair() {
 
     let owner = inspect_receipt_backed_host_components(
         &HealthcheckContext {
+            profile: tracedecay_runtime_core::config::ProfileRoot::under_home(artifact_root.path()),
             home: artifact_root.path().to_path_buf(),
             project_path: artifact_root.path().to_path_buf(),
         },
@@ -301,6 +302,7 @@ fn component_set_dry_run_retains_analyzers_but_refuses_registration_aliases() {
     };
 
     let mut clean_registration = CatalogHostComponentRegistrationAuthority::new(
+        &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
         "opencode",
         home.path(),
         request.lifecycle.operation,
@@ -332,6 +334,7 @@ fn component_set_dry_run_retains_analyzers_but_refuses_registration_aliases() {
     )
     .unwrap();
     let mut retained_registration = CatalogHostComponentRegistrationAuthority::new(
+        &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
         "opencode",
         home.path(),
         request.lifecycle.operation,
@@ -361,6 +364,7 @@ fn component_set_dry_run_retains_analyzers_but_refuses_registration_aliases() {
     )
     .unwrap();
     let mut conflicting_registration = CatalogHostComponentRegistrationAuthority::new(
+        &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
         "opencode",
         home.path(),
         request.lifecycle.operation,
@@ -609,6 +613,7 @@ fn component_set_dry_run_reports_competing_claims_and_binds_them_to_the_plan() {
     };
     let preview_now = |home: &Path| {
         let mut registration = CatalogHostComponentRegistrationAuthority::new(
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home),
             "opencode",
             home,
             request.lifecycle.operation,
@@ -688,6 +693,7 @@ fn component_set_dry_run_reports_competing_claims_and_binds_them_to_the_plan() {
         HostBundleWriterV1::open_with_lifecycle_root(home.path(), lifecycle.path()).unwrap();
     let mut transaction = HostComponentSetTransactionV1::new(&mut writer);
     let mut registration = CatalogHostComponentRegistrationAuthority::new(
+        &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
         "opencode",
         home.path(),
         request.lifecycle.operation,
@@ -733,6 +739,7 @@ fn unreadable_host_registration_refuses_instead_of_reporting_no_conflict() {
         operation_id: [44; 16],
     };
     let mut registration = CatalogHostComponentRegistrationAuthority::new(
+        &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
         "opencode",
         home.path(),
         request.lifecycle.operation,

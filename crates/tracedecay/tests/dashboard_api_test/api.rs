@@ -9,9 +9,6 @@ fn absent_canonical_fact_id(existing: &FactId) -> String {
 
 #[test]
 fn retired_dashboard_routes_fall_through_to_the_canonical_spa_index() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture_without_memory().await;
@@ -55,9 +52,6 @@ fn retired_dashboard_routes_fall_through_to_the_canonical_spa_index() {
 
 #[test]
 fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         use tracedecay_automation_runtime::automation::managed_skills::{
@@ -66,8 +60,7 @@ fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
         };
 
         let fixture = start_dashboard_fixture(false).await;
-        let profile_root = tracedecay_runtime_core::storage::default_profile_root()
-            .unwrap_or_else(|err| panic!("expected dashboard fixture profile root: {err}"));
+        let profile_root = fixture.host_runtime.profile_root().to_path_buf();
         create_managed_skill(
             &profile_root,
             ManagedSkillDraft {
@@ -144,9 +137,6 @@ fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
 
 #[test]
 fn holographic_dashboard_endpoints_return_seeded_payloads() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(false).await;
@@ -425,9 +415,6 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
 
 #[test]
 fn holographic_fact_detail_returns_full_content_and_entities() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(false).await;
@@ -544,9 +531,6 @@ fn holographic_fact_detail_returns_full_content_and_entities() {
 
 #[test]
 fn holographic_fact_trust_history_returns_feedback_trail_and_empty_for_unreviewed_facts() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(false).await;
@@ -655,9 +639,6 @@ fn holographic_fact_trust_history_returns_feedback_trail_and_empty_for_unreviewe
 
 #[test]
 fn lcm_endpoints_cover_seeded_fts_and_like_fallback() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(true).await;
@@ -741,9 +722,6 @@ fn lcm_endpoints_cover_seeded_fts_and_like_fallback() {
 
 #[test]
 fn lcm_endpoints_return_empty_state_when_no_rows_exist() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture_without_memory().await;
@@ -798,9 +776,6 @@ fn lcm_endpoints_return_empty_state_when_no_rows_exist() {
 /// via the additive `storage_scope` payload field.
 #[test]
 fn lcm_serves_project_session_store_without_global_override() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let tmp = tempdir_or_panic();
@@ -808,10 +783,9 @@ fn lcm_serves_project_session_store_without_global_override() {
             .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
         let project_root = tmp_root.join("project");
         let profile_root = tmp_root.join("profile").join(".tracedecay");
-        let _env_guard = EnvVarGuard::unset(GLOBAL_DB_ENV);
-        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+        let profile = ProfileRoot::new(&profile_root);
 
-        let (cg, session_store) = setup_project(&project_root).await;
+        let (cg, session_store) = setup_project(&profile, &project_root).await;
         seed_lcm_fixture(&session_store, &project_root).await;
 
         let port = pick_free_port();
@@ -877,9 +851,6 @@ fn lcm_serves_project_session_store_without_global_override() {
 /// come from the resolved project store that transcript ingest writes.
 #[test]
 fn lcm_project_store_wins_over_global_accounting_override() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let tmp = tempdir_or_panic();
@@ -888,9 +859,8 @@ fn lcm_project_store_wins_over_global_accounting_override() {
         let project_root = tmp_root.join("project");
         let global_db_path = tmp_root.join("global").join("global.db");
         let profile_root = tmp_root.join("profile").join(".tracedecay");
-        let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
-        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
-        let (cg, session_store) = setup_project(&project_root).await;
+        let profile = ProfileRoot::new(&profile_root).with_global_db_override(&global_db_path);
+        let (cg, session_store) = setup_project(&profile, &project_root).await;
         // The project store has rows; the overridden global accounting store has none.
         seed_lcm_fixture(&session_store, &project_root).await;
 

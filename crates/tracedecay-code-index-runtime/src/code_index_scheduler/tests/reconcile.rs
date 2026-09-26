@@ -10547,12 +10547,12 @@ async fn busy_admission_schedules_follow_up_cadence_wake() {
 /// observability store is busy.
 #[tokio::test]
 async fn blocked_observability_store_does_not_hold_reconcile_readiness() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let profile_dir = tempfile::tempdir().expect("profile");
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let store = TempDir::new().expect("store root");
     let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
     let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+        profile_dir.path().to_path_buf(),
         fixture.path(),
         scope.project_id.clone(),
     )
@@ -10643,7 +10643,7 @@ async fn blocked_observability_store_does_not_hold_reconcile_readiness() {
 /// one project observation store.
 #[tokio::test]
 async fn installed_observability_lane_records_index_and_retrieval_observations() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let profile_dir = tempfile::tempdir().expect("profile");
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
@@ -10678,7 +10678,7 @@ async fn installed_observability_lane_records_index_and_retrieval_observations()
         .expect("mount core query authority");
 
     let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+        profile_dir.path().to_path_buf(),
         fixture.path(),
         scope.project_id.clone(),
     )

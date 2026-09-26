@@ -27,11 +27,7 @@ use serde_json::Value;
 use tokio::sync::OnceCell;
 use tracedecay_domain::errors::Result as TdResult;
 use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
-use tracedecay_runtime_core::storage::{
-    PrivateStoreIo, default_profile_project_id, default_profile_root,
-};
-
-use crate::common::GLOBAL_DB_ENV;
+use tracedecay_runtime_core::storage::{PrivateStoreIo, default_profile_project_id};
 
 /// Store schema versions admitted by recorded version rather than by the
 /// graph-DB final shape. Init refuses a store recorded at any other version,
@@ -127,24 +123,10 @@ fn test_helper() { assert!(!helper().is_empty()); }
     .unwrap();
 }
 
-/// Drop-in replacement for `TraceDecay::init(project)` in tests: seeds an
-/// initialized (schema-complete, empty) store from the on-disk template and
-/// opens it. Falls back to the real init when seeding is not possible.
-pub async fn init_project_from_template(project_root: &Path) -> TdResult<TraceDecay> {
-    // Boxed open/init futures: the production graph composition is the
-    // mega-future whose inline layout overflows perf-profile test stacks.
-    if let Some(template) = template_root().await
-        && let Some(targets) = SeedTargets::from_env()
-        && seed_store(&template.join(EMPTY_FLAVOR), project_root, &targets).is_ok()
-        && let Ok(cg) = Box::pin(TraceDecay::open(project_root)).await
-    {
-        return Ok(cg);
-    }
-    Box::pin(TraceDecay::init(project_root)).await
-}
-
-/// Like [`init_project_from_template`] but for callers that pass an explicit
-/// profile root via `TraceDecayOpenOptions` instead of env vars.
+/// Drop-in replacement for `TraceDecay::init_with_options(project, options)`
+/// in tests: seeds an initialized (schema-complete, empty) store from the
+/// on-disk template into the options' profile and opens it. Falls back to the
+/// real init when seeding is not possible.
 pub async fn init_project_from_template_with_options(
     project_root: &Path,
     options: TraceDecayOpenOptions,
@@ -172,16 +154,6 @@ struct SeedTargets {
 }
 
 impl SeedTargets {
-    fn from_env() -> Option<Self> {
-        let profile_root = default_profile_root().ok()?;
-        let global_db_path = std::env::var_os(GLOBAL_DB_ENV)
-            .map_or_else(|| profile_root.join("global.db"), PathBuf::from);
-        Some(Self {
-            profile_root,
-            global_db_path,
-        })
-    }
-
     fn from_options(options: &TraceDecayOpenOptions) -> Option<Self> {
         let profile_root = options.profile_root.clone()?;
         let global_db_path = options

@@ -8,6 +8,7 @@
 //! upgrade. Pass `--no-reinstall` to skip that agent-integration refresh.
 
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use crate::agent_cmd::{HostLifecycleCompletion, HostLifecycleSummary};
 use crate::upgrade::UpgradeOutcome;
@@ -18,6 +19,7 @@ use tracedecay_session_memory::user_config::UserConfig;
 /// lifecycle state, returning the service path and socket or `None` when no
 /// service is installed.
 fn refresh_daemon_service(
+    profile: &ProfileRoot,
     previous_state: daemon_control::DaemonServiceState,
 ) -> tracedecay_domain::errors::Result<Option<(PathBuf, PathBuf)>> {
     if !cfg!(any(target_os = "linux", target_os = "macos", windows)) {
@@ -29,15 +31,16 @@ fn refresh_daemon_service(
                 message: "tracedecay not found on PATH".to_string(),
             }
         })?;
-    let spec = daemon_control::service_spec(tracedecay_bin, None)?;
-    refresh_daemon_service_with_spec(previous_state, &spec)
+    let spec = daemon_control::service_spec(profile, tracedecay_bin, None)?;
+    refresh_daemon_service_with_spec(profile, previous_state, &spec)
 }
 
 fn refresh_daemon_service_with_spec(
+    profile: &ProfileRoot,
     previous_state: daemon_control::DaemonServiceState,
     spec: &daemon_control::DaemonServiceSpec,
 ) -> tracedecay_domain::errors::Result<Option<(PathBuf, PathBuf)>> {
-    let socket_path = daemon_control::installed_service_socket_path()?
+    let socket_path = daemon_control::installed_service_socket_path(profile)?
         .unwrap_or_else(|| spec.socket_path.clone());
     Ok(
         daemon_control::refresh_installed_service_under_lease_with_state(
@@ -61,9 +64,10 @@ fn print_daemon_transport_location(socket_path: &Path) {
 }
 
 fn refresh_daemon_service_after_update(
+    profile: &ProfileRoot,
     previous_state: daemon_control::DaemonServiceState,
 ) -> tracedecay_domain::errors::Result<()> {
-    match refresh_daemon_service(previous_state)? {
+    match refresh_daemon_service(profile, previous_state)? {
         Some((service_path, socket_path)) => {
             eprintln!(
                 "\x1b[32m✔\x1b[0m Daemon service refreshed at {}",
@@ -71,7 +75,7 @@ fn refresh_daemon_service_after_update(
             );
             print_daemon_transport_location(&socket_path);
         }
-        None if daemon_control::daemon_reachable() => {
+        None if daemon_control::daemon_reachable(profile) => {
             eprintln!(
                 "  \x1b[33mwarning:\x1b[0m a TraceDecay daemon is running without an installed service; \
                  it keeps serving the previous version until its `tracedecay daemon run` process is restarted."
@@ -121,8 +125,11 @@ where
     refresh(daemon_control::DaemonServiceState::RunningEnabled)
 }
 
-pub(crate) fn restart_daemon_service() -> tracedecay_domain::errors::Result<()> {
+pub(crate) fn restart_daemon_service(
+    profile: &ProfileRoot,
+) -> tracedecay_domain::errors::Result<()> {
     let guard = daemon_control::QuiescedDaemonLifecycle::acquire(
+        profile,
         "daemon restart",
         crate::product_runtime::PRODUCT_BUILD_VERSION,
     )?;
@@ -149,7 +156,7 @@ pub(crate) fn restart_daemon_service() -> tracedecay_domain::errors::Result<()> 
             });
         }
     };
-    let operation_result = refresh_daemon_service(stopped_state);
+    let operation_result = refresh_daemon_service(profile, stopped_state);
     let restore_result = guard.finish_with_state(desired_state);
     match combine_operation_and_restore("daemon restart", operation_result, restore_result)? {
         Some((service_path, socket_path)) => {
@@ -309,9 +316,10 @@ impl PluginRefreshOutcome {
 
 #[hotpath::measure(label = "cli.update.run", future = true)]
 pub(crate) async fn run_update_command(
+    profile: &ProfileRoot,
     no_reinstall: bool,
 ) -> tracedecay_domain::errors::Result<HostLifecycleCompletion> {
-    let refresh = run_update_flow("update", RefreshPolicy::Always, no_reinstall).await?;
+    let refresh = run_update_flow(profile, "update", RefreshPolicy::Always, no_reinstall).await?;
     update_completion(refresh)
 }
 
@@ -343,26 +351,35 @@ fn update_completion(
 
 #[hotpath::measure(label = "cli.upgrade.run", future = true)]
 pub(crate) async fn run_upgrade_command(
+    profile: &ProfileRoot,
     no_reinstall: bool,
 ) -> tracedecay_domain::errors::Result<()> {
-    run_update_flow("upgrade", RefreshPolicy::AfterInstall, no_reinstall)
-        .await
-        .map(|_| ())
+    run_update_flow(
+        profile,
+        "upgrade",
+        RefreshPolicy::AfterInstall,
+        no_reinstall,
+    )
+    .await
+    .map(|_| ())
 }
 
 async fn run_update_flow(
+    profile: &ProfileRoot,
     operation: &str,
     refresh_policy: RefreshPolicy,
     no_reinstall: bool,
 ) -> tracedecay_domain::errors::Result<Option<PluginRefreshOutcome>> {
     let refresh = daemon_control::with_exclusive_maintenance_window(
+        profile,
         operation,
         crate::product_runtime::PRODUCT_BUILD_VERSION,
         |lease_token| {
-            let outcome =
-                run_install_then_refresh(refresh_policy, crate::upgrade::run_upgrade, |binary| {
-                    run_post_update_subcommand(no_reinstall, binary, lease_token)
-                })?;
+            let outcome = run_install_then_refresh(
+                refresh_policy,
+                || crate::upgrade::run_upgrade(profile),
+                |binary| run_post_update_subcommand(no_reinstall, binary, lease_token),
+            )?;
             // Report the installed version so the window's daemon restore
             // validates the binary it actually starts, not the one that was
             // running before the upgrade.
@@ -372,7 +389,7 @@ async fn run_update_flow(
             })
         },
     )?;
-    reset_refused_profile_authorities(operation).await?;
+    reset_refused_profile_authorities(profile, operation).await?;
     Ok(refresh)
 }
 
@@ -410,9 +427,10 @@ fn profile_reset_decision(
 /// complete profile database state, the one reset authority a profile-scoped
 /// refusal has. Old shapes are deleted, never migrated or backed up.
 async fn reset_refused_profile_authorities(
+    profile: &ProfileRoot,
     operation: &str,
 ) -> tracedecay_domain::errors::Result<()> {
-    if !daemon_control::daemon_reachable() {
+    if !daemon_control::daemon_reachable(profile) {
         eprintln!(
             "No reachable TraceDecay daemon after {operation}; the profile's persisted shape is \
              checked on the daemon's next open."
@@ -420,6 +438,7 @@ async fn reset_refused_profile_authorities(
         return Ok(());
     }
     let probe = crate::commands::daemon_tool_json(
+        profile,
         None,
         "tracedecay_project_list",
         serde_json::json!({ "limit": 1, "format": "json" }),
@@ -435,7 +454,7 @@ async fn reset_refused_profile_authorities(
                  binary; refused authorities are never migrated or backed up. Re-run \
                  `tracedecay init <project-root>` for each project afterwards."
             );
-            crate::commands::handle_wipe(true, true).await
+            crate::commands::handle_wipe(profile, true, true).await
         }
         ProfileResetDecision::Undecided(detail) => {
             eprintln!(
@@ -468,25 +487,27 @@ fn combine_operation_and_restore<T>(
 
 #[hotpath::measure(label = "cli.update.post", future = true)]
 pub(crate) async fn run_post_update_command(
+    profile: &ProfileRoot,
     no_reinstall: bool,
     lifecycle_lease_token: Option<&str>,
 ) -> tracedecay_domain::errors::Result<HostLifecycleCompletion> {
     if let Some(token) = lifecycle_lease_token {
         let lifecycle_lease =
             tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_or_inherited(
-                &tracedecay_runtime_core::storage::default_profile_root()?,
+                profile.data_dir(),
                 "post-update",
                 Some(token),
             )?;
-        return run_post_update_tasks(no_reinstall, &lifecycle_lease).await;
+        return run_post_update_tasks(profile, no_reinstall, &lifecycle_lease).await;
     }
 
     let guard = daemon_control::QuiescedDaemonLifecycle::acquire(
+        profile,
         "post-update",
         crate::product_runtime::PRODUCT_BUILD_VERSION,
     )?;
     let operation_result = match guard.lifecycle_lease() {
-        Ok(lifecycle_lease) => run_post_update_tasks(no_reinstall, lifecycle_lease).await,
+        Ok(lifecycle_lease) => run_post_update_tasks(profile, no_reinstall, lifecycle_lease).await,
         Err(error) => Err(error),
     };
     let restore_result = guard.finish_after_update();
@@ -558,14 +579,15 @@ fn run_post_update_subcommand(
 /// reinstall` surfaces it because its explicit lifecycle result was not
 /// durably recorded.
 pub(crate) fn record_completed_reinstall_pass(
+    profile: &ProfileRoot,
     config: &mut UserConfig,
 ) -> tracedecay_domain::errors::Result<()> {
     if config.mark_version_installed(env!("CARGO_PKG_VERSION")) {
-        config
-            .save()
-            .map_err(|err| tracedecay_domain::errors::TraceDecayError::Config {
+        config.save(profile.data_dir()).map_err(|err| {
+            tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("could not save tracedecay config: {err}"),
-            })?;
+            }
+        })?;
     }
     Ok(())
 }
@@ -593,6 +615,7 @@ pub(crate) fn install_pass_covers_tracked_agents(
 /// failing agent and returns every host's typed result; an unresolvable
 /// binary fails the pass before any install runs.
 async fn reinstall_tracked_agents_under_lease(
+    profile: &ProfileRoot,
     agent_ids: &[String],
     tracked: &[String],
     home: &Path,
@@ -604,6 +627,7 @@ async fn reinstall_tracked_agents_under_lease(
         }
     })?;
     crate::agent_cmd::reinstall_agent_integrations_under_lease(
+        profile,
         agent_ids,
         tracked,
         home,
@@ -614,19 +638,22 @@ async fn reinstall_tracked_agents_under_lease(
 }
 
 pub(crate) async fn run_post_update_tasks(
+    profile: &ProfileRoot,
     no_reinstall: bool,
     lifecycle_lease: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
 ) -> tracedecay_domain::errors::Result<HostLifecycleCompletion> {
     eprintln!("\nPreparing safe post-update maintenance.");
     eprintln!("  Waiting for TraceDecay writers to shut down cleanly, do not interrupt.");
-    let previous_daemon_state = daemon_control::verify_installed_service_quiesced_under_lease()?;
+    let previous_daemon_state =
+        daemon_control::verify_installed_service_quiesced_under_lease(profile)?;
     eprintln!("\x1b[32m✔\x1b[0m TraceDecay writers stopped; exclusive maintenance window active.");
-    let mutation_result = run_post_update_mutations(no_reinstall, lifecycle_lease).await;
-    let restart_result = refresh_daemon_service_after_update(previous_daemon_state);
+    let mutation_result = run_post_update_mutations(profile, no_reinstall, lifecycle_lease).await;
+    let restart_result = refresh_daemon_service_after_update(profile, previous_daemon_state);
     combine_operation_and_restore("post-update maintenance", mutation_result, restart_result)
 }
 
 async fn run_post_update_mutations(
+    profile: &ProfileRoot,
     no_reinstall: bool,
     lifecycle_lease: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
 ) -> tracedecay_domain::errors::Result<HostLifecycleCompletion> {
@@ -635,8 +662,8 @@ async fn run_post_update_mutations(
         // `--no-reinstall` is a durable opt-out for THIS version, not a
         // one-command deferral: advance the version markers so the explicit
         // lifecycle decision remains durable for this version.
-        let mut config = UserConfig::load();
-        if let Err(err) = record_completed_reinstall_pass(&mut config) {
+        let mut config = UserConfig::load(profile.data_dir());
+        if let Err(err) = record_completed_reinstall_pass(profile, &mut config) {
             eprintln!("warning: {err}");
         }
         return Ok(HostLifecycleCompletion::Complete);
@@ -646,7 +673,7 @@ async fn run_post_update_mutations(
     // MCP config. Run the full tracked-agent pass, then advance the version
     // markers. On failure the markers stay put so the incomplete explicit
     // lifecycle remains observable.
-    let mut config = UserConfig::load();
+    let mut config = UserConfig::load(profile.data_dir());
     // Prune tracked ids that no longer resolve to an integration (a release
     // renamed/removed one, or a typo landed in `installed_agents`).
     // The reinstall pass skips such ids, but dropping them here stops the
@@ -656,11 +683,11 @@ async fn run_post_update_mutations(
         .installed_agents
         .retain(|id| tracedecay_agent_hosts::agents::get_integration(id).is_ok());
     if config.installed_agents.len() != before
-        && let Err(err) = config.save()
+        && let Err(err) = config.save(profile.data_dir())
     {
         eprintln!("warning: could not save tracedecay config: {err}");
     }
-    let Some(home) = tracedecay_agent_hosts::agents::home_dir() else {
+    let Some(home) = profile.home().map(std::path::Path::to_path_buf) else {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: "could not determine home directory".to_string(),
         });
@@ -668,13 +695,15 @@ async fn run_post_update_mutations(
     // Detected integrations the config never tracked are refreshed too, so an
     // upgrade over an older install does not leave doctor reporting stale
     // rendered versions that no maintenance pass will touch.
-    let agent_ids = crate::agent_cmd::maintenance_sweep_agents(&config.installed_agents, &home);
+    let agent_ids =
+        crate::agent_cmd::maintenance_sweep_agents(profile, &config.installed_agents, &home);
     if agent_ids.is_empty() {
         eprintln!("Refreshing agent integrations: nothing to refresh");
     } else {
         eprintln!("Refreshing agent integrations: {}", agent_ids.join(", "));
     }
     let summary = reinstall_tracked_agents_under_lease(
+        profile,
         &agent_ids,
         &config.installed_agents,
         &home,
@@ -684,7 +713,7 @@ async fn run_post_update_mutations(
     let summary = match summary {
         Ok(summary) => summary,
         Err(error) => {
-            deploy_managed_skills_after_lifecycle();
+            deploy_managed_skills_after_lifecycle(profile);
             return Err(error);
         }
     };
@@ -697,15 +726,15 @@ async fn run_post_update_mutations(
         }
     }
     if config.installed_agents.len() != before
-        && let Err(err) = config.save()
+        && let Err(err) = config.save(profile.data_dir())
     {
         eprintln!("warning: could not save tracedecay config: {err}");
     }
-    deploy_managed_skills_after_lifecycle();
+    deploy_managed_skills_after_lifecycle(profile);
     // Version markers record only a pass that left every host current.
     let completion = summary.finish()?;
     if completion == HostLifecycleCompletion::Complete
-        && let Err(err) = record_completed_reinstall_pass(&mut config)
+        && let Err(err) = record_completed_reinstall_pass(profile, &mut config)
     {
         eprintln!("warning: {err}");
     }
@@ -721,22 +750,19 @@ async fn run_post_update_mutations(
 /// emptied without one kept advertising skills that no longer exist. Deploying
 /// here makes the lifecycle converge the index whatever the store did.
 /// Best-effort: a failure never fails the lifecycle pass.
-pub(crate) fn deploy_managed_skills_after_lifecycle() {
-    let Ok(profile_root) = tracedecay_runtime_core::storage::default_profile_root() else {
-        return;
-    };
-    let Some(home) = tracedecay_agent_hosts::agents::home_dir() else {
+pub(crate) fn deploy_managed_skills_after_lifecycle(profile: &ProfileRoot) {
+    let Some(home) = profile.home().map(std::path::Path::to_path_buf) else {
         return;
     };
     let start = std::env::current_dir().ok().unwrap_or_else(|| home.clone());
     let project_root =
         tracedecay_automation_runtime::automation::skill_materialization::resolve_project_root(
-            &start,
+            profile, &start,
         );
     let receipt = tracedecay_automation_runtime::automation::skill_writer::deploy_managed_skills_at(
         &tracedecay_agent_hosts::host_io(),
         &home,
-        &profile_root,
+        profile.data_dir(),
         &project_root,
     );
     for error in &receipt.errors {
@@ -931,6 +957,9 @@ mod tests {
     #[tokio::test]
     async fn reinstall_agent_integrations_skips_unknown_ids()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let profile_home = tempfile::tempdir().unwrap();
+        let profile =
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(profile_home.path());
         let home = TempDir::new()?;
         let lease_root = TempDir::new()?;
         let lifecycle_lease =
@@ -939,6 +968,7 @@ mod tests {
                 "post-update-test",
             )?;
         let summary = crate::agent_cmd::reinstall_agent_integrations_under_lease(
+            profile,
             &["unknown-agent".to_string()],
             &["unknown-agent".to_string()],
             home.path(),

@@ -1400,9 +1400,10 @@ async fn typed_diagnostics_summary(
     // The hook stream is plain synchronous file IO over up-to-megabyte tails;
     // read it off the async worker instead of blocking a runtime thread.
     let store_root = state.store_root.clone();
+    let profile_root = state.profile_root.clone();
     let project_root = state.project_root.clone();
     let hook_analytics = tokio::task::spawn_blocking(move || {
-        read_hook_analytics_rows_at(Some(&store_root), Some(&project_root))
+        read_hook_analytics_rows_at(&profile_root, Some(&store_root), Some(&project_root))
     })
     .await
     .map_err(|error| format!("hook analytics read task failed: {error}"))?;

@@ -712,20 +712,31 @@ pub async fn ingest_transcript_with_cancellation(
     if let Some(cg) = cg
         && !user_scope
     {
-        let settlement = hotpath::future!(
-            tracedecay_agent_hosts::hooks::hint_outcomes::settlement::settle_project_hint_outcomes(
-                accounting_db,
-                session_authorities.project.map(std::convert::AsRef::as_ref),
-                tracedecay_application::analytics_bridge::hook_import_sources(Some(
-                    cg.project_root()
-                )),
-                cg.project_root(),
-                tracedecay_runtime_core::tracedecay::current_timestamp()
-            ),
-            label = "mcp.hook_runtime.hint_settle"
-        )
-        .await;
-        output["hint_outcomes"] = settlement.as_json();
+        output["hint_outcomes"] = match profile_root.map(|profile_root| {
+            tracedecay_application::analytics_bridge::hook_import_sources(
+                profile_root,
+                Some(cg.project_root()),
+            )
+        }) {
+            None => json!({ "status": "unavailable", "reason": "profile_root_unavailable" }),
+            Some(Err(error)) => json!({
+                "status": "failed",
+                "operation": "hook_import_sources",
+                "detail": error.to_string(),
+            }),
+            Some(Ok(sources)) => hotpath::future!(
+                tracedecay_agent_hosts::hooks::hint_outcomes::settlement::settle_project_hint_outcomes(
+                    accounting_db,
+                    session_authorities.project.map(std::convert::AsRef::as_ref),
+                    sources,
+                    cg.project_root(),
+                    tracedecay_runtime_core::tracedecay::current_timestamp()
+                ),
+                label = "mcp.hook_runtime.hint_settle"
+            )
+            .await
+            .as_json(),
+        };
     }
     // Routes that admit observations directly report what they committed, so a
     // `messages_upserted: 0` pass is readable without guessing which drainer

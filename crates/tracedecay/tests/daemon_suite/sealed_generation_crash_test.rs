@@ -23,7 +23,7 @@ use crate::code_index_journey::{
     RECEIPT_TIMEOUT, commit_all, exact_identity, git, initialize_tracedecay,
     stop_daemon_gracefully, tool, wait_for_terminal_generation,
 };
-use crate::common::{IsolatedEnv, daemon_socket_path, spawn_tracedecay_daemon_with};
+use crate::common::{IsolatedHome, daemon_socket_path, spawn_tracedecay_daemon_with};
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 const PUBLICATION_TEMPORARY_PREFIXES: [&str; 2] =
@@ -126,7 +126,7 @@ fn initialize_repository(project: &Path) -> String {
 
 #[tokio::test]
 async fn sigkill_after_the_seal_restarts_on_the_identical_sealed_generation() {
-    let (environment, project) = IsolatedEnv::acquire().await;
+    let (environment, project) = IsolatedHome::new();
     let project = canonical_existing_identity(&project).expect("canonical fixture project");
     let revision = initialize_repository(&project);
     let socket = daemon_socket_path(environment.home());
@@ -136,9 +136,14 @@ async fn sigkill_after_the_seal_restarts_on_the_identical_sealed_generation() {
         initialize_tracedecay(environment.home(), &project),
     );
     tracedecay_project::product_runtime::register_fixture_product_runtime();
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
-            .expect("production daemon handshake");
+    let handshake = tracedecay::daemon::handshake_for_current_client(
+        environment.profile(),
+        Some(project.clone()),
+        None,
+        false,
+        false,
+    )
+    .expect("production daemon handshake");
 
     let sealed = wait_for_terminal_generation(
         &socket,
@@ -193,7 +198,7 @@ async fn sigkill_after_the_seal_restarts_on_the_identical_sealed_generation() {
 
 #[tokio::test]
 async fn sigkill_during_the_seal_keeps_the_prior_generation_published() {
-    let (environment, project) = IsolatedEnv::acquire().await;
+    let (environment, project) = IsolatedHome::new();
     let project = canonical_existing_identity(&project).expect("canonical fixture project");
     let revision = initialize_repository(&project);
     let socket = daemon_socket_path(environment.home());
@@ -203,9 +208,14 @@ async fn sigkill_during_the_seal_keeps_the_prior_generation_published() {
         initialize_tracedecay(environment.home(), &project),
     );
     tracedecay_project::product_runtime::register_fixture_product_runtime();
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
-            .expect("production daemon handshake");
+    let handshake = tracedecay::daemon::handshake_for_current_client(
+        environment.profile(),
+        Some(project.clone()),
+        None,
+        false,
+        false,
+    )
+    .expect("production daemon handshake");
     let prior = wait_for_terminal_generation(
         &socket,
         &handshake,

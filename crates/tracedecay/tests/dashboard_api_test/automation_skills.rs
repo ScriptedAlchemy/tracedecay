@@ -2,9 +2,6 @@ use crate::dashboard_api_support::*;
 
 #[test]
 fn managed_skills_are_dashboard_controllable_and_persistent() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(false).await;
@@ -200,9 +197,6 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
 
 #[test]
 fn managed_skills_are_dashboard_controllable_with_direct_activation() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let tmp = tempdir_or_panic();
@@ -213,12 +207,11 @@ fn managed_skills_are_dashboard_controllable_with_direct_activation() {
         let home = tmp_root.join("home");
         let profile_root = home.join(".tracedecay");
         std::fs::create_dir_all(&home).unwrap();
-        let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
-        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
-        let _home_guard = EnvVarGuard::set("HOME", &home);
-        let _userprofile_guard = EnvVarGuard::set("USERPROFILE", &home);
+        let profile = ProfileRoot::new(&profile_root)
+            .with_global_db_override(&global_db_path)
+            .with_home(&home);
 
-        let (cg, host_runtime) = setup_project(&project_root).await;
+        let (cg, host_runtime) = setup_project(&profile, &project_root).await;
         let managed_skill_profile_root = host_runtime.profile_root().to_path_buf();
         let agent = http_agent();
         let port = pick_free_port();
@@ -364,9 +357,6 @@ fn managed_skills_are_dashboard_controllable_with_direct_activation() {
 
 #[test]
 fn managed_skill_dashboard_api_applies_updates_immediately() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let tmp = tempdir_or_panic();
@@ -377,12 +367,11 @@ fn managed_skill_dashboard_api_applies_updates_immediately() {
         let profile_root = tmp_root.join("profile").join(".tracedecay");
         let home = tmp_root.join("home");
         std::fs::create_dir_all(&home).unwrap();
-        let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
-        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
-        let _home_guard = EnvVarGuard::set("HOME", &home);
-        let _userprofile_guard = EnvVarGuard::set("USERPROFILE", &home);
+        let profile = ProfileRoot::new(&profile_root)
+            .with_global_db_override(&global_db_path)
+            .with_home(&home);
 
-        let (cg, host_runtime) = setup_project(&project_root).await;
+        let (cg, host_runtime) = setup_project(&profile, &project_root).await;
         let managed_skill_profile_root = host_runtime.profile_root().to_path_buf();
         let agent = http_agent();
         let port = pick_free_port();

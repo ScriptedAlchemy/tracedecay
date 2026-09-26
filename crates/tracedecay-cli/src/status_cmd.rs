@@ -3,6 +3,7 @@ use std::future::Future;
 use std::io::IsTerminal;
 use std::path::Path;
 use std::time::Duration;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
@@ -262,6 +263,7 @@ fn project_open_line(status: &ProjectOpenStatusV1) -> String {
 }
 
 async fn daemon_tool_json_within(
+    profile: &ProfileRoot,
     response_deadline: Instant,
     request_deadline: Instant,
     project_path: &Path,
@@ -274,6 +276,7 @@ async fn daemon_tool_json_within(
         response_deadline,
         tool_name,
         commands::daemon_tool_json_until(
+            profile,
             request_deadline,
             Some(project_path),
             tool_name,
@@ -330,6 +333,7 @@ pub(crate) fn format_memory_status_report(status: &MemoryStatusV1) -> String {
 
 #[hotpath::measure(label = "cli.status.dispatch", future = true)]
 pub(crate) async fn handle_status_command(
+    profile: &ProfileRoot,
     path: Option<String>,
     project_id: Option<String>,
     project_path: Option<String>,
@@ -352,6 +356,7 @@ pub(crate) async fn handle_status_command(
     timeout_at(
         deadline,
         handle_status_command_within(
+            profile,
             deadline,
             server_deadline,
             path,
@@ -375,6 +380,7 @@ pub(crate) async fn handle_status_command(
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_status_command_within(
+    profile: &ProfileRoot,
     deadline: Instant,
     server_deadline: Instant,
     path: Option<String>,
@@ -384,9 +390,10 @@ async fn handle_status_command_within(
     short: bool,
     runtime: bool,
 ) -> tracedecay_domain::errors::Result<()> {
-    let project_path = resolve_cli_project_root(path, project_id, project_path).await?;
+    let project_path = resolve_cli_project_root(profile, path, project_id, project_path).await?;
     if runtime {
         let result = daemon_tool_json_within(
+            profile,
             deadline,
             server_deadline,
             &project_path,
@@ -407,6 +414,7 @@ async fn handle_status_command_within(
         return Ok(());
     }
     let daemon_status = daemon_tool_json_within(
+        profile,
         deadline,
         server_deadline,
         &project_path,
@@ -449,6 +457,7 @@ async fn handle_status_command_within(
         .map(serde_json::from_value)
         .transpose()?;
     let accounting = daemon_tool_json_within(
+        profile,
         deadline,
         server_deadline,
         &project_path,
@@ -468,7 +477,7 @@ async fn handle_status_command_within(
         .and_then(Value::as_u64);
     let upload_enabled = timeout_at(
         deadline,
-        commands::canonical_upload_enabled(&project_path),
+        commands::canonical_upload_enabled(profile, &project_path),
     )
     .await
     .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
@@ -476,7 +485,7 @@ async fn handle_status_command_within(
             "timed out waiting for canonical worldwide-counter upload setting before status deadline"
                 .to_string(),
     })??;
-    let mut config = tracedecay_session_memory::user_config::UserConfig::load();
+    let mut config = tracedecay_session_memory::user_config::UserConfig::load(profile.data_dir());
     let now = current_unix_timestamp();
     let stdout_is_terminal = std::io::stdout().is_terminal();
     let stderr_is_terminal = std::io::stderr().is_terminal();
@@ -579,12 +588,12 @@ async fn handle_status_command_within(
     if let Some(refresh) = refresh
         && let Some(fresh) = await_online_refresh(deadline, refresh).await
         && fresh.apply(&mut config, now)
-        && let Err(err) = config.save_if_exists()
+        && let Err(err) = config.save_if_exists(profile.data_dir())
     {
         eprintln!("warning: could not save tracedecay config: {err}");
     }
     if stdout_is_terminal {
-        global::check_for_update(&mut config, false, true);
+        global::check_for_update(profile, &mut config, false, true);
     }
     Ok(())
 }

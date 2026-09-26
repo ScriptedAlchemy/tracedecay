@@ -881,7 +881,7 @@ async fn cancel_in_alias_activation_gap_mirrors_primary_terminal_receipt() {
             project_id: project_id.clone(),
             profile_root: profile_root.path().to_path_buf(),
             project_root,
-            transcript_source_home: None,
+            transcript_source_profile: tracedecay_runtime_core::config::ProfileRoot::new(profile_root.path().to_path_buf()),
             project_sessions,
             user_sessions: profile_sessions.clone(),
             registry: profile_sessions.clone(),

@@ -1,6 +1,7 @@
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_global_db::profile_registry_maintenance::{
     ProfileRegistryMaintenanceRuntime, remove_store_directory, verify_store_path_absent,
@@ -232,6 +233,7 @@ pub(crate) async fn try_admit_profile_registry(
 /// captured service state when the caller finishes.
 #[hotpath::measure(label = "cli.profile.offline_acquire")]
 pub(crate) fn take_profile_offline(
+    profile: &ProfileRoot,
     profile_root: &Path,
     operation: &'static str,
 ) -> tracedecay_domain::errors::Result<ProfileOfflineAuthority> {
@@ -252,6 +254,7 @@ pub(crate) fn take_profile_offline(
                  restored when {operation} finishes."
             );
             match tracedecay_daemon_control::QuiescedDaemonLifecycle::acquire_with_timeout(
+                profile,
                 operation,
                 PROFILE_OFFLINE_LEASE_TIMEOUT,
                 crate::product_runtime::PRODUCT_BUILD_VERSION,
@@ -430,13 +433,15 @@ mod wipe_safety_tests {
 /// stdin to reach the wipe.
 #[hotpath::measure(label = "cli.wipe.run", future = true)]
 pub(crate) async fn handle_wipe(
+    profile: &ProfileRoot,
     all: bool,
     assume_yes: bool,
 ) -> tracedecay_domain::errors::Result<()> {
-    handle_wipe_inner(all, assume_yes).await
+    handle_wipe_inner(profile, all, assume_yes).await
 }
 
 fn handle_wipe_inner(
+    profile: &ProfileRoot,
     all: bool,
     assume_yes: bool,
 ) -> std::pin::Pin<
@@ -444,13 +449,15 @@ fn handle_wipe_inner(
 > {
     // Erase the deeply nested wipe future before it reaches the measured
     // wrapper so every profiling feature can compute its layout.
+    let profile = profile.clone();
     Box::pin(async move {
-        let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
+        let profile = &profile;
+        let profile_root = profile.data_dir().to_path_buf();
         let home_tracedecay = Some(profile_root.clone());
         if all {
             validate_complete_wipe_profile_root(
                 &profile_root,
-                tracedecay_agent_hosts::agents::home_dir().as_deref(),
+                profile.home().map(std::path::Path::to_path_buf).as_deref(),
             )?;
         }
         if wipe_must_not_wait_for_stdin(assume_yes, io::stdin().is_terminal()) {
@@ -461,8 +468,9 @@ fn handle_wipe_inner(
         // A wedged daemon never exits on its own, so the lease is acquired
         // through the bounded profile-offline sequence instead of a bare
         // fail-fast attempt whose only advice was to wait for it.
-        let profile_offline = take_profile_offline(&profile_root, "wipe")?;
+        let profile_offline = take_profile_offline(profile, &profile_root, "wipe")?;
         let outcome = wipe_under_profile_offline(
+            profile,
             all,
             assume_yes,
             &profile_root,
@@ -533,6 +541,7 @@ pub(crate) fn wipe_must_not_wait_for_stdin(assume_yes: bool, stdin_is_terminal: 
 /// maintenance scope and registry handles drop before the caller restores the
 /// daemon service.
 async fn wipe_under_profile_offline(
+    profile: &ProfileRoot,
     all: bool,
     assume_yes: bool,
     profile_root: &Path,
@@ -558,11 +567,12 @@ async fn wipe_under_profile_offline(
         let project_paths = if all {
             Vec::new()
         } else {
-            global::gather_target_projects(false).await?
+            global::gather_target_projects(profile, false).await?
         };
         let mut targets = Vec::new();
         for path in &project_paths {
             let location = global::classify_project_storage_with_registry(
+                profile,
                 path,
                 registry.as_ref(),
                 home_tracedecay.as_deref(),
@@ -654,22 +664,28 @@ async fn wipe_under_profile_offline(
 
 /// Handles the `list` and `list --all` commands.
 #[hotpath::measure(label = "cli.list.run", future = true)]
-pub(crate) async fn handle_list(all: bool) -> tracedecay_domain::errors::Result<()> {
-    handle_list_inner(all).await
+pub(crate) async fn handle_list(
+    profile: &ProfileRoot,
+    all: bool,
+) -> tracedecay_domain::errors::Result<()> {
+    handle_list_inner(profile, all).await
 }
 
 fn handle_list_inner(
+    profile: &ProfileRoot,
     all: bool,
 ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = tracedecay_domain::errors::Result<()>> + Send + 'static>,
 > {
     // Erase the deeply nested list future before it reaches the measured
     // wrapper so every profiling feature can compute its layout.
+    let profile = profile.clone();
     Box::pin(async move {
+        let profile = &profile;
         use tracedecay_runtime_core::text::format_token_count;
 
-        let home_tracedecay = tracedecay_runtime_core::config::user_data_dir();
-        let project_paths = global::gather_target_projects(all).await?;
+        let home_tracedecay = Some(profile.data_dir().to_path_buf());
+        let project_paths = global::gather_target_projects(profile, all).await?;
 
         if !all && project_paths.is_empty() {
             println!("No tracedecay projects found in current folder, parents, or children.");
@@ -677,6 +693,7 @@ fn handle_list_inner(
         }
 
         let token_result = daemon_tool_json(
+            profile,
             None,
             "tracedecay_admin_cli",
             serde_json::json!({
@@ -694,11 +711,12 @@ fn handle_list_inner(
         let mut token_errors: Vec<String> = Vec::new();
 
         for path in &project_paths {
-            let mut location = global::classify_project_storage(path)?;
+            let mut location = global::classify_project_storage(profile, path)?;
             if location.status == global::ProjectStorageStatus::Stale
                 && let Some(profile_root) = home_tracedecay.as_deref()
             {
                 let context = daemon_tool_json(
+                    profile,
                     None,
                     "tracedecay_admin_cli",
                     serde_json::json!({

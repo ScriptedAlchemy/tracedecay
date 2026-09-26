@@ -10,6 +10,7 @@ use std::fmt::Write as _;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::{Value, json};
 use tracedecay_contracts::retained_surfaces::{
@@ -138,8 +139,11 @@ impl SessionRefreshOutcomeView {
     }
 }
 
-pub(super) async fn handle_session_refresh_action(action: SessionsRefreshAction) -> Result<()> {
-    let transport = LiveSessionRefreshDaemonTransport;
+pub(super) async fn handle_session_refresh_action(
+    profile: &ProfileRoot,
+    action: SessionsRefreshAction,
+) -> Result<()> {
+    let transport = LiveSessionRefreshDaemonTransport { profile };
     handle_session_refresh_action_with_transport(&transport, action).await
 }
 
@@ -463,16 +467,20 @@ trait SessionRefreshDaemonTransport {
     ) -> SessionRefreshDaemonFuture<'a>;
 }
 
-struct LiveSessionRefreshDaemonTransport;
+struct LiveSessionRefreshDaemonTransport<'p> {
+    profile: &'p ProfileRoot,
+}
 
-impl SessionRefreshDaemonTransport for LiveSessionRefreshDaemonTransport {
+impl SessionRefreshDaemonTransport for LiveSessionRefreshDaemonTransport<'_> {
     fn call<'a>(
         &'a self,
         project_root: Option<&'a Path>,
         tool_name: &'a str,
         arguments: Value,
     ) -> SessionRefreshDaemonFuture<'a> {
-        Box::pin(async move { daemon_tool_json(project_root, tool_name, arguments).await })
+        Box::pin(
+            async move { daemon_tool_json(self.profile, project_root, tool_name, arguments).await },
+        )
     }
 }
 

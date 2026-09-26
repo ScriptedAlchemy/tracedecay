@@ -12,6 +12,7 @@ use serde_json::Value;
 use tracedecay_hooks::DaemonHookEvent;
 
 use crate::ports::hook_runtime::HookRuntimeV1;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 mod analytics;
 mod claude;
@@ -316,6 +317,7 @@ pub async fn dispatch_opencode_tool_after(
 /// lock and fail the hook without delivering anything to the host.
 #[hotpath::measure(future = true, label = "hosts.hooks.write_output")]
 pub(crate) async fn write_hook_output(
+    profile: &ProfileRoot,
     project_root: Option<&Path>,
     host: NativeHostIdentityV1,
     event_json: &str,
@@ -324,7 +326,8 @@ pub(crate) async fn write_hook_output(
     let delivery_writer = match project_root {
         None => None,
         Some(project_root) => {
-            let Some(layout) = store_layout::enrolled_layout(project_root) else {
+            let Some(layout) = store_layout::enrolled_layout(profile.data_dir(), project_root)
+            else {
                 tracing::warn!(
                     host = host.hook_key(),
                     "Hook output delivery has no enrolled project layout"
@@ -467,7 +470,7 @@ async fn hook_native_event(
         return 0;
     };
     if let Some(guidance) = dispatch(runtime, &event, &root, started).await
-        && !write_hook_output(Some(&root), host, &event, &guidance).await
+        && !write_hook_output(&runtime.profile, Some(&root), host, &event, &guidance).await
     {
         return 1;
     }
@@ -523,7 +526,7 @@ async fn native_event_project_root(runtime: &HookRuntimeV1, event: &str) -> Opti
         .and_then(Value::as_str)
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())?;
-    (runtime.project_root_resolver)(&start).await
+    (runtime.project_root_resolver)(&runtime.profile, &start).await
 }
 
 #[hotpath::measure(future = true, label = "hosts.hooks.daemon_action")]
@@ -544,6 +547,7 @@ pub(crate) async fn daemon_hook_action(
     }
     let started = std::time::Instant::now();
     let result = (runtime.daemon_tool)(
+        &runtime.profile,
         project_root,
         "tracedecay_hook_runtime",
         arguments,
@@ -773,7 +777,7 @@ pub(crate) async fn notify_hook_event_with_telemetry(
     telemetry: &analytics::HookTimingSpan,
 ) {
     let payload_bytes = analytics::measure_json_payload_bytes(&event);
-    (runtime.event_notifier)(project_root, event).await;
+    (runtime.event_notifier)(&runtime.profile, project_root, event).await;
     telemetry.note_completed_daemon_notification(payload_bytes);
 }
 
@@ -798,7 +802,9 @@ pub async fn hook_hermes_terminal_receipt(runtime: &HookRuntimeV1) -> i32 {
             })
         });
     let project_root = match cwd {
-        Some(cwd) => (runtime.project_root_resolver)(std::path::Path::new(&cwd)).await,
+        Some(cwd) => {
+            (runtime.project_root_resolver)(&runtime.profile, std::path::Path::new(&cwd)).await
+        }
         None => None,
     };
     let hook_name = parsed
@@ -851,6 +857,7 @@ pub async fn hook_hermes_terminal_receipt(runtime: &HookRuntimeV1) -> i32 {
         |guidance| serde_json::json!({ "additional_context": guidance }).to_string(),
     );
     if !write_hook_output(
+        &runtime.profile,
         project_root.as_deref(),
         NativeHostIdentityV1::Hermes,
         &event_json,
@@ -901,42 +908,7 @@ fn research_block_reason(hint: Option<ToolHint>) -> String {
 }
 
 #[cfg(test)]
-pub(crate) struct EnvGuard {
-    key: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-#[cfg(test)]
-impl EnvGuard {
-    pub(crate) fn set_path(key: &'static str, value: &Path) -> Self {
-        let previous = std::env::var_os(key);
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, previous }
-    }
-}
-
-#[cfg(test)]
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.previous {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
-    tracedecay_runtime_core::config::lock_user_data_dir_test_env()
-}
-
-#[cfg(test)]
-pub(crate) fn run_with_test_env_lock<T>(future: impl std::future::Future<Output = T>) -> T {
-    let _lock = lock_test_env();
+pub(crate) fn block_on_hook_test_runtime<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -1049,6 +1021,7 @@ fn hook_route_session_id(parsed: &Value) -> Option<String> {
 }
 
 fn deduped_project_hint_with_id(
+    profile: &ProfileRoot,
     root: Option<&Path>,
     agent: HostIntegrationIdV1,
     session_id: Option<String>,
@@ -1056,7 +1029,7 @@ fn deduped_project_hint_with_id(
     hint: ToolHint,
 ) -> Option<ToolHint> {
     let Some(session_id) = session_id else {
-        record_hint_emitted(root, agent, None, hint_id, &hint);
+        record_hint_emitted(profile.data_dir(), root, agent, None, hint_id, &hint);
         return Some(hint);
     };
 
@@ -1064,18 +1037,10 @@ fn deduped_project_hint_with_id(
     // those decisions in the user profile so one missing cwd does not turn
     // every prompt/tool event into the same repeated hint.
     let project_path = root
-        .and_then(store_layout::layout)
+        .and_then(|root| store_layout::layout(profile.data_dir(), root))
         .filter(|layout| layout.data_root.is_dir())
         .map(|layout| layout.data_root.join("tool_hints_seen.json"));
-    let path = project_path.or_else(|| {
-        tracedecay_runtime_core::storage::default_profile_root()
-            .ok()
-            .map(|profile| profile.join("tool_hints_seen.json"))
-    });
-    let Some(path) = path else {
-        record_hint_emitted(root, agent, Some(&session_id), hint_id, &hint);
-        return Some(hint);
-    };
+    let path = project_path.unwrap_or_else(|| profile.data_dir().join("tool_hints_seen.json"));
     let mut dedupe = tool_hints::ToolHintDedupe::load_or_default(&path);
     let decision = dedupe.decide(&session_id, hint.category);
     // Every decision, including the suppressed ones, advances the persisted
@@ -1090,7 +1055,15 @@ fn deduped_project_hint_with_id(
         HintDeliveryDecisionV1::SuppressBudget => ("suppressed_budget", hint),
         HintDeliveryDecisionV1::SuppressDuplicate => ("suppressed_duplicate", hint),
     };
-    record_hint_analytics(root, event, agent, Some(&session_id), hint_id, &reported);
+    record_hint_analytics(
+        profile.data_dir(),
+        root,
+        event,
+        agent,
+        Some(&session_id),
+        hint_id,
+        &reported,
+    );
 
     matches!(
         decision,
@@ -1228,22 +1201,22 @@ fn event_cwd_from_parsed(parsed: &Value) -> Option<PathBuf> {
 /// Claude, Codex, and Kiro all send the session working directory under the
 /// same key, so this resolver is host-neutral and lives beside the other
 /// event-field readers rather than in any one host's module.
-fn event_project_root(parsed: &Value) -> Option<PathBuf> {
+fn event_project_root(profile: &ProfileRoot, parsed: &Value) -> Option<PathBuf> {
     let cwd = event_cwd_from_parsed(parsed)?;
-    tracedecay_runtime_core::config::discover_project_root(&cwd)
+    profile.discover_project_root(&cwd)
 }
 
 /// [`event_project_root`] for callers that hold only the raw event JSON.
-fn event_project_root_from_json(event_json: &str) -> Option<PathBuf> {
+fn event_project_root_from_json(profile: &ProfileRoot, event_json: &str) -> Option<PathBuf> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
-    event_project_root(&parsed)
+    event_project_root(profile, &parsed)
 }
 
 /// The project root of the hook process's own working directory. Used by the
 /// surfaces whose payload carries no `cwd` at all.
-fn process_cwd_project_root() -> Option<PathBuf> {
+fn process_cwd_project_root(profile: &ProfileRoot) -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
-    tracedecay_runtime_core::config::discover_project_root(&cwd)
+    profile.discover_project_root(&cwd)
 }
 
 /// Resolves the project root from the event `cwd`, falling back to the hook
@@ -1251,10 +1224,10 @@ fn process_cwd_project_root() -> Option<PathBuf> {
 /// non-project `cwd` still resolves to nothing: the event named a directory, and
 /// silently re-attributing it to wherever the hook happens to run would route the
 /// event into an unrelated project.
-fn event_project_root_or_process_cwd(parsed: &Value) -> Option<PathBuf> {
+fn event_project_root_or_process_cwd(profile: &ProfileRoot, parsed: &Value) -> Option<PathBuf> {
     match event_cwd_from_parsed(parsed) {
-        Some(cwd) => tracedecay_runtime_core::config::discover_project_root(&cwd),
-        None => process_cwd_project_root(),
+        Some(cwd) => profile.discover_project_root(&cwd),
+        None => process_cwd_project_root(profile),
     }
 }
 
@@ -1267,7 +1240,7 @@ async fn event_project_root_with_identity(
     parsed: &Value,
 ) -> Option<PathBuf> {
     let cwd = event_cwd_from_parsed(parsed)?;
-    (runtime.project_root_resolver)(&cwd).await
+    (runtime.project_root_resolver)(&runtime.profile, &cwd).await
 }
 
 fn format_tool_hint(hint: &ToolHint) -> String {

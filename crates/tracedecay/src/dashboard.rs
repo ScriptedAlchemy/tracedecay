@@ -48,17 +48,25 @@ pub fn register_test_schema_installer() {
 }
 
 #[doc(hidden)]
+/// The dashboard context of `graph`, owned by `profile` when a daemon serves
+/// it, else by the profile the graph was opened in.
 pub fn dashboard_project_context(
     graph: &tracedecay_project::project::TraceDecay,
-) -> DashboardProjectContext {
-    DashboardProjectContext {
+    profile: Option<&tracedecay_runtime_core::config::ProfileRoot>,
+) -> tracedecay_domain::errors::Result<DashboardProjectContext> {
+    let profile = match profile {
+        Some(profile) => profile.clone(),
+        None => tracedecay_runtime_core::config::ProfileRoot::new(graph.profile_root()?),
+    };
+    Ok(DashboardProjectContext {
+        profile,
         store_layout: graph.store_layout().clone(),
         dashboard_db_path: graph.dashboard_db_path(),
         dashboard_database: graph.dashboard_database_guard(),
         retention_config: graph.get_config().sync.retention.clone(),
         host_io: tracedecay_agent_hosts::host_io(),
         user_settings_client: graph.configuration_runtime().user_settings_client(),
-    }
+    })
 }
 
 #[cfg(feature = "test-transport")]
@@ -66,6 +74,7 @@ pub fn dashboard_project_context(
 #[allow(clippy::too_many_arguments)]
 pub async fn run_until_shutdown_for_tests_with_host_admission<F>(
     graph: std::sync::Arc<tracedecay_project::project::TraceDecay>,
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
     authority: DashboardHostAdmissionTestAuthorityV1,
     project_graphs: DashboardTestProjectGraphsV1,
     endpoint: DashboardTestEndpointV1<'_>,
@@ -77,7 +86,7 @@ where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
     tracedecay_dashboard_api::run_until_shutdown_for_tests_with_host_admission(
-        std::sync::Arc::new(dashboard_project_context(&graph)),
+        std::sync::Arc::new(dashboard_project_context(&graph, Some(profile))?),
         authority,
         project_graphs,
         endpoint,
@@ -100,10 +109,10 @@ where
 #[doc(hidden)]
 pub async fn dashboard_automation_authority_for_test(
     cg: std::sync::Arc<tracedecay_project::project::TraceDecay>,
-    profile_root: impl AsRef<std::path::Path>,
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
 ) -> tracedecay_domain::errors::Result<(DashboardAutomationAuthorityV1, DashboardAutomationWriter)>
 {
-    let profile_root = canonical_existing_identity(profile_root.as_ref())?;
+    let profile_root = canonical_existing_identity(profile.data_dir())?;
     let project_root = canonical_existing_identity(cg.project_root())?;
     let configuration = hotpath::future!(
         cg.configuration_runtime().client().current(),
@@ -153,7 +162,8 @@ pub async fn dashboard_automation_authority_for_test(
             1,
             resident_memory,
         ),
-    );
+    )
+    .with_owner_home(profile.home().map(std::path::Path::to_path_buf));
     hotpath::future!(
         invocation_service.mount_observability_producer(
             project_root.clone(),

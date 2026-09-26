@@ -12,18 +12,18 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_mcp::{JsonRpcRequest, JsonRpcResponse};
 
-use super::dispatch_test_support::SelectorEnv;
+use super::dispatch_test_support::SelectorProfile;
 use crate::mcp::McpServer;
-use tracedecay_project::config::lock_user_data_dir_test_env;
 use tracedecay_project::project::TraceDecay;
 
-async fn open_server() -> (TempDir, SelectorEnv, Arc<McpServer>) {
+async fn open_server() -> (TempDir, SelectorProfile, Arc<McpServer>) {
     let dir = TempDir::new().expect("temp dir");
-    let env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("hook-runtime");
     fs::create_dir_all(project.join("src")).expect("project src");
     fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").expect("probe source");
     let (cg, runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.hook-runtime.proof",
     )
@@ -37,7 +37,7 @@ async fn open_server() -> (TempDir, SelectorEnv, Arc<McpServer>) {
     let server = McpServer::new_with_host_admission_test_runtime_for_test(cg, None, scoped)
         .await
         .expect("project MCP server");
-    (dir, env, server)
+    (dir, profile, server)
 }
 
 async fn counters(server: &McpServer) -> (u64, u64) {
@@ -115,7 +115,6 @@ fn assert_execution_refused(response: &JsonRpcResponse, id: i64, message: &str) 
 
 #[tokio::test]
 async fn hook_runtime_resets_the_local_counter_and_refuses_the_other_inputs() {
-    let _env_lock = lock_user_data_dir_test_env();
     let (_dir, _env, server) = open_server().await;
 
     let removed = call_hook(

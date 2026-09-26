@@ -380,10 +380,11 @@ mod shutdown_owner_tests {
 
     #[tokio::test]
     async fn terminal_shutdown_failure_replays_without_retaining_server_owner() {
-        let _pin = tracedecay_project::config::PinnedUserDataDir::new();
+        let profile = tempfile::tempdir().expect("profile root");
         let project = tempfile::tempdir().expect("project root");
         let (graph, _runtime) =
             tracedecay_project::project::TraceDecay::init_test_fixture_with_registered_runtime(
+                profile.path(),
                 project.path(),
                 "project.shutdown-owner",
             )

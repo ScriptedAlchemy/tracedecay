@@ -274,6 +274,7 @@ fn component_registration_reads_the_cli_owned_mcp_state() {
     )
     .unwrap();
     let health = HealthcheckContext {
+        profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
         home: home.path().to_path_buf(),
         project_path: home.path().to_path_buf(),
     };

@@ -11,7 +11,7 @@ use tracedecay_domain::{ObservabilityPayloadV1, ProjectId};
 use tracedecay_mcp::BrokerStreamTransport;
 
 struct DeliverySettlementFixture {
-    _pin: tracedecay_runtime_core::config::PinnedUserDataDir,
+    _profile: tempfile::TempDir,
     _project: tempfile::TempDir,
     recorder: Arc<BoundedDeliverySettlementRecorderV1>,
     authority: Arc<DeliverySettlementAuthorityV1>,
@@ -24,11 +24,11 @@ struct DeliverySettlementFixture {
 }
 
 async fn delivery_settlement_fixture() -> DeliverySettlementFixture {
-    let pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let profile = tempfile::tempdir().expect("profile");
     let project = tempfile::tempdir().expect("project");
     let project_id = ProjectId::new("project.rmcp.delivery").expect("project id");
     let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+        profile.path(),
         project.path(),
         project_id.clone(),
     )
@@ -54,7 +54,7 @@ async fn delivery_settlement_fixture() -> DeliverySettlementFixture {
             .expect("settlement recorder"),
     );
     DeliverySettlementFixture {
-        _pin: pin,
+        _profile: profile,
         _project: project,
         recorder,
         authority,

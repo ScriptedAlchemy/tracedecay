@@ -9,8 +9,8 @@
 use std::path::Path;
 
 use crate::common::{
-    EnvVarGuard, GLOBAL_DB_ENV_LOCK as ENV_LOCK, create_runtime, get_json, http_agent,
-    pick_free_port, wait_for_dashboard,
+    create_runtime, get_json, http_agent, in_child_test, pick_free_port, rerun_test_in_child,
+    wait_for_dashboard,
 };
 use crate::dashboard_api_support::{MessageDetails, MessageRecordBuilder, message};
 use crate::runtime::DashboardTestRuntimeV1;
@@ -19,13 +19,12 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay::dashboard;
 use tracedecay_global_db::ParseOffset;
-use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::SessionRecord;
 
 struct Fixture {
     _tmp: TempDir,
-    _env_guards: Vec<EnvVarGuard>,
     base_url: String,
     server: tokio::task::JoinHandle<()>,
     /// Start of the current UTC day; seeded timestamps hang off this.
@@ -403,13 +402,7 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
 
     let global_db_path = tmp.path().join("global").join("global.db");
     let profile_root = tmp.path().join("profile").join(".tracedecay");
-    let env_guards = vec![
-        EnvVarGuard::set("TRACEDECAY_GLOBAL_DB", &global_db_path),
-        EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root),
-        // `.cargo/config.toml` disables global accounting for cargo-launched
-        // processes; opt back in so the recording state reads "enabled".
-        EnvVarGuard::set("TRACEDECAY_ENABLE_GLOBAL_DB", "1"),
-    ];
+    let profile = ProfileRoot::new(&profile_root).with_global_db_override(&global_db_path);
 
     let now = now_unix();
     let day_start = now - (now % 86_400);
@@ -417,7 +410,7 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
     let project_id =
         tracedecay_domain::ProjectId::new("dashboard_savings_fixture").expect("project identity");
     let host_runtime = Arc::new(
-        DashboardTestRuntimeV1::project(&profile_root, &project_root, project_id)
+        DashboardTestRuntimeV1::project(&profile, &project_root, project_id)
             .await
             .expect("savings host-admission runtime"),
     );
@@ -442,12 +435,14 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
     let base_url = format!("http://127.0.0.1:{port}");
     let server_runtime = Arc::clone(&host_runtime);
     let server_graph = Arc::new(cg);
+    let server_profile = profile.clone();
     let server = tokio::spawn(async move {
         let authority = server_runtime
             .dashboard_test_authority()
             .expect("dashboard savings authority");
         let _ = dashboard::run_until_shutdown_for_tests_with_host_admission(
             server_graph,
+            &server_profile,
             authority,
             tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             tracedecay_dashboard_api::DashboardTestEndpointV1 {
@@ -467,7 +462,6 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
 
     Fixture {
         _tmp: tmp,
-        _env_guards: env_guards,
         base_url,
         server,
         day_start,
@@ -484,9 +478,19 @@ fn find_model<'a>(rows: &'a Value, model: &Value) -> &'a Value {
 
 #[test]
 fn savings_overview_reflects_seeded_ledger() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // `.cargo/config.toml` disables global accounting for cargo-launched
+    // processes; the journey runs in a child that opts back in so the
+    // recording state reads "enabled".
+    if !in_child_test() {
+        rerun_test_in_child(
+            "savings::savings_overview_reflects_seeded_ledger",
+            &[(
+                "TRACEDECAY_ENABLE_GLOBAL_DB",
+                Some(std::ffi::OsStr::new("1")),
+            )],
+        );
+        return;
+    }
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(FixtureSeed::LedgerOnly).await;
@@ -521,9 +525,19 @@ fn savings_overview_reflects_seeded_ledger() {
 
 #[test]
 fn daily_model_series_limits_days_not_model_rows() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // `.cargo/config.toml` disables global accounting for cargo-launched
+    // processes; the journey runs in a child that opts back in so the
+    // recording state reads "enabled".
+    if !in_child_test() {
+        rerun_test_in_child(
+            "savings::daily_model_series_limits_days_not_model_rows",
+            &[(
+                "TRACEDECAY_ENABLE_GLOBAL_DB",
+                Some(std::ffi::OsStr::new("1")),
+            )],
+        );
+        return;
+    }
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(FixtureSeed::DailyLimitRegression).await;
@@ -598,9 +612,19 @@ fn daily_model_series_limits_days_not_model_rows() {
 
 #[test]
 fn session_content_counts_ignore_metadata_usage_without_canonical_provider_evidence() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // `.cargo/config.toml` disables global accounting for cargo-launched
+    // processes; the journey runs in a child that opts back in so the
+    // recording state reads "enabled".
+    if !in_child_test() {
+        rerun_test_in_child(
+            "savings::session_content_counts_ignore_metadata_usage_without_canonical_provider_evidence",
+            &[(
+                "TRACEDECAY_ENABLE_GLOBAL_DB",
+                Some(std::ffi::OsStr::new("1")),
+            )],
+        );
+        return;
+    }
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(FixtureSeed::Base).await;
@@ -697,9 +721,19 @@ fn session_content_counts_ignore_metadata_usage_without_canonical_provider_evide
 
 #[test]
 fn overview_pricing_reports_bundled_snapshot_provenance() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // `.cargo/config.toml` disables global accounting for cargo-launched
+    // processes; the journey runs in a child that opts back in so the
+    // recording state reads "enabled".
+    if !in_child_test() {
+        rerun_test_in_child(
+            "savings::overview_pricing_reports_bundled_snapshot_provenance",
+            &[(
+                "TRACEDECAY_ENABLE_GLOBAL_DB",
+                Some(std::ffi::OsStr::new("1")),
+            )],
+        );
+        return;
+    }
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(FixtureSeed::Base).await;

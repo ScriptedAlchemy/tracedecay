@@ -3,13 +3,10 @@ use tracedecay_automation_runtime::automation::backend::AgentTaskRetryAttempt;
 
 #[test]
 fn fact_store_curate_is_the_only_public_manual_automation_launcher() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let mut fixture = start_dashboard_configuration_fixture().await;
-        let project_id = "dashboard_fixture_project";
+        let project_id = fixture.project_id.clone();
         let agent = http_agent();
         let base_url = fixture.base_url.clone();
 
@@ -132,9 +129,6 @@ fn fact_store_curate_is_the_only_public_manual_automation_launcher() {
 
 #[test]
 fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let tmp = tempdir_or_panic();
@@ -143,10 +137,10 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
         let project_root = tmp_root.join("project");
         let global_db_path = tmp_root.join("global").join("global.db");
         let profile_root = tmp_root.join("profile").join(".tracedecay");
-        let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
-        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+        let profile = ProfileRoot::new(&profile_root)
+            .with_global_db_override(&global_db_path);
 
-        let (cg, host_runtime) = setup_project(&project_root).await;
+        let (cg, host_runtime) = setup_project(&profile, &project_root).await;
         let fixture = seed_memory_fixture(&cg).await;
         let curated_fact_id = fixture.near_duplicate_fact_id.clone();
         let fake_codex = FakeCodexAppServer::new_memory_curator(
@@ -405,9 +399,6 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
 
 #[test]
 fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let tmp = tempdir_or_panic();
@@ -416,10 +407,10 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
         let project_root = tmp_root.join("project");
         let global_db_path = tmp_root.join("global").join("global.db");
         let profile_root = tmp_root.join("profile").join(".tracedecay");
-        let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
-        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+        let profile = ProfileRoot::new(&profile_root)
+            .with_global_db_override(&global_db_path);
 
-        let (cg, host_runtime) = setup_project(&project_root).await;
+        let (cg, host_runtime) = setup_project(&profile, &project_root).await;
         let dashboard_root = cg.store_layout().dashboard_root.clone();
         let run_id = "artifact_api_run";
         let created_at = "2026-06-24T00:00:00Z";
@@ -561,9 +552,6 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
 
 #[test]
 fn automation_outcomes_endpoint_reports_activated_skills_and_automatic_fact_receipt_trajectories() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let tmp = tempdir_or_panic();
@@ -572,10 +560,9 @@ fn automation_outcomes_endpoint_reports_activated_skills_and_automatic_fact_rece
         let project_root = tmp_root.join("project");
         let global_db_path = tmp_root.join("global").join("global.db");
         let profile_root = tmp_root.join("profile").join(".tracedecay");
-        let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
-        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+        let profile = ProfileRoot::new(&profile_root).with_global_db_override(&global_db_path);
 
-        let (cg, host_runtime) = setup_project(&project_root).await;
+        let (cg, host_runtime) = setup_project(&profile, &project_root).await;
         use tracedecay_automation_runtime::automation::managed_skills::{
             ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, create_managed_skill,
             default_managed_skill_targets,

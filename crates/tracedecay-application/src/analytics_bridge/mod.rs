@@ -83,29 +83,30 @@ impl HookImportOutcome {
     }
 }
 
-/// The hook JSONL files relevant to a project: its store file plus the
-/// user-level fallback file shared by every project.
-pub fn hook_import_sources(project_root: Option<&Path>) -> Vec<HookImportSource> {
+/// The hook JSONL files relevant to a project in the profile whose data
+/// directory is `profile_root`: its store file plus the user-level fallback
+/// file shared by every project. A project whose store layout cannot be
+/// resolved is a typed failure, never a silently shorter source list.
+pub fn hook_import_sources(
+    profile_root: &Path,
+    project_root: Option<&Path>,
+) -> tracedecay_domain::errors::Result<Vec<HookImportSource>> {
     let mut sources = Vec::new();
-    if let Some(root) = project_root
-        && let Ok(layout) =
-            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(root)
-    {
+    if let Some(root) = project_root {
+        let layout = tracedecay_runtime_core::storage::resolve_layout(root, profile_root)?;
         sources.push(HookImportSource {
             path: layout.data_root.join("hook_analytics.jsonl"),
             default_project_root: Some(root.to_path_buf()),
         });
     }
-    if let Ok(profile_root) = tracedecay_runtime_core::storage::default_profile_root() {
-        let path = profile_root.join("hook_analytics.jsonl");
-        if !sources.iter().any(|source| source.path == path) {
-            sources.push(HookImportSource {
-                path,
-                default_project_root: None,
-            });
-        }
+    let path = profile_root.join("hook_analytics.jsonl");
+    if !sources.iter().any(|source| source.path == path) {
+        sources.push(HookImportSource {
+            path,
+            default_project_root: None,
+        });
     }
-    sources
+    Ok(sources)
 }
 
 /// Imports new hook JSONL rows into `analytics_events`, advancing a byte
@@ -130,10 +131,11 @@ pub async fn import_hook_analytics(
 #[hotpath::measure(label = "usecases.analytics.sync", future = true)]
 pub async fn analytics_sync_with_db(
     gdb: &RegisteredGlobalDb,
+    profile_root: &Path,
     project_root: Option<&Path>,
-) -> Value {
-    let sources = hook_import_sources(project_root);
-    import_hook_analytics(gdb, sources).await.as_json()
+) -> tracedecay_domain::errors::Result<Value> {
+    let sources = hook_import_sources(profile_root, project_root)?;
+    Ok(import_hook_analytics(gdb, sources).await.as_json())
 }
 
 pub async fn import_source(

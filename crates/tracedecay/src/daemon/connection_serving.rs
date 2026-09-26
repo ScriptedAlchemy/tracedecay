@@ -1782,7 +1782,8 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         setup_activity,
         &first_request,
         || async {
-            let (canonical_project_path, _) = project_route_for_handshake(&handshake)?;
+            let (canonical_project_path, _) =
+                project_route_for_handshake(&handshake, store_administration.owner_home()?)?;
             Ok(Box::pin(portable_cached_project_server(
                 &store_administration,
                 &canonical_project_path,
@@ -1909,7 +1910,8 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
             if matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
                 && handshake.project_path.is_some()
             {
-                let (project_path, _) = project_route_for_handshake(&handshake)?;
+                let (project_path, _) =
+                    project_route_for_handshake(&handshake, store_administration.owner_home()?)?;
                 match Box::pin(portable_cached_project_server(
                     &store_administration,
                     &project_path,
@@ -1946,10 +1948,14 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
                         McpMethod::Initialize | McpMethod::ToolsList
                     ) =>
                 {
-                    match portable_cached_project_open_failure(
-                        project_open_gates.as_ref(),
-                        &handshake,
-                    )
+                    match async {
+                        portable_cached_project_open_failure(
+                            project_open_gates.as_ref(),
+                            &handshake,
+                            store_administration.owner_home()?,
+                        )
+                        .await
+                    }
                     .await
                     {
                         Ok(Some(failure)) => Some(failure.to_error()),

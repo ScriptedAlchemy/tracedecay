@@ -111,6 +111,11 @@ impl TraceDecay {
         &self.store_layout
     }
 
+    /// The data directory of the profile this graph was opened in.
+    pub fn profile_root(&self) -> tracedecay_domain::errors::Result<std::path::PathBuf> {
+        self.open_options.resolved_profile_root()
+    }
+
     pub fn retained_project_store_db(&self) -> Result<Database> {
         if !tracedecay_runtime_core::path_safety::same_canonical_path(
             self.db.canonical_database_path(),

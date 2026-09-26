@@ -36,7 +36,7 @@
 
 #[path = "../../tracedecay/tests/common/mod.rs"]
 mod common;
-use common::{EnvVarGuard, apply_isolated_profile_env, run_ok};
+use common::{apply_isolated_profile_env, run_ok};
 
 #[path = "work_route_exposure_conformance/work_evidence.rs"]
 mod work_evidence;
@@ -64,14 +64,9 @@ use tracedecay_contracts::{
 };
 use tracedecay_daemon_service::application_surface::http_application_router;
 use tracedecay_domain::ProjectId;
-use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_tool_catalog::RouteExposureV1;
-
-/// Pins the global database away from the operator's profile. The production
-/// constant is crate-private, so the name is repeated here for the same reason
-/// the shared test harness repeats it.
-const GLOBAL_DB_ENV: &str = "TRACEDECAY_GLOBAL_DB";
 
 /// Tail that no canonical binding declares, used to prove the routers really
 /// answer `404` for an unmounted path instead of swallowing everything.
@@ -102,10 +97,6 @@ struct ProductionDaemon {
     authorization: String,
     home: TempDir,
     profile: PathBuf,
-    _guards: Vec<EnvVarGuard>,
-    // Held for the fixture's whole life: starting a daemon pins process-wide
-    // environment variables, and this binary now hosts more than one test.
-    _env_lock: std::sync::MutexGuard<'static, ()>,
 }
 
 impl ProductionDaemon {
@@ -113,7 +104,6 @@ impl ProductionDaemon {
         // `inner_router` builds an in-process daemon handshake, which reads the
         // registered product runtime; only `main` registers one in production.
         common::register_process_product_runtime();
-        let env_lock = common::lock_global_db_env();
         let home = tempfile::tempdir().expect("isolated home");
         let root = home.path().to_path_buf();
         let profile = root.join(".tracedecay");
@@ -130,15 +120,6 @@ impl ProductionDaemon {
             "pub const ROUTE_EXPOSURE_FIXTURE: bool = true;\n",
         )
         .expect("fixture source");
-
-        let guards = vec![
-            EnvVarGuard::set("HOME", &root),
-            EnvVarGuard::set("USERPROFILE", &root),
-            EnvVarGuard::set("XDG_CONFIG_HOME", root.join(".config")),
-            EnvVarGuard::set(USER_DATA_DIR_ENV, &profile),
-            EnvVarGuard::set(GLOBAL_DB_ENV, profile.join("global.db")),
-            EnvVarGuard::set("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1"),
-        ];
 
         run_ok(
             Command::new("git")
@@ -192,9 +173,13 @@ impl ProductionDaemon {
             authorization: format!("Bearer {token}"),
             home,
             profile,
-            _guards: guards,
-            _env_lock: env_lock,
         }
+    }
+
+    fn profile_root(&self) -> ProfileRoot {
+        ProfileRoot::new(&self.profile)
+            .with_home(self.home.path())
+            .with_global_db_override(self.profile.join("global.db"))
     }
 
     /// External URL for a canonical route path, which already starts with
@@ -1380,7 +1365,7 @@ fn public_executable_routes_are_served_by_the_production_daemon() {
         .enable_all()
         .build()
         .expect("probe runtime");
-    let inner = runtime.block_on(inner_router(&fixture.project));
+    let inner = runtime.block_on(inner_router(&fixture.profile_root(), &fixture.project));
 
     let mut observations = Vec::with_capacity(declared_routes.len());
     for (operation_id, (route_path, body)) in declared_routes {
@@ -1602,8 +1587,9 @@ fn post_probe(
 
 /// Builds the same in-process router the daemon mounts, used only as secondary
 /// evidence so an inner/outer disagreement can be named precisely.
-async fn inner_router(project: &Path) -> axum::Router {
+async fn inner_router(profile: &ProfileRoot, project: &Path) -> axum::Router {
     let handshake = tracedecay::daemon::handshake_for_current_client(
+        profile,
         Some(project.to_path_buf()),
         None,
         false,

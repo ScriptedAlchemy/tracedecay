@@ -22,8 +22,6 @@ use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::path_safety::canonical_root_identity as canonical_temp_path;
 
-use crate::home_env_lock::HOME_ENV_LOCK;
-
 fn git_cli_path(path: &Path) -> PathBuf {
     #[cfg(windows)]
     {
@@ -133,7 +131,6 @@ async fn init_primary(fx: &Fixture) -> String {
 
 #[tokio::test]
 async fn observation_store_resolver_maps_primary_and_linked_worktree_to_same_store() {
-    let _guard = HOME_ENV_LOCK.lock().await;
     let fx = build_fixture();
     let project_id = init_primary(&fx).await;
     let store_root = fx.profile_root.join(format!("projects/{project_id}"));
@@ -183,7 +180,6 @@ async fn observation_store_resolver_maps_primary_and_linked_worktree_to_same_sto
 
 #[tokio::test]
 async fn opening_from_linked_worktree_keeps_canonical_root_on_primary() {
-    let _guard = HOME_ENV_LOCK.lock().await;
     let fx = build_fixture();
     let project_id = init_primary(&fx).await;
 
@@ -243,7 +239,6 @@ async fn opening_from_linked_worktree_keeps_canonical_root_on_primary() {
 
 #[tokio::test]
 async fn stale_worktree_canonical_root_heals_on_next_touch() {
-    let _guard = HOME_ENV_LOCK.lock().await;
     let fx = build_fixture();
     let project_id = init_primary(&fx).await;
 

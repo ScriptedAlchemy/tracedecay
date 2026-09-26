@@ -3,8 +3,8 @@
 mod fixtures;
 
 pub(crate) use fixtures::{
-    SeedSessionMessage, SeededDuplicateFacts, fact_exists, fixture_open_options, init_project,
-    read_artifact, seed_duplicate_facts, seed_project_session_activity,
+    SeedSessionMessage, SeededDuplicateFacts, fact_exists, fixture_host_home, fixture_open_options,
+    init_project, read_artifact, seed_duplicate_facts, seed_project_session_activity,
     seed_project_session_activity_at, seed_session_message_in_db,
 };
 #[cfg(feature = "test-transport")]
@@ -59,12 +59,10 @@ pub(crate) use tracedecay_runtime_core::tracedecay::current_timestamp;
 pub(crate) use tracedecay_sessions::admission::HostAdmissionScope;
 pub(crate) use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
-pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 pub(crate) fn automation_project_context(
     cg: &TraceDecay,
 ) -> tracedecay_automation_runtime::ports::project_runtime::AutomationProjectContext {
-    cg.automation_project_context()
+    cg.automation_project_context(Some(fixture_host_home(cg.project_root())))
         .expect("automation project context")
 }
 
@@ -734,14 +732,6 @@ impl AgentTaskBackend for InspectSkillWriterUnderusedBackend {
     fn executable(&self) -> Option<&std::path::Path> {
         None
     }
-}
-
-pub(crate) use crate::common::EnvVarGuard;
-
-/// Pins the profile database override at the test project's isolated session
-/// store. Callers must hold [`ENV_LOCK`] while the guard is alive.
-pub(crate) fn isolate_global_db(cg: &TraceDecay) -> EnvVarGuard {
-    EnvVarGuard::set("TRACEDECAY_GLOBAL_DB", &cg.store_layout().sessions_db_path)
 }
 
 impl FailingBackend {

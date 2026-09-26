@@ -230,7 +230,8 @@ impl TraceDecay {
         )
         .await?
         .into_parts();
-        let (configuration_runtime, _) = ProjectConfigurationRuntime::open(opened)?;
+        let (configuration_runtime, _) =
+            ProjectConfigurationRuntime::open(opened, &open_options.resolved_profile_root()?)?;
         let configuration_runtime = Arc::new(configuration_runtime);
         let internal_detached_scope =
             tracedecay_runtime_core::worktree::detached_worktree_graph_scope(project_root)

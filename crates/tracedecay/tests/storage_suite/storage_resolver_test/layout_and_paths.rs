@@ -29,14 +29,12 @@ fn resolve_layout_defaults_to_profile_shard_without_marker_or_local_db() {
 
 #[tokio::test]
 async fn store_layout_uses_profile_shard_when_enrolled() {
-    let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("repo");
     let home = test_home(&dir);
     let shard_root = home.join(".tracedecay/projects/proj_123");
     fs::create_dir_all(project.join(".tracedecay")).unwrap();
     fs::create_dir_all(&shard_root).unwrap();
-    let _home_guard = HomeGuard::set(&home);
     fs::write(project.join("lib.rs"), "pub fn enrolled() {}\n").unwrap();
     init_repo_with_commit(&project);
     assert!(write_repository_identity_marker(&project, "proj_123").unwrap());

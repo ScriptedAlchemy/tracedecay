@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use tracedecay_sessions::runtime::SessionProvider;
 
-use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::{
     ingest_global_sources_for_provider, mark_test_project, open_project_session_db,
 };
@@ -36,9 +35,10 @@ fn install_fixture(agent_dir: &Path, project: &Path) -> PathBuf {
     path
 }
 
-async fn assert_fixture_session_landed(project: &Path) {
+async fn assert_fixture_session_landed(home: &Path, project: &Path) {
     let db = open_project_session_db(project).await.unwrap();
-    let stats = ingest_global_sources_for_provider(&db, project, Some(SessionProvider::Pi)).await;
+    let stats =
+        ingest_global_sources_for_provider(home, &db, project, Some(SessionProvider::Pi)).await;
     assert!(stats.messages_upserted > 0, "{stats:?}");
 
     let session = db.get_session("pi", SESSION_ID).await.unwrap();
@@ -76,36 +76,43 @@ async fn assert_fixture_session_landed(project: &Path) {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn pi_fixture_session_lands_in_the_project_store() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // An ambient `PI_CODING_AGENT_DIR` is outside this isolated home, so the
+    // source keeps the home's default agent directory.
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let _home = EnvVarGuard::set("HOME", &home);
-    let _agent_dir = EnvVarGuard::unset("PI_CODING_AGENT_DIR");
     init_git_repo(&project);
     mark_test_project(&project);
     install_fixture(&home.join(".pi/agent"), &project);
 
-    assert_fixture_session_landed(&project).await;
+    assert_fixture_session_landed(&home, &project).await;
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn pi_agent_dir_override_relocates_the_session_source_for_the_process_home() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let tmp = TempDir::new().unwrap();
-    let (home, project) = setup(&tmp);
-    let relocated = tmp.path().join("relocated-pi-agent");
-    let _home = EnvVarGuard::set("HOME", &home);
-    let _agent_dir = EnvVarGuard::set("PI_CODING_AGENT_DIR", &relocated);
+async fn pi_agent_dir_override_relocates_the_session_source_inside_the_home() {
+    // `PI_CODING_AGENT_DIR` is a process variable, honored only when it names
+    // a directory inside the home, so the journey runs in a child test process
+    // whose environment points it at `<home>/relocated-pi-agent`.
+    if !crate::common::in_child_test() {
+        let tmp = TempDir::new().unwrap();
+        let relocated = tmp.path().join("home").join("relocated-pi-agent");
+        crate::common::rerun_test_in_child(
+            "pi::pi_agent_dir_override_relocates_the_session_source_inside_the_home",
+            &[("PI_CODING_AGENT_DIR", Some(relocated.as_os_str()))],
+        );
+        return;
+    }
+    let relocated =
+        PathBuf::from(std::env::var_os("PI_CODING_AGENT_DIR").expect("child PI_CODING_AGENT_DIR"));
+    let home = relocated
+        .parent()
+        .expect("relocated agent dir has a home")
+        .to_path_buf();
+    let project = home.parent().expect("fixture root").join("project");
+    crate::support::init_project_at(&project);
     init_git_repo(&project);
     mark_test_project(&project);
     install_fixture(&relocated, &project);
 
-    assert_fixture_session_landed(&project).await;
+    assert_fixture_session_landed(&home, &project).await;
 }

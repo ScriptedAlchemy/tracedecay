@@ -48,37 +48,36 @@ fn log_catalog_prewarm_task(result: std::result::Result<(), tokio::task::JoinErr
 
 #[cfg(unix)]
 pub fn run_foreground(
+    profile: tracedecay_runtime_core::config::ProfileRoot,
     socket_path: PathBuf,
     remote_tls: Option<RemoteBrainTlsConfig>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> {
     Box::pin(hotpath::future!(
-        run_foreground_unix(socket_path, remote_tls),
+        run_foreground_unix(profile, socket_path, remote_tls),
         label = "daemon.bootstrap.run_foreground"
     ))
 }
 
 #[cfg(not(unix))]
 pub fn run_foreground(
+    profile: tracedecay_runtime_core::config::ProfileRoot,
     socket_path: PathBuf,
     remote_tls: Option<RemoteBrainTlsConfig>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> {
     Box::pin(hotpath::future!(
-        run_foreground_loopback(socket_path, remote_tls),
+        run_foreground_loopback(profile, socket_path, remote_tls),
         label = "daemon.bootstrap.run_foreground"
     ))
 }
 
 #[cfg(not(unix))]
 async fn run_foreground_loopback(
+    profile: tracedecay_runtime_core::config::ProfileRoot,
     _socket_path: PathBuf,
     remote_tls: Option<RemoteBrainTlsConfig>,
 ) -> Result<()> {
     let bootstrap_started = Instant::now();
-    let profile_root = tracedecay_runtime_core::config::user_data_dir().ok_or_else(|| {
-        TraceDecayError::Config {
-            message: "could not determine TraceDecay user data directory".to_string(),
-        }
-    })?;
+    let profile_root = profile.data_dir().to_path_buf();
     let catalog_prewarm = tokio::task::spawn_blocking(prewarm_static_daemon_bootstrap_catalog);
     let requested = default_loopback_endpoint();
     let _lifecycle_lease = hotpath::measure_block!("daemon.bootstrap.lifecycle_lease", {
@@ -94,11 +93,14 @@ async fn run_foreground_loopback(
         authority.record().epoch,
         &authority.record().process_run_id,
     )?;
-    let store_administration =
-        StoreAdministration::default().with_profile_identity(authority.profile_identity().clone());
+    let store_administration = StoreAdministration::default()
+        .with_profile_identity(authority.profile_identity().clone())
+        .with_owner_profile(profile.clone());
     let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
-    let invocation =
-        DaemonInvocationState::with_progress_producer_incarnation(authority.record().epoch);
+    let invocation = DaemonInvocationState::with_progress_producer_incarnation(
+        authority.record().epoch,
+        profile.home(),
+    );
     invocation.configure_github_read_only_credentials(authority.profile_identity());
     store_administration.install_remote_recovery_project_lifecycle()?;
     let deletion_owners = remote_deletion::RemoteDeletionRuntimeOwners {
@@ -503,15 +505,12 @@ fn hosted_dashboard_shutdown_owner() -> tracedecay_daemon_service::shutdown::Shu
     reason = "Foreground Unix bootstrap is one ordered authority-acquire, engine-wire, and serve sequence."
 )]
 async fn run_foreground_unix(
+    profile: tracedecay_runtime_core::config::ProfileRoot,
     socket_path: PathBuf,
     remote_tls: Option<RemoteBrainTlsConfig>,
 ) -> Result<()> {
     let bootstrap_started = Instant::now();
-    let profile_root = tracedecay_runtime_core::config::user_data_dir().ok_or_else(|| {
-        TraceDecayError::Config {
-            message: "could not determine TraceDecay user data directory".to_string(),
-        }
-    })?;
+    let profile_root = profile.data_dir().to_path_buf();
     let catalog_prewarm = tokio::task::spawn_blocking(prewarm_static_daemon_bootstrap_catalog);
     let endpoint = DaemonEndpoint::Unix(socket_path);
     let _lifecycle = hotpath::measure_block!("daemon.bootstrap.lifecycle_lease", {
@@ -529,8 +528,9 @@ async fn run_foreground_unix(
     )?;
     let http_application_registry = http_application::DaemonHttpApplicationRegistry::default();
     let engine = DaemonEngine::default()
-        .with_progress_producer_incarnation(authority.record().epoch)
+        .with_progress_producer_incarnation(authority.record().epoch, profile.home())
         .with_profile_identity(authority.profile_identity().clone())
+        .with_owner_profile(profile.clone())
         .with_http_application_registry(http_application_registry.clone());
     engine
         .store_administration
@@ -655,6 +655,7 @@ async fn run_foreground_unix(
     // every watcher setting from the pinned configuration already held by
     // their retained server; bootstrap never supplies activation authority.
     let git_watcher = git_watch::GitWatcher::new_with_canonical_scheduler(
+        profile.home().map(Path::to_path_buf),
         GitWatchMaintenanceWakeV1::new({
             let maintenance = maintenance.clone();
             move || maintenance.wake()
@@ -945,7 +946,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn foreground_bootstrap_future_is_heap_bounded() {
-        let future = run_foreground(PathBuf::from("/tmp/unused-tracedecay.sock"), None);
+        let future = run_foreground(
+            tracedecay_runtime_core::config::ProfileRoot::new("/tmp/unused-tracedecay-profile"),
+            PathBuf::from("/tmp/unused-tracedecay.sock"),
+            None,
+        );
 
         assert_eq!(
             std::mem::size_of_val(&future),

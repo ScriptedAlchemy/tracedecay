@@ -909,6 +909,7 @@ fn run_combined_review_for_retrieval_inner<'a>(
         let (skill_report, skill_record, skill_committed_receipt) =
             match finalize_skill_writer_success(
                 &cg.host_io,
+                cg.host_home.as_deref(),
                 &skill_finalizer,
                 &skill_bundle.profile_root,
                 Some(&cg.project_root),

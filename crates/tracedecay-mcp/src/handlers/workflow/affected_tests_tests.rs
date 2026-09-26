@@ -272,7 +272,7 @@ fn push_fixture_symbol(
 
 #[tokio::test]
 async fn directly_changed_test_file_dispatches_each_full_test_identity() {
-    let _profile = tracedecay_project::config::PinnedUserDataDir::new();
+    let profile = tempfile::TempDir::new().unwrap();
     let dir = tempfile::TempDir::new().unwrap();
     let project = dir.path();
     std::fs::create_dir_all(project.join("src")).unwrap();
@@ -290,6 +290,7 @@ async fn directly_changed_test_file_dispatches_each_full_test_identity() {
     .unwrap();
 
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.path(),
         project,
         "project.mcp-affected-tests",
     )
@@ -391,7 +392,7 @@ async fn directly_changed_test_file_dispatches_each_full_test_identity() {
 /// reporting success.
 #[tokio::test]
 async fn nested_source_module_dispatches_the_crate_relative_test_identity() {
-    let _profile = tracedecay_project::config::PinnedUserDataDir::new();
+    let profile = tempfile::TempDir::new().unwrap();
     let dir = tempfile::TempDir::new().unwrap();
     let project = dir.path();
     std::fs::create_dir_all(project.join("src/auth")).unwrap();
@@ -414,6 +415,7 @@ async fn nested_source_module_dispatches_the_crate_relative_test_identity() {
     .unwrap();
 
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.path(),
         project,
         "project.mcp-nested-module-tests",
     )
@@ -485,9 +487,10 @@ async fn nested_source_module_dispatches_the_crate_relative_test_identity() {
 
 #[tokio::test]
 async fn non_string_changed_paths_are_rejected_before_test_selection() {
-    let _profile = tracedecay_project::config::PinnedUserDataDir::new();
+    let profile = tempfile::TempDir::new().unwrap();
     let dir = tempfile::TempDir::new().unwrap();
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.path(),
         dir.path(),
         "project.mcp-affected-tests-invalid-input",
     )
@@ -561,7 +564,7 @@ fn unsupported_profile_is_rejected_before_test_selection() {
 
 #[tokio::test]
 async fn timed_out_test_runner_returns_a_terminal_receipt() {
-    let _profile = tracedecay_project::config::PinnedUserDataDir::new();
+    let profile = tempfile::TempDir::new().unwrap();
     let dir = tempfile::TempDir::new().unwrap();
     let project = dir.path();
     std::fs::create_dir_all(project.join("src")).unwrap();
@@ -579,6 +582,7 @@ async fn timed_out_test_runner_returns_a_terminal_receipt() {
     .unwrap();
 
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.path(),
         project,
         "project.mcp-affected-tests-timeout",
     )
@@ -629,7 +633,7 @@ async fn timed_out_test_runner_returns_a_terminal_receipt() {
 
 #[tokio::test]
 async fn cancellation_retains_results_completed_before_the_later_test() {
-    let _profile = tracedecay_project::config::PinnedUserDataDir::new();
+    let profile = tempfile::TempDir::new().unwrap();
     let dir = tempfile::TempDir::new().unwrap();
     let project = dir.path();
     std::fs::create_dir_all(project.join("src")).unwrap();
@@ -647,6 +651,7 @@ async fn cancellation_retains_results_completed_before_the_later_test() {
     .unwrap();
 
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.path(),
         project,
         "project.mcp-affected-tests-partial-cancel",
     )
@@ -708,7 +713,7 @@ async fn cancellation_retains_results_completed_before_the_later_test() {
 
 #[tokio::test]
 async fn vacuous_or_nonzero_test_output_is_a_failed_terminal() {
-    let _profile = tracedecay_project::config::PinnedUserDataDir::new();
+    let profile = tempfile::TempDir::new().unwrap();
     let dir = tempfile::TempDir::new().unwrap();
     let project = dir.path();
     std::fs::create_dir_all(project.join("src")).unwrap();
@@ -726,6 +731,7 @@ async fn vacuous_or_nonzero_test_output_is_a_failed_terminal() {
     .unwrap();
 
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.path(),
         project,
         "project.mcp-affected-tests-failed-output",
     )
@@ -793,7 +799,7 @@ async fn vacuous_or_nonzero_test_output_is_a_failed_terminal() {
 
 #[tokio::test]
 async fn reported_passing_and_failing_tests_complete_with_observed_results() {
-    let _profile = tracedecay_project::config::PinnedUserDataDir::new();
+    let profile = tempfile::TempDir::new().unwrap();
     let dir = tempfile::TempDir::new().unwrap();
     let project = dir.path();
     std::fs::create_dir_all(project.join("src")).unwrap();
@@ -811,6 +817,7 @@ async fn reported_passing_and_failing_tests_complete_with_observed_results() {
     .unwrap();
 
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.path(),
         project,
         "project.mcp-affected-tests-failing-result",
     )

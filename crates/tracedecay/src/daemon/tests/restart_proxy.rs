@@ -200,6 +200,7 @@ async fn connect_with_restart_grace_reconnects_once_daemon_rebinds() {
     });
 
     super::super::connect_with_restart_grace(
+        socket.parent().expect("socket parent"),
         &socket,
         std::time::Duration::from_secs(8),
         std::time::Duration::from_millis(50),
@@ -223,9 +224,14 @@ async fn connect_with_restart_grace_gives_up_with_restart_hint() {
     let poll = std::time::Duration::from_millis(50);
     let started = tokio::time::Instant::now();
 
-    let err = super::super::connect_with_restart_grace(&socket, grace, poll)
-        .await
-        .expect_err("connect should fail when no daemon ever binds");
+    let err = super::super::connect_with_restart_grace(
+        socket.parent().expect("socket parent"),
+        &socket,
+        grace,
+        poll,
+    )
+    .await
+    .expect_err("connect should fail when no daemon ever binds");
 
     let elapsed = started.elapsed();
     assert!(elapsed >= grace, "restart grace must be fully observed");
@@ -606,13 +612,12 @@ async fn initialize_root_routing_fails_closed_without_pinned_configuration() {
     })
     .to_string();
 
-    let config_path =
-        tracedecay_runtime_core::storage::resolve_layout_for_current_profile(&project)
-            .map_or_else(
-                |_| tracedecay_runtime_core::config::get_tracedecay_dir(&project),
-                |layout| layout.data_root,
-            )
-            .join("config.json");
+    let config_path = tracedecay_runtime_core::storage::resolve_layout(&project, profile.path())
+        .map_or_else(
+            |_| tracedecay_runtime_core::config::get_tracedecay_dir(&project),
+            |layout| layout.data_root,
+        )
+        .join("config.json");
     std::fs::create_dir_all(config_path.parent().expect("legacy config parent"))
         .expect("create legacy config parent");
     let legacy_input = json!({
@@ -664,6 +669,7 @@ async fn serve_proxies_when_socket_already_exists() {
 
     assert!(
         super::super::should_proxy_serve_to_daemon_with(
+            dir.path(),
             &socket,
             None,
             std::time::Duration::from_secs(8),
@@ -685,6 +691,7 @@ async fn serve_stays_in_process_without_socket_or_installed_service() {
     let decision = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         super::super::should_proxy_serve_to_daemon_with(
+            dir.path(),
             &socket,
             None,
             std::time::Duration::from_secs(8),
@@ -699,6 +706,7 @@ async fn serve_stays_in_process_without_socket_or_installed_service() {
     let decision = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         super::super::should_proxy_serve_to_daemon_with(
+            dir.path(),
             &socket,
             Some(&other_socket),
             std::time::Duration::from_secs(8),
@@ -728,6 +736,7 @@ async fn serve_waits_out_restart_window_when_service_owns_socket() {
 
     assert!(
         super::super::should_proxy_serve_to_daemon_with(
+            dir.path(),
             &socket,
             Some(&socket),
             std::time::Duration::from_secs(8),
@@ -758,6 +767,7 @@ async fn serve_attaches_during_first_service_start_once_the_record_appears() {
 
     assert!(
         super::super::should_proxy_serve_to_daemon_with(
+            dir.path(),
             &socket,
             Some(&socket),
             std::time::Duration::from_secs(8),
@@ -777,6 +787,7 @@ async fn serve_falls_back_when_installed_service_never_rebinds() {
 
     assert!(
         !super::super::should_proxy_serve_to_daemon_with(
+            dir.path(),
             &socket,
             Some(&socket),
             std::time::Duration::from_millis(200),

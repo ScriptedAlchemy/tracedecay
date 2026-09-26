@@ -38,8 +38,8 @@ pub fn register_runtime_ports() -> Result<()> {
 /// The root's hook runtime handle: every capability a hook path needs, as one
 /// `Copy` value composed over this root's daemon client.
 #[must_use]
-pub fn hook_runtime() -> HookRuntimeV1 {
-    tracedecay_project::runtime_ports::hook_runtime_with(daemon_client_ports())
+pub fn hook_runtime(profile: tracedecay_runtime_core::config::ProfileRoot) -> HookRuntimeV1 {
+    tracedecay_project::runtime_ports::hook_runtime_with(profile, daemon_client_ports())
 }
 
 /// The root's session review port: the post-ingest review hint routed through
@@ -57,7 +57,16 @@ fn schedule_user_session_review<'a>(
 ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
     Box::pin(hotpath::future!(
         async move {
-            let runtime = hook_runtime();
+            // Review runs inside the ingest pass that just wrote the sessions,
+            // which is scoped to the owning transcript source profile.
+            let Some(profile) = tracedecay_sessions::runtime::transcript_source_profile() else {
+                tracing::warn!(
+                    provider,
+                    "session review not scheduled: ingest ran outside a transcript source profile"
+                );
+                return;
+            };
+            let runtime = hook_runtime(profile);
             tracedecay_agent_hosts::hooks::schedule_user_session_review(
                 &runtime, provider, session_id,
             )
@@ -81,6 +90,7 @@ const fn daemon_client_ports() -> DaemonClientPortsV1 {
 /// The port is a plain `fn` returning a boxed future so the extracted crate
 /// needs no async-trait machinery.
 fn daemon_tool_json<'a>(
+    profile: &'a tracedecay_runtime_core::config::ProfileRoot,
     project_root: Option<&'a Path>,
     tool_name: &'a str,
     arguments: Value,
@@ -89,6 +99,7 @@ fn daemon_tool_json<'a>(
     Box::pin(hotpath::future!(
         async move {
             let handshake = crate::daemon::handshake_for_current_client(
+                profile,
                 project_root.map(Path::to_path_buf),
                 None,
                 false,
@@ -101,13 +112,14 @@ fn daemon_tool_json<'a>(
     ))
 }
 
-fn notify_hook_event(
-    project_root: &Path,
+fn notify_hook_event<'a>(
+    profile: &'a tracedecay_runtime_core::config::ProfileRoot,
+    project_root: &'a Path,
     event: tracedecay_hooks::DaemonHookEvent,
-) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
     Box::pin(hotpath::future!(
         async move {
-            let _ = crate::daemon::notify_hook_event(project_root, event).await;
+            let _ = crate::daemon::notify_hook_event(profile, project_root, event).await;
         },
         label = "runtime_ports.notify_hook"
     ))

@@ -377,6 +377,9 @@ pub struct DaemonInvocationService {
     #[cfg(any(test, feature = "test-helpers"))]
     configuration_runtime_registration_pause:
         Arc<Mutex<Option<ConfigurationRuntimeRegistrationPauseV1>>>,
+    /// Home of the daemon owner's user, where daemon-run automation deploys
+    /// managed skills. `None` when the owning profile has no home.
+    owner_home: Option<PathBuf>,
 }
 
 impl Default for DaemonInvocationService {
@@ -424,7 +427,20 @@ impl DaemonInvocationService {
             native_integration_status_broadcasts: Arc::new(Mutex::new(BTreeMap::new())),
             #[cfg(any(test, feature = "test-helpers"))]
             configuration_runtime_registration_pause: Arc::new(Mutex::new(None)),
+            owner_home: None,
         }
+    }
+
+    /// Binds the daemon owner's home, from the profile the daemon serves.
+    #[must_use]
+    pub fn with_owner_home(mut self, owner_home: Option<PathBuf>) -> Self {
+        self.owner_home = owner_home;
+        self
+    }
+
+    /// Home of the daemon owner's user, when the owning profile has one.
+    pub fn owner_home(&self) -> Option<&Path> {
+        self.owner_home.as_deref()
     }
 
     /// Reads both immutable generations through this daemon's scheduler owner.

@@ -936,30 +936,6 @@ where
     Ok(())
 }
 
-/// Returns the user's home directory, cross-platform.
-pub fn home_dir() -> Option<PathBuf> {
-    std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .ok()
-        .map(PathBuf::from)
-}
-
-/// True when `home` is the home directory of the running process. Ambient
-/// per-user overrides (`XDG_CONFIG_HOME`, `PI_CODING_AGENT_DIR`) describe only
-/// that home; a caller naming any other root must stay inside it.
-pub(crate) fn is_process_home(home: &Path) -> bool {
-    let Some(own) = home_dir() else {
-        return false;
-    };
-    if own == home {
-        return true;
-    }
-    match (std::fs::canonicalize(&own), std::fs::canonicalize(home)) {
-        (Ok(own), Ok(home)) => own == home,
-        _ => false,
-    }
-}
-
 /// Parse a JSONC string (comments and trailing commas allowed), falling back
 /// to `serde_json::json!({})` on any parse failure. Read-only paths only.
 pub fn parse_jsonc(input: &str) -> serde_json::Value {
