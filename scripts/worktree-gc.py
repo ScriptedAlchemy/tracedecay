@@ -18,7 +18,8 @@ process cwd or executable inside), DIRTY, LOCKED, and NESTED lanes are never
 removed; removal re-verifies state at delete time and uses plain
 `git worktree remove` (no --force); branch deletion is a compare-and-swap on
 the verified SHA. Build reclamation deletes only regenerable, git-ignored
-build output (`target/`, `node_modules/` beside a tracked package-lock.json)
+build output (`target/`, and the `node_modules/` and `.pnpm/` trees that
+`pnpm install` rebuilds from the tracked pnpm-lock.yaml)
 of idle, inactive lanes, dirty or not, and never source.
 """
 
@@ -44,8 +45,12 @@ GH_TIMEOUT_SECONDS = 60
 # that proves the build tool can regenerate it.
 BUILD_OUTPUTS = (
     ("target", "Cargo.toml"),
-    ("node_modules", "package-lock.json"),
-    ("dashboard/node_modules", "dashboard/package-lock.json"),
+    ("node_modules", "pnpm-lock.yaml"),
+    ("dashboard/node_modules", "pnpm-lock.yaml"),
+    ("sdks/typescript/node_modules", "pnpm-lock.yaml"),
+    ("plugin/cursor-native-extension/node_modules", "pnpm-lock.yaml"),
+    (".pnpm", "pnpm-lock.yaml"),
+    ("sdks/codegen/.pnpm", "pnpm-lock.yaml"),
 )
 STATUSES = ("PRIMARY", "PRUNABLE", "ACTIVE", "NESTED", "DIRTY", "LOCKED", "UNMERGED", "FRESH", "MERGED")
 
