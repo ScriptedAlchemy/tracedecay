@@ -89,24 +89,72 @@ pub fn graph_stable_identity(kind: &str, value: &str) -> String {
     format!("{kind}:{}", hex::encode(digest.finalize()))
 }
 
-pub(crate) fn encoded_namespace_key(namespace: &GraphNamespace) -> String {
-    hex::encode(namespace.as_str().as_bytes())
+/// Width of the namespace id that leads every unique key.
+const NAMESPACE_KEY_ID_BYTES: usize = 8;
+const DIGEST_BYTES: usize = 32;
+const RAW_IDENTITY_TAG: u8 = 0;
+const DIGEST_IDENTITY_TAG: u8 = 1;
+
+/// The short id a namespace contributes to every unique key it owns: the
+/// leading bytes of the namespace's SHA-256.
+///
+/// It is derived rather than allocated so a lookup needs no read and a sealed
+/// copy rebuilds identical keys. Every indexed read re-checks the row's
+/// namespace scalar, so two namespaces sharing an id surface as `Corrupt`
+/// instead of aliasing each other's rows.
+pub(crate) type NamespaceKeyId = [u8; NAMESPACE_KEY_ID_BYTES];
+
+pub(crate) fn namespace_key_id(namespace: &GraphNamespace) -> NamespaceKeyId {
+    let digest = Sha256::digest(namespace.as_str().as_bytes());
+    let mut id = [0; NAMESPACE_KEY_ID_BYTES];
+    id.copy_from_slice(&digest[..NAMESPACE_KEY_ID_BYTES]);
+    id
 }
 
-pub(crate) fn stable_key_from_encoded(encoded_namespace: &str, identity: &str) -> String {
-    format!("{}:{}", encoded_namespace, hex::encode(identity.as_bytes()))
+/// Unique-key bytes for `identity` inside the namespace `namespace_id` names.
+///
+/// Keys are only ever matched exactly through a property hash index; no scan
+/// orders by them. The encoding is injective: a `<kind>:<64 lowercase hex>`
+/// identity (every [`graph_stable_identity`]) is stored as its kind followed
+/// by the 32 digest bytes, anything else verbatim, and a tag byte separates
+/// the two forms.
+pub(crate) fn stable_key(namespace_id: &NamespaceKeyId, identity: &str) -> Vec<u8> {
+    let mut key = Vec::with_capacity(NAMESPACE_KEY_ID_BYTES + 1 + identity.len());
+    key.extend_from_slice(namespace_id);
+    match identity
+        .rsplit_once(':')
+        .and_then(|(kind, digest)| Some((kind, decode_lower_hex_digest(digest)?)))
+    {
+        Some((kind, digest)) => {
+            key.push(DIGEST_IDENTITY_TAG);
+            key.extend_from_slice(kind.as_bytes());
+            key.extend_from_slice(&digest);
+        }
+        None => {
+            key.push(RAW_IDENTITY_TAG);
+            key.extend_from_slice(identity.as_bytes());
+        }
+    }
+    key
 }
 
-pub(crate) fn stable_key(namespace: &GraphNamespace, identity: &str) -> String {
-    stable_key_from_encoded(&encoded_namespace_key(namespace), identity)
+/// Only the canonical lowercase spelling compacts, so every identity has
+/// exactly one key.
+fn decode_lower_hex_digest(digest: &str) -> Option<[u8; DIGEST_BYTES]> {
+    if digest.len() != DIGEST_BYTES * 2
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+    let mut bytes = [0; DIGEST_BYTES];
+    hex::decode_to_slice(digest, &mut bytes).ok()?;
+    Some(bytes)
 }
 
-pub(crate) fn projection_key(namespace: &GraphNamespace, projection: &GraphProjectionId) -> String {
-    stable_key(namespace, projection.as_str())
-}
-
-fn key_label(prefix: &str, key: &str) -> String {
-    format!("{prefix}{}", hex::encode(key.as_bytes()))
+pub(crate) fn key_value(namespace: &GraphNamespace, identity: &str) -> Value {
+    Value::Bytes(stable_key(&namespace_key_id(namespace), identity).into())
 }
 
 /// The indexed unique-key value for one entity.
@@ -116,13 +164,13 @@ fn key_label(prefix: &str, key: &str) -> String {
 /// therefore one columnar node table, per entity, which caps out at grafeo's
 /// `u16` table id long before a real repository graph is loaded.
 pub(crate) fn entity_key_value(namespace: &GraphNamespace, identity: &GraphEntityId) -> Value {
-    Value::from(stable_key(namespace, identity.as_str()))
+    key_value(namespace, identity.as_str())
 }
 
 /// The indexed unique-key value for one relation locator. See
 /// [`entity_key_value`] for why this is a property rather than a label.
 pub(crate) fn relation_key_value(namespace: &GraphNamespace, identity: &GraphRelationId) -> Value {
-    Value::from(stable_key(namespace, identity.as_str()))
+    key_value(namespace, identity.as_str())
 }
 
 /// The indexed unique-key value for a relation locator's native edge.
@@ -141,10 +189,12 @@ pub(crate) fn relation_projection_label(
     namespace: &GraphNamespace,
     projection: &GraphProjectionId,
 ) -> String {
-    key_label(
-        RELATION_OWNER_LABEL_PREFIX,
-        &projection_key(namespace, projection),
-    )
+    let owner = format!(
+        "{}:{}",
+        hex::encode(namespace.as_str().as_bytes()),
+        hex::encode(projection.as_str().as_bytes())
+    );
+    format!("{RELATION_OWNER_LABEL_PREFIX}{}", hex::encode(owner))
 }
 
 /// The indexed unique-key value for one projection-state node.
@@ -155,7 +205,7 @@ pub(crate) fn projection_state_key_value(
     namespace: &GraphNamespace,
     projection: &GraphProjectionId,
 ) -> Value {
-    Value::from(projection_key(namespace, projection))
+    key_value(namespace, projection.as_str())
 }
 
 /// The indexed unique-key value for one publication receipt.
@@ -163,7 +213,7 @@ pub(crate) fn publication_key_value(
     namespace: &GraphNamespace,
     identity: &GraphIdempotencyKey,
 ) -> Value {
-    Value::from(stable_key(namespace, identity.as_str()))
+    key_value(namespace, identity.as_str())
 }
 
 pub(crate) fn entity_projection_label(
@@ -172,7 +222,7 @@ pub(crate) fn entity_projection_label(
 ) -> String {
     format!(
         "{OWNER_LABEL_PREFIX}{}_{}",
-        encoded_namespace_key(namespace),
+        hex::encode(namespace.as_str().as_bytes()),
         hex::encode(projection.as_str().as_bytes())
     )
 }
@@ -200,7 +250,7 @@ pub(crate) fn entity_labels(
     projection: &GraphProjectionId,
     labels: &BTreeSet<GraphLabel>,
 ) -> Vec<String> {
-    let namespace_hex = encoded_namespace_key(namespace);
+    let namespace_hex = hex::encode(namespace.as_str().as_bytes());
     let projection_hex = hex::encode(projection.as_str().as_bytes());
     let mut native = vec![
         ENTITY_LABEL.to_owned(),
@@ -267,14 +317,10 @@ pub(crate) fn entity_properties(
     projection: &GraphProjectionId,
     entity: &GraphEntity,
 ) -> Vec<(String, Value)> {
-    let encoded_namespace = encoded_namespace_key(namespace);
     let mut properties = vec![
         (
             ENTITY_KEY_PROPERTY.to_owned(),
-            Value::from(stable_key_from_encoded(
-                &encoded_namespace,
-                entity.identity.as_str(),
-            )),
+            key_value(namespace, entity.identity.as_str()),
         ),
         (
             NAMESPACE_PROPERTY.to_owned(),
@@ -307,14 +353,10 @@ pub(crate) fn relation_properties(
     let edge = i64::try_from(edge.as_u64()).map_err(|_| GraphDbError::Corrupt {
         message: "Grafeo edge identity exceeds the persisted scalar range".to_owned(),
     })?;
-    let encoded_namespace = encoded_namespace_key(namespace);
     let mut properties = vec![
         (
             RELATION_KEY_PROPERTY.to_owned(),
-            Value::from(stable_key_from_encoded(
-                &encoded_namespace,
-                relation.identity.as_str(),
-            )),
+            key_value(namespace, relation.identity.as_str()),
         ),
         (
             NAMESPACE_PROPERTY.to_owned(),
@@ -356,15 +398,7 @@ pub(crate) fn edge_properties(
     projection: &GraphProjectionId,
     relation: &GraphRelation,
 ) -> Vec<(String, Value)> {
-    let encoded_namespace = encoded_namespace_key(namespace);
     let mut properties = vec![
-        (
-            RELATION_KEY_PROPERTY.to_owned(),
-            Value::from(stable_key_from_encoded(
-                &encoded_namespace,
-                relation.identity.as_str(),
-            )),
-        ),
         (
             NAMESPACE_PROPERTY.to_owned(),
             Value::from(namespace.as_str()),
@@ -407,10 +441,7 @@ pub(crate) fn projection_properties(
     let mut properties = vec![
         (
             PROJECTION_KEY_PROPERTY.to_owned(),
-            Value::from(stable_key_from_encoded(
-                &encoded_namespace_key(namespace),
-                projection.as_str(),
-            )),
+            key_value(namespace, projection.as_str()),
         ),
         (
             NAMESPACE_PROPERTY.to_owned(),
@@ -435,10 +466,7 @@ pub(crate) fn publication_properties(
     let mut properties = vec![
         (
             PUBLICATION_KEY_PROPERTY.to_owned(),
-            Value::from(stable_key_from_encoded(
-                &encoded_namespace_key(namespace),
-                key.as_str(),
-            )),
+            key_value(namespace, key.as_str()),
         ),
         (
             NAMESPACE_PROPERTY.to_owned(),
@@ -850,5 +878,61 @@ mod graph_stable_identity_tests {
             graph_stable_identity("symbol", "occ"),
             graph_stable_identity("symbolo", "cc")
         );
+    }
+}
+
+#[cfg(test)]
+mod stable_key_tests {
+    use std::collections::BTreeSet;
+
+    use super::{graph_stable_identity, namespace_key_id, stable_key};
+    use crate::GraphNamespace;
+
+    #[test]
+    fn a_stable_identity_key_is_the_namespace_id_kind_and_raw_digest() {
+        let workspace = namespace_key_id(&GraphNamespace::new("workspace").unwrap());
+        let key = stable_key(&workspace, &graph_stable_identity("symbol", "occ"));
+
+        let mut expected = vec![0x21, 0xa3, 0x23, 0x0e, 0x03, 0x77, 0x2a, 0x58, 1];
+        expected.extend_from_slice(b"symbol");
+        expected.extend_from_slice(
+            &hex::decode("199f069a8ccddbb90bd0626b5904f52fbb2d92879bdbbf2c5dc29c1ea4ab66fb")
+                .unwrap(),
+        );
+        assert_eq!(key, expected);
+        assert_eq!(key.len(), 47);
+        assert_eq!(
+            stable_key(&workspace, "entity"),
+            [
+                &[0x21, 0xa3, 0x23, 0x0e, 0x03, 0x77, 0x2a, 0x58, 0][..],
+                b"entity"
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
+    fn keys_differ_whenever_namespace_or_identity_differs() {
+        let digest = "ab".repeat(32);
+        let identities = [
+            format!("symbol:{digest}"),
+            format!("symbol:{}", digest.to_uppercase()),
+            format!("symbo:l{digest}"),
+            format!("symbol:{digest}0"),
+            format!("\u{1}symbol{}", "\u{ab}".repeat(32)),
+            "symbol".to_owned(),
+            String::new(),
+        ];
+        let namespaces = ["workspace", "generation:workspace"]
+            .map(|namespace| namespace_key_id(&GraphNamespace::new(namespace).unwrap()));
+        let keys: BTreeSet<Vec<u8>> = namespaces
+            .iter()
+            .flat_map(|namespace| {
+                identities
+                    .iter()
+                    .map(|identity| stable_key(namespace, identity))
+            })
+            .collect();
+        assert_eq!(keys.len(), 14);
     }
 }

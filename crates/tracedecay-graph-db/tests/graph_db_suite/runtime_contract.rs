@@ -6,10 +6,10 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tracedecay_graph_db::{
     GraphBudgetKind, GraphCancellation, GraphDbError, GraphDbLeaseV1, GraphDbOwner, GraphEntity,
-    GraphEntityId, GraphIdempotencyKey, GraphLabel, GraphMutation, GraphNamespace,
-    GraphProjectionId, GraphPublication, GraphPublicationInputDigest, GraphRelation,
-    GraphRelationId, GraphRelationKind, GraphTraversalDirection, GraphWatermark, GraphWriteBatch,
-    NeverCancelled, ProjectionReplacement, SourceGeneration, TraversalRequest,
+    GraphEntityId, GraphFormatVersion, GraphIdempotencyKey, GraphLabel, GraphMutation,
+    GraphNamespace, GraphProjectionId, GraphPublication, GraphPublicationInputDigest,
+    GraphRelation, GraphRelationId, GraphRelationKind, GraphTraversalDirection, GraphWatermark,
+    GraphWriteBatch, NeverCancelled, ProjectionReplacement, SourceGeneration, TraversalRequest,
 };
 
 use crate::support;
@@ -1004,6 +1004,64 @@ fn wrong_tracedecay_format_requires_reset() {
     raw.close().unwrap();
     let error = RegisteredGraph::open_lease(temp.path()).err().unwrap();
     assert!(matches!(error, GraphDbError::ResetRequired { .. }));
+}
+
+#[test]
+fn superseded_format_store_is_rebuilt_fresh_with_its_sealed_generations_discarded() {
+    let temp = TempDir::new().unwrap();
+    let path = graph_path(temp.path());
+    let previous_format = i64::from(GraphFormatVersion::current().get() - 1);
+    let raw = grafeo_engine::GrafeoDB::with_config(
+        grafeo_engine::Config::persistent(&path)
+            .with_storage_format(grafeo_engine::config::StorageFormat::SingleFile),
+    )
+    .unwrap();
+    raw.session()
+        .create_node_with_props(
+            &["__tracedecay_graph_db_format"],
+            [
+                ("__tracedecay_graph_db_version", previous_format.into()),
+                ("__tracedecay_graph_db_schema", "native-scalars-v1".into()),
+                ("__tracedecay_graph_db_sequence", 1_i64.into()),
+            ],
+        )
+        .unwrap();
+    raw.session()
+        .create_node_with_props(
+            &["__tracedecay_graph_db_entity"],
+            [
+                (
+                    "__tracedecay_graph_db_entity_key",
+                    "70726f6a656374:61".into(),
+                ),
+                ("__tracedecay_graph_db_namespace", "project".into()),
+                ("__tracedecay_graph_db_projection", "code".into()),
+                ("__tracedecay_graph_db_entity_id", "stale".into()),
+            ],
+        )
+        .unwrap();
+    raw.close().unwrap();
+    let sealed_generation = temp.path().join("graph.sealed").join("0".repeat(64));
+    std::fs::create_dir_all(&sealed_generation).unwrap();
+    std::fs::write(
+        sealed_generation.join("generation.grafeo"),
+        b"format 2 bytes",
+    )
+    .unwrap();
+
+    let (_registered, db) = RegisteredGraph::open_lease(temp.path()).unwrap();
+
+    assert!(!temp.path().join("graph.sealed").exists());
+    assert_eq!(
+        db.entity(&namespace(), &entity_id("stale"), live())
+            .unwrap(),
+        None
+    );
+    db.publish_unverified(publication("event-1", None)).unwrap();
+    assert_eq!(
+        db.entity(&namespace(), &entity_id("a"), live()).unwrap(),
+        Some(entity("a"))
+    );
 }
 
 #[test]
