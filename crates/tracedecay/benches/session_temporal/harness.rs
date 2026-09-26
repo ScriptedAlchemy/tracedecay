@@ -8,8 +8,6 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::collections::BTreeSet;
-use std::env;
-use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -154,50 +152,28 @@ impl Phase {
     }
 }
 
-/// RAII isolation for `HOME` and `TRACEDECAY_DATA_DIR`.
-///
-/// Holds the crate-wide `lock_user_data_dir_test_env` mutex for the lifetime
-/// of the guard so restoration can be observed without racing other env
-/// mutators.
+/// A throwaway home and data directory the benchmark hands to every API it
+/// drives; nothing reads the process environment for them.
 pub struct IsolatedBenchmarkEnv {
-    _env_lock: std::sync::MutexGuard<'static, ()>,
     temp: TempDir,
     home: PathBuf,
     data_dir: PathBuf,
-    previous_home: Option<OsString>,
-    previous_data_dir: Option<OsString>,
-    restored: bool,
 }
 
 impl IsolatedBenchmarkEnv {
     pub fn enter(prefix: &str) -> BenchResult<Self> {
-        let env_lock = tracedecay_project::config::lock_user_data_dir_test_env();
         let temp = tempfile::Builder::new()
             .prefix(prefix)
             .tempdir()
             .map_err(|error| format!("create tempdir: {error}"))?;
         let home = temp.path().join("home");
         let data_dir = temp.path().join("tracedecay-data");
-        fs::create_dir_all(&home).map_err(|error| format!("create HOME: {error}"))?;
-        fs::create_dir_all(&data_dir)
-            .map_err(|error| format!("create TRACEDECAY_DATA_DIR: {error}"))?;
-
-        let previous_home = env::var_os("HOME");
-        let previous_data_dir = env::var_os("TRACEDECAY_DATA_DIR");
-        // SAFETY: the crate-wide environment lock is held for the RAII lifetime.
-        unsafe {
-            env::set_var("HOME", &home);
-            env::set_var("TRACEDECAY_DATA_DIR", &data_dir);
-        }
-
+        fs::create_dir_all(&home).map_err(|error| format!("create home: {error}"))?;
+        fs::create_dir_all(&data_dir).map_err(|error| format!("create data dir: {error}"))?;
         Ok(Self {
-            _env_lock: env_lock,
             temp,
             home,
             data_dir,
-            previous_home,
-            previous_data_dir,
-            restored: false,
         })
     }
 
@@ -211,32 +187,6 @@ impl IsolatedBenchmarkEnv {
 
     pub fn path(&self) -> &Path {
         self.temp.path()
-    }
-
-    /// Restore `HOME` and `TRACEDECAY_DATA_DIR` while the env lock is still held.
-    pub fn restore_under_lock(&mut self) {
-        if self.restored {
-            return;
-        }
-        restore_env("HOME", self.previous_home.take());
-        restore_env("TRACEDECAY_DATA_DIR", self.previous_data_dir.take());
-        self.restored = true;
-    }
-}
-
-impl Drop for IsolatedBenchmarkEnv {
-    fn drop(&mut self) {
-        self.restore_under_lock();
-    }
-}
-
-fn restore_env(key: &str, previous: Option<OsString>) {
-    // SAFETY: restores process environment captured by IsolatedBenchmarkEnv.
-    unsafe {
-        match previous {
-            Some(value) => env::set_var(key, value),
-            None => env::remove_var(key),
-        }
     }
 }
 
@@ -1312,23 +1262,5 @@ mod tests {
         assert!(phases.contains(&Phase::CompactRank));
         assert!(phases.contains(&Phase::LateHydrate));
         assert!(samples.record_count >= root_relation_fixture::ROOT_RELATION_PARTICIPANT_COUNT);
-    }
-
-    #[tokio::test]
-    async fn isolated_env_sets_and_restores_home_and_data_dir() {
-        let mut isolated = IsolatedBenchmarkEnv::enter("session-temporal-env-").unwrap();
-        let prior_home = isolated.previous_home.clone();
-        let prior_data = isolated.previous_data_dir.clone();
-        assert_eq!(
-            env::var_os("HOME").as_deref(),
-            Some(isolated.home().as_os_str())
-        );
-        assert_eq!(
-            env::var_os("TRACEDECAY_DATA_DIR").as_deref(),
-            Some(isolated.data_dir().as_os_str())
-        );
-        isolated.restore_under_lock();
-        assert_eq!(env::var_os("HOME"), prior_home);
-        assert_eq!(env::var_os("TRACEDECAY_DATA_DIR"), prior_data);
     }
 }

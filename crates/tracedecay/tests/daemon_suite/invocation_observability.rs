@@ -91,7 +91,7 @@ async fn runtime(
     let project = tempfile::tempdir().expect("project");
     let project_id = ProjectId::new(format!("project.{name}")).expect("project id");
     let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+        project.path().join("profile"),
         project.path(),
         project_id.clone(),
     )
@@ -105,7 +105,6 @@ async fn runtime(
 
 #[tokio::test]
 async fn project_runtime_reuses_one_producer_and_shutdown_flushes_it() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, project_id, database, _runtime) = runtime("observability-mount").await;
     let root = PathBuf::from("/project/observability-mount");
     let service = DaemonInvocationService::default();
@@ -163,7 +162,6 @@ async fn project_runtime_reuses_one_producer_and_shutdown_flushes_it() {
 
 #[tokio::test]
 async fn a_same_root_remount_stamps_the_configuration_it_resolved() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, project_id, database, _runtime) = runtime("observability-remount").await;
     let root = PathBuf::from("/project/observability-remount");
     let service = DaemonInvocationService::default();
@@ -258,7 +256,6 @@ async fn a_same_root_remount_stamps_the_configuration_it_resolved() {
 
 #[tokio::test]
 async fn a_new_daemon_runtime_restarts_the_project_producer_after_clean_shutdown() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, project_id, database, _runtime) = runtime("observability-restart").await;
     let root = PathBuf::from("/project/observability-restart");
     let first_service = DaemonInvocationService::default();
@@ -297,12 +294,11 @@ async fn a_new_daemon_runtime_restarts_the_project_producer_after_clean_shutdown
 
 #[tokio::test]
 async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let project = tempfile::tempdir().expect("project");
     let project_id = ProjectId::new("project.observability-store-alias").expect("project id");
     let registered_runtime =
         tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+            project.path().join("profile"),
             project.path(),
             project_id.clone(),
         )
@@ -818,7 +814,6 @@ async fn exact_store_routing_collapses_linked_roots_without_crossing_stores() {
 
 #[tokio::test]
 async fn last_alias_shutdown_keeps_the_store_retiring_until_drain_finishes() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, project_id, database, _runtime) =
         runtime("observability-retiring-shutdown").await;
     let root = PathBuf::from("/project/observability-retiring-shutdown");
@@ -912,7 +907,6 @@ async fn last_alias_shutdown_keeps_the_store_retiring_until_drain_finishes() {
 
 #[tokio::test]
 async fn concurrent_two_alias_release_keeps_the_store_retiring_until_drain_finishes() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, project_id, database, _runtime) =
         runtime("observability-retiring-two-aliases").await;
     let registry = StoreObservabilityRegistryV1::default();
@@ -1022,7 +1016,6 @@ async fn concurrent_two_alias_release_keeps_the_store_retiring_until_drain_finis
 
 #[tokio::test]
 async fn adjacent_linked_alias_capacity_drops_retain_distinct_policy_carriers() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, project_id, database, _runtime) =
         runtime("observability-linked-capacity-drops").await;
     let blocker = database
@@ -1128,7 +1121,6 @@ async fn adjacent_linked_alias_capacity_drops_retain_distinct_policy_carriers() 
 
 #[tokio::test]
 async fn dropped_last_alias_keeps_the_store_retiring_until_owners_release() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, project_id, database, _runtime) = runtime("observability-retiring-drop").await;
     let registry = StoreObservabilityRegistryV1::default();
     let identity = ObservabilityProducerIdentityV1 {
@@ -1197,7 +1189,6 @@ async fn dropped_last_alias_keeps_the_store_retiring_until_owners_release() {
 
 #[tokio::test]
 async fn runtimeless_last_alias_drop_keeps_the_store_retiring_until_the_drain_confirms() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, project_id, database, _runtime) =
         runtime("observability-runtimeless-drop").await;
     let registry = StoreObservabilityRegistryV1::default();
@@ -1278,7 +1269,6 @@ async fn runtimeless_last_alias_drop_keeps_the_store_retiring_until_the_drain_co
 
 #[tokio::test]
 async fn registered_shutdown_reports_a_blocked_producer_flush() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, project_id, database, _runtime) =
         runtime("observability-shutdown-failure").await;
     let identity = ObservabilityProducerIdentityV1 {

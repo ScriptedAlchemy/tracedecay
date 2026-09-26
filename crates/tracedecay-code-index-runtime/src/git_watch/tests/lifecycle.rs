@@ -10,6 +10,7 @@ async fn pinned_project_config_is_the_only_activation_authority() {
     let watcher = GitWatcher::from_parts(
         process_default.clone(),
         true,
+        None,
         MaintenanceCoordinator::default(),
         Some(crate::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(32)),
     );

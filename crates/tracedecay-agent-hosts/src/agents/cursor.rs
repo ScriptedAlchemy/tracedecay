@@ -4,6 +4,7 @@
 //! directory. The plugin owns MCP, hooks, and rule configuration.
 
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::{Value, json};
 
@@ -56,9 +57,10 @@ impl AgentIntegration for CursorIntegration {
     fn export_managed_skills(
         &self,
         home: &Path,
-        profile_root: &Path,
+        profile: &ProfileRoot,
     ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
     {
+        let profile_root = profile.data_dir();
         if !cursor_plugin_manifest_path(home).exists() {
             return Ok(Vec::new());
         }
@@ -148,20 +150,24 @@ impl AgentIntegration for CursorIntegration {
         home.join(".cursor").is_dir()
     }
 
-    fn detected_host_surface(&self, home: &Path) -> Option<PathBuf> {
+    fn detected_host_surface(&self, home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         let surface = home.join(".cursor");
         surface.is_dir().then_some(surface)
     }
 
-    fn primary_config_path(&self, home: &Path) -> Option<std::path::PathBuf> {
+    fn primary_config_path(
+        &self,
+        home: &Path,
+        _profile: &ProfileRoot,
+    ) -> Option<std::path::PathBuf> {
         Some(cursor_plugin_manifest_path(home))
     }
 
-    fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
+    fn host_registration_paths(&self, home: &Path, _profile: &ProfileRoot) -> Vec<PathBuf> {
         vec![cursor_plugin_manifest_path(home)]
     }
 
-    fn has_tracedecay(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
         cursor_plugin_manifest_path(home).exists()
     }
 }
@@ -768,6 +774,7 @@ mod tests {
         integration.healthcheck(
             &mut doctor,
             &HealthcheckContext {
+                profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
                 home: home.path().to_path_buf(),
                 project_path: project.path().to_path_buf(),
             },
@@ -842,6 +849,7 @@ mod tests {
         let mut writer =
             HostBundleWriterV1::open_with_lifecycle_root(home.path(), lifecycle.path()).unwrap();
         let mut registration = crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             "cursor",
             home.path(),
             install.lifecycle.operation,
@@ -870,6 +878,7 @@ mod tests {
         let current = cursor_component_set(&current_bin);
         let update = cursor_component_request(HostBundleLifecycleOpV1::Update, [62; 16], true);
         let mut registration = crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             "cursor",
             home.path(),
             update.lifecycle.operation,
@@ -890,6 +899,7 @@ mod tests {
         let updated_bytes = std::fs::read(&mcp_path).unwrap();
 
         let mut repeat_registration = crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             "cursor",
             home.path(),
             update.lifecycle.operation,
@@ -910,6 +920,7 @@ mod tests {
         let denied = cursor_component_request(HostBundleLifecycleOpV1::Update, [63; 16], false);
         let rejected = cursor_component_set("/opt/tracedecay-v3");
         let mut denied_registration = crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             "cursor",
             home.path(),
             denied.lifecycle.operation,
@@ -940,6 +951,7 @@ mod tests {
 
         let report = crate::agents::inspect_receipt_backed_host_components(
             &HealthcheckContext {
+                profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
                 home: home.path().to_path_buf(),
                 project_path: project.path().to_path_buf(),
             },
@@ -1022,6 +1034,7 @@ mod tests {
 
             let request = cursor_component_request(operation, [71; 16], true);
             let mut registration = crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
+                &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
                 "cursor",
                 home.path(),
                 operation,
@@ -1052,6 +1065,7 @@ mod tests {
 
             let adopt = adopting_cursor_component_request(operation, [72; 16]);
             let mut adopting_registration = crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
+                &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
                 "cursor",
                 home.path(),
                 operation,

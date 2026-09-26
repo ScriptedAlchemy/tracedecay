@@ -1152,7 +1152,6 @@ async fn session_automatic_facts_replay_same_run_idempotently() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn session_reflector_rejects_unsupported_source_role_and_time_filters_without_writes() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     let project_db = project_session_runtime(&cg).await;
@@ -1184,7 +1183,6 @@ async fn session_reflector_rejects_unsupported_source_role_and_time_filters_with
         },
     )
     .await;
-    let _global_db = isolate_global_db(&cg);
 
     let backend = InspectSessionEvidenceBackend;
     let unsupported_filter_options = SessionReflectorAutomationOptions {

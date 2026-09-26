@@ -86,7 +86,7 @@ pub(super) struct PrContextCursorBinding<'a> {
     pub merge_base: &'a str,
     pub graph_generation: &'a str,
     pub maximum_symbols: usize,
-    pub changes: &'a [GitFileChange],
+    pub changes: &'a [GitFileChangeV1],
 }
 
 impl<'a> PrContextCursorBinding<'a> {
@@ -155,7 +155,7 @@ pub(super) struct PrContextCursorComparison<'a> {
     pub merge_base: &'a str,
     pub graph_generation: &'a str,
     pub maximum_symbols: usize,
-    pub changes: &'a [GitFileChange],
+    pub changes: &'a [GitFileChangeV1],
 }
 
 /// Why an offered PR-context cursor cannot be honored.
@@ -420,7 +420,7 @@ mod tests {
     fn binding_for<'a>(
         root: &'a [u8],
         scope: Option<PrContextCursorScope<'a>>,
-        changes: &'a [GitFileChange],
+        changes: &'a [GitFileChangeV1],
     ) -> PrContextCursorBinding<'a> {
         binding_bound_to(root, scope, None, changes)
     }
@@ -436,7 +436,7 @@ mod tests {
         root: &'a [u8],
         scope: Option<PrContextCursorScope<'a>>,
         store: Option<PrContextCursorStore<'a>>,
-        changes: &'a [GitFileChange],
+        changes: &'a [GitFileChangeV1],
     ) -> PrContextCursorBinding<'a> {
         PrContextCursorBinding {
             protocol: "tracedecay.pr-context.cursor.v2",
@@ -618,9 +618,9 @@ mod tests {
     /// someone else's.
     #[test]
     fn a_cursor_from_a_moved_comparison_is_invalid() {
-        let changes = vec![GitFileChange {
+        let changes = vec![GitFileChangeV1 {
             path: "src/lib.rs".to_owned(),
-            status: "modified",
+            status: GitFileChangeStatusV1::Modified,
         }];
         let empty = Vec::new();
         let scope = resolved("project.a", None);

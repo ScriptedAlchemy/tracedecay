@@ -2,11 +2,9 @@ use std::path::Path;
 use std::time::Instant;
 
 use serde_json::Value;
-use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
+use tracedecay_runtime_core::config::ProfileRoot;
 
-use super::{
-    EnvGuard, HOOK_ANALYTICS_FILENAME, TestDaemonHookActionGuard, dispatch_pi_event, lock_test_env,
-};
+use super::{HOOK_ANALYTICS_FILENAME, TestDaemonHookActionGuard, dispatch_pi_event};
 
 fn read_analytics_rows(path: &Path) -> Vec<Value> {
     std::fs::read_to_string(path)
@@ -17,28 +15,25 @@ fn read_analytics_rows(path: &Path) -> Vec<Value> {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn pi_lifecycle_events_record_under_pi_and_land_their_session() {
-    let _lock = lock_test_env();
     let project = tempfile::tempdir().unwrap();
-    let profile = tempfile::tempdir().unwrap();
+    let profile_dir = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
-    let profile_root = profile.path().canonicalize().unwrap();
-    let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
+    let profile_root = profile_dir.path().canonicalize().unwrap();
+    let profile = ProfileRoot::new(&profile_root);
     tracedecay_runtime_core::storage::pin_fixture_repository_identity(
         &project_root,
         "proj_pi_hook",
     )
     .unwrap();
     let layout =
-        tracedecay_runtime_core::storage::resolve_layout_for_current_profile(&project_root)
-            .unwrap();
+        tracedecay_runtime_core::storage::resolve_layout(&project_root, &profile_root).unwrap();
     std::fs::create_dir_all(&layout.data_root).unwrap();
     let daemon = TestDaemonHookActionGuard::install([
         serde_json::json!({ "user_scope": false, "messages_upserted": 6 }),
         serde_json::json!({ "user_scope": false, "messages_upserted": 1 }),
     ]);
-    let runtime = crate::ports::hook_runtime::crate_test_runtime();
+    let runtime = crate::ports::hook_runtime::crate_test_runtime(profile.clone());
 
     for hook_name in ["session_start", "agent_end"] {
         let event = serde_json::json!({

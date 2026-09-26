@@ -12,17 +12,14 @@ use tracedecay_code_extraction::ExtractedSchemaEvidenceV1;
 use tracedecay_code_extraction::incremental::{ParseDocumentIdentity, ParseError};
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeGenerationManifestV1,
-    CodeGenerationSourceCommitmentsV1, CodeIndexCapabilityManifestV1, CodeSearchChunkV1,
-    ComponentVersion, CoverageSummaryV1, ExactTechnicalTermV1, ExtractorRevision, FileOccurrenceId,
-    GenerationTestAttributionV1, LanguageId, ManifestDigest, PolicyRevisionId, PrivacyDomainId,
-    ProjectId, ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1,
-    ProjectionReplayReasonV1, ProviderEvaluationStateV1, RefId, RelationEdgeKindV1, RepositoryId,
-    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityLevelV1,
-    SnapshotFileDispositionV1, SymbolOccurrenceId, TestAttributionEvidenceClassV1, UtcMicros,
-    ValidatedCodeFileV1, WorktreeId, canonical_sha256,
-};
-use tracedecay_graph_db::{
-    GraphGenerationManifest, GraphProjectionIdentity, GraphProjectorRevision,
+    CodeGenerationSourceCommitmentsV1, CodeIndexCapabilityManifestV1, ComponentVersion,
+    CoverageSummaryV1, ExtractorRevision, FileOccurrenceId, GenerationTestAttributionV1,
+    LanguageId, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId,
+    ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1,
+    ProviderEvaluationStateV1, RefId, RelationEdgeKindV1, RepositoryId, SanitizedCodeFileV1,
+    SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1,
+    SymbolOccurrenceId, TestAttributionEvidenceClassV1, UtcMicros, ValidatedCodeFileV1, WorktreeId,
+    canonical_sha256,
 };
 
 use super::{
@@ -47,10 +44,7 @@ use super::{
         SanitizedCodeIntake, SanitizedSnapshotCapabilityV1,
     },
     languages::{LanguageRegistry, StaticLanguageRegistry},
-    lineage::{
-        GenerationSymbolIndexV1, LineageResolutionErrorV1, LineageSymbolRecordV1,
-        SymbolLineageResolver,
-    },
+    lineage::{GenerationSymbolIndexV1, LineageResolutionErrorV1, SymbolLineageResolver},
     projection::{
         CodeChunkProjectionSink, ProjectionPublicationErrorV1, ProjectionPublicationHandoffV1,
         expected_request_digest, project_for_publication,
@@ -101,10 +95,14 @@ pub use lexical_page_source::{
     VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedLexicalSymbolDisplayV1,
     VerifiedSealedTextGenerationMetadataV1,
 };
+mod graph_inputs;
+pub(crate) use graph_inputs::{CodeGraphFileBatchV1, CodeGraphResolutionV1};
 mod partitioned_codec;
+pub(crate) mod resident_bytes;
 pub use partitioned_codec::{
-    SealedGenerationSegmentIdentityV1, SealedGenerationSegmentPublicationV1,
-    SealedGenerationSegmentReadV1,
+    SealedGenerationFileWindowsV1, SealedGenerationSegmentIdentityV1,
+    SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
+    SealedGenerationSegmentReaderV1,
 };
 mod sealed_codec;
 pub use sealed_codec::{
@@ -303,6 +301,10 @@ pub enum CodeIndexPublicationStoreErrorV1 {
     CorruptionResetRequired(String),
     #[error("the publication authority is unavailable: {0}")]
     Unavailable(String),
+    /// Materializing the whole generation does not fit the process
+    /// resident-memory budget now; it succeeds once memory is given back.
+    #[error("decoding the generation does not fit the resident-memory budget: {0}")]
+    ResidentMemoryRefused(String),
 }
 
 /// Canonical active-generation slot inside one repository-owned code-index
@@ -795,24 +797,8 @@ pub struct CodeIndexPublishedGenerationV1 {
     /// every chunk on each `active_generation` call re-derived a value that is
     /// a pure function of the immutable generation.
     chunk_policy: OnceLock<ChunkPolicyRevisionSummaryV1>,
-    /// Reclaimable code-graph publication manifest. Concurrent seat retries
-    /// share a complete build while a publication caller owns it, but the
-    /// generation does not pin the full entity/relation projection after the
-    /// durable graph has consumed it. The key remains first-success-wins so a
-    /// foreign projection identity can never replace the canonical memo.
-    graph_manifest: OnceLock<Arc<Mutex<CodeGraphManifestMemoV1>>>,
     /// [`Self::retained_bytes`] of the immutable decode, measured once.
     retained_bytes: OnceLock<u64>,
-}
-
-/// One successfully built code-graph publication manifest, pinned to the
-/// exact projection identity and projector revision it was derived under. A
-/// lookup under any other identity is a memo miss, never an aliased manifest.
-#[derive(Clone, Debug)]
-struct CodeGraphManifestMemoV1 {
-    projection: GraphProjectionIdentity,
-    projector_revision: GraphProjectorRevision,
-    manifest: Weak<GraphGenerationManifest>,
 }
 
 /// The chunk policy-revision census of one immutable generation: no chunks at
@@ -1012,91 +998,7 @@ impl CodeIndexPublishedGenerationV1 {
     }
 
     fn measure_decode_bytes(&self) -> usize {
-        use std::mem::size_of;
-        let chunk_bytes = |chunk: &CodeSearchChunkV1| {
-            size_of::<CodeSearchChunkV1>()
-                .saturating_add(chunk.id.as_str().len())
-                .saturating_add(chunk.content_digest.as_str().len())
-                .saturating_add(chunk.sanitized_text.as_str().len())
-                .saturating_add(chunk.exact_terms.iter().fold(0, |bytes, term| {
-                    bytes
-                        .saturating_add(size_of::<ExactTechnicalTermV1>())
-                        .saturating_add(term.original_bytes().len())
-                        .saturating_add(term.canonical_bytes().len())
-                }))
-                .saturating_add(chunk.subtokens.iter().fold(0, |bytes, subtoken| {
-                    bytes
-                        .saturating_add(size_of::<String>())
-                        .saturating_add(subtoken.len())
-                }))
-        };
-        let symbol_bytes = |symbol: &LineageSymbolRecordV1| {
-            size_of::<LineageSymbolRecordV1>()
-                .saturating_add(symbol.occurrence.as_str().len())
-                .saturating_add(symbol.qualified_name.len())
-                .saturating_add(symbol.simple_name.len())
-                .saturating_add(symbol.kind.len())
-                .saturating_add(symbol.visibility.len())
-                .saturating_add(symbol.signature.as_ref().map_or(0, String::len))
-        };
-        let file_bytes = |file: &FileGenerationArtifactsV1| {
-            let artifacts = &file.artifacts;
-            size_of::<FileGenerationArtifactsV1>()
-                .saturating_add(
-                    artifacts
-                        .edges
-                        .len()
-                        .saturating_mul(size_of::<CanonicalRelationEdgeV1>()),
-                )
-                .saturating_add(
-                    artifacts
-                        .imports
-                        .len()
-                        .saturating_mul(size_of::<CodeIndexImportEvidenceV1>()),
-                )
-                .saturating_add(
-                    artifacts
-                        .unresolved_references
-                        .len()
-                        .saturating_mul(size_of::<CodeIndexUnresolvedReferenceV1>()),
-                )
-                .saturating_add(artifacts.clone_bodies.iter().fold(0, |bytes, body| {
-                    bytes
-                        .saturating_add(size_of::<CodeIndexCloneBodyV1>())
-                        .saturating_add(body.retained_owned_bytes())
-                }))
-        };
-        // Chunks and symbols are `Arc`-shared between the files and the
-        // generation-wide indices; count each allocation once, from the index.
-        self.chunks
-            .chunks()
-            .iter()
-            .fold(0_usize, |bytes, chunk| {
-                bytes.saturating_add(chunk_bytes(chunk))
-            })
-            .saturating_add(self.symbols.symbols.iter().fold(0, |bytes, symbol| {
-                bytes.saturating_add(symbol_bytes(symbol))
-            }))
-            .saturating_add(
-                self.files
-                    .iter()
-                    .fold(0, |bytes, file| bytes.saturating_add(file_bytes(file))),
-            )
-            .saturating_add(
-                self.edges
-                    .len()
-                    .saturating_mul(size_of::<CanonicalRelationEdgeV1>()),
-            )
-            .saturating_add(
-                self.lineage
-                    .len()
-                    .saturating_mul(size_of::<SymbolLineageCandidateV1>()),
-            )
-            .saturating_add(self.snapshot.files.iter().fold(0, |bytes, file| {
-                bytes
-                    .saturating_add(size_of::<SanitizedCodeFileV1>())
-                    .saturating_add(file.logical_path.len())
-            }))
+        self.measure_resident_bytes()
     }
 
     /// Build the production generation-bound affected-test authority.
@@ -1325,49 +1227,6 @@ impl CodeIndexPublishedGenerationV1 {
             read: Arc::new(read),
             retained_bytes,
         })
-    }
-
-    /// The memoized code-graph publication manifest for exactly this
-    /// projection identity and projector revision, if a prior complete build
-    /// recorded one. A key mismatch is a miss, never a substituted manifest.
-    pub(crate) fn memoized_graph_manifest(
-        &self,
-        projection: &GraphProjectionIdentity,
-        projector_revision: &GraphProjectorRevision,
-    ) -> Option<Arc<GraphGenerationManifest>> {
-        let memo = self.graph_manifest.get()?;
-        let memo = match memo.lock() {
-            Ok(memo) => memo,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        (memo.projection == *projection && memo.projector_revision == *projector_revision)
-            .then(|| memo.manifest.upgrade())
-            .flatten()
-    }
-
-    /// Record one complete, successfully built code-graph publication
-    /// manifest. First success wins; the generation is immutable, so any
-    /// competing build under the same key produced an identical manifest.
-    pub(crate) fn memoize_graph_manifest(
-        &self,
-        projection: GraphProjectionIdentity,
-        projector_revision: GraphProjectorRevision,
-        manifest: Arc<GraphGenerationManifest>,
-    ) {
-        let memo = self.graph_manifest.get_or_init(|| {
-            Arc::new(Mutex::new(CodeGraphManifestMemoV1 {
-                projection: projection.clone(),
-                projector_revision: projector_revision.clone(),
-                manifest: Weak::new(),
-            }))
-        });
-        let mut memo = match memo.lock() {
-            Ok(memo) => memo,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if memo.projection == projection && memo.projector_revision == projector_revision {
-            memo.manifest = Arc::downgrade(&manifest);
-        }
     }
 
     /// Return chunks re-admitted through their parser-backed exact authority.
@@ -2327,7 +2186,6 @@ where
                 admitted: OnceLock::new(),
                 attribution: OnceLock::new(),
                 chunk_policy: OnceLock::new(),
-                graph_manifest: OnceLock::new(),
                 retained_bytes: OnceLock::new(),
             };
             hotpath::measure_block!(

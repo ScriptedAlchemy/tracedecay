@@ -128,10 +128,14 @@ fn compose_dashboard_automation_authority_with_resolver(
     let run_port = dashboard_automation_run_port(
         profile_root.clone(),
         Arc::clone(&project_resolver),
-        invocation_service,
+        invocation_service.clone(),
     );
-    let skill_port =
-        dashboard_managed_skill_command_port(profile_root.clone(), project_resolver, writer);
+    let skill_port = dashboard_managed_skill_command_port(
+        profile_root.clone(),
+        invocation_service.owner_home().map(Path::to_path_buf),
+        project_resolver,
+        writer,
+    );
     DashboardAutomationAuthorityV1::new(profile_root, run_port, skill_port).map_err(|error| {
         TraceDecayError::Config {
             message: error.detail().to_owned(),
@@ -219,11 +223,13 @@ fn dashboard_automation_run_control(
 
 fn dashboard_managed_skill_command_port(
     profile_root: PathBuf,
+    host_home: Option<PathBuf>,
     project_resolver: DashboardAutomationProjectResolver,
     writer: DashboardAutomationWriter,
 ) -> DashboardManagedSkillCommandPortV1 {
     Arc::new(move |invocation| {
         let profile_root = profile_root.clone();
+        let host_home = host_home.clone();
         let project_resolver = Arc::clone(&project_resolver);
         let writer = Arc::clone(&writer);
         Box::pin(async move {
@@ -231,6 +237,7 @@ fn dashboard_managed_skill_command_port(
                 let cg = project_resolver(invocation.project_root.clone()).await?;
                 execute_dashboard_managed_skill_command(
                     &tracedecay_agent_hosts::host_io(),
+                    host_home.as_deref(),
                     &profile_root,
                     cg.project_root(),
                     invocation.command,
@@ -477,6 +484,7 @@ async fn execute_dashboard_automation_run(
 #[hotpath::measure(label = "daemon.dashboard.automation.skill", future = true)]
 async fn execute_dashboard_managed_skill_command(
     host_io: &HostIo,
+    host_home: Option<&Path>,
     profile_root: &Path,
     project_root: &Path,
     command: DashboardManagedSkillCommandV1,
@@ -548,7 +556,8 @@ async fn execute_dashboard_managed_skill_command(
                 .map_err(|error| managed_skill_lifecycle_error(profile_root, &id, error))?
         }
     };
-    let deployment = deploy_managed_skills_to_project(host_io, profile_root, project_root);
+    let deployment =
+        deploy_managed_skills_to_project(host_io, host_home, profile_root, project_root);
     Ok(DashboardManagedSkillCommandOutcomeV1 { skill, deployment })
 }
 

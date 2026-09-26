@@ -305,7 +305,7 @@ impl McpServer {
                     .profile_identity
                     .as_ref()
                     .map(|identity| identity.profile_id().clone()),
-                profile_root: self.profile_root.as_deref(),
+                profile: self.profile.as_ref(),
                 resolved_project_route,
                 automation_scheduler_reconciler: self.automation_scheduler_reconciler.clone(),
                 automation_writer: self.dashboard_automation_writer.clone(),
@@ -353,24 +353,15 @@ impl McpServer {
                 .with_project_lcm_authority(self.project_lcm_authority.as_deref()),
             },
         );
-        // A composed daemon serves one transcript home. The refresh schedulers
-        // already run their sweep under this pin; scoping the dispatch puts
-        // every hook-triggered ingest on the same reader instead of letting it
-        // resolve the process `$HOME` on its own. A production daemon resolves
-        // `$HOME` here, the value that reader would have found anyway.
+        // A composed daemon serves one transcript owner. The refresh
+        // schedulers already run their sweep under this profile; scoping the
+        // dispatch puts every hook-triggered ingest on the same reader.
         let dispatch: std::pin::Pin<
             Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>,
-        > = match self
-            .profile_root
-            .as_deref()
-            .and_then(crate::daemon::daemon_transcript_source_home)
-        {
-            Some(transcript_source_home) => {
-                Box::pin(tracedecay_sessions::runtime::with_transcript_source_home(
-                    transcript_source_home,
-                    dispatch,
-                ))
-            }
+        > = match self.profile.clone() {
+            Some(profile) => Box::pin(
+                tracedecay_sessions::runtime::with_transcript_source_profile(profile, dispatch),
+            ),
             None => dispatch,
         };
         if let Some(read_flight) = read_flight {

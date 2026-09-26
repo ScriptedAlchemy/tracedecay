@@ -8,6 +8,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Mutex, PoisonError};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::Value;
 use tokio::time::Instant;
@@ -51,6 +52,7 @@ impl FamilyTool {
 /// Run one Work or Workflow tool and print the tool result its MCP call returns.
 #[hotpath::measure(label = "cli.tool.application_family", future = true)]
 pub(super) async fn dispatch_cli_family_tool(
+    profile: &ProfileRoot,
     tool: FamilyTool,
     tool_name: &str,
     tool_args: Value,
@@ -62,7 +64,8 @@ pub(super) async fn dispatch_cli_family_tool(
         mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
             message: format!("could not allocate a request id for {tool_name}"),
         })?;
-    let handshake = tracedecay::daemon::handshake_for_current_client(project, None, false, false)?;
+    let handshake =
+        tracedecay::daemon::handshake_for_current_client(profile, project, None, false, false)?;
     let executor = FamilyToolExecutor {
         client: tracedecay_daemon_identity::invocation_client_for_current(handshake)?,
         tool,

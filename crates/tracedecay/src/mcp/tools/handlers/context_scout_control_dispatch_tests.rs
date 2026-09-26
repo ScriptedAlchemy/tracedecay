@@ -6,7 +6,6 @@ use tempfile::TempDir;
 
 use super::dispatch_test_support::*;
 use super::*;
-use tracedecay_project::config::lock_user_data_dir_test_env;
 use tracedecay_project::project::TraceDecay;
 
 #[derive(Default)]
@@ -87,13 +86,13 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RecordingUnavailab
 
 #[tokio::test]
 async fn context_scout_pause_and_resume_preserve_caller_idempotency_keys() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("context-scout-control-dispatch");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.mcp-context-scout-control-dispatch",
     )

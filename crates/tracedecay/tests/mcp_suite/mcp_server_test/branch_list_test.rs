@@ -5,14 +5,11 @@
 
 use std::path::Path;
 use std::process::Command;
-use std::sync::Arc;
 
 use serde_json::{Value, json};
-use tracedecay::mcp::McpServer;
+use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 
-use super::support::{jsonrpc_request, response_with_id};
-use crate::mcp_server_test::run_client_connection_with_messages;
-use crate::support::{init_test_project, real_mcp_server, test_temp_dir};
+use crate::support::test_temp_dir;
 
 const HEAD_COMMIT: &str = "dbc21220c25f50fce6ac93b6e7859062cd3d3ca8";
 
@@ -127,20 +124,16 @@ fn write_branch_fixture(root: &Path) {
     git(root, &["tag", "v1", HEAD_COMMIT], None);
 }
 
-async fn call_branch_list(server: &Arc<McpServer>, id: i64, arguments: Value) -> Value {
-    let responses = run_client_connection_with_messages(
-        Arc::clone(server),
-        vec![jsonrpc_request(
-            json!(id),
-            "tools/call",
-            json!({
-                "name": "tracedecay_branch_list",
-                "arguments": arguments,
-            }),
-        )],
-    )
-    .await;
-    response_with_id(&responses, json!(id))
+async fn call_branch_list(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project_root: &Path,
+    arguments: Value,
+) -> Value {
+    let response = harness
+        .call_tool(project_root, "tracedecay_branch_list", arguments)
+        .await
+        .expect("branch list tools/call");
+    serde_json::to_value(response).expect("branch list response JSON")
 }
 
 fn payload_text(response: &Value) -> &str {
@@ -179,47 +172,39 @@ fn assert_unavailable(response: &Value, expected: &str) {
 #[tokio::test]
 async fn branch_list_reports_exact_local_refs_and_typed_rejections() {
     let dir = test_temp_dir();
-    write_branch_fixture(dir.path());
-    let (cg, _env) = init_test_project(dir.path()).await;
-    let server = real_mcp_server(cg).await;
+    let project_root = dir.path().join("project");
+    std::fs::create_dir_all(&project_root).expect("project root");
+    write_branch_fixture(&project_root);
+    let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
+        dir.path(),
+        vec![project_root.clone()],
+    ))
+    .await
+    .expect("production composition for branch list");
+    let call = |arguments: Value| call_branch_list(&harness, &project_root, arguments);
 
-    let markdown = call_branch_list(&server, 1, json!({})).await;
+    let markdown = call(json!({})).await;
     assert_ok_payload(&markdown, DEFAULT_MARKDOWN);
 
-    let json_page = call_branch_list(&server, 2, json!({"format": "json"})).await;
+    let json_page = call(json!({"format": "json"})).await;
     assert_ok_payload(&json_page, COMPLETE_JSON);
 
-    let empty_after = call_branch_list(&server, 3, json!({"format": "json", "after": ""})).await;
+    let empty_after = call(json!({"format": "json", "after": ""})).await;
     assert_ok_payload(&empty_after, COMPLETE_JSON);
 
-    let clamped = call_branch_list(&server, 4, json!({"format": "json", "limit": 200})).await;
+    let clamped = call(json!({"format": "json", "limit": 200})).await;
     assert_ok_payload(&clamped, CLAMPED_JSON);
 
-    let first = call_branch_list(&server, 5, json!({"format": "json", "limit": 1})).await;
+    let first = call(json!({"format": "json", "limit": 1})).await;
     assert_ok_payload(&first, FIRST_PAGE_JSON);
 
-    let second = call_branch_list(
-        &server,
-        6,
-        json!({"format": "json", "limit": 1, "after": "alpha"}),
-    )
-    .await;
+    let second = call(json!({"format": "json", "limit": 1, "after": "alpha"})).await;
     assert_ok_payload(&second, SECOND_PAGE_JSON);
 
-    let last = call_branch_list(
-        &server,
-        7,
-        json!({"format": "json", "limit": 2, "after": "beta"}),
-    )
-    .await;
+    let last = call(json!({"format": "json", "limit": 2, "after": "beta"})).await;
     assert_ok_payload(&last, LAST_PAGE_JSON);
 
-    let tail = call_branch_list(
-        &server,
-        8,
-        json!({"format": "json", "limit": 1, "after": "zeta"}),
-    )
-    .await;
+    let tail = call(json!({"format": "json", "limit": 1, "after": "zeta"})).await;
     assert_ok_payload(&tail, EMPTY_TAIL_JSON);
     assert_ne!(
         payload_text(&first),
@@ -227,14 +212,13 @@ async fn branch_list_reports_exact_local_refs_and_typed_rejections() {
         "the page after the last local ref is empty only because the first page was not"
     );
 
-    let invalid =
-        call_branch_list(&server, 9, json!({"format": "json", "after": "bad..name"})).await;
+    let invalid = call(json!({"format": "json", "after": "bad..name"})).await;
     assert_unavailable(
         &invalid,
         "{\"reason\":\"branch_ref_invalid\",\"retryable\":false,\"status\":\"unavailable\"}",
     );
 
-    let zero = call_branch_list(&server, 10, json!({"limit": 0})).await;
+    let zero = call(json!({"limit": 0})).await;
     assert!(zero["result"].is_null(), "{zero}");
     assert_eq!(zero["error"]["code"], json!(-32603));
     assert_eq!(
@@ -246,11 +230,13 @@ async fn branch_list_reports_exact_local_refs_and_typed_rejections() {
         json!("tracedecay_branch_list")
     );
 
-    std::fs::rename(dir.path().join(".git"), dir.path().join(".git-hidden")).expect("hide git dir");
-    let missing = call_branch_list(&server, 11, json!({"format": "json"})).await;
+    std::fs::rename(project_root.join(".git"), project_root.join(".git-hidden"))
+        .expect("hide git dir");
+    let missing = call(json!({"format": "json"})).await;
     assert_unavailable(
         &missing,
         "{\"reason\":\"repository_unavailable\",\"retryable\":true,\"status\":\"unavailable\"}",
     );
     assert_ne!(payload_text(&json_page), payload_text(&missing));
+    harness.shutdown().await;
 }

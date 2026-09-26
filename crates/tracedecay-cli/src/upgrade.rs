@@ -15,6 +15,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Output};
 use std::time::{Duration, Instant};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -784,7 +785,11 @@ fn install_upgrade_version(latest: &str, is_beta: bool) -> Result<Option<PathBuf
     perform_upgrade(&download)
 }
 
-fn run_versioned_upgrade(current: &str, is_beta: bool) -> Result<UpgradeOutcome> {
+fn run_versioned_upgrade(
+    profile: &ProfileRoot,
+    current: &str,
+    is_beta: bool,
+) -> Result<UpgradeOutcome> {
     eprintln!("Checking GitHub releases...");
     let latest = latest_upgrade_version(is_beta)?;
     let latest = match classify_upgrade(current, &latest) {
@@ -797,7 +802,7 @@ fn run_versioned_upgrade(current: &str, is_beta: bool) -> Result<UpgradeOutcome>
 
     eprintln!("Upgrading v{current} → v{latest}...");
     let binary = install_upgrade_version(latest, is_beta)?;
-    record_previous_version();
+    record_previous_version(profile);
     Ok(finish_versioned_upgrade(latest, binary))
 }
 
@@ -858,14 +863,14 @@ fn preflight_asset_check(version: &str, is_beta: bool) -> Result<ReleaseDownload
 /// `previous_version` and decides whether reinstall is required for the
 /// transition (e.g. minor/major bumps re-register agents to pick up new MCP
 /// tools or hook changes; patch bumps just update the field).
-fn record_previous_version() {
+fn record_previous_version(profile: &ProfileRoot) {
     let current = env!("CARGO_PKG_VERSION");
-    let mut cfg = UserConfig::load();
+    let mut cfg = UserConfig::load(profile.data_dir());
     if cfg.previous_version == current {
         return;
     }
     cfg.previous_version = current.to_string();
-    if let Err(err) = cfg.save() {
+    if let Err(err) = cfg.save(profile.data_dir()) {
         eprintln!(
             "  \x1b[33mwarning:\x1b[0m could not record previous version ({err}); \
              run `tracedecay reinstall` manually if new tools aren't registered"
@@ -1079,7 +1084,11 @@ fn run_delegated_upgrade(
     })
 }
 
-fn run_package_manager_upgrade(manager: PackageManager, is_beta: bool) -> Result<UpgradeOutcome> {
+fn run_package_manager_upgrade(
+    profile: &ProfileRoot,
+    manager: PackageManager,
+    is_beta: bool,
+) -> Result<UpgradeOutcome> {
     let outcome = run_delegated_upgrade(
         manager,
         &manager.refresh_command(),
@@ -1087,7 +1096,7 @@ fn run_package_manager_upgrade(manager: PackageManager, is_beta: bool) -> Result
         || manager.installed_binary(is_beta),
     )?;
     if matches!(outcome, UpgradeOutcome::Installed { .. }) {
-        record_previous_version();
+        record_previous_version(profile);
     }
     Ok(outcome)
 }
@@ -1095,7 +1104,7 @@ fn run_package_manager_upgrade(manager: PackageManager, is_beta: bool) -> Result
 /// Check for a newer version and perform the upgrade if one is available.
 ///
 /// Returns whether a new binary was actually installed.
-pub fn run_upgrade() -> Result<UpgradeOutcome> {
+pub fn run_upgrade(profile: &ProfileRoot) -> Result<UpgradeOutcome> {
     let current = env!("CARGO_PKG_VERSION");
     let is_beta = cloud::is_beta();
     let channel = if is_beta { "beta" } else { "stable" };
@@ -1110,8 +1119,10 @@ pub fn run_upgrade() -> Result<UpgradeOutcome> {
     eprintln!("Current version: v{current} ({channel} channel{method_suffix})");
 
     match upgrade_source_for(&method) {
-        UpgradeSource::PackageManager(manager) => run_package_manager_upgrade(manager, is_beta),
-        UpgradeSource::GitHubRelease => run_versioned_upgrade(current, is_beta),
+        UpgradeSource::PackageManager(manager) => {
+            run_package_manager_upgrade(profile, manager, is_beta)
+        }
+        UpgradeSource::GitHubRelease => run_versioned_upgrade(profile, current, is_beta),
     }
 }
 
@@ -1126,11 +1137,15 @@ pub fn show_channel() {
 /// Package-manager installs are refused before anything is fetched: the
 /// manager owns those files, and no manager command switches channels.
 #[hotpath::measure(label = "cli.channel.switch")]
-pub fn switch_channel(target_channel: &str) -> Result<String> {
-    switch_channel_for(&cloud::detect_install_method(), target_channel)
+pub fn switch_channel(profile: &ProfileRoot, target_channel: &str) -> Result<String> {
+    switch_channel_for(profile, &cloud::detect_install_method(), target_channel)
 }
 
-fn switch_channel_for(method: &InstallMethod, target_channel: &str) -> Result<String> {
+fn switch_channel_for(
+    profile: &ProfileRoot,
+    method: &InstallMethod,
+    target_channel: &str,
+) -> Result<String> {
     let current = env!("CARGO_PKG_VERSION");
     let current_is_beta = cloud::is_beta();
     let current_channel = if current_is_beta { "beta" } else { "stable" };
@@ -1173,7 +1188,7 @@ fn switch_channel_for(method: &InstallMethod, target_channel: &str) -> Result<St
     // Channel switches do not yet run the post-update refresh chain, so the
     // installed path is unused here.
     let _ = perform_upgrade(&download)?;
-    record_previous_version();
+    record_previous_version(profile);
     eprintln!("\x1b[32m✔\x1b[0m Switched to {target_channel} channel: v{latest}");
     Ok(latest)
 }
@@ -1527,14 +1542,18 @@ mod tests {
 
     #[test]
     fn package_manager_installs_refuse_channel_switches_before_fetching_anything() {
+        let profile_home = tempfile::tempdir().unwrap();
+        let profile =
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(profile_home.path());
         let other_channel = if cloud::is_beta() { "stable" } else { "beta" };
 
-        let homebrew = switch_channel_for(&InstallMethod::Brew, other_channel).unwrap_err();
+        let homebrew =
+            switch_channel_for(profile, &InstallMethod::Brew, other_channel).unwrap_err();
         let message = homebrew.to_string();
         assert!(message.contains("installed by Homebrew"), "{message}");
         assert!(message.contains("`brew upgrade tracedecay`"), "{message}");
 
-        let scoop = switch_channel_for(&InstallMethod::Scoop, other_channel).unwrap_err();
+        let scoop = switch_channel_for(profile, &InstallMethod::Scoop, other_channel).unwrap_err();
         let message = scoop.to_string();
         assert!(message.contains("installed by Scoop"), "{message}");
         let (current, target) = if cloud::is_beta() {
@@ -1700,10 +1719,13 @@ mod tests {
 
     #[test]
     fn switch_channel_same_channel_is_a_successful_noop() {
+        let profile_home = tempfile::tempdir().unwrap();
+        let profile =
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(profile_home.path());
         let current = env!("CARGO_PKG_VERSION").to_string();
         let current_channel = if cloud::is_beta() { "beta" } else { "stable" };
 
-        let result = switch_channel(current_channel);
+        let result = switch_channel(profile, current_channel);
 
         assert_eq!(result.unwrap(), current);
     }

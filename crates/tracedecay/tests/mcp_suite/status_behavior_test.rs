@@ -177,6 +177,13 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
     assert!(compact.get("node_count").is_none());
     assert_eq!(compact["server"]["errors"], 0);
     assert!(compact["server"].get("worktree_mismatch").is_none());
+    assert_eq!(
+        compact["github_source"],
+        json!({
+            "state": "absent",
+            "reason": "the checkout has no GitHub origin, or its advisory owner has not mounted in this daemon",
+        })
+    );
 
     let worktree_id = &compact["code_index_freshness"]["worktree"]["worktree_id"];
     let generation_id = &compact["graph_statistics"]["generation_id"];

@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 
 use crate::fixture;
-use crate::support::{HomeEnvGuard, lock_process_env, test_temp_dir};
+use crate::support::test_temp_dir;
 
 const TOOL: &str = "tracedecay_session_refresh_status";
 const SESSION_ID: &str = "session.status-proof";
@@ -189,12 +189,8 @@ fn assert_lookup(answer: &HostAnswer, outcome: &str, code: &str, message: &str) 
 /// Presenting a finished handle under another session id does not rebind it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_refresh_status_reports_the_handle_the_host_holds() {
-    let env_lock = lock_process_env().await;
     let root = test_temp_dir();
     let isolation = root.path().join("composition");
-    let home = root.path().join("home");
-    std::fs::create_dir_all(&home).expect("isolated home");
-    let _home_guard = HomeEnvGuard::set(&env_lock, &home);
     let project = isolation.join("project");
     std::fs::create_dir_all(&project).expect("project");
     fixture::write_indexed_fixture_sources(&project);

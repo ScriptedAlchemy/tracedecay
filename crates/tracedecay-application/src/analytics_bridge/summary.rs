@@ -590,6 +590,7 @@ impl HookAnalyticsRows {
 /// see `HookAnalyticsRows::window_payload` for the caption callers must
 /// surface alongside any derived figure.
 pub fn read_hook_analytics_rows_at(
+    profile_root: &std::path::Path,
     store_root: Option<&std::path::Path>,
     project_root: Option<&std::path::Path>,
 ) -> HookAnalyticsRows {
@@ -598,11 +599,9 @@ pub fn read_hook_analytics_rows_at(
     if let Some(store_path) = &store_path {
         read_hook_analytics_file(store_path, None, &mut out);
     }
-    if let Ok(profile_root) = tracedecay_runtime_core::storage::default_profile_root() {
-        let global_path = profile_root.join("hook_analytics.jsonl");
-        if store_path.as_deref() != Some(global_path.as_path()) {
-            read_hook_analytics_file(&global_path, project_root, &mut out);
-        }
+    let global_path = profile_root.join("hook_analytics.jsonl");
+    if store_path.as_deref() != Some(global_path.as_path()) {
+        read_hook_analytics_file(&global_path, project_root, &mut out);
     }
     sort_hook_analytics_rows(&mut out.rows);
     out

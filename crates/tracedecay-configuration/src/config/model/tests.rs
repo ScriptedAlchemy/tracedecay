@@ -1,38 +1,7 @@
 use super::is_generated_path_segment;
-use std::ffi::OsString;
 use std::fs;
-use std::path::PathBuf;
 use tempfile::TempDir;
-use tracedecay_runtime_core::config::{
-    PinnedUserDataDir, USER_DATA_DIR_ENV, discover_project_root, get_tracedecay_dir,
-    is_ambient_project_root, is_generated_dir_segment, lock_user_data_dir_test_env, user_data_dir,
-};
-
-struct EnvRestore {
-    key: &'static str,
-    previous: Option<OsString>,
-}
-
-impl EnvRestore {
-    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-        let previous = std::env::var_os(key);
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvRestore {
-    fn drop(&mut self) {
-        unsafe {
-            match self.previous.take() {
-                Some(previous) => std::env::set_var(self.key, previous),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
+use tracedecay_runtime_core::config::{ProfileRoot, get_tracedecay_dir, is_generated_dir_segment};
 
 #[test]
 fn test_data_dir_defaults_to_tracedecay_for_new_installs() {
@@ -51,101 +20,6 @@ fn test_data_dir_uses_tracedecay_when_present() {
         get_tracedecay_dir(root.path()),
         root.path().join(".tracedecay")
     );
-}
-
-#[cfg(unix)]
-#[test]
-fn user_data_dir_canonicalizes_symlinked_existing_parent() {
-    let _lock = lock_user_data_dir_test_env();
-    let root = TempDir::new().unwrap();
-    let real_home = root.path().join("real-home");
-    let linked_home = root.path().join("linked-home");
-    fs::create_dir_all(&real_home).unwrap();
-    std::os::unix::fs::symlink(&real_home, &linked_home).unwrap();
-    let _env = EnvRestore::set(USER_DATA_DIR_ENV, linked_home.join(".tracedecay"));
-
-    assert_eq!(
-        user_data_dir().unwrap(),
-        real_home.canonicalize().unwrap().join(".tracedecay")
-    );
-}
-
-#[test]
-fn nextest_shared_target_profile_is_isolated_by_test_name() {
-    let _lock = lock_user_data_dir_test_env();
-    let root = TempDir::new().unwrap();
-    let target = root.path().join("target");
-    fs::create_dir_all(target.join("debug")).unwrap();
-    let profile = target.join("test-profile/.tracedecay");
-    let _profile = EnvRestore::set(USER_DATA_DIR_ENV, &profile);
-    let _binary_id = EnvRestore::set("NEXTEST_BINARY_ID", "tracedecay::storage_suite");
-    let _test_name = EnvRestore::set("NEXTEST_TEST_NAME", "storage_suite::isolated_profile");
-
-    let resolved = user_data_dir().unwrap();
-
-    let canonical_profile = target
-        .canonicalize()
-        .unwrap()
-        .join("test-profile/.tracedecay");
-    assert!(resolved.starts_with(canonical_profile.join("nextest")));
-    assert_ne!(resolved, canonical_profile);
-}
-
-#[test]
-fn nextest_shared_target_profile_is_isolated_under_the_perf_profile() {
-    let _lock = lock_user_data_dir_test_env();
-    let root = TempDir::new().unwrap();
-    let target = root.path().join("target");
-    // A `cargo test-ci` / CI checkout only ever builds `target/perf`.
-    fs::create_dir_all(target.join("perf")).unwrap();
-    let profile = target.join("test-profile/.tracedecay");
-    let _profile = EnvRestore::set(USER_DATA_DIR_ENV, &profile);
-    let _binary_id = EnvRestore::set("NEXTEST_BINARY_ID", "tracedecay::storage_suite");
-    let _test_name = EnvRestore::set("NEXTEST_TEST_NAME", "storage_suite::perf_profile");
-
-    let resolved = user_data_dir().unwrap();
-
-    let canonical_profile = target
-        .canonicalize()
-        .unwrap()
-        .join("test-profile/.tracedecay");
-    assert!(resolved.starts_with(canonical_profile.join("nextest")));
-    assert_ne!(resolved, canonical_profile);
-}
-
-#[test]
-fn nextest_preserves_explicit_temp_profile_override() {
-    let _lock = lock_user_data_dir_test_env();
-    let root = TempDir::new().unwrap();
-    let profile = root.path().join("test-profile/.tracedecay");
-    let _profile = EnvRestore::set(USER_DATA_DIR_ENV, &profile);
-    let _test_name = EnvRestore::set("NEXTEST_TEST_NAME", "storage_suite::explicit_profile");
-
-    assert_eq!(
-        user_data_dir().unwrap(),
-        root.path()
-            .canonicalize()
-            .unwrap()
-            .join("test-profile/.tracedecay")
-    );
-}
-
-#[test]
-fn implicit_discovery_never_selects_the_user_profile_root() {
-    let _profile = PinnedUserDataDir::new();
-    let home = PathBuf::from(std::env::var_os("HOME").expect("pinned HOME"));
-    let home_store = tracedecay_runtime_core::storage::default_profile_sharded_layout(
-        &home,
-        &user_data_dir().expect("pinned profile"),
-    )
-    .expect("home store layout");
-    fs::create_dir_all(&home_store.data_root).expect("home store root");
-    fs::write(&home_store.graph_db_path, b"").expect("ambient project marker");
-    let nested = home.join("unrelated/nested");
-    fs::create_dir_all(&nested).expect("nested directory");
-
-    assert!(is_ambient_project_root(&home));
-    assert_eq!(discover_project_root(&nested), None);
 }
 
 // ---------------------------------------------------------------------------
@@ -234,16 +108,17 @@ mod retention_config_tests {
 fn explicit_relative_path_is_anchored_to_the_cli_working_directory() {
     let cwd = std::env::current_dir().unwrap();
 
-    let dot = super::resolve_path_with_discovery(Some(".".to_string()));
+    let profile = ProfileRoot::new(cwd.join("unused-profile"));
+    let dot = super::resolve_path_with_discovery(&profile, Some(".".to_string()));
     assert!(dot.is_absolute());
     assert_eq!(dot, cwd.join("."));
     assert_eq!(
-        super::resolve_path_with_discovery(Some("nested/project".to_string())),
+        super::resolve_path_with_discovery(&profile, Some("nested/project".to_string())),
         cwd.join("nested/project")
     );
     let absolute = TempDir::new().unwrap();
     assert_eq!(
-        super::resolve_path_with_discovery(Some(absolute.path().display().to_string())),
+        super::resolve_path_with_discovery(&profile, Some(absolute.path().display().to_string())),
         absolute.path()
     );
 }

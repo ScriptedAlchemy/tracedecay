@@ -331,7 +331,9 @@ impl EvidenceCoverage {
 }
 
 /// Safe reason why authorized requested evidence was omitted.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum OmissionReason {
     Budget,
@@ -343,9 +345,18 @@ pub enum OmissionReason {
     Cancelled,
     TimedOut,
     Conflict,
+    /// Evidence came from a macro body that was not expanded, so what the
+    /// expansion defines or calls is not covered.
+    MacroBodyUnparsed,
+    /// The continuation cursor can no longer be redeemed (its lifetime ended
+    /// or the snapshot it pages is gone); restart the request without it.
+    CursorExpired,
+    /// The continuation cursor was issued for another project, worktree, or
+    /// ref; redeem it where it was issued.
+    CursorForeign,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Omission {
     pub domain: EvidenceDomain,

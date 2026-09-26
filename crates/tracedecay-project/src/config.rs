@@ -679,37 +679,26 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
 }
 
 #[hotpath::measure(label = "daemon.config.discover", future = true)]
-pub async fn discover_project_root_with_identity(start: &Path) -> Option<PathBuf> {
-    if let Some(root) = tracedecay_runtime_core::config::discover_project_root(start) {
+pub async fn discover_project_root_with_identity(
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
+    start: &Path,
+) -> Option<PathBuf> {
+    if let Some(root) = profile.discover_project_root(start) {
         return Some(root);
     }
     let candidate = tracedecay_runtime_core::worktree::git_worktree_root(start)
         .unwrap_or_else(|| start.to_path_buf());
-    if crate::project::TraceDecay::has_initialized_store(&candidate).await {
+    if crate::project::TraceDecay::has_initialized_store_with_options(
+        &candidate,
+        &crate::project::TraceDecayOpenOptions::for_profile(profile),
+    )
+    .await
+    {
         Some(candidate)
     } else {
         None
     }
 }
-
-/// Serializes test and benchmark code that mutates process-wide storage env
-/// vars (`TRACEDECAY_DATA_DIR` and related HOME/profile pins).
-///
-/// Single source of truth: [`tracedecay_runtime_core::config`] owns the lock,
-/// [`lock_user_data_dir_test_env`], and `PinnedUserDataDir`; this module only
-/// re-exports them so every historical `config::…` call site keeps
-/// resolving. The re-export follows the same gate as its only non-test
-/// consumer, the root's `session_temporal_benchmark`, so a production build
-/// carries neither the harness nor its accessor.
-#[cfg(any(test, feature = "test-helpers"))]
-pub use tracedecay_runtime_core::config::lock_user_data_dir_test_env;
-
-/// Pins [`USER_DATA_DIR_ENV`] and agent home discovery to an isolated temp
-/// profile while holding the shared user-data-dir test lock, so parallel lib
-/// tests cannot race profile resolution or scan live host transcripts during
-/// `TraceDecay::init` / indexing.
-#[cfg(any(test, feature = "test-helpers"))]
-pub use tracedecay_runtime_core::config::PinnedUserDataDir;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

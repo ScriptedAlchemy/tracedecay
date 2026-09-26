@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_project::project::TraceDecay;
 
@@ -6,8 +7,9 @@ use super::daemon::daemon_tool_json;
 
 /// True when the global DB has zero registered projects (or can't be opened
 /// at all), i.e. the user has not run `tracedecay init` anywhere yet.
-async fn is_fresh_install() -> bool {
+async fn is_fresh_install(profile: &ProfileRoot) -> bool {
     daemon_tool_json(
+        profile,
         None,
         "tracedecay_admin_cli",
         serde_json::json!({ "action": "registry_empty" }),
@@ -19,15 +21,22 @@ async fn is_fresh_install() -> bool {
 }
 
 /// When invoked with no subcommand, offer to create the index if none exists.
-pub(crate) async fn handle_no_command() -> tracedecay_domain::errors::Result<()> {
+pub(crate) async fn handle_no_command(
+    profile: &ProfileRoot,
+) -> tracedecay_domain::errors::Result<()> {
     let project_path = tracedecay_configuration::resolve_path(None);
-    if TraceDecay::has_initialized_store(&project_path).await {
+    if TraceDecay::has_initialized_store_with_options(
+        &project_path,
+        &tracedecay_project::project::TraceDecayOpenOptions::for_profile(profile),
+    )
+    .await
+    {
         // Already initialized, show help via clap
         let _ = <crate::cli::Cli as clap::CommandFactory>::command().print_help();
         eprintln!();
         return Ok(());
     }
-    if is_fresh_install().await {
+    if is_fresh_install(profile).await {
         eprintln!("\x1b[1;36mWelcome to tracedecay!\x1b[0m");
         eprintln!(
             "Looks like a new installation. To get started, run \x1b[1mtracedecay init\x1b[0m \
@@ -47,6 +56,7 @@ pub(crate) async fn handle_no_command() -> tracedecay_domain::errors::Result<()>
 
 #[hotpath::measure(label = "cli.init.run", future = true)]
 pub(crate) async fn handle_init(
+    profile: &ProfileRoot,
     path: Option<String>,
     skip_folders: Vec<String>,
     include_folders: Vec<String>,
@@ -55,7 +65,7 @@ pub(crate) async fn handle_init(
     assume_yes: bool,
 ) -> tracedecay_domain::errors::Result<()> {
     let project_path = tracedecay_configuration::resolve_path(path);
-    let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
+    let profile_root = profile.data_dir().to_path_buf();
     if let Some(message) =
         tracedecay_global_db::ephemeral_root_rejection(&project_path, &profile_root)
     {
@@ -63,13 +73,14 @@ pub(crate) async fn handle_init(
     }
     let adoption = moved_store_adoption_request(adopt_project, fresh, assume_yes)?;
     let mut handshake = tracedecay::daemon::handshake_for_current_client(
+        profile,
         Some(project_path.clone()),
         None,
         false,
         true,
     )?;
     handshake.moved_store_adoption = adoption;
-    let daemon_available = init_daemon_available();
+    let daemon_available = init_daemon_available(profile);
 
     let project_path_for_remedy = project_path.clone();
     handle_init_with_daemon_availability(
@@ -97,8 +108,8 @@ pub(crate) async fn handle_init(
 /// both behind `daemon_socket_connectable`, so assuming availability wherever
 /// the transport differs would let init proceed on Windows without the
 /// scheduler it then requires.
-fn init_daemon_available() -> bool {
-    tracedecay_daemon_control::daemon_socket_connectable()
+fn init_daemon_available(profile: &ProfileRoot) -> bool {
+    tracedecay_daemon_control::daemon_socket_connectable(profile)
 }
 
 /// Maps explicit `tracedecay init` flags to the adoption request the daemon
@@ -347,7 +358,9 @@ mod daemon_precondition_tests {
         let _socket = SocketEnvGuard::set(&profile.path().join("absent.sock"));
 
         assert!(
-            !super::init_daemon_available(),
+            !super::init_daemon_available(&tracedecay_runtime_core::config::ProfileRoot::new(
+                profile.path()
+            )),
             "an endpoint with no listener must not count as an available daemon"
         );
     }
@@ -607,6 +620,7 @@ mod init_bootstrap_tests {
 
 #[hotpath::measure(label = "cli.sync.run", future = true)]
 pub(crate) async fn handle_sync(
+    profile: &ProfileRoot,
     path: Option<String>,
     skip_folders: Vec<String>,
     include_folders: Vec<String>,
@@ -619,10 +633,11 @@ pub(crate) async fn handle_sync(
         "brokered sync does not yet support --skip-folders/--include-folders; update tracedecay.toml first",
     )?;
     let resolved = super::scope::resolve_project_scope(
-        tracedecay_configuration::resolve_path_with_discovery(path),
+        profile,
+        tracedecay_configuration::resolve_path_with_discovery(profile, path),
     )
     .await?;
-    let handshake = super::daemon::client_handshake(Some(&resolved.project_path))?;
+    let handshake = super::daemon::client_handshake(profile, Some(&resolved.project_path))?;
     let result = tracedecay::daemon::call_default_tool(
         &handshake,
         "tracedecay_admin_sync",
@@ -654,11 +669,7 @@ pub(crate) async fn handle_sync(
         ),
     }
     if doctor {
-        tracedecay::doctor::run_doctor(
-            &tracedecay_runtime_core::storage::default_profile_root()?,
-            crate::cloud::doctor_network_probes(),
-        )
-        .await?;
+        tracedecay::doctor::run_doctor(profile, crate::cloud::doctor_network_probes()).await?;
     }
     Ok(())
 }

@@ -24,7 +24,7 @@ use super::publication_support::{
     validate_replay_cursor,
 };
 use super::{GraphDbRegistration, GraphDbRegistry, check_registration_request};
-use crate::generation::{metadata_manifest_from_source, validate_supplied_manifest_binding};
+use crate::generation::{metadata_manifest_from_source, validate_supplied_rows_binding};
 use crate::generation_runtime::{
     GenerationContentsDeletion, GenerationStageOutcome, SealedReleaseReceiptAuthority,
 };
@@ -32,10 +32,10 @@ use crate::lease::{
     GenerationLocator, VerifiedGenerationLease, VerifiedGraphSnapshot, generation_lease,
 };
 use crate::{
-    GraphCommit, GraphDb, GraphDbError, GraphDbLeaseV1, GraphGenerationManifest,
-    GraphGenerationManifestIdentity, GraphGenerationReplaySource, GraphProjectionIdentity,
-    GraphReplayCollectionOutcome, SealedStagingRelease, SealedStagingRetentionReason,
-    SupersededReplayRetirement, VerifiedGraphCommit,
+    GraphCommit, GraphDb, GraphDbError, GraphDbLeaseV1, GraphGenerationManifestIdentity,
+    GraphGenerationReplaySource, GraphGenerationRowSpill, GraphGenerationRows, GraphNamespace,
+    GraphProjectionId, GraphProjectionIdentity, GraphReplayCollectionOutcome, SealedStagingRelease,
+    SealedStagingRetentionReason, SupersededReplayRetirement, VerifiedGraphCommit,
 };
 
 /// A publication whose durable generation proof completed but whose
@@ -1202,7 +1202,7 @@ impl GraphDbRegistry {
         authority: &mut dyn GraphPublicationStoreV1,
         context: &GraphPublicationOperationContextV1<'_>,
         publication_key: &GraphPublicationKeyV1,
-        supplied_manifest: Option<Arc<GraphGenerationManifest>>,
+        supplied_rows: Option<GraphGenerationRows>,
     ) -> Result<VerifiedGraphCommit, GraphDbError> {
         let operation = self.registered_operation(registration)?;
         self.publish_verified_inner(
@@ -1210,7 +1210,7 @@ impl GraphDbRegistry {
             authority,
             context,
             publication_key,
-            supplied_manifest,
+            supplied_rows,
         )
     }
 
@@ -1230,7 +1230,7 @@ impl GraphDbRegistry {
         authority: &mut dyn GraphPublicationStoreV1,
         context: &GraphPublicationOperationContextV1<'_>,
         publication_key: &GraphPublicationKeyV1,
-        supplied_manifest: Option<Arc<GraphGenerationManifest>>,
+        supplied_rows: Option<GraphGenerationRows>,
     ) -> Result<GraphPublicationPreparationV1, GraphDbError> {
         let operation = self.registered_operation(registration)?;
         self.prepare_verified_publication_inner(
@@ -1238,7 +1238,7 @@ impl GraphDbRegistry {
             authority,
             context,
             publication_key,
-            supplied_manifest,
+            supplied_rows,
         )
     }
 
@@ -1257,6 +1257,18 @@ impl GraphDbRegistry {
     ) -> Result<VerifiedGraphCommit, GraphDbError> {
         let operation = self.registered_operation(registration)?;
         self.complete_verified_publication_inner(&operation, authority, context, proven)
+    }
+
+    /// A row spill for one generation of `projection`, under the registered
+    /// store's scratch root. A batch producer fills it and hands the finished
+    /// generation to [`Self::prepare_verified_publication`].
+    pub fn generation_row_spill(
+        &self,
+        registration: GraphDbRegistration,
+        projection: GraphProjectionIdentity,
+    ) -> Result<GraphGenerationRowSpill, GraphDbError> {
+        let operation = self.registered_operation(registration)?;
+        operation.database().generation_row_spill(projection)
     }
 
     /// Publishes through an already-issued, registry-validated graph lease.
@@ -1282,14 +1294,14 @@ impl GraphDbRegistry {
         authority: &mut dyn GraphPublicationStoreV1,
         context: &GraphPublicationOperationContextV1<'_>,
         publication_key: &GraphPublicationKeyV1,
-        supplied_manifest: Option<Arc<GraphGenerationManifest>>,
+        supplied_rows: Option<GraphGenerationRows>,
     ) -> Result<VerifiedGraphCommit, GraphDbError> {
         match self.prepare_verified_publication_inner(
             operation,
             authority,
             context,
             publication_key,
-            supplied_manifest,
+            supplied_rows,
         )? {
             GraphPublicationPreparationV1::Settled(commit) => Ok(*commit),
             GraphPublicationPreparationV1::Proven(proven) => {
@@ -1314,7 +1326,7 @@ impl GraphDbRegistry {
         authority: &mut dyn GraphPublicationStoreV1,
         context: &GraphPublicationOperationContextV1<'_>,
         publication_key: &GraphPublicationKeyV1,
-        supplied_manifest: Option<Arc<GraphGenerationManifest>>,
+        supplied_rows: Option<GraphGenerationRows>,
     ) -> Result<GraphPublicationPreparationV1, GraphDbError> {
         operation.check(self, context)?;
         operation.require_publication_binding(publication_key)?;
@@ -1357,20 +1369,21 @@ impl GraphDbRegistry {
         let metadata_manifest =
             metadata_manifest_from_source(&replay.publication, &source, &check)?;
         let metadata_only = metadata_manifest.is_some();
-        let has_supplied_manifest = supplied_manifest.is_some();
-        let manifest = match supplied_manifest {
-            Some(manifest) => {
-                validate_supplied_manifest_binding(&replay.publication, &manifest, true, &check)?;
-                manifest
+        let has_supplied_manifest = supplied_rows.is_some();
+        let manifest = match supplied_rows {
+            Some(rows) => {
+                validate_supplied_rows_binding(&replay.publication, &rows, true, &check)?;
+                rows
             }
             None => match metadata_manifest {
-                Some(manifest) => Arc::new(manifest),
-                None => Arc::new(GraphGenerationManifest::from_replay_source(
+                Some(manifest) => manifest.into(),
+                None => GraphGenerationRows::from_replay_source(
                     &replay.publication,
                     source,
                     self.inner.manifest_provider.as_ref(),
+                    || replay_row_spill(&database, &replay.publication.key.projection),
                     &check,
-                )?),
+                )?,
             },
         };
         let apply_native = !metadata_only;
@@ -1549,7 +1562,7 @@ impl GraphDbRegistry {
                             );
                             database.remember_sealed_only_generation(&repair_lease)?;
                             database.apply_generation_unverified_with_digest_observed(
-                                manifest,
+                                manifest.into_manifest(&repair_check)?,
                                 sealed_digest,
                                 &repair_check,
                             )?;
@@ -1606,7 +1619,7 @@ impl GraphDbRegistry {
                             } else {
                                 let staged = database
                                     .apply_generation_unverified_with_digest_observed(
-                                        manifest,
+                                        manifest.into_manifest(&check)?,
                                         sealed_digest,
                                         &check,
                                     )?;
@@ -1754,7 +1767,7 @@ impl GraphDbRegistry {
                     }
                     Ok(None) => {
                         let staged = database.apply_generation_unverified_with_digest_observed(
-                            manifest,
+                            manifest.into_manifest(&check)?,
                             sealed_digest,
                             &check,
                         )?;
@@ -2244,11 +2257,12 @@ impl GraphDbRegistry {
         let metadata_manifest =
             metadata_manifest_from_source(&replay.publication, &source, &check)?;
         let manifest = match metadata_manifest {
-            Some(manifest) => manifest,
-            None => GraphGenerationManifest::from_replay_source(
+            Some(manifest) => manifest.into(),
+            None => GraphGenerationRows::from_replay_source(
                 &replay.publication,
                 source,
                 self.inner.manifest_provider.as_ref(),
+                || replay_row_spill(database, &replay.publication.key.projection),
                 &check,
             )?,
         };
@@ -2427,8 +2441,8 @@ fn describe_verified_head(head: Option<&GraphVerifiedHeadV1>) -> String {
     }
 }
 
-/// Seals an eligible generation straight from its manifest, bypassing the
-/// staging database entirely; see [`GraphDb::seal_generation_from_manifest`].
+/// Seals an eligible generation straight from its rows, bypassing the
+/// staging database entirely; see [`GraphDb::seal_generation_directly`].
 ///
 /// `Ok(None)` means the generation must be staged and proven the ordinary
 /// way: it is not eligible (its rows have no durable home outside staging,
@@ -2436,7 +2450,7 @@ fn describe_verified_head(head: Option<&GraphVerifiedHeadV1>) -> String {
 /// lane cannot serve this database.
 fn direct_seal(
     database: &GraphDbLeaseV1,
-    manifest: &GraphGenerationManifest,
+    rows: &GraphGenerationRows,
     expected: &GraphRecoveredGenerationDigestV1,
     eligible: bool,
     check: &dyn Fn() -> Result<(), GraphDbError>,
@@ -2444,7 +2458,19 @@ fn direct_seal(
     if !eligible {
         return Ok(None);
     }
-    database.seal_generation_from_manifest(manifest, expected, check)
+    database.seal_generation_directly(rows, expected, check)
+}
+
+/// A row spill under `database`'s own scratch root for the generation a
+/// journaled replay of `projection` publishes.
+fn replay_row_spill(
+    database: &GraphDb,
+    projection: &GraphProjectionIdentityV1,
+) -> Result<GraphGenerationRowSpill, GraphDbError> {
+    database.generation_row_spill(GraphProjectionIdentity::new(
+        GraphNamespace::new(projection.namespace.as_str())?,
+        GraphProjectionId::new(projection.projection.as_str())?,
+    ))
 }
 
 /// Seats a verified lease for a historical (already durably linearized)
@@ -3334,7 +3360,7 @@ mod historical_publication_reuse_tests {
                 &mut fixture.authority,
                 &context,
                 &fixture.key,
-                Some(Arc::clone(&manifest)),
+                Some(Arc::clone(&manifest).into()),
             )
             .unwrap();
         assert_eq!(repaired.head, fixture.head);
@@ -3410,7 +3436,7 @@ mod historical_publication_reuse_tests {
                 &mut fixture.authority,
                 &context,
                 &fixture.key,
-                Some(manifest),
+                Some(manifest.into()),
             ),
             Err(GraphDbError::Conflict { .. })
         ));

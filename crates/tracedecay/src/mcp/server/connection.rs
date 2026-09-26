@@ -305,10 +305,20 @@ impl McpServer {
                     && tokens_saved > last_flushed
                 {
                     let delta = tokens_saved - last_flushed;
-                    match self.canonical_upload_enabled().await {
-                        Ok(upload_enabled) => {
+                    match (self.canonical_upload_enabled().await, self.owner_profile()) {
+                        (Err(error), _) => failures.push(format!(
+                            "worldwide counter upload configuration unavailable: {error}"
+                        )),
+                        (Ok(_), None) => failures.push(
+                            "worldwide counter upload skipped: server has no owning profile"
+                                .to_owned(),
+                        ),
+                        (Ok(upload_enabled), Some(profile)) => {
+                            let profile_root = profile.data_dir();
                             let mut config =
-                                tracedecay_session_memory::user_config::UserConfig::load();
+                                tracedecay_session_memory::user_config::UserConfig::load(
+                                    profile_root,
+                                );
                             config.pending_upload += delta;
                             if upload_enabled
                                 && let Some(_total) = tracedecay_dashboard_api::cloud::flush_pending(
@@ -319,13 +329,10 @@ impl McpServer {
                                 let now = tracedecay_runtime_core::tracedecay::current_timestamp();
                                 config.last_upload_at = now;
                             }
-                            if let Err(err) = config.save() {
+                            if let Err(err) = config.save(profile_root) {
                                 tracing::warn!(error = %err, "could not save upload config during shutdown");
                             }
                         }
-                        Err(error) => failures.push(format!(
-                            "worldwide counter upload configuration unavailable: {error}"
-                        )),
                     }
                 }
             }

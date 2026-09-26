@@ -1,13 +1,13 @@
 //! Host-install surface that used to live on `tracedecay-agent-hosts::agents`.
 //!
-//! Pure helpers (`home_dir`, `uses_default_user_profile`, the skill-index
+//! Pure helpers (`uses_default_user_profile`, the skill-index
 //! marker) are implemented here. Host-config writes, plugin bundle files, and
 //! managed-skill export sweeps stay in agent-hosts, which sits above this
 //! crate: it builds one [`HostIo`] value and passes it to every automation
 //! entry point that writes host-owned files. There is no process-global slot,
 //! so omitting the bundle is a compile error rather than a runtime fallback.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -93,15 +93,6 @@ impl HostIo {
     pub fn codex_agent_files(&self) -> &'static [PluginFile] {
         (self.codex_agent_files)()
     }
-}
-
-/// Returns the user's home directory, cross-platform.
-#[must_use]
-pub fn home_dir() -> Option<PathBuf> {
-    std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .ok()
-        .map(PathBuf::from)
 }
 
 #[must_use]

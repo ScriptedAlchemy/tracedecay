@@ -8,6 +8,7 @@
 //! installed without a real Roo runtime fixture.
 
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_domain::errors::Result;
 
@@ -56,7 +57,7 @@ impl AgentIntegration for RooCodeIntegration {
         roo_ext_dir(home).is_dir()
     }
 
-    fn primary_config_path(&self, home: &Path) -> Option<PathBuf> {
+    fn primary_config_path(&self, home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         Some(roo_settings_path(home))
     }
 
@@ -64,6 +65,7 @@ impl AgentIntegration for RooCodeIntegration {
         &self,
         components: &[super::host_bundle::HostComponentV1],
         home: &Path,
+        _profile: &ProfileRoot,
     ) -> Vec<PathBuf> {
         if components == [super::host_bundle::HostComponentV1::ContextMcp] {
             vec![roo_settings_path(home)]
@@ -112,7 +114,7 @@ impl AgentIntegration for RooCodeIntegration {
         Ok(())
     }
 
-    fn has_tracedecay(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
         super::mcp_config_has_tracedecay(&roo_settings_path(home), "mcpServers", load_json_file)
     }
 }

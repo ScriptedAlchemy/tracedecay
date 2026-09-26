@@ -204,9 +204,23 @@ pub(super) fn ensure_context_scout_owner_before_advertising(
 
 #[cfg(unix)]
 impl DaemonEngine {
-    pub(super) fn with_progress_producer_incarnation(mut self, producer_incarnation: u64) -> Self {
-        self.invocation =
-            DaemonInvocationState::with_progress_producer_incarnation(producer_incarnation);
+    pub(super) fn with_progress_producer_incarnation(
+        mut self,
+        producer_incarnation: u64,
+        owner_home: Option<&std::path::Path>,
+    ) -> Self {
+        self.invocation = DaemonInvocationState::with_progress_producer_incarnation(
+            producer_incarnation,
+            owner_home,
+        );
+        self
+    }
+
+    pub(super) fn with_owner_profile(
+        mut self,
+        owner_profile: tracedecay_runtime_core::config::ProfileRoot,
+    ) -> Self {
+        self.store_administration = self.store_administration.with_owner_profile(owner_profile);
         self
     }
 
@@ -491,7 +505,7 @@ impl DaemonEngine {
         // Erase the deeply nested future before it reaches the measured
         // wrapper so every profiling feature can compute its layout.
         Box::pin(async move {
-            let (project_path, route) = Self::project_route(handshake)?;
+            let (project_path, route) = self.project_route(handshake)?;
             // A route-alias hit returns the mounted server without re-running
             // registry admission: enrollment was proven when this route was
             // bound, and a mounted server's continued validity is owned by the
@@ -546,7 +560,7 @@ impl DaemonEngine {
         handshake: &DaemonHandshake,
         requirement: ProjectServerRequirement,
     ) -> Result<Option<Arc<crate::mcp::McpServer>>> {
-        let (project_path, route) = Self::project_route(handshake)?;
+        let (project_path, route) = self.project_route(handshake)?;
         let bound = {
             let mut servers = self.store_administration.project_servers().lock().await;
             servers
@@ -581,7 +595,7 @@ impl DaemonEngine {
         // Erase the deeply nested future before it reaches the measured
         // wrapper so every profiling feature can compute its layout.
         Box::pin(async move {
-            let (project_path, route) = Self::project_route(&handshake)?;
+            let (project_path, route) = self.project_route(&handshake)?;
             // Admission before warm-up: an ambient, unenrolled directory must be
             // rejected here, before any project-open task is minted, so no graph
             // or index work ever starts for a path without durable enrollment.
@@ -677,7 +691,7 @@ impl DaemonEngine {
             {
                 return Ok(server);
             }
-            let (project_path, route) = Self::project_route(handshake)?;
+            let (project_path, route) = self.project_route(handshake)?;
             // Foreground requests must never pin a connection while a cold project
             // warm-up runs. The open task remains tracked and continues in the
             // background after this bounded wait expires.
@@ -782,7 +796,7 @@ impl DaemonEngine {
         &self,
         handshake: &DaemonHandshake,
     ) -> Result<Option<ProjectOpenFailure>> {
-        let (_, route) = Self::project_route(handshake)?;
+        let (_, route) = self.project_route(handshake)?;
         let tasks = project_open_tasks(&self.project_open_gates).await;
         Ok(tasks.cached_failure(&route))
     }
@@ -869,8 +883,11 @@ impl DaemonEngine {
         })
     }
 
-    pub(super) fn project_route(handshake: &DaemonHandshake) -> Result<(PathBuf, ProjectRouteKey)> {
-        project_route_for_handshake(handshake)
+    pub(super) fn project_route(
+        &self,
+        handshake: &DaemonHandshake,
+    ) -> Result<(PathBuf, ProjectRouteKey)> {
+        project_route_for_handshake(handshake, self.store_administration.owner_home()?)
     }
 
     #[hotpath::measure(label = "daemon.engine.activate_project_server", future = true)]

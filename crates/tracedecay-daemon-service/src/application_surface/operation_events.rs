@@ -834,6 +834,7 @@ pub(super) fn operation_event_problem(
                 },
                 retry: RetryDirective::AfterRevalidate,
                 legal_actions: vec![LegalAction::Refresh],
+                detail: None,
             }
         }
         OperationEventError::InvalidFrontier => ApplicationProblem::conflict(

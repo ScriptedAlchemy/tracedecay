@@ -10,7 +10,6 @@ use tracedecay_sessions::runtime::hosts::codex::CodexSource;
 use tracedecay_sessions::runtime::source::{StoredCursor, TranscriptSource};
 
 use crate::codex::{write_codex_rollout, write_jsonl};
-use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::{
     durable_table_count, ingest_global_sources_for_provider, mark_test_project,
     open_project_session_db, try_ingest_source,
@@ -428,14 +427,9 @@ async fn codex_subagent_rollout_uses_parent_link_from_session_meta() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn codex_jsonl_path_relocation_keeps_session_identity_on_production_observation_path() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
     let session = "codex-path-reloc-prod";
@@ -449,7 +443,7 @@ async fn codex_jsonl_path_relocation_keeps_session_identity_on_production_observ
 
     let db = open_project_session_db(&project).await.unwrap();
     assert_eq!(
-        ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Codex))
+        ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Codex))
             .await
             .messages_upserted,
         2
@@ -471,9 +465,13 @@ async fn codex_jsonl_path_relocation_keeps_session_identity_on_production_observ
     std::fs::remove_file(&original).unwrap();
 
     let relocated_db = open_project_session_db(&project).await.unwrap();
-    let retry =
-        ingest_global_sources_for_provider(&relocated_db, &project, Some(SessionProvider::Codex))
-            .await;
+    let retry = ingest_global_sources_for_provider(
+        &home,
+        &relocated_db,
+        &project,
+        Some(SessionProvider::Codex),
+    )
+    .await;
     // Content-addressed observation identity + session_meta.payload.id keep the
     // logical session stable across filesystem path relocation; redelivery is a
     // durable no-op (no overwrite / no duplicate searchable rows).
@@ -500,14 +498,9 @@ async fn codex_jsonl_path_relocation_keeps_session_identity_on_production_observ
 /// carries the host's call id; a failed apply and a call-id-less record
 /// record nothing.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn codex_file_change_items_record_edit_times_and_call_ids() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
     let session = "codex-file-change";
@@ -577,7 +570,7 @@ async fn codex_file_change_items_record_edit_times_and_call_ids() {
     );
 
     let db = open_project_session_db(&project).await.unwrap();
-    ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Codex)).await;
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Codex)).await;
 
     let session_row = db.get_session("codex", session).await.unwrap();
     let metadata: serde_json::Value =
@@ -712,14 +705,9 @@ fn write_codex_spawn_child(dir: &Path, cwd: &str) {
 /// spawn record binds the child's `parent_tool_use_id` to that call, which is
 /// the same id the parent's spawn tool-call message carries.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn codex_subagent_binds_the_spawning_call_recorded_by_its_parent() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
     let cwd = project.to_string_lossy();
@@ -729,7 +717,7 @@ async fn codex_subagent_binds_the_spawning_call_recorded_by_its_parent() {
     write_codex_spawn_child(&dir, &cwd);
 
     let db = open_project_session_db(&project).await.unwrap();
-    ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Codex)).await;
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Codex)).await;
 
     let child_row = db.get_session("codex", CODEX_SPAWN_CHILD).await.unwrap();
     assert_eq!(
@@ -764,14 +752,9 @@ async fn codex_subagent_binds_the_spawning_call_recorded_by_its_parent() {
 /// The child rollout may be ingested before its parent records the spawn; the
 /// parent's later spawn record binds the already-ingested child.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn codex_child_ingested_before_its_parent_is_bound_when_the_spawn_lands() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
     let cwd = project.to_string_lossy();
@@ -780,7 +763,7 @@ async fn codex_child_ingested_before_its_parent_is_bound_when_the_spawn_lands() 
     write_codex_spawn_child(&dir, &cwd);
 
     let db = open_project_session_db(&project).await.unwrap();
-    ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Codex)).await;
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Codex)).await;
     let child_row = db.get_session("codex", CODEX_SPAWN_CHILD).await.unwrap();
     assert_eq!(
         (
@@ -792,7 +775,7 @@ async fn codex_child_ingested_before_its_parent_is_bound_when_the_spawn_lands() 
     );
 
     write_codex_spawn_parent(&dir, &cwd);
-    ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Codex)).await;
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Codex)).await;
     let child_row = db.get_session("codex", CODEX_SPAWN_CHILD).await.unwrap();
     assert_eq!(
         child_row.parent_tool_use_id.as_deref(),

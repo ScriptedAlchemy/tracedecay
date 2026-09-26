@@ -98,7 +98,7 @@ pub(super) fn git_diff_file_changes(
     project_root: &std::path::Path,
     from_ref: &str,
     to_ref: &str,
-) -> std::result::Result<Vec<GitFileChange>, String> {
+) -> std::result::Result<Vec<GitFileChangeV1>, String> {
     git_diff_file_changes_controlled(project_root, from_ref, to_ref, &|| false)
 }
 
@@ -196,7 +196,7 @@ fn git_diff_file_changes_controlled(
     from_ref: &str,
     to_ref: &str,
     cancelled: &(impl Fn() -> bool + ?Sized),
-) -> std::result::Result<Vec<GitFileChange>, String> {
+) -> std::result::Result<Vec<GitFileChangeV1>, String> {
     check_git_pr_cancelled(cancelled)?;
     let repo = open_project_repository(project_root)?;
     let from_tree = repo
@@ -236,9 +236,9 @@ fn git_diff_file_changes_controlled(
                     ..
                 } => {
                     if !entry_mode.is_tree() {
-                        changed.push(GitFileChange {
+                        changed.push(GitFileChangeV1 {
                             path: location.to_string(),
-                            status: "added",
+                            status: GitFileChangeStatusV1::Added,
                         });
                     }
                 }
@@ -248,9 +248,9 @@ fn git_diff_file_changes_controlled(
                     ..
                 } => {
                     if !entry_mode.is_tree() {
-                        changed.push(GitFileChange {
+                        changed.push(GitFileChangeV1 {
                             path: location.to_string(),
-                            status: "modified",
+                            status: GitFileChangeStatusV1::Modified,
                         });
                     }
                 }
@@ -260,9 +260,9 @@ fn git_diff_file_changes_controlled(
                     ..
                 } => {
                     if !entry_mode.is_tree() {
-                        changed.push(GitFileChange {
+                        changed.push(GitFileChangeV1 {
                             path: location.to_string(),
-                            status: "deleted",
+                            status: GitFileChangeStatusV1::Deleted,
                         });
                     }
                 }
@@ -274,15 +274,15 @@ fn git_diff_file_changes_controlled(
                     ..
                 } => {
                     if !source_entry_mode.is_tree() {
-                        changed.push(GitFileChange {
+                        changed.push(GitFileChangeV1 {
                             path: source_location.to_string(),
-                            status: "deleted",
+                            status: GitFileChangeStatusV1::Deleted,
                         });
                     }
                     if !entry_mode.is_tree() {
-                        changed.push(GitFileChange {
+                        changed.push(GitFileChangeV1 {
                             path: location.to_string(),
-                            status: "added",
+                            status: GitFileChangeStatusV1::Added,
                         });
                     }
                 }
@@ -435,7 +435,7 @@ fn git_commit_log_controlled(
     base_ref: &str,
     head_ref: &str,
     cancelled: &(impl Fn() -> bool + ?Sized),
-) -> std::result::Result<Vec<Value>, String> {
+) -> std::result::Result<Vec<GitCommitSubjectV1>, String> {
     check_git_pr_cancelled(cancelled)?;
     let repo = open_project_repository(project_root)?;
 
@@ -484,7 +484,10 @@ fn git_commit_log_controlled(
             .unwrap_or("")
             .to_string();
         let short_id = format!("{:.7}", commit.id);
-        commits.push(json!({"hash": short_id, "subject": subject}));
+        commits.push(GitCommitSubjectV1 {
+            hash: short_id,
+            subject,
+        });
     }
 
     check_git_pr_cancelled(cancelled)?;
@@ -501,9 +504,9 @@ fn git_commit_log_controlled(
 pub(super) fn classify_file_role(
     path: &str,
     _files_with_inline_tests: &HashSet<String>,
-) -> &'static str {
+) -> GitFileRoleV1 {
     if tracedecay_code_index::is_test_file(path) {
-        return "test";
+        return GitFileRoleV1::Test;
     }
     let lower = path.to_lowercase();
     let ext = std::path::Path::new(&lower)
@@ -515,16 +518,16 @@ pub(super) fn classify_file_role(
         Some("toml" | "yaml" | "yml" | "json" | "lock" | "ini" | "cfg")
     ) || lower.contains("config")
     {
-        return "config";
+        return GitFileRoleV1::Config;
     }
     // Documentation
     if matches!(ext, Some("md" | "rst" | "txt"))
         || lower.starts_with("docs/")
         || lower.starts_with("doc/")
     {
-        return "docs";
+        return GitFileRoleV1::Docs;
     }
-    "source"
+    GitFileRoleV1::Source
 }
 
 #[cfg(test)]
@@ -558,7 +561,7 @@ mod tests {
 
         assert_eq!(paths, ["feature.txt"]);
         assert_eq!(comparison.commits.len(), 1);
-        assert_eq!(comparison.commits[0]["subject"], "feature");
+        assert_eq!(comparison.commits[0].subject, "feature");
     }
 
     #[test]
@@ -742,10 +745,22 @@ mod tests {
     #[test]
     fn config_files_classified_as_config_not_source() {
         let empty: HashSet<String> = HashSet::new();
-        assert_eq!(classify_file_role("Cargo.toml", &empty), "config");
-        assert_eq!(classify_file_role("package.json", &empty), "config");
-        assert_eq!(classify_file_role("foo.yaml", &empty), "config");
-        assert_eq!(classify_file_role("config.ini", &empty), "config");
+        assert_eq!(
+            classify_file_role("Cargo.toml", &empty),
+            GitFileRoleV1::Config
+        );
+        assert_eq!(
+            classify_file_role("package.json", &empty),
+            GitFileRoleV1::Config
+        );
+        assert_eq!(
+            classify_file_role("foo.yaml", &empty),
+            GitFileRoleV1::Config
+        );
+        assert_eq!(
+            classify_file_role("config.ini", &empty),
+            GitFileRoleV1::Config
+        );
     }
 
     /// Regression for bug #3 follow-up: a source file with `#[cfg(test)] mod
@@ -756,14 +771,23 @@ mod tests {
     fn source_file_with_inline_tests_keeps_source_role() {
         let mut with_inline: HashSet<String> = HashSet::new();
         with_inline.insert("src/lib.rs".to_string());
-        assert_eq!(classify_file_role("src/lib.rs", &with_inline), "source");
+        assert_eq!(
+            classify_file_role("src/lib.rs", &with_inline),
+            GitFileRoleV1::Source
+        );
     }
 
     #[test]
     fn path_based_test_files_classify_as_test() {
         let empty: HashSet<String> = HashSet::new();
-        assert_eq!(classify_file_role("tests/integration.rs", &empty), "test");
-        assert_eq!(classify_file_role("src/foo_test.rs", &empty), "test");
+        assert_eq!(
+            classify_file_role("tests/integration.rs", &empty),
+            GitFileRoleV1::Test
+        );
+        assert_eq!(
+            classify_file_role("src/foo_test.rs", &empty),
+            GitFileRoleV1::Test
+        );
     }
 
     /// A project directory that is not a git repository must report the typed

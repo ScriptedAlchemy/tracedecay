@@ -6,7 +6,9 @@ use tracedecay_contracts::retained_surfaces::{
     SessionRefreshReceiptV1, SessionRefreshScopeV1, SessionRefreshStatusResultV1,
     SessionRefreshTerminalStateResultV1, TemporalCoverageV1,
 };
-use tracedecay_contracts::{ApplicationProblem, RetainedSurfaceExecutionErrorV1, SafeDiagnostic};
+use tracedecay_contracts::{
+    ApplicationProblem, ApplicationProblemDetailV1, RetainedSurfaceExecutionErrorV1,
+};
 
 use tracedecay_session_memory::session::{
     SessionRefreshCoverageView, SessionRefreshFrontierView, SessionRefreshProgressView,
@@ -56,11 +58,18 @@ pub(super) fn status_result(
             "the refresh handle does not belong to the requested scope",
         ),
         SessionRefreshServiceOutcome::StaleFrontier {
-            active_projection_frontier,
+            requested,
+            committed,
+            active,
         } => refresh_problem(
             RetainedOutcomeStatusV1::Stale,
             "refresh_frontier_stale",
-            &stale_frontier_message(active_projection_frontier),
+            &ApplicationProblemDetailV1::StaleRefreshFrontier {
+                requested,
+                committed,
+                active,
+            }
+            .message(),
         ),
         SessionRefreshServiceOutcome::Stale => refresh_problem(
             RetainedOutcomeStatusV1::Stale,
@@ -244,11 +253,14 @@ fn effect_error(outcome: SessionRefreshServiceOutcome) -> RetainedSurfaceExecuti
         }
         SessionRefreshServiceOutcome::Stale => RetainedSurfaceExecutionErrorV1::Stale,
         SessionRefreshServiceOutcome::StaleFrontier {
-            active_projection_frontier,
-        } => RetainedSurfaceExecutionErrorV1::ApplicationProblem(ApplicationProblem::stale(
-            SafeDiagnostic {
-                code: "application.retained.refresh-frontier-stale".to_owned(),
-                message: stale_frontier_message(active_projection_frontier),
+            requested,
+            committed,
+            active,
+        } => RetainedSurfaceExecutionErrorV1::ApplicationProblem(ApplicationProblem::from_detail(
+            ApplicationProblemDetailV1::StaleRefreshFrontier {
+                requested,
+                committed,
+                active,
             },
         )),
         SessionRefreshServiceOutcome::Aborted => RetainedSurfaceExecutionErrorV1::Cancelled(
@@ -278,14 +290,6 @@ fn effect_error(outcome: SessionRefreshServiceOutcome) -> RetainedSurfaceExecuti
             )
         }
     }
-}
-
-fn stale_frontier_message(active_projection_frontier: u64) -> String {
-    format!(
-        "The refresh window no longer contains the committed projection frontier \
-         {active_projection_frontier}; begin again from source frontier \
-         {active_projection_frontier}."
-    )
 }
 
 fn refresh_problem(
@@ -437,7 +441,9 @@ mod tests {
     fn a_stale_begin_frontier_is_a_stale_problem_naming_the_committed_frontier() {
         let error = begin_result(
             SessionRefreshServiceOutcome::StaleFrontier {
-                active_projection_frontier: 80,
+                requested: 120,
+                committed: 40,
+                active: 80,
             },
             &profile_scope(),
         )
@@ -454,11 +460,21 @@ mod tests {
             problem.legal_actions(),
             &[tracedecay_contracts::LegalAction::Refresh]
         );
+        let wire = serde_json::to_value(&problem).expect("serialized problem");
         assert_eq!(
-            serde_json::to_value(&problem).expect("serialized problem")["diagnostic"],
+            wire["diagnostic"],
             serde_json::json!({
                 "code": "application.retained.refresh-frontier-stale",
                 "message": "The refresh window no longer contains the committed projection frontier 80; begin again from source frontier 80."
+            })
+        );
+        assert_eq!(
+            wire["detail"],
+            serde_json::json!({
+                "kind": "stale_refresh_frontier",
+                "requested": 120,
+                "committed": 40,
+                "active": 80
             })
         );
     }

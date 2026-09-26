@@ -1,9 +1,11 @@
 use crate::cli::AutomationSkillsAction;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 /// Managed-skill commands operate on the profile authority and then run the
 /// same project-scoped deployment reconciliation used by automatic curation.
 /// There is no separate operator export/install phase.
 pub(super) async fn handle_automation_skills_command(
+    profile: &ProfileRoot,
     action: AutomationSkillsAction,
 ) -> tracedecay_domain::errors::Result<()> {
     use tracedecay_automation_runtime::automation::managed_skills::{
@@ -12,7 +14,7 @@ pub(super) async fn handle_automation_skills_command(
         disable_managed_skill, list_managed_skills, load_managed_skill, restore_managed_skill,
     };
 
-    let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
+    let profile_root = profile.data_dir().to_path_buf();
     let skill = match action {
         AutomationSkillsAction::List { json } => {
             let skills = list_managed_skills(&profile_root).await?;
@@ -47,7 +49,7 @@ pub(super) async fn handle_automation_skills_command(
             return Ok(());
         }
         AutomationSkillsAction::Deploy => {
-            let deployment = deploy_skills_to_current_project(&profile_root)?;
+            let deployment = deploy_skills_to_current_project(profile)?;
             println!("{}", serde_json::to_string_pretty(&deployment)?);
             return Ok(());
         }
@@ -121,7 +123,7 @@ pub(super) async fn handle_automation_skills_command(
         AutomationSkillsAction::Archive { id } => archive_managed_skill(&profile_root, &id).await?,
         AutomationSkillsAction::Restore { id } => restore_managed_skill(&profile_root, &id).await?,
     };
-    let deployment = deploy_skills_to_current_project(&profile_root)?;
+    let deployment = deploy_skills_to_current_project(profile)?;
     println!(
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
@@ -133,7 +135,7 @@ pub(super) async fn handle_automation_skills_command(
 }
 
 fn deploy_skills_to_current_project(
-    profile_root: &std::path::Path,
+    profile: &ProfileRoot,
 ) -> tracedecay_domain::errors::Result<
     tracedecay_automation_runtime::automation::skill_writer::ManagedSkillDeploymentReceipt,
 > {
@@ -144,12 +146,13 @@ fn deploy_skills_to_current_project(
     })?;
     let project_root =
         tracedecay_automation_runtime::automation::skill_materialization::resolve_project_root(
-            &current,
+            profile, &current,
         );
     Ok(
         tracedecay_automation_runtime::automation::skill_writer::deploy_managed_skills_to_project(
             &tracedecay_agent_hosts::host_io(),
-            profile_root,
+            profile.home(),
+            profile.data_dir(),
             &project_root,
         ),
     )

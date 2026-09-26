@@ -205,11 +205,17 @@ impl ProjectSummarizerFixture {
     }
 }
 
-/// Runs a future under the canonical user-data-dir test lock: fixtures share
-/// one project identity, so its process-wide pinned summarizer binding must
-/// not race parallel tests.
-fn run_with_test_env_lock<T>(future: impl std::future::Future<Output = T>) -> T {
-    let _lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
+/// Serializes [`ProjectSummarizerFixture`] users: fixtures share one project
+/// identity, and the process-wide pin cache holds one summarizer binding per
+/// project.
+static PINNED_SUMMARIZER_BINDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Runs a future while owning the shared fixture project's pinned summarizer
+/// binding, so parallel tests cannot replace it mid-run.
+fn run_with_pinned_summarizer_binding<T>(future: impl std::future::Future<Output = T>) -> T {
+    let _binding = PINNED_SUMMARIZER_BINDING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -1042,7 +1048,7 @@ async fn successive_claude_compactions_bind_to_the_previous_native_boundary_afte
 #[cfg(unix)]
 #[test]
 fn native_compaction_requires_exact_selected_raw_membership() {
-    run_with_test_env_lock(async {
+    run_with_pinned_summarizer_binding(async {
         let fixture = ProjectSummarizerFixture::open().await;
         let db = fixture.db();
         let session_id = "codex-native-membership-session";
@@ -1437,7 +1443,7 @@ async fn summary_convergence_keeps_unsupported_provider_typed_pending() {
 #[cfg(unix)]
 #[test]
 fn parked_sessions_converge_once_the_summarizer_becomes_available_without_restart() {
-    run_with_test_env_lock(async {
+    run_with_pinned_summarizer_binding(async {
         // A project id no other test pins, so the shard starts with no
         // published configuration at all.
         let root = tempfile::tempdir().unwrap();
@@ -1623,7 +1629,7 @@ where
 #[cfg(unix)]
 #[test]
 fn refresh_begins_at_the_committed_frontier_after_background_summaries_publish() {
-    run_with_test_env_lock(async {
+    run_with_pinned_summarizer_binding(async {
         let fixture = ProjectSummarizerFixture::open().await;
         fixture.pin(LcmSummarizerExecutablesV1::unconfigured());
         let db = fixture.db();
@@ -2277,7 +2283,7 @@ async fn malformed_relation_receipt_is_permanent_without_starving_summary_work()
 
 #[test]
 fn mega_session_convergence_bounds_protection_and_compression_pages() {
-    run_with_test_env_lock(async {
+    run_with_pinned_summarizer_binding(async {
         // Summarization must never reach the operator's installed agent CLI:
         // this profile shard has no `lcm.summarizer_executables.v1` binding,
         // so every provider stays unconfigured and nothing is launched.
@@ -2340,7 +2346,7 @@ fn mega_session_convergence_bounds_protection_and_compression_pages() {
 #[cfg(unix)]
 #[test]
 fn retained_pages_never_reuse_unbound_session_wide_native_text() {
-    run_with_test_env_lock(async {
+    run_with_pinned_summarizer_binding(async {
         const RAW_ROWS: i64 = tracedecay_lcm::LCM_SCAN_PAGE_ROWS + 1;
         let fixture = ProjectSummarizerFixture::open().await;
         let db = fixture.db();
@@ -2443,7 +2449,7 @@ fn retained_pages_never_reuse_unbound_session_wide_native_text() {
 #[cfg(unix)]
 #[test]
 fn protected_in_place_revision_stales_old_summary_before_reconvergence() {
-    run_with_test_env_lock(async {
+    run_with_pinned_summarizer_binding(async {
         let fixture = ProjectSummarizerFixture::open().await;
         let db = fixture.db();
         let storage_root = db.db_path().parent().unwrap();
@@ -2588,7 +2594,7 @@ fn protected_in_place_revision_stales_old_summary_before_reconvergence() {
 #[cfg(unix)]
 #[test]
 fn disjoint_published_summary_revisions_both_reconverge_across_restart() {
-    run_with_test_env_lock(async {
+    run_with_pinned_summarizer_binding(async {
         let fixture = ProjectSummarizerFixture::open().await;
         let db = fixture.db();
         let storage_root = db.db_path().parent().unwrap();
@@ -2799,7 +2805,7 @@ fn disjoint_published_summary_revisions_both_reconverge_across_restart() {
 #[cfg(unix)]
 #[test]
 fn retained_summary_rejects_a_role_revision_during_model_generation() {
-    run_with_test_env_lock(async {
+    run_with_pinned_summarizer_binding(async {
         let fixture = ProjectSummarizerFixture::open().await;
         let db = fixture.db();
         let storage_root = db.db_path().parent().unwrap().to_path_buf();
@@ -3090,7 +3096,7 @@ async fn large_byte_session_stops_each_retained_pass_at_the_existing_budget() {
 
 #[test]
 fn concurrent_raw_revision_cannot_be_overwritten_by_staged_protection() {
-    run_with_test_env_lock(async {
+    run_with_pinned_summarizer_binding(async {
         const RAW_ROWS: i64 = 32;
         let harness = RegisteredGlobalDbHarness::open("lcm-protection-revision-barrier").await;
         let db = harness.registered.clone();
@@ -3469,7 +3475,7 @@ async fn ingest_codex_compaction_evidence(
 #[cfg(unix)]
 #[test]
 fn codex_and_cursor_daemon_adapters_commit_exact_authoritative_summaries() {
-    run_with_test_env_lock(async {
+    run_with_pinned_summarizer_binding(async {
         let fixture = ProjectSummarizerFixture::open().await;
         let db = fixture.db();
         let temporary = tempfile::tempdir().unwrap();

@@ -113,7 +113,7 @@ fn scout_evidence(now: UtcMicros) -> ContextScoutEvidenceEnvelopeV1 {
 
 #[tokio::test]
 async fn authentic_callback_to_all_delivery_surfaces() {
-    let (_environment, project) = common::IsolatedEnv::acquire().await;
+    let (_environment, project) = common::IsolatedHome::new();
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(
         project.join("src/lib.rs"),
@@ -135,7 +135,11 @@ async fn authentic_callback_to_all_delivery_surfaces() {
 
     let layout = project_runtime.store_layout();
     let worktree_id = tracedecay_agent_hosts::hooks::hook_worktree_id_for_layout(
-        &tracedecay::hook_runtime(),
+        &tracedecay::hook_runtime(tracedecay_runtime_core::config::ProfileRoot::new(
+            project_runtime
+                .profile_root()
+                .expect("production project profile root"),
+        )),
         layout,
     )
     .expect("production worktree identity");
@@ -278,7 +282,7 @@ async fn authentic_callback_to_all_delivery_surfaces() {
 async fn exact_search_is_ready_within_the_startup_deadline() {
     const STARTUP_DEADLINE: Duration = Duration::from_secs(5);
 
-    let (environment, project) = common::IsolatedEnv::acquire().await;
+    let (environment, project) = common::IsolatedHome::new();
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(
         project.join("src/lib.rs"),

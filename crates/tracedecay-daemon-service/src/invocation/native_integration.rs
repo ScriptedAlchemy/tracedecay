@@ -889,6 +889,7 @@ fn unavailable_native_integration() -> ApplicationProblem {
         },
         retry: RetryDirective::AfterDelay,
         legal_actions: vec![tracedecay_contracts::LegalAction::Retry],
+        detail: None,
     }
 }
 

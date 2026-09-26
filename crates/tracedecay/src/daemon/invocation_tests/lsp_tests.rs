@@ -413,7 +413,7 @@ fn lsp_delivery_same_session_identical_frames_after_ack_have_distinct_events() {
 }
 
 struct LspDeliveryFixture {
-    _pin: tracedecay_runtime_core::config::PinnedUserDataDir,
+    _profile: tempfile::TempDir,
     /// The runtime owns the daemon database scope every durable settlement
     /// write is admitted under. Dropping it leaves the lease without an active
     /// write scope, so the recorder's replay would retain every receipt
@@ -428,11 +428,11 @@ struct LspDeliveryFixture {
 }
 
 async fn lsp_delivery_fixture() -> LspDeliveryFixture {
-    let pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let profile = tempfile::tempdir().expect("profile");
     let project = tempfile::tempdir().expect("project");
     let project_id = ProjectId::new("project.lsp.delivery").expect("project id");
     let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+        profile.path(),
         project.path(),
         project_id.clone(),
     )
@@ -470,7 +470,7 @@ async fn lsp_delivery_fixture() -> LspDeliveryFixture {
         .expect("settlement recorder"),
     );
     LspDeliveryFixture {
-        _pin: pin,
+        _profile: profile,
         _runtime: runtime,
         _project: project,
         project_id,

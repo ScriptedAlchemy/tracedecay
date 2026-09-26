@@ -481,11 +481,11 @@ mod tests {
 
     #[tokio::test]
     async fn project_open_census_persists_known_coverage_family_observations() {
-        let _pin = tracedecay_project::config::PinnedUserDataDir::new();
+        let profile = tempfile::tempdir().expect("profile");
         let project = tempfile::tempdir().expect("project");
         let project_id = ProjectId::new("project.adoption.census").expect("project id");
         let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+            profile.path(),
             project.path(),
             project_id.clone(),
         )

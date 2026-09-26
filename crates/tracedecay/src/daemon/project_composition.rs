@@ -231,25 +231,22 @@ async fn release_one_idle_project_server_before_open(
     Ok(capacity_admission)
 }
 
-/// The one home a composed daemon reads host transcripts from.
+/// The one transcript owner a composed project reads host transcripts for:
+/// the project's profile data directory with the daemon owner's home.
 ///
 /// Both readers resolve it here: the composition pins it onto the session
 /// refresh schedulers that own the background sweep, and the MCP server scopes
 /// every tool dispatch to it so a hook-triggered ingest cannot resolve a
 /// different one.
-///
-/// Gated exactly like the `production_harness` module that owns the isolated
-/// layout: an integration test links this crate without `cfg(test)`, so a
-/// `cfg(test)`-only pin left `mcp_suite` compositions sweeping the developer's
-/// real `$HOME` transcripts.
-#[cfg(any(test, feature = "test-transport"))]
-pub(crate) fn daemon_transcript_source_home(profile_root: &Path) -> Option<PathBuf> {
-    profile_root.parent().map(Path::to_path_buf)
-}
-
-#[cfg(not(any(test, feature = "test-transport")))]
-pub(crate) fn daemon_transcript_source_home(_profile_root: &Path) -> Option<PathBuf> {
-    tracedecay_sessions::runtime::home_dir()
+pub(crate) fn daemon_transcript_source_profile(
+    owner: &tracedecay_runtime_core::config::ProfileRoot,
+    profile_root: &Path,
+) -> tracedecay_runtime_core::config::ProfileRoot {
+    let profile = tracedecay_runtime_core::config::ProfileRoot::new(profile_root);
+    match owner.home() {
+        Some(home) => profile.with_home(home),
+        None => profile,
+    }
 }
 
 /// Borrowed handles every project-open phase reads. A phase future captures
@@ -503,7 +500,7 @@ struct ComposedCoreServer {
     registered_profile_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     accounting_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
     graph_runtime: Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
-    transcript_source_home: Option<PathBuf>,
+    transcript_source_profile: tracedecay_runtime_core::config::ProfileRoot,
     code_index_activation: Arc<code_index_scheduler::CodeIndexActivationV1>,
     ports: ProjectRoutePorts,
 }
@@ -897,8 +894,13 @@ impl ProjectOpenInputs<'_> {
         // degradation for an unreadable file) plus the home-level OpenCode
         // analyzer-ownership registration adopted on top of the project-level
         // one.
+        let transcript_source_profile = daemon_transcript_source_profile(
+            self.store_administration.owner_profile()?,
+            profile_identity.profile_root(),
+        );
         let diagnostic_broker =
             tracedecay_application::dashboard_diagnostics::open_diagnostic_broker(
+                Some(&transcript_source_profile),
                 self.canonical_project_path.to_path_buf(),
                 &cg.store_layout().dashboard_root,
             )
@@ -911,7 +913,6 @@ impl ProjectOpenInputs<'_> {
             self.canonical_project_path.to_path_buf(),
             code_index.scope.clone(),
         ));
-        let transcript_source_home = daemon_transcript_source_home(profile_identity.profile_root());
         let core = ComposedCoreServer {
             project_id,
             current_key,
@@ -921,7 +922,7 @@ impl ProjectOpenInputs<'_> {
             registered_profile_db,
             accounting_db,
             graph_runtime,
-            transcript_source_home,
+            transcript_source_profile,
             code_index_activation,
             ports: ProjectRoutePorts {
                 code_index,
@@ -952,6 +953,7 @@ impl ProjectOpenInputs<'_> {
                 Arc::clone(cg),
                 self.handshake.scope_prefix.clone(),
                 crate::mcp::server::McpServerDaemonCoreAuthority {
+                    profile: core.transcript_source_profile.clone(),
                     profile_identity: core.profile_identity.clone(),
                     accounting: core.accounting_db.clone(),
                     registry: core.registered_profile_db.clone(),
@@ -1270,7 +1272,7 @@ impl ProjectOpenInputs<'_> {
                     Arc::new(core.profile_identity.clone()),
                     self.canonical_project_path.to_path_buf(),
                     code_index.project_id.clone(),
-                    core.transcript_source_home.clone(),
+                    core.transcript_source_profile.clone(),
                     refresh_schedulers.codex_discovery(),
                     Arc::clone(&background_cpu),
                 )),
@@ -1284,7 +1286,7 @@ impl ProjectOpenInputs<'_> {
                     user_session_db.clone(),
                     core.registered_profile_db.clone(),
                     Arc::new(core.profile_identity.clone()),
-                    core.transcript_source_home.clone(),
+                    core.transcript_source_profile.clone(),
                     refresh_schedulers.codex_discovery(),
                     Arc::clone(&background_cpu),
                     crate::session_review_port(),
@@ -1299,7 +1301,7 @@ impl ProjectOpenInputs<'_> {
                 project_id: code_index.project_id.clone(),
                 profile_root: core.profile_identity.profile_root().to_path_buf(),
                 project_root: self.canonical_project_path.to_path_buf(),
-                transcript_source_home: core.transcript_source_home.clone(),
+                transcript_source_profile: core.transcript_source_profile.clone(),
                 project_sessions: session_db.clone(),
                 user_sessions: user_session_db.clone(),
                 registry: core.registered_profile_db.clone(),
@@ -1364,7 +1366,7 @@ impl ProjectOpenInputs<'_> {
                 user_session_db.clone(),
                 session_db.clone(),
                 core.profile_identity.profile_root().to_path_buf(),
-                core.transcript_source_home.clone(),
+                core.transcript_source_profile.clone(),
                 remote_operational_read,
                 schema_convergence,
                 cg.get_config().sync.retention.clone(),
@@ -1381,6 +1383,7 @@ impl ProjectOpenInputs<'_> {
                     Arc::clone(cg),
                     self.handshake.scope_prefix.clone(),
                     crate::mcp::server::McpServerDaemonAuthority {
+                        profile: core.transcript_source_profile.clone(),
                         profile_identity: core.profile_identity.clone(),
                         databases: crate::mcp::server::McpServerDaemonDatabases {
                             accounting: core.accounting_db.clone(),
@@ -1531,6 +1534,7 @@ impl ProjectOpenInputs<'_> {
             self.log_phase("production_owners_registered", None, full_setup_started);
             mount_http_application_router(
                 self.http_application_registry,
+                self.store_administration.owner_profile()?,
                 &core.project_id,
                 self.canonical_project_path,
             )

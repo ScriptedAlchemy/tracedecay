@@ -1214,7 +1214,7 @@ mod tests {
         assert_eq!(options.skill_writer.trigger, AutomationTrigger::ManualCli);
         let automation_context = fixture
             .memory
-            .automation_project_context()
+            .automation_project_context(Some(fixture._temp.path().join("home")))
             .expect("compose project automation context");
 
         let prior_skill_run_id = "combined-partial-replay-prior-skill";

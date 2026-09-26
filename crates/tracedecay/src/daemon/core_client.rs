@@ -128,24 +128,30 @@ pub(crate) async fn write_daemon_preamble(
     .await
 }
 
-pub(crate) fn default_available_socket_path() -> Result<PathBuf> {
-    let socket_path = default_socket_path()?;
+/// The socket of the daemon serving the profile `handshake` names.
+pub(crate) fn default_available_socket_path(handshake: &DaemonHandshake) -> Result<PathBuf> {
+    let profile_root = &handshake.client_identity.profile_root;
+    let socket_path = default_socket_path(profile_root)?;
     #[cfg(unix)]
     {
         if socket_path.exists() {
             Ok(socket_path)
         } else {
-            Err(unavailable_error(&socket_path))
+            Err(unavailable_error(
+                &tracedecay_runtime_core::config::ProfileRoot::new(profile_root),
+                &socket_path,
+            ))
         }
     }
     #[cfg(not(unix))]
     {
-        current_daemon_connection()?;
+        current_daemon_connection(profile_root)?;
         Ok(socket_path)
     }
 }
 
 pub(crate) async fn connect_to_current_daemon_within(
+    profile_root: &Path,
     socket_path: &Path,
     client_deadline: Option<DaemonClientDeadline>,
 ) -> Result<(ResolvedDaemonConnection, BrokerStream)> {
@@ -154,7 +160,7 @@ pub(crate) async fn connect_to_current_daemon_within(
         None => DAEMON_RESTART_GRACE,
     };
     connect_with_restart_grace_resolving(
-        || client_connection(socket_path),
+        || client_connection(profile_root, socket_path),
         grace,
         DAEMON_RESTART_POLL_INTERVAL,
     )
@@ -167,12 +173,13 @@ pub(crate) async fn connect_to_current_daemon_within(
 /// duplicated. Non-transient errors (e.g. permission denied) fail immediately.
 #[cfg(unix)]
 pub(crate) async fn connect_with_restart_grace(
+    profile_root: &Path,
     socket_path: &Path,
     grace: Duration,
     poll_interval: Duration,
 ) -> Result<BrokerStream> {
     let (_, stream) = connect_with_restart_grace_resolving(
-        || client_connection(socket_path),
+        || client_connection(profile_root, socket_path),
         grace,
         poll_interval,
     )
@@ -261,11 +268,23 @@ pub(crate) async fn call_tool_with_liveness_poll(
         Some(deadline) => {
             deadline
                 .run("connect", tool_name, async {
-                    connect_to_current_daemon_within(socket_path, Some(deadline)).await
+                    connect_to_current_daemon_within(
+                        &handshake.client_identity.profile_root,
+                        socket_path,
+                        Some(deadline),
+                    )
+                    .await
                 })
                 .await?
         }
-        None => connect_to_current_daemon_within(socket_path, None).await?,
+        None => {
+            connect_to_current_daemon_within(
+                &handshake.client_identity.profile_root,
+                socket_path,
+                None,
+            )
+            .await?
+        }
     };
     let (reader, mut writer) = stream.into_owned_split();
     let id = json!(1);
@@ -543,7 +562,7 @@ pub async fn call_default_tool(
     tool_name: &str,
     arguments: serde_json::Value,
 ) -> Result<serde_json::Value> {
-    let socket_path = default_available_socket_path()?;
+    let socket_path = default_available_socket_path(handshake)?;
     let deadline = Instant::now() + tool_request_deadline()?;
     let result = call_tool_within(
         &socket_path,
@@ -574,7 +593,7 @@ pub async fn call_default_tool_within(
     arguments: serde_json::Value,
     deadline: Instant,
 ) -> Result<serde_json::Value> {
-    let socket_path = default_available_socket_path()?;
+    let socket_path = default_available_socket_path(handshake)?;
     // Deadline-aware application callers need the daemon's typed warming
     // response. Retrying that response until `deadline` turns a useful
     // temporary state into a client-side timeout with no response body.
@@ -595,7 +614,7 @@ pub async fn call_default_tool_awaiting_project_open(
     arguments: serde_json::Value,
     deadline: Instant,
 ) -> Result<serde_json::Value> {
-    let socket_path = default_available_socket_path()?;
+    let socket_path = default_available_socket_path(handshake)?;
     call_tool_with_project_open_retry(&socket_path, handshake, tool_name, arguments, deadline).await
 }
 

@@ -507,6 +507,7 @@ fn denied_document() -> Value {
         "problem": {
             "cancellation_stage": null,
             "code": "not_found_or_not_authorized",
+            "detail": null,
             "committed_receipt": null,
             "coverage": null,
             "details": [],

@@ -348,7 +348,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 )?
                 .await
                 .map_err(|_| CallableCodeCursorError::Unavailable)?
-                .ok_or(CallableCodeCursorError::Unavailable)
+                // The generation this authenticated cursor pages is no
+                // longer held, so no later retry can serve it either.
+                .ok_or(CallableCodeCursorError::Stale)
             } else if is_unpinned_latest(requested) {
                 self.latest_complete_fresh_for_scope(request.scope())
                     .await
@@ -411,7 +413,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 )?
                 .await
                 .map_err(|_| CallableCodeCursorError::Unavailable)?
-                .ok_or(CallableCodeCursorError::Unavailable)
+                .ok_or(CallableCodeCursorError::Stale)
             } else if is_unpinned_latest(requested) {
                 self.latest_text_fresh_for_scope(request.scope())
                     .await
@@ -484,7 +486,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 )?
                 .await
                 .map_err(|_| CallableCodeCursorError::Unavailable)?
-                .ok_or(CallableCodeCursorError::Unavailable)
+                .ok_or(CallableCodeCursorError::Stale)
             } else if is_unpinned_latest(requested) {
                 self.retained_text_owner_freshness_for_scope(request.scope())
                     .await
@@ -719,16 +721,24 @@ fn rejected_cursor<T>(
     if !is_unpinned_latest(&generation) {
         evidence.temporal.source_generation = Some(generation);
     }
+    let reason = match error {
+        CallableCodeCursorError::Stale => OmissionReason::CursorExpired,
+        CallableCodeCursorError::Foreign => OmissionReason::CursorForeign,
+        CallableCodeCursorError::Invalid => OmissionReason::Failed,
+        CallableCodeCursorError::Unavailable => OmissionReason::Unavailable,
+    };
     evidence.omissions.push(Omission {
         domain: EvidenceDomain::Symbol,
         count: 0,
-        reason: match error {
-            CallableCodeCursorError::Stale => OmissionReason::Stale,
-            CallableCodeCursorError::Invalid => OmissionReason::Failed,
-            CallableCodeCursorError::Unavailable => OmissionReason::Unavailable,
-        },
+        reason,
     });
-    RetrievalPortOutcome::Unavailable(evidence)
+    // Only an unavailable authority is worth retrying; a rejected cursor
+    // fails the same way every time it is presented.
+    if reason == OmissionReason::Unavailable {
+        RetrievalPortOutcome::Unavailable(evidence)
+    } else {
+        RetrievalPortOutcome::Failed(evidence)
+    }
 }
 
 fn bounded_result<T>(

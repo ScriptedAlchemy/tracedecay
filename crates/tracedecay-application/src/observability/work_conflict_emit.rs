@@ -577,12 +577,12 @@ mod tests {
 
     #[tokio::test]
     async fn preflight_prediction_and_apply_outcome_persist_one_linked_pair() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let profile_dir = tempfile::tempdir().expect("profile");
         let project = tempfile::tempdir().expect("project dir");
         let project_id = ProjectId::new("project.work-conflict.durable").unwrap();
         let scope_ref = project_id.as_str().to_owned();
         let runtime = RegisteredGlobalDbTestRuntime::project(
-            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+            profile_dir.path().to_path_buf(),
             project.path(),
             project_id.clone(),
         )

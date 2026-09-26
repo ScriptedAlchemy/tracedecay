@@ -3,26 +3,16 @@ use std::path::Path;
 
 use tempfile::TempDir;
 use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
-use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
 use tracedecay_runtime_core::storage::{STORE_MANIFEST_FILENAME, pin_fixture_repository_identity};
 
-use crate::common::{EnvVarGuard, canonical_existing_path};
-use crate::home_env_lock::HOME_ENV_LOCK;
+use crate::common::canonical_existing_path;
 
-struct HomeEnvGuard {
-    _home: EnvVarGuard,
-    _userprofile: EnvVarGuard,
-    _data_dir: EnvVarGuard,
-}
-
-impl HomeEnvGuard {
-    fn set(home: &Path) -> Self {
-        crate::common::register_process_runtime_ports();
-        Self {
-            _home: EnvVarGuard::set("HOME", home),
-            _userprofile: EnvVarGuard::set("USERPROFILE", home),
-            _data_dir: EnvVarGuard::set(USER_DATA_DIR_ENV, home.join(".tracedecay")),
-        }
+/// Open options naming `profile_root` explicitly, as every production caller
+/// does.
+fn profile_options(profile_root: &Path) -> TraceDecayOpenOptions {
+    TraceDecayOpenOptions {
+        profile_root: Some(profile_root.to_path_buf()),
+        global_db_path: Some(profile_root.join("global.db")),
     }
 }
 
@@ -142,7 +132,6 @@ fn schema_version(db_path: &Path) -> u32 {
 
 #[tokio::test]
 async fn fresh_profile_initialization_creates_the_final_v2_store() {
-    let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let root = canonical_existing_path(dir.path());
     let home = root.join("home");
@@ -150,10 +139,10 @@ async fn fresh_profile_initialization_creates_the_final_v2_store() {
     let project = root.join("repo");
     let shard_root = profile_root.join("projects/proj_init");
     fs::create_dir_all(&project).unwrap();
-    let _home_guard = HomeEnvGuard::set(&home);
+    crate::common::register_process_runtime_ports();
     pin_fixture_repository_identity(&project, "proj_init").unwrap();
 
-    let cg = init_with_maintenance(&project, &profile_root, TraceDecayOpenOptions::default())
+    let cg = init_with_maintenance(&project, &profile_root, profile_options(&profile_root))
         .await
         .unwrap();
 
@@ -177,17 +166,16 @@ async fn fresh_profile_initialization_creates_the_final_v2_store() {
 
 #[tokio::test]
 async fn incompatible_profile_store_requires_reset_without_in_place_changes() {
-    let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let root = canonical_existing_path(dir.path());
     let home = root.join("home");
     let profile_root = home.join(".tracedecay");
     let project = root.join("repo");
     fs::create_dir_all(&project).unwrap();
-    let _home_guard = HomeEnvGuard::set(&home);
+    crate::common::register_process_runtime_ports();
 
     let initialized =
-        init_with_maintenance(&project, &profile_root, TraceDecayOpenOptions::default())
+        init_with_maintenance(&project, &profile_root, profile_options(&profile_root))
             .await
             .unwrap();
     let db_path = initialized.db_path().to_path_buf();
@@ -200,12 +188,8 @@ async fn incompatible_profile_store_requires_reset_without_in_place_changes() {
         .unwrap();
     drop(connection);
 
-    let error = match open_with_maintenance(
-        &project,
-        &profile_root,
-        TraceDecayOpenOptions::default(),
-    )
-    .await
+    let error = match open_with_maintenance(&project, &profile_root, profile_options(&profile_root))
+        .await
     {
         Ok(_) => panic!("an incompatible profile store must require a reset"),
         Err(error) => error,
@@ -229,14 +213,13 @@ async fn incompatible_profile_store_requires_reset_without_in_place_changes() {
 
 #[tokio::test]
 async fn trace_decay_init_with_options_uses_explicit_profile_identity() {
-    let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let root = canonical_existing_path(dir.path());
     let daemon_home = root.join("daemon-home");
     let client_profile = root.join("client-profile");
     let project = root.join("repo");
     fs::create_dir_all(&project).unwrap();
-    let _home_guard = HomeEnvGuard::set(&daemon_home);
+    crate::common::register_process_runtime_ports();
     pin_fixture_repository_identity(&project, "proj_explicit").unwrap();
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(client_profile.clone()),
@@ -273,14 +256,13 @@ async fn trace_decay_init_with_options_uses_explicit_profile_identity() {
 
 #[tokio::test]
 async fn trace_decay_options_global_db_path_implies_profile_root() {
-    let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let root = canonical_existing_path(dir.path());
     let daemon_home = root.join("daemon-home");
     let client_profile = root.join("client-profile");
     let project = root.join("repo");
     fs::create_dir_all(&project).unwrap();
-    let _home_guard = HomeEnvGuard::set(&daemon_home);
+    crate::common::register_process_runtime_ports();
     pin_fixture_repository_identity(&project, "proj_db_only").unwrap();
     let open_options = TraceDecayOpenOptions {
         profile_root: None,
@@ -312,7 +294,6 @@ async fn trace_decay_options_global_db_path_implies_profile_root() {
 
 #[tokio::test]
 async fn trace_decay_open_matches_renamed_git_checkout_by_registered_remote() {
-    let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let root = canonical_existing_path(dir.path());
     let home = root.join("home");
@@ -329,11 +310,11 @@ async fn trace_decay_open_matches_renamed_git_checkout_by_registered_remote() {
             "git@github.com:ScriptedAlchemy/tracedecay.git",
         ],
     );
-    let _home_guard = HomeEnvGuard::set(&home);
+    crate::common::register_process_runtime_ports();
 
     let profile_root = home.join(".tracedecay");
     let initialized =
-        init_with_maintenance(&project, &profile_root, TraceDecayOpenOptions::default())
+        init_with_maintenance(&project, &profile_root, profile_options(&profile_root))
             .await
             .unwrap();
     let original_project_id = initialized
@@ -346,7 +327,7 @@ async fn trace_decay_open_matches_renamed_git_checkout_by_registered_remote() {
     drop(initialized);
     fs::rename(&project, &renamed).unwrap();
 
-    let reopened = open_with_maintenance(&renamed, &profile_root, TraceDecayOpenOptions::default())
+    let reopened = open_with_maintenance(&renamed, &profile_root, profile_options(&profile_root))
         .await
         .unwrap();
 
@@ -367,10 +348,8 @@ async fn trace_decay_open_matches_renamed_git_checkout_by_registered_remote() {
 
 #[tokio::test]
 async fn persisted_repository_identity_survives_rename_while_serve_open_fails_closed() {
-    let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let root = canonical_existing_path(dir.path());
-    let daemon_home = root.join("daemon-home");
     let client_profile = root.join("client-profile");
     let project = root.join("repo-before-rename");
     let renamed = root.join("repo-after-rename");
@@ -385,7 +364,7 @@ async fn persisted_repository_identity_survives_rename_while_serve_open_fails_cl
             "git@github.com:ScriptedAlchemy/tracedecay.git",
         ],
     );
-    let _home_guard = HomeEnvGuard::set(&daemon_home);
+    crate::common::register_process_runtime_ports();
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(client_profile.clone()),
         global_db_path: Some(client_profile.join("global.db")),
@@ -456,7 +435,6 @@ async fn branch_open_rejects_a_mismatched_maintenance_profile() {
 
 #[tokio::test]
 async fn trace_decay_open_branch_uses_shared_profile_store() {
-    let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let root = canonical_existing_path(dir.path());
     let home = root.join("home");
@@ -470,10 +448,10 @@ async fn trace_decay_open_branch_uses_shared_profile_store() {
     run_git(&project, &["add", "seed.txt"]);
     run_git(&project, &["commit", "-m", "seed"]);
     run_git(&project, &["branch", "feature/profile"]);
-    let _home_guard = HomeEnvGuard::set(&home);
+    crate::common::register_process_runtime_ports();
     pin_fixture_repository_identity(&project, "proj_branch").unwrap();
     let initialized =
-        init_with_maintenance(&project, &profile_root, TraceDecayOpenOptions::default())
+        init_with_maintenance(&project, &profile_root, profile_options(&profile_root))
             .await
             .unwrap();
     let shard_root = initialized.store_layout().data_root.clone();
@@ -516,7 +494,7 @@ async fn trace_decay_open_branch_uses_shared_profile_store() {
         &project,
         "feature/profile",
         &profile_root,
-        TraceDecayOpenOptions::default(),
+        profile_options(&profile_root),
     )
     .await
     .unwrap();
@@ -528,7 +506,6 @@ async fn trace_decay_open_branch_uses_shared_profile_store() {
 
 #[tokio::test]
 async fn trace_decay_open_with_options_selects_branch_in_explicit_profile() {
-    let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let root = canonical_existing_path(dir.path());
     let daemon_home = root.join("daemon-home");
@@ -552,7 +529,7 @@ async fn trace_decay_open_with_options_selects_branch_in_explicit_profile() {
     run_git(&project, &["commit", "-m", "feature"]);
     run_git(&project, &["checkout", "-"]);
 
-    let _home_guard = HomeEnvGuard::set(&daemon_home);
+    crate::common::register_process_runtime_ports();
     pin_fixture_repository_identity(&project, "proj_auto_branch").unwrap();
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(client_profile.clone()),

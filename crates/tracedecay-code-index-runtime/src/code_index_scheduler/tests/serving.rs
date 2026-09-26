@@ -5476,8 +5476,8 @@ async fn unpinned_cursor_continues_on_its_immutable_generation() {
             &tampered_request,
         )
         .await;
-    let RetrievalPortOutcome::Unavailable(tampered_evidence) = tampered_outcome else {
-        panic!("tampered cursor must be rejected");
+    let RetrievalPortOutcome::Failed(tampered_evidence) = tampered_outcome else {
+        panic!("tampered cursor must be rejected as a failed request");
     };
     assert_eq!(
         tampered_evidence.omissions[0].reason,

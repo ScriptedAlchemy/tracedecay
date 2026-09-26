@@ -31,16 +31,15 @@ LIBSQLITE3_FLAGS = { value = "-DSQLITE_MAX_WORKER_THREADS=15 -DSQLITE_DEFAULT_ME
 TRACEDECAY_DISABLE_GLOBAL_DB = { value = "1", force = false }
 
 # Point cargo-launched processes at a workspace-local profile. Without this,
-# any test (or `tracedecay` binary a test spawns) that doesn't set
-# TRACEDECAY_DATA_DIR itself resolves storage to the developer's real
-# ~/.tracedecay, enrolling temp fixture repos into the real profile and
-# contending with a live daemon. `force = true` so an ambient export in the
-# developer's shell cannot redirect the whole test run back to the real
-# profile; tests that need a private profile still override per-test with
-# `set_var`/`Command::env`, and the HOME-fallback tests remove the variable
-# in-process. Installed binaries run outside cargo and are unaffected, but the
-# profile does apply to `cargo run`. Use the installed binary for real
-# `daemon install-service` runs.
+# a test binary or a `tracedecay` binary a test spawns without its own
+# environment resolves storage to the developer's real ~/.tracedecay,
+# enrolling temp fixture repos into the real profile and contending with a
+# live daemon. `force = true` so an ambient export in the developer's shell
+# cannot redirect the whole test run back to the real profile. In-process
+# tests pass their own TempDir `ProfileRoot` explicitly; spawned binaries get
+# theirs through `Command::env`. Installed binaries run outside cargo and are
+# unaffected, but the profile does apply to `cargo run`. Use the installed
+# binary for real `daemon install-service` runs.
 # Enforced by crates/tracedecay-cli/tests/core_cli_suite/test_profile_isolation_test.rs.
 TRACEDECAY_DATA_DIR = { value = "target/test-profile/.tracedecay", force = true, relative = true }
 

@@ -476,12 +476,8 @@ mod tests {
         fixture
             .client
             .call_tool(
-                CallToolRequestParams::new("tracedecay_changelog").with_arguments(
-                    json!({"from_ref": "missing-rmcp-oracle-ref", "to_ref": "HEAD"})
-                        .as_object()
-                        .cloned()
-                        .expect("object arguments"),
-                ),
+                CallToolRequestParams::new("tracedecay_multi_root_scope_set_read")
+                    .with_arguments(serde_json::Map::new()),
             )
             .await
             .expect("semantic refusal stays a completed tool result");

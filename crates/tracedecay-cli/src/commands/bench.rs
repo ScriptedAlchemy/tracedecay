@@ -1,14 +1,17 @@
 use super::daemon::daemon_tool_json;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 #[hotpath::measure(label = "cli.bench.run", future = true)]
 pub(crate) async fn handle_bench(
+    profile: &ProfileRoot,
     queries: Option<String>,
     json: bool,
     path: Option<String>,
     max_nodes: usize,
 ) -> tracedecay_domain::errors::Result<()> {
     let resolved =
-        super::scope::resolve_project_scope(tracedecay_configuration::resolve_path(path)).await?;
+        super::scope::resolve_project_scope(profile, tracedecay_configuration::resolve_path(path))
+            .await?;
     let queries_toml = queries
         .map(std::fs::read_to_string)
         .transpose()
@@ -16,6 +19,7 @@ pub(crate) async fn handle_bench(
             message: format!("failed to read query file: {error}"),
         })?;
     let result = daemon_tool_json(
+        profile,
         Some(&resolved.project_path),
         "tracedecay_admin_project",
         serde_json::json!({

@@ -10,7 +10,7 @@ use crate::error::rollback_failure;
 use crate::location::ValidatedOpen;
 use crate::schema::{
     FINAL_SCHEMA, FORMAT_LABEL, FORMAT_VERSION_PROPERTY, INDEXED_PROPERTIES, NAMESPACE_PROPERTY,
-    PROJECTION_PROPERTY, QUARANTINE_KEY_PROPERTY, SCHEMA_PROPERTY, SEQUENCE_PROPERTY,
+    PROJECTION_PROPERTY, QUARANTINE_KEY_PROPERTY, SCHEMA_PROPERTY, SEQUENCE_PROPERTY, key_value,
     nodes_with_label, required_string,
 };
 use crate::state::FormatState;
@@ -171,23 +171,26 @@ fn validate_or_initialize_format_marker(
         .ok_or_else(|| GraphDbError::Corrupt {
             message: "TraceDecay format marker is unreadable".to_owned(),
         })?;
+    let expected = validated.expected_format.get();
     let actual = marker
         .get_property(FORMAT_VERSION_PROPERTY)
         .and_then(Value::as_int64);
-    if actual != Some(i64::from(validated.expected_format.get())) {
-        return Err(GraphDbError::ResetRequired {
-            message: format!(
-                "TraceDecay graph format mismatch: expected {}, found {actual:?}",
-                validated.expected_format.get()
-            ),
-        });
-    }
     if marker.get_property(SCHEMA_PROPERTY).and_then(Value::as_str) != Some(FINAL_SCHEMA) {
         return Err(GraphDbError::ResetRequired {
             message: "TraceDecay graph schema is not the final native scalar schema".to_owned(),
         });
     }
-    Ok(())
+    match actual.and_then(|found| u32::try_from(found).ok()) {
+        Some(found) if found == expected => Ok(()),
+        Some(found) if found > 0 && found < expected => {
+            Err(GraphDbError::FormatSuperseded { found, expected })
+        }
+        _ => Err(GraphDbError::ResetRequired {
+            message: format!(
+                "TraceDecay graph format mismatch: expected {expected}, found {actual:?}"
+            ),
+        }),
+    }
 }
 
 /// Records how much corpus the engine open just hydrated, so the phase spans
@@ -426,9 +429,17 @@ pub(crate) fn set_projection_quarantine(
         .find_nodes_by_property(QUARANTINE_KEY_PROPERTY, &key_value)
         .into_iter()
         .filter(|node| {
-            store
-                .get_node(*node)
-                .is_some_and(|record| record.has_label(QUARANTINE_LABEL))
+            store.get_node(*node).is_some_and(|record| {
+                record.has_label(QUARANTINE_LABEL)
+                    && record
+                        .get_property(NAMESPACE_PROPERTY)
+                        .and_then(Value::as_str)
+                        == Some(namespace.as_str())
+                    && record
+                        .get_property(PROJECTION_PROPERTY)
+                        .and_then(Value::as_str)
+                        == Some(projection.as_str())
+            })
         });
     let existing = markers.next();
     if markers.next().is_some() {
@@ -493,11 +504,7 @@ pub(crate) fn set_projection_quarantine(
 /// A property rather than a label for the same reason entity identity is: one
 /// native label per record becomes one columnar node table per record.
 fn quarantine_key_value(namespace: &GraphNamespace, projection: &GraphProjectionId) -> Value {
-    Value::from(format!(
-        "{}_{}",
-        hex::encode(namespace.as_str().as_bytes()),
-        hex::encode(projection.as_str().as_bytes())
-    ))
+    key_value(namespace, projection.as_str())
 }
 
 pub(crate) fn quarantine_transition_failure(context: &str, error: GraphDbError) -> GraphDbError {
@@ -510,6 +517,7 @@ pub(crate) fn is_database_fault(error: &GraphDbError) -> bool {
     matches!(
         error,
         GraphDbError::ResetRequired { .. }
+            | GraphDbError::FormatSuperseded { .. }
             | GraphDbError::Corrupt { .. }
             | GraphDbError::DurabilityUncertain { .. }
     )

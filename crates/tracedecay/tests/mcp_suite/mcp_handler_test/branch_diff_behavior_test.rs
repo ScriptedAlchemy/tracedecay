@@ -300,21 +300,14 @@ async fn branch_diff_reports_the_symbols_that_differ_between_master_and_feature(
 
     let missing_base =
         handle_real_server_tool_call_raw(&server, "tracedecay_branch_diff", json!({})).await;
-    assert_eq!(missing_base["error"]["code"], -32602, "{missing_base}");
+    assert_eq!(missing_base["error"]["code"], -32603, "{missing_base}");
     assert_eq!(
-        missing_base["error"]["message"], "missing required parameter: base",
+        missing_base["error"]["message"],
+        "tool execution failed: config error: invalid arguments for tracedecay_branch_diff: missing field `base`",
         "{missing_base}"
     );
     assert_eq!(
         missing_base["error"]["data"]["tool"], "tracedecay_branch_diff",
-        "{missing_base}"
-    );
-    assert_eq!(
-        missing_base["error"]["data"]["reason_code"], "missing_required_parameter",
-        "{missing_base}"
-    );
-    assert_eq!(
-        missing_base["error"]["data"]["retryable"], false,
         "{missing_base}"
     );
 

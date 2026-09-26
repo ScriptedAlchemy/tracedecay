@@ -14,12 +14,11 @@ use tracedecay_contracts::remote::status::{
 use tracedecay_contracts::{DoctorCoverageCompletenessV1, RemoteListenerReadV1};
 use tracedecay_domain::{CurrentRemoteAuthorityStateV1, UtcMicros};
 
-use crate::mcp::tools::handlers::dispatch_test_support::SelectorEnv;
+use crate::mcp::tools::handlers::dispatch_test_support::SelectorProfile;
 use crate::mcp::tools::handlers::{
     ToolCallRegistryOptions, handle_tool_call_with_registry_options,
 };
 use tracedecay_mcp::ToolResult;
-use tracedecay_project::config::lock_user_data_dir_test_env;
 use tracedecay_project::project::TraceDecay;
 
 fn available_authority() -> CurrentRemoteAuthorityStateV1 {
@@ -73,16 +72,14 @@ fn parse_tool_json(result: &ToolResult) -> Value {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn dispatch_returns_provider_json_or_typed_unavailable() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     // The temp project and the temp profile must share one hermetic
     // authority root; a fixture that splits them exercises a different
     // (cross-authority) dispatch shape than the one under test.
     let canonical_root = dir.path().canonicalize().unwrap();
-    let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
+    let profile_root = profile.data_dir();
     assert!(
         profile_root.starts_with(&canonical_root),
         "hermetic profile authority {} must live under the fixture root {}",
@@ -93,6 +90,7 @@ async fn dispatch_returns_provider_json_or_typed_unavailable() {
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.mcp-remote-status",
     )

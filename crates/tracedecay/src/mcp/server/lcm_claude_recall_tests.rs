@@ -41,12 +41,8 @@ fn git(root: &std::path::Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed");
 }
 
-async fn server_with_authorities() -> (
-    Arc<McpServer>,
-    TempDir,
-    tracedecay_project::config::PinnedUserDataDir,
-) {
-    let pin = tracedecay_project::config::PinnedUserDataDir::new();
+async fn server_with_authorities() -> (Arc<McpServer>, TempDir, TempDir) {
+    let profile = TempDir::new().expect("isolated profile");
     let dir = TempDir::new().expect("temp project");
     git(dir.path(), &["init", "-q", "-b", "main"]);
     git(dir.path(), &["config", "user.email", "test@example.com"]);
@@ -61,14 +57,20 @@ async fn server_with_authorities() -> (
     git(dir.path(), &["add", "."]);
     git(dir.path(), &["commit", "-q", "-m", "initial"]);
     let runtime = HostAdmissionTestRuntimeV1::project(
-        tracedecay_runtime_core::config::user_data_dir().expect("isolated profile root"),
+        profile.path(),
         dir.path(),
         ProjectId::new(PROJECT_ID).expect("typed project identity"),
     )
     .await
     .expect("registered Claude recall runtime");
     let graph = runtime
-        .initialize_project_graph_for_test(dir.path(), TraceDecayOpenOptions::default())
+        .initialize_project_graph_for_test(
+            dir.path(),
+            TraceDecayOpenOptions {
+                profile_root: Some(profile.path().to_path_buf()),
+                global_db_path: None,
+            },
+        )
         .await
         .expect("daemon-owned project init");
     let context = crate::test_support::host_admission::mcp_server_context_for_test(
@@ -83,7 +85,7 @@ async fn server_with_authorities() -> (
         )
         .await
         .expect("retained-owner MCP test server");
-    (server, dir, pin)
+    (server, dir, profile)
 }
 
 /// Calls one retained MCP tool and returns its evidence value.
@@ -239,20 +241,15 @@ async fn ingest_and_project(
         .expect("materialize claude temporal projection");
 }
 
-async fn ingested_server() -> (
-    Arc<McpServer>,
-    TempDir,
-    TempDir,
-    tracedecay_project::config::PinnedUserDataDir,
-) {
-    let (server, dir, pin) = server_with_authorities().await;
+async fn ingested_server() -> (Arc<McpServer>, TempDir, TempDir, TempDir) {
+    let (server, dir, profile) = server_with_authorities().await;
     let home = TempDir::new().expect("temp home");
     write_claude_transcript(home.path(), dir.path());
     let runtime = server
         .host_admission_test_runtime_for_test()
         .expect("retained host-admission test runtime");
     ingest_and_project(runtime, home.path(), dir.path()).await;
-    (server, dir, home, pin)
+    (server, dir, home, profile)
 }
 
 fn omission_reasons(evidence: &Value) -> Vec<String> {
@@ -269,7 +266,7 @@ fn omission_reasons(evidence: &Value) -> Vec<String> {
 
 #[tokio::test]
 async fn lcm_grep_returns_every_matching_claude_message() {
-    let (server, _dir, _home, _pin) = ingested_server().await;
+    let (server, _dir, _home, _profile) = ingested_server().await;
 
     let evidence = call_tool(
         &server,
@@ -301,7 +298,7 @@ async fn lcm_grep_returns_every_matching_claude_message() {
 
 #[tokio::test]
 async fn lcm_grep_finds_a_term_stored_in_exactly_one_message() {
-    let (server, _dir, _home, _pin) = ingested_server().await;
+    let (server, _dir, _home, _profile) = ingested_server().await;
 
     let evidence = call_tool(
         &server,
@@ -339,7 +336,7 @@ async fn lcm_grep_finds_a_term_stored_in_exactly_one_message() {
 
 #[tokio::test]
 async fn lcm_expand_query_returns_every_matching_claude_message() {
-    let (server, _dir, _home, _pin) = ingested_server().await;
+    let (server, _dir, _home, _profile) = ingested_server().await;
 
     let evidence = call_tool(
         &server,
@@ -378,7 +375,7 @@ async fn lcm_expand_query_returns_every_matching_claude_message() {
 
 #[tokio::test]
 async fn lcm_expand_reads_every_live_raw_message_store_id() {
-    let (server, _dir, _home, _pin) = ingested_server().await;
+    let (server, _dir, _home, _profile) = ingested_server().await;
 
     let loaded = call_tool(
         &server,

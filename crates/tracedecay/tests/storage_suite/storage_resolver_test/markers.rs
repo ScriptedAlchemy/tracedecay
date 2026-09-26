@@ -8,18 +8,22 @@ use tempfile::TempDir;
 #[test]
 fn legacy_enrollment_marker_alone_is_not_discovered() {
     let dir = TempDir::new().unwrap();
+    let profile_dir = TempDir::new().unwrap();
+    let profile = ProfileRoot::new(profile_dir.path());
     let root = dir.path();
     let child = root.join("src/storage");
     fs::create_dir_all(&child).unwrap();
     write_enrollment(root);
 
-    assert_eq!(discover_project_root(&child), None);
-    assert!(!TraceDecay::is_initialized(root));
+    assert_eq!(profile.discover_project_root(&child), None);
+    assert!(!TraceDecay::is_initialized_in_profile(&profile, root));
 }
 
 #[test]
 fn repository_identity_marker_is_discovered_without_graph_db() {
     let dir = TempDir::new().unwrap();
+    let profile_dir = TempDir::new().unwrap();
+    let profile = ProfileRoot::new(profile_dir.path());
     let root = dir.path().join("repo");
     let child = root.join("src/storage");
     fs::create_dir_all(&child).unwrap();
@@ -27,8 +31,8 @@ fn repository_identity_marker_is_discovered_without_graph_db() {
     init_repo_with_commit(&root);
     assert!(write_repository_identity_marker(&root, "proj_123").unwrap());
 
-    assert_eq!(discover_project_root(&child), Some(root.clone()));
-    assert!(TraceDecay::is_initialized(&root));
+    assert_eq!(profile.discover_project_root(&child), Some(root.clone()));
+    assert!(TraceDecay::is_initialized_in_profile(&profile, &root));
 }
 
 #[test]

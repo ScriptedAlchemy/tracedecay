@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::TraceDecayError;
 
-use super::{CancellationStage, EffectReceipt, EffectTermination};
+use super::{ApplicationProblemDetailV1, CancellationStage, EffectReceipt, EffectTermination};
 use crate::context::{RequestAdmission, RequestContext};
 use crate::error::ApplicationContractError;
 
@@ -189,6 +189,7 @@ pub enum ApplicationProblem {
         diagnostic: SafeDiagnostic,
         retry: RetryDirective,
         legal_actions: Vec<LegalAction>,
+        detail: Option<Box<ApplicationProblemDetailV1>>,
     },
     Unsupported {
         diagnostic: SafeDiagnostic,
@@ -200,6 +201,7 @@ pub enum ApplicationProblem {
         diagnostic: SafeDiagnostic,
         retry: RetryDirective,
         legal_actions: Vec<LegalAction>,
+        detail: Option<Box<ApplicationProblemDetailV1>>,
     },
     ExecutionFailed {
         classification: ApplicationExecutionFailureClassV1,
@@ -216,6 +218,7 @@ pub enum ApplicationProblem {
         diagnostic: SafeDiagnostic,
         retry: RetryDirective,
         legal_actions: Vec<LegalAction>,
+        detail: Option<Box<ApplicationProblemDetailV1>>,
     },
     Cancelled {
         stage: CancellationStage,
@@ -256,6 +259,8 @@ enum ApplicationProblemWire {
         diagnostic: SafeDiagnostic,
         retry: RetryDirective,
         legal_actions: Vec<LegalAction>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<Box<ApplicationProblemDetailV1>>,
     },
     Unsupported {
         diagnostic: SafeDiagnostic,
@@ -267,6 +272,8 @@ enum ApplicationProblemWire {
         diagnostic: SafeDiagnostic,
         retry: RetryDirective,
         legal_actions: Vec<LegalAction>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<Box<ApplicationProblemDetailV1>>,
     },
     ExecutionFailed {
         classification: ApplicationExecutionFailureClassV1,
@@ -283,6 +290,8 @@ enum ApplicationProblemWire {
         diagnostic: SafeDiagnostic,
         retry: RetryDirective,
         legal_actions: Vec<LegalAction>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<Box<ApplicationProblemDetailV1>>,
     },
     Cancelled {
         stage: CancellationStage,
@@ -339,10 +348,12 @@ impl From<ApplicationProblem> for ApplicationProblemWire {
                 diagnostic,
                 retry,
                 legal_actions,
+                detail,
             } => Self::Stale {
                 diagnostic,
                 retry,
                 legal_actions,
+                detail,
             },
             ApplicationProblem::Unsupported {
                 diagnostic,
@@ -358,11 +369,13 @@ impl From<ApplicationProblem> for ApplicationProblemWire {
                 diagnostic,
                 retry,
                 legal_actions,
+                detail,
             } => Self::Unavailable {
                 classification,
                 diagnostic,
                 retry,
                 legal_actions,
+                detail,
             },
             ApplicationProblem::ExecutionFailed {
                 classification,
@@ -388,10 +401,12 @@ impl From<ApplicationProblem> for ApplicationProblemWire {
                 diagnostic,
                 retry,
                 legal_actions,
+                detail,
             } => Self::Saturated {
                 diagnostic,
                 retry,
                 legal_actions,
+                detail,
             },
             ApplicationProblem::Cancelled {
                 stage,
@@ -478,10 +493,12 @@ impl ApplicationProblem {
                 diagnostic,
                 retry,
                 legal_actions,
+                detail,
             } => Self::Stale {
                 diagnostic,
                 retry,
                 legal_actions,
+                detail,
             },
             ApplicationProblemWire::Unsupported {
                 diagnostic,
@@ -497,11 +514,13 @@ impl ApplicationProblem {
                 diagnostic,
                 retry,
                 legal_actions,
+                detail,
             } => Self::Unavailable {
                 classification,
                 diagnostic,
                 retry,
                 legal_actions,
+                detail,
             },
             ApplicationProblemWire::ExecutionFailed {
                 classification,
@@ -527,10 +546,12 @@ impl ApplicationProblem {
                 diagnostic,
                 retry,
                 legal_actions,
+                detail,
             } => Self::Saturated {
                 diagnostic,
                 retry,
                 legal_actions,
+                detail,
             },
             ApplicationProblemWire::Cancelled {
                 stage,
@@ -558,6 +579,13 @@ impl ApplicationProblem {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         if let Some(diagnostic) = self.diagnostic() {
             diagnostic.validate()?;
+        }
+        if let Some(detail) = self.detail()
+            && *self != Self::from_detail(detail.clone())
+        {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "application problem detail",
+            });
         }
 
         match self {
@@ -812,6 +840,7 @@ impl ApplicationProblem {
             diagnostic,
             retry: RetryDirective::AfterDelay,
             legal_actions: vec![LegalAction::Retry],
+            detail: None,
         }
     }
 
@@ -824,19 +853,55 @@ impl ApplicationProblem {
         })
     }
 
-    /// The refusal for a query whose code index is parked: the same request
-    /// cannot succeed until the operator applies the park's remedy, which
-    /// `message` names, so it is never retried and names reconcile as the way
-    /// forward.
-    pub fn code_index_parked(message: String) -> Self {
-        Self::Unavailable {
-            classification: ApplicationUnavailableClassV1::Authority,
-            diagnostic: SafeDiagnostic {
-                code: "application.code-index.parked".to_owned(),
-                message,
+    /// The one problem a typed detail names: its kind, code, retry, legal
+    /// actions, and rendered message all follow from the detail.
+    ///
+    /// A parked code index cannot answer until the operator applies the
+    /// park's remedy, so it is never retried and names reconcile. A stale
+    /// refresh frontier is revalidated from the committed frontier. A lock
+    /// deadline is capacity: the same request may succeed after a delay.
+    pub fn from_detail(detail: ApplicationProblemDetailV1) -> Self {
+        let diagnostic = SafeDiagnostic {
+            code: detail.code().to_owned(),
+            message: detail.message(),
+        };
+        match detail {
+            ApplicationProblemDetailV1::Parked { .. } => Self::Unavailable {
+                classification: ApplicationUnavailableClassV1::Authority,
+                diagnostic,
+                retry: RetryDirective::Never,
+                legal_actions: vec![LegalAction::Reconcile],
+                detail: Some(Box::new(detail)),
             },
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::Reconcile],
+            ApplicationProblemDetailV1::StaleRefreshFrontier { .. } => Self::Stale {
+                diagnostic,
+                retry: RetryDirective::AfterRevalidate,
+                legal_actions: vec![LegalAction::Refresh],
+                detail: Some(Box::new(detail)),
+            },
+            ApplicationProblemDetailV1::LockDeadline { .. } => Self::Saturated {
+                diagnostic,
+                retry: RetryDirective::AfterDelay,
+                legal_actions: vec![LegalAction::Retry],
+                detail: Some(Box::new(detail)),
+            },
+        }
+    }
+
+    pub fn detail(&self) -> Option<&ApplicationProblemDetailV1> {
+        match self {
+            Self::Stale { detail, .. }
+            | Self::Unavailable { detail, .. }
+            | Self::Saturated { detail, .. } => detail.as_deref(),
+            Self::InvalidRequest { .. }
+            | Self::NotFoundOrNotAuthorized { .. }
+            | Self::Conflict { .. }
+            | Self::PartialEffect { .. }
+            | Self::Unsupported { .. }
+            | Self::ExecutionFailed { .. }
+            | Self::ResetRequired { .. }
+            | Self::Cancelled { .. }
+            | Self::TimedOut { .. } => None,
         }
     }
 
@@ -854,6 +919,7 @@ impl ApplicationProblem {
             diagnostic,
             retry: RetryDirective::AfterRevalidate,
             legal_actions: vec![LegalAction::Retry],
+            detail: None,
         };
         problem.validate()?;
         Ok(problem)
@@ -878,6 +944,7 @@ impl ApplicationProblem {
             diagnostic,
             retry: RetryDirective::AfterRevalidate,
             legal_actions: vec![LegalAction::Refresh],
+            detail: None,
         }
     }
 
@@ -890,6 +957,7 @@ impl ApplicationProblem {
             },
             retry: RetryDirective::AfterDelay,
             legal_actions: vec![LegalAction::Retry],
+            detail: None,
         }
     }
 

@@ -1,9 +1,9 @@
 use super::tool_hints::{HintCategory, MAX_HINTS_PER_SESSION};
 use super::{
-    EnvGuard, HostIntegrationIdV1, Path, PathBuf, ToolHint, Value, deduped_project_hint_with_id,
+    HostIntegrationIdV1, Path, PathBuf, ToolHint, Value, deduped_project_hint_with_id,
     mint_hint_id, record_hint_emitted, record_hook_invoked,
 };
-use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 /// Terminal event kinds a single `hint_candidate` may resolve to. Every
 /// candidate must be followed by exactly one of these.
@@ -27,11 +27,11 @@ fn test_hint() -> ToolHint {
 
 /// Enrolls `project_root` in the profile store and materializes its data dir
 /// so `deduped_project_hint` reaches the on-disk dedupe branch.
-fn enroll_project(project_root: &Path, project_id: &str) -> PathBuf {
+fn enroll_project(project_root: &Path, profile_root: &Path, project_id: &str) -> PathBuf {
     tracedecay_runtime_core::storage::pin_fixture_repository_identity(project_root, project_id)
         .unwrap();
     let layout =
-        tracedecay_runtime_core::storage::resolve_layout_for_current_profile(project_root).unwrap();
+        tracedecay_runtime_core::storage::resolve_layout(project_root, profile_root).unwrap();
     std::fs::create_dir_all(&layout.data_root).unwrap();
     layout.data_root
 }
@@ -83,17 +83,16 @@ fn events_for<'a>(rows: &'a [Value], id: &str) -> Vec<&'a Value> {
 
 #[test]
 fn hook_invocation_rows_include_duration_telemetry() {
-    let _lock = super::lock_test_env();
     let project = tempfile::tempdir().unwrap();
-    let profile = tempfile::tempdir().unwrap();
+    let profile_dir = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
-    let profile_root = profile.path().canonicalize().unwrap();
-    let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
-    let data_root = enroll_project(&project_root, "proj_hook_duration");
+    let profile_root = profile_dir.path().canonicalize().unwrap();
+    let profile = ProfileRoot::new(&profile_root);
+    let data_root = enroll_project(&project_root, &profile_root, "proj_hook_duration");
 
     {
         let _hook_telemetry = record_hook_invoked(
-            &crate::ports::hook_runtime::crate_test_runtime(),
+            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
             Some(&project_root),
             HostIntegrationIdV1::Codex,
             "PostToolUse",
@@ -127,17 +126,16 @@ fn hook_invocation_rows_include_duration_telemetry() {
 
 #[test]
 fn record_hint_emitted_missing_session_is_single_terminal() {
-    let _lock = super::lock_test_env();
     let project = tempfile::tempdir().unwrap();
-    let profile = tempfile::tempdir().unwrap();
+    let profile_dir = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
-    let profile_root = profile.path().canonicalize().unwrap();
-    let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
-    let data_root = enroll_project(&project_root, "proj_missing_session");
+    let profile_root = profile_dir.path().canonicalize().unwrap();
+    let data_root = enroll_project(&project_root, &profile_root, "proj_missing_session");
     let hint = test_hint();
     let id = mint_hint_id();
 
     record_hint_emitted(
+        &profile_root,
         Some(&project_root),
         HostIntegrationIdV1::Cursor,
         None,
@@ -161,18 +159,18 @@ fn record_hint_emitted_missing_session_is_single_terminal() {
 /// known.
 #[test]
 fn every_hint_branch_yields_exactly_one_terminal_with_hint_id() {
-    let _lock = super::lock_test_env();
     let project = tempfile::tempdir().unwrap();
-    let profile = tempfile::tempdir().unwrap();
+    let profile_dir = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
-    let profile_root = profile.path().canonicalize().unwrap();
-    let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
-    let data_root = enroll_project(&project_root, "proj_terminal_invariant");
+    let profile_root = profile_dir.path().canonicalize().unwrap();
+    let profile = ProfileRoot::new(&profile_root);
+    let data_root = enroll_project(&project_root, &profile_root, "proj_terminal_invariant");
 
     // Branch: root known, session known → on-disk dedupe emits once.
     let emit_id = mint_hint_id();
     assert!(
         deduped_project_hint_with_id(
+            &profile,
             Some(&project_root),
             HostIntegrationIdV1::Cursor,
             Some("session-emit".to_string()),
@@ -186,6 +184,7 @@ fn every_hint_branch_yields_exactly_one_terminal_with_hint_id() {
     let dup_id = mint_hint_id();
     assert!(
         deduped_project_hint_with_id(
+            &profile,
             Some(&project_root),
             HostIntegrationIdV1::Cursor,
             Some("session-emit".to_string()),
@@ -199,6 +198,7 @@ fn every_hint_branch_yields_exactly_one_terminal_with_hint_id() {
     let no_session_id = mint_hint_id();
     assert!(
         deduped_project_hint_with_id(
+            &profile,
             Some(&project_root),
             HostIntegrationIdV1::Cursor,
             None,
@@ -212,6 +212,7 @@ fn every_hint_branch_yields_exactly_one_terminal_with_hint_id() {
     let no_root_id = mint_hint_id();
     assert!(
         deduped_project_hint_with_id(
+            &profile,
             None,
             HostIntegrationIdV1::Cursor,
             Some("session-noroot".to_string()),
@@ -270,14 +271,14 @@ fn every_hint_branch_yields_exactly_one_terminal_with_hint_id() {
 
 #[test]
 fn hints_without_project_root_dedupe_in_the_user_profile() {
-    let _lock = super::lock_test_env();
-    let profile = tempfile::tempdir().unwrap();
-    let profile_root = profile.path().canonicalize().unwrap();
-    let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
+    let profile_dir = tempfile::tempdir().unwrap();
+    let profile_root = profile_dir.path().canonicalize().unwrap();
+    let profile = ProfileRoot::new(&profile_root);
     let session = Some("session-without-project-root".to_string());
 
     assert!(
         deduped_project_hint_with_id(
+            &profile,
             None,
             HostIntegrationIdV1::Codex,
             session.clone(),
@@ -288,6 +289,7 @@ fn hints_without_project_root_dedupe_in_the_user_profile() {
     );
     assert!(
         deduped_project_hint_with_id(
+            &profile,
             None,
             HostIntegrationIdV1::Codex,
             session,
@@ -303,13 +305,12 @@ fn hints_without_project_root_dedupe_in_the_user_profile() {
 /// terminal, and no hint is returned to the caller.
 #[test]
 fn budget_exhaustion_records_suppressed_budget_terminal() {
-    let _lock = super::lock_test_env();
     let project = tempfile::tempdir().unwrap();
-    let profile = tempfile::tempdir().unwrap();
+    let profile_dir = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
-    let profile_root = profile.path().canonicalize().unwrap();
-    let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
-    let data_root = enroll_project(&project_root, "proj_budget");
+    let profile_root = profile_dir.path().canonicalize().unwrap();
+    let profile = ProfileRoot::new(&profile_root);
+    let data_root = enroll_project(&project_root, &profile_root, "proj_budget");
 
     let session = "session-budget".to_string();
     // Fill the budget with distinct categories.
@@ -328,6 +329,7 @@ fn budget_exhaustion_records_suppressed_budget_terminal() {
         };
         assert!(
             deduped_project_hint_with_id(
+                &profile,
                 Some(&project_root),
                 HostIntegrationIdV1::Cursor,
                 Some(session.clone()),
@@ -343,6 +345,7 @@ fn budget_exhaustion_records_suppressed_budget_terminal() {
     // branch from the duplicate branch).
     let over_id = mint_hint_id();
     let over = deduped_project_hint_with_id(
+        &profile,
         Some(&project_root),
         HostIntegrationIdV1::Cursor,
         Some(session.clone()),
@@ -369,17 +372,17 @@ fn budget_exhaustion_records_suppressed_budget_terminal() {
 /// stronger re-hint recorded as `hint_escalated`, with the escalation prefix.
 #[test]
 fn repeated_usage_records_hint_escalated_terminal() {
-    let _lock = super::lock_test_env();
     let project = tempfile::tempdir().unwrap();
-    let profile = tempfile::tempdir().unwrap();
+    let profile_dir = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
-    let profile_root = profile.path().canonicalize().unwrap();
-    let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
-    let data_root = enroll_project(&project_root, "proj_escalate");
+    let profile_root = profile_dir.path().canonicalize().unwrap();
+    let profile = ProfileRoot::new(&profile_root);
+    let data_root = enroll_project(&project_root, &profile_root, "proj_escalate");
 
     let session = "session-escalate".to_string();
     let emit = |id: &str| {
         deduped_project_hint_with_id(
+            &profile,
             Some(&project_root),
             HostIntegrationIdV1::Cursor,
             Some(session.clone()),

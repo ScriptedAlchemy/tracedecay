@@ -665,7 +665,6 @@ mod tests {
 
     #[tokio::test]
     async fn storage_telemetry_without_resolved_scope_fails_closed() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, mut state, _) = state_for_test().await;
         state.resolved_scope = None;
 
@@ -689,7 +688,6 @@ mod tests {
 
     #[tokio::test]
     async fn roles_sharing_one_store_file_are_reported_once_with_both_roles() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, state, _) = state_for_test().await;
         let Json(envelope) = telemetry(State(state)).await;
 

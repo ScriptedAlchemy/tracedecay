@@ -2,15 +2,18 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::time::Instant;
 use tracedecay_contracts::{ApplicationEnvelope, ApplicationOutcome, ApplicationProblemEnvelope};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 /// Resolves the daemon handshake for the current client. One labeled
 /// boundary so a slow CLI invocation can attribute time to client identity
 /// resolution separately from the daemon round-trip itself.
 #[hotpath::measure(label = "cli.daemon.handshake")]
 pub(crate) fn client_handshake(
+    profile: &ProfileRoot,
     project_path: Option<&std::path::Path>,
 ) -> tracedecay_domain::errors::Result<tracedecay_daemon_protocol::DaemonHandshake> {
     tracedecay::daemon::handshake_for_current_client(
+        profile,
         project_path.map(std::path::Path::to_path_buf),
         None,
         false,
@@ -115,13 +118,14 @@ fn retained_decode_error(
 /// One-shot daemon tool call using the shared `TRACEDECAY_TOOL_DEADLINE_MS`
 /// envelope (default 120s) via `tracedecay::daemon::call_default_tool`.
 pub(crate) async fn daemon_tool_json(
+    profile: &ProfileRoot,
     project_path: Option<&std::path::Path>,
     tool_name: &str,
     arguments: serde_json::Value,
 ) -> tracedecay_domain::errors::Result<serde_json::Value> {
     #[cfg(feature = "hotpath")]
     hotpath::val!("cli.daemon.tool").set(&tool_name);
-    let handshake = client_handshake(project_path)?;
+    let handshake = client_handshake(profile, project_path)?;
     let result = hotpath::future!(
         tracedecay::daemon::call_default_tool(&handshake, tool_name, arguments),
         label = "cli.daemon.request"
@@ -136,6 +140,7 @@ pub(crate) async fn daemon_tool_json(
 /// recovery fetch, so the command cannot outlive its own budget on private
 /// retry clocks.
 pub(crate) async fn daemon_tool_json_until(
+    profile: &ProfileRoot,
     deadline: Instant,
     project_path: Option<&std::path::Path>,
     tool_name: &str,
@@ -143,7 +148,7 @@ pub(crate) async fn daemon_tool_json_until(
 ) -> tracedecay_domain::errors::Result<serde_json::Value> {
     #[cfg(feature = "hotpath")]
     hotpath::val!("cli.daemon.tool").set(&tool_name);
-    let handshake = client_handshake(project_path)?;
+    let handshake = client_handshake(profile, project_path)?;
     // Distinct from `cli.daemon.request`: this lifetime includes waiting out a
     // cold project open, so aggregating the two would conflate daemon latency
     // with deliberate open waits.

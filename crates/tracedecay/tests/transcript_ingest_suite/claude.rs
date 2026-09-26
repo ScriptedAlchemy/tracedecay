@@ -14,7 +14,6 @@ use tracedecay_sessions::runtime::hosts::claude::ClaudeSource;
 use tracedecay_sessions::runtime::hosts::claude_observation::ingest_source_with_observations_with_admission;
 use tracedecay_sessions::runtime::shared::TranscriptIngestStats;
 
-use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::{
     claude_observation_cursor, durable_table_count, ingest_global_sources_for_provider,
     mark_test_project, open_project_session_db, try_ingest_claude_source,
@@ -413,20 +412,15 @@ async fn claude_transcript_populates_searchable_messages() {
 /// semantics, cache-write from `cache_creation_input_tokens`, and unmeasured
 /// counters typed-absent. Non-counter fields (`service_tier`) never survive.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn claude_usage_counters_land_in_provider_usage_observations() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
     write_claude_transcript(&home, &project, "claude-usage-observations");
 
     let db = open_project_session_db(&project).await.unwrap();
-    ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Claude)).await;
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Claude)).await;
 
     let observations = db.provider_usage_observations("claude").await;
     assert_eq!(observations.len(), 1);
@@ -1118,21 +1112,16 @@ async fn claude_workflow_nested_subagent_uses_parent_cwd_fallback() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn claude_observation_path_conflicting_redelivery_does_not_overwrite() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
     let path = write_claude_transcript(&home, &project, "claude-obs-conflict");
 
     let db = open_project_session_db(&project).await.unwrap();
     assert_eq!(
-        ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Claude))
+        ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Claude))
             .await
             .messages_upserted,
         2
@@ -1174,7 +1163,8 @@ async fn claude_observation_path_conflicting_redelivery_does_not_overwrite() {
 
     let again = open_project_session_db(&project).await.unwrap();
     let _ =
-        ingest_global_sources_for_provider(&again, &project, Some(SessionProvider::Claude)).await;
+        ingest_global_sources_for_provider(&home, &again, &project, Some(SessionProvider::Claude))
+            .await;
     let replayed = again
         .search_session_messages("claude", None, "fixed", 10)
         .await;

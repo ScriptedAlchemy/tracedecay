@@ -16,7 +16,6 @@ use std::sync::{
 use super::bootstrap::set_owner_only_permissions;
 // The parent `daemon` module imports this under `cfg(test)` only, so
 // `use super::*` cannot carry it into a `test-transport` build.
-use super::project_composition::daemon_transcript_source_home;
 use super::project_server_lifecycle::{detach_project_servers, shutdown_detached_project_servers};
 use super::*;
 #[cfg(unix)]
@@ -78,6 +77,24 @@ pub struct ProductionProjectCompositionHarnessV1 {
 /// Resolvable before `open` so a caller can predict the composed layout.
 fn composed_profile_root(isolation_root: &Path) -> PathBuf {
     isolation_root.join("profile")
+}
+
+/// The owner the composition serves: its isolated profile, with the isolation
+/// root as the home its host transcripts live under.
+fn composed_owner_profile(profile_root: &Path) -> tracedecay_runtime_core::config::ProfileRoot {
+    let owner = tracedecay_runtime_core::config::ProfileRoot::new(profile_root);
+    match profile_root.parent() {
+        Some(home) => owner.with_home(home),
+        None => owner,
+    }
+}
+
+/// The operator's real profile, which an isolation root must never overlap.
+fn live_profile_root() -> Option<PathBuf> {
+    tracedecay_runtime_core::config::ProfileRoot::from_env()
+        .ok()
+        .map(|profile| profile.data_dir().to_path_buf())
+        .filter(|path| path.exists())
 }
 
 /// Type-erased open future so a caller async body stores only a fat pointer.
@@ -345,8 +362,10 @@ async fn install_production_composition_stores(
     profile_identity: profile_identity::LocalProfileIdentityAuthorityV1,
     long_lived_session_maintenance_for_test: bool,
 ) -> Result<ProductionCompositionStoreHandles> {
-    let store_administration =
-        StoreAdministration::default().with_profile_identity(profile_identity.clone());
+    let owner = composed_owner_profile(profile_identity.profile_root());
+    let store_administration = StoreAdministration::default()
+        .with_profile_identity(profile_identity.clone())
+        .with_owner_profile(owner.clone());
     #[cfg(test)]
     if long_lived_session_maintenance_for_test {
         Box::pin(store_administration.install_long_lived_session_runtime_registry_for_test())
@@ -354,7 +373,7 @@ async fn install_production_composition_stores(
     }
     #[cfg(not(test))]
     let _ = long_lived_session_maintenance_for_test;
-    let invocation = DaemonInvocationState::default();
+    let invocation = DaemonInvocationState::with_progress_producer_incarnation(1, owner.home());
     invocation.configure_github_read_only_credentials(&profile_identity);
     let http_application_registry = http_application::DaemonHttpApplicationRegistry::default();
     let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
@@ -462,7 +481,8 @@ async fn mount_one_production_composition_project(
         catalog_version: String::new(),
         moved_store_adoption: tracedecay_project::project::MovedStoreAdoption::Never,
     };
-    let (canonical_project_path, _) = project_route_for_handshake(&handshake)?;
+    let (canonical_project_path, _) =
+        project_route_for_handshake(&handshake, stores.store_administration.owner_home()?)?;
     let composition = stores
         .store_administration
         .with_writer(|| {
@@ -524,15 +544,16 @@ impl ProductionProjectCompositionHarnessV1 {
     /// under `$HOME` is invisible to the composition and the session lane
     /// stays empty forever.
     pub fn transcript_source_home(isolation_root: impl AsRef<Path>) -> Option<PathBuf> {
-        daemon_transcript_source_home(&composed_profile_root(isolation_root.as_ref()))
+        composed_owner_profile(&composed_profile_root(isolation_root.as_ref()))
+            .home()
+            .map(Path::to_path_buf)
     }
 
     pub fn open(
         isolation_root: impl AsRef<Path>,
         project_roots: impl IntoIterator<Item = PathBuf>,
     ) -> ProductionHarnessOpenFuture {
-        let live_profile_root =
-            tracedecay_runtime_core::config::user_data_dir().filter(|path| path.exists());
+        let live_profile_root = live_profile_root();
         Self::open_with_live_profile_root(
             isolation_root.as_ref().to_path_buf(),
             project_roots.into_iter().collect(),
@@ -550,8 +571,7 @@ impl ProductionProjectCompositionHarnessV1 {
         isolation_root: impl AsRef<Path>,
         project_roots: impl IntoIterator<Item = PathBuf>,
     ) -> ProductionHarnessOpenFuture {
-        let live_profile_root =
-            tracedecay_runtime_core::config::user_data_dir().filter(|path| path.exists());
+        let live_profile_root = live_profile_root();
         Self::open_with_live_profile_root(
             isolation_root.as_ref().to_path_buf(),
             project_roots.into_iter().collect(),
@@ -567,8 +587,7 @@ impl ProductionProjectCompositionHarnessV1 {
         project_roots: impl IntoIterator<Item = PathBuf>,
         scope_prefix: impl Into<String>,
     ) -> ProductionHarnessOpenFuture {
-        let live_profile_root =
-            tracedecay_runtime_core::config::user_data_dir().filter(|path| path.exists());
+        let live_profile_root = live_profile_root();
         Self::open_with_live_profile_root(
             isolation_root.as_ref().to_path_buf(),
             project_roots.into_iter().collect(),

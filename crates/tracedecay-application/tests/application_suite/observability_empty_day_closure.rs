@@ -7,11 +7,11 @@ use tracedecay_domain::CoverageStateV1;
 
 #[tokio::test]
 async fn idle_producer_publishes_one_proved_completed_quiet_day() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let profile_dir = tempfile::tempdir().expect("profile");
     let project = tempfile::tempdir().expect("project");
     let scope = "project.observability.empty.v2";
     let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+        profile_dir.path().to_path_buf(),
         project.path(),
         tracedecay_domain::ProjectId::new(scope).expect("project identifier"),
     )

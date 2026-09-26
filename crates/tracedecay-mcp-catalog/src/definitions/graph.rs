@@ -2,10 +2,7 @@
 
 use serde_json::{Value, json};
 
-use super::{
-    context_description, def, def_always_load, def_required_object, string_property,
-    with_project_selector_properties,
-};
+use super::{context_description, def, def_always_load, with_project_selector_properties};
 use crate::ToolDefinition;
 
 // ── alwaysLoad tools (loaded into the model prompt immediately) ─────────
@@ -123,7 +120,7 @@ pub(super) fn def_search() -> ToolDefinition {
     )
 }
 
-pub(super) fn def_grep() -> ToolDefinition {
+pub(super) fn def_grep(input_schema: Value) -> ToolDefinition {
     // alwaysLoad: content/text search is the single most common native-tool
     // reflex (grep/rg). Keeping it in the always-loaded set means the model
     // never has to ToolSearch for it before reaching for Bash grep, which is
@@ -133,36 +130,7 @@ pub(super) fn def_grep() -> ToolDefinition {
         "tracedecay_grep",
         "Grep Content",
         "grep, ripgrep, rg, text search, find string. Literal/regex content search over UTF-8 text sources in the project working tree (respects .gitignore; binary and non-UTF-8 files are outside the search scope), graph-enriched: each hit resolves the enclosing symbol so the natural next call is tracedecay_source_body with its node_id. Bounded file or line omissions and unavailable source candidates are reported as partial coverage. Routing: use this for literal/regex content search (string literals, config keys, error messages); for symbol names use tracedecay_search; for concepts use tracedecay_context. Defaults to the active project; pass project_selector.project_id only when intentionally searching another registered project.",
-        json!({
-            "type": "object",
-            "properties": with_project_selector_properties(json!({
-                "pattern": {
-                    "type": "string",
-                    "description": "Content to search for. Treated as a regular expression unless fixed_strings is true."
-                },
-                "fixed_strings": {
-                    "type": "boolean",
-                    "description": "Treat pattern as a literal string instead of a regex (default: false)."
-                },
-                "case_sensitive": {
-                    "type": "boolean",
-                    "description": "Match case-sensitively (default: false = case-insensitive)."
-                },
-                "path_glob": {
-                    "type": "string",
-                    "description": "Optional glob restricting which files are searched, matched against project-relative paths (e.g. 'src/**/*.rs')."
-                },
-                "context_lines": {
-                    "type": "number",
-                    "description": "Lines of surrounding context to include per hit (default: 0, max: 3)."
-                },
-                "max_results": {
-                    "type": "number",
-                    "description": "Maximum number of matching lines to return (default: 50, max: 200)."
-                }
-            })),
-            "required": ["pattern"]
-        }),
+        input_schema,
     )
 }
 
@@ -206,21 +174,18 @@ pub(super) fn def_context(input_schema: Value) -> ToolDefinition {
     )
 }
 
-pub(super) fn def_by_qualified_name() -> ToolDefinition {
-    def_required_object(
+pub(super) fn def_by_qualified_name(input_schema: Value) -> ToolDefinition {
+    def(
         "tracedecay_by_qualified_name",
         "Lookup by qualified name",
         "Look up nodes by their qualified name. Multiple rows can share a \
          qualified name (overloads, generics, separate impl blocks). Useful \
          for cross-run lookups where the content-hash node ID has changed.",
-        json!({
-            "qualified_name": string_property("The exact qualified name to look up.")
-        }),
-        &["qualified_name"],
+        input_schema,
     )
 }
 
-pub(super) fn def_signature() -> ToolDefinition {
+pub(super) fn def_signature(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_signature",
         "Signature",
@@ -230,17 +195,7 @@ pub(super) fn def_signature() -> ToolDefinition {
          instead of reading source files when you only need the public-API \
          surface of a function, method, or type. Multiple rows can be \
          returned (overloads, separate impls).",
-        json!({
-            "type": "object",
-            "properties": {
-                "qualified_name": string_property("The exact qualified name to look up."),
-                "node_id": string_property("Optional: look up a single node by its ID instead of qualified_name.")
-            },
-            "anyOf": [
-                { "required": ["qualified_name"] },
-                { "required": ["node_id"] }
-            ]
-        }),
+        input_schema,
     )
 }
 
@@ -309,7 +264,7 @@ pub(super) fn def_redundancy(input_schema: Value) -> ToolDefinition {
     )
 }
 
-pub(super) fn def_derives() -> ToolDefinition {
+pub(super) fn def_derives(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_derives",
         "Derives on Type",
@@ -317,23 +272,7 @@ pub(super) fn def_derives() -> ToolDefinition {
          name carries `syntax_exact` evidence. Generated trait implementations \
          and methods are reported unavailable because macro expansion is not \
          retained in the verified graph.",
-        json!({
-            "type": "object",
-            "properties": {
-                "qualified_name": {
-                    "type": "string",
-                    "description": "The type's qualified name (or short name, same lookup as tracedecay_by_qualified_name)."
-                },
-                "node_id": {
-                    "type": "string",
-                    "description": "Optional: look up the type by node ID instead."
-                }
-            },
-            "anyOf": [
-                { "required": ["qualified_name"] },
-                { "required": ["node_id"] }
-            ]
-        }),
+        input_schema,
     )
 }
 
@@ -406,7 +345,7 @@ pub(super) fn def_config() -> ToolDefinition {
     )
 }
 
-pub(super) fn def_find_exact_symbol() -> ToolDefinition {
+pub(super) fn def_find_exact_symbol(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_find_exact_symbol",
         "Exact Symbol Lookup",
@@ -415,24 +354,7 @@ pub(super) fn def_find_exact_symbol() -> ToolDefinition {
          No BM25, no fuzzy match, no scoring. Use this when you already know \
          the symbol name and want the cheapest possible lookup; use \
          `tracedecay_search` for relevance-ranked discovery instead.",
-        json!({
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Exact bare symbol name (no `::`, no glob)."
-                },
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum matches to return (default: 20, max: 200)."
-                },
-                "lazy_index_ignored_dependencies": {
-                    "type": "boolean",
-                    "description": "Opt in to bounded indexing of ignored dependency entry files when an import hint matches (default: false)."
-                }
-            },
-            "required": ["name"]
-        }),
+        input_schema,
     )
 }
 

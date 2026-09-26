@@ -345,13 +345,15 @@ async fn dispatch_admin_cli(
         AdminCliAction::AnalyticsSync => {
             tracedecay_application::analytics_bridge::analytics_sync_with_db(
                 context.require_accounting_db()?,
+                context.require_profile_root()?,
                 context.project_root(),
             )
-            .await
+            .await?
         }
         AdminCliAction::AnalyticsDiagnostics { all, no_sync } => {
             tracedecay_application::analytics_bridge::analytics_diagnostics_with_db(
                 context.require_accounting_db()?,
+                context.require_profile_root()?,
                 context
                     .registered_project_session_db
                     .map(std::convert::AsRef::as_ref),

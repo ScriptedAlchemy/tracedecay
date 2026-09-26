@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::db::engine::Value as EngineValue;
@@ -20,19 +20,6 @@ pub(crate) fn global_db_operation_message(
         message: message.into(),
         operation: operation.to_string(),
     }
-}
-
-/// Returns the path to the global database: `global.db` inside the user-level
-/// data dir (`~/.tracedecay/` by default).
-pub fn global_db_path() -> Option<PathBuf> {
-    tracedecay_runtime_core::config::global_db_path()
-}
-
-/// True when `TRACEDECAY_GLOBAL_DB` pins the global DB to an explicit path.
-/// Consumers treat the override as an operator decision that wins over project
-/// store discovery.
-pub fn global_db_path_is_overridden() -> bool {
-    tracedecay_runtime_core::config::global_db_path_is_overridden()
 }
 
 /// How [`global_accounting_enabled`] reached its decision; the dashboard

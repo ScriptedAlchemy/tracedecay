@@ -1,11 +1,11 @@
 //! Host-visible behavior of `tracedecay_hermes_skill_bridge`.
 //!
-//! Calls go through the MCP `tools/call` path. The install lives under an
-//! isolated `HOME`; `HERMES_HOME` is pointed at a different tree so a bridge
-//! that honored an alternate root would return the wrong skills.
+//! Calls go through the MCP `tools/call` path. The install lives under the
+//! server profile's isolated home; the inventory journeys run in a child test
+//! process whose `HERMES_HOME` names a different tree, so a bridge that
+//! honored an alternate root would return the wrong skills.
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -26,29 +26,21 @@ const WORKFLOW_BODY: &str =
 const BARE_NOTE_BODY: &str = "# just a note\n";
 const SECRET_BODY: &str = "---\nname: secret\ndescription: Not in the standard install\n---\n";
 
-struct HermesHomeGuard {
-    previous: Option<OsString>,
-}
-
-impl HermesHomeGuard {
-    fn set(path: &Path) -> Self {
-        let previous = std::env::var_os("HERMES_HOME");
-        unsafe {
-            std::env::set_var("HERMES_HOME", path);
-        }
-        Self { previous }
+/// The `HERMES_HOME` a child test process runs under: an alternate Hermes
+/// root outside the isolated home that a bridge honoring it would read.
+fn alternate_hermes_home_in_child(test_name: &str) -> Option<PathBuf> {
+    if crate::common::in_child_test() {
+        return Some(PathBuf::from(
+            std::env::var_os("HERMES_HOME").expect("child HERMES_HOME"),
+        ));
     }
-}
-
-impl Drop for HermesHomeGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match self.previous.take() {
-                Some(value) => std::env::set_var("HERMES_HOME", value),
-                None => std::env::remove_var("HERMES_HOME"),
-            }
-        }
-    }
+    let alternate_root = TempDir::new().unwrap();
+    let alternate = canonicalize_test_dir(alternate_root.path()).join("custom-hermes");
+    crate::common::rerun_test_in_child(
+        &format!("mcp_handler_test::hermes_skill_bridge_test::{test_name}"),
+        &[("HERMES_HOME", Some(alternate.as_os_str()))],
+    );
+    None
 }
 
 struct IsolatedHome {
@@ -63,7 +55,11 @@ async fn open_isolated_home() -> (IsolatedHome, TestTraceDecay) {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
     let (cg, env) = init_test_project(&project).await;
-    let home = canonicalize_test_dir(&project.join("home"));
+    let home = env
+        .profile
+        .home()
+        .expect("test profile names its home")
+        .to_path_buf();
     (
         IsolatedHome {
             home,
@@ -117,7 +113,7 @@ fn file_snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 }
 
 async fn open_server(cg: TestTraceDecay) -> Arc<McpServer> {
-    Box::pin(McpServer::new(cg.into_inner(), None)).await
+    Box::pin(crate::support::real_mcp_server(cg)).await
 }
 
 async fn call_bridge(server: &Arc<McpServer>, id: i64, arguments: Value) -> Value {
@@ -295,7 +291,7 @@ fn populated_inventory(home: &Path, include_bodies: bool, include_payloads: bool
     })
 }
 
-fn seed_populated_install(home: &Path) -> PathBuf {
+fn seed_populated_install(home: &Path, alternate: &Path) {
     let agent_home = home.join(".hermes");
     let skills_dir = agent_home.join("skills");
     write_skill(&skills_dir.join("ops").join("workflow"), WORKFLOW_BODY);
@@ -328,16 +324,18 @@ fn seed_populated_install(home: &Path) -> PathBuf {
         symlink(&outside, skills_dir.join("escaped")).unwrap();
     }
 
-    let alternate = home.join("custom-hermes");
     write_skill(&alternate.join("skills").join("secret"), SECRET_BODY);
-    alternate
 }
 
 #[tokio::test]
 async fn hermes_skill_bridge_mcp_returns_standard_install_inventory() {
+    let Some(alternate) = alternate_hermes_home_in_child(
+        "hermes_skill_bridge_mcp_returns_standard_install_inventory",
+    ) else {
+        return;
+    };
     let (isolated, cg) = open_isolated_home().await;
-    let alternate = seed_populated_install(&isolated.home);
-    let _hermes_home = HermesHomeGuard::set(&alternate);
+    seed_populated_install(&isolated.home, &alternate);
     let before = snapshot_roots(&[
         isolated.home.join(".hermes"),
         alternate.clone(),
@@ -422,10 +420,13 @@ async fn hermes_skill_bridge_mcp_returns_standard_install_inventory() {
 
 #[tokio::test]
 async fn hermes_skill_bridge_mcp_reports_missing_install_as_empty_inventory() {
+    let Some(alternate) = alternate_hermes_home_in_child(
+        "hermes_skill_bridge_mcp_reports_missing_install_as_empty_inventory",
+    ) else {
+        return;
+    };
     let (isolated, cg) = open_isolated_home().await;
-    let alternate = isolated.home.join("custom-hermes");
     write_skill(&alternate.join("skills").join("secret"), SECRET_BODY);
-    let _hermes_home = HermesHomeGuard::set(&alternate);
     let before = snapshot_roots(std::slice::from_ref(&alternate));
     let server = open_server(cg).await;
 

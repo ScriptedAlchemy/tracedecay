@@ -270,6 +270,7 @@ impl OperationEventError {
                 )?,
                 retry: RetryDirective::AfterRevalidate,
                 legal_actions: vec![LegalAction::Refresh],
+                detail: None,
             },
             Self::InvalidFrontier => ApplicationProblem::conflict(
                 "operation_event.invalid_frontier",

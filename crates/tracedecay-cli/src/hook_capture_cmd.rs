@@ -2,6 +2,7 @@ use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_domain::NativeHostIdentityV1;
 use tracedecay_domain::UtcMicros;
@@ -131,6 +132,8 @@ const NATIVE_CAPTURE_COMMANDS: &[(&str, NativeHookCaptureSourceV1)] = &[
     ),
 ];
 
+/// Native hook callbacks are their own process boundary: each resolves its
+/// profile from the environment here, before any hook authority runs.
 pub(crate) fn try_run(args: &[OsString]) -> Option<i32> {
     let command = args.get(1)?.to_str()?;
     // Native callbacks must never enter normal CLI startup: that path owns
@@ -144,14 +147,19 @@ pub(crate) fn try_run(args: &[OsString]) -> Option<i32> {
         // An empty successful response preserves the host's normal allow path
         // without reviving the removed hook-local policy authority. The
         // invocation itself is still adoption telemetry, and `TOOL_INPUT`
-        // carries no event name, so the hook name is supplied here.
-        tracedecay_agent_hosts::hooks::record_native_capture_invoked(
-            &tracedecay::hook_runtime(),
-            std::env::current_dir().ok().as_deref(),
-            NativeHostIdentityV1::ClaudeCode,
-            Some("preToolUse"),
-            &std::env::var("TOOL_INPUT").unwrap_or_default(),
-        );
+        // carries no event name, so the hook name is supplied here. The
+        // allow response never depends on it: a process without a profile
+        // records nothing and still allows the tool.
+        match ProfileRoot::from_env() {
+            Ok(profile) => tracedecay_agent_hosts::hooks::record_native_capture_invoked(
+                &tracedecay::hook_runtime(profile),
+                std::env::current_dir().ok().as_deref(),
+                NativeHostIdentityV1::ClaudeCode,
+                Some("preToolUse"),
+                &std::env::var("TOOL_INPUT").unwrap_or_default(),
+            ),
+            Err(error) => tracing::debug!(%error, "preToolUse invocation not recorded"),
+        }
         return Some(0);
     }
     // Hooks with a provider-supported synchronous response must enter the
@@ -163,7 +171,10 @@ pub(crate) fn try_run(args: &[OsString]) -> Option<i32> {
     }
     let source = capture_source_from_name(command)?;
     Some(if args.len() == 2 {
-        run_native_capture(source)
+        match ProfileRoot::from_env() {
+            Ok(profile) => run_native_capture(&profile, source),
+            Err(error) => refused(error),
+        }
     } else {
         refused("hook callbacks take no arguments")
     })
@@ -282,6 +293,7 @@ impl PreparedNativeCapture {
 }
 
 fn prepare_native_capture(
+    profile: &ProfileRoot,
     source: NativeHookCaptureSourceV1,
     payload: &[u8],
     working_directory: &std::io::Result<std::path::PathBuf>,
@@ -289,15 +301,16 @@ fn prepare_native_capture(
     let Ok(project_root) = working_directory.as_ref() else {
         return PreparedNativeCapture::plain(NativeHookCaptureOutcomeV1::Unavailable);
     };
-    let layout = match tracedecay_runtime_core::storage::resolve_enrolled_layout_for_current_profile(
+    let layout = match tracedecay_runtime_core::storage::resolve_persisted_layout(
         project_root,
+        profile.data_dir(),
     ) {
         Ok(Some(layout)) => layout,
         Ok(None) => return PreparedNativeCapture::plain(NativeHookCaptureOutcomeV1::Unbound),
         Err(_) => return PreparedNativeCapture::plain(NativeHookCaptureOutcomeV1::Unavailable),
     };
     let worktree_id = tracedecay_agent_hosts::hooks::hook_worktree_id_for_layout(
-        &tracedecay::hook_runtime(),
+        &tracedecay::hook_runtime(profile.clone()),
         &layout,
     );
     let (Some(now), Ok(worktree_id)) = (current_time(), worktree_id) else {
@@ -341,7 +354,7 @@ fn prepare_native_capture(
     }
 }
 
-pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
+pub(crate) fn run_native_capture(profile: &ProfileRoot, source: NativeHookCaptureSourceV1) -> i32 {
     let payload = match read_bounded_stdin() {
         Ok(payload) => payload,
         Err(()) => return refused("stdin was unreadable or exceeded the payload bound"),
@@ -351,13 +364,13 @@ pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
     // unbound, unsupported, or rejected callback still proves the host fired
     // the hook, which is the one thing adoption telemetry must not lose.
     tracedecay_agent_hosts::hooks::record_native_capture_invoked(
-        &tracedecay::hook_runtime(),
+        &tracedecay::hook_runtime(profile.clone()),
         working_directory.as_deref().ok(),
         source.host(),
         None,
         &String::from_utf8_lossy(&payload),
     );
-    let prepared = prepare_native_capture(source, &payload, &working_directory);
+    let prepared = prepare_native_capture(profile, source, &payload, &working_directory);
     let outcome = prepared.outcome;
 
     let stdout = std::io::stdout();

@@ -476,10 +476,10 @@ pub fn is_isolated_test_path(path: &Path) -> bool {
     if under_isolated_root(path, std::env::temp_dir()) {
         return true;
     }
-    std::env::var_os("TRACEDECAY_DATA_DIR")
+    std::env::var_os(crate::config::USER_DATA_DIR_ENV)
         .filter(|root| !root.is_empty())
-        .and_then(|_| crate::config::user_data_dir())
-        .is_some_and(|root| under_isolated_root(path, root))
+        .and_then(|_| crate::config::ProfileRoot::from_env().ok())
+        .is_some_and(|profile| under_isolated_root(path, profile.data_dir().to_path_buf()))
 }
 
 /// Whether `path` lives under `root`, comparing both sides in one spelling.

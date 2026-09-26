@@ -15,6 +15,7 @@
 mod plugin_cli;
 
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::json;
 
@@ -79,7 +80,7 @@ impl AgentIntegration for OpenCodeIntegration {
         install_opencode_plugin(&plugin_path, &ctx.tracedecay_bin)?;
         install_prompt_rules(&agents_md)?;
         super::install_managed_skill_prompt_index(
-            &ctx.home,
+            ctx.profile.data_dir(),
             &agents_md,
             tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::OpenCode,
         )
@@ -89,6 +90,7 @@ impl AgentIntegration for OpenCodeIntegration {
         &self,
         _components: &[super::host_bundle::HostComponentV1],
         _home: &Path,
+        _profile_root: &Path,
         project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
         Ok(vec![
@@ -117,14 +119,14 @@ impl AgentIntegration for OpenCodeIntegration {
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mOpenCode integration\x1b[0m");
-        doctor_check_config(dc, &ctx.home);
-        doctor_check_prompt(dc, &ctx.home);
-        doctor_check_plugin(dc, &ctx.home);
+        doctor_check_config(dc, &ctx.home, &ctx.profile);
+        doctor_check_prompt(dc, &ctx.home, &ctx.profile);
+        doctor_check_plugin(dc, &ctx.home, &ctx.profile);
         super::doctor_check_managed_skill_prompt_indexes(
             dc,
-            &ctx.home,
+            ctx.profile.data_dir(),
             &[
-                opencode_prompt_path(&ctx.home),
+                opencode_prompt_path(&ctx.home, &ctx.profile),
                 ctx.project_path.join("AGENTS.md"),
             ],
             tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::OpenCode,
@@ -138,7 +140,7 @@ impl AgentIntegration for OpenCodeIntegration {
     ) -> super::host_bundle::HostBundleRegistrationStateV1 {
         use super::host_bundle::{HostBundleRegistrationStateV1 as State, HostComponentV1};
 
-        let config_path = opencode_config_path(&ctx.home);
+        let config_path = opencode_config_path(&ctx.home, &ctx.profile);
         let config = match std::fs::read(&config_path) {
             Ok(config_bytes) => {
                 let Ok(config) = serde_json::from_slice::<serde_json::Value>(&config_bytes) else {
@@ -187,10 +189,10 @@ impl AgentIntegration for OpenCodeIntegration {
                 State::Missing
             };
         }
-        let plugin_path = opencode_plugin_path(&ctx.home);
+        let plugin_path = opencode_plugin_path(&ctx.home, &ctx.profile);
         let plugin_current = std::fs::read_to_string(&plugin_path)
             .is_ok_and(|contents| contents.contains(OPENCODE_PLUGIN_MARKER));
-        let prompt_current = std::fs::read_to_string(opencode_prompt_path(&ctx.home))
+        let prompt_current = std::fs::read_to_string(opencode_prompt_path(&ctx.home, &ctx.profile))
             .is_ok_and(|contents| contents.contains(PROMPT_RULE_MARKER));
         if plugin_current && lsp_current && prompt_current {
             State::Current
@@ -205,18 +207,30 @@ impl AgentIntegration for OpenCodeIntegration {
         home.join(".config").join("opencode").is_dir()
     }
 
-    fn primary_config_path(&self, home: &Path) -> Option<std::path::PathBuf> {
-        Some(opencode_config_path(home))
+    fn primary_config_path(
+        &self,
+        home: &Path,
+        profile: &ProfileRoot,
+    ) -> Option<std::path::PathBuf> {
+        Some(opencode_config_path(home, profile))
     }
 
-    fn host_registration_paths(&self, home: &Path) -> Vec<std::path::PathBuf> {
-        vec![opencode_config_path(home), opencode_prompt_path(home)]
+    fn host_registration_paths(
+        &self,
+        home: &Path,
+        profile: &ProfileRoot,
+    ) -> Vec<std::path::PathBuf> {
+        vec![
+            opencode_config_path(home, profile),
+            opencode_prompt_path(home, profile),
+        ]
     }
 
     fn host_component_registration_paths(
         &self,
         components: &[super::host_bundle::HostComponentV1],
         home: &Path,
+        profile: &ProfileRoot,
     ) -> Vec<std::path::PathBuf> {
         use super::host_bundle::HostComponentV1;
 
@@ -224,17 +238,20 @@ impl AgentIntegration for OpenCodeIntegration {
         if components.contains(&HostComponentV1::Core)
             || components.contains(&HostComponentV1::ContextMcp)
         {
-            paths.push(opencode_config_path(home));
+            paths.push(opencode_config_path(home, profile));
         }
         if components.contains(&HostComponentV1::Core) {
-            paths.push(opencode_prompt_path(home));
+            paths.push(opencode_prompt_path(home, profile));
         }
-        paths.extend(external_opencode_asset_paths(home, components));
+        paths.extend(external_opencode_asset_paths(home, components, profile));
         paths
     }
 
     fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
-        install_mcp_server(&opencode_config_path(&ctx.home), &ctx.tracedecay_bin)
+        install_mcp_server(
+            &opencode_config_path(&ctx.home, &ctx.profile),
+            &ctx.tracedecay_bin,
+        )
     }
 
     fn activate_deployed_host_component_registration(
@@ -247,21 +264,21 @@ impl AgentIntegration for OpenCodeIntegration {
         let core = components.contains(&HostComponentV1::Core);
         let mcp = components.contains(&HostComponentV1::ContextMcp);
         install_registration_entries(
-            &opencode_config_path(&ctx.home),
+            &opencode_config_path(&ctx.home, &ctx.profile),
             &ctx.tracedecay_bin,
             mcp,
             core,
         )?;
         if core {
-            let prompt = opencode_prompt_path(&ctx.home);
+            let prompt = opencode_prompt_path(&ctx.home, &ctx.profile);
             install_prompt_rules(&prompt)?;
             super::install_managed_skill_prompt_index(
-                &ctx.home,
+                ctx.profile.data_dir(),
                 &prompt,
                 tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::OpenCode,
             )?;
         }
-        mirror_external_opencode_assets(&ctx.home, components)?;
+        mirror_external_opencode_assets(&ctx.home, components, &ctx.profile)?;
         Ok(())
     }
 
@@ -274,21 +291,21 @@ impl AgentIntegration for OpenCodeIntegration {
 
         let core = components.contains(&HostComponentV1::Core);
         let mcp = components.contains(&HostComponentV1::ContextMcp);
-        remove_registration_entries(&opencode_config_path(&ctx.home), mcp, core)?;
+        remove_registration_entries(&opencode_config_path(&ctx.home, &ctx.profile), mcp, core)?;
         if core {
-            let prompt = opencode_prompt_path(&ctx.home);
+            let prompt = opencode_prompt_path(&ctx.home, &ctx.profile);
             super::remove_managed_skill_prompt_index(
                 &prompt,
                 tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::OpenCode,
             )?;
             uninstall_prompt_rules(&prompt)?;
         }
-        remove_external_opencode_assets(&ctx.home, components)?;
+        remove_external_opencode_assets(&ctx.home, components, &ctx.profile)?;
         Ok(())
     }
 
-    fn has_tracedecay(&self, home: &Path) -> bool {
-        let config_path = opencode_config_path(home);
+    fn has_tracedecay(&self, home: &Path, profile: &ProfileRoot) -> bool {
+        let config_path = opencode_config_path(home, profile);
         if !config_path.exists() {
             return false;
         }
@@ -297,19 +314,24 @@ impl AgentIntegration for OpenCodeIntegration {
         mcp.and_then(|v| v.get("tracedecay")).is_some()
     }
 
-    fn detected_host_surface(&self, home: &Path) -> Option<std::path::PathBuf> {
-        let config_path = opencode_config_path(home);
+    fn detected_host_surface(
+        &self,
+        home: &Path,
+        profile: &ProfileRoot,
+    ) -> Option<std::path::PathBuf> {
+        let config_path = opencode_config_path(home, profile);
         config_path.exists().then_some(config_path)
     }
 
     fn export_managed_skills(
         &self,
         home: &Path,
-        profile_root: &Path,
+        profile: &ProfileRoot,
     ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
     {
-        let prompt_path = opencode_prompt_path(home);
-        if !self.has_tracedecay(home) || !prompt_path.exists() {
+        let profile_root = profile.data_dir();
+        let prompt_path = opencode_prompt_path(home, profile);
+        if !self.has_tracedecay(home, profile) || !prompt_path.exists() {
             return Ok(Vec::new());
         }
         Ok(vec![
@@ -358,31 +380,31 @@ fn local_config_has_tracedecay(project_root: &Path) -> bool {
 // Config path resolution
 // ---------------------------------------------------------------------------
 
-/// Honors an absolute `$XDG_CONFIG_HOME`, including locations outside `HOME`,
-/// but only when `home` *is* this process user's home. See
-/// [`ambient_xdg_config_home`].
-fn opencode_config_path(home: &Path) -> std::path::PathBuf {
-    opencode_config_path_for(home, ambient_xdg_config_home(home).as_deref())
+/// Honors the profile's absolute `$XDG_CONFIG_HOME` only inside `home`.
+///
+/// A caller that names a root, a per-home sweep, a managed-skill export
+/// destination scan, a test sandbox, must stay inside the root it named, so
+/// an `$XDG_CONFIG_HOME` outside `home` never redirects OpenCode to another
+/// user's `~/.config/opencode`. This is the same rule every other host-home
+/// override follows (`host_home_override`).
+fn opencode_config_path(home: &Path, profile: &ProfileRoot) -> std::path::PathBuf {
+    opencode_config_path_for(home, profile_xdg_config_home(home, profile).as_deref())
 }
 
-/// The ambient `$XDG_CONFIG_HOME`, scoped to the home it actually describes.
-///
-/// `$XDG_CONFIG_HOME` names *this process user's* config root, so it only
-/// answers for a caller that is resolving that same user's home. A caller that
-/// names a different root, a per-home sweep, a managed-skill export
-/// destination scan, a test sandbox, must stay inside the root it named.
-///
-/// Reading it unconditionally let a lifecycle export sweep that was handed a
-/// sandbox `home` resolve OpenCode to the operator's real
-/// `~/.config/opencode/AGENTS.md` and deploy managed skills into it, and made
-/// `primary_config_path(home)` answer outside `home`. Only the resolution of
-/// the ambient value is scoped; [`opencode_config_path_for`] still honors an
-/// explicit external root exactly as before.
-fn ambient_xdg_config_home(home: &Path) -> Option<std::ffi::OsString> {
-    if !super::is_process_home(home) {
-        return None;
-    }
-    std::env::var_os("XDG_CONFIG_HOME")
+fn profile_xdg_config_home(home: &Path, profile: &ProfileRoot) -> Option<std::ffi::OsString> {
+    xdg_config_home_inside(
+        home,
+        profile
+            .xdg_config_home()
+            .map(|xdg| xdg.as_os_str().to_owned()),
+    )
+}
+
+fn xdg_config_home_inside(
+    home: &Path,
+    xdg: Option<std::ffi::OsString>,
+) -> Option<std::ffi::OsString> {
+    xdg.filter(|xdg| Path::new(xdg).starts_with(home))
 }
 
 fn opencode_config_path_for(home: &Path, xdg: Option<&std::ffi::OsStr>) -> std::path::PathBuf {
@@ -398,8 +420,8 @@ fn opencode_config_path_for(home: &Path, xdg: Option<&std::ffi::OsStr>) -> std::
 /// a revision and the moment it applies; a path keyed on what exists would
 /// move the hashed registration path list mid-transaction and roll every apply
 /// back with `StalePreview`. The write path creates the parent on demand.
-pub(super) fn opencode_prompt_path(home: &Path) -> std::path::PathBuf {
-    ambient_xdg_config_home(home)
+pub(super) fn opencode_prompt_path(home: &Path, profile: &ProfileRoot) -> std::path::PathBuf {
+    profile_xdg_config_home(home, profile)
         .map(std::path::PathBuf::from)
         .filter(|path| path.is_absolute())
         .unwrap_or_else(|| home.join(".config"))
@@ -442,8 +464,9 @@ fn opencode_asset_relative_paths(
 fn external_opencode_asset_paths(
     home: &Path,
     components: &[super::host_bundle::HostComponentV1],
+    profile: &ProfileRoot,
 ) -> Vec<std::path::PathBuf> {
-    let root = opencode_config_path(home)
+    let root = opencode_config_path(home, profile)
         .parent()
         .unwrap_or(home)
         .to_path_buf();
@@ -467,8 +490,9 @@ fn external_opencode_asset_paths_for(
 fn mirror_external_opencode_assets(
     home: &Path,
     components: &[super::host_bundle::HostComponentV1],
+    profile: &ProfileRoot,
 ) -> Result<()> {
-    let root = opencode_config_path(home)
+    let root = opencode_config_path(home, profile)
         .parent()
         .unwrap_or(home)
         .to_path_buf();
@@ -498,8 +522,9 @@ fn mirror_external_opencode_assets_to(
 fn remove_external_opencode_assets(
     home: &Path,
     components: &[super::host_bundle::HostComponentV1],
+    profile: &ProfileRoot,
 ) -> Result<()> {
-    for path in external_opencode_asset_paths(home, components) {
+    for path in external_opencode_asset_paths(home, components, profile) {
         match super::safe_remove_host_file(&path) {
             Ok(()) => tracedecay_private_fs::framed_log::sync_parent_directory(
                 &path,
@@ -519,8 +544,8 @@ fn remove_external_opencode_assets(
     Ok(())
 }
 
-fn opencode_plugin_path(home: &Path) -> std::path::PathBuf {
-    opencode_config_path(home)
+fn opencode_plugin_path(home: &Path, profile: &ProfileRoot) -> std::path::PathBuf {
+    opencode_config_path(home, profile)
         .parent()
         .unwrap_or(home)
         .join("plugins/tracedecay.ts")
@@ -900,8 +925,8 @@ fn uninstall_prompt_rules(prompt_path: &Path) -> Result<()> {
 // Healthcheck helpers
 // ---------------------------------------------------------------------------
 
-fn doctor_check_config(dc: &mut DoctorCounters, home: &Path) {
-    let config_path = opencode_config_path(home);
+fn doctor_check_config(dc: &mut DoctorCounters, home: &Path, profile: &ProfileRoot) {
+    let config_path = opencode_config_path(home, profile);
     if !config_path.exists() {
         dc.warn(&format!(
             "{} not found, run `tracedecay install --agent opencode` if you use OpenCode",
@@ -950,17 +975,17 @@ fn doctor_check_config(dc: &mut DoctorCounters, home: &Path) {
     }
 }
 
-fn doctor_check_prompt(dc: &mut DoctorCounters, home: &Path) {
+fn doctor_check_prompt(dc: &mut DoctorCounters, home: &Path, profile: &ProfileRoot) {
     super::doctor_check_prompt_contains_tracedecay(
         dc,
-        &opencode_prompt_path(home),
+        &opencode_prompt_path(home, profile),
         "AGENTS.md",
         "opencode",
     );
 }
 
-fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
-    let plugin_path = opencode_plugin_path(home);
+fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path, profile: &ProfileRoot) {
+    let plugin_path = opencode_plugin_path(home, profile);
     let installed = std::fs::read_to_string(&plugin_path)
         .ok()
         .is_some_and(|contents| contents.contains(OPENCODE_PLUGIN_MARKER));
@@ -981,74 +1006,33 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
 mod tests {
     use super::*;
 
-    struct XdgConfigHomeGuard {
-        previous_xdg: Option<std::ffi::OsString>,
-        previous_home: Option<std::ffi::OsString>,
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl XdgConfigHomeGuard {
-        fn set(xdg: &Path, home: &Path) -> Self {
-            let lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
-            let previous_xdg = std::env::var_os("XDG_CONFIG_HOME");
-            let previous_home = std::env::var_os("HOME");
-            // SAFETY: the shared profile-discovery lock is held for the
-            // guard's lifetime, so no sibling test observes the override.
-            unsafe {
-                std::env::set_var("XDG_CONFIG_HOME", xdg);
-                std::env::set_var("HOME", home);
-            }
-            Self {
-                previous_xdg,
-                previous_home,
-                _lock: lock,
-            }
-        }
-    }
-
-    impl Drop for XdgConfigHomeGuard {
-        fn drop(&mut self) {
-            // SAFETY: see `XdgConfigHomeGuard::set`; the lock is still held.
-            unsafe {
-                match self.previous_xdg.take() {
-                    Some(previous) => std::env::set_var("XDG_CONFIG_HOME", previous),
-                    None => std::env::remove_var("XDG_CONFIG_HOME"),
-                }
-                match self.previous_home.take() {
-                    Some(previous) => std::env::set_var("HOME", previous),
-                    None => std::env::remove_var("HOME"),
-                }
-            }
-        }
-    }
-
-    /// An ambient `$XDG_CONFIG_HOME` describes the process user's own home. A
-    /// caller that names a different root must be answered inside that root:
-    /// otherwise a managed-skill export sweep handed a sandbox home resolves
-    /// OpenCode to the operator's real `~/.config/opencode` and writes there.
+    /// The profile's `$XDG_CONFIG_HOME` is honored only inside the home being
+    /// resolved: otherwise a managed-skill export sweep handed a sandbox home
+    /// resolves OpenCode to the operator's real `~/.config/opencode` and
+    /// writes there.
     #[test]
-    fn ambient_xdg_never_redirects_a_foreign_home_outside_itself() {
-        let process_home = tempfile::tempdir().unwrap();
-        let xdg = tempfile::tempdir().unwrap();
-        let other_home = tempfile::tempdir().unwrap();
-        let _guard = XdgConfigHomeGuard::set(xdg.path(), process_home.path());
+    fn profile_xdg_never_redirects_a_home_outside_itself() {
+        let home = tempfile::tempdir().unwrap();
+        let inside = home.path().join("xdg");
+        let outside = tempfile::tempdir().unwrap();
 
-        assert!(
-            opencode_config_path(other_home.path()).starts_with(other_home.path()),
-            "config path escaped the requested home"
-        );
-        assert!(
-            opencode_prompt_path(other_home.path()).starts_with(other_home.path()),
-            "prompt path escaped the requested home"
-        );
-        // The same ambient value still answers for the home it describes.
+        let foreign = ProfileRoot::under_home(home.path()).with_xdg_config_home(outside.path());
         assert_eq!(
-            opencode_config_path(process_home.path()),
-            xdg.path().join("opencode/opencode.json")
+            opencode_config_path(home.path(), &foreign),
+            home.path().join(".config/opencode/opencode.json")
         );
         assert_eq!(
-            opencode_prompt_path(process_home.path()),
-            xdg.path().join("opencode/AGENTS.md")
+            opencode_prompt_path(home.path(), &foreign),
+            home.path().join(".config/opencode/AGENTS.md")
+        );
+        let own = ProfileRoot::under_home(home.path()).with_xdg_config_home(&inside);
+        assert_eq!(
+            opencode_config_path(home.path(), &own),
+            inside.join("opencode/opencode.json")
+        );
+        assert_eq!(
+            opencode_prompt_path(home.path(), &own),
+            inside.join("opencode/AGENTS.md")
         );
     }
 
@@ -1255,6 +1239,7 @@ mod tests {
         let config = project.path().join("opencode.json");
         std::fs::write(&config, "{not-json").unwrap();
         let ctx = InstallContext {
+            profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             home: home.path().to_path_buf(),
             tracedecay_bin: "/usr/bin/tracedecay".to_string(),
             project_root: Some(project.path().to_path_buf()),

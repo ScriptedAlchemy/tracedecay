@@ -4,6 +4,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use tracedecay_runtime_core::config::ProfileRoot;
+
 use sha2::{Digest, Sha256};
 use tracedecay_host_integration::host_bundle_stale_preview;
 use tracedecay_host_integration::host_bundle_storage_failure;
@@ -72,24 +74,34 @@ impl CatalogHostComponentRegistrationAuthority {
     }
 
     pub fn new(
+        profile: &ProfileRoot,
         agent_id: &str,
         home: &Path,
         operation: crate::agents::host_bundle::HostBundleLifecycleOpV1,
     ) -> tracedecay_domain::errors::Result<Self> {
         let tracedecay_bin = current_tracedecay_binary()?;
-        Self::new_with_tracedecay_bin(agent_id, home, operation, tracedecay_bin)
+        Self::new_with_tracedecay_bin(profile, agent_id, home, operation, tracedecay_bin)
     }
 
     pub fn new_with_tracedecay_bin(
+        profile: &ProfileRoot,
         agent_id: &str,
         home: &Path,
         operation: crate::agents::host_bundle::HostBundleLifecycleOpV1,
         tracedecay_bin: String,
     ) -> tracedecay_domain::errors::Result<Self> {
-        Self::new_with_tracedecay_bin_and_dashboard(agent_id, home, operation, tracedecay_bin, true)
+        Self::new_with_tracedecay_bin_and_dashboard(
+            profile,
+            agent_id,
+            home,
+            operation,
+            tracedecay_bin,
+            true,
+        )
     }
 
     pub fn new_with_tracedecay_bin_and_dashboard(
+        profile: &ProfileRoot,
         agent_id: &str,
         home: &Path,
         operation: crate::agents::host_bundle::HostBundleLifecycleOpV1,
@@ -102,17 +114,19 @@ impl CatalogHostComponentRegistrationAuthority {
             }
         })?;
         let integration = crate::agents::get_integration(agent_id)?;
-        let registration_path = integration.primary_config_path(home);
+        let registration_path = integration.primary_config_path(home, profile);
         Ok(Self {
             integration,
             context: crate::agents::InstallContext {
                 home: home.to_path_buf(),
+                profile: profile.clone(),
                 tracedecay_bin,
                 project_root: None,
                 dashboard,
             },
             health_context: crate::agents::HealthcheckContext {
                 home: home.to_path_buf(),
+                profile: profile.clone(),
                 project_path,
             },
             registration_path,
@@ -192,6 +206,7 @@ impl CatalogHostComponentRegistrationAuthority {
                             .map(|component| component.manifest.component)
                             .collect::<Vec<_>>(),
                         &self.context.home,
+                        &self.context.profile,
                     )
                     .is_empty())
             || (component_set.host == crate::agents::host_bundle::HostKindV1::OpenCode
@@ -364,7 +379,11 @@ impl CatalogHostComponentRegistrationAuthority {
             .collect::<Vec<_>>();
         let mut paths = self
             .integration
-            .host_component_registration_paths_checked(&components, &self.context.home)
+            .host_component_registration_paths_checked(
+                &components,
+                &self.context.home,
+                &self.context.profile,
+            )
             .map_err(|error| Self::registration_error(component_set.host, error))?;
         if self.integration.id() == "claude" {
             let artifact_owned_manifest = self
@@ -715,7 +734,11 @@ impl crate::agents::host_bundle::HostComponentSetRegistrationV1
                 .collect::<Vec<_>>();
             let foreign = self
                 .integration
-                .foreign_bundle_entrypoints(&components, &self.context.home)
+                .foreign_bundle_entrypoints(
+                    &components,
+                    &self.context.home,
+                    self.context.profile.data_dir(),
+                )
                 .map_err(|error| Self::registration_error(component_set.host, error))?;
             if !foreign.is_empty() {
                 let paths = foreign
@@ -1156,6 +1179,7 @@ mod tests {
     fn gemini_component_sets_are_not_artifact_only_lifecycles() {
         let home = tempfile::tempdir().expect("home");
         let authority = CatalogHostComponentRegistrationAuthority::new(
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             "gemini",
             home.path(),
             crate::agents::host_bundle::HostBundleLifecycleOpV1::Install,
@@ -1179,6 +1203,7 @@ mod tests {
         // managed artifacts, so the assertion above is about Gemini's
         // classification and not about a predicate that always answers false.
         let cursor = CatalogHostComponentRegistrationAuthority::new(
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             "cursor",
             home.path(),
             crate::agents::host_bundle::HostBundleLifecycleOpV1::Install,
@@ -1231,6 +1256,7 @@ mod tests {
             )
             .expect("Codex has a compiled default set");
         let mut authority = CatalogHostComponentRegistrationAuthority::new(
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             "codex",
             home.path(),
             crate::agents::host_bundle::HostBundleLifecycleOpV1::Install,

@@ -430,7 +430,7 @@ pub(super) fn def_rename_symbol() -> ToolDefinition {
     )
 }
 
-pub(super) fn def_ast_grep_search() -> ToolDefinition {
+pub(super) fn def_ast_grep_search(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_ast_grep_search",
         "AST Structural Search",
@@ -442,28 +442,7 @@ pub(super) fn def_ast_grep_search() -> ToolDefinition {
          tracedecay_source_body with that symbol's node_id. Routing: use this when the pattern is structural (e.g. `foo($$$)`, \
          `if ($C) { $$$ }`); for a literal/regex string use tracedecay_grep; for a symbol name \
          use tracedecay_search. To rewrite a structural match, pair with tracedecay_ast_grep_rewrite.",
-        json!({
-            "type": "object",
-            "properties": {
-                "pattern": {
-                    "type": "string",
-                    "description": "ast-grep structural pattern (SGPattern syntax), e.g. 'reserve_stock($$$)' or 'Result<$T, $E>'."
-                },
-                "lang": {
-                    "type": "string",
-                    "description": "Optional language key to force (e.g. 'rust', 'typescript', 'python'). Omit to auto-detect each file from its extension."
-                },
-                "path_glob": {
-                    "type": "string",
-                    "description": "Optional glob restricting which files are searched, matched against project-relative paths (e.g. 'src/**/*.rs')."
-                },
-                "max_results": {
-                    "type": "number",
-                    "description": "Maximum number of matches to return (default: 50, max: 200)."
-                }
-            },
-            "required": ["pattern"]
-        }),
+        input_schema,
     )
 }
 

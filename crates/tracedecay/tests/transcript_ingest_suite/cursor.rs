@@ -16,8 +16,8 @@ use tracedecay_sessions::runtime::hosts::cursor::{
     try_ingest_cursor_project_sweep_capped as try_ingest_cursor_project_sweep_capped_for_project,
 };
 use tracedecay_sessions::runtime::source::{TranscriptIngestResult, TranscriptSource};
+use tracedecay_sessions::runtime::with_transcript_source_profile;
 
-use crate::common::{EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK};
 #[cfg(unix)]
 use crate::common::{spawn_tracedecay_daemon, tracedecay_command_with_home};
 use crate::restart_atomicity::{
@@ -32,10 +32,13 @@ async fn ingest_cursor_transcript_event(
     event_json: &str,
     db: &ProjectSessionTestRuntime,
 ) -> CursorTranscriptIngestStats {
-    ingest_cursor_transcript_event_for_project(
-        event_json,
-        &db.runtime().facade(),
-        db.project_id().clone(),
+    with_transcript_source_profile(
+        db.transcript_source_profile(),
+        ingest_cursor_transcript_event_for_project(
+            event_json,
+            &db.runtime().facade(),
+            db.project_id().clone(),
+        ),
     )
     .await
 }
@@ -45,11 +48,14 @@ async fn ingest_cursor_transcript_event_capped(
     db: &ProjectSessionTestRuntime,
     max_new_bytes: Option<u64>,
 ) -> CursorTranscriptIngestStats {
-    ingest_cursor_transcript_event_capped_for_project(
-        event_json,
-        &db.runtime().facade(),
-        db.project_id().clone(),
-        max_new_bytes,
+    with_transcript_source_profile(
+        db.transcript_source_profile(),
+        ingest_cursor_transcript_event_capped_for_project(
+            event_json,
+            &db.runtime().facade(),
+            db.project_id().clone(),
+            max_new_bytes,
+        ),
     )
     .await
 }
@@ -60,12 +66,15 @@ async fn try_ingest_cursor_project_sweep_capped<S: BuildHasher>(
     max_new_bytes: Option<u64>,
     skip_session_ids: std::collections::HashSet<String, S>,
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
-    try_ingest_cursor_project_sweep_capped_for_project(
-        project_root,
-        &db.runtime().facade(),
-        db.project_id().clone(),
-        max_new_bytes,
-        skip_session_ids,
+    with_transcript_source_profile(
+        db.transcript_source_profile(),
+        try_ingest_cursor_project_sweep_capped_for_project(
+            project_root,
+            &db.runtime().facade(),
+            db.project_id().clone(),
+            max_new_bytes,
+            skip_session_ids,
+        ),
     )
     .await
 }
@@ -278,22 +287,10 @@ async fn user_cursor_hook_event_without_workspace_fails_closed_on_slug_collision
 
 #[cfg(unix)]
 #[tokio::test]
-// Intentional: this test pins process-wide HOME/TRACEDECAY_GLOBAL_DB while the
-// hook resolves its storage paths.
-#[allow(clippy::await_holding_lock)]
 async fn cursor_pre_compact_without_native_payload_is_read_only_and_reports_no_backlog() {
     let tmp = TempDir::new().unwrap();
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
     let home = tmp.path().join("home");
     let profile = home.join(".tracedecay");
-    let _env_guards = [
-        EnvVarGuard::set("TRACEDECAY_DATA_DIR", &profile),
-        EnvVarGuard::set(GLOBAL_DB_ENV, profile.join("global.db")),
-        EnvVarGuard::set("HOME", &home),
-        EnvVarGuard::set("USERPROFILE", &home),
-    ];
     let project = tmp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
     let project_id = mark_test_project(&project);
@@ -320,6 +317,7 @@ async fn cursor_pre_compact_without_native_payload_is_read_only_and_reports_no_b
     .unwrap();
 
     let _daemon = spawn_tracedecay_daemon(&home);
+    let hook_runtime = tracedecay::hook_runtime(crate::common::isolated_profile_under_home(&home));
     // Native pressure needs the registered graph scope as well as the session
     // shard. An empty graph-file marker bypasses init and never publishes that
     // scope; exercise the same enrollment that precedes real host callbacks.
@@ -350,8 +348,7 @@ async fn cursor_pre_compact_without_native_payload_is_read_only_and_reports_no_b
     .to_string();
     let warmup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
-        let warmup =
-            cursor_pre_compact_via_daemon(&tracedecay::hook_runtime(), &warmup_event).await;
+        let warmup = cursor_pre_compact_via_daemon(&hook_runtime, &warmup_event).await;
         let retryable = match (warmup.status.as_str(), warmup.reason.as_str()) {
             ("error", reason) => {
                 assert_eq!(reason, "timed out", "warmup hit a non-budget error");
@@ -384,8 +381,7 @@ async fn cursor_pre_compact_without_native_payload_is_read_only_and_reports_no_b
         "context_tokens": 124000,
         "context_window_size": 128000
     });
-    let outcome =
-        cursor_pre_compact_via_daemon(&tracedecay::hook_runtime(), &event.to_string()).await;
+    let outcome = cursor_pre_compact_via_daemon(&hook_runtime, &event.to_string()).await;
     // Pressure-only preCompact never carries Cursor's own summary text. The
     // daemon still runs its owned compaction route against the (empty)
     // session store and reports no backlog instead of treating the missing
@@ -416,21 +412,9 @@ async fn cursor_pre_compact_without_native_payload_is_read_only_and_reports_no_b
 }
 
 #[tokio::test]
-// Intentional: this test asserts the resolved profile session DB path, so it
-// pins process-wide profile env while opening and checking that path.
-#[allow(clippy::await_holding_lock)]
 async fn cursor_transcript_ingest_populates_searchable_messages() {
     let tmp = TempDir::new().unwrap();
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
     let profile = tmp.path().join("profile");
-    let _env_guards = [
-        EnvVarGuard::set("TRACEDECAY_DATA_DIR", &profile),
-        EnvVarGuard::set(GLOBAL_DB_ENV, profile.join("global.db")),
-        EnvVarGuard::set("HOME", tmp.path().join("home")),
-        EnvVarGuard::set("USERPROFILE", tmp.path().join("home")),
-    ];
     let project = tmp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
     init_git_repo(&project);
@@ -711,21 +695,9 @@ async fn cursor_tool_use_blocks_populate_tool_event_metadata() {
 }
 
 #[tokio::test]
-// Intentional: this test retains and reopens the profile's registered project
-// session runtime, so it pins process-wide profile env under GLOBAL_DB_ENV_LOCK.
-#[allow(clippy::await_holding_lock)]
 async fn cursor_transcript_ingest_retries_after_mid_batch_db_failure() {
     let tmp = TempDir::new().unwrap();
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
     let profile = tmp.path().join("profile");
-    let _env_guards = [
-        EnvVarGuard::set("TRACEDECAY_DATA_DIR", &profile),
-        EnvVarGuard::set(GLOBAL_DB_ENV, profile.join("global.db")),
-        EnvVarGuard::set("HOME", tmp.path().join("home")),
-        EnvVarGuard::set("USERPROFILE", tmp.path().join("home")),
-    ];
     let project = init_project(&tmp);
     let project_id = mark_test_project(&project);
     let transcript = tmp.path().join("cursor-session.jsonl");
@@ -1137,18 +1109,10 @@ fn write_sweep_fixture(
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn cursor_sweep_ingests_historical_transcripts() {
     let tmp = TempDir::new().unwrap();
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
     let project = init_project(&tmp);
     let home = tmp.path().join("home");
-    let _env_guards = [
-        EnvVarGuard::set("HOME", &home),
-        EnvVarGuard::set("USERPROFILE", &home),
-    ];
     write_sweep_fixture(&home, &project);
 
     let db = open_project_session_db(&project).await.unwrap();
@@ -1219,18 +1183,10 @@ async fn cursor_hook_after_sweep_is_noop() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn cursor_sweep_picks_up_lines_appended_after_hook_ingest() {
     let tmp = TempDir::new().unwrap();
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
     let project = init_project(&tmp);
     let home = tmp.path().join("home");
-    let _env_guards = [
-        EnvVarGuard::set("HOME", &home),
-        EnvVarGuard::set("USERPROFILE", &home),
-    ];
     let (parent, _child) = write_sweep_fixture(&home, &project);
 
     let db = open_project_session_db(&project).await.unwrap();
@@ -1466,21 +1422,9 @@ async fn cursor_sweep_skips_ambiguous_project_slug() {
 }
 
 #[tokio::test]
-// Intentional: this test pins process-wide profile storage while the Cursor
-// sweep resolves its project session DB.
-#[allow(clippy::await_holding_lock)]
 async fn cursor_sweep_ingests_profile_stored_project_without_legacy_local_database() {
     let tmp = TempDir::new().unwrap();
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
     let profile = tmp.path().join("profile");
-    let _env_guards = [
-        EnvVarGuard::set("TRACEDECAY_DATA_DIR", &profile),
-        EnvVarGuard::set(GLOBAL_DB_ENV, profile.join("global.db")),
-        EnvVarGuard::set("HOME", tmp.path().join("home")),
-        EnvVarGuard::set("USERPROFILE", tmp.path().join("home")),
-    ];
     let home = tmp.path().join("home");
     let project = tmp.path().join("unindexed");
     std::fs::create_dir_all(&project).unwrap();

@@ -188,6 +188,7 @@ impl GraphDb {
         let opened = open_validated_graph(&validated, GraphEngineOpenSite::Eager)?;
         if let Some(path) = validated.config.path.as_deref() {
             crate::sealed_store::sweep_abandoned_sealed_staging(path);
+            crate::sealed_store::sweep_abandoned_row_spills(path);
         }
         markers.bind(opened.identity);
         let graph = Arc::new(Self {
@@ -1607,6 +1608,23 @@ impl GraphDb {
                              canonical replay authorities re-project its generations"
                         );
                         opened
+                    }
+                }
+            }
+            Err(GraphDbError::FormatSuperseded { .. })
+                if persistent_store_state == PersistentGraphStoreState::Existing =>
+            {
+                let path = validated.config.path.as_deref().ok_or_else(|| {
+                    GraphDbError::unavailable("persistent graph database has no container path")
+                })?;
+                match crate::corrupt_store::replace_superseded_container(path, &|| {
+                    open_validated_graph(&validated, GraphEngineOpenSite::LazyFirstUse)
+                })? {
+                    crate::corrupt_store::CorruptStoreRecovery::Reopened(opened) => opened,
+                    crate::corrupt_store::CorruptStoreRecovery::Deleted => {
+                        let mut fresh = validated.clone();
+                        fresh.preexisting_store = false;
+                        open_validated_graph(&fresh, GraphEngineOpenSite::LazyFirstUse)?
                     }
                 }
             }

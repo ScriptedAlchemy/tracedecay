@@ -47,6 +47,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use grafeo_common::types::{EdgeId, NodeId, PropertyKey, Value};
 use grafeo_core::graph::compact::IncrementalCompactStoreBuilder;
@@ -71,7 +72,9 @@ use crate::state::{
 use crate::{
     GraphCommit, GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDurability,
     GraphEntity, GraphFormatVersion, GraphGenerationManifest, GraphGenerationManifestIdentity,
-    GraphNamespace, GraphProjectionId, GraphRelation, GraphWriteBatch, NeverCancelled,
+    GraphGenerationRowSpill, GraphGenerationRows, GraphNamespace, GraphProjectionId,
+    GraphProjectionIdentity, GraphRelation, GraphWriteBatch, NeverCancelled,
+    SpilledGraphGeneration,
 };
 
 /// Opens and verifies one dependency-free sealed generation without opening
@@ -493,6 +496,41 @@ pub(crate) fn sweep_abandoned_sealed_staging(database_path: &Path) {
             removed,
             "removed abandoned sealed staging directories left by interrupted seals"
         );
+    }
+}
+
+/// Prefix of a batch producer's row spill under the sealed root.
+const ROW_SPILL_PREFIX: &str = ".rows-";
+
+/// Removes every row spill another process left under the store's sealed
+/// root. Run at the eager open, whose exclusive store lock means no other
+/// process is producing rows for this store. Spills named for this process
+/// are skipped: a remount inside a live daemon may overlap its own publisher,
+/// whose spill removes itself when it drops.
+pub(crate) fn sweep_abandoned_row_spills(database_path: &Path) {
+    let root = sealed_store_root(database_path);
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return;
+    };
+    let own = format!("{ROW_SPILL_PREFIX}{}-", std::process::id());
+    for entry in entries.flatten() {
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(ROW_SPILL_PREFIX) && !name.starts_with(&own))
+        {
+            let path = entry.path();
+            if let Err(error) = std::fs::remove_dir_all(&path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(
+                    event = "graph_row_spill_sweep_failed",
+                    path = %path.display(),
+                    error = %error,
+                    "abandoned graph row spill could not be removed"
+                );
+            }
+        }
     }
 }
 
@@ -976,9 +1014,9 @@ impl GraphDb {
     /// (kill-switch set, memory-backed, or no reopen configuration), so the
     /// caller must stage and prove the generation the ordinary way.
     #[hotpath::measure(label = "graph_db.sealed_store.seal_direct", impl_type = "GraphDb")]
-    pub(crate) fn seal_generation_from_manifest(
+    pub(crate) fn seal_generation_directly(
         &self,
-        manifest: &GraphGenerationManifest,
+        rows: &GraphGenerationRows,
         expected: &GraphRecoveredGenerationDigestV1,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<Option<GraphCommit>, GraphDbError> {
@@ -992,8 +1030,14 @@ impl GraphDb {
             return Ok(None);
         };
         check()?;
-        manifest.validate_checked(check)?;
-        let identity = manifest.identity();
+        let source = match rows {
+            GraphGenerationRows::Manifest(manifest) => {
+                manifest.validate_checked(check)?;
+                SealedRowSource::Manifest(manifest)
+            }
+            GraphGenerationRows::Spilled(spilled) => SealedRowSource::Spilled(spilled),
+        };
+        let identity = rows.identity();
         if !identity.dependencies.is_empty() {
             return Err(GraphDbError::invalid(
                 "a direct sealed build requires a dependency-free generation",
@@ -1010,13 +1054,8 @@ impl GraphDb {
             // restage gets, not a silent rebuild underneath its readers.
             return Err(refusal);
         }
-        let (store, _) = build_or_open_sealed_store(
-            SealedRowSource::Manifest(manifest),
-            &identity,
-            expected,
-            &database_path,
-            check,
-        )?;
+        let (store, _) =
+            build_or_open_sealed_store(source, &identity, expected, &database_path, check)?;
         self.install_sealed_generation_store(locator.clone(), store)?;
         // The generation normally exists only as this sealed artifact: it is
         // sealed-only from its first instant, and no lease remembered for it
@@ -1050,6 +1089,33 @@ impl GraphDb {
                 message: "sealed generation is missing its projection commit".to_owned(),
             })?;
         Ok(Some(commit))
+    }
+
+    /// A row spill for one generation of `projection`, scratch space under
+    /// this store's sealed root. Registered stores are always persistent; a
+    /// memory-backed database has no disk to spill to and refuses typed.
+    pub(crate) fn generation_row_spill(
+        &self,
+        projection: GraphProjectionIdentity,
+    ) -> Result<GraphGenerationRowSpill, GraphDbError> {
+        static NEXT_SPILL: AtomicU64 = AtomicU64::new(0);
+        let database_path = self
+            .inner
+            .reopen
+            .as_ref()
+            .and_then(|reopen| reopen.config.path.as_deref())
+            .ok_or_else(|| {
+                GraphDbError::unavailable("a memory-backed graph store has no row spill root")
+            })?;
+        let root = sealed_store_root(database_path);
+        std::fs::create_dir_all(&root)
+            .map_err(|error| sealed_store_io_failure("row spill root create failed", error))?;
+        let directory = root.join(format!(
+            "{ROW_SPILL_PREFIX}{}-{}",
+            std::process::id(),
+            NEXT_SPILL.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        GraphGenerationRowSpill::create(directory, projection)
     }
 
     /// Opens an existing sealed store for `identity` without building one.
@@ -1275,6 +1341,9 @@ pub(crate) enum SealedRowSource<'a> {
     /// or read. The journal and the code generation it names remain the
     /// recovery source for every failure boundary of the build.
     Manifest(&'a GraphGenerationManifest),
+    /// The same rows, merged on disk by a batch producer. Always
+    /// dependency-free, and recoverable from the same journal.
+    Spilled(&'a SpilledGraphGeneration),
 }
 
 /// Builds (or adopts) the sealed store for `identity` and returns the
@@ -1398,6 +1467,16 @@ fn build_sealed_container(
                 SealedRowSource::Manifest(manifest) => {
                     let counts = push_manifest_rows(
                         manifest,
+                        identity,
+                        &physical_namespace,
+                        &mut sealed,
+                        check,
+                    )?;
+                    Ok((counts.0, counts.1, BTreeMap::new()))
+                }
+                SealedRowSource::Spilled(spilled) => {
+                    let counts = push_spilled_rows(
+                        spilled,
                         identity,
                         &physical_namespace,
                         &mut sealed,
@@ -1563,6 +1642,119 @@ fn push_manifest_rows(
         Ok::<(), GraphDbError>(())
     })?;
     Ok((entities.len(), manifest.relations.len()))
+}
+
+/// Pushes a spilled generation's merged rows in the same order and shape as
+/// [`push_manifest_rows`]: entities stream in identity order and take the
+/// first sealed node ids, then relations stream in identity order with each
+/// endpoint resolved to its entity's position in the resident identity list.
+/// Only one window of decoded rows is held at a time.
+fn push_spilled_rows(
+    spilled: &SpilledGraphGeneration,
+    identity: &GraphGenerationManifestIdentity,
+    physical_namespace: &GraphNamespace,
+    sealed: &mut SealedCompactRows,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<(usize, usize), GraphDbError> {
+    let projection = &identity.projection.projection;
+    let workers = rayon::current_thread_index()
+        .map(|_| rayon::current_num_threads())
+        .unwrap_or(1);
+    let row_window = workers.max(1).saturating_mul(512);
+    hotpath::gauge!("code_index.seal.encode.effective_workers").set(workers);
+    let (entity_count, relation_count) = spilled.row_counts();
+    hotpath::measure_block!("code_index.seal.encode.entities", {
+        let mut rows = spilled.entities()?;
+        let mut pushed = 0usize;
+        loop {
+            let window = rows
+                .by_ref()
+                .take(row_window)
+                .map(|row| row.map(|(entity, _)| entity))
+                .collect::<Result<Vec<_>, _>>()?;
+            if window.is_empty() {
+                break;
+            }
+            check()?;
+            let prepared = collect_prepared_rows_ordered(&window, |_, entity| {
+                Ok(SealedCompactRows::prepare_entity(
+                    physical_namespace,
+                    projection,
+                    entity,
+                ))
+            })?;
+            for prepared in prepared {
+                let node = sealed.push_prepared_node(prepared)?;
+                if usize::try_from(node.as_u64()).ok() != Some(pushed) {
+                    return Err(GraphDbError::Corrupt {
+                        message: "sealed build entity ids diverged from spilled order".to_owned(),
+                    });
+                }
+                pushed += 1;
+            }
+        }
+        if pushed != entity_count {
+            return Err(GraphDbError::Corrupt {
+                message: "sealed build read a different entity count than was spilled".to_owned(),
+            });
+        }
+        Ok::<(), GraphDbError>(())
+    })?;
+    hotpath::measure_block!("code_index.seal.encode.relations", {
+        let mut rows = spilled.relations()?;
+        let mut pushed = 0usize;
+        loop {
+            let window = rows
+                .by_ref()
+                .take(row_window)
+                .collect::<Result<Vec<_>, _>>()?;
+            if window.is_empty() {
+                break;
+            }
+            check()?;
+            let start = pushed;
+            let prepared = collect_prepared_rows_ordered(
+                &window,
+                |offset, (relation, endpoints)| {
+                    let mut nodes = [NodeId::new(0); 2];
+                    for (slot, endpoint) in nodes.iter_mut().zip(endpoints) {
+                        let index = spilled.entity_index(endpoint).ok_or_else(|| {
+                            GraphDbError::Corrupt {
+                                message: format!(
+                                    "local relation endpoint `{endpoint}` is absent from the candidate generation"
+                                ),
+                            }
+                        })?;
+                        *slot = NodeId::new(u64::try_from(index).map_err(|_| {
+                            GraphDbError::unavailable("sealed entity count exceeds u64")
+                        })?);
+                    }
+                    let edge_index = u64::try_from(start.saturating_add(offset)).map_err(|_| {
+                        GraphDbError::unavailable("sealed relation count exceeds u64")
+                    })?;
+                    let stored = relation.storage_relation()?;
+                    let prepared = SealedCompactRows::prepare_relation(
+                        physical_namespace,
+                        projection,
+                        &stored,
+                        EdgeId::new(edge_index),
+                    )?;
+                    Ok((prepared, nodes))
+                },
+            )?;
+            for (prepared, nodes) in prepared {
+                sealed.push_prepared_relation(prepared, nodes[0], nodes[1])?;
+                pushed += 1;
+            }
+        }
+        if pushed != relation_count {
+            return Err(GraphDbError::Corrupt {
+                message: "sealed build read a different relation count than was spilled".to_owned(),
+            });
+        }
+        Ok::<(), GraphDbError>(())
+    })?;
+    Ok((entity_count, relation_count))
 }
 
 /// Pushes a staged generation's rows out of the shared staging database.

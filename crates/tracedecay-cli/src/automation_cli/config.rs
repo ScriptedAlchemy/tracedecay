@@ -1,5 +1,6 @@
 use crate::cli::AutomationConfigAction;
 use crate::resolve_cli_project_root;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 pub(crate) fn project_automation_reconcile_args() -> serde_json::Value {
     serde_json::json!({
@@ -9,9 +10,11 @@ pub(crate) fn project_automation_reconcile_args() -> serde_json::Value {
 }
 
 pub(crate) async fn notify_project_automation_scheduler(
+    profile: &ProfileRoot,
     project_path: &std::path::Path,
 ) -> tracedecay_domain::errors::Result<()> {
     crate::commands::daemon_tool_json(
+        profile,
         Some(project_path),
         "tracedecay_admin_project",
         project_automation_reconcile_args(),
@@ -21,6 +24,7 @@ pub(crate) async fn notify_project_automation_scheduler(
 }
 
 pub(super) async fn handle_automation_config_command(
+    profile: &ProfileRoot,
     action: AutomationConfigAction,
 ) -> tracedecay_domain::errors::Result<()> {
     use tracedecay_automation_runtime::automation::config::{
@@ -34,10 +38,10 @@ pub(super) async fn handle_automation_config_command(
         | AutomationConfigAction::Disable { path, .. }
         | AutomationConfigAction::Set { path, .. } => path.clone(),
     };
-    let requested = resolve_cli_project_root(path, None, None).await?;
-    let resolved = crate::commands::resolve_project_scope(requested).await?;
-    let current = load_canonical_automation_config(&resolved.project_path).await?;
-    let codex = load_canonical_codex_executable(&resolved.project_path).await?;
+    let requested = resolve_cli_project_root(profile, path, None, None).await?;
+    let resolved = crate::commands::resolve_project_scope(profile, requested).await?;
+    let current = load_canonical_automation_config(profile, &resolved.project_path).await?;
+    let codex = load_canonical_codex_executable(profile, &resolved.project_path).await?;
     let patch = match action {
         AutomationConfigAction::Get { json, .. } => {
             print_automation_config(&current, &codex, json, false)?;
@@ -125,16 +129,18 @@ pub(super) async fn handle_automation_config_command(
         }
     };
 
-    let effective = apply_project_automation_patch(&resolved.project_path, patch).await?;
+    let effective = apply_project_automation_patch(profile, &resolved.project_path, patch).await?;
     print_automation_config(&effective, &codex, true, false)
 }
 
 pub(crate) async fn load_canonical_automation_config(
+    profile: &ProfileRoot,
     project_path: &std::path::Path,
 ) -> tracedecay_domain::errors::Result<
     tracedecay_automation_runtime::automation::config::AutomationConfig,
 > {
     match crate::commands::current_project_setting(
+        profile,
         project_path,
         tracedecay_domain::configuration::AUTOMATION_SETTINGS_SETTING_KEY,
     )
@@ -153,10 +159,12 @@ pub(crate) async fn load_canonical_automation_config(
 /// The `codex` executable the project's `lcm.summarizer_executables.v1`
 /// setting binds; the automation backend spawns only this path.
 async fn load_canonical_codex_executable(
+    profile: &ProfileRoot,
     project_path: &std::path::Path,
 ) -> tracedecay_domain::errors::Result<tracedecay_domain::configuration::LcmSummarizerExecutableV1>
 {
     match crate::commands::current_project_setting(
+        profile,
         project_path,
         tracedecay_domain::configuration::LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
     )
@@ -172,20 +180,23 @@ async fn load_canonical_codex_executable(
 }
 
 pub(crate) async fn apply_project_automation_patch(
+    profile: &ProfileRoot,
     project_path: &std::path::Path,
     patch: tracedecay_automation_runtime::automation::config::AutomationConfigPatch,
 ) -> tracedecay_domain::errors::Result<
     tracedecay_automation_runtime::automation::config::AutomationConfig,
 > {
-    let resolved = crate::commands::resolve_project_scope(project_path.to_path_buf()).await?;
-    let current = load_canonical_automation_config(&resolved.project_path).await?;
+    let resolved =
+        crate::commands::resolve_project_scope(profile, project_path.to_path_buf()).await?;
+    let current = load_canonical_automation_config(profile, &resolved.project_path).await?;
     let effective = tracedecay_automation_runtime::automation::config::effective_config(
         &current,
         Some(&patch),
     )?;
     if effective != current {
         let expected_revision =
-            crate::commands::current_configuration_revision(&resolved.project_path).await?;
+            crate::commands::current_configuration_revision(profile, &resolved.project_path)
+                .await?;
         let mutation = crate::commands::project_configuration_set(
             &resolved.project_id,
             tracedecay_domain::configuration::AUTOMATION_SETTINGS_SETTING_KEY,
@@ -194,6 +205,7 @@ pub(crate) async fn apply_project_automation_patch(
             )),
         )?;
         let receipt = crate::commands::mutate_project_configuration(
+            profile,
             &resolved.project_path,
             &resolved.project_id,
             expected_revision,
@@ -201,7 +213,7 @@ pub(crate) async fn apply_project_automation_patch(
         )
         .await?;
         crate::commands::report_configuration_receipt(receipt.as_ref());
-        notify_project_automation_scheduler(&resolved.project_path).await?;
+        notify_project_automation_scheduler(profile, &resolved.project_path).await?;
     }
     Ok(effective)
 }

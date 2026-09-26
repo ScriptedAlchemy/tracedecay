@@ -40,7 +40,7 @@ mod goal_event_tests {
     };
     use crate::runtime::ingest::project_provider::ProjectProviderRun;
     use crate::runtime::source::{HostProviderCoverage, read_host_provider_coverage};
-    use crate::runtime::{SessionProvider, with_transcript_source_home};
+    use crate::runtime::{SessionProvider, with_transcript_source_profile};
 
     fn goal_event_line(objective: &str, status: &str) -> Value {
         json!({
@@ -884,8 +884,8 @@ mod goal_event_tests {
 
         for pass_index in 0..failure_ceiling {
             let before = admission.observations().len();
-            let outcome = with_transcript_source_home(
-                home.clone(),
+            let outcome = with_transcript_source_profile(
+                tracedecay_runtime_core::config::ProfileRoot::under_home(home.clone()),
                 ProjectProviderRun {
                     project_root: &project,
                     project_id: &project_id,

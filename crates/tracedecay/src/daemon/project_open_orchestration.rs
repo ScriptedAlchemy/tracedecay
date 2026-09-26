@@ -426,7 +426,8 @@ pub(super) async fn schedule_portable_project_server_warmup(
     initialize_request: JsonRpcRequest,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> Result<()> {
-    let (canonical_project_path, route) = project_route_for_handshake(&handshake)?;
+    let (canonical_project_path, route) =
+        project_route_for_handshake(&handshake, store_administration.owner_home()?)?;
     if portable_cached_project_server(
         &store_administration,
         &canonical_project_path,
@@ -475,7 +476,8 @@ pub(super) async fn portable_project_server_for_request(
     requirement: ProjectServerRequirement,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> Result<Arc<crate::mcp::McpServer>> {
-    let (canonical_project_path, route) = project_route_for_handshake(handshake)?;
+    let (canonical_project_path, route) =
+        project_route_for_handshake(handshake, store_administration.owner_home()?)?;
     // Heap-allocate the cached-server probe: this future is embedded by value
     // in every connection-serving composition, and its resident frame
     // overflows the worker stack in perf-profile layouts when inlined.
@@ -605,8 +607,9 @@ pub(super) async fn portable_project_server_for_request(
 pub(super) async fn portable_cached_project_open_failure(
     project_open_gates: &tokio::sync::Mutex<ProjectOpenGates>,
     handshake: &DaemonHandshake,
+    owner_home: Option<&Path>,
 ) -> Result<Option<ProjectOpenFailure>> {
-    let (_, route) = project_route_for_handshake(handshake)?;
+    let (_, route) = project_route_for_handshake(handshake, owner_home)?;
     let tasks = project_open_tasks(project_open_gates).await;
     Ok(tasks.cached_failure(&route))
 }

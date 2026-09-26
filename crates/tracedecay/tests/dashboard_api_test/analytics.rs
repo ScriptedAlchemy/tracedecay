@@ -5,9 +5,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::common::{
-    GLOBAL_DB_ENV_LOCK as ENV_LOCK, MessageRecordBuilder, TraceDecayStorageEnvGuard,
-    canonicalize_test_dir, create_runtime, get_json, http_agent, pick_free_port, tempdir_or_panic,
-    wait_for_dashboard,
+    MessageRecordBuilder, canonicalize_test_dir, create_runtime, get_json, http_agent,
+    isolated_profile_under_home, pick_free_port, tempdir_or_panic, wait_for_dashboard,
 };
 use crate::runtime::DashboardTestRuntimeV1;
 use serde_json::Value;
@@ -26,7 +25,6 @@ use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
 struct Fixture {
     _tmp: TempDir,
-    _storage: TraceDecayStorageEnvGuard,
     base_url: String,
     server: tokio::task::JoinHandle<()>,
     project_root: PathBuf,
@@ -472,7 +470,7 @@ async fn seed_fallback_analytics(runtime: &DashboardTestRuntimeV1, project_root:
 
 async fn start_fixture(seed_durable_events: bool) -> Fixture {
     let tmp = tempdir_or_panic();
-    let storage = TraceDecayStorageEnvGuard::for_tempdir(&tmp);
+    let profile = isolated_profile_under_home(&tmp.path().join("home"));
     let project_root = canonicalize_test_dir(&tmp.path().join("project"));
     std::fs::write(
         project_root.join("lib.rs"),
@@ -480,14 +478,14 @@ async fn start_fixture(seed_durable_events: bool) -> Fixture {
     )
     .expect("seed source file");
 
-    let profile_root = storage.profile_root().to_path_buf();
-    let global_db_path = storage.global_db_path().to_path_buf();
+    let profile_root = profile.data_dir().to_path_buf();
+    let global_db_path = profile.global_db_path();
     let project_id = tracedecay_domain::ProjectId::new(
         tracedecay_runtime_core::storage::default_profile_project_id(&project_root),
     )
     .expect("project identity");
     let host_runtime = Arc::new(
-        DashboardTestRuntimeV1::project(&profile_root, &project_root, project_id)
+        DashboardTestRuntimeV1::project(&profile, &project_root, project_id)
             .await
             .expect("analytics host-admission runtime"),
     );
@@ -511,12 +509,14 @@ async fn start_fixture(seed_durable_events: bool) -> Fixture {
     let base_url = format!("http://127.0.0.1:{port}");
     let server_runtime = Arc::clone(&host_runtime);
     let server_graph = Arc::new(cg);
+    let server_profile = profile.clone();
     let server = tokio::spawn(async move {
         let authority = server_runtime
             .dashboard_test_authority()
             .expect("dashboard analytics authority");
         let _ = dashboard::run_until_shutdown_for_tests_with_host_admission(
             server_graph,
+            &server_profile,
             authority,
             tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             tracedecay_dashboard_api::DashboardTestEndpointV1 {
@@ -535,7 +535,6 @@ async fn start_fixture(seed_durable_events: bool) -> Fixture {
 
     Fixture {
         _tmp: tmp,
-        _storage: storage,
         base_url,
         server,
         project_root,
@@ -563,9 +562,6 @@ fn has_row(rows: &Value, key: &str, value: &str) -> bool {
 
 #[test]
 fn analytics_api_advertises_and_aggregates_session_usage() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(false).await;
@@ -626,9 +622,6 @@ fn analytics_api_advertises_and_aggregates_session_usage() {
 
 #[test]
 fn analytics_api_prefers_durable_events_when_available() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(true).await;
@@ -656,9 +649,6 @@ fn analytics_api_prefers_durable_events_when_available() {
 
 #[test]
 fn analytics_diagnostics_reports_tool_hook_and_prompt_rollups() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(true).await;
@@ -713,9 +703,6 @@ fn analytics_diagnostics_reports_tool_hook_and_prompt_rollups() {
 /// back to showing a rollup captioned as a tree.
 #[test]
 fn subagent_tree_route_answers_seeded_delegation_edges_as_a_tree() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(true).await;
@@ -795,9 +782,6 @@ fn subagent_tree_route_answers_seeded_delegation_edges_as_a_tree() {
 
 #[test]
 fn analytics_api_filters_fallback_events_to_current_project() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(false).await;
@@ -829,9 +813,6 @@ fn analytics_api_filters_fallback_events_to_current_project() {
 
 #[test]
 fn analytics_api_uses_recent_durable_events_when_window_is_capped() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(false).await;
@@ -873,9 +854,6 @@ fn analytics_api_uses_recent_durable_events_when_window_is_capped() {
 /// `metric_parity_view`, which panics on a metric that omits one.
 #[test]
 fn canonical_observatory_and_costs_reads_stamp_real_observed_windows() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(true).await;
@@ -937,9 +915,6 @@ fn metric_parity_view(metrics: &Value) -> Vec<Value> {
 
 #[test]
 fn observatory_counts_canonical_failed_outcomes() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(false).await;
@@ -976,9 +951,6 @@ fn observatory_counts_canonical_failed_outcomes() {
 
 #[test]
 fn observatory_serves_rejected_argument_groups_from_seeded_observations() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(false).await;

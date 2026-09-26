@@ -132,7 +132,21 @@ pub const fn http_application_owner_kind(
         | ApplicationSurfaceOperation::GodClass
         | ApplicationSurfaceOperation::UnsafePatterns
         | ApplicationSurfaceOperation::Constructors
-        | ApplicationSurfaceOperation::FieldSites => return None,
+        | ApplicationSurfaceOperation::FieldSites
+        | ApplicationSurfaceOperation::FindExactSymbol
+        | ApplicationSurfaceOperation::ByQualifiedName
+        | ApplicationSurfaceOperation::Signature
+        | ApplicationSurfaceOperation::Derives
+        | ApplicationSurfaceOperation::Grep
+        | ApplicationSurfaceOperation::AstGrepSearch
+        | ApplicationSurfaceOperation::Affected
+        | ApplicationSurfaceOperation::DiffContext
+        | ApplicationSurfaceOperation::Changelog
+        | ApplicationSurfaceOperation::CommitContext
+        | ApplicationSurfaceOperation::PrContext
+        | ApplicationSurfaceOperation::BranchSearch
+        | ApplicationSurfaceOperation::BranchDiff
+        | ApplicationSurfaceOperation::BranchList => return None,
         ApplicationSurfaceOperation::FactStoreCurate
         | ApplicationSurfaceOperation::FactStoreAdd
         | ApplicationSurfaceOperation::FactStoreSearch

@@ -2,10 +2,13 @@ mod analytics;
 mod envelope;
 mod evidence;
 mod problem;
+mod problem_detail;
 mod receipt;
 mod stream;
 
-pub use analytics::{ContextMemoryAnalyticsV1, InvocationAnalyticsV1};
+pub use analytics::{
+    ContextMemoryAnalyticsV1, InvocationAnalyticsV1, PrContextAnalyticsV1, PrContextStageTimingsV1,
+};
 pub use envelope::{
     APPLICATION_PROBLEM_REVISION, ApplicationEnvelope, ApplicationOutcome,
     ApplicationProblemEnvelope, ApplicationProblemRecord, ApplicationResult, MAX_PROBLEM_DETAILS,
@@ -23,6 +26,7 @@ pub use problem::{
     ApplicationUnavailableClassV1, LegalAction, ProblemOwningLayer, ProblemTerminality,
     RUNTIME_MOUNTING_REASON_CODE, RetryDirective, RetryScope, SafeDiagnostic,
 };
+pub use problem_detail::ApplicationProblemDetailV1;
 pub use receipt::{
     CancellationObservation, CancellationStage, EffectId, EffectReceipt, EffectResult,
     EffectTermination, IdempotencyKey, OperationBudgetUsage, OperationReceipt,

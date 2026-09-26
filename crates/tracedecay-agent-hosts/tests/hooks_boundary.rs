@@ -12,6 +12,7 @@ use tracedecay_domain::NativeHostIdentityV1;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{ProjectId, UtcMicros};
 use tracedecay_hooks::{DaemonHookEvent, NativeHookCaptureSourceV1, NativeHookDecodeError};
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_runtime_core::storage::StoreLayout;
 
 #[test]
@@ -93,24 +94,33 @@ fn installed_but_unsupported_events_remain_successful_noop_candidates() {
 #[tokio::test]
 async fn two_hook_runtime_handles_coexist_without_first_registration_wins() {
     fn runtime(
+        profile: ProfileRoot,
         timing_gate: hook_runtime::HookTimingGate,
         daemon_tool: hook_runtime::DaemonToolInvoker,
     ) -> hook_runtime::HookRuntimeV1 {
-        fn project_root(_: &Path) -> Pin<Box<dyn Future<Output = Option<PathBuf>> + Send + '_>> {
+        fn project_root<'a>(
+            _: &'a ProfileRoot,
+            _: &'a Path,
+        ) -> Pin<Box<dyn Future<Output = Option<PathBuf>> + Send + 'a>> {
             Box::pin(async { None })
         }
         fn scope(_: &Path, _: &ProjectId) -> Result<ResolvedScope, String> {
             Err("fixture has no scope resolver".to_owned())
         }
-        fn notify(_: &Path, _: DaemonHookEvent) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        fn notify<'a>(
+            _: &'a ProfileRoot,
+            _: &'a Path,
+            _: DaemonHookEvent,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
             Box::pin(async {})
         }
-        fn initialized(_: &Path) -> bool {
+        fn initialized(_: &ProfileRoot, _: &Path) -> bool {
             false
         }
-        fn layout(
-            _: &Path,
-        ) -> Pin<Box<dyn Future<Output = tracedecay_domain::errors::Result<StoreLayout>> + Send + '_>>
+        fn layout<'a>(
+            _: &'a ProfileRoot,
+            _: &'a Path,
+        ) -> Pin<Box<dyn Future<Output = tracedecay_domain::errors::Result<StoreLayout>> + Send + 'a>>
         {
             Box::pin(async {
                 Err(TraceDecayError::Config {
@@ -119,6 +129,7 @@ async fn two_hook_runtime_handles_coexist_without_first_registration_wins() {
             })
         }
         hook_runtime::HookRuntimeV1 {
+            profile,
             daemon_tool,
             project_root_resolver: project_root,
             scope_resolver: scope,
@@ -135,6 +146,7 @@ async fn two_hook_runtime_handles_coexist_without_first_registration_wins() {
         Some(false)
     }
     fn tool_first<'a>(
+        _: &'a ProfileRoot,
         _: Option<&'a Path>,
         _: &'a str,
         _: Value,
@@ -143,6 +155,7 @@ async fn two_hook_runtime_handles_coexist_without_first_registration_wins() {
         Box::pin(async { Ok(json!({ "handle": "first" })) })
     }
     fn tool_second<'a>(
+        _: &'a ProfileRoot,
         _: Option<&'a Path>,
         _: &'a str,
         _: Value,
@@ -155,19 +168,29 @@ async fn two_hook_runtime_handles_coexist_without_first_registration_wins() {
         })
     }
 
-    let first = runtime(timings_on, tool_first);
-    let second = runtime(timings_off, tool_second);
+    let first_home = tempfile::tempdir().expect("first profile home");
+    let second_home = tempfile::tempdir().expect("second profile home");
+    let first = runtime(
+        ProfileRoot::under_home(first_home.path()),
+        timings_on,
+        tool_first,
+    );
+    let second = runtime(
+        ProfileRoot::under_home(second_home.path()),
+        timings_off,
+        tool_second,
+    );
     let root = Path::new("/workspace/project");
 
     assert_eq!((first.timing_gate)(root), Some(true));
     assert_eq!((second.timing_gate)(root), Some(false));
     assert_eq!(
-        (first.daemon_tool)(None, "tracedecay_status", json!({}), false)
+        (first.daemon_tool)(&first.profile, None, "tracedecay_status", json!({}), false)
             .await
             .expect("first handle's daemon answers"),
         json!({ "handle": "first" })
     );
-    let error = (second.daemon_tool)(None, "tracedecay_status", json!({}), false)
+    let error = (second.daemon_tool)(&second.profile, None, "tracedecay_status", json!({}), false)
         .await
         .expect_err("second handle must not borrow the first handle's daemon");
     assert!(error.to_string().contains("second handle has no daemon"));

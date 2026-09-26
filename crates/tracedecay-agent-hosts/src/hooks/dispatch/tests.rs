@@ -11,6 +11,7 @@ use tracedecay_hooks::{
     HookAdmissionReceiptV1, HookDeliveryFutureV1, HookFeedbackDeliveryOutcomeV1,
     HookGuidanceDispositionV1, HookScopedFeedbackV1,
 };
+use tracedecay_runtime_core::config::ProfileRoot;
 
 /// Test shim over [`super::native_material`], which now takes the identity
 /// fields `prepare_bound_hook` already decoded. These cases start from the raw
@@ -433,6 +434,8 @@ fn opencode_lsp_fixture_event() -> (serde_json::Value, String) {
 
 #[tokio::test]
 async fn opencode_lsp_updated_uses_project_scoped_daemon_action() {
+    let profile_home = tempfile::tempdir().unwrap();
+    let profile = ProfileRoot::under_home(profile_home.path());
     let project = tempfile::tempdir().unwrap();
     let (event, event_json) = opencode_lsp_fixture_event();
     let guard = crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
@@ -441,7 +444,7 @@ async fn opencode_lsp_updated_uses_project_scoped_daemon_action() {
     })]);
 
     let dispatch = dispatch_opencode_lsp_updated(
-        &crate::ports::hook_runtime::crate_test_runtime(),
+        &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
         &event_json,
         project.path(),
         None,
@@ -464,6 +467,8 @@ async fn opencode_lsp_updated_uses_project_scoped_daemon_action() {
 
 #[tokio::test]
 async fn opencode_lsp_updated_rejects_non_accepted_daemon_status() {
+    let profile_home = tempfile::tempdir().unwrap();
+    let profile = ProfileRoot::under_home(profile_home.path());
     let project = tempfile::tempdir().unwrap();
     let (_event, event_json) = opencode_lsp_fixture_event();
     let _guard = crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
@@ -472,7 +477,7 @@ async fn opencode_lsp_updated_rejects_non_accepted_daemon_status() {
     })]);
 
     let dispatch = dispatch_opencode_lsp_updated(
-        &crate::ports::hook_runtime::crate_test_runtime(),
+        &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
         &event_json,
         project.path(),
         None,
@@ -486,6 +491,8 @@ async fn opencode_lsp_updated_rejects_non_accepted_daemon_status() {
 
 #[tokio::test]
 async fn delivery_receipt_withheld_when_ineligible_or_foreign_envelope() {
+    let profile_home = tempfile::tempdir().unwrap();
+    let profile = ProfileRoot::under_home(profile_home.path());
     let project = tempfile::tempdir().unwrap();
     let notice = sample_notice();
     let mut envelope = sample_envelope(&notice);
@@ -501,7 +508,7 @@ async fn delivery_receipt_withheld_when_ineligible_or_foreign_envelope() {
         receipt_id: [3; 16],
         ..receipt.clone()
     };
-    let runtime = crate::ports::hook_runtime::crate_test_runtime();
+    let runtime = crate::ports::hook_runtime::crate_test_runtime(profile.clone());
     let port = DaemonDeliveryReceiptPort::new(&runtime, project.path());
     let rollback = HookFeedbackRollbackSwitchV1 {
         configuration_revision: 1,
@@ -914,7 +921,8 @@ fn opencode_rendered_plugin_queues_only_tool_after_lifecycle_identity() {
 /// moment waits for the peer instead of failing the open with `Busy`.
 #[test]
 fn binding_publication_waits_for_a_live_callback_holding_the_spool() {
-    let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let profile_home = tempfile::tempdir().unwrap();
+    let profile = ProfileRoot::under_home(profile_home.path());
     let project = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
     tracedecay_runtime_core::storage::pin_fixture_repository_identity(
@@ -924,7 +932,7 @@ fn binding_publication_waits_for_a_live_callback_holding_the_spool() {
     .unwrap();
     let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
         &project_root,
-        &tracedecay_runtime_core::storage::default_profile_root().unwrap(),
+        profile.data_dir(),
         "proj_hook_binding_contention",
     )
     .unwrap();
@@ -933,7 +941,7 @@ fn binding_publication_waits_for_a_live_callback_holding_the_spool() {
     }
     let runtime = HookRuntimeV1 {
         scope_resolver: contention_scope,
-        ..crate::ports::hook_runtime::crate_test_runtime()
+        ..crate::ports::hook_runtime::crate_test_runtime(profile.clone())
     };
     publish_daemon_bindings(&runtime, &layout).unwrap();
 

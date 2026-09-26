@@ -1,16 +1,19 @@
 use std::path::Path;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use crate::{commands::daemon_tool_json, current_unix_timestamp};
 
 pub(crate) use tracedecay_runtime_core::storage::{ProjectStorageLocation, ProjectStorageStatus};
 
 pub(crate) fn classify_project_storage(
+    profile: &ProfileRoot,
     project_root: &Path,
 ) -> tracedecay_domain::errors::Result<ProjectStorageLocation> {
-    tracedecay_runtime_core::storage::classify_project_storage(project_root)
+    tracedecay_runtime_core::storage::classify_project_storage(profile.data_dir(), project_root)
 }
 
 pub(crate) async fn classify_project_storage_with_registry(
+    profile: &ProfileRoot,
     project_root: &Path,
     registry: Option<
         &tracedecay_global_db::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime,
@@ -18,7 +21,7 @@ pub(crate) async fn classify_project_storage_with_registry(
     profile_root: Option<&Path>,
 ) -> tracedecay_domain::errors::Result<ProjectStorageLocation> {
     let (Some(registry), Some(profile_root)) = (registry, profile_root) else {
-        return classify_project_storage(project_root);
+        return classify_project_storage(profile, project_root);
     };
     registry
         .classify_project_storage(project_root, profile_root)
@@ -102,6 +105,7 @@ pub(crate) fn try_flush(
 /// parallel). If `skip_suppression` is false, the warning is suppressed for 15
 /// minutes after it was last shown; if true it is always shown (used for status).
 pub(crate) fn check_for_update(
+    profile: &ProfileRoot,
     config: &mut tracedecay_session_memory::user_config::UserConfig,
     skip_cache: bool,
     skip_suppression: bool,
@@ -117,7 +121,7 @@ pub(crate) fn check_for_update(
     } else if let Some(v) = crate::cloud::fetch_latest_version() {
         config.cached_latest_version = v.clone();
         config.last_version_check_at = now;
-        if let Err(err) = config.save_if_exists() {
+        if let Err(err) = config.save_if_exists(profile.data_dir()) {
             eprintln!("warning: could not save tracedecay config: {err}");
         }
         v
@@ -141,7 +145,7 @@ pub(crate) fn check_for_update(
         );
         if !skip_suppression {
             config.last_version_warning_at = now;
-            if let Err(err) = config.save_if_exists() {
+            if let Err(err) = config.save_if_exists(profile.data_dir()) {
                 eprintln!("warning: could not save tracedecay config: {err}");
             }
         }
@@ -183,10 +187,12 @@ pub(crate) fn tracedecay_dir_size(dir: &Path) -> u64 {
 /// interpret an unavailable daemon or malformed registry response as an empty
 /// registry.
 pub(crate) async fn gather_target_projects(
+    profile: &ProfileRoot,
     all: bool,
 ) -> tracedecay_domain::errors::Result<Vec<std::path::PathBuf>> {
     if all {
         let payload = daemon_tool_json(
+            profile,
             None,
             "tracedecay_admin_cli",
             serde_json::json!({
@@ -198,7 +204,7 @@ pub(crate) async fn gather_target_projects(
         .await?;
         registry_project_roots(&payload)
     } else {
-        Ok(gather_local_projects())
+        Ok(gather_local_projects(profile))
     }
 }
 
@@ -230,11 +236,11 @@ fn registry_project_roots(
 }
 
 /// Returns initialized project roots at cwd, an ancestor, or a descendant.
-pub(crate) fn gather_local_projects() -> Vec<std::path::PathBuf> {
+pub(crate) fn gather_local_projects(profile: &ProfileRoot) -> Vec<std::path::PathBuf> {
     let Ok(cwd) = std::env::current_dir() else {
         return Vec::new();
     };
-    gather_local_projects_from(&cwd)
+    gather_local_projects_from(profile, &cwd)
 }
 
 /// Same as [`gather_local_projects`] but takes the starting directory explicitly.
@@ -242,13 +248,16 @@ pub(crate) fn gather_local_projects() -> Vec<std::path::PathBuf> {
 /// Ancestors count when they host a profile-sharded store or, at a worktree
 /// root, the repository identity marker; ambient roots (filesystem root, the
 /// user's home) never do. Descendants count by repository identity marker.
-pub(crate) fn gather_local_projects_from(cwd: &Path) -> Vec<std::path::PathBuf> {
+pub(crate) fn gather_local_projects_from(
+    profile: &ProfileRoot,
+    cwd: &Path,
+) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
     for dir in cwd.ancestors() {
-        if tracedecay_runtime_core::config::is_initialized_project_root(dir)
-            && !tracedecay_runtime_core::config::is_ambient_project_root(dir)
+        if profile.is_initialized_project_root(dir)
+            && !profile.is_ambient_project_root(dir)
             && seen.insert(dir.to_path_buf())
         {
             out.push(dir.to_path_buf());
@@ -410,34 +419,37 @@ mod gather_tests {
 
     #[test]
     fn finds_project_at_cwd() {
-        let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let profile_dir = tempfile::tempdir().unwrap();
+        let profile = &ProfileRoot::new(profile_dir.path());
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().canonicalize().unwrap();
         make_enrolled_project(&cwd, "proj_cwd");
 
-        let out = gather_local_projects_from(&cwd);
+        let out = gather_local_projects_from(profile, &cwd);
         assert_eq!(out, vec![cwd]);
     }
 
     #[test]
     fn finds_profile_sharded_store_at_cwd() {
-        let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let profile_dir = tempfile::tempdir().unwrap();
+        let profile = &ProfileRoot::new(profile_dir.path());
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().canonicalize().unwrap();
         let store = tracedecay_runtime_core::storage::default_profile_sharded_layout(
             &cwd,
-            &tracedecay_runtime_core::config::user_data_dir().unwrap(),
+            profile.data_dir(),
         )
         .unwrap();
         fs::create_dir_all(&store.data_root).unwrap();
         fs::write(&store.graph_db_path, b"").unwrap();
 
-        assert_eq!(gather_local_projects_from(&cwd), vec![cwd]);
+        assert_eq!(gather_local_projects_from(profile, &cwd), vec![cwd]);
     }
 
     #[test]
     fn ignores_repo_local_graph_database_directories() {
-        let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let profile_dir = tempfile::tempdir().unwrap();
+        let profile = &ProfileRoot::new(profile_dir.path());
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().canonicalize().unwrap();
         let child = cwd.join("child");
@@ -446,7 +458,7 @@ mod gather_tests {
             fs::write(root.join(".tracedecay/tracedecay.db"), b"").unwrap();
         }
 
-        let out = gather_local_projects_from(&cwd);
+        let out = gather_local_projects_from(profile, &cwd);
         assert!(
             out.is_empty(),
             "repo-local data dirs are not projects: {out:?}"
@@ -455,7 +467,8 @@ mod gather_tests {
 
     #[test]
     fn finds_both_ancestor_and_descendant_dedup() {
-        let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let profile_dir = tempfile::tempdir().unwrap();
+        let profile = &ProfileRoot::new(profile_dir.path());
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         let cwd = root.join("mid");
@@ -465,7 +478,7 @@ mod gather_tests {
         make_enrolled_project(&child, "proj_child");
         make_enrolled_project(&root, "proj_root");
 
-        let out = gather_local_projects_from(&cwd);
+        let out = gather_local_projects_from(profile, &cwd);
         assert!(out.contains(&root));
         assert!(out.contains(&child));
         let unique: std::collections::HashSet<_> = out.iter().collect();
@@ -474,7 +487,8 @@ mod gather_tests {
 
     #[test]
     fn finds_profile_enrolled_projects_without_graph_db() {
-        let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let profile_dir = tempfile::tempdir().unwrap();
+        let profile = &ProfileRoot::new(profile_dir.path());
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         let cwd = root.join("mid");
@@ -499,7 +513,7 @@ mod gather_tests {
         )
         .unwrap();
 
-        let out = gather_local_projects_from(&cwd);
+        let out = gather_local_projects_from(profile, &cwd);
 
         assert!(
             out.contains(&root),
@@ -569,14 +583,15 @@ mod gather_tests {
 
     #[test]
     fn skips_projects_inside_node_modules() {
-        let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let profile_dir = tempfile::tempdir().unwrap();
+        let profile = &ProfileRoot::new(profile_dir.path());
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().canonicalize().unwrap();
         let buried = cwd.join("node_modules").join("pkg");
         fs::create_dir_all(&buried).unwrap();
         make_enrolled_project(&buried, "proj_buried");
 
-        let out = gather_local_projects_from(&cwd);
+        let out = gather_local_projects_from(profile, &cwd);
         assert!(
             !out.contains(&buried),
             "projects inside node_modules must be skipped, got {out:?}"

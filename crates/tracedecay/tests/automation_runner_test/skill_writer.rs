@@ -3,12 +3,10 @@ use crate::support::*;
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn retained_skill_writer_preserves_retrieval_and_defers_ledger_publication() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let _global_db = isolate_global_db(&cg);
     let retrieval = FixtureAutomationSessionRetrieval::new(&cg);
     let backend = SkillJsonBackend::new(no_skill_needed_output(
         "The retained evidence does not warrant a managed skill mutation.",
@@ -86,12 +84,9 @@ async fn skill_writer_runner_skips_when_task_is_disabled() {
     );
 }
 
-// Every test below that reaches evidence building holds `ENV_LOCK` and pins
-// its profile database override at the isolated session store.
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_default_provider_searches_all_providers() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
@@ -110,7 +105,6 @@ async fn skill_writer_default_provider_searches_all_providers() {
         },
     )
     .await;
-    let _global_db = isolate_global_db(&cg);
     let backend = SkillJsonBackend::new(no_skill_needed_output(
         "The provider-wide evidence does not warrant a managed skill mutation.",
         "insufficient_repeated_evidence",
@@ -136,7 +130,6 @@ async fn skill_writer_default_provider_searches_all_providers() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_replays_recent_sessions_without_keyword_matches() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
@@ -157,7 +150,6 @@ async fn skill_writer_replays_recent_sessions_without_keyword_matches() {
         },
     )
     .await;
-    let _global_db = isolate_global_db(&cg);
     let backend = SkillWriterReplayEvidenceBackend::new("skill-writer-replay-1");
     let config = enabled_skill_writer_config();
     let retrieval = StaticAutomationSessionRetrieval::message(
@@ -187,7 +179,6 @@ async fn skill_writer_replays_recent_sessions_without_keyword_matches() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_host_modes_do_not_select_alternate_lcm_storage() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
@@ -206,7 +197,6 @@ async fn skill_writer_host_modes_do_not_select_alternate_lcm_storage() {
         },
     )
     .await;
-    let _global_db = isolate_global_db(&cg);
 
     let backend = SkillJsonBackend::new(no_skill_needed_output(
         "The host-mode evidence does not warrant a managed skill mutation.",
@@ -254,12 +244,10 @@ async fn skill_writer_host_modes_do_not_select_alternate_lcm_storage() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_runner_repairs_then_activates_validated_create() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let _global_db = isolate_global_db(&cg);
     let backend = SequentialJsonBackend::new(vec![
         json!({
             "outcome": "skills_proposed",
@@ -492,12 +480,10 @@ async fn skill_writer_runner_repairs_then_activates_validated_create() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_quarantines_output_after_bounded_repair_exhaustion() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let _global_db = isolate_global_db(&cg);
     let invalid = json!({
         "outcome": "skills_proposed",
         "decision": null,
@@ -536,13 +522,11 @@ async fn skill_writer_quarantines_output_after_bounded_repair_exhaustion() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_evidence_imports_project_skill_usage_analytics_before_summarizing() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
     seed_search_underuse_session_evidence(&cg).await;
-    let _global_db = isolate_global_db(&cg);
     let active = create_managed_skill(
         &profile_root,
         ManagedSkillDraft {
@@ -624,12 +608,10 @@ async fn skill_writer_evidence_imports_project_skill_usage_analytics_before_summ
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_runner_activates_validated_skills() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let _global_db = isolate_global_db(&cg);
     let active = create_managed_skill(
         &profile_root,
         ManagedSkillDraft {
@@ -754,12 +736,10 @@ async fn skill_writer_runner_activates_validated_skills() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let _global_db = isolate_global_db(&cg);
     let active = create_managed_skill(
         &profile_root,
         ManagedSkillDraft {
@@ -964,12 +944,10 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_runner_ledgers_malformed_backend_output() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let _global_db = isolate_global_db(&cg);
     let backend = SkillTextBackend::new("not json");
     let config = enabled_skill_writer_config();
 
@@ -1015,12 +993,10 @@ async fn skill_writer_runner_ledgers_malformed_backend_output() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_runner_ledgers_missing_skills_array() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let _global_db = isolate_global_db(&cg);
     let output = json!({"summary": "no skills"});
     let backend = SkillJsonBackend::new(output.clone());
     let config = enabled_skill_writer_config();
@@ -1067,12 +1043,10 @@ async fn skill_writer_runner_ledgers_missing_skills_array() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_runner_records_noop_fallback_when_backend_run_task_fails() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let _global_db = isolate_global_db(&cg);
     let backend = FailingBackend::new(AgentTaskKind::SkillWriter);
     let config = AutomationConfig {
         timeout_secs: 1,
@@ -1119,12 +1093,10 @@ async fn skill_writer_runner_records_noop_fallback_when_backend_run_task_fails()
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_runner_retains_no_skill_needed_without_deployment() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let _global_db = isolate_global_db(&cg);
     let decision = json!({
         "reason": "The recorded request is a one-off calculation with no repeated workflow failure.",
         "remedy": "one_off_task"

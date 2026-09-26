@@ -20,7 +20,7 @@ use tracedecay_contracts::retrieval::grep_analysis::{
 use tracedecay_contracts::retrieval::{
     AffectedFileTestsPrimitiveResultV1, HealthDeltaRequest, HealthDeltaResult,
     OperationalRetrievalPort, PrimitiveFailureKind, PrimitiveInvocation, PrimitiveRequest,
-    RetrievalPortContext, RetrievalPortOutcome, SessionRetrievalBudgetStageV1,
+    PrimitiveSupportGap, RetrievalPortContext, RetrievalPortOutcome, SessionRetrievalBudgetStageV1,
     SessionRetrievalStructuralRefusalV1, SourceReadPortContext, SourceReadPortOutcome,
     SourceReadPrimitivePort, SourceRetrievalPort, SymbolGraphItem, SymbolGraphPage,
     SymbolGraphPortContext, SymbolGraphPortOutcome, SymbolGraphPrimitivePort,
@@ -29,14 +29,15 @@ use tracedecay_contracts::retrieval::{
 };
 use tracedecay_contracts::{
     ApplicationContractError, ApplicationEnvelope, ApplicationOperation, ApplicationOutcome,
-    ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind, ApplicationResult,
-    AuthorityReceipt, CancellationContext, CancellationObservation, CancellationStage,
-    CapabilityGrantId, CapabilityGrantSnapshot, CoverageCompleteness, CoverageDomainState,
-    Deadline, DisclosureClass, EvidenceCoverage, EvidenceDomain, EvidencePacket, FreshnessState,
-    LegalAction, Omission, OmissionReason, OpaqueCursor, OperationBudgetUsage, OperationReceipt,
-    OperationTermination, PageCursor, PageRequest, PageState, PolicyDecisionRef, RequestAdmission,
-    RequestContext, RequestCostReceiptV1, RequestId, ResolvedScope, RetrievalEvidence,
-    RetryDirective, SafeDiagnostic, TemporalState,
+    ApplicationProblem, ApplicationProblemDetailV1, ApplicationProblemEnvelope,
+    ApplicationProblemKind, ApplicationResult, AuthorityReceipt, CancellationContext,
+    CancellationObservation, CancellationStage, CapabilityGrantId, CapabilityGrantSnapshot,
+    CoverageCompleteness, CoverageDomainState, Deadline, DisclosureClass, EvidenceCoverage,
+    EvidenceDomain, EvidencePacket, FreshnessState, LegalAction, Omission, OmissionReason,
+    OpaqueCursor, OperationBudgetUsage, OperationReceipt, OperationTermination, PageCursor,
+    PageRequest, PageState, PolicyDecisionRef, RequestAdmission, RequestContext,
+    RequestCostReceiptV1, RequestId, ResolvedScope, RetrievalEvidence, RetryDirective,
+    SafeDiagnostic, TemporalState,
 };
 use tracedecay_domain::text::forward_slash_path;
 use tracedecay_domain::{CodeGenerationId, CommitId, ComponentVersion, UtcMicros};
@@ -472,8 +473,7 @@ impl OwnedPrimitiveRuntime {
 impl OwnedPrimitiveRuntime {
     /// A code-index read refused as retryable while the worktree is parked
     /// would be retried forever: nothing converges until the operator acts.
-    /// The park's remedy and cause replace the generic refusal; the remedy
-    /// leads so a long cause is what the diagnostic bound cuts.
+    /// The park's typed cause and remedy replace the generic refusal.
     async fn parked_refusal(&self, refusal: ApplicationProblemEnvelope) -> PrimitiveResult<Value> {
         let Some(parked) = self
             .convergence_park
@@ -482,14 +482,14 @@ impl OwnedPrimitiveRuntime {
         else {
             return Ok(Err(refusal));
         };
-        let message = safe_problem_message(&format!(
-            "The code index for this worktree is parked; remedy: {}; cause: {}",
-            parked.remediation, parked.reason
-        ));
         Ok(Err(ApplicationProblemEnvelope::new(
             refusal.contract,
             refusal.request_id,
-            ApplicationProblem::code_index_parked(message),
+            ApplicationProblem::from_detail(ApplicationProblemDetailV1::Parked {
+                cause: parked.reason,
+                remedy: parked.remediation,
+                retries_on_wake: parked.retries_on_wake,
+            }),
         )?))
     }
 }
@@ -1362,7 +1362,11 @@ fn symbol_page<T: Serialize + SymbolGraphItem>(
     let total = page.total;
     let continuation = page.next_cursor.clone();
     let temporal = symbol_temporal_state(&page, finished_at);
-    let unsupported = !page.support_gaps.is_empty();
+    let gap_omissions = page
+        .support_gaps
+        .iter()
+        .map(PrimitiveSupportGap::omission_reason)
+        .collect::<BTreeSet<_>>();
     let touched_files = page.touched_files();
     let payload = value_or_problem!(serde_json::to_value(page), context, operation);
     let mut result = evidence_result(
@@ -1392,16 +1396,17 @@ fn symbol_page<T: Serialize + SymbolGraphItem>(
         envelope.touched_files = touched_files;
         envelope.cost = cost;
     }
-    if unsupported
-        && let Ok(envelope) = &mut result
+    if let Ok(envelope) = &mut result
         && let ApplicationOutcome::Evidence(packet) = &mut envelope.outcome
     {
-        // Unsupported coverage is one capability omission, not an estimate of missing symbols.
-        packet.omissions.push(Omission {
-            domain,
-            count: 1,
-            reason: OmissionReason::Unsupported,
-        });
+        // Each gap kind is one capability omission, not an estimate of missing symbols.
+        packet
+            .omissions
+            .extend(gap_omissions.into_iter().map(|reason| Omission {
+                domain,
+                count: 1,
+                reason,
+            }));
     }
     Ok(result)
 }

@@ -383,6 +383,25 @@ export type AnalyticsUsageSummaryV1 = z.infer<typeof AnalyticsUsageSummaryV1Sche
 export const ApplicationExecutionFailureClassV1Schema = z.enum(["denied", "malformed_output", "permanent"]);
 export type ApplicationExecutionFailureClassV1 = z.infer<typeof ApplicationExecutionFailureClassV1Schema>;
 
+/** The structured facts behind a problem. Adapters read these fields; the
+problem's `message` is only their one human rendering. */
+export const ApplicationProblemDetailV1Schema = z.discriminatedUnion("kind", [z.object({
+  deadline_ms: z.number().int().safe().min(0),
+  kind: z.literal("lock_deadline"),
+  resource: z.string(),
+}).strict(), z.object({
+  cause: z.string(),
+  kind: z.literal("parked"),
+  remedy: z.string(),
+  retries_on_wake: z.boolean(),
+}).strict(), z.object({
+  active: z.number().int().safe().min(0),
+  committed: z.number().int().safe().min(0),
+  kind: z.literal("stale_refresh_frontier"),
+  requested: z.number().int().safe().min(0),
+}).strict()]);
+export type ApplicationProblemDetailV1 = z.infer<typeof ApplicationProblemDetailV1Schema>;
+
 /** Stable application failure envelope. Partial effects and reset-required
 states are admitted terminals; partial effects carry their committed
 receipt directly while reset-required states carry an explicit action. */
@@ -399,13 +418,14 @@ export type ApplicationProblemKind = z.infer<typeof ApplicationProblemKindSchema
 
 /** Stable application problem record shared verbatim by every adapter. */
 export const ApplicationProblemRecordSchema = z.object({
-  cancellation_stage: z.lazy(() => RequiredNullable2Schema),
+  cancellation_stage: z.lazy(() => RequiredNullable3Schema),
   code: z.string(),
-  committed_receipt: z.lazy(() => RequiredNullableSchema),
+  committed_receipt: z.lazy(() => RequiredNullable2Schema),
   coverage: z.union([z.lazy(() => EvidenceCoverageSchema), z.null()]),
+  detail: z.lazy(() => RequiredNullableSchema),
   details: z.array(z.lazy(() => SafeDiagnosticSchema)),
   diagnostic: z.union([z.lazy(() => SafeDiagnosticSchema), z.null()]),
-  execution_failure_classification: z.lazy(() => RequiredNullable4Schema),
+  execution_failure_classification: z.lazy(() => RequiredNullable5Schema),
   kind: z.lazy(() => ApplicationProblemKindSchema),
   legal_actions: z.array(z.lazy(() => LegalActionSchema)),
   message: z.string(),
@@ -418,7 +438,7 @@ export const ApplicationProblemRecordSchema = z.object({
   revision: z.number().int().min(0),
   terminality: z.lazy(() => ProblemTerminalitySchema),
   trace_id: z.string(),
-  unavailable_classification: z.lazy(() => RequiredNullable3Schema),
+  unavailable_classification: z.lazy(() => RequiredNullable4Schema),
 }).strict();
 export type ApplicationProblemRecord = z.infer<typeof ApplicationProblemRecordSchema>;
 
@@ -5057,26 +5077,32 @@ export type RequiredCheckV1 = z.infer<typeof RequiredCheckV1Schema>;
 /** Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`
 from an omitted field. New terminal-state fields must be present on every
 record so a missing committed receipt cannot be mistaken for `None`. */
-export const RequiredNullableSchema = z.union([z.lazy(() => EffectReceiptSchema), z.null()]);
+export const RequiredNullableSchema = z.union([z.lazy(() => ApplicationProblemDetailV1Schema), z.null()]);
 export type RequiredNullable = z.infer<typeof RequiredNullableSchema>;
 
 /** Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`
 from an omitted field. New terminal-state fields must be present on every
 record so a missing committed receipt cannot be mistaken for `None`. */
-export const RequiredNullable2Schema = z.union([z.lazy(() => CancellationStageSchema), z.null()]);
+export const RequiredNullable2Schema = z.union([z.lazy(() => EffectReceiptSchema), z.null()]);
 export type RequiredNullable2 = z.infer<typeof RequiredNullable2Schema>;
 
 /** Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`
 from an omitted field. New terminal-state fields must be present on every
 record so a missing committed receipt cannot be mistaken for `None`. */
-export const RequiredNullable3Schema = z.union([z.lazy(() => ApplicationUnavailableClassV1Schema), z.null()]);
+export const RequiredNullable3Schema = z.union([z.lazy(() => CancellationStageSchema), z.null()]);
 export type RequiredNullable3 = z.infer<typeof RequiredNullable3Schema>;
 
 /** Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`
 from an omitted field. New terminal-state fields must be present on every
 record so a missing committed receipt cannot be mistaken for `None`. */
-export const RequiredNullable4Schema = z.union([z.lazy(() => ApplicationExecutionFailureClassV1Schema), z.null()]);
+export const RequiredNullable4Schema = z.union([z.lazy(() => ApplicationUnavailableClassV1Schema), z.null()]);
 export type RequiredNullable4 = z.infer<typeof RequiredNullable4Schema>;
+
+/** Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`
+from an omitted field. New terminal-state fields must be present on every
+record so a missing committed receipt cannot be mistaken for `None`. */
+export const RequiredNullable5Schema = z.union([z.lazy(() => ApplicationExecutionFailureClassV1Schema), z.null()]);
+export type RequiredNullable5 = z.infer<typeof RequiredNullable5Schema>;
 
 /** The resolved configuration scope is one exact project/repository/worktree root.
 

@@ -482,6 +482,7 @@ pub(super) fn git_read_output_limit_problem() -> ApplicationProblem {
         },
         retry: RetryDirective::Never,
         legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
+        detail: None,
     }
 }
 

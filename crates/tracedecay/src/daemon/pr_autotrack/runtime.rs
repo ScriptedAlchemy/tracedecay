@@ -105,6 +105,13 @@ async fn tick(
     let window = 14 * 86_400;
     let cap = 64;
     let cutoff = tracedecay_runtime_core::tracedecay::current_timestamp().saturating_sub(window);
+    let owner_home = match administration.owner_profile() {
+        Ok(owner) => owner.home().map(std::path::Path::to_path_buf),
+        Err(error) => {
+            tracing::warn!(%error, "PR auto-track tick skipped: daemon owner profile unavailable");
+            return;
+        }
+    };
     let Ok(records) = database.list_code_projects(cap).await else {
         return;
     };
@@ -116,7 +123,12 @@ async fn tick(
             return;
         }
         let root = PathBuf::from(&record.canonical_root);
-        if !root.is_dir() || tracedecay_runtime_core::config::is_ambient_project_root(&root) {
+        if !root.is_dir()
+            || tracedecay_runtime_core::config::is_ambient_project_root(
+                owner_home.as_deref(),
+                &root,
+            )
+        {
             continue;
         }
         // A poll loop has no right to turn an arbitrary project path into

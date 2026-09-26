@@ -11,9 +11,8 @@
 //!
 //! A hook is a one-shot subprocess spawned by `hook_cmd` for a single event, so
 //! resolution is stable for its entire lifetime and the answer can simply be
-//! kept. The cache is keyed by (profile root, project root) so a changed
-//! `TRACEDECAY_USER_DATA_DIR`, the shape tests and multi-profile runs use,
-//! never reads another profile's answer.
+//! kept. The cache is keyed by (profile root, project root) so two profiles
+//! in one process never read each other's answer.
 //!
 //! Errors collapse to `None`, matching every hook caller, all of which already
 //! discard the error and fall back (to the profile-wide analytics file, or to
@@ -32,34 +31,33 @@ static ENROLLED_LAYOUTS: LazyLock<Mutex<LayoutCache>> =
 static RESOLVED_LAYOUTS: LazyLock<Mutex<LayoutCache>> =
     LazyLock::new(|| Mutex::new(LayoutCache::new()));
 
-/// The store layout for `project_root` only when an authority already names
-/// this checkout. Memoized [`tracedecay_runtime_core::storage::resolve_enrolled_layout_for_current_profile`].
-pub(super) fn enrolled_layout(project_root: &Path) -> Option<StoreLayout> {
-    memoized(&ENROLLED_LAYOUTS, project_root, |root| {
-        tracedecay_runtime_core::storage::resolve_enrolled_layout_for_current_profile(root)
+/// The store layout for `project_root` in `profile_root` only when an
+/// authority already names this checkout. Memoized
+/// [`tracedecay_runtime_core::storage::resolve_persisted_layout`].
+pub(super) fn enrolled_layout(profile_root: &Path, project_root: &Path) -> Option<StoreLayout> {
+    memoized(&ENROLLED_LAYOUTS, profile_root, project_root, |root| {
+        tracedecay_runtime_core::storage::resolve_persisted_layout(root, profile_root)
             .ok()
             .flatten()
     })
 }
 
-/// The store layout for `project_root`, falling back to the default
-/// profile-sharded layout. Memoized [`tracedecay_runtime_core::storage::resolve_layout_for_current_profile`].
-pub(super) fn layout(project_root: &Path) -> Option<StoreLayout> {
-    memoized(&RESOLVED_LAYOUTS, project_root, |root| {
-        tracedecay_runtime_core::storage::resolve_layout_for_current_profile(root).ok()
+/// The store layout for `project_root` in `profile_root`, falling back to the
+/// default profile-sharded layout. Memoized
+/// [`tracedecay_runtime_core::storage::resolve_layout`].
+pub(super) fn layout(profile_root: &Path, project_root: &Path) -> Option<StoreLayout> {
+    memoized(&RESOLVED_LAYOUTS, profile_root, project_root, |root| {
+        tracedecay_runtime_core::storage::resolve_layout(root, profile_root).ok()
     })
 }
 
 fn memoized(
     cache: &Mutex<LayoutCache>,
+    profile_root: &Path,
     project_root: &Path,
     resolve: impl FnOnce(&Path) -> Option<StoreLayout>,
 ) -> Option<StoreLayout> {
-    let Ok(profile_root) = tracedecay_runtime_core::storage::default_profile_root() else {
-        // Without a profile there is nothing to key on and nothing to resolve.
-        return None;
-    };
-    let key = (profile_root, project_root.to_path_buf());
+    let key = (profile_root.to_path_buf(), project_root.to_path_buf());
     if let Some(hit) = cache
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -77,21 +75,6 @@ fn memoized(
     resolved
 }
 
-/// Drops every memoized layout. Test-only: within one test process the same
-/// checkout is enrolled, re-enrolled, and re-pointed at fresh profiles, which a
-/// hook subprocess never does.
-#[cfg(test)]
-pub(crate) fn clear_memoized_layouts() {
-    ENROLLED_LAYOUTS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clear();
-    RESOLVED_LAYOUTS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clear();
-}
-
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
@@ -99,14 +82,13 @@ mod tests {
 
     #[test]
     fn enrolled_layout_is_resolved_once_per_project_root() {
-        // `PinnedUserDataDir` already holds the user-data-dir test lock.
-        let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-        clear_memoized_layouts();
+        let profile = tempfile::tempdir().unwrap();
+        let profile = profile.path();
 
         let project = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();
         assert!(
-            enrolled_layout(&project_root).is_none(),
+            enrolled_layout(profile, &project_root).is_none(),
             "an unenrolled checkout must resolve to no layout"
         );
 
@@ -117,33 +99,37 @@ mod tests {
             "proj_hook_layout_memo",
         )
         .unwrap();
-        assert!(enrolled_layout(&project_root).is_none());
+        assert!(enrolled_layout(profile, &project_root).is_none());
 
-        clear_memoized_layouts();
-        let resolved = enrolled_layout(&project_root).expect("an enrolled checkout resolves");
+        ENROLLED_LAYOUTS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&(profile.to_path_buf(), project_root.clone()));
+        let resolved =
+            enrolled_layout(profile, &project_root).expect("an enrolled checkout resolves");
         assert_eq!(
             resolved.identity.project_id.as_deref(),
             Some("proj_hook_layout_memo")
         );
         // A second call returns the same memoized layout.
         assert_eq!(
-            enrolled_layout(&project_root).map(|layout| layout.data_root),
+            enrolled_layout(profile, &project_root).map(|layout| layout.data_root),
             Some(resolved.data_root)
         );
     }
 
     #[test]
     fn layout_falls_back_to_the_default_profile_shard() {
-        // `PinnedUserDataDir` already holds the user-data-dir test lock.
-        let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-        clear_memoized_layouts();
+        let profile = tempfile::tempdir().unwrap();
+        let profile = profile.path();
 
         let project = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();
         // Unlike `enrolled_layout`, this resolver mints the default shard.
-        let first = layout(&project_root).expect("default profile-sharded layout resolves");
-        let second = layout(&project_root).expect("memoized layout is returned again");
+        let first =
+            layout(profile, &project_root).expect("default profile-sharded layout resolves");
+        let second = layout(profile, &project_root).expect("memoized layout is returned again");
         assert_eq!(first.data_root, second.data_root);
-        assert!(enrolled_layout(&project_root).is_none());
+        assert!(enrolled_layout(profile, &project_root).is_none());
     }
 }

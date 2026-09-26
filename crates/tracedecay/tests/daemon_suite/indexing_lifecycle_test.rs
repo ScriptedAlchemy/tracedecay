@@ -27,7 +27,9 @@ use crate::code_index_journey::{
     initialize_tracedecay, result_paths, search, status, stop_daemon_gracefully, tool,
     wait_for_readiness, wait_for_terminal_generation,
 };
-use crate::common::{EnvVarGuard, IsolatedEnv, daemon_socket_path, spawn_tracedecay_daemon_with};
+use crate::common::{
+    IsolatedHome, daemon_socket_path, spawn_tracedecay_daemon_logged, spawn_tracedecay_daemon_with,
+};
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 fn initialize_repository(project: &Path) -> (String, String) {
@@ -301,7 +303,7 @@ fn assert_exact_ignored_dependency_roster(generation: &CodeIndexPublishedGenerat
 
 #[tokio::test]
 async fn ignored_dependency_admission_survives_physical_daemon_restart_without_widening() {
-    let (environment, project) = IsolatedEnv::acquire().await;
+    let (environment, project) = IsolatedHome::new();
     let project = canonical_existing_identity(&project).expect("canonical fixture project");
     let revision = initialize_ignored_dependency_repository(&project);
     let socket = daemon_socket_path(environment.home());
@@ -309,9 +311,14 @@ async fn ignored_dependency_admission_survives_physical_daemon_restart_without_w
     let project_id = initialize_tracedecay(environment.home(), &project);
     let identity = exact_identity(&project, project_id);
     tracedecay_project::product_runtime::register_fixture_product_runtime();
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
-            .expect("production daemon handshake");
+    let handshake = tracedecay::daemon::handshake_for_current_client(
+        environment.profile(),
+        Some(project.clone()),
+        None,
+        false,
+        false,
+    )
+    .expect("production daemon handshake");
 
     let baseline = wait_for_terminal_generation(
         &socket,
@@ -417,7 +424,7 @@ async fn ignored_dependency_admission_survives_physical_daemon_restart_without_w
 
 #[tokio::test]
 async fn one_line_append_publishes_fresh_generation_with_carried_clone_bodies() {
-    let (environment, project) = IsolatedEnv::acquire().await;
+    let (environment, project) = IsolatedHome::new();
     let project = canonical_existing_identity(&project).expect("canonical fixture project");
     fs::create_dir_all(project.join("src")).expect("fixture source directory");
     fs::write(
@@ -444,8 +451,7 @@ async fn one_line_append_publishes_fresh_generation_with_carried_clone_bodies() 
 
     let socket = daemon_socket_path(environment.home());
     let log_path = environment.scratch().join("incremental-clone-carry.log");
-    let _daemon_log = EnvVarGuard::set("TRACEDECAY_TEST_DAEMON_LOG", &log_path);
-    let mut daemon = spawn_tracedecay_daemon_with(environment.home(), |command| {
+    let mut daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |command| {
         command.env(
             "RUST_LOG",
             "tracedecay_code_index_runtime::code_index_scheduler::registry=debug",
@@ -454,9 +460,14 @@ async fn one_line_append_publishes_fresh_generation_with_carried_clone_bodies() 
     let project_id = initialize_tracedecay(environment.home(), &project);
     let identity = exact_identity(&project, project_id);
     tracedecay_project::product_runtime::register_fixture_product_runtime();
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
-            .expect("production daemon handshake");
+    let handshake = tracedecay::daemon::handshake_for_current_client(
+        environment.profile(),
+        Some(project.clone()),
+        None,
+        false,
+        false,
+    )
+    .expect("production daemon handshake");
 
     let initial = wait_for_terminal_generation(
         &socket,
@@ -474,7 +485,7 @@ async fn one_line_append_publishes_fresh_generation_with_carried_clone_bodies() 
     let mut edited = fs::read_to_string(project.join("src/edited.rs")).expect("edited source");
     writeln!(edited, "pub fn appended_once() -> usize {{ 2 }}").expect("append source line");
     fs::write(project.join("src/edited.rs"), edited).expect("write appended source");
-    deliver_save(&project, &["src/edited.rs"]).await;
+    deliver_save(environment.profile(), &project, &["src/edited.rs"]).await;
     let refreshed = wait_for_terminal_generation(
         &socket,
         &handshake,
@@ -506,7 +517,7 @@ async fn one_line_append_publishes_fresh_generation_with_carried_clone_bodies() 
 /// same payload.
 #[tokio::test]
 async fn status_wait_for_returns_reached_with_the_saved_edit_generation() {
-    let (environment, project) = IsolatedEnv::acquire().await;
+    let (environment, project) = IsolatedHome::new();
     let project = canonical_existing_identity(&project).expect("canonical fixture project");
     fs::create_dir_all(project.join("src")).expect("fixture source directory");
     fs::write(
@@ -523,13 +534,17 @@ async fn status_wait_for_returns_reached_with_the_saved_edit_generation() {
     commit_all(&project, "status wait fixture");
     let socket = daemon_socket_path(environment.home());
     let log_path = environment.scratch().join("status-wait.log");
-    let _daemon_log = EnvVarGuard::set("TRACEDECAY_TEST_DAEMON_LOG", &log_path);
-    let mut daemon = spawn_tracedecay_daemon_with(environment.home(), |_| {});
+    let mut daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |_| {});
     initialize_tracedecay(environment.home(), &project);
     tracedecay_project::product_runtime::register_fixture_product_runtime();
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
-            .expect("production daemon handshake");
+    let handshake = tracedecay::daemon::handshake_for_current_client(
+        environment.profile(),
+        Some(project.clone()),
+        None,
+        false,
+        false,
+    )
+    .expect("production daemon handshake");
 
     let initial = wait_for_readiness(&socket, &handshake, "fresh", RECEIPT_TIMEOUT).await;
     let initial_generation = initial["code_index_freshness"]["worktree"]["latest_generation_id"]
@@ -542,7 +557,7 @@ async fn status_wait_for_returns_reached_with_the_saved_edit_generation() {
         "pub fn before_wait() -> usize { 1 }\npub fn after_wait() -> usize { 2 }\n",
     )
     .expect("edit source");
-    deliver_save(&project, &["src/lib.rs"]).await;
+    deliver_save(environment.profile(), &project, &["src/lib.rs"]).await;
     let waited = wait_for_readiness(&socket, &handshake, "fresh", RECEIPT_TIMEOUT).await;
     assert_eq!(
         waited["code_index_freshness"]["status"], "current",
@@ -564,15 +579,14 @@ async fn status_wait_for_returns_reached_with_the_saved_edit_generation() {
 
 #[tokio::test]
 async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_generations() {
-    let (environment, project) = IsolatedEnv::acquire().await;
+    let (environment, project) = IsolatedHome::new();
     let project = canonical_existing_identity(&project).expect("canonical fixture project");
     let (main_revision, feature_revision) = initialize_repository(&project);
     let socket = daemon_socket_path(environment.home());
     let log_path = environment
         .scratch()
         .join("incremental-lifecycle-daemon.log");
-    let _daemon_log = EnvVarGuard::set("TRACEDECAY_TEST_DAEMON_LOG", &log_path);
-    let mut daemon = spawn_tracedecay_daemon_with(environment.home(), |command| {
+    let mut daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |command| {
         command.env(
             "RUST_LOG",
             "tracedecay_code_index_runtime::code_index_scheduler::registry=debug",
@@ -581,9 +595,14 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
     let project_id = initialize_tracedecay(environment.home(), &project);
     let identity = exact_identity(&project, project_id);
     tracedecay_project::product_runtime::register_fixture_product_runtime();
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
-            .expect("production daemon handshake");
+    let handshake = tracedecay::daemon::handshake_for_current_client(
+        environment.profile(),
+        Some(project.clone()),
+        None,
+        false,
+        false,
+    )
+    .expect("production daemon handshake");
 
     let initial = wait_for_terminal_generation(
         &socket,
@@ -603,7 +622,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         "pub fn lifecycle_saved_symbol() -> &'static str { \"saved\" }\n",
     )
     .expect("save source file");
-    deliver_save(&project, &["src/saved.rs"]).await;
+    deliver_save(environment.profile(), &project, &["src/saved.rs"]).await;
     // Dirty worktree generations keep ref/worktree identity but must not claim
     // HEAD as source_revision, that field is exact-commit evidence only.
     let saved = wait_for_terminal_generation(
@@ -621,7 +640,12 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
 
     fs::rename(project.join("src/saved.rs"), project.join("src/renamed.rs"))
         .expect("rename source file");
-    deliver_save(&project, &["src/saved.rs", "src/renamed.rs"]).await;
+    deliver_save(
+        environment.profile(),
+        &project,
+        &["src/saved.rs", "src/renamed.rs"],
+    )
+    .await;
     let renamed = wait_for_terminal_generation(
         &socket,
         &handshake,
@@ -641,7 +665,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
     );
 
     fs::remove_file(project.join("src/renamed.rs")).expect("delete renamed source file");
-    deliver_save(&project, &["src/renamed.rs"]).await;
+    deliver_save(environment.profile(), &project, &["src/renamed.rs"]).await;
     let deleted = wait_for_terminal_generation(
         &socket,
         &handshake,
@@ -782,7 +806,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         "cancelled partial work leaked into the active sealed generation"
     );
 
-    daemon = spawn_tracedecay_daemon_with(environment.home(), |command| {
+    daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |command| {
         command.env(
             "RUST_LOG",
             "tracedecay_code_index_runtime::code_index_scheduler::registry=debug",
@@ -829,7 +853,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         !killed.success(),
         "hard-kill fault injection must not become a graceful daemon exit"
     );
-    daemon = spawn_tracedecay_daemon_with(environment.home(), |command| {
+    daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |command| {
         command.env(
             "RUST_LOG",
             "tracedecay_code_index_runtime::code_index_scheduler::registry=debug",

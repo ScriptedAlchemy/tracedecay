@@ -933,9 +933,11 @@ pub(crate) mod tests {
             snapshot,
         )
         .expect("pinned configuration");
-        let (configuration_runtime, _) =
-            ProjectConfigurationRuntime::open(OpenedRuntimeConfiguration::new(pinned, lease))
-                .expect("configuration runtime");
+        let (configuration_runtime, _) = ProjectConfigurationRuntime::open(
+            OpenedRuntimeConfiguration::new(pinned, lease),
+            &profile_root,
+        )
+        .expect("configuration runtime");
         std::mem::forget(temp);
         std::mem::forget(scope);
         std::mem::forget(sessions);

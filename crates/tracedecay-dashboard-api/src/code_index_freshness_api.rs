@@ -169,7 +169,6 @@ mod tests {
 
     #[tokio::test]
     async fn freshness_route_is_typed_unsupported_without_daemon_authority() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, state) = state_for_test().await;
         let Json(envelope) = freshness(State(state)).await;
 
@@ -181,7 +180,6 @@ mod tests {
 
     #[tokio::test]
     async fn mounted_scheduler_without_a_generation_is_loading_not_ready() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, mut state) = state_for_test().await;
         state.code_index_freshness_reader = Some(Arc::new(|root| {
             Box::pin(async move {
@@ -218,7 +216,6 @@ mod tests {
 
     #[tokio::test]
     async fn attached_registry_without_a_mount_is_unknown_not_unsupported() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, mut state) = state_for_test().await;
         state.code_index_freshness_reader = Some(Arc::new(|_| Box::pin(async { Ok(None) })));
 
@@ -230,7 +227,6 @@ mod tests {
 
     #[tokio::test]
     async fn complete_generation_reports_its_noncurrent_freshness_state() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         for staleness in [
             CodeIndexStalenessStateV1::Stale,
             CodeIndexStalenessStateV1::Verifying,
@@ -267,7 +263,6 @@ mod tests {
 
     #[tokio::test]
     async fn fresh_generation_reports_incomplete_coverage_without_noncurrent_guidance() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let (_project, mut state) = state_for_test().await;
         state.code_index_freshness_reader = Some(Arc::new(|root| {
             Box::pin(async move {

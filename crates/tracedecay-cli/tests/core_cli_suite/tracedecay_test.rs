@@ -115,6 +115,45 @@ fn status_anchors_an_explicit_dot_to_the_cli_working_directory() {
     );
 }
 
+/// `--project-path .` names the registered project the operator stands in,
+/// exactly as its absolute path does; the registry never sees the bare `.`.
+#[test]
+fn project_path_flags_resolve_a_relative_path_from_inside_the_project() {
+    let (_home, _project, home_path, project_path) =
+        setup_daemon_project("pub fn imported_marker() {}\n");
+
+    let import = tracedecay_command_with_home(&home_path)
+        .current_dir(&project_path)
+        .args(["sessions", "import", "--project-path", "."])
+        .output()
+        .expect("tracedecay sessions import should run");
+    let stdout = String::from_utf8_lossy(&import.stdout);
+    assert!(
+        import.status.success()
+            && stdout.starts_with("session import completed (")
+            && stdout.ends_with(")\n"),
+        "sessions import --project-path . must import into the CLI's project\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&import.stderr)
+    );
+
+    let status = tracedecay_command_with_home(&home_path)
+        .current_dir(project_path.join("src"))
+        .args(["status", "--json", "--project-path", ".."])
+        .output()
+        .expect("tracedecay status should run");
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        status.status.success(),
+        "status --project-path .. must report the CLI's project\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let status: serde_json::Value = serde_json::from_str(&stdout).expect("status JSON");
+    assert_eq!(
+        status["project_root"],
+        project_path.to_string_lossy().as_ref()
+    );
+}
+
 #[test]
 fn daemon_tool_search_discloses_configured_alias_recovery() {
     let (_home, _project, home_path, project_path) = setup_daemon_project("pub fn cache() {}\n");

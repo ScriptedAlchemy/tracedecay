@@ -1,5 +1,6 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::{Value, json};
 use tracedecay_contracts::{ProjectRegistryView, render_project_registry_view};
@@ -18,6 +19,7 @@ const MAX_LIMIT: usize = 1_000;
 
 #[hotpath::measure(label = "cli.projects.dispatch", future = true)]
 pub(crate) async fn handle_projects_action(
+    profile: &ProfileRoot,
     action: ProjectsAction,
     assume_yes: bool,
     dry_run: bool,
@@ -25,29 +27,38 @@ pub(crate) async fn handle_projects_action(
     match action {
         ProjectsAction::List { limit, json } => {
             let limit = bounded_limit(limit);
-            let payload = call_registry_admin(json!({
-                "action": "registry_list",
-                "limit": limit,
-                "query": null,
-            }))
+            let payload = call_registry_admin(
+                profile,
+                json!({
+                    "action": "registry_list",
+                    "limit": limit,
+                    "query": null,
+                }),
+            )
             .await?;
             print_registry_list(&payload, "registered projects", json)?;
         }
         ProjectsAction::Search { query, limit, json } => {
             let limit = bounded_limit(limit);
-            let payload = call_registry_admin(json!({
-                "action": "registry_list",
-                "limit": limit,
-                "query": query,
-            }))
+            let payload = call_registry_admin(
+                profile,
+                json!({
+                    "action": "registry_list",
+                    "limit": limit,
+                    "query": query,
+                }),
+            )
             .await?;
             print_registry_list(&payload, &format!("projects matching \"{query}\""), json)?;
         }
         ProjectsAction::Context { selector, json } => {
-            let payload = call_registry_admin(json!({
-                "action": "registry_context",
-                "project_arg": selector,
-            }))
+            let payload = call_registry_admin(
+                profile,
+                json!({
+                    "action": "registry_context",
+                    "project_arg": selector,
+                }),
+            )
             .await?;
             if payload["status"] != "ok" {
                 return Err(TraceDecayError::Config {
@@ -66,7 +77,7 @@ pub(crate) async fn handle_projects_action(
             selector,
             keep_store,
         } => {
-            handle_projects_forget(&selector, keep_store, assume_yes, dry_run).await?;
+            handle_projects_forget(profile, &selector, keep_store, assume_yes, dry_run).await?;
         }
     }
     Ok(())
@@ -84,6 +95,7 @@ pub(crate) async fn handle_projects_action(
 /// never stops the service.
 #[hotpath::measure(label = "cli.projects.forget", future = true)]
 async fn handle_projects_forget(
+    profile: &ProfileRoot,
     selector: &str,
     keep_store: bool,
     assume_yes: bool,
@@ -91,7 +103,7 @@ async fn handle_projects_forget(
 ) -> Result<()> {
     let selector_arg = forget_selector_argument(selector)?;
     if dry_run {
-        return preview_projects_forget(selector, &selector_arg, keep_store).await;
+        return preview_projects_forget(profile, selector, &selector_arg, keep_store).await;
     }
     if !assume_yes {
         return Err(TraceDecayError::Config {
@@ -102,8 +114,8 @@ async fn handle_projects_forget(
             ),
         });
     }
-    let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
-    let profile_offline = take_profile_offline(&profile_root, "projects forget")?;
+    let profile_root = profile.data_dir().to_path_buf();
+    let profile_offline = take_profile_offline(profile, &profile_root, "projects forget")?;
     let outcome = forget_under_profile_offline(
         selector,
         &selector_arg,
@@ -166,19 +178,23 @@ async fn forget_under_profile_offline(
 /// Read-only forget preview, brokered through the daemon registry like the
 /// other `projects` reads. Prints exactly what a confirmed run would remove.
 async fn preview_projects_forget(
+    profile: &ProfileRoot,
     selector: &str,
     selector_arg: &Path,
     keep_store: bool,
 ) -> Result<()> {
-    let payload = call_registry_admin(json!({
-        "action": "registry_context",
-        "project_arg": selector_arg,
-    }))
+    let payload = call_registry_admin(
+        profile,
+        json!({
+            "action": "registry_context",
+            "project_arg": selector_arg,
+        }),
+    )
     .await?;
     if payload["status"] != "ok" {
         return Err(forget_selector_not_found(selector));
     }
-    let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
+    let profile_root = profile.data_dir().to_path_buf();
     let project = &payload["project"];
     println!(
         "Would forget project {} ({}).",
@@ -334,11 +350,11 @@ fn render_project_context_payload(payload: &Value) -> String {
 }
 
 #[hotpath::measure(label = "cli.projects.request", future = true)]
-async fn call_registry_admin(arguments: Value) -> Result<Value> {
+async fn call_registry_admin(profile: &ProfileRoot, arguments: Value) -> Result<Value> {
     let cwd = std::env::current_dir()?;
-    let project_root = tracedecay_runtime_core::config::discover_project_root(&cwd);
+    let project_root = profile.discover_project_root(&cwd);
     let arguments = registry_admin_arguments(project_root, arguments);
-    daemon_tool_json(None, "tracedecay_admin_cli", arguments).await
+    daemon_tool_json(profile, None, "tracedecay_admin_cli", arguments).await
 }
 
 fn registry_admin_arguments(project_root: Option<PathBuf>, mut arguments: Value) -> Value {

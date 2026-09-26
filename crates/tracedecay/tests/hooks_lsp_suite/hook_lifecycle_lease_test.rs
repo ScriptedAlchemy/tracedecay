@@ -451,8 +451,13 @@ fn native_hook_captures_only_bound_transport_spool_records() {
             &project_id,
         )
         .unwrap();
-        tracedecay_agent_hosts::hooks::publish_hook_bindings(&tracedecay::hook_runtime(), &layout)
-            .unwrap();
+        tracedecay_agent_hosts::hooks::publish_hook_bindings(
+            &tracedecay::hook_runtime(tracedecay_runtime_core::config::ProfileRoot::under_home(
+                &home,
+            )),
+            &layout,
+        )
+        .unwrap();
         let data_root = layout.data_root;
 
         // Every response-capable handler resolves project identity from the

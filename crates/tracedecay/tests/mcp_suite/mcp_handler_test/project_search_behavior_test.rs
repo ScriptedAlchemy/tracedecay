@@ -127,7 +127,7 @@ async fn open_search_fixture() -> SearchFixture {
         .display()
         .to_string();
     let server = McpServer::new_with_host_admission_test_runtime_for_test(
-        TraceDecay::open(cg.project_root())
+        TraceDecay::open_with_options(cg.project_root(), crate::support::graph_open_options(&cg))
             .await
             .expect("open calling project"),
         None,
@@ -541,7 +541,7 @@ async fn project_search_bounds_pages_and_does_not_expand_wildcards() {
 async fn project_search_rejects_a_non_string_query_and_an_unmounted_registry() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let server = McpServer::new(
-        TraceDecay::open(cg.project_root())
+        TraceDecay::open_with_options(cg.project_root(), crate::support::graph_open_options(&cg))
             .await
             .expect("open calling project"),
         None,

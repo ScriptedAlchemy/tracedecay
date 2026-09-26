@@ -17,10 +17,7 @@ use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1
 use tracedecay_sessions::runtime::hosts::codex::CodexSource;
 
 #[cfg(unix)]
-use crate::common::{
-    EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK, spawn_tracedecay_daemon,
-    tracedecay_command_with_home,
-};
+use crate::common::{spawn_tracedecay_daemon, tracedecay_command_with_home};
 #[cfg(unix)]
 use crate::restart_atomicity::mark_test_project;
 use crate::support::setup;
@@ -158,20 +155,10 @@ fn configure_codex_summarizer(
 
 #[cfg(unix)]
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn codex_post_compact_hook_commits_app_server_summary_through_daemon_effect() {
     let tmp = TempDir::new().unwrap();
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (home, project) = setup(&tmp);
     let profile = home.join(".tracedecay");
-    let _env_guards = [
-        EnvVarGuard::set("TRACEDECAY_DATA_DIR", &profile),
-        EnvVarGuard::set(GLOBAL_DB_ENV, profile.join("global.db")),
-        EnvVarGuard::set("HOME", &home),
-        EnvVarGuard::set("USERPROFILE", &home),
-    ];
     let codex_bin = tmp.path().join("codex");
     std::fs::write(
         &codex_bin,

@@ -10,8 +10,8 @@ use std::time::Duration;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay_domain::errors::{Result as TraceDecayResult, TraceDecayError};
 use tracedecay_mcp::ToolResult;
-use tracedecay_project::project::TraceDecay;
-use tracedecay_runtime_core::storage::resolve_layout_for_current_profile;
+use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_runtime_core::storage::resolve_layout;
 
 struct MountedProductionProject {
     harness: ProductionProjectCompositionHarnessV1,
@@ -476,10 +476,7 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
     let project_root = dir.path().join("project");
     fs::create_dir_all(&project_root).unwrap();
     let project = project_root.as_path();
-    let env_lock = lock_process_env().await;
-    let home = project.join("home");
-    let _home_guard = HomeEnvGuard::set(&env_lock, &home);
-    let _global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
+    let profile = crate::common::isolated_profile_under_home(&project.join("home"));
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn f() -> u32 { 1 }\n").unwrap();
     git_run(project, &["init"]);
@@ -489,8 +486,12 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
     git_run(project, &["commit", "-m", "initial"]);
     git_run(project, &["branch", "-M", "main"]);
 
-    let _initialized = TestTraceDecay::new(TraceDecay::init(project).await.unwrap());
-    let tracedecay_dir = resolve_layout_for_current_profile(project)
+    let _initialized = TestTraceDecay::new(
+        TraceDecay::init_with_options(project, TraceDecayOpenOptions::for_profile(&profile))
+            .await
+            .unwrap(),
+    );
+    let tracedecay_dir = resolve_layout(project, profile.data_dir())
         .unwrap()
         .data_root;
     tracedecay_runtime_core::branch_meta::save_branch_meta(
@@ -499,7 +500,11 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
     )
     .unwrap();
 
-    let cg = TestTraceDecay::new(TraceDecay::open(project).await.unwrap());
+    let cg = TestTraceDecay::new(
+        TraceDecay::open_with_options(project, TraceDecayOpenOptions::for_profile(&profile))
+            .await
+            .unwrap(),
+    );
     git_run(project, &["checkout", "-b", "feature"]);
 
     // Branch drift diagnostics moved off `tracedecay_branch_list` (now the
@@ -719,12 +724,12 @@ async fn test_recursion() {
 
 #[tokio::test]
 async fn test_changelog_no_git() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    // Fixture enrollment pins a repository identity, which initializes an
-    // empty git repository with an unborn HEAD and no commits. The tree diff
-    // must surface a structured git error naming the unresolvable ref in the
-    // tool payload rather than success-looking prose (a project that is not a
-    // repository at all is covered by the git shell's own open refusal test).
+    let cg = setup_empty_analysis_project().await;
+    // The fixture repository holds a single commit, so `HEAD~1` names no
+    // commit. The tree diff must surface a structured git error naming the
+    // unresolvable ref in the tool payload rather than success-looking prose
+    // (a project that is not a repository at all is covered by the git
+    // shell's own open refusal test).
     let result = handle_tool_call(
         &cg,
         "tracedecay_changelog",
@@ -743,8 +748,9 @@ async fn test_changelog_no_git() {
             .as_str()
             .unwrap_or_default()
             .contains("cannot resolve 'HEAD~1'"),
-        "the unborn-HEAD refusal must name the unresolvable ref: {output}"
+        "the refusal must name the unresolvable ref: {output}"
     );
+    close_test_graph(cg).await;
 }
 
 #[tokio::test]
@@ -771,7 +777,7 @@ async fn run_affected_tests_requires_manifest_scoped_changed_paths() {
 
 #[tokio::test]
 async fn pr_context_no_git_returns_structured_git_error() {
-    let (cg, _env, _dir) = setup_empty_project().await;
+    let cg = setup_empty_analysis_project().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_pr_context",
@@ -785,6 +791,7 @@ async fn pr_context_no_git_returns_structured_git_error() {
     let output: Value = serde_json::from_str(text).unwrap();
     assert_eq!(output["error"]["kind"].as_str(), Some("git"));
     assert_eq!(output["error"]["operation"].as_str(), Some("diff"));
+    close_test_graph(cg).await;
 }
 
 #[tokio::test]
@@ -3699,7 +3706,7 @@ async fn pr_context_reports_the_pinned_feature_summary() {
     .expect_err("a numeric cursor is not a continuation token");
     assert_eq!(
         cursor.to_string(),
-        "config error: tracedecay_pr_context failed over production MCP: tool execution failed: config error: PR context cursor must be a string"
+        "config error: tracedecay_pr_context failed over production MCP: tool execution failed: config error: invalid arguments for tracedecay_pr_context: invalid type: integer `1`, expected a string"
     );
 
     close_test_graph(host).await;
@@ -4619,7 +4626,7 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
         missing_files
             .expect_err("missing files must be refused")
             .to_string(),
-        "config error: tracedecay_diff_context failed over production MCP: missing required parameter: files (array of strings)"
+        "config error: tracedecay_diff_context failed over production MCP: tool execution failed: config error: invalid arguments for tracedecay_diff_context: missing field `files`"
     );
 
     let files_not_array = handle_tool_call(
@@ -4634,7 +4641,7 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
         files_not_array
             .expect_err("a string files argument must be refused")
             .to_string(),
-        "config error: tracedecay_diff_context failed over production MCP: missing required parameter: files (array of strings)"
+        "config error: tracedecay_diff_context failed over production MCP: tool execution failed: config error: invalid arguments for tracedecay_diff_context: invalid type: string \"src/tier_c.rs\", expected a sequence"
     );
 
     let not_object = handle_tool_call(

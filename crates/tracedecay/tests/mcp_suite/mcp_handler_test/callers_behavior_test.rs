@@ -348,3 +348,70 @@ async fn tracedecay_callers_reads_the_selected_registered_project() {
 
     harness.shutdown().await;
 }
+
+const MACRO_LIB_RS: &str = "\
+macro_rules! cfg_rt { ($($item:item)*) => { $($item)* } }\n\
+macro_rules! route { ($($tokens:tt)*) => {}; }\n\
+\n\
+cfg_rt! {\n\
+    pub mod foo {\n\
+        pub fn bar() {}\n\
+    }\n\
+}\n\
+\n\
+route! { \"/\" => handler() }\n\
+\n\
+pub fn entry() {\n\
+    foo::bar();\n\
+}\n\
+\n\
+pub fn handler() {}\n";
+
+/// An item-list macro body (`cfg_rt! { ... }`) is parsed, so `bar` is a symbol
+/// with a complete caller answer. A body that is not an item list is not
+/// expanded: its call is attributed to the `route!` invocation, and the answer
+/// is partial with a typed `macro_body_unparsed` omission naming it.
+#[tokio::test]
+async fn tracedecay_callers_parses_item_macro_bodies_and_discloses_unexpanded_ones() {
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(project.join("src/lib.rs"), MACRO_LIB_RS).unwrap();
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    warm_code_index_search(&server, "handler").await;
+
+    let bar_id = function_id(&server, "bar").await;
+    let bar_callers =
+        evidence(&call_callers(&server, json!({"node_id": bar_id, "maximum_depth": 1})).await);
+    assert_eq!(
+        caller_rows(&bar_callers),
+        vec![row("entry", "src/lib.rs", 12, 1)],
+        "bar inside cfg_rt! is called by entry: {bar_callers}"
+    );
+    assert_eq!(bar_callers["coverage"]["completeness"], "complete");
+    assert_eq!(bar_callers["omissions"], json!([]));
+
+    let handler_id = function_id(&server, "handler").await;
+    let handler_callers =
+        evidence(&call_callers(&server, json!({"node_id": handler_id, "maximum_depth": 1})).await);
+    assert_eq!(
+        caller_rows(&handler_callers),
+        vec![row("route!", "src/lib.rs", 10, 1)],
+        "the call inside the unexpanded route! body is attributed to the invocation"
+    );
+    assert_eq!(handler_callers["coverage"]["completeness"], "partial");
+    assert_eq!(
+        handler_callers["omissions"],
+        json!([{"domain": "graph", "count": 1, "reason": "macro_body_unparsed"}])
+    );
+    assert_eq!(
+        handler_callers["payload"]["support_gaps"],
+        json!([{"provider": "code_index", "language": null, "reason": "macro_body_unparsed: route!"}])
+    );
+
+    fixture.harness.shutdown().await;
+}

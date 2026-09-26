@@ -105,11 +105,11 @@ fn topology_envelope(scope: &str, id: u64, event_time_micros: i64) -> Observabil
 
 #[tokio::test]
 async fn idle_producer_converges_dirty_days_into_application_readable_fragments() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let profile_dir = tempfile::tempdir().expect("profile");
     let project = tempfile::tempdir().expect("project");
     let scope = "project.observability.rollup-convergence.v2";
     let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+        profile_dir.path().to_path_buf(),
         project.path(),
         tracedecay_domain::ProjectId::new(scope).expect("project identifier"),
     )

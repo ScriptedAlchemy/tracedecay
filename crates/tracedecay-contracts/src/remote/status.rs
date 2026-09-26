@@ -168,6 +168,7 @@ fn invalid_status() -> ApplicationProblem {
         .expect("static Remote operational status diagnostic is valid"),
         retry: RetryDirective::AfterRevalidate,
         legal_actions: vec![LegalAction::Refresh, LegalAction::Reconcile],
+        detail: None,
     }
 }
 

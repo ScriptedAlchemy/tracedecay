@@ -655,7 +655,6 @@ async fn wait_for_preserved_discovery(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() {
-    let _profile = tracedecay_project::config::PinnedUserDataDir::new();
     let isolation = tempfile::TempDir::new().expect("isolated home/profile");
     let project = isolation.path().join("project");
     seed_project(&project);

@@ -68,8 +68,19 @@ fn apply_daemon_initialize_route_inner<'a>(
             return Ok(None);
         }
         let registry = store_administration.registered_profile_database().await?;
-        let Some(route) =
-            resolve_daemon_initialize_route(request.params.as_ref(), Some(&registry)).await?
+        // Discovery runs in the requesting client's profile, with the daemon
+        // owner's home as the one ambient root no route may select.
+        let owner = store_administration.owner_profile()?;
+        let discovery_profile = crate::daemon::daemon_transcript_source_profile(
+            owner,
+            &handshake.client_identity.profile_root,
+        );
+        let Some(route) = resolve_daemon_initialize_route(
+            &discovery_profile,
+            request.params.as_ref(),
+            Some(&registry),
+        )
+        .await?
         else {
             return Ok(None);
         };

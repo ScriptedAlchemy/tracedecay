@@ -191,9 +191,12 @@ async fn call_md(cg: &TraceDecay, tool: &str, mut args: Value) -> String {
         .upsert_code_project(&project_id, cg.project_root(), None, None, None)
         .await
         .unwrap_or_else(|error| panic!("register workflow fixture project: {error}"));
-    let graph = Box::pin(TraceDecay::open(cg.project_root()))
-        .await
-        .unwrap_or_else(|error| panic!("open workflow fixture graph: {error}"));
+    let graph = Box::pin(TraceDecay::open_with_options(
+        cg.project_root(),
+        crate::support::graph_open_options(cg),
+    ))
+    .await
+    .unwrap_or_else(|error| panic!("open workflow fixture graph: {error}"));
     let server = Box::pin(McpServer::new_with_host_admission_test_runtime_for_test(
         graph,
         None,
@@ -250,7 +253,7 @@ async fn call(
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn workflow_queries_distinguish_missing_schema_from_empty_results() {
-    let (_env, project_root) = common::IsolatedEnv::acquire().await;
+    let (_env, project_root) = common::IsolatedHome::new();
     let cg = TraceDecay::init(&project_root)
         .await
         .unwrap_or_else(|error| panic!("init project: {error}"));
@@ -286,7 +289,7 @@ async fn workflow_queries_distinguish_missing_schema_from_empty_results() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn workflows_query_surface_end_to_end() {
-    let (env, project_root) = common::IsolatedEnv::acquire().await;
+    let (env, project_root) = common::IsolatedHome::new();
     let home = env.home().to_path_buf();
 
     let cg = TraceDecay::init(&project_root)
@@ -544,6 +547,7 @@ fn invalid_request_problem() -> Value {
             "code": "application.retained.invalid-request",
             "message": "The retained operation request is invalid."
         },
+        "detail": null,
         "committed_receipt": null,
         "owning_layer": "application",
         "terminality": "pre_admission",
@@ -572,6 +576,7 @@ fn unbuilt_index_problem() -> Value {
             "code": "application.retained.authority-unavailable",
             "message": "The retained operation authority is unavailable: workflow_index_not_built: the workflow index has not been built for this project yet"
         },
+        "detail": null,
         "committed_receipt": null,
         "owning_layer": "application",
         "terminality": "pre_admission",
@@ -602,7 +607,7 @@ async fn refuse(cg: &TraceDecay, args: Value) -> String {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn workflows_tool_returns_literal_query_documents() {
-    let (env, project_root) = common::IsolatedEnv::acquire().await;
+    let (env, project_root) = common::IsolatedHome::new();
     let home = env.home().to_path_buf();
     let cg = TraceDecay::init(&project_root)
         .await

@@ -168,6 +168,21 @@ fn open_registered_database(
                 }
             }
         }
+        Err(GraphDbError::FormatSuperseded { .. })
+            if persistent_store_state == PersistentGraphStoreState::Existing =>
+        {
+            match crate::corrupt_store::replace_superseded_container(path, &|| {
+                open(PersistentGraphStoreState::Existing)
+            })? {
+                crate::corrupt_store::CorruptStoreRecovery::Reopened(database) => {
+                    Ok((database, PersistentGraphStoreState::Existing))
+                }
+                crate::corrupt_store::CorruptStoreRecovery::Deleted => {
+                    let fresh_state = inspect_graph_database_file(path)?;
+                    Ok((open(fresh_state)?, fresh_state))
+                }
+            }
+        }
         Err(error) => Err(error),
     }
 }
@@ -235,6 +250,7 @@ pub(super) fn retains_fault(error: &GraphDbError) -> bool {
     matches!(
         error,
         GraphDbError::ResetRequired { .. }
+            | GraphDbError::FormatSuperseded { .. }
             | GraphDbError::Corrupt { .. }
             | GraphDbError::DurabilityUncertain { .. }
     )
@@ -252,7 +268,9 @@ pub(super) fn status(entry: &RegistryEntry) -> GraphDbRegistryStatus {
             GraphDbRuntimeState::DurabilityUncertain => GraphDbRegistryStatus::DurabilityUncertain,
         },
         RegistryEntry::Faulted { error, .. } => match error {
-            GraphDbError::ResetRequired { .. } => GraphDbRegistryStatus::ResetRequired,
+            GraphDbError::ResetRequired { .. } | GraphDbError::FormatSuperseded { .. } => {
+                GraphDbRegistryStatus::ResetRequired
+            }
             GraphDbError::Corrupt { .. } => GraphDbRegistryStatus::Corrupt,
             GraphDbError::DurabilityUncertain { .. } => GraphDbRegistryStatus::DurabilityUncertain,
             GraphDbError::Cancelled

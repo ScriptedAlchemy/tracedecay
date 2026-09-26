@@ -29,11 +29,11 @@ fn attempt() -> DeliverySettlementAttemptV1 {
 
 #[tokio::test]
 async fn fanout_observation_exists_only_after_durable_terminal_settlement() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let profile_dir = tempfile::tempdir().expect("profile");
     let project = tempfile::tempdir().expect("project");
     let project_id = ProjectId::new("project.delivery.settlement").expect("project id");
     let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+        profile_dir.path().to_path_buf(),
         project.path(),
         project_id.clone(),
     )
@@ -117,11 +117,11 @@ async fn fanout_observation_exists_only_after_durable_terminal_settlement() {
 
 #[tokio::test]
 async fn bounded_recorder_keeps_settlement_io_off_the_delivery_boundary_and_drains() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let profile_dir = tempfile::tempdir().expect("profile");
     let project = tempfile::tempdir().expect("project");
     let project_id = ProjectId::new("project.delivery.recorder").expect("project id");
     let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+        profile_dir.path().to_path_buf(),
         project.path(),
         project_id.clone(),
     )
@@ -184,11 +184,11 @@ async fn bounded_recorder_keeps_settlement_io_off_the_delivery_boundary_and_drai
 
 #[tokio::test]
 async fn recorder_queue_saturation_retains_every_durable_receipt() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let profile_dir = tempfile::tempdir().expect("profile");
     let project = tempfile::tempdir().expect("project");
     let project_id = ProjectId::new("project.delivery.saturation").expect("project id");
     let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+        profile_dir.path().to_path_buf(),
         project.path(),
         project_id.clone(),
     )
@@ -250,11 +250,11 @@ async fn recorder_queue_saturation_retains_every_durable_receipt() {
 
 #[tokio::test]
 async fn recorder_replays_retained_receipt_after_transient_db_failure_and_restart() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let profile_dir = tempfile::tempdir().expect("profile");
     let project = tempfile::tempdir().expect("project");
     let project_id = ProjectId::new("project.delivery.restart").expect("project id");
     let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+        profile_dir.path().to_path_buf(),
         project.path(),
         project_id.clone(),
     )

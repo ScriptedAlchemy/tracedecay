@@ -4,6 +4,7 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -187,17 +188,20 @@ impl tracedecay_agent_hosts::agents::host_bundle::HostBundleLifecycleStorageV1
 }
 
 pub(crate) async fn handle_feedback_rollback_command(
+    profile: &ProfileRoot,
     action: crate::cli::FeedbackRollbackAction,
 ) -> tracedecay_domain::errors::Result<()> {
     match action {
-        crate::cli::FeedbackRollbackAction::DryRun { agent } => feedback_rollback_dry_run(&agent),
+        crate::cli::FeedbackRollbackAction::DryRun { agent } => {
+            feedback_rollback_dry_run(profile, &agent)
+        }
         crate::cli::FeedbackRollbackAction::Apply { agent, state, yes } => {
             if !yes {
                 return Err(tracedecay_domain::errors::TraceDecayError::Config {
                     message: "feedback rollback apply requires --yes".to_string(),
                 });
             }
-            feedback_rollback_apply(&agent, Path::new(&state))
+            feedback_rollback_apply(profile, &agent, Path::new(&state))
         }
         crate::cli::FeedbackRollbackAction::Restore { state, yes } => {
             if !yes {
@@ -205,12 +209,13 @@ pub(crate) async fn handle_feedback_rollback_command(
                     message: "feedback rollback restore requires --yes".to_string(),
                 });
             }
-            feedback_rollback_restore(Path::new(&state))
+            feedback_rollback_restore(profile, Path::new(&state))
         }
     }
 }
 
 fn feedback_rollback_inputs(
+    profile: &ProfileRoot,
     agent_id: &str,
 ) -> tracedecay_domain::errors::Result<(
     PathBuf,
@@ -218,16 +223,16 @@ fn feedback_rollback_inputs(
     tracedecay_agent_hosts::agents::host_bundle::HostComponentSetReceiptV1,
     tracedecay_agent_hosts::agents::host_bundle_registry::VerifiedEmbeddedHostBundleV1,
 )> {
-    let home = tracedecay_agent_hosts::agents::home_dir().ok_or_else(|| {
-        tracedecay_domain::errors::TraceDecayError::Config {
+    let home = profile
+        .home()
+        .map(std::path::Path::to_path_buf)
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
             message: "could not determine home directory".to_string(),
-        }
-    })?;
+        })?;
     let lifecycle_root =
-        tracedecay_agent_hosts::agents::host_bundle::resolved_host_bundle_lifecycle_root()
-            .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("could not resolve host lifecycle root: {error}"),
-            })?;
+        tracedecay_agent_hosts::agents::host_bundle::resolved_host_bundle_lifecycle_root(
+            profile.data_dir(),
+        );
     let host = host_kind_for_agent(agent_id)?;
     let previous =
         tracedecay_agent_hosts::agents::host_bundle::latest_host_component_set_receipt_at(
@@ -487,11 +492,12 @@ fn read_feedback_repair_contents(
 }
 
 fn snapshot_feedback_registration(
+    profile: &ProfileRoot,
     home: &Path,
     integration: &dyn tracedecay_agent_hosts::agents::AgentIntegration,
     component: tracedecay_agent_hosts::agents::host_bundle::HostComponentV1,
 ) -> tracedecay_domain::errors::Result<Vec<FeedbackRegistrationFileState>> {
-    let paths = feedback_registration_paths(home, integration, component)?;
+    let paths = feedback_registration_paths(profile, home, integration, component)?;
     paths
         .into_iter()
         .enumerate()
@@ -539,13 +545,14 @@ fn snapshot_feedback_registration(
 /// Re-resolves the registration inventory and pins it to a recorded snapshot.
 /// `inventory_changed` carries the caller's own wording for a stale inventory.
 fn feedback_registration_paths_for_state(
+    profile: &ProfileRoot,
     home: &Path,
     integration: &dyn tracedecay_agent_hosts::agents::AgentIntegration,
     component: tracedecay_agent_hosts::agents::host_bundle::HostComponentV1,
     registration_files: &[FeedbackRegistrationFileState],
     inventory_changed: &str,
 ) -> tracedecay_domain::errors::Result<Vec<PathBuf>> {
-    let paths = feedback_registration_paths(home, integration, component)?;
+    let paths = feedback_registration_paths(profile, home, integration, component)?;
     if paths.len() == registration_files.len() {
         Ok(paths)
     } else {
@@ -568,12 +575,14 @@ fn feedback_registration_path<'a>(
 }
 
 fn capture_feedback_applied_registration(
+    profile: &ProfileRoot,
     home: &Path,
     integration: &dyn tracedecay_agent_hosts::agents::AgentIntegration,
     component: tracedecay_agent_hosts::agents::host_bundle::HostComponentV1,
     registration_files: &mut [FeedbackRegistrationFileState],
 ) -> tracedecay_domain::errors::Result<()> {
     let paths = feedback_registration_paths_for_state(
+        profile,
         home,
         integration,
         component,
@@ -593,12 +602,14 @@ fn capture_feedback_applied_registration(
 }
 
 fn validate_feedback_registration_snapshot(
+    profile: &ProfileRoot,
     home: &Path,
     integration: &dyn tracedecay_agent_hosts::agents::AgentIntegration,
     component: tracedecay_agent_hosts::agents::host_bundle::HostComponentV1,
     registration_files: &[FeedbackRegistrationFileState],
 ) -> tracedecay_domain::errors::Result<()> {
     let paths = feedback_registration_paths_for_state(
+        profile,
         home,
         integration,
         component,
@@ -626,6 +637,7 @@ fn validate_feedback_registration_snapshot(
 }
 
 fn validate_feedback_registration_restore(
+    profile: &ProfileRoot,
     home: &Path,
     integration: &dyn tracedecay_agent_hosts::agents::AgentIntegration,
     component: tracedecay_agent_hosts::agents::host_bundle::HostComponentV1,
@@ -634,6 +646,7 @@ fn validate_feedback_registration_restore(
     intent_root: Option<&Path>,
 ) -> tracedecay_domain::errors::Result<Vec<PathBuf>> {
     let paths = feedback_registration_paths_for_state(
+        profile,
         home,
         integration,
         component,
@@ -712,6 +725,7 @@ fn validate_feedback_registration_restore(
 }
 
 fn restore_feedback_registration(
+    profile: &ProfileRoot,
     home: &Path,
     integration: &dyn tracedecay_agent_hosts::agents::AgentIntegration,
     component: tracedecay_agent_hosts::agents::host_bundle::HostComponentV1,
@@ -720,6 +734,7 @@ fn restore_feedback_registration(
     intent_root: Option<&Path>,
 ) -> tracedecay_domain::errors::Result<()> {
     let paths = validate_feedback_registration_restore(
+        profile,
         home,
         integration,
         component,
@@ -902,11 +917,13 @@ fn restore_feedback_artifact_permissions(
 }
 
 fn feedback_registration_paths(
+    profile: &ProfileRoot,
     home: &Path,
     integration: &dyn tracedecay_agent_hosts::agents::AgentIntegration,
     component: tracedecay_agent_hosts::agents::host_bundle::HostComponentV1,
 ) -> tracedecay_domain::errors::Result<Vec<PathBuf>> {
-    let mut paths = integration.host_component_registration_paths_checked(&[component], home)?;
+    let mut paths =
+        integration.host_component_registration_paths_checked(&[component], home, profile)?;
     if integration.id() == "claude" {
         let artifact_owned_manifest =
             home.join(".claude/plugins/marketplaces/tracedecay/.claude-plugin/marketplace.json");
@@ -1121,8 +1138,11 @@ fn persist_feedback_state(
     })
 }
 
-fn feedback_rollback_dry_run(agent_id: &str) -> tracedecay_domain::errors::Result<()> {
-    let (home, _lifecycle_root, aggregate, target) = feedback_rollback_inputs(agent_id)?;
+fn feedback_rollback_dry_run(
+    profile: &ProfileRoot,
+    agent_id: &str,
+) -> tracedecay_domain::errors::Result<()> {
+    let (home, _lifecycle_root, aggregate, target) = feedback_rollback_inputs(profile, agent_id)?;
     let (previous, previous_receipt) = live_feedback_receipt(&home, &aggregate)?;
     let verifier = feedback_pair_verifier(&previous, &target.manifest)?;
     let request = feedback_request(
@@ -1163,18 +1183,23 @@ fn feedback_rollback_dry_run(agent_id: &str) -> tracedecay_domain::errors::Resul
 
 #[hotpath::measure(label = "cli.agent.feedback")]
 fn feedback_rollback_apply(
+    profile: &ProfileRoot,
     agent_id: &str,
     state_path: &Path,
 ) -> tracedecay_domain::errors::Result<()> {
     let dashboard_enabled =
-        load_host_lifecycle_user_config()?.dashboard_enabled_for_agent(agent_id);
-    let (home, lifecycle_root, aggregate, target) = feedback_rollback_inputs(agent_id)?;
+        load_host_lifecycle_user_config(profile)?.dashboard_enabled_for_agent(agent_id);
+    let (home, lifecycle_root, aggregate, target) = feedback_rollback_inputs(profile, agent_id)?;
     let (previous, _previous_receipt) = live_feedback_receipt(&home, &aggregate)?;
     let previous_contents = read_feedback_repair_contents(&home, &previous)?;
     let artifact_permissions = snapshot_feedback_artifact_permissions(&home, &previous)?;
     let integration = tracedecay_agent_hosts::agents::get_integration(agent_id)?;
-    let registration_files =
-        snapshot_feedback_registration(&home, integration.as_ref(), target.manifest.component)?;
+    let registration_files = snapshot_feedback_registration(
+        profile,
+        &home,
+        integration.as_ref(),
+        target.manifest.component,
+    )?;
     let verifier = feedback_pair_verifier(&previous, &target.manifest)?;
     let request = feedback_request(
         &target.manifest,
@@ -1209,6 +1234,7 @@ fn feedback_rollback_apply(
     };
     persist_feedback_state(state_path, &lifecycle_root, &state)?;
     validate_feedback_registration_snapshot(
+        profile,
         &home,
         integration.as_ref(),
         target.manifest.component,
@@ -1248,12 +1274,14 @@ fn feedback_rollback_apply(
 
     let context = tracedecay_agent_hosts::agents::InstallContext {
         home: home.clone(),
+        profile: profile.clone(),
         tracedecay_bin: tracedecay_agent_hosts::agents::which_tracedecay()
             .unwrap_or_else(|| "tracedecay".to_string()),
         project_root: None,
         dashboard: state.dashboard_enabled,
     };
     let registration_snapshot = validate_feedback_registration_snapshot(
+        profile,
         &home,
         integration.as_ref(),
         target.manifest.component,
@@ -1280,6 +1308,7 @@ fn feedback_rollback_apply(
                 }
                 let health = tracedecay_agent_hosts::agents::HealthcheckContext {
                     home: home.clone(),
+                    profile: profile.clone(),
                     project_path: std::env::current_dir().unwrap_or_else(|_| home.clone()),
                 };
                 (integration.host_component_registration(target.manifest.component, &health)
@@ -1292,6 +1321,7 @@ fn feedback_rollback_apply(
                     })
             });
             let capture_result = capture_feedback_applied_registration(
+                profile,
                 &home,
                 integration.as_ref(),
                 target.manifest.component,
@@ -1307,7 +1337,7 @@ fn feedback_rollback_apply(
         state.compensation_preserves_registration = !registration_effect_attempted;
         persist_feedback_state(state_path, &lifecycle_root, &state)?;
         drop(writer);
-        feedback_rollback_restore(state_path)?;
+        feedback_rollback_restore(profile, state_path)?;
         return Err(registration_error);
     }
     writer
@@ -1324,7 +1354,10 @@ fn feedback_rollback_apply(
 }
 
 #[hotpath::measure(label = "cli.agent.feedback")]
-fn feedback_rollback_restore(state_path: &Path) -> tracedecay_domain::errors::Result<()> {
+fn feedback_rollback_restore(
+    profile: &ProfileRoot,
+    state_path: &Path,
+) -> tracedecay_domain::errors::Result<()> {
     let bytes = fs::read(state_path).map_err(|error| {
         tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(
@@ -1345,16 +1378,16 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay_domain::errors::Re
             message: "unsupported feedback rollback state version".to_string(),
         });
     }
-    let home = tracedecay_agent_hosts::agents::home_dir().ok_or_else(|| {
-        tracedecay_domain::errors::TraceDecayError::Config {
+    let home = profile
+        .home()
+        .map(std::path::Path::to_path_buf)
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
             message: "could not determine home directory".to_string(),
-        }
-    })?;
+        })?;
     let lifecycle_root =
-        tracedecay_agent_hosts::agents::host_bundle::resolved_host_bundle_lifecycle_root()
-            .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("could not resolve host lifecycle root: {error}"),
-            })?;
+        tracedecay_agent_hosts::agents::host_bundle::resolved_host_bundle_lifecycle_root(
+            profile.data_dir(),
+        );
     if host_kind_for_agent(&state.agent_id)? != state.host {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: "feedback rollback state host does not match its integration".to_string(),
@@ -1373,7 +1406,7 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay_domain::errors::Re
     }
     let integration = tracedecay_agent_hosts::agents::get_integration(&state.agent_id)?;
     let dashboard_enabled =
-        load_host_lifecycle_user_config()?.dashboard_enabled_for_agent(&state.agent_id);
+        load_host_lifecycle_user_config(profile)?.dashboard_enabled_for_agent(&state.agent_id);
     if dashboard_enabled != state.dashboard_enabled {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(
@@ -1384,6 +1417,7 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay_domain::errors::Re
     }
     if state.switch_receipt.is_none() && !state.effect_started {
         validate_feedback_registration_restore(
+            profile,
             &home,
             integration.as_ref(),
             feedback_component,
@@ -1396,6 +1430,7 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay_domain::errors::Re
     }
     if !state.compensation_preserves_registration {
         validate_feedback_registration_restore(
+            profile,
             &home,
             integration.as_ref(),
             feedback_component,
@@ -1525,6 +1560,7 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay_domain::errors::Re
             // The writer already resolved the lower-level artifact journal.
             // No feedback registration or aggregate receipt effect occurred.
             validate_feedback_registration_restore(
+                profile,
                 &home,
                 integration.as_ref(),
                 feedback_component,
@@ -1540,6 +1576,7 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay_domain::errors::Re
     let verifier = feedback_pair_verifier(&state.previous_manifest, &state.target_manifest)?;
     if committed_restore_receipt.is_none() && !state.compensation_preserves_registration {
         validate_feedback_registration_restore(
+            profile,
             &home,
             integration.as_ref(),
             feedback_component,
@@ -1598,6 +1635,7 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay_domain::errors::Re
     let mut writer = lifecycle.into_storage();
     let context = tracedecay_agent_hosts::agents::InstallContext {
         home,
+        profile: profile.clone(),
         tracedecay_bin: tracedecay_agent_hosts::agents::which_tracedecay()
             .unwrap_or_else(|| "tracedecay".to_string()),
         project_root: None,
@@ -1605,6 +1643,7 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay_domain::errors::Re
     };
     if !state.compensation_preserves_registration {
         restore_feedback_registration(
+            profile,
             &context.home,
             integration.as_ref(),
             feedback_component,
@@ -1616,6 +1655,7 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay_domain::errors::Re
     restore_feedback_artifact_permissions(&context.home, &state.artifact_permissions)?;
     if !state.compensation_preserves_registration {
         validate_feedback_registration_snapshot(
+            profile,
             &context.home,
             integration.as_ref(),
             feedback_component,

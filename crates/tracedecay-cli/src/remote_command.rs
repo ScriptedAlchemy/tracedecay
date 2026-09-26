@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -63,9 +64,9 @@ pub enum RemoteCommand {
 }
 
 #[hotpath::measure(label = "serve.remote.run")]
-pub fn run(command: RemoteCommand) -> Result<()> {
+pub fn run(profile: &ProfileRoot, command: RemoteCommand) -> Result<()> {
     match command {
-        RemoteCommand::Status { json } => run_status(json),
+        RemoteCommand::Status { json } => run_status(profile, json),
         RemoteCommand::Enroll {
             args,
             enrollment_credential_file,
@@ -92,7 +93,7 @@ pub fn run(command: RemoteCommand) -> Result<()> {
             let local_spool = if args.json {
                 None
             } else {
-                caller_local_spool_evidence(&response)
+                caller_local_spool_evidence(profile, &response)
             };
             emit_query_response(&response, local_spool.as_ref(), args.json)
         }
@@ -135,10 +136,10 @@ pub fn run(command: RemoteCommand) -> Result<()> {
 }
 
 #[hotpath::measure(label = "serve.remote.status")]
-fn run_status(json: bool) -> Result<()> {
+fn run_status(profile: &ProfileRoot, json: bool) -> Result<()> {
     let status = hotpath::measure_block!(
         "serve.remote.status.read",
-        tracedecay::daemon::live_remote_operational_status()?
+        tracedecay::daemon::live_remote_operational_status(profile)?
     );
     if json {
         print!("{}", status_json_line(&status)?);
@@ -282,6 +283,7 @@ fn protocol_exit_status<T>(response: &RemoteProtocolResponseV1<T>) -> Result<()>
 /// answer keeps the serving node's own evidence, and a local daemon that
 /// cannot answer leaves the wire's typed absence in place.
 fn caller_local_spool_evidence(
+    profile: &ProfileRoot,
     response: &RemoteProtocolResponseV1<RemoteQueryResultV1>,
 ) -> Option<RemoteSpoolOperationalStatusV1> {
     let payload = query_payload(response)?;
@@ -293,7 +295,7 @@ fn caller_local_spool_evidence(
     ) {
         return None;
     }
-    match tracedecay::daemon::live_remote_operational_status() {
+    match tracedecay::daemon::live_remote_operational_status(profile) {
         Ok(RemoteOperationalStatusReadV1::Observed { status, .. }) => Some(status.spool),
         Ok(
             RemoteOperationalStatusReadV1::Unconfigured

@@ -496,6 +496,8 @@ pub struct DashboardState {
     pub storage_mode: String,
     /// Resolved active project store root.
     pub store_root: PathBuf,
+    /// Data directory of the owning profile, home of profile-wide files.
+    pub profile_root: PathBuf,
     /// Resolved dashboard sidecar root inside the active project store.
     pub dashboard_root: PathBuf,
     /// Retention policy resolved with the owning runtime configuration.
@@ -937,8 +939,7 @@ async fn build_state_inner(
     let savings_db_path = registered_savings_db
         .as_ref()
         .map(|db| db.db_path().display().to_string())
-        .or_else(|| tracedecay_global_db::global_db_path().map(|path| path.display().to_string()))
-        .unwrap_or_default();
+        .unwrap_or_else(|| cg.profile.global_db_path().display().to_string());
     let delivery_settlements = Arc::new(
         events_delivery::DashboardDeliverySettlementRegistryV1::new(delivery_settlement_authority),
     );
@@ -981,6 +982,7 @@ async fn build_state_inner(
         pr_autotrack_reader,
         storage_mode,
         store_root,
+        profile_root: cg.profile.data_dir().to_path_buf(),
         dashboard_root,
         retention_config: cg.retention_config.clone(),
         user_settings: Arc::clone(&cg.user_settings_client),
@@ -1162,6 +1164,7 @@ where
     // entry point started the dashboard.
     let code_diagnostics_broker =
         crate::application::dashboard_diagnostics::open_diagnostic_broker(
+            Some(&cg.profile),
             cg.store_layout.project_root.clone(),
             &cg.store_layout.dashboard_root,
         )
@@ -2598,6 +2601,7 @@ mod authority_tests {
                 pr_autotrack_reader: None,
                 storage_mode: storage_mode_label(&layout.storage_mode).to_owned(),
                 store_root: layout.data_root.clone(),
+                profile_root: profile_root.clone(),
                 dashboard_root: layout.dashboard_root.clone(),
                 retention_config: tracedecay_configuration::RetentionConfig::default(),
                 user_settings: Arc::new(

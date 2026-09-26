@@ -4,6 +4,7 @@
 //! authorization, mutation, audit, and credential semantics remain in the
 //! existing application operations and transactional store.
 
+use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 use tracedecay_contracts::now_micros;
@@ -49,7 +50,10 @@ pub struct ProjectConfigurationRuntime {
 }
 
 impl ProjectConfigurationRuntime {
-    pub fn open(opened: OpenedRuntimeConfiguration) -> Result<(Self, PinnedRuntimeConfiguration)> {
+    pub fn open(
+        opened: OpenedRuntimeConfiguration,
+        profile_root: &Path,
+    ) -> Result<(Self, PinnedRuntimeConfiguration)> {
         let OpenedRuntimeConfiguration {
             configuration,
             registered_database,
@@ -81,6 +85,7 @@ impl ProjectConfigurationRuntime {
         let user_settings = Arc::new(ProductionUserSettingsDaemonClient::new(
             Arc::clone(&client),
             profile_id,
+            profile_root.to_path_buf(),
         ));
         Ok((
             Self {

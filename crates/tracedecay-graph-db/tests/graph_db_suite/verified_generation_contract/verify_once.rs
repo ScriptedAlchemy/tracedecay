@@ -388,7 +388,7 @@ fn activation_verify_cost_probe() {
             &mut authority,
             &context,
             &key,
-            Some(Arc::clone(&generation)),
+            Some(Arc::clone(&generation).into()),
         )
         .unwrap();
     let publish_wall = publish_started.elapsed();

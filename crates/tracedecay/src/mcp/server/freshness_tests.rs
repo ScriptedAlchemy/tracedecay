@@ -5,7 +5,6 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_mcp::tool_error_response;
-use tracedecay_project::config::PinnedUserDataDir;
 use tracedecay_project::project::TraceDecay;
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
@@ -59,12 +58,12 @@ fn git(root: &std::path::Path, args: &[&str]) {
 }
 
 struct FreshnessFixtureAuthority {
-    _pin: PinnedUserDataDir,
+    profile: TempDir,
     _runtime: Arc<tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1>,
 }
 
 async fn init_indexed_repo() -> (TraceDecay, TempDir, FreshnessFixtureAuthority) {
-    let pin = PinnedUserDataDir::new();
+    let profile = TempDir::new().unwrap();
     let dir = TempDir::new().unwrap();
     let root = dir.path();
     git(root, &["init", "-q", "-b", "main"]);
@@ -75,15 +74,18 @@ async fn init_indexed_repo() -> (TraceDecay, TempDir, FreshnessFixtureAuthority)
     std::fs::write(root.join("src/a.rs"), "pub fn a() {}\n").unwrap();
     git(root, &["add", "."]);
     git(root, &["commit", "-q", "-m", "initial"]);
-    let (cg, runtime) =
-        TraceDecay::init_test_fixture_with_registered_runtime(root, "project.mcp-freshness")
-            .await
-            .expect("init");
+    let (cg, runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.path(),
+        root,
+        "project.mcp-freshness",
+    )
+    .await
+    .expect("init");
     (
         cg,
         dir,
         FreshnessFixtureAuthority {
-            _pin: pin,
+            profile,
             _runtime: runtime,
         },
     )
@@ -135,7 +137,11 @@ async fn branch_drift_serves_the_old_snapshot_until_the_swap_lands() {
         ._runtime
         .open_project_graph_for_test(
             root,
-            tracedecay_project::project::TraceDecayOpenOptions::default(),
+            tracedecay_project::project::TraceDecayOpenOptions::for_profile(
+                &tracedecay_runtime_core::config::ProfileRoot::new(
+                    fixture_authority.profile.path(),
+                ),
+            ),
         )
         .await
         .unwrap();
@@ -252,18 +258,21 @@ async fn a_cancelled_machine_reads_as_settled_and_refuses_further_phases() {
 
 #[tokio::test]
 async fn direct_server_keeps_configured_profile_root_with_overridden_registry_db() {
-    let (cg, dir, _pin) = init_indexed_repo().await;
-    let profile_root =
-        tracedecay_runtime_core::config::user_data_dir().expect("configured profile root");
+    let (cg, dir, fixture_authority) = init_indexed_repo().await;
+    let profile =
+        tracedecay_runtime_core::config::ProfileRoot::new(fixture_authority.profile.path());
     let override_root = dir.path().join("registry-override");
     let runtime = FreshnessRuntime::open(&override_root).await;
     let registry = runtime.profile_database().await;
 
-    let server = McpServer::new_with_dbs(cg, None, None, Some(registry), true).await;
+    let server =
+        McpServer::new_with_dbs(cg, None, None, Some(registry), Some(profile.clone())).await;
 
-    assert_eq!(server.profile_root.as_deref(), Some(profile_root.as_path()));
+    assert_eq!(server.owner_profile(), Some(&profile));
     assert_ne!(
-        server.profile_root.as_deref(),
+        server
+            .owner_profile()
+            .map(tracedecay_runtime_core::config::ProfileRoot::data_dir),
         server
             .registry_db
             .as_deref()

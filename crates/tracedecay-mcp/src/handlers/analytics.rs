@@ -437,6 +437,7 @@ async fn observatory_and_costs_sections(
 pub async fn handle_analytics(
     cg: &TraceDecay,
     args: Value,
+    profile_root: Option<&Path>,
     analytics_db: Option<&RegisteredGlobalDb>,
     project_sessions: Option<&RegisteredGlobalDb>,
     application_deadline: Deadline,
@@ -521,7 +522,7 @@ pub async fn handle_analytics(
     }
     if wants_section(section, "automation") {
         let automation = hotpath::future!(
-            automation_section(&scope.root, since),
+            automation_section(profile_root, &scope.root, since),
             label = "mcp.analytics.report.automation"
         )
         .await;
@@ -751,28 +752,34 @@ async fn facts_section(
     })
 }
 
-async fn automation_section(project_root: &Path, since: i64) -> Value {
+async fn automation_section(profile_root: Option<&Path>, project_root: &Path, since: i64) -> Value {
+    let Some(profile_root) = profile_root else {
+        return json!({
+            "available": false,
+            "reason": "profile root unavailable",
+        });
+    };
     // Only an enrolled project has an automation ledger; resolving through the
     // path-derived default layout would name a shard this directory never
     // owned and the read below would mint it.
-    let dashboard_root =
-        match tracedecay_runtime_core::storage::resolve_enrolled_layout_for_current_profile(
-            project_root,
-        ) {
-            Ok(Some(layout)) => layout.dashboard_root,
-            Ok(None) => {
-                return json!({
-                    "available": false,
-                    "reason": "project is not enrolled in this profile",
-                });
-            }
-            Err(err) => {
-                return json!({
-                    "available": false,
-                    "reason": format!("could not resolve automation dashboard root: {err}"),
-                });
-            }
-        };
+    let dashboard_root = match tracedecay_runtime_core::storage::resolve_persisted_layout(
+        project_root,
+        profile_root,
+    ) {
+        Ok(Some(layout)) => layout.dashboard_root,
+        Ok(None) => {
+            return json!({
+                "available": false,
+                "reason": "project is not enrolled in this profile",
+            });
+        }
+        Err(err) => {
+            return json!({
+                "available": false,
+                "reason": format!("could not resolve automation dashboard root: {err}"),
+            });
+        }
+    };
     let records = match load_run_records(&dashboard_root, AUTOMATION_RECORD_LIMIT).await {
         Ok(records) => records,
         Err(err) => {

@@ -2,8 +2,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::common::{
-    GLOBAL_DB_ENV_LOCK, TraceDecayStorageEnvGuard, canonicalize_test_dir, create_runtime, get_json,
-    http_agent, pick_free_port, tempdir_or_panic, wait_for_dashboard,
+    canonicalize_test_dir, create_runtime, get_json, http_agent, isolated_profile_under_home,
+    pick_free_port, tempdir_or_panic, wait_for_dashboard,
 };
 use crate::dashboard_api_support::{post_json_body, write_file};
 use crate::runtime::DashboardTestRuntimeV1;
@@ -58,7 +58,6 @@ use tracedecay_session_memory::context::RegisteredScopeResolver;
 
 struct DashboardFixture {
     _tmp: TempDir,
-    _storage: TraceDecayStorageEnvGuard,
     base_url: String,
     server: tokio::task::JoinHandle<()>,
 }
@@ -197,7 +196,7 @@ fn make_node(id: &str, kind: NodeKind, name: &str, file_path: &str, start_line: 
 
 async fn setup_project(
     project_root: &Path,
-    profile_root: &Path,
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
 ) -> (TraceDecay, std::sync::Arc<DashboardTestRuntimeV1>) {
     write_file(
         &project_root.join("src/dashboard/mod.rs"),
@@ -216,17 +215,14 @@ async fn setup_project(
         ProjectId::new(tracedecay_runtime_core::storage::default_profile_project_id(project_root))
             .expect("project identity");
     let runtime = std::sync::Arc::new(
-        DashboardTestRuntimeV1::project(profile_root, project_root, project_id)
+        DashboardTestRuntimeV1::project(profile, project_root, project_id)
             .await
             .unwrap_or_else(|error| panic!("open dashboard graph authority: {error}")),
     );
     let graph = runtime
         .initialize_project_graph_for_test(
             project_root,
-            tracedecay_project::project::TraceDecayOpenOptions {
-                profile_root: Some(profile_root.to_path_buf()),
-                global_db_path: None,
-            },
+            tracedecay_project::project::TraceDecayOpenOptions::for_profile(profile),
         )
         .await
         .unwrap_or_else(|error| panic!("initialize dashboard graph fixture: {error}"));
@@ -786,10 +782,9 @@ async fn start_dashboard_fixture_seeded(
     // Canonicalize before the first project-session registration: later
     // composers canonicalize again, and the in-process resolver treats
     // `/var/folders` vs `/private/var/folders` as DuplicateProjectAuthority.
-    let storage = TraceDecayStorageEnvGuard::for_tempdir(&tmp);
+    let profile = isolated_profile_under_home(&tmp.path().join("home"));
     let project_root = canonicalize_test_dir(&tmp.path().join("project"));
-    let profile_root = storage.profile_root().to_path_buf();
-    let (cg, host_runtime) = setup_project(&project_root, &profile_root).await;
+    let (cg, host_runtime) = setup_project(&project_root, &profile).await;
     let (code_graph_admission, code_graph_projection) =
         compose_graph_authority(&cg, graph_seed, freshness);
 
@@ -805,6 +800,7 @@ async fn start_dashboard_fixture_seeded(
     let server = tokio::spawn(async move {
         let _ = dashboard::run_until_shutdown_for_tests_with_host_admission(
             server_graph,
+            &profile,
             authority,
             tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             tracedecay_dashboard_api::DashboardTestEndpointV1 {
@@ -825,7 +821,6 @@ async fn start_dashboard_fixture_seeded(
 
     DashboardFixture {
         _tmp: tmp,
-        _storage: storage,
         base_url,
         server,
     }
@@ -833,9 +828,6 @@ async fn start_dashboard_fixture_seeded(
 
 #[test]
 fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture().await;
@@ -987,9 +979,6 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
 
 #[test]
 fn every_graph_route_accepts_the_production_project_owner_grant() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture_with(false, true, false).await;
@@ -1034,9 +1023,6 @@ fn every_graph_route_accepts_the_production_project_owner_grant() {
 
 #[test]
 fn code_read_api_returns_verified_families_and_one_revision_union_layout() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture().await;
@@ -1192,9 +1178,6 @@ fn seed_large_generation_fixture() -> GraphFixtureSeedV1 {
 
 #[test]
 fn graph_reads_answer_a_generation_larger_than_a_whole_census_page() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture_seeded(
@@ -1352,9 +1335,6 @@ fn graph_reads_answer_a_generation_larger_than_a_whole_census_page() {
 
 #[test]
 fn graph_api_marks_stale_served_reads_in_the_envelope_freshness() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_stale_serving_dashboard_fixture().await;
@@ -1398,9 +1378,6 @@ fn graph_api_marks_stale_served_reads_in_the_envelope_freshness() {
 
 #[test]
 fn graph_api_caller_and_callee_traversal_are_behaviorally_symmetric() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture_with(false, false, true).await;
@@ -1449,9 +1426,6 @@ fn graph_api_caller_and_callee_traversal_are_behaviorally_symmetric() {
 
 #[test]
 fn graph_api_finds_shortest_path_and_analytics() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture().await;
@@ -1522,9 +1496,6 @@ fn graph_api_finds_shortest_path_and_analytics() {
 
 #[test]
 fn graph_api_seedless_subgraph_returns_default_hub_slice() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         // 4 interconnected nodes + 1 orphan with no edges.
@@ -1644,9 +1615,6 @@ fn graph_api_seedless_subgraph_returns_default_hub_slice() {
 
 #[test]
 fn structure_visualization_endpoints_report_measured_data() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture_with(false, true, false).await;

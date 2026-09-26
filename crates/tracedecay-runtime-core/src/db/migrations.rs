@@ -48,7 +48,8 @@ const ROOT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS metadata (
 /// from that content and never persisted. v38 stores compact writer-ledger
 /// receipts, keeps full external-source receipts only while retained, and
 /// stores each external-source mutation without what its row already says.
-pub const SCHEMA_VERSION: u32 = 38;
+/// v39 drops the handoff grant table, which lives in the project session store.
+pub const SCHEMA_VERSION: u32 = 39;
 
 /// Verifies that a rusqlite connection sees the exact final relational shape
 /// this binary creates. This is query-only and shares the daemon's schema
@@ -195,12 +196,6 @@ async fn create_schema_transaction(conn: &(impl Executor + Sync)) -> Result<()> 
         .await
         .map_err(|e| TraceDecayError::Database {
             message: format!("failed to create graph publication schema: {e}"),
-            operation: "create_schema".to_string(),
-        })?;
-    conn.execute_batch(tracedecay_rusqlite_runtime::handoff::HANDOFF_OPEN_SCHEMA_V1)
-        .await
-        .map_err(|e| TraceDecayError::Database {
-            message: format!("failed to create handoff-open schema: {e}"),
             operation: "create_schema".to_string(),
         })?;
     conn.execute_batch(tracedecay_rusqlite_runtime::runtime_ledger::RUNTIME_LEDGER_SCHEMA)

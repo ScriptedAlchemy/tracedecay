@@ -1,6 +1,7 @@
 use super::daemon_automation_action;
 use crate::cli::AutomationFactsAction;
 use crate::resolve_cli_project_root;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 pub(super) fn automatic_fact_receipt_list_rpc_args(
     state: Option<&str>,
@@ -18,6 +19,7 @@ pub(super) fn automatic_fact_receipt_view_rpc_args(id: &str) -> serde_json::Valu
 }
 
 pub(super) async fn handle_automation_facts_command(
+    profile: &ProfileRoot,
     action: AutomationFactsAction,
 ) -> tracedecay_domain::errors::Result<()> {
     let path = match &action {
@@ -25,18 +27,23 @@ pub(super) async fn handle_automation_facts_command(
             path.clone()
         }
     };
-    let project_path = resolve_cli_project_root(path, None, None).await?;
+    let project_path = resolve_cli_project_root(profile, path, None, None).await?;
     let payload = match action {
         AutomationFactsAction::List { state, limit, .. } => {
             daemon_automation_action(
+                profile,
                 &project_path,
                 automatic_fact_receipt_list_rpc_args(state.as_deref(), limit),
             )
             .await?
         }
         AutomationFactsAction::View { id, .. } => {
-            daemon_automation_action(&project_path, automatic_fact_receipt_view_rpc_args(&id))
-                .await?
+            daemon_automation_action(
+                profile,
+                &project_path,
+                automatic_fact_receipt_view_rpc_args(&id),
+            )
+            .await?
         }
     };
     println!("{}", serde_json::to_string_pretty(&payload)?);

@@ -1074,12 +1074,14 @@ async fn held_handle_store_lock_surfaces_the_typed_deadline_miss() {
         error.source()
     })
     .find_map(|error| error.downcast_ref::<TraceDecayError>());
-    let expected = format!(
-        "response-handle writer lock at {} stayed contended past its admission deadline; retry the operation",
-        lock_path.display()
-    );
     assert!(
-        matches!(cause, Some(TraceDecayError::SyncLock { message }) if *message == expected),
+        matches!(
+            cause,
+            Some(TraceDecayError::LockDeadline {
+                resource: "response-handle writer lock",
+                deadline_ms: 10_000,
+            })
+        ),
         "{error:?}"
     );
     assert_eq!(

@@ -111,12 +111,9 @@ pub fn default_profile_project_id(project_root: &Path) -> String {
 ///
 /// See [`path_local_profile_project_id`] for why discovery must not consult
 /// the repository-collapsed identity here.
-pub(crate) fn has_path_local_profile_store(project_root: &Path) -> bool {
-    let Ok(profile_root) = default_profile_root() else {
-        return false;
-    };
+pub(crate) fn has_path_local_profile_store(profile_root: &Path, project_root: &Path) -> bool {
     let data_root =
-        profile_sharded_data_root(&profile_root, &path_local_profile_project_id(project_root));
+        profile_sharded_data_root(profile_root, &path_local_profile_project_id(project_root));
     data_root.join(config::DB_FILENAME).exists()
 }
 
@@ -164,6 +161,14 @@ pub fn resolve_layout(project_root: &Path, profile_root: &Path) -> Result<StoreL
     default_profile_sharded_layout(project_root, profile_root)
 }
 
+/// Resolves this checkout's store in `profile_root` only when an authority
+/// already names it, and reports `Ok(None)` when the answer would be a
+/// path-derived guess.
+///
+/// Callers that merely want somewhere to put a file, hook analytics is the
+/// motivating one, must not enroll a directory as a side effect. Every
+/// directory this resolver declines is a store shard that never gets minted for
+/// a path that was never a project.
 pub fn resolve_persisted_layout(
     project_root: &Path,
     profile_root: &Path,
@@ -188,54 +193,4 @@ pub fn resolve_persisted_layout(
         return profile_sharded_layout(project_root, profile_root, &project_id).map(Some);
     }
     Ok(None)
-}
-
-pub fn default_profile_root() -> Result<PathBuf> {
-    config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
-        message: "could not resolve user profile data directory".to_string(),
-    })
-}
-
-/// Synchronous store resolution for callers that cannot await the registry:
-/// hooks, MCP response handles, config resolution, the agent command, Doctor,
-/// and diagnostics.
-///
-/// It consults every authority available without awaiting, the repository
-/// identity marker and the profile shard via [`resolve_persisted_layout`], so
-/// it agrees with the async registry resolver about the same directory.
-pub fn resolve_layout_for_current_profile(project_root: &Path) -> Result<StoreLayout> {
-    let profile_root = default_profile_root()?;
-    match resolve_enrolled_layout(project_root, &profile_root)? {
-        Some(layout) => Ok(layout),
-        None => default_profile_sharded_layout(project_root, &profile_root),
-    }
-}
-
-/// Resolves this checkout's store only when an authority already names it, and
-/// reports `Ok(None)` when the answer would be a path-derived guess.
-///
-/// Callers that merely want somewhere to put a file, hook analytics is the
-/// motivating one, must not enroll a directory as a side effect. Every
-/// directory this resolver declines is a store shard that never gets minted for
-/// a path that was never a project.
-pub fn resolve_enrolled_layout_for_current_profile(
-    project_root: &Path,
-) -> Result<Option<StoreLayout>> {
-    let profile_root = default_profile_root()?;
-    resolve_enrolled_layout(project_root, &profile_root)
-}
-
-fn resolve_enrolled_layout(
-    project_root: &Path,
-    profile_root: &Path,
-) -> Result<Option<StoreLayout>> {
-    resolve_persisted_layout(project_root, profile_root)
-}
-
-pub fn resolve_project_session_db_path(project_root: &Path) -> Result<PathBuf> {
-    Ok(resolve_layout_for_current_profile(project_root)?.sessions_db_path)
-}
-
-pub fn resolve_lcm_payload_root(project_root: &Path) -> Result<PathBuf> {
-    Ok(resolve_layout_for_current_profile(project_root)?.lcm_payload_root)
 }

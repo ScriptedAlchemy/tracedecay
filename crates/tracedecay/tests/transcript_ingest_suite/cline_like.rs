@@ -9,7 +9,6 @@ use tracedecay_sessions::runtime::source::{StoredCursor, TranscriptIngestError, 
 use tracedecay_store::ObservationProjectionStore;
 use tracedecay_store::ObservationReplayRequest;
 
-use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::durable_table_count;
 use crate::restart_atomicity::{
     ProjectSessionTestRuntime, assert_secret_absent_from_observation_sinks,
@@ -691,11 +690,7 @@ async fn cline_like_user_scope_includes_only_unregistered_tasks() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn cline_family_secrets_are_sanitized_before_observation_and_projection() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     for (provider, extension_id, selected_provider) in [
         ("cline", "saoudrizwan.claude-dev", SessionProvider::Cline),
         (
@@ -707,7 +702,6 @@ async fn cline_family_secrets_are_sanitized_before_observation_and_projection() 
     ] {
         let tmp = TempDir::new().unwrap();
         let (home, project) = setup(&tmp);
-        let _home = EnvVarGuard::set("HOME", &home);
         init_git_repo(&project);
         mark_test_project(&project);
         let history = write_task(
@@ -729,7 +723,7 @@ async fn cline_family_secrets_are_sanitized_before_observation_and_projection() 
         let db = open_project_session_db(&project).await.unwrap();
 
         assert!(
-            ingest_global_sources_for_provider(&db, &project, Some(selected_provider))
+            ingest_global_sources_for_provider(&home, &db, &project, Some(selected_provider))
                 .await
                 .messages_upserted
                 > 0,
@@ -747,11 +741,7 @@ async fn cline_family_secrets_are_sanitized_before_observation_and_projection() 
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn cline_like_replacement_projection_replay_is_deterministic() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     // Table-driven across the three Cline-like storage roots.
     for (provider, extension_id, selected_provider) in [
         ("cline", "saoudrizwan.claude-dev", SessionProvider::Cline),
@@ -764,7 +754,6 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
     ] {
         let tmp = TempDir::new().unwrap();
         let (home, project) = setup(&tmp);
-        let _home = EnvVarGuard::set("HOME", &home);
         init_git_repo(&project);
         mark_test_project(&project);
         let root = vscode_storage_root(&home, extension_id);
@@ -772,7 +761,8 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
         let history = write_task(&root, &project, &session_id);
 
         let db = open_project_session_db(&project).await.unwrap();
-        let _ = ingest_global_sources_for_provider(&db, &project, Some(selected_provider)).await;
+        let _ =
+            ingest_global_sources_for_provider(&home, &db, &project, Some(selected_provider)).await;
         // Two conversational rows; the ui_messages api_req_started record is
         // uncorrelated usage evidence in the observation family, not a
         // message row (token accounting left conversational metadata).
@@ -807,7 +797,7 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
         // Exact restart is a no-op.
         let replay = open_project_session_db(&project).await.unwrap();
         assert_eq!(
-            ingest_global_sources_for_provider(&replay, &project, Some(selected_provider))
+            ingest_global_sources_for_provider(&home, &replay, &project, Some(selected_provider))
                 .await
                 .messages_upserted,
             0,
@@ -841,7 +831,8 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
         .unwrap();
         set_projection_failure(&replay, true).await;
         let _ =
-            ingest_global_sources_for_provider(&replay, &project, Some(selected_provider)).await;
+            ingest_global_sources_for_provider(&home, &replay, &project, Some(selected_provider))
+                .await;
         let committed_api = cline_stream_cursor(
             &replay,
             provider,
@@ -894,8 +885,13 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
         // the failure; the reopened mount re-arms the queue so this recovery
         // pass replays the committed suffix immediately.
         let recovered = open_project_session_db(&project).await.unwrap();
-        let _ =
-            ingest_global_sources_for_provider(&recovered, &project, Some(selected_provider)).await;
+        let _ = ingest_global_sources_for_provider(
+            &home,
+            &recovered,
+            &project,
+            Some(selected_provider),
+        )
+        .await;
         assert_eq!(
             recovered
                 .search_session_messages(provider, None, "projection retry suffix", 10)
@@ -915,9 +911,14 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
             );
         }
         assert_eq!(
-            ingest_global_sources_for_provider(&recovered, &project, Some(selected_provider),)
-                .await
-                .messages_upserted,
+            ingest_global_sources_for_provider(
+                &home,
+                &recovered,
+                &project,
+                Some(selected_provider),
+            )
+            .await
+            .messages_upserted,
             0,
             "{provider}: post-recovery replay"
         );
@@ -947,8 +948,13 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
             serde_json::json!(serde_json::json!({"tokensIn": 2200, "tokensOut": 450}).to_string());
         ui_records.push(appended_usage);
         std::fs::write(&ui_path, serde_json::to_vec_pretty(&ui_records).unwrap()).unwrap();
-        let _ =
-            ingest_global_sources_for_provider(&recovered, &project, Some(selected_provider)).await;
+        let _ = ingest_global_sources_for_provider(
+            &home,
+            &recovered,
+            &project,
+            Some(selected_provider),
+        )
+        .await;
         let appended_ui = cline_stream_cursor(
             &recovered,
             provider,
@@ -995,9 +1001,14 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
         // and publish neither duplicate observations nor duplicate usage.
         for _ in 0..2 {
             assert_eq!(
-                ingest_global_sources_for_provider(&reopened, &project, Some(selected_provider))
-                    .await
-                    .messages_upserted,
+                ingest_global_sources_for_provider(
+                    &home,
+                    &reopened,
+                    &project,
+                    Some(selected_provider)
+                )
+                .await
+                .messages_upserted,
                 0
             );
             for (stream, expected) in [
@@ -1022,14 +1033,9 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
 
 #[tokio::test]
 #[cfg(not(windows))]
-#[allow(clippy::await_holding_lock)]
 async fn cline_delimiter_ambiguous_native_ids_survive_restart_and_rebuild() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
     let root = vscode_storage_root(&home, "saoudrizwan.claude-dev");
@@ -1059,7 +1065,8 @@ async fn cline_delimiter_ambiguous_native_ids_survive_restart_and_rebuild() {
     .unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cline)).await;
+    let _ = ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cline))
+        .await;
     let hits = db
         .search_session_messages("cline", None, "delimiter collision fixture", 10)
         .await;
@@ -1079,9 +1086,14 @@ async fn cline_delimiter_ambiguous_native_ids_survive_restart_and_rebuild() {
 
     let reopened = open_project_session_db(&project).await.unwrap();
     assert_eq!(
-        ingest_global_sources_for_provider(&reopened, &project, Some(SessionProvider::Cline))
-            .await
-            .messages_upserted,
+        ingest_global_sources_for_provider(
+            &home,
+            &reopened,
+            &project,
+            Some(SessionProvider::Cline)
+        )
+        .await
+        .messages_upserted,
         0
     );
     let committed = durable_table_count(&reopened, "observations").await;
@@ -1107,11 +1119,7 @@ async fn cline_delimiter_ambiguous_native_ids_survive_restart_and_rebuild() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn golden_fixture_ingests_through_each_provider_discriminator() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let manifest: serde_json::Value = serde_json::from_str(include_str!(
         "../../../../tests/fixtures/transcript_golden/cline_like/manifest.json"
     ))
@@ -1150,7 +1158,6 @@ async fn golden_fixture_ingests_through_each_provider_discriminator() {
     ] {
         let tmp = TempDir::new().unwrap();
         let (home, project) = setup(&tmp);
-        let _home = EnvVarGuard::set("HOME", &home);
         init_git_repo(&project);
         mark_test_project(&project);
         let root = vscode_storage_root(&home, extension_id);
@@ -1169,7 +1176,8 @@ async fn golden_fixture_ingests_through_each_provider_discriminator() {
         );
 
         let db = open_project_session_db(&project).await.unwrap();
-        let _ = ingest_global_sources_for_provider(&db, &project, Some(selected_provider)).await;
+        let _ =
+            ingest_global_sources_for_provider(&home, &db, &project, Some(selected_provider)).await;
         let hits = db
             .search_session_messages(provider, None, "billing pipeline", 10)
             .await;

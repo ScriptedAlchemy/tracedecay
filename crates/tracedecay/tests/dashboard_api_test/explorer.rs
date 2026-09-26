@@ -20,9 +20,6 @@ fn wait_for_query(agent: &ureq::Agent, base_url: &str, run_id: &str) -> Value {
 
 #[test]
 fn explorer_query_coordinates_real_sources_without_inventing_a_merge() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(true).await;
@@ -128,9 +125,6 @@ fn explorer_query_coordinates_real_sources_without_inventing_a_merge() {
 
 #[test]
 fn explorer_session_routes_reuse_lcm_size_and_read_context_authority() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(true).await;

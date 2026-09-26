@@ -2,9 +2,9 @@
 
 use std::collections::HashSet;
 
-use serde_json::{Value, json};
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_code_index::lineage::LineageSymbolRecordV1;
+use tracedecay_contracts::retrieval::{NodeExpansionCostV1, SymbolSelectorSurfaceRequestV1};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_query::VerifiedGraphQuery;
@@ -54,19 +54,15 @@ pub fn graph_occurrence_id(raw: &str) -> Result<SymbolOccurrenceId> {
 }
 
 #[hotpath::measure(label = "mcp.graph.nodes_addressed")]
-pub fn nodes_addressed_by_args(
+pub fn nodes_addressed_by_selector(
     graph: &VerifiedGraphQuery,
-    args: &Value,
+    selector: &SymbolSelectorSurfaceRequestV1,
 ) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
-    let node_id = args
-        .get("node_id")
-        .or_else(|| args.get("id"))
-        .and_then(Value::as_str);
-    if let Some(node_id) = node_id {
+    if let Some(node_id) = selector.node_id.as_deref() {
         let occurrence = graph_occurrence_id(node_id)?;
         return Ok(graph.symbol_summary(&occurrence)?.into_iter().collect());
     }
-    let Some(qualified_name) = args.get("qualified_name").and_then(Value::as_str) else {
+    let Some(qualified_name) = selector.qualified_name.as_deref() else {
         return Err(TraceDecayError::Config {
             message: "missing required parameter: qualified_name or node_id".to_owned(),
         });
@@ -140,21 +136,6 @@ pub fn graph_symbols_in_scope(
     Ok(scoped)
 }
 
-pub fn graph_symbol_location_value(symbol: &CodeGraphSymbolSummaryV1) -> Result<Value> {
-    let metadata = required_graph_metadata(symbol)?;
-    let file_path = required_graph_file_path(symbol)?;
-    Ok(json!({
-        "node_id": symbol.occurrence.as_str(),
-        "name": metadata.simple_name,
-        "qualified_name": metadata.qualified_name,
-        "kind": metadata.kind,
-        "file": file_path,
-        "start_line": metadata.start_line.saturating_add(1),
-        "end_line": graph_symbol_end_line(metadata)?.saturating_add(1),
-        "unavailable_fields": ["attrs_start_line"],
-    }))
-}
-
 pub fn single_graph_adjacency_batch<T>(mut batches: Vec<Vec<T>>) -> Result<Vec<T>> {
     if batches.len() != 1 {
         return Err(graph_symbol_corrupt(format!(
@@ -219,13 +200,13 @@ pub fn traverse_verified_neighbors(
 pub fn cost_to_expand_verified(
     metadata: &LineageSymbolRecordV1,
     file_size_bytes: u64,
-) -> Result<Value> {
+) -> Result<NodeExpansionCostV1> {
     let end_line = graph_symbol_end_line(metadata)?;
     let line_count = end_line - metadata.start_line + 1;
-    Ok(json!({
-        "body": u64::from(line_count) * 20,
-        "full_file": file_size_bytes / 4,
-    }))
+    Ok(NodeExpansionCostV1 {
+        body: u64::from(line_count) * 20,
+        full_file: file_size_bytes / 4,
+    })
 }
 
 pub fn line_for_byte_offset(source: &str, byte_offset: u64) -> Result<u32> {

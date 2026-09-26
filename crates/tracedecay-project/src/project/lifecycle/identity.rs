@@ -165,9 +165,16 @@ impl TraceDecay {
         }
     }
 
-    /// Returns `true` if a `TraceDecay` project has been initialized at the given root.
-    pub fn is_initialized(project_root: &Path) -> bool {
-        Self::is_initialized_with_options(project_root, &TraceDecayOpenOptions::default())
+    /// Whether a hook may treat `project_root` as a `TraceDecay` project of
+    /// `profile`: its store exists there, or its repository names an identity.
+    pub fn is_initialized_in_profile(
+        profile: &tracedecay_runtime_core::config::ProfileRoot,
+        project_root: &Path,
+    ) -> bool {
+        Self::is_initialized_with_options(
+            project_root,
+            &TraceDecayOpenOptions::for_profile(profile),
+        ) || tracedecay_runtime_core::storage::has_repository_identity_marker(project_root)
     }
 
     pub fn is_initialized_with_options(
@@ -185,12 +192,6 @@ impl TraceDecay {
         }
         option_resolved_store_exists
             || tracedecay_runtime_core::storage::has_repository_identity_marker(project_root)
-    }
-
-    #[hotpath::skip]
-    pub async fn has_initialized_store(project_root: &Path) -> bool {
-        Self::has_initialized_store_with_options(project_root, &TraceDecayOpenOptions::default())
-            .await
     }
 
     #[hotpath::skip]
@@ -233,14 +234,6 @@ impl TraceDecay {
     /// Resolves the profile store layout for a local path using the `.git/`
     /// repository identity marker first, then the global registry aliases for
     /// the git identity. Nothing in the working tree carries identity.
-    #[hotpath::skip]
-    pub async fn resolve_store_layout_for_identity(project_root: &Path) -> Result<StoreLayout> {
-        Self::resolve_store_layout_for_identity_with_options(
-            project_root,
-            &TraceDecayOpenOptions::default(),
-        )
-        .await
-    }
 
     #[hotpath::skip]
     pub async fn resolve_store_layout_for_identity_with_options(

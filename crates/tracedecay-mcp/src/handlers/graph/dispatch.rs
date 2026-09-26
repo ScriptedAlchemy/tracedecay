@@ -4,20 +4,15 @@ use serde_json::Value;
 use tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
 use tracedecay_domain::errors::Result;
 
-use super::{
-    handle_by_qualified_name, handle_derives, handle_find_exact_symbol, handle_search,
-    handle_signature,
-};
+use super::handle_search;
 use crate::ToolResult;
-use crate::handlers::ast_grep::handle_ast_grep_search;
-use crate::handlers::grep::handle_grep;
 use crate::handlers::support::unknown_tool_error;
 use crate::handlers::verified_read::{VerifiedGraphOpen, verified_read_operation as read};
 use crate::tool_context::McpToolContext;
 
-/// Dispatches one graph-family tool (`tracedecay_search`,
-/// `tracedecay_impact`, ...) onto its handler, opening the verified graph
-/// through `open` under the operation the catalog registers for it.
+/// Dispatches one graph-family tool (`tracedecay_search`) onto its handler,
+/// opening the verified graph through `open` under the operation the catalog
+/// registers for it.
 pub async fn dispatch_tool(
     ctx: &McpToolContext<'_>,
     open: &VerifiedGraphOpen<'_>,
@@ -34,69 +29,6 @@ pub async fn dispatch_tool(
                 args,
                 scope_prefix,
                 ignored_dependency_admission,
-            )
-            .await
-        }
-        "tracedecay_grep" => {
-            // Grep degrades to a lexical answer when the graph is unavailable,
-            // so the open outcome travels to the handler instead of failing here.
-            let graph = match read("source_lines") {
-                Ok(operation) => open(operation).await,
-                Err(error) => Err(error),
-            };
-            handle_grep(
-                ctx.project_root(),
-                &ctx.store_layout().response_handle_root,
-                graph.as_ref(),
-                args,
-                scope_prefix,
-                ctx.deadline().cloned(),
-                ctx.cancellation().cloned(),
-            )
-            .await
-        }
-        "tracedecay_ast_grep_search" => {
-            handle_ast_grep_search(
-                ctx.project_root(),
-                &ctx.store_layout().response_handle_root,
-                args,
-                scope_prefix,
-                ctx.deadline().cloned(),
-                ctx.cancellation().cloned(),
-            )
-            .await
-        }
-        "tracedecay_find_exact_symbol" => {
-            handle_find_exact_symbol(
-                ctx,
-                &open(read("qualified_name")?).await?,
-                args,
-                scope_prefix,
-                ignored_dependency_admission,
-            )
-            .await
-        }
-        "tracedecay_by_qualified_name" => {
-            handle_by_qualified_name(
-                &ctx.store_layout().response_handle_root,
-                &open(read("qualified_name")?).await?,
-                args,
-            )
-            .await
-        }
-        "tracedecay_signature" => {
-            handle_signature(
-                &ctx.store_layout().response_handle_root,
-                &open(read("qualified_name")?).await?,
-                args,
-            )
-            .await
-        }
-        "tracedecay_derives" => {
-            handle_derives(
-                &ctx.store_layout().response_handle_root,
-                &open(read("code_type_hierarchy")?).await?,
-                args,
             )
             .await
         }

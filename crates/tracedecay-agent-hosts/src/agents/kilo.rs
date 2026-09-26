@@ -10,6 +10,7 @@
 //! uninstalled until a real native fixture admits their protocol.
 
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_domain::errors::Result;
 
@@ -78,7 +79,11 @@ impl AgentIntegration for KiloIntegration {
         kilo_config_dir(home).is_dir()
     }
 
-    fn primary_config_path(&self, home: &Path) -> Option<std::path::PathBuf> {
+    fn primary_config_path(
+        &self,
+        home: &Path,
+        _profile: &ProfileRoot,
+    ) -> Option<std::path::PathBuf> {
         Some(kilo_config_path(home))
     }
 
@@ -86,6 +91,7 @@ impl AgentIntegration for KiloIntegration {
         &self,
         components: &[super::host_bundle::HostComponentV1],
         home: &Path,
+        _profile: &ProfileRoot,
     ) -> Vec<PathBuf> {
         if components == [super::host_bundle::HostComponentV1::ContextMcp] {
             vec![kilo_config_path(home)]
@@ -132,7 +138,7 @@ impl AgentIntegration for KiloIntegration {
         Ok(())
     }
 
-    fn has_tracedecay(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
         super::mcp_config_has_tracedecay(&kilo_config_path(home), "mcp", load_jsonc_file)
     }
 }

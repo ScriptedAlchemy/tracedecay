@@ -370,6 +370,8 @@ const HARD_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5)
 
 #[cfg(windows)]
 struct NativeDaemonControl {
+    /// The task's own profile, whose identity every probe presents.
+    profile: tracedecay_runtime_core::config::ProfileRoot,
     transport_hint: PathBuf,
     expected_version: String,
     clock_origin: std::time::Instant,
@@ -378,7 +380,11 @@ struct NativeDaemonControl {
 #[cfg(windows)]
 impl DaemonControlApi for NativeDaemonControl {
     fn request_shutdown(&mut self) -> ShutdownRequestAttempt {
-        match super::probe::request_daemon_shutdown(&self.transport_hint, &self.expected_version) {
+        match super::probe::request_daemon_shutdown(
+            &self.profile,
+            &self.transport_hint,
+            &self.expected_version,
+        ) {
             Ok(super::probe::DaemonShutdownRequest::Acknowledged) => {
                 ShutdownRequestAttempt::Acknowledged
             }
@@ -391,6 +397,7 @@ impl DaemonControlApi for NativeDaemonControl {
 
     fn readiness(&mut self, timeout: std::time::Duration) -> ControlObservation {
         let protocol = super::probe::daemon_protocol_state_with_timeout(
+            &self.profile,
             &self.transport_hint,
             &self.expected_version,
             timeout,
@@ -434,7 +441,7 @@ fn render_task_xml_for(spec: &DaemonServiceSpec, identity: &TaskIdentity) -> Res
     validate_task_remote_tls(spec.remote_tls.as_ref())?;
     let profile_root = match &spec.data_dir_override {
         Some(profile_root) => profile_root.clone(),
-        None => super::tracedecay_data_dir()?,
+        None => spec.profile.data_dir().to_path_buf(),
     };
     #[cfg(windows)]
     let profile_root = fully_qualified_windows_path(&profile_root, "daemon profile root")?;
@@ -1012,6 +1019,7 @@ fn prepare_scoop_package_service_windows(
         write_scoop_state(state_file, &state)?;
 
         let mut control = NativeDaemonControl {
+            profile: tracedecay_runtime_core::config::ProfileRoot::new(state.profile_root.clone()),
             transport_hint: state.profile_root.join("daemon.sock"),
             expected_version: expected_version.to_owned(),
             clock_origin: std::time::Instant::now(),
@@ -1086,6 +1094,7 @@ fn restore_scoop_package_service_windows(
 
     with_platform_api_for_package(package_id, |api| {
         let mut control = NativeDaemonControl {
+            profile: tracedecay_runtime_core::config::ProfileRoot::new(state.profile_root.clone()),
             transport_hint: state.profile_root.join("daemon.sock"),
             expected_version: expected_version.to_owned(),
             clock_origin: std::time::Instant::now(),
@@ -2067,6 +2076,7 @@ fn with_platform_control_api<T>(
                             .to_string(),
                 })?;
             let mut control = NativeDaemonControl {
+                profile: tracedecay_runtime_core::config::ProfileRoot::new(profile_root.clone()),
                 transport_hint: profile_root.join("daemon.sock"),
                 expected_version: expected_version.to_owned(),
                 clock_origin: std::time::Instant::now(),

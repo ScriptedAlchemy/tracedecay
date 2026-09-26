@@ -55,9 +55,6 @@ fn retained_effect_payload<'a>(response: &'a Value, operation: &str) -> &'a Valu
 
 #[test]
 fn retained_admin_journey_commits_add_update_feedback_and_remove() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_retained_memory_fixture().await;
@@ -215,9 +212,6 @@ fn retained_admin_journey_commits_add_update_feedback_and_remove() {
 
 #[test]
 fn retained_mutations_deny_foreign_project_scope_without_a_receipt() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_retained_memory_fixture().await;
@@ -313,10 +307,6 @@ fn automatic_fact_receipt_endpoints_expose_terminal_applied_and_quarantined_rece
         MemoryApplication, ProjectMemoryFactAddRequest, automatic_fact_add_command,
     };
     use tracedecay_store::{ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryFactAddMaterialV1};
-
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(false).await;

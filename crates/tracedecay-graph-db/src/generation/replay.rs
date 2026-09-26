@@ -4,7 +4,10 @@ use tracedecay_store::runtime::{
     GraphPublicationInputDigestV1, GraphPublicationReplayV1, GraphVerifiedHeadV1, StoreShardIdV1,
 };
 
-use super::{GraphDbError, GraphGenerationManifest, GraphIdempotencyKey};
+use super::{
+    GraphDbError, GraphGenerationManifest, GraphGenerationRowSpill, GraphGenerationRows,
+    GraphIdempotencyKey, SpilledGraphGeneration,
+};
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -130,9 +133,10 @@ fn validate_decoded_metadata_binding(
     validate_publication_manifest_identity(publication, manifest, validate_expected_digest, check)
 }
 
-pub(crate) fn validate_supplied_manifest_binding(
+/// Pins supplied rows to the journaled replay they claim to publish.
+pub(crate) fn validate_supplied_rows_binding(
     publication: &GraphPublicationReplayV1,
-    manifest: &GraphGenerationManifest,
+    rows: &GraphGenerationRows,
     validate_expected_digest: bool,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(), GraphDbError> {
@@ -143,9 +147,36 @@ pub(crate) fn validate_supplied_manifest_binding(
                 message: format!("graph publication replay is invalid: {error}"),
             })
     })?;
+    let manifest = match rows {
+        GraphGenerationRows::Manifest(manifest) => manifest,
+        // Spilled rows only ever publish a sealed code generation, whose
+        // journal names its replay source rather than a manifest; the
+        // journaled digests were derived from these exact rows at append.
+        GraphGenerationRows::Spilled(spilled) => {
+            return match checked_decode_replay_source(&publication.canonical_replay_source, check)?
+            {
+                GraphGenerationReplaySource::SealedCodeGeneration(source) => {
+                    validate_sealed_replay(&source)?;
+                    validate_publication_identity(
+                        publication,
+                        &spilled.identity(),
+                        validate_expected_digest
+                            .then(|| spilled.expected_recovered_digest().clone()),
+                        check,
+                    )
+                }
+                GraphGenerationReplaySource::InlineManifest(_)
+                | GraphGenerationReplaySource::MetadataOnlyManifest(_) => Err(
+                    GraphDbError::conflict("replay.validate_supplied_manifest_binding"),
+                ),
+            };
+        }
+    };
     manifest.validate_checked(check)?;
     match checked_decode_replay_source(&publication.canonical_replay_source, check)? {
-        GraphGenerationReplaySource::InlineManifest(replayed) if replayed.as_ref() == manifest => {
+        GraphGenerationReplaySource::InlineManifest(replayed)
+            if replayed.as_ref() == manifest.as_ref() =>
+        {
             validate_publication_manifest_identity(
                 publication,
                 manifest,
@@ -191,19 +222,36 @@ fn validate_publication_manifest_identity(
     validate_expected_digest: bool,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(), GraphDbError> {
+    let expected_digest = if validate_expected_digest {
+        Some(manifest.expected_recovered_digest(check)?)
+    } else {
+        None
+    };
+    // Proved on the manifest first so the identity inherits the memo.
+    manifest.dependency_closure_digest(check)?;
+    validate_publication_identity(publication, &manifest.identity(), expected_digest, check)
+}
+
+fn validate_publication_identity(
+    publication: &GraphPublicationReplayV1,
+    identity: &super::GraphGenerationManifestIdentity,
+    expected_digest: Option<tracedecay_store::runtime::GraphRecoveredGenerationDigestV1>,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<(), GraphDbError> {
     hotpath::measure_block!("graph_db.generation.replay.binding.identity", {
-        let direct_dependencies =
-            manifest.relational_dependency_generations(&publication.key.projection.shard_id)?;
-        if publication.key.projection.namespace.as_str() != manifest.projection.namespace.as_str()
+        let direct_dependencies = super::relational_dependency_generations(
+            &identity.dependencies,
+            &publication.key.projection.shard_id,
+        )?;
+        if publication.key.projection.namespace.as_str() != identity.projection.namespace.as_str()
             || publication.key.projection.projection.as_str()
-                != manifest.projection.projection.as_str()
-            || publication.key.generation.as_str() != manifest.generation.as_str()
+                != identity.projection.projection.as_str()
+            || publication.key.generation.as_str() != identity.generation.as_str()
             || publication.direct_dependency_generations != direct_dependencies
             || publication.dependency_generation_closure_digest
-                != manifest.dependency_closure_digest(check)?
-            || (validate_expected_digest
-                && publication.expected_recovered_digest
-                    != manifest.expected_recovered_digest(check)?)
+                != identity.dependency_closure_digest(check)?
+            || expected_digest
+                .is_some_and(|expected| publication.expected_recovered_digest != expected)
         {
             return Err(GraphDbError::conflict(
                 "replay.validate_publication_manifest_identity",
@@ -288,13 +336,19 @@ fn validate_sha256(value: &str, subject: &str) -> Result<(), GraphDbError> {
     Ok(())
 }
 
+/// Rebuilds a sealed code generation's graph rows from its durable source.
+///
+/// The registry hands the provider a spill under the store's own scratch
+/// root; the provider pushes the rows in batches and finishes it, so a
+/// replay never holds the whole generation in memory.
 pub trait GraphGenerationManifestProvider: Send + Sync {
     fn hydrate_sealed_code_generation(
         &self,
         owner: &tracedecay_store::GraphProjectionIdentityV1,
         source: &SealedCodeGenerationReplay,
+        spill: GraphGenerationRowSpill,
         check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<GraphGenerationManifest, GraphDbError>;
+    ) -> Result<SpilledGraphGeneration, GraphDbError>;
 }
 
 pub(crate) struct InlineOnlyGraphGenerationManifestProvider;
@@ -304,8 +358,9 @@ impl GraphGenerationManifestProvider for InlineOnlyGraphGenerationManifestProvid
         &self,
         _owner: &tracedecay_store::GraphProjectionIdentityV1,
         _source: &SealedCodeGenerationReplay,
+        _spill: GraphGenerationRowSpill,
         _check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<GraphGenerationManifest, GraphDbError> {
+    ) -> Result<SpilledGraphGeneration, GraphDbError> {
         Err(GraphDbError::unavailable(
             "sealed code generation replay provider is not mounted",
         ))

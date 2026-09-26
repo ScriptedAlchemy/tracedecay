@@ -27,8 +27,12 @@ const PREPARED_QUERY_CURSOR_TTL_MICROS_V1: i64 = 15 * 60 * 1_000_000;
 pub enum PreparedQueryErrorV1 {
     #[error("prepared query cursor is invalid")]
     Invalid,
+    /// Expired, or its key or generation is no longer held: restart without it.
     #[error("prepared query cursor is stale")]
     Stale,
+    /// Issued for another scope (project, repository, worktree, or ref).
+    #[error("prepared query cursor was issued for another scope")]
+    Foreign,
     #[error("prepared query authority is unavailable")]
     Unavailable,
 }
@@ -224,6 +228,9 @@ impl PreparedQueryV1 {
             canonical_sha256(&candidates).map_err(|_| PreparedQueryErrorV1::Unavailable)?;
         let start = match &self.cursor {
             Some(cursor) => {
+                if cursor.payload.scope_digest != bindings.scope_digest {
+                    return Err(PreparedQueryErrorV1::Foreign);
+                }
                 require_unexpired(cursor, now)?;
                 if cursor.payload.generation != bindings.generation
                     || cursor.payload.candidate_set_digest != candidate_set_digest
@@ -231,7 +238,6 @@ impl PreparedQueryV1 {
                     return Err(PreparedQueryErrorV1::Stale);
                 }
                 if cursor.payload.operation != bindings.operation
-                    || cursor.payload.scope_digest != bindings.scope_digest
                     || cursor.payload.query_binding_digest != bindings.query_binding_digest
                     || cursor.payload.page_size != page_size
                 {
@@ -302,6 +308,11 @@ pub fn authenticate_prepared_query_cursor_for_routing(
     now: UtcMicros,
 ) -> Result<PreparedQueryCursorRoutingV1, PreparedQueryErrorV1> {
     let cursor = decode_cursor(encoded)?;
+    // Unauthenticated at this point, but it only selects which rejection a
+    // cursor from another scope receives; nothing is served from it.
+    if cursor.payload.scope_digest != bindings.scope_digest {
+        return Err(PreparedQueryErrorV1::Foreign);
+    }
     let request = routing_request(
         &cursor.payload.request_binding,
         &cursor.authentication,
@@ -316,10 +327,9 @@ pub fn authenticate_prepared_query_cursor_for_routing(
             &cursor_authentication_payload_bytes(&cursor.payload)?,
             &cursor.authentication,
         )
-        .map_err(map_authority_error)?;
+        .map_err(map_verification_error)?;
     require_unexpired(&cursor, now)?;
     if cursor.payload.operation != bindings.operation
-        || cursor.payload.scope_digest != bindings.scope_digest
         || cursor.payload.query_binding_digest != bindings.query_binding_digest
         || cursor.payload.page_size != bindings.page_size
     {
@@ -363,7 +373,7 @@ fn authenticate_cursor(
             &cursor_authentication_payload_bytes(&cursor.payload)?,
             &cursor.authentication,
         )
-        .map_err(map_authority_error)?;
+        .map_err(map_verification_error)?;
     if cursor.payload.request_binding != PreparedQueryRequestBindingV1::from_request(request) {
         return Err(PreparedQueryErrorV1::Invalid);
     }
@@ -405,6 +415,21 @@ fn map_authority_error(error: QueryAuthorityErrorV1) -> PreparedQueryErrorV1 {
         )
         | QueryAuthorityErrorV1::AuthorityUnavailable => PreparedQueryErrorV1::Unavailable,
         _ => PreparedQueryErrorV1::Invalid,
+    }
+}
+
+/// Redeeming a cursor never waits on key availability: a key this authority
+/// does not hold is one it will not hold later, and another privacy domain's
+/// cursor belongs to another scope.
+fn map_verification_error(error: QueryAuthorityErrorV1) -> PreparedQueryErrorV1 {
+    match error {
+        QueryAuthorityErrorV1::QueryAuthentication(
+            QueryDigestAuthenticationError::KeyUnavailable,
+        ) => PreparedQueryErrorV1::Stale,
+        QueryAuthorityErrorV1::QueryAuthentication(
+            QueryDigestAuthenticationError::PrivacyDomainMismatch,
+        ) => PreparedQueryErrorV1::Foreign,
+        error => map_authority_error(error),
     }
 }
 

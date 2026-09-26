@@ -89,7 +89,44 @@ pub(crate) fn recover_deterministically_corrupt_container_with<T>(
         });
     }
 
-    delete_container_family(container, first_fault)?;
+    delete_container_family(container, &[])?;
+    tracing::warn!(
+        event = "store_corrupt_deleted",
+        container = %container.display(),
+        fault_fingerprint = %format!("sha256:{}", sha256_hex(first_fault.as_bytes())),
+        fault = %first_fault,
+        "deterministically corrupt graph container deleted; \
+         a fresh store rebuilds from the canonical replay authorities"
+    );
+    Ok(CorruptStoreRecovery::Deleted)
+}
+
+/// Replaces a container whose open reported [`GraphDbError::FormatSuperseded`].
+///
+/// Under the same decision lock as corruption, the open is re-run: another
+/// authority may already have replaced the store. A second superseded
+/// verdict deletes the family together with the sealed generation root,
+/// because every artifact under it was written in the superseded format.
+/// The caller reopens the vacant path fresh.
+pub(crate) fn replace_superseded_container<T>(
+    container: &Path,
+    verification_open: &dyn Fn() -> Result<T, GraphDbError>,
+) -> Result<CorruptStoreRecovery<T>, GraphDbError> {
+    let _decision_lock = acquire_corruption_decision_lock(container)?;
+    let (found, expected) = match verification_open() {
+        Ok(database) => return Ok(CorruptStoreRecovery::Reopened(database)),
+        Err(GraphDbError::FormatSuperseded { found, expected }) => (found, expected),
+        Err(other) => return Err(other),
+    };
+    delete_container_family(container, &[container.with_extension("sealed")])?;
+    tracing::info!(
+        event = "store_superseded_format_deleted",
+        container = %container.display(),
+        found,
+        expected,
+        "graph container in a superseded format deleted; \
+         a fresh store rebuilds from the canonical replay authorities"
+    );
     Ok(CorruptStoreRecovery::Deleted)
 }
 
@@ -143,11 +180,11 @@ fn acquire_corruption_decision_lock(
     }
 }
 
-/// Deletes the container family. The container goes last: it is the fault
-/// authority, so an interruption mid-delete leaves the corrupt container in
-/// place for the next deciding authority rather than a vacant path beside
-/// stranded sidecars.
-fn delete_container_family(container: &Path, fault: &str) -> Result<(), GraphDbError> {
+/// Deletes the container family and any `derived` siblings. The container
+/// goes last: it is the fault authority, so an interruption mid-delete leaves
+/// it in place for the next deciding authority rather than a vacant path
+/// beside stranded sidecars.
+fn delete_container_family(container: &Path, derived: &[PathBuf]) -> Result<(), GraphDbError> {
     match container.symlink_metadata() {
         Ok(metadata) if metadata.is_file() => {}
         Ok(_) => {
@@ -168,30 +205,23 @@ fn delete_container_family(container: &Path, fault: &str) -> Result<(), GraphDbE
         wal_sidecar_path(container),
         container.with_extension("verified"),
         container.with_extension("spill"),
-    ] {
-        remove_family_member(&sidecar)?;
+    ]
+    .iter()
+    .chain(derived)
+    {
+        remove_family_member(sidecar)?;
     }
     remove_family_member(container)?;
     if let Some(parent) = container.parent() {
         sync_directory(parent, DirectorySyncPolicy::Strict).map_err(|error| {
             GraphDbError::DurabilityUncertain {
                 message: format!(
-                    "corrupt graph container {} was deleted but its directory sync failed: \
-                     {error}",
+                    "graph container {} was deleted but its directory sync failed: {error}",
                     container.display()
                 ),
             }
         })?;
     }
-
-    tracing::warn!(
-        event = "store_corrupt_deleted",
-        container = %container.display(),
-        fault_fingerprint = %format!("sha256:{}", sha256_hex(fault.as_bytes())),
-        fault = %fault,
-        "deterministically corrupt graph container deleted; \
-         a fresh store rebuilds from the canonical replay authorities"
-    );
     Ok(())
 }
 
@@ -206,7 +236,7 @@ fn remove_family_member(member: &Path) -> Result<(), GraphDbError> {
     };
     removed.map_err(|error| {
         GraphDbError::unavailable(format!(
-            "corrupt graph store member {} could not be deleted: {error}",
+            "graph store member {} could not be deleted: {error}",
             member.display()
         ))
     })

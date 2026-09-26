@@ -91,7 +91,9 @@ async fn cursor_pre_compact_via_daemon_inner(
     let root = serde_json::from_str::<serde_json::Value>(event_json)
         .ok()
         .as_ref()
-        .and_then(super::cursor::cursor_project_root_from_parsed_event);
+        .and_then(|parsed| {
+            super::cursor::cursor_project_root_from_parsed_event(&runtime.profile, parsed)
+        });
     let Some(root) = root else {
         return CursorPreCompactOutcome::skipped("no project root");
     };
@@ -121,6 +123,7 @@ async fn cursor_pre_compact_via_daemon_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracedecay_runtime_core::config::ProfileRoot;
 
     #[tokio::test]
     async fn native_compaction_routes_once_to_daemon_within_hook_budget() {
@@ -146,7 +149,10 @@ mod tests {
         .to_string();
 
         let started = std::time::Instant::now();
-        let runtime = crate::ports::hook_runtime::crate_test_runtime();
+        let profile_home = tempfile::tempdir().unwrap();
+        let runtime = crate::ports::hook_runtime::crate_test_runtime(ProfileRoot::under_home(
+            profile_home.path(),
+        ));
         let outcome = cursor_pre_compact_via_daemon(&runtime, &event_json).await;
 
         assert!(

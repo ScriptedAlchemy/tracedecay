@@ -120,21 +120,6 @@ fn required_object_schema(properties: Value, required: &[&str]) -> Value {
     schema
 }
 
-fn def_required_object(
-    name: &str,
-    title: &str,
-    description: &str,
-    properties: Value,
-    required: &[&str],
-) -> ToolDefinition {
-    def(
-        name,
-        title,
-        description,
-        required_object_schema(properties, required),
-    )
-}
-
 fn string_property(description: &str) -> Value {
     json!({
         "type": "string",
@@ -338,8 +323,8 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
     };
     let mut definitions = vec![
         def_search(),
-        def_grep(),
-        def_ast_grep_search(),
+        def_grep(request_schema("grep")?),
+        def_ast_grep_search(request_schema("ast_grep_search")?),
         def_retrieve(),
         def_context(request_schema("context")?),
         def_impact(request_schema("impact")?),
@@ -354,9 +339,9 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_multi_root_scope_set_compare_and_swap(),
         def_multi_root_execute()?,
         def_remote_status_read(),
-        def_affected(),
+        def_affected(request_schema("affected")?),
         def_dead_code(request_schema("dead_code")?),
-        def_diff_context(),
+        def_diff_context(request_schema("diff_context")?),
         def_circular(request_schema("circular")?),
         def_hotspots(request_schema("hotspots")?),
         def_similar(request_schema("similar")?),
@@ -372,15 +357,15 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_complexity(request_schema("complexity")?),
         def_doc_coverage(request_schema("doc_coverage")?),
         def_god_class(request_schema("god_class")?),
-        def_changelog(),
+        def_changelog(request_schema("changelog")?),
         def_port_status(request_schema("port_status")?),
         def_port_order(request_schema("port_order")?),
-        def_commit_context(),
-        def_pr_context(),
+        def_commit_context(request_schema("commit_context")?),
+        def_pr_context(request_schema("pr_context")?),
         def_test_map(request_schema("test_map")?),
-        def_branch_search(),
-        def_branch_diff(),
-        def_branch_list(),
+        def_branch_search(request_schema("branch_search")?),
+        def_branch_diff(request_schema("branch_diff")?),
+        def_branch_list(request_schema("branch_list")?),
         def_str_replace(),
         def_multi_str_replace(),
         def_insert_at(),
@@ -392,10 +377,10 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_dsm(request_schema("dsm")?),
         def_test_risk(request_schema("test_risk")?),
         def_todos(request_schema("todos")?),
-        def_by_qualified_name(),
-        def_signature(),
+        def_by_qualified_name(request_schema("by_qualified_name")?),
+        def_signature(request_schema("signature")?),
         def_diagnose(request_schema("diagnose")?),
-        def_derives(),
+        def_derives(request_schema("derives")?),
         def_run_affected_tests(),
     ];
     definitions.extend(memory::memory_definitions(&request_schema)?);
@@ -431,7 +416,7 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_rename_symbol(),
         def_source_edit_reconcile(),
         def_source_edit_rollback(),
-        def_find_exact_symbol(),
+        def_find_exact_symbol(request_schema("find_exact_symbol")?),
     ]);
     definitions.extend(application_definitions()?);
     let work = work_worker.join().map_err(|_| {

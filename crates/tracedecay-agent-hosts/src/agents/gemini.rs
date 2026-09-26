@@ -30,6 +30,7 @@
 //! `mcpServers.tracedecay` entry in `~/.gemini/settings.json`.
 
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_domain::errors::Result;
 
@@ -169,7 +170,7 @@ impl AgentIntegration for GeminiIntegration {
 
     /// The staged manifest, not `~/.gemini/settings.json`: the manifest is the
     /// one native config file this integration's projection owns and writes.
-    fn primary_config_path(&self, home: &Path) -> Option<PathBuf> {
+    fn primary_config_path(&self, home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         Some(staged_manifest_path(home))
     }
 
@@ -177,7 +178,7 @@ impl AgentIntegration for GeminiIntegration {
     /// source manifest TraceDecay writes, the installed manifest Gemini writes
     /// from it, and the shared settings file the host CLI may touch while
     /// enabling or disabling the extension.
-    fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
+    fn host_registration_paths(&self, home: &Path, _profile: &ProfileRoot) -> Vec<PathBuf> {
         vec![
             staged_manifest_path(home),
             installed_manifest_path(home),
@@ -187,7 +188,7 @@ impl AgentIntegration for GeminiIntegration {
 
     /// Adoption is a fact about Gemini, not about TraceDecay's staging: a
     /// staged source that the host never installed is not an installation.
-    fn has_tracedecay(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
         match read_installed_extension(home) {
             InstalledExtensionV1::Present(manifest) => {
                 manifest.get("name").and_then(serde_json::Value::as_str) == Some(EXTENSION_NAME)

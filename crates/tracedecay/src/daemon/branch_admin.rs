@@ -457,6 +457,8 @@ impl ProfileHostAdmissionBootstrapContext {
 #[derive(Clone)]
 pub(super) struct StoreAdministration {
     profile_identity: Option<profile_identity::LocalProfileIdentityAuthorityV1>,
+    /// The profile the daemon process serves, as its boundary resolved it.
+    owner_profile: Option<tracedecay_runtime_core::config::ProfileRoot>,
     authenticated_profile_database_scopes:
         Arc<ProfiledTokioMutex<HashMap<PathBuf, tracedecay_runtime_core::db::DaemonDatabaseScope>>>,
     session_runtime_registries: SharedSessionRuntimeRegistries,
@@ -559,6 +561,7 @@ impl Default for StoreAdministration {
     fn default() -> Self {
         Self {
             profile_identity: None,
+            owner_profile: None,
             authenticated_profile_database_scopes: Arc::new(hotpath::mutex!(
                 tokio::sync::Mutex::new(HashMap::new()),
                 label = "daemon.branch_admin.profile_scopes"
@@ -811,6 +814,30 @@ impl StoreAdministration {
     ) -> Self {
         self.profile_identity = Some(profile_identity);
         self
+    }
+
+    pub(super) fn with_owner_profile(
+        mut self,
+        owner_profile: tracedecay_runtime_core::config::ProfileRoot,
+    ) -> Self {
+        self.owner_profile = Some(owner_profile);
+        self
+    }
+
+    /// Home of the daemon owner's user, which no request may open as a
+    /// project.
+    pub(super) fn owner_home(&self) -> Result<Option<&Path>> {
+        Ok(self.owner_profile()?.home())
+    }
+
+    /// The profile the daemon process serves: its home, data directory, and
+    /// global database.
+    pub(super) fn owner_profile(&self) -> Result<&tracedecay_runtime_core::config::ProfileRoot> {
+        self.owner_profile
+            .as_ref()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "daemon owner profile is unavailable".to_string(),
+            })
     }
 
     pub(super) fn profile_identity(

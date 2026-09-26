@@ -49,6 +49,12 @@ pub(crate) fn fixture_open_options(project_root: &Path) -> TraceDecayOpenOptions
     }
 }
 
+/// The user home a fixture's automation runs deploy managed skills under,
+/// hidden beside the fixture profile.
+pub(crate) fn fixture_host_home(project_root: &Path) -> std::path::PathBuf {
+    project_root.join(".tracedecay").join("fixture-home")
+}
+
 pub(crate) async fn init_project(project_root: &Path) -> TraceDecay {
     crate::common::register_process_runtime_ports();
     fs::create_dir_all(project_root.join("src")).unwrap();
@@ -74,7 +80,7 @@ pub(crate) async fn seed_project_session_activity_at(cg: &TraceDecay, timestamp:
         panic!("combined-review fixtures require an authoritative project owner");
     };
     let context = cg
-        .automation_project_context()
+        .automation_project_context(Some(fixture_host_home(cg.project_root())))
         .expect("automation project context");
     assert_eq!(context.project_id, project_id);
     let sessions = &context.project_sessions;

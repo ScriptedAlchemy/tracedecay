@@ -47,6 +47,7 @@ use tracedecay_automation_runtime::automation::host_io::{
 use tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary;
 use tracedecay_domain::errors::Result;
 use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 pub use antigravity::AntigravityIntegration;
 pub(crate) use bundle_identity::{
@@ -74,7 +75,7 @@ pub use zed::ZedIntegration;
 pub use git_post_commit_hook::{install_git_post_commit_hook, report_git_post_commit_hook_status};
 pub use host_config_io::{
     HostFileMetadataIdentityV1, JsonConfigDialect, capture_host_file_metadata, copilot_cli_dir,
-    home_dir, host_config_write_intent_path, kiro_data_dir, load_json_file, load_json_file_strict,
+    host_config_write_intent_path, kiro_data_dir, load_json_file, load_json_file_strict,
     load_jsonc_file, load_jsonc_file_strict, load_toml_file, parse_jsonc,
     restore_host_file_metadata, safe_remove_host_file, safe_write_bytes_file,
     safe_write_bytes_file_with_metadata, safe_write_json_file, safe_write_text_file,
@@ -83,7 +84,7 @@ pub use host_config_io::{
 };
 pub(crate) use host_config_io::{
     JsonConfigMutation, collect_regular_files, ensure_project_local_safe_path,
-    ensure_project_local_safe_paths, hook_command, host_home_override, is_process_home,
+    ensure_project_local_safe_paths, hook_command, host_home_override,
     record_host_config_observation_bytes, update_json_config_transactionally,
     update_toml_config_transactionally,
 };
@@ -101,17 +102,13 @@ pub use mcp_registration::{
 
 #[hotpath::measure(label = "agent_hosts.agents.managed_skill.install_index")]
 pub(crate) fn install_managed_skill_prompt_index(
-    profile_home: &Path,
+    profile_root: &Path,
     prompt_path: &Path,
     target: tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget,
 ) -> Result<()> {
-    let profile_root =
-        tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(
-            profile_home,
-        );
     tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
         &crate::host_io(),
-        &profile_root,
+        profile_root,
         target,
         prompt_path,
     )?;
@@ -146,17 +143,13 @@ pub(crate) fn remove_managed_skill_prompt_index(
 #[hotpath::measure(label = "agent_hosts.agents.managed_skill.doctor_index")]
 pub(crate) fn doctor_check_managed_skill_prompt_indexes(
     dc: &mut DoctorCounters,
-    profile_home: &Path,
+    profile_root: &Path,
     prompt_paths: &[PathBuf],
     target: tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget,
 ) {
-    let profile_root =
-        tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(
-            profile_home,
-        );
     for prompt_path in prompt_paths {
         match tracedecay_automation_runtime::automation::skill_targets::stale_prompt_index_ids(
-            &profile_root,
+            profile_root,
             prompt_path,
             target,
         ) {
@@ -193,9 +186,10 @@ pub fn export_managed_skills_to_agents(
     if !uses_default_user_profile(home, profile_root) {
         return Vec::new();
     }
+    let profile = ProfileRoot::new(profile_root).with_home(home);
     let mut reports = Vec::new();
     for ag in all_integrations() {
-        match ag.export_managed_skills(home, profile_root) {
+        match ag.export_managed_skills(home, &profile) {
             Ok(exports) => {
                 if !exports.is_empty() {
                     reports.push(ManagedSkillExportReport {
@@ -227,11 +221,12 @@ pub fn export_managed_skills_to_agent_hosts(
     if !uses_default_user_profile(home, profile_root) {
         return Vec::new();
     }
+    let profile = ProfileRoot::new(profile_root).with_home(home);
     let mut reports = Vec::new();
     for ag in all_integrations() {
         let mut exports = Vec::new();
         let mut errors = Vec::new();
-        match ag.export_managed_skills(home, profile_root) {
+        match ag.export_managed_skills(home, &profile) {
             Ok(global_exports) => exports.extend(global_exports),
             Err(err) => errors.push(err.to_string()),
         }
@@ -328,7 +323,7 @@ pub trait AgentIntegration {
     fn export_managed_skills(
         &self,
         _home: &Path,
-        _profile_root: &Path,
+        _profile: &ProfileRoot,
     ) -> Result<Vec<SkillInstallSummary>> {
         Ok(Vec::new())
     }
@@ -362,7 +357,7 @@ pub trait AgentIntegration {
     /// about detected-but-unintegrated hosts instead of printing nothing for
     /// them. The default is `None`: a host without a cheap, reliable presence
     /// probe stays quiet rather than guessing at foreign config layouts.
-    fn detected_host_surface(&self, _home: &Path) -> Option<PathBuf> {
+    fn detected_host_surface(&self, _home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         None
     }
 
@@ -409,6 +404,7 @@ pub trait AgentIntegration {
         &self,
         _components: &[host_bundle::HostComponentV1],
         _home: &Path,
+        _profile_root: &Path,
     ) -> Result<Vec<PathBuf>> {
         Ok(Vec::new())
     }
@@ -421,7 +417,7 @@ pub trait AgentIntegration {
 
     /// Returns true if tracedecay MCP server is already registered in this
     /// agent's config. Used for migration backfill.
-    fn has_tracedecay(&self, _home: &Path) -> bool {
+    fn has_tracedecay(&self, _home: &Path, _profile: &ProfileRoot) -> bool {
         false
     }
 
@@ -433,7 +429,7 @@ pub trait AgentIntegration {
     /// should return the same path the install helper writes to, including
     /// any platform-conditional branching. Returning `None` means "no single
     /// primary config" (e.g. an append-only TOML file with no rewrite path).
-    fn primary_config_path(&self, _home: &Path) -> Option<PathBuf> {
+    fn primary_config_path(&self, _home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         None
     }
 
@@ -441,8 +437,10 @@ pub trait AgentIntegration {
     /// aggregate component-set lifecycle. The transaction snapshots all
     /// returned paths in memory before invoking the host registration
     /// authority.
-    fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
-        self.primary_config_path(home).into_iter().collect()
+    fn host_registration_paths(&self, home: &Path, profile: &ProfileRoot) -> Vec<PathBuf> {
+        self.primary_config_path(home, profile)
+            .into_iter()
+            .collect()
     }
 
     /// Mutable registration paths for the exact selected components. Hosts
@@ -452,8 +450,9 @@ pub trait AgentIntegration {
         &self,
         _components: &[host_bundle::HostComponentV1],
         home: &Path,
+        profile: &ProfileRoot,
     ) -> Vec<PathBuf> {
-        self.host_registration_paths(home)
+        self.host_registration_paths(home, profile)
     }
 
     /// Fallible exact registration inventory used by the transaction snapshot.
@@ -464,8 +463,9 @@ pub trait AgentIntegration {
         &self,
         components: &[host_bundle::HostComponentV1],
         home: &Path,
+        profile: &ProfileRoot,
     ) -> Result<Vec<PathBuf>> {
-        Ok(self.host_component_registration_paths(components, home))
+        Ok(self.host_component_registration_paths(components, home, profile))
     }
 
     /// Exact project-scoped paths the catalog registration projection may
@@ -475,6 +475,7 @@ pub trait AgentIntegration {
         &self,
         _components: &[host_bundle::HostComponentV1],
         _home: &Path,
+        _profile_root: &Path,
         _project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
         Err(tracedecay_domain::errors::TraceDecayError::Config {
@@ -585,6 +586,9 @@ pub enum NonInteractiveInstallOutcome {
 /// Context passed to catalog-backed host registration and refresh operations.
 pub struct InstallContext {
     pub home: PathBuf,
+    /// The TraceDecay profile whose managed skills and settings the host
+    /// integration reads.
+    pub profile: ProfileRoot,
     pub tracedecay_bin: String,
     /// Codex update/uninstall can use this as an explicit repo-local plugin
     /// target. Other integrations ignore it.
@@ -599,6 +603,7 @@ pub struct InstallContext {
 /// Context passed to [`AgentIntegration::healthcheck`].
 pub struct HealthcheckContext {
     pub home: PathBuf,
+    pub profile: ProfileRoot,
     pub project_path: PathBuf,
 }
 
@@ -1009,7 +1014,12 @@ mod managed_skill_prompt_index_doctor_tests {
                 integration: "opencode",
                 scope: "user AGENTS.md",
                 slug: "opencode",
-                index_path: |home, _| super::opencode::opencode_prompt_path(home),
+                index_path: |home, _| {
+                    super::opencode::opencode_prompt_path(
+                        home,
+                        &tracedecay_runtime_core::config::ProfileRoot::under_home(home),
+                    )
+                },
                 seed: seed_nothing,
             },
             IndexRow {
@@ -1076,6 +1086,7 @@ mod managed_skill_prompt_index_doctor_tests {
 
             let integration = get_integration(row.integration).unwrap();
             let ctx = HealthcheckContext {
+                profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home),
                 home: home.to_path_buf(),
                 project_path: project.to_path_buf(),
             };

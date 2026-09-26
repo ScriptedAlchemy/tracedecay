@@ -70,11 +70,17 @@ pub async fn execute_retained_memory_curator(
         .automation_request(context.request_context.request_id())
         .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
     let run_id = automation_request.run_id.as_str().to_owned();
-    let automation_context = cg.automation_project_context().map_err(|error| {
-        RetainedSurfaceExecutionErrorV1::unavailable(format!(
-            "the automation project context could not be composed: {error}"
-        ))
-    })?;
+    let automation_context = cg
+        .automation_project_context(
+            invocation_service
+                .owner_home()
+                .map(std::path::Path::to_path_buf),
+        )
+        .map_err(|error| {
+            RetainedSurfaceExecutionErrorV1::unavailable(format!(
+                "the automation project context could not be composed: {error}"
+            ))
+        })?;
     let admission = crate::automation_effect::prepare(
         invocation_service,
         cg,

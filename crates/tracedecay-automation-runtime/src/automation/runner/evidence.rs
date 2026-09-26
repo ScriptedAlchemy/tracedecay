@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use tracedecay_automation::analytics::{ToolUsageObservation, underused_tool_family_signals};
 use tracedecay_automation::text::truncate_chars_for_prompt;
-use tracedecay_domain::errors::Result;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
@@ -758,10 +758,11 @@ pub(super) async fn build_skill_writer_evidence(
     analytics_db: Option<&RegisteredGlobalDb>,
     options: SkillWriterAutomationOptions,
 ) -> Result<SkillWriterEvidenceOutcome> {
-    let profile_root = match options.profile_root {
-        Some(path) => path,
-        None => tracedecay_runtime_core::storage::default_profile_root()?,
-    };
+    let profile_root = options
+        .profile_root
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "skill writer evidence requires the owning profile root".to_string(),
+        })?;
     let provider =
         normalized_non_empty(&options.provider).unwrap_or_else(default_skill_writer_provider);
     let query = normalized_non_empty(&options.query).unwrap_or_else(default_skill_writer_query);

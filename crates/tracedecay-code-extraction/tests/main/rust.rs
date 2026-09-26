@@ -1407,3 +1407,96 @@ fn wildcard_imports_retain_unresolved_dependencies_alongside_named_bindings() {
     assert!(uses.contains(&"crate::two::{Item, *}"), "{uses:?}");
     assert!(uses.contains(&"Item"), "{uses:?}");
 }
+
+/// tokio wraps module declarations, re-exports, and whole modules in
+/// `cfg_*! { ... }` item-list macros; their items belong to the enclosing
+/// scope at their own source positions.
+#[test]
+fn item_list_macro_bodies_contribute_their_items_and_imports() {
+    let source = "\
+cfg_rt! {
+    pub mod foo {
+        pub fn bar() {}
+    }
+    mod builder;
+    pub use self::builder::Builder;
+}
+";
+    let result = RustExtractor.extract_artifact("src/lib.rs", source);
+    assert!(
+        result.result.errors.is_empty(),
+        "{:?}",
+        result.result.errors
+    );
+    let mut symbols = result
+        .result
+        .nodes
+        .iter()
+        .filter(|node| !matches!(node.kind, NodeKind::File | NodeKind::Use))
+        .map(|node| {
+            (
+                node.qualified_name.as_str(),
+                node.kind.as_str(),
+                node.start_line,
+            )
+        })
+        .collect::<Vec<_>>();
+    symbols.sort();
+    assert_eq!(
+        symbols,
+        vec![
+            ("src/lib.rs::builder", "module", 4),
+            ("src/lib.rs::foo", "module", 1),
+            ("src/lib.rs::foo::bar", "function", 2),
+        ]
+    );
+    let imports = result
+        .imports
+        .iter()
+        .map(|import| {
+            (
+                import.module_specifier.as_str(),
+                import.imported_name.as_deref(),
+                import.is_public,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(imports, vec![("self::builder", Some("Builder"), true)]);
+}
+
+/// A body that is not an item list stays unexpanded: the invocation is a
+/// `name!` macro-invocation node owning the calls written inside it, while an
+/// item-list sibling still yields its function.
+#[test]
+fn non_item_macro_bodies_become_invocation_nodes_that_own_their_calls() {
+    let source = "\
+route! { \"/\" => handler() }
+cfg_rt! { pub fn plain() {} }
+";
+    let result = RustExtractor.extract_artifact("src/lib.rs", source).result;
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    let nodes = result
+        .nodes
+        .iter()
+        .filter(|node| node.kind != NodeKind::File)
+        .map(|node| (node.name.as_str(), node.kind.as_str(), node.start_line))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        nodes,
+        vec![("route!", "macro_invocation", 0), ("plain", "function", 1)]
+    );
+    let route = result
+        .nodes
+        .iter()
+        .find(|node| node.name == "route!")
+        .expect("route! invocation node");
+    let calls = result
+        .unresolved_refs
+        .iter()
+        .filter(|reference| {
+            reference.reference_kind == EdgeKind::Calls && reference.from_node_id == route.id
+        })
+        .map(|reference| (reference.reference_name.as_str(), reference.line))
+        .collect::<Vec<_>>();
+    assert_eq!(calls, vec![("handler", 0)]);
+}

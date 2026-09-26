@@ -22,20 +22,22 @@ pub(crate) const HOOK_EVENT_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750
 
 #[hotpath::measure(label = "daemon.engine.hooks.notify", future = true)]
 pub async fn notify_hook_event(
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
     project_path: &Path,
     event: DaemonHookEvent,
 ) -> HookEventNotifyOutcomeV1 {
     let connection = std::env::var_os(SOCKET_ENV)
         .filter(|path| !path.is_empty())
-        .map_or_else(current_daemon_connection, |path| {
-            client_connection(Path::new(&path))
-        });
+        .map_or_else(
+            || current_daemon_connection(profile.data_dir()),
+            |path| client_connection(profile.data_dir(), Path::new(&path)),
+        );
     let Ok(connection) = connection else {
         return HookEventNotifyOutcomeV1::Unavailable;
     };
     match timeout(
         HOOK_EVENT_NOTIFY_TIMEOUT,
-        notify_hook_event_to_connection(project_path, event, connection),
+        notify_hook_event_to_connection(profile, project_path, event, connection),
     )
     .await
     {
@@ -46,11 +48,13 @@ pub async fn notify_hook_event(
 
 #[hotpath::measure(label = "daemon.engine.hooks.deliver", future = true)]
 async fn notify_hook_event_to_connection(
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
     project_path: &Path,
     event: DaemonHookEvent,
     connection: ResolvedDaemonConnection,
 ) -> HookEventNotifyOutcomeV1 {
     let Ok(handshake) = crate::daemon::handshake_for_current_client(
+        profile,
         Some(project_path.to_path_buf()),
         None,
         false,
@@ -114,10 +118,13 @@ mod tests {
         let socket_dir = tempfile::tempdir().unwrap();
         let missing_socket = socket_dir.path().join("missing.sock");
         let _authority = super::super::tests::seed_socket_authority(&missing_socket);
-        let connection = client_connection(&missing_socket).expect("seeded daemon authority");
+        let profile = tracedecay_runtime_core::config::ProfileRoot::new(socket_dir.path());
+        let connection = client_connection(profile.data_dir(), &missing_socket)
+            .expect("seeded daemon authority");
         let started = Instant::now();
 
         let outcome = notify_hook_event_to_connection(
+            &profile,
             socket_dir.path(),
             DaemonHookEvent::cursor_after_shell_execution(socket_dir.path().to_path_buf()),
             connection,

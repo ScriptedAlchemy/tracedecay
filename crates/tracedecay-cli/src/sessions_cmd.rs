@@ -1,5 +1,6 @@
 use std::fmt::Write as _;
 use std::path::Path;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use crate::{
     cli::{SessionsAction, SessionsSearchArgs},
@@ -54,6 +55,7 @@ fn message_search_rpc_args(args: SessionsSearchArgs) -> Value {
 
 #[hotpath::measure(label = "cli.sessions.dispatch", future = true)]
 pub(crate) async fn handle_sessions_action(
+    profile: &ProfileRoot,
     action: SessionsAction,
 ) -> tracedecay_domain::errors::Result<()> {
     match action {
@@ -61,20 +63,20 @@ pub(crate) async fn handle_sessions_action(
             project_id,
             project_path,
         } => {
-            handle_sessions_import(project_id, project_path).await?;
+            handle_sessions_import(profile, project_id, project_path).await?;
         }
         SessionsAction::SyncStatus {
             idempotency_key,
             project_id,
             project_path,
         } => {
-            run_sync_status(project_id, project_path, idempotency_key).await?;
+            run_sync_status(profile, project_id, project_path, idempotency_key).await?;
         }
         SessionsAction::Search(args) => {
-            handle_sessions_search(*args).await?;
+            handle_sessions_search(profile, *args).await?;
         }
         SessionsAction::Refresh { action } => {
-            handle_session_refresh_action(action).await?;
+            handle_session_refresh_action(profile, action).await?;
         }
         SessionsAction::GitSync {
             project_id,
@@ -84,7 +86,14 @@ pub(crate) async fn handle_sessions_action(
             dry_run,
         } => {
             hotpath::future!(
-                run_git_sync(project_id, project_path, since, limit_sessions, dry_run),
+                run_git_sync(
+                    profile,
+                    project_id,
+                    project_path,
+                    since,
+                    limit_sessions,
+                    dry_run
+                ),
                 label = "cli.sessions.git_sync"
             )
             .await?;
@@ -95,7 +104,7 @@ pub(crate) async fn handle_sessions_action(
             project_id,
             project_path,
         } => {
-            handle_sessions_unfinished(limit, json, project_id, project_path).await?;
+            handle_sessions_unfinished(profile, limit, json, project_id, project_path).await?;
         }
     }
     Ok(())
@@ -103,25 +112,31 @@ pub(crate) async fn handle_sessions_action(
 
 #[hotpath::measure(label = "cli.sessions.import", future = true)]
 async fn handle_sessions_import(
+    profile: &ProfileRoot,
     project_id: Option<String>,
     project_path: Option<String>,
 ) -> tracedecay_domain::errors::Result<()> {
-    let project_path = resolve_cli_project_root(None, project_id, project_path).await?;
+    let project_path = resolve_cli_project_root(profile, None, project_id, project_path).await?;
     let outcome = call_daemon_tool(
+        profile,
         &project_path,
         "tracedecay_admin_cli",
         json!({ "action": "sessions_import" }),
     )
     .await?;
-    await_session_sync_completion(&project_path, "session import", outcome).await
+    await_session_sync_completion(profile, &project_path, "session import", outcome).await
 }
 
 #[hotpath::measure(label = "cli.sessions.search", future = true)]
-async fn handle_sessions_search(args: SessionsSearchArgs) -> tracedecay_domain::errors::Result<()> {
+async fn handle_sessions_search(
+    profile: &ProfileRoot,
+    args: SessionsSearchArgs,
+) -> tracedecay_domain::errors::Result<()> {
     let project_id = args.project_id.clone();
     let project_path = args.project_path.clone();
-    let project_path = resolve_cli_project_root(None, project_id, project_path).await?;
+    let project_path = resolve_cli_project_root(profile, None, project_id, project_path).await?;
     let payload = call_daemon_tool(
+        profile,
         &project_path,
         "tracedecay_message_search",
         message_search_rpc_args(args),
@@ -192,13 +207,15 @@ impl SessionsSearchReport {
 
 #[hotpath::measure(label = "cli.sessions.unfinished", future = true)]
 async fn handle_sessions_unfinished(
+    profile: &ProfileRoot,
     limit: usize,
     json: bool,
     project_id: Option<String>,
     project_path: Option<String>,
 ) -> tracedecay_domain::errors::Result<()> {
-    let project_path = resolve_cli_project_root(None, project_id, project_path).await?;
+    let project_path = resolve_cli_project_root(profile, None, project_id, project_path).await?;
     let payload = call_daemon_tool(
+        profile,
         &project_path,
         "tracedecay_admin_cli",
         json!({ "action": "sessions_unfinished", "limit": limit }),
@@ -232,11 +249,12 @@ async fn handle_sessions_unfinished(
 }
 
 async fn call_daemon_tool(
+    profile: &ProfileRoot,
     project_root: &Path,
     tool_name: &str,
     arguments: Value,
 ) -> tracedecay_domain::errors::Result<Value> {
-    crate::commands::daemon_tool_json(Some(project_root), tool_name, arguments).await
+    crate::commands::daemon_tool_json(profile, Some(project_root), tool_name, arguments).await
 }
 
 #[cfg(test)]

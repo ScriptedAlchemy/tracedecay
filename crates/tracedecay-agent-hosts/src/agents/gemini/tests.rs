@@ -76,6 +76,7 @@ fn recorded_invocations(log: &Path) -> Vec<String> {
 
 fn install_context(home: &Path, tracedecay_bin: &str) -> InstallContext {
     InstallContext {
+        profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home),
         home: home.to_path_buf(),
         tracedecay_bin: tracedecay_bin.to_string(),
         project_root: None,
@@ -329,12 +330,16 @@ fn registration_state_follows_the_hosts_installed_extension() {
 
     let home = tempfile::tempdir().unwrap();
     let health = HealthcheckContext {
+        profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
         home: home.path().to_path_buf(),
         project_path: home.path().to_path_buf(),
     };
     stage_rendered_extension(home.path(), "/bin/tracedecay");
     assert!(
-        !GeminiIntegration.has_tracedecay(home.path()),
+        !GeminiIntegration.has_tracedecay(
+            home.path(),
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path())
+        ),
         "a staged source the host never installed is not an installation"
     );
     assert_eq!(
@@ -343,7 +348,10 @@ fn registration_state_follows_the_hosts_installed_extension() {
     );
 
     simulate_host_install(home.path(), "/bin/tracedecay");
-    assert!(GeminiIntegration.has_tracedecay(home.path()));
+    assert!(GeminiIntegration.has_tracedecay(
+        home.path(),
+        &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path())
+    ));
     assert_eq!(
         GeminiIntegration.host_component_registration(HostComponentV1::ContextMcp, &health),
         HostBundleRegistrationStateV1::Current

@@ -321,9 +321,13 @@ async fn test_tools_call_semantic_failure_sets_is_error() {
 
 #[tokio::test]
 async fn test_tools_call_plain_text_failure_sets_is_error() {
-    let (server, _dir) = setup_server().await;
+    let fixture = crate::support::production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
     let responses = run_server_with_messages(
-        server,
+        std::sync::Arc::clone(&server),
         vec![jsonrpc_request(
             json!(34),
             "tools/call",
@@ -354,6 +358,7 @@ async fn test_tools_call_plain_text_failure_sets_is_error() {
         text.contains("## error") && text.contains("**kind:** git"),
         "expected rendered changelog git failure, got: {text}"
     );
+    fixture.harness.shutdown().await;
 }
 
 #[tokio::test]
@@ -1580,7 +1585,7 @@ async fn test_run_returns_transport_read_errors() {
 // the migration-running path) before the status reads.
 #[tokio::test]
 async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
-    let profile = crate::common::fixture::TestProfile::acquire().await;
+    let profile = crate::common::fixture::TestProfile::isolated();
     let repository =
         crate::common::fixture::GitFixture::primary(profile.path("lcm-migration-project"));
     fs::create_dir_all(repository.root().join("src")).unwrap();
@@ -1654,8 +1659,9 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     // store file was recreated" (created/length drift on one path) from "a
     // different store file answered" (the seeded file left untouched).
     let sessions_db =
-        tracedecay_runtime_core::storage::resolve_project_session_db_path(&project_root)
-            .expect("resolve the project's sessions db path");
+        tracedecay_runtime_core::storage::resolve_layout(&project_root, profile.root())
+            .expect("resolve the project's sessions db path")
+            .sessions_db_path;
     let stat_sessions_db = |label: &str| match std::fs::metadata(&sessions_db) {
         Ok(meta) => format!(
             "{label}: path={} len={} created={:?} modified={:?}",

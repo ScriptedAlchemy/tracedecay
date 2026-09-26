@@ -299,8 +299,11 @@ fn unquote(s: &str) -> String {
 /// readable (the doctor treats that as "no watcher telemetry available").
 #[cfg(unix)]
 #[hotpath::measure(label = "daemon.engine.logging.watcher_events")]
-pub fn recent_watcher_events(max_lines: usize) -> HashMap<String, WatcherEvent> {
-    let text = read_daemon_log_tail(max_lines);
+pub fn recent_watcher_events(
+    profile_root: &Path,
+    max_lines: usize,
+) -> HashMap<String, WatcherEvent> {
+    let text = read_daemon_log_tail(profile_root, max_lines);
     let mut latest: HashMap<String, WatcherEvent> = HashMap::new();
     for line in text.lines() {
         if let Some(ev) = parse_watcher_log_line(line) {
@@ -314,15 +317,13 @@ pub fn recent_watcher_events(max_lines: usize) -> HashMap<String, WatcherEvent> 
 /// Best-effort read of the tail of the daemon log across service runners.
 #[cfg(unix)]
 #[hotpath::measure(label = "daemon.engine.logging.read_tail")]
-fn read_daemon_log_tail(max_lines: usize) -> String {
+fn read_daemon_log_tail(profile_root: &Path, max_lines: usize) -> String {
     // macOS launchd: a plain err-log file next to the data dir.
-    if let Some(data_dir) = tracedecay_runtime_core::config::user_data_dir() {
-        let err_log = data_dir.join("daemon.err.log");
-        if let Ok(contents) = std::fs::read_to_string(&err_log) {
-            let lines: Vec<&str> = contents.lines().collect();
-            let start = lines.len().saturating_sub(max_lines);
-            return lines[start..].join("\n");
-        }
+    let err_log = profile_root.join("daemon.err.log");
+    if let Ok(contents) = std::fs::read_to_string(&err_log) {
+        let lines: Vec<&str> = contents.lines().collect();
+        let start = lines.len().saturating_sub(max_lines);
+        return lines[start..].join("\n");
     }
     // Linux systemd: pull recent journal lines for the user unit.
     let output = std::process::Command::new("journalctl")
@@ -341,8 +342,12 @@ fn read_daemon_log_tail(max_lines: usize) -> String {
     }
 }
 
-pub fn unavailable_error(socket_path: &Path) -> TraceDecayError {
-    let advice = tracedecay_daemon_control::unavailable_daemon_socket_advice(socket_path, None);
+pub fn unavailable_error(
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
+    socket_path: &Path,
+) -> TraceDecayError {
+    let advice =
+        tracedecay_daemon_control::unavailable_daemon_socket_advice(profile, socket_path, None);
     TraceDecayError::project_route(
         tracedecay_daemon_protocol::DAEMON_CONNECT_DOWN,
         true,

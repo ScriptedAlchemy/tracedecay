@@ -10,6 +10,7 @@ use std::fmt::Write as _;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::{Value, json};
 use tracedecay_contracts::retained_surfaces::{
@@ -27,6 +28,7 @@ use crate::cli::{
     SessionsRefreshAction,
 };
 use crate::commands::{daemon_tool_json, retained_effect_payload, retained_tool_payload};
+use crate::registered_project_path_selector;
 
 const PROJECT_CONTEXT_TOOL: &str = "tracedecay_project_context";
 
@@ -137,8 +139,11 @@ impl SessionRefreshOutcomeView {
     }
 }
 
-pub(super) async fn handle_session_refresh_action(action: SessionsRefreshAction) -> Result<()> {
-    let transport = LiveSessionRefreshDaemonTransport;
+pub(super) async fn handle_session_refresh_action(
+    profile: &ProfileRoot,
+    action: SessionsRefreshAction,
+) -> Result<()> {
+    let transport = LiveSessionRefreshDaemonTransport { profile };
     handle_session_refresh_action_with_transport(&transport, action).await
 }
 
@@ -295,7 +300,10 @@ where
         (Some(project_id), None) => {
             json!({ "project_selector": { "project_id": project_id }, "format": "json" })
         }
-        (None, Some(project_path)) => json!({ "path": project_path, "format": "json" }),
+        (None, Some(project_path)) => json!({
+            "path": registered_project_path_selector(project_path)?,
+            "format": "json",
+        }),
         (None, None) => {
             return Err(refresh_config_error(
                 "sessions refresh requires --project-id, --project-path, or --profile; it never falls back to the current directory",
@@ -459,16 +467,20 @@ trait SessionRefreshDaemonTransport {
     ) -> SessionRefreshDaemonFuture<'a>;
 }
 
-struct LiveSessionRefreshDaemonTransport;
+struct LiveSessionRefreshDaemonTransport<'p> {
+    profile: &'p ProfileRoot,
+}
 
-impl SessionRefreshDaemonTransport for LiveSessionRefreshDaemonTransport {
+impl SessionRefreshDaemonTransport for LiveSessionRefreshDaemonTransport<'_> {
     fn call<'a>(
         &'a self,
         project_root: Option<&'a Path>,
         tool_name: &'a str,
         arguments: Value,
     ) -> SessionRefreshDaemonFuture<'a> {
-        Box::pin(async move { daemon_tool_json(project_root, tool_name, arguments).await })
+        Box::pin(
+            async move { daemon_tool_json(self.profile, project_root, tool_name, arguments).await },
+        )
     }
 }
 

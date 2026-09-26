@@ -41,6 +41,9 @@ pub(super) async fn dispatch_analytics(
     analytics::handle_analytics(
         cg,
         args,
+        options
+            .profile
+            .map(tracedecay_runtime_core::config::ProfileRoot::data_dir),
         options.global_db.map(RegisteredGlobalDbLeaseV1::as_ref),
         options
             .session_authorities

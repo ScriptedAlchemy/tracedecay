@@ -147,6 +147,7 @@ fn conflict_problem() -> Value {
             "code": "application.retained.conflict",
             "message": "The retained operation conflicts with current state."
         },
+        "detail": null,
         "committed_receipt": null,
         "owning_layer": "application",
         "terminality": "pre_admission",
@@ -170,6 +171,7 @@ fn hidden_fact_problem() -> Value {
         "code": "not_found_or_not_authorized",
         "message": "The requested resource was not found or is not authorized",
         "diagnostic": null,
+        "detail": null,
         "committed_receipt": null,
         "owning_layer": "application",
         "terminality": "pre_admission",

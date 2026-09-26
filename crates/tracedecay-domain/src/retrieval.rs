@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
@@ -52,7 +53,7 @@ fn retrieval_digest_error(error: DomainError) -> RetrievalContractError {
 }
 
 validated_string_newtype!(
-    plain,
+    schema,
     RetrievalContractError,
     validate_retrieval_identity;
     PrincipalId,
@@ -209,7 +210,9 @@ pub enum RetrievalContractError {
 /// Runtime-backed retrieval lanes. Each lane is independently testable,
 /// disableable, budgeted, and attributable; one lane is never an alias over
 /// another.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RetrieverKind {
     ExactLiteral,
@@ -299,7 +302,18 @@ pub struct TemporalLaneEvidenceV1 {
 /// Deterministic fixed-point score in millionths. No floating point crosses
 /// this boundary.
 #[derive(
-    Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    JsonSchema,
 )]
 #[serde(transparent)]
 pub struct FixedPointScore(pub u64);
@@ -555,7 +569,7 @@ pub struct RetrievalRequest {
 /// Source freshness is source- and retriever-specific: there is no global
 /// age-decay multiplier. Missing, stale, incompatible, and current are
 /// distinct states.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SourceFreshness {
     pub source_namespace: SourceNamespace,
@@ -570,7 +584,9 @@ pub struct SourceFreshness {
 }
 
 /// Compatibility state of one source/projection pair.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum FreshnessCompatibilityV1 {
     Current,
@@ -582,7 +598,9 @@ pub enum FreshnessCompatibilityV1 {
 
 /// Evidence role used by dedupe/diversity caps. Independent corroboration
 /// and contradictions are preserved.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceRole {
     Primary,
@@ -685,7 +703,18 @@ pub enum ExactFieldV1 {
 /// The exact tiers, lexicographically ordered above all approximate
 /// candidates. Fusion derives this only from a validated [`ExactAdmissionProof`].
 #[derive(
-    Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ExactClass {
@@ -869,7 +898,7 @@ pub trait ExactAdmissionValidator {
 /// One retriever's scored contribution to a fused candidate. Every ranked
 /// candidate retains every retriever's raw score domain, ordinal rank,
 /// calibrated feature, weight, and weighted contribution.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CandidateContribution {
     pub retriever: RetrieverKind,
@@ -887,7 +916,7 @@ pub struct CandidateContribution {
 /// Structured occurrence provenance retained through fusion. Fusion
 /// preserves each exact `(source_occurrence_id, retriever_evidence_anchor)`
 /// pair; parallel unassociated provenance vectors are forbidden.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OccurrenceProvenance {
     pub source_occurrence_id: SourceOccurrenceId,
@@ -903,7 +932,7 @@ pub struct OccurrenceProvenance {
 }
 
 /// A candidate after contribution grouping and fixed-point fusion.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FusedCandidate {
     pub anchor_id: RetrievalAnchorId,
@@ -952,7 +981,7 @@ impl FusedCandidate {
 }
 
 /// A fused candidate with its final deterministic ordinal.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RankedCandidate {
     pub candidate: FusedCandidate,
@@ -961,7 +990,7 @@ pub struct RankedCandidate {
 
 /// One recorded ranking decision. Explanations are rendered from this
 /// provenance, never reconstructed from a final scalar score.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RankingDecision {
     pub kind: RankingDecisionKind,
@@ -972,7 +1001,9 @@ pub struct RankingDecision {
 }
 
 /// The decision kinds the pipeline must record.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RankingDecisionKind {
     ExactTierAdmission,

@@ -4,11 +4,14 @@ mod runs;
 mod skills;
 
 use crate::cli::AutomationAction;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 async fn daemon_project_dashboard_root(
+    profile: &ProfileRoot,
     project_path: &std::path::Path,
 ) -> tracedecay_domain::errors::Result<std::path::PathBuf> {
     let context = crate::commands::daemon_tool_json(
+        profile,
         Some(project_path),
         "tracedecay_active_project",
         serde_json::json!({ "format": "json" }),
@@ -25,40 +28,48 @@ async fn daemon_project_dashboard_root(
 }
 
 async fn daemon_automation_action(
+    profile: &ProfileRoot,
     project_path: &std::path::Path,
     args: serde_json::Value,
 ) -> tracedecay_domain::errors::Result<serde_json::Value> {
-    crate::commands::daemon_tool_json(Some(project_path), "tracedecay_admin_project", args).await
+    crate::commands::daemon_tool_json(
+        profile,
+        Some(project_path),
+        "tracedecay_admin_project",
+        args,
+    )
+    .await
 }
 
 pub(crate) async fn handle_automation_command(
+    profile: &ProfileRoot,
     action: AutomationAction,
 ) -> tracedecay_domain::errors::Result<()> {
     match action {
         AutomationAction::Config { action } => {
             hotpath::future!(
-                config::handle_automation_config_command(action),
+                config::handle_automation_config_command(profile, action),
                 label = "cli.automation.config"
             )
             .await
         }
         AutomationAction::Runs { action } => {
             hotpath::future!(
-                runs::handle_automation_runs_command(action),
+                runs::handle_automation_runs_command(profile, action),
                 label = "cli.automation.runs"
             )
             .await
         }
         AutomationAction::Skills { action } => {
             hotpath::future!(
-                skills::handle_automation_skills_command(action),
+                skills::handle_automation_skills_command(profile, action),
                 label = "cli.automation.skills"
             )
             .await
         }
         AutomationAction::Facts { action } => {
             hotpath::future!(
-                facts::handle_automation_facts_command(action),
+                facts::handle_automation_facts_command(profile, action),
                 label = "cli.automation.facts"
             )
             .await

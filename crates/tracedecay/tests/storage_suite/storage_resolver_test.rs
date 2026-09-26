@@ -1,9 +1,7 @@
-use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::home_env_lock::HOME_ENV_LOCK;
 use serde_json::Value;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
@@ -15,8 +13,7 @@ use tracedecay_mcp::response_handles::{
 use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::branch_meta::{self, BranchMeta};
-use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
-use tracedecay_runtime_core::config::discover_project_root;
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_runtime_core::path_safety::{
     canonical_root_identity, plain_git_args, plain_host_path,
 };
@@ -24,8 +21,7 @@ use tracedecay_runtime_core::storage::{
     PrivateStoreIo, ProjectPath, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION,
     StorageMode, StoreArtifactPath, StoreKind, StoreManifest, default_profile_project_id,
     profile_sharded_layout, read_repository_identity_marker, read_store_manifest,
-    repository_identity_path, resolve_layout, resolve_layout_for_current_profile,
-    resolve_lcm_payload_root, resolve_project_session_db_path, write_repository_identity_marker,
+    repository_identity_path, resolve_layout, write_repository_identity_marker,
     write_store_manifest, write_store_manifest_to_path,
 };
 
@@ -39,50 +35,10 @@ mod markers;
 mod working_tree_guard;
 mod worktrees_clones;
 
-struct HomeGuard {
-    previous_home: Option<OsString>,
-    previous_userprofile: Option<OsString>,
-    previous_data_dir: Option<OsString>,
-}
-
-impl HomeGuard {
-    fn set(home: &Path) -> Self {
-        crate::common::register_process_runtime_ports();
-        let previous_home = std::env::var_os("HOME");
-        let previous_userprofile = std::env::var_os("USERPROFILE");
-        let previous_data_dir = std::env::var_os(USER_DATA_DIR_ENV);
-        fs::create_dir_all(home).unwrap();
-        let home = canonical_temp_path(home);
-        unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::set_var("USERPROFILE", &home);
-            std::env::set_var(USER_DATA_DIR_ENV, home.join(".tracedecay"));
-        }
-        Self {
-            previous_home,
-            previous_userprofile,
-            previous_data_dir,
-        }
-    }
-}
-
-impl Drop for HomeGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match self.previous_home.take() {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-            match self.previous_userprofile.take() {
-                Some(value) => std::env::set_var("USERPROFILE", value),
-                None => std::env::remove_var("USERPROFILE"),
-            }
-            match self.previous_data_dir.take() {
-                Some(value) => std::env::set_var(USER_DATA_DIR_ENV, value),
-                None => std::env::remove_var(USER_DATA_DIR_ENV),
-            }
-        }
-    }
+/// The profile `<home>/.tracedecay` every storage fixture passes explicitly.
+fn test_profile(home: &Path) -> ProfileRoot {
+    crate::common::register_process_runtime_ports();
+    crate::common::isolated_profile_under_home(home)
 }
 
 /// Fabricates a retired legacy `<root>/.tracedecay/enrollment.json` exactly as
@@ -118,10 +74,6 @@ fn assert_path_eq(actual: impl AsRef<Path>, expected: impl AsRef<Path>) {
     );
 }
 
-fn maintenance_profile_root() -> PathBuf {
-    tracedecay_runtime_core::config::user_data_dir().expect("test profile root")
-}
-
 fn prepare_maintenance_profile(profile_root: &Path) {
     fs::create_dir_all(profile_root).unwrap();
     #[cfg(unix)]
@@ -132,9 +84,10 @@ fn prepare_maintenance_profile(profile_root: &Path) {
 }
 
 async fn init_with_maintenance(
+    profile: &ProfileRoot,
     project_root: &Path,
 ) -> tracedecay_domain::errors::Result<TraceDecay> {
-    let profile_root = maintenance_profile_root();
+    let profile_root = profile.data_dir().to_path_buf();
     prepare_maintenance_profile(&profile_root);
     let lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
         &profile_root,
@@ -159,9 +112,10 @@ async fn init_with_maintenance(
 }
 
 async fn open_with_maintenance(
+    profile: &ProfileRoot,
     project_root: &Path,
 ) -> tracedecay_domain::errors::Result<TraceDecay> {
-    let profile_root = maintenance_profile_root();
+    let profile_root = profile.data_dir().to_path_buf();
     prepare_maintenance_profile(&profile_root);
     let lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
         &profile_root,

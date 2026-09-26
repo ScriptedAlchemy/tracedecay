@@ -1,4 +1,4 @@
-//! The shared fixture authority: one isolated environment, one profile, and
+//! The shared fixture authority: one isolated home, one profile, and
 //! project identities resolved and registered through the production paths.
 //!
 //! Test setup used to reimplement identity resolution, synthesizing a profile
@@ -8,7 +8,7 @@
 //! and every one of them delegates to the authority production uses:
 //!
 //! ```ignore
-//! let profile = TestProfile::acquire().await;              // isolated HOME, one profile
+//! let profile = TestProfile::isolated();                   // isolated home, one profile
 //! let repo = GitFixture::primary(profile.path("project")); // template-seeded checkout
 //! let project = profile.enroll(repo.root()).await;         // registered + enrolled
 //! let data_root = project.data_root();                     // taken from the opened graph
@@ -16,8 +16,8 @@
 //!
 //! What each piece owns:
 //!
-//! * [`TestProfile`] wraps [`super::IsolatedEnv`], so `HOME`,
-//!   `TRACEDECAY_DATA_DIR`, and the global-DB override always point inside a
+//! * [`TestProfile`] wraps [`super::IsolatedHome`], so the home, profile
+//!   data directory, and global DB it hands out always point inside a
 //!   throwaway directory. It is also the *only* source of
 //!   [`TraceDecayOpenOptions`] in a fixture, which is what keeps N projects in
 //!   ONE profile: an open with default options synthesizes a per-project
@@ -50,74 +50,50 @@ use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use tracedecay_runtime_core::storage::{self, StoreLayout};
 
-use super::IsolatedEnv;
+use super::IsolatedHome;
 
 // ---------------------------------------------------------------------------
-// Profile: one isolated environment, one profile, N projects
+// Profile: one isolated home, one profile, N projects
 // ---------------------------------------------------------------------------
 
 struct TestProfileInner {
-    env: IsolatedEnv,
-    root: PathBuf,
-    global_db_path: PathBuf,
+    env: IsolatedHome,
 }
 
-/// One isolated environment plus the single profile every project in a fixture
-/// is enrolled in.
+/// One isolated home plus the single profile every project in a fixture is
+/// enrolled in.
 ///
-/// Cloning is cheap and shares the isolated environment, so a
-/// [`RegisteredProject`] keeps the throwaway `HOME` and the process-wide env
-/// lock alive for as long as any handle to it exists. A fixture therefore
-/// cannot drop its environment guard while still using a store. The
-/// environment pins process-global state from the test's own thread (its
-/// env lock guard must be released there), so handles are shared with `Rc`.
+/// Cloning is cheap and shares the isolated home, so a [`RegisteredProject`]
+/// keeps the throwaway directory alive for as long as any handle to it exists.
 #[derive(Clone)]
 pub struct TestProfile {
     inner: Rc<TestProfileInner>,
 }
 
 impl TestProfile {
-    /// Acquires the isolated environment and pins this fixture's profile.
-    pub async fn acquire() -> Self {
-        Self::build(IsolatedEnv::acquire().await.0)
-    }
-
-    /// Sync counterpart of [`Self::acquire`] for plain `#[test]` fns.
-    ///
-    /// Panics if called from within an async context; use [`Self::acquire`]
-    /// there.
-    pub fn acquire_blocking() -> Self {
-        Self::build(IsolatedEnv::acquire_blocking().0)
-    }
-
-    fn build(env: IsolatedEnv) -> Self {
-        let root = env.home().join(".tracedecay");
-        fs::create_dir_all(&root).unwrap_or_else(|err| {
-            panic!(
-                "failed to create fixture profile '{}': {err}",
-                root.display()
-            )
-        });
-        let global_db_path = root.join("global.db");
+    pub fn isolated() -> Self {
         Self {
             inner: Rc::new(TestProfileInner {
-                env,
-                root,
-                global_db_path,
+                env: IsolatedHome::new().0,
             }),
         }
     }
 
     /// This fixture's profile root (`<home>/.tracedecay`).
     pub fn root(&self) -> &Path {
-        &self.inner.root
+        self.inner.env.profile_root()
+    }
+
+    /// This fixture's profile, for APIs that take it explicitly.
+    pub fn profile(&self) -> &tracedecay_runtime_core::config::ProfileRoot {
+        self.inner.env.profile()
     }
 
     pub fn home(&self) -> &Path {
         self.inner.env.home()
     }
 
-    /// The throwaway directory holding the isolated `HOME` and every checkout,
+    /// The throwaway directory holding the isolated home and every checkout,
     /// for fixtures that need siblings (a bare `origin`, a linked worktree).
     pub fn scratch(&self) -> &Path {
         self.inner.env.scratch()
@@ -149,10 +125,7 @@ impl TestProfile {
     /// test builds synthesize a per-project standalone profile, which silently
     /// puts two projects of one fixture in two profiles.
     pub fn open_options(&self) -> TraceDecayOpenOptions {
-        TraceDecayOpenOptions {
-            profile_root: Some(self.inner.root.clone()),
-            global_db_path: Some(self.inner.global_db_path.clone()),
-        }
+        self.inner.env.open_options()
     }
 
     /// Registers, enrolls, and initializes `project_root` in this profile.
@@ -462,7 +435,7 @@ impl std::ops::Deref for RegisteredProject {
 
 /// A checkout inside a fixture profile that was never enrolled or registered.
 pub struct UnenrolledProject {
-    // Keeps the isolated environment alive for the negative case too.
+    // Keeps the isolated home alive for the negative case too.
     _profile: TestProfile,
     root: PathBuf,
 }

@@ -1670,6 +1670,124 @@ fn decode_segment_window(
     })
 }
 
+/// Reads one sealed segment's bytes into the buffer it is handed.
+pub type SealedGenerationSegmentReaderV1<'a> = dyn FnMut(SealedGenerationSegmentReadV1<'_>, &mut Vec<u8>) -> Result<(), CodeIndexProductionErrorV1>
+    + 'a;
+
+/// Files one window of a sealed generation's segments decodes at a time.
+const FILE_WINDOW_FILES_PER_WORKER_V1: usize = 4;
+
+/// A sealed generation's file segments, decoded back one bounded window of
+/// files at a time without assembling the generation.
+///
+/// Only the authenticated partitioned manifest is resident: the snapshot and
+/// the ordered segment descriptors. Every window's segments are verified
+/// against their content addresses as they decode, and a window's decoded
+/// rows are the caller's to drop before the next window is read.
+pub struct SealedGenerationFileWindowsV1 {
+    generation: PartitionedPublishedGenerationV1,
+    scope: FileScopeIdentityV1,
+}
+
+impl std::fmt::Debug for SealedGenerationFileWindowsV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SealedGenerationFileWindowsV1")
+            .field("generation_id", &self.generation.manifest.generation_id)
+            .field("files", &self.generation.file_segments.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl SealedGenerationFileWindowsV1 {
+    /// Authenticates the partitioned manifest `manifest_bytes` and indexes its
+    /// file segments. No segment is read.
+    pub fn open(manifest_bytes: &[u8]) -> Result<Self, CodeIndexProductionErrorV1> {
+        let generation = parse_partitioned_manifest(manifest_bytes)?;
+        let scope = FileScopeIdentityV1::of(&generation.manifest, &generation.snapshot);
+        Ok(Self { generation, scope })
+    }
+
+    #[must_use]
+    pub fn generation_id(&self) -> &CodeGenerationId {
+        &self.generation.manifest.generation_id
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> &SanitizedCodeSnapshotV1 {
+        &self.generation.snapshot
+    }
+
+    #[must_use]
+    pub fn manifest(&self) -> &CodeGenerationManifestV1 {
+        &self.generation.manifest
+    }
+
+    /// Decodes every file segment in manifest order, handing each window's
+    /// files to `visit` with the snapshot record each file was sealed from.
+    pub(super) fn for_each_file_window<E>(
+        &self,
+        read_segment: &mut SealedGenerationSegmentReaderV1<'_>,
+        mut visit: impl FnMut(
+            Vec<(&SanitizedCodeFileV1, PersistedFileGenerationArtifactsV1)>,
+        ) -> Result<(), E>,
+    ) -> Result<(), E>
+    where
+        E: From<CodeIndexProductionErrorV1>,
+    {
+        let descriptors = &self.generation.file_segments;
+        let window_files = crate::parallelism::indexing_workers()
+            .max(1)
+            .saturating_mul(FILE_WINDOW_FILES_PER_WORKER_V1);
+        let mut buffers = vec![Vec::new(); window_files];
+        let mut start = 0;
+        while start < descriptors.len() {
+            let pending = &descriptors[start..];
+            let read = read_segment_window(
+                pending,
+                &mut buffers,
+                LEXICAL_FILE_PREFETCH_BYTES_V1,
+                |descriptor, segment| {
+                    read_segment(
+                        SealedGenerationSegmentReadV1::Whole {
+                            digest: &descriptor.segment_digest,
+                            size_bytes: descriptor.segment_size_bytes,
+                        },
+                        segment,
+                    )
+                },
+            )?;
+            let window = &pending[..read];
+            let decoded = decode_segment_window(
+                window,
+                &buffers[..read],
+                &self.generation.manifest.generation_id,
+                &self.generation.manifest.snapshot_digest,
+                &self.scope,
+            )?;
+            let files = window
+                .iter()
+                .zip(decoded)
+                .map(|(descriptor, page)| {
+                    self.generation
+                        .snapshot
+                        .files
+                        .get(descriptor.file_key as usize)
+                        .map(|file| (file, page))
+                        .ok_or_else(|| {
+                            CodeIndexProductionErrorV1::Contract(
+                                "sealed generation file key is outside its snapshot".to_owned(),
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            start += read;
+            visit(files)?;
+        }
+        Ok(())
+    }
+}
+
 impl VerifiedSealedLexicalPageSourceV1 {
     pub fn open_partitioned_sealed(
         manifest_bytes: &[u8],

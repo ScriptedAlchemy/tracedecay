@@ -3,9 +3,9 @@
 use std::sync::Arc;
 
 use tracedecay_contracts::{
-    ApplicationExecutionFailureClassV1, ApplicationProblem, CancellationContext, Deadline,
-    RequestId, SafeDiagnostic, SourceEditInvocationV1, SourceEditReconciliationInvocationV1,
-    SourceEditRollbackInvocationV1,
+    ApplicationExecutionFailureClassV1, ApplicationProblem, ApplicationProblemDetailV1,
+    CancellationContext, Deadline, RequestId, SafeDiagnostic, SourceEditInvocationV1,
+    SourceEditReconciliationInvocationV1, SourceEditRollbackInvocationV1,
 };
 use tracedecay_daemon_protocol::DaemonInvocationProblem;
 
@@ -248,6 +248,9 @@ fn source_edit_safe_diagnostic(
 fn source_edit_execution_problem(
     error: TraceDecayError,
 ) -> Result<ApplicationProblem, tracedecay_contracts::ApplicationContractError> {
+    if let Some(detail) = ApplicationProblemDetailV1::from_lock_deadline(&error) {
+        return Ok(ApplicationProblem::from_detail(detail));
+    }
     let (code, message) = source_edit_kernel_cause(&error);
     let diagnostic = source_edit_safe_diagnostic(code, message)?;
     match diagnostic.code.as_str() {
@@ -369,6 +372,44 @@ mod tests {
             .expect("idempotency conflict must stay a typed project-route error");
         assert_eq!(reason_code, SOURCE_EDIT_IDEMPOTENCY_CONFLICT);
         assert!(retryable);
+    }
+
+    #[test]
+    fn a_missed_writer_lock_deadline_is_retryable_capacity_with_typed_detail() {
+        let response = map_source_edit_error(
+            "request.source-edit.lock-deadline".to_owned(),
+            SourceEditOwnerError::ExecutionFailed(TraceDecayError::LockDeadline {
+                resource: "source-edit writer lock",
+                deadline_ms: 30_000,
+            }),
+        );
+        let wire = serde_json::to_value(&response).expect("daemon response wire");
+        let problem = &wire["problem"];
+        assert_eq!(
+            (
+                &problem["kind"],
+                &problem["retry"],
+                &problem["legal_actions"],
+                &problem["diagnostic"],
+                &problem["detail"],
+            ),
+            (
+                &serde_json::json!("saturated"),
+                &serde_json::json!("after_delay"),
+                &serde_json::json!(["retry"]),
+                &serde_json::json!({
+                    "code": "application.lock-deadline",
+                    "message": "The source-edit writer lock stayed busy past its 30000ms \
+                                admission deadline; retry the operation.",
+                }),
+                &serde_json::json!({
+                    "kind": "lock_deadline",
+                    "resource": "source-edit writer lock",
+                    "deadline_ms": 30_000,
+                }),
+            ),
+            "{wire}"
+        );
     }
 
     #[test]

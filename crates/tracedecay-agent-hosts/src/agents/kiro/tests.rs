@@ -75,6 +75,7 @@ fn healthcheck_skips_steering_when_legacy_file_is_absent() {
     KiroIntegration.healthcheck(
         &mut counters,
         &HealthcheckContext {
+            profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             home: home.path().to_path_buf(),
             project_path: home.path().to_path_buf(),
         },
@@ -106,6 +107,7 @@ fn global_activate_does_not_create_missing_legacy_steering() {
         .activate_deployed_host_component_registration(
             &[HostComponentV1::ContextMcp],
             &InstallContext {
+                profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
                 home: home.path().to_path_buf(),
                 tracedecay_bin: "/bin/tracedecay".to_string(),
                 project_root: None,
@@ -520,6 +522,7 @@ fn failed_kiro_cli_effect_rolls_back_the_peer_containing_registry() {
     let mut writer = HostBundleWriterV1::open_with_lifecycle_root(home.path(), lifecycle.path())
         .expect("host bundle writer must open for an isolated profile");
     let mut registration = crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
+        &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
         "kiro",
         home.path(),
         request.lifecycle.operation,
@@ -575,6 +578,7 @@ fn rollback_refuses_a_foreign_registry_write_after_cli_apply() {
     let component_set = kiro_component_set();
     let request = kiro_component_request(HostBundleLifecycleOpV1::Install, [32; 16]);
     let mut registration = crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
+        &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
         "kiro",
         home.path(),
         request.lifecycle.operation,
@@ -643,6 +647,7 @@ fn detected_kiro_without_a_tracedecay_server_is_a_single_optional_warning() {
     KiroIntegration.healthcheck(
         &mut counters,
         &HealthcheckContext {
+            profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             home: home.path().to_path_buf(),
             project_path: home.path().to_path_buf(),
         },
@@ -663,6 +668,7 @@ fn malformed_kiro_mcp_config_remains_a_doctor_failure() {
     KiroIntegration.healthcheck(
         &mut counters,
         &HealthcheckContext {
+            profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             home: home.path().to_path_buf(),
             project_path: home.path().to_path_buf(),
         },
@@ -695,6 +701,7 @@ fn an_empty_kiro_mcp_config_is_a_doctor_failure() {
     KiroIntegration.healthcheck(
         &mut counters,
         &HealthcheckContext {
+            profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             home: home.path().to_path_buf(),
             project_path: home.path().to_path_buf(),
         },
@@ -707,50 +714,32 @@ fn an_empty_kiro_mcp_config_is_a_doctor_failure() {
 #[cfg(unix)]
 #[test]
 fn cli_lifecycle_leaves_an_ambient_kiro_home_sentinel_untouched() {
+    const AMBIENT_CHILD: &str = "TRACEDECAY_TEST_AMBIENT_KIRO_HOME_CHILD";
+    let Some(ambient) = std::env::var_os(AMBIENT_CHILD).map(PathBuf::from) else {
+        // The ambient `KIRO_HOME` is process environment; a child isolates
+        // it from concurrently running tests.
+        let ambient = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "agents::kiro::tests::cli_lifecycle_leaves_an_ambient_kiro_home_sentinel_untouched",
+            ])
+            .env(AMBIENT_CHILD, ambient.path())
+            .env("KIRO_HOME", ambient.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "the ambient KIRO_HOME child failed");
+        return;
+    };
     let home = tempfile::tempdir().unwrap();
-    let ambient = tempfile::tempdir().unwrap();
     let bin_dir = tempfile::tempdir().unwrap();
     let log = bin_dir.path().join("invocations.log");
     let kiro_cli = bin_dir.path().join("kiro-cli");
     fake_kiro_cli(&kiro_cli, &log, FAKE_REGISTRY_BODY);
-    let ambient_mcp = ambient.path().join("settings/mcp.json");
+    let ambient_mcp = ambient.join("settings/mcp.json");
     std::fs::create_dir_all(ambient_mcp.parent().unwrap()).unwrap();
     let sentinel = br#"{"mcpServers":{"operator-sentinel":{"command":"keep"}}}"#;
     std::fs::write(&ambient_mcp, sentinel).unwrap();
-    let _ambient = {
-        struct AmbientKiroHomeGuard {
-            previous: Option<std::ffi::OsString>,
-            _lock: std::sync::MutexGuard<'static, ()>,
-        }
-
-        impl AmbientKiroHomeGuard {
-            fn set(value: &Path) -> Self {
-                let lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
-                let previous = std::env::var_os("KIRO_HOME");
-                // SAFETY: the shared profile-discovery lock serializes this
-                // process-global test environment mutation.
-                unsafe { std::env::set_var("KIRO_HOME", value) };
-                Self {
-                    previous,
-                    _lock: lock,
-                }
-            }
-        }
-
-        impl Drop for AmbientKiroHomeGuard {
-            fn drop(&mut self) {
-                // SAFETY: see `AmbientKiroHomeGuard::set`.
-                unsafe {
-                    match self.previous.take() {
-                        Some(previous) => std::env::set_var("KIRO_HOME", previous),
-                        None => std::env::remove_var("KIRO_HOME"),
-                    }
-                }
-            }
-        }
-
-        AmbientKiroHomeGuard::set(ambient.path())
-    };
     kiro_mcp_add_with(&kiro_cli, home.path(), "/bin/tracedecay")
         .expect("the admitted profile must drive the native CLI");
     assert_eq!(std::fs::read(&ambient_mcp).unwrap(), sentinel);

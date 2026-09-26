@@ -6,7 +6,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
-use tracedecay_graph_db::{GraphTraversalDirection, TraversalRequest};
+use tracedecay_graph_db::{
+    GraphGenerationRowSpill, GraphGenerationRows, GraphLabel, GraphTraversalDirection,
+    TraversalRequest,
+};
 
 use super::*;
 
@@ -209,7 +212,7 @@ fn publish_sealed(
             authority,
             &context,
             &record.publication.key,
-            Some(Arc::new(manifest.clone())),
+            Some(Arc::new(manifest.clone()).into()),
         )
         .unwrap()
 }
@@ -701,7 +704,7 @@ fn missing_sealed_only_artifact_requires_reset_and_allows_republish() {
             &mut authority,
             &context,
             &record.publication.key,
-            Some(Arc::new(manifest.clone())),
+            Some(Arc::new(manifest.clone()).into()),
         )
         .unwrap();
     assert_snapshot_reads(&republished.snapshot, &identity, "restaged");
@@ -1447,6 +1450,99 @@ fn retirement_waits_for_a_live_direct_sealed_reader() {
     );
 }
 
+/// A generation shaped like a code graph: `symbol:<digest>` entities chained
+/// by `edge:<digest>` relations, the identities `graph_stable_identity` mints.
+fn stable_identity_manifest(
+    projection_identity: GraphProjectionIdentity,
+    rows: usize,
+) -> GraphGenerationManifest {
+    let symbol = |index: usize| {
+        GraphEntityId::new(graph_stable_identity("symbol", &index.to_string())).unwrap()
+    };
+    let entities = (0..rows)
+        .map(|index| GraphEntity::new(symbol(index), BTreeSet::new(), BTreeMap::new()).unwrap())
+        .collect();
+    let relations = (0..rows - 1)
+        .map(|index| {
+            GraphGenerationRelation::new(
+                GraphRelationId::new(graph_stable_identity("edge", &index.to_string())).unwrap(),
+                GraphEntityRef::new(projection_identity.clone(), symbol(index)),
+                GraphEntityRef::new(projection_identity.clone(), symbol(index + 1)),
+                GraphRelationKind::new("calls").unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap()
+        })
+        .collect();
+    GraphGenerationManifest::new(
+        projection_identity,
+        GraphGenerationId::new("key-budget-g1").unwrap(),
+        SourceGeneration::new("source:key-budget-g1").unwrap(),
+        GraphWatermark::new("watermark:key-budget-g1").unwrap(),
+        Vec::new(),
+        entities,
+        relations,
+    )
+    .unwrap()
+}
+
+/// Keys and relation identities are the bulk of a sealed generation's
+/// bytes. Hex keys sealed this 2,000-symbol generation to 3,150,837 bytes,
+/// and binary keys, which the compact dictionary stores as marked hex, to
+/// 1,786,870. Base64url keys plus each relation identity, source, and target
+/// stored once, on its locator, in compact form seal it to 1,037,302, and
+/// the rows still resolve through keys and edges.
+#[test]
+fn sealed_generation_bytes_stay_within_the_compact_identity_budget() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("sealed-store:key-budget", "code");
+    let manifest = stable_identity_manifest(identity.clone(), 2_000);
+    let record = stage_sealed_manifest(
+        &mut authority,
+        &registered.binding,
+        &manifest,
+        "publish:key-budget-g1",
+        None,
+        '0',
+    );
+    let commit = publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
+    assert!(commit.snapshot.serves_from_sealed_store());
+
+    let sealed_bytes = directory_bytes(&sealed_store_root(temp.path()));
+    assert!(
+        sealed_bytes <= 1_150_000,
+        "sealed generation took {sealed_bytes} bytes"
+    );
+    let last = GraphEntityId::new(graph_stable_identity("symbol", "1999")).unwrap();
+    assert_eq!(
+        commit
+            .snapshot
+            .entity(
+                &GraphEntityRef::new(identity.clone(), last.clone()),
+                Arc::new(TestCancellation),
+            )
+            .unwrap(),
+        Some(GraphEntity::new(last, BTreeSet::new(), BTreeMap::new()).unwrap())
+    );
+    let relation = commit
+        .snapshot
+        .relation(
+            &GraphRelationRef::new(
+                identity,
+                GraphRelationId::new(graph_stable_identity("edge", "0")).unwrap(),
+            ),
+            Arc::new(TestCancellation),
+        )
+        .unwrap()
+        .expect("sealed relation must resolve through its binary key");
+    assert_eq!(
+        relation.to.identity.as_str(),
+        graph_stable_identity("symbol", "1")
+    );
+}
+
 // ---------------------------------------------------------------------------
 // At-rest measurement probe (ignored): sealed artifact open vs staging replay
 // ---------------------------------------------------------------------------
@@ -1637,7 +1733,7 @@ fn sealed_artifact_open_probe() {
             &mut authority,
             &context,
             &record.publication.key,
-            Some(Arc::new(manifest)),
+            Some(Arc::new(manifest).into()),
         )
         .unwrap();
     let seal_wall = seal_started.elapsed();
@@ -1760,4 +1856,311 @@ fn sealed_artifact_open_probe() {
     assert_eq!(sealed_hits, 64);
     assert!(staging_visits > 1);
     assert_eq!(sealed_visits, staging_visits);
+}
+
+/// A generation wide enough that its rows span many spill batches: 300
+/// entities with distinct labels and payloads, and 450 relations whose
+/// endpoints cross every batch boundary.
+fn spill_fixture_manifest(identity: GraphProjectionIdentity) -> GraphGenerationManifest {
+    let entities = (0..300)
+        .map(|index| {
+            GraphEntity::new(
+                GraphEntityId::new(format!("entity:{index:03}")).unwrap(),
+                BTreeSet::from([
+                    GraphLabel::new(if index % 3 == 0 { "File" } else { "Symbol" }).unwrap(),
+                ]),
+                BTreeMap::from([(
+                    GraphPropertyName::new("marker").unwrap(),
+                    GraphProperty::String(format!("payload-{}", index * 7919 % 1000)),
+                )]),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let relations = (0..450)
+        .map(|index| {
+            GraphGenerationRelation::new(
+                GraphRelationId::new(format!("relation:{index:03}")).unwrap(),
+                GraphEntityRef::new(
+                    identity.clone(),
+                    GraphEntityId::new(format!("entity:{:03}", index % 300)).unwrap(),
+                ),
+                GraphEntityRef::new(
+                    identity.clone(),
+                    GraphEntityId::new(format!("entity:{:03}", (index * 37 + 11) % 300)).unwrap(),
+                ),
+                GraphRelationKind::new(if index % 2 == 0 { "calls" } else { "uses" }).unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    GraphGenerationManifest::new(
+        identity,
+        GraphGenerationId::new("spill-g1").unwrap(),
+        SourceGeneration::new("source:spill-g1").unwrap(),
+        GraphWatermark::new("watermark:spill-g1").unwrap(),
+        Vec::new(),
+        entities,
+        relations,
+    )
+    .unwrap()
+}
+
+/// The manifest's rows pushed in three batches, in reverse and interleaved
+/// order, with one entity and one relation repeated across batches.
+fn spill_manifest_rows(
+    spill: &mut GraphGenerationRowSpill,
+    manifest: &GraphGenerationManifest,
+) -> Result<(), GraphDbError> {
+    let mut entities = manifest.entities.clone();
+    entities.reverse();
+    let mut relations = manifest.relations.clone();
+    relations.reverse();
+    let (first_entities, rest_entities) = entities.split_at(120);
+    let (first_relations, rest_relations) = relations.split_at(200);
+    spill.push_batch(first_entities.to_vec(), rest_relations.to_vec(), &|| Ok(()))?;
+    let mut repeated_entities = rest_entities.to_vec();
+    repeated_entities.push(first_entities[7].clone());
+    spill.push_batch(repeated_entities, Vec::new(), &|| Ok(()))?;
+    let mut repeated_relations = first_relations.to_vec();
+    repeated_relations.push(rest_relations[3].clone());
+    spill.push_batch(Vec::new(), repeated_relations, &|| Ok(()))
+}
+
+/// The sealed container's bytes past its headers. The file header and the
+/// two checkpoint headers (the first 12,288 bytes) carry the wall-clock time
+/// the container was written; every section after them is a pure function of
+/// the rows.
+fn sealed_container_sections(root: &Path) -> (u64, Vec<u8>) {
+    const CONTAINER_DATA_OFFSET: usize = 3 * 4096;
+    let entries = std::fs::read_dir(sealed_store_root(root))
+        .unwrap()
+        .map(Result::unwrap)
+        .filter(|entry| entry.path().join("generation.grafeo").is_file())
+        .collect::<Vec<_>>();
+    assert_eq!(entries.len(), 1, "exactly one sealed generation");
+    let bytes = std::fs::read(entries[0].path().join("generation.grafeo")).unwrap();
+    (bytes.len() as u64, bytes[CONTAINER_DATA_OFFSET..].to_vec())
+}
+
+fn row_spills(root: &Path) -> Vec<String> {
+    std::fs::read_dir(sealed_store_root(root))
+        .map(|entries| {
+            entries
+                .map(Result::unwrap)
+                .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+                .filter(|name| name.starts_with(".rows-"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Rows pushed through a spill in shuffled batches, repeats included, seal
+/// the same recovered digest, receipt, and container sections as the
+/// manifest holding the same rows, and the spill leaves no scratch behind.
+///
+/// Fails if the merge drops or duplicates a row (the receipt counts and the
+/// digest move), if relation endpoints resolve to the wrong sealed node (the
+/// container sections differ), or if the spill directory outlives
+/// publication.
+#[test]
+fn spilled_rows_seal_the_same_generation_as_their_manifest() {
+    let identity = projection("sealed-store:spill", "code");
+    let manifest = spill_fixture_manifest(identity.clone());
+
+    let from_manifest = TempDir::new().unwrap();
+    let manifest_graph = RegisteredGraph::new_mounted(from_manifest.path()).unwrap();
+    let mut manifest_authority = RelationalAuthority::default();
+    let record = stage_sealed_manifest(
+        &mut manifest_authority,
+        &manifest_graph.binding,
+        &manifest,
+        "publish:spill-g1",
+        None,
+        '5',
+    );
+    publish_sealed(
+        &manifest_graph,
+        from_manifest.path(),
+        &mut manifest_authority,
+        &record,
+        &manifest,
+    );
+
+    let from_spill = TempDir::new().unwrap();
+    let spill_graph = RegisteredGraph::new_mounted(from_spill.path()).unwrap();
+    let mut spill = spill_graph
+        .registry
+        .generation_row_spill(
+            registration(spill_graph.binding.clone(), from_spill.path()),
+            identity.clone(),
+        )
+        .unwrap();
+    assert_eq!(row_spills(from_spill.path()).len(), 1);
+    spill_manifest_rows(&mut spill, &manifest).unwrap();
+    assert_eq!(spill.distinct_entities(), 300);
+    let spilled = spill.finish(manifest.identity(), &|| Ok(())).unwrap();
+    assert_eq!(spilled.row_counts(), (300, 450));
+    assert_eq!(
+        spilled.expected_recovered_digest(),
+        &manifest.expected_recovered_digest(&|| Ok(())).unwrap()
+    );
+    let rows = GraphGenerationRows::from(spilled);
+    let mut spill_authority = RelationalAuthority::default();
+    let source = SealedCodeGenerationReplay {
+        repository: RepositoryId::new("repository.graph-staging-release").unwrap(),
+        generation: CodeGenerationId::new("code-generation.spill-g1").unwrap(),
+        sealed_state_digest: SealedGraphStateDigest::try_from(format!("sha256:{}", "5".repeat(64)))
+            .unwrap(),
+        projector_revision: GraphProjectorRevision::try_from(
+            "projector.graph-staging-release".to_owned(),
+        )
+        .unwrap(),
+    };
+    let spill_record = spill_authority.stage(
+        rows.relational_sealed_replay(
+            spill_graph.binding.shard_id.clone(),
+            GraphIdempotencyKey::new("publish:spill-g1").unwrap(),
+            digest('5'),
+            None,
+            source,
+            &|| Ok(()),
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        spill_record.publication.canonical_replay_source,
+        record.publication.canonical_replay_source
+    );
+    assert_eq!(
+        spill_record.publication.expected_recovered_digest,
+        record.publication.expected_recovered_digest
+    );
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    spill_graph
+        .registry
+        .publish_verified(
+            registration(spill_graph.binding.clone(), from_spill.path()),
+            &mut spill_authority,
+            &context,
+            &spill_record.publication.key,
+            Some(rows),
+        )
+        .unwrap();
+
+    assert_eq!(
+        receipt_for_generation(from_spill.path(), "spill-g1"),
+        receipt_for_generation(from_manifest.path(), "spill-g1"),
+    );
+    assert!(
+        receipt_for_generation(from_spill.path(), "spill-g1")
+            .unwrap()
+            .contains("\"relations\": 450")
+    );
+    assert_eq!(
+        sealed_container_sections(from_spill.path()),
+        sealed_container_sections(from_manifest.path())
+    );
+    assert_eq!(row_spills(from_spill.path()), Vec::<String>::new());
+}
+
+/// Two rows that share an identity with different content, or a relation
+/// whose endpoint no batch pushed, refuse the spilled generation typed, the
+/// same verdicts the manifest constructor gives the same rows.
+#[test]
+fn spilled_rows_refuse_conflicting_repeats_and_dangling_endpoints() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let identity = projection("sealed-store:spill-refusal", "code");
+    let manifest = spill_fixture_manifest(identity.clone());
+    let new_spill = || {
+        registered
+            .registry
+            .generation_row_spill(
+                registration(registered.binding.clone(), temp.path()),
+                identity.clone(),
+            )
+            .unwrap()
+    };
+
+    let mut conflicting = new_spill();
+    spill_manifest_rows(&mut conflicting, &manifest).unwrap();
+    conflicting
+        .push_batch(
+            vec![entity("entity:042", "a different payload")],
+            Vec::new(),
+            &|| Ok(()),
+        )
+        .unwrap();
+    let refused = conflicting
+        .finish(manifest.identity(), &|| Ok(()))
+        .unwrap_err();
+    assert_eq!(
+        refused,
+        GraphDbError::invalid("a graph generation repeats an entity or relation identity")
+    );
+
+    let mut dangling = new_spill();
+    spill_manifest_rows(&mut dangling, &manifest).unwrap();
+    dangling
+        .push_batch(
+            Vec::new(),
+            vec![
+                GraphGenerationRelation::new(
+                    GraphRelationId::new("relation:dangling").unwrap(),
+                    GraphEntityRef::new(
+                        identity.clone(),
+                        GraphEntityId::new("entity:000").unwrap(),
+                    ),
+                    GraphEntityRef::new(
+                        identity.clone(),
+                        GraphEntityId::new("entity:999").unwrap(),
+                    ),
+                    GraphRelationKind::new("calls").unwrap(),
+                    BTreeMap::new(),
+                )
+                .unwrap(),
+            ],
+            &|| Ok(()),
+        )
+        .unwrap();
+    let refused = dangling
+        .finish(manifest.identity(), &|| Ok(()))
+        .unwrap_err();
+    assert_eq!(
+        refused,
+        GraphDbError::invalid(
+            "local relation endpoint `entity:999` is absent from the candidate generation"
+        )
+    );
+
+    let mut exact = new_spill();
+    spill_manifest_rows(&mut exact, &manifest).unwrap();
+    assert_eq!(
+        exact
+            .finish(manifest.identity(), &|| Ok(()))
+            .unwrap()
+            .row_counts(),
+        (300, 450)
+    );
+    assert_eq!(row_spills(temp.path()), Vec::<String>::new());
+}
+
+/// A row spill a killed process left under the sealed root is removed the
+/// next time the store opens; a spill named for the opening process is its
+/// own live publisher's and stays.
+#[test]
+fn store_open_sweeps_row_spills_abandoned_by_another_process() {
+    let temp = TempDir::new().unwrap();
+    let root = sealed_store_root(temp.path());
+    std::fs::create_dir_all(root.join(".rows-4194305-0")).unwrap();
+    std::fs::write(root.join(".rows-4194305-0/entities-0.run"), b"abandoned").unwrap();
+    let own = format!(".rows-{}-999999", std::process::id());
+    std::fs::create_dir_all(root.join(&own)).unwrap();
+
+    let _registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+
+    assert_eq!(row_spills(temp.path()), vec![own]);
 }

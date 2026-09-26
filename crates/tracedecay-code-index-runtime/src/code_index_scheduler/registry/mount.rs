@@ -10,7 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tracedecay_code_index::production::CodeIndexInterruptionV1;
+use tracedecay_code_index::production::{
+    CodeIndexInterruptionV1, CodeIndexPublicationStoreErrorV1,
+};
 use tracedecay_contracts::code_index_freshness::{
     CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexConvergenceParkedV1,
 };
@@ -18,8 +20,8 @@ use tracedecay_domain::ProjectId;
 
 use super::super::{
     CodeIndexCadenceTriggerV1, CodeIndexNoopEvidenceV1, CodeIndexReconcileOutcomeV1,
-    CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1, LatestCodeTextGenerationV1,
-    LatestCompleteCodeIndexV1, RetainedTextGenerationRestoreV1,
+    CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1, DaemonCodeIndexPublicationStoreV1,
+    LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1, RetainedTextGenerationRestoreV1,
     graph_activation::{CodeGraphActivationAuthorityV1, CodeGraphActivationPolicyV1},
     now_micros,
     reconcile_panic_guard::{
@@ -1681,6 +1683,89 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 let mut result = match source_result {
                     Ok(mut outcome) if prepare_graph => {
+                        // Publish the graph head from the sealed segments
+                        // before the serving decode below. The graph build and
+                        // the decoded generation are this step's two
+                        // corpus-sized working sets and must not be resident
+                        // together; the activation after the decode recovers
+                        // the head published here.
+                        let mut graph_publish_refusal = None;
+                        if let Some(text) = graph_text.as_ref() {
+                            let generation_id = text.metadata().manifest().generation_id.clone();
+                            let binding_scheduler = Arc::clone(&worker_scheduler);
+                            let shutting_down = Arc::clone(&worker_shutting_down);
+                            let binding_passes = Arc::clone(&worker_reconcile_in_progress);
+                            // The build is admitted like the decode it
+                            // replaces: charged before it runs, parked when it
+                            // does not fit, and holding its reservation until
+                            // the head is published.
+                            let admitted_binding = tokio::task::spawn_blocking(move || {
+                                let (_step, scheduler) = Self::lock_scheduler_for_graph_step(
+                                    &binding_scheduler,
+                                    &shutting_down,
+                                    &binding_passes,
+                                )?;
+                                let binding =
+                                    scheduler.code_graph_replay_binding(&generation_id)?;
+                                let admission = scheduler
+                                    .active_generation_decoder()
+                                    .map(|decoder| decoder.admit_sealed_graph_build())
+                                    .transpose();
+                                Ok::<_, CodeIndexSchedulerErrorV1>((binding, admission))
+                            })
+                            .await;
+                            match admitted_binding {
+                                Ok(Ok((
+                                    _,
+                                    Err(CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(
+                                        detail,
+                                    )),
+                                ))) => graph_publish_refusal = Some(detail),
+                                Ok(Ok((_, Err(error)))) => tracing::warn!(
+                                    event = "code_index_graph_publish_admission_failed",
+                                    error = %error,
+                                    "sealed graph build admission failed; activation publishes \
+                                     the graph after the serving decode"
+                                ),
+                                Ok(Ok((replay_binding, Ok(reservation)))) => {
+                                    let published = worker_graph_activation
+                                        .publish_sealed_graph(
+                                            &worker_project_id,
+                                            &worker_repository_id,
+                                            &worker_worktree_id,
+                                            text,
+                                            replay_binding,
+                                            Arc::clone(&worker_shutting_down),
+                                        )
+                                        .await;
+                                    drop(reservation);
+                                    match published {
+                                        Ok(_) => {}
+                                        Err(error) if error.is_resident_memory_graph_refusal() => {
+                                            graph_publish_refusal = Some(error.to_string());
+                                        }
+                                        Err(error) => tracing::warn!(
+                                            event = "code_index_graph_publish_before_decode_failed",
+                                            error = %error,
+                                            "sealed graph publication failed before the serving \
+                                             decode; activation retries it after the decode"
+                                        ),
+                                    }
+                                }
+                                Ok(Err(error)) => tracing::warn!(
+                                    event = "code_index_graph_publish_binding_unavailable",
+                                    error = %error,
+                                    "sealed replay binding is unavailable; activation publishes \
+                                     the graph after the serving decode"
+                                ),
+                                Err(error) => tracing::warn!(
+                                    event = "code_index_graph_publish_binding_task_failed",
+                                    error = %error,
+                                    "sealed replay binding task failed; activation publishes the \
+                                     graph after the serving decode"
+                                ),
+                            }
+                        }
                         let graph_scheduler = Arc::clone(&worker_scheduler);
                         let graph_text = graph_text.clone();
                         let shutting_down = Arc::clone(&worker_shutting_down);
@@ -1689,6 +1774,11 @@ impl CodeIndexSchedulerRegistryV1 {
                         let prepare_wake = Arc::clone(&worker_wake);
                         match hotpath::future!(
                             tokio::task::spawn_blocking(move || {
+                                // A graph build the memory watermark stopped
+                                // parks exactly like a decode that does not fit.
+                                if let Some(detail) = graph_publish_refusal {
+                                    return Ok((None, None, false, Some(detail)));
+                                }
                                 let decoder = Self::lock_scheduler_for_graph_step(
                                     &graph_scheduler,
                                     &shutting_down,
@@ -1703,18 +1793,31 @@ impl CodeIndexSchedulerRegistryV1 {
                                          the sealed generation cannot seat"
                                     );
                                 }
-                                let generation = decoder.and_then(|decoder| {
-                                    match decoder.load_active_shared() {
-                                        Ok(generation) => generation,
-                                        Err(error) => {
-                                            tracing::warn!(
-                                                event = "code_index_graph_prepare_load_failed",
-                                                error = %error,
-                                                "active generation decode failed; \
-                                                 the sealed generation cannot seat"
-                                            );
-                                            None
-                                        }
+                                // The seal released the decoded generation for
+                                // the text build. Decoding it again is charged
+                                // against the process budget, and a decode that
+                                // does not fit parks until memory is given back.
+                                let decoded = match decoder
+                                    .as_ref()
+                                    .map(DaemonCodeIndexPublicationStoreV1::load_active_shared)
+                                {
+                                    Some(Err(
+                                        CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(
+                                            detail,
+                                        ),
+                                    )) => return Ok((None, None, false, Some(detail))),
+                                    decoded => decoded,
+                                };
+                                let generation = decoded.and_then(|decoded| match decoded {
+                                    Ok(generation) => generation,
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            event = "code_index_graph_prepare_load_failed",
+                                            error = %error,
+                                            "active generation decode failed; \
+                                             the sealed generation cannot seat"
+                                        );
+                                        None
                                     }
                                 });
                                 let latest = match generation {
@@ -1770,13 +1873,31 @@ impl CodeIndexSchedulerRegistryV1 {
                                 };
                                 replay_binding
                                     .transpose()
-                                    .map(|binding| (latest, binding, roster_refusal_rebuild))
+                                    .map(|binding| (latest, binding, roster_refusal_rebuild, None))
                             }),
                             label = "daemon.code_index.graph_prepare"
                         )
                         .await
                         {
-                            Ok(Ok((latest, replay_binding, roster_refusal_rebuild))) => {
+                            Ok(Ok((_, _, _, Some(detail)))) => {
+                                park_convergence(
+                                    &worker_convergence_park,
+                                    detail.clone(),
+                                    CONVERGENCE_PARK_GRAPH_RESIDENT_MEMORY_REMEDIATION_V1,
+                                    Some(CodeIndexBuildBlockedReasonV1::ResidentMemory),
+                                    true,
+                                );
+                                worker_memory_retry.schedule(&worker_pending_wake, &worker_wake);
+                                tracing::warn!(
+                                    event = "code_index_graph_prepare_decode_refused",
+                                    published_pass,
+                                    detail = %detail,
+                                    "the sealed generation waits to decode until memory is \
+                                     given back; text serving is unaffected"
+                                );
+                                Ok((outcome, None, None))
+                            }
+                            Ok(Ok((latest, replay_binding, roster_refusal_rebuild, None))) => {
                                 if latest.is_none() {
                                     tracing::warn!(
                                         event = "code_index_graph_prepare_no_servable_generation",

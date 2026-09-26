@@ -106,32 +106,28 @@ async fn changelog_rejects_missing_and_non_object_arguments() {
     let missing_from = missing_from
         .error
         .expect("missing from_ref is a JSON-RPC error");
-    assert_eq!(missing_from.code, -32602);
-    assert_eq!(missing_from.message, "missing required parameter: from_ref");
+    assert_eq!(missing_from.code, -32603);
     assert_eq!(
-        missing_from.data,
-        Some(json!({
-            "tool": "tracedecay_changelog",
-            "reason_code": "missing_required_parameter",
-            "retryable": false,
-            "detail": "missing required parameter: from_ref"
-        }))
+        missing_from.message,
+        "tool execution failed: config error: invalid arguments for tracedecay_changelog: missing field `from_ref`"
+    );
+    assert_eq!(
+        missing_from.data.as_ref().map(|data| &data["tool"]),
+        Some(&json!("tracedecay_changelog"))
     );
 
     let missing_to = call_changelog(&repo, json!({"from_ref": "HEAD", "format": "json"})).await;
     let missing_to = missing_to
         .error
         .expect("missing to_ref is a JSON-RPC error");
-    assert_eq!(missing_to.code, -32602);
-    assert_eq!(missing_to.message, "missing required parameter: to_ref");
+    assert_eq!(missing_to.code, -32603);
     assert_eq!(
-        missing_to.data,
-        Some(json!({
-            "tool": "tracedecay_changelog",
-            "reason_code": "missing_required_parameter",
-            "retryable": false,
-            "detail": "missing required parameter: to_ref"
-        }))
+        missing_to.message,
+        "tool execution failed: config error: invalid arguments for tracedecay_changelog: missing field `to_ref`"
+    );
+    assert_eq!(
+        missing_to.data.as_ref().map(|data| &data["tool"]),
+        Some(&json!("tracedecay_changelog"))
     );
 
     let not_object = call_changelog(&repo, json!(["HEAD", "HEAD"])).await;

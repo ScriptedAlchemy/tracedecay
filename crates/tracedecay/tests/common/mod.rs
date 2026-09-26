@@ -28,8 +28,9 @@ use serde_json::Value;
 use tempfile::NamedTempFile;
 use tempfile::TempDir;
 use tokio::sync::OnceCell;
+use tracedecay_project::project::TraceDecayOpenOptions;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
+use tracedecay_runtime_core::config::{GLOBAL_DB_PATH_ENV, ProfileRoot, USER_DATA_DIR_ENV};
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
@@ -146,192 +147,33 @@ pub fn incomplete_code_index_query_lanes(search: &Value) -> Vec<&'static str> {
         .collect()
 }
 
-/// Env var pinning the global DB path; tests that set it serialize on
-/// [`GLOBAL_DB_ENV_LOCK`].
-pub const GLOBAL_DB_ENV: &str = "TRACEDECAY_GLOBAL_DB";
-
-/// Serializes tests within one binary that mutate process-wide env vars.
+/// A throwaway user home holding one TraceDecay profile, handed explicitly to
+/// every API a fixture drives.
 ///
-/// Prefer [`IsolatedEnv`], which bundles this serialization with a throwaway
-/// home and [`TraceDecayStorageEnvGuard`]; reach for this raw lock only when
-/// a test needs finer-grained control over which env vars it swaps.
-pub static GLOBAL_DB_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Acquires `mutex`, recovering the guard even when a prior holder panicked.
-pub fn lock_recovering_poison<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|err| err.into_inner())
-}
-
-/// Serializes tests that pin [`GLOBAL_DB_ENV`], tolerating a poisoned lock.
-pub fn lock_global_db_env() -> std::sync::MutexGuard<'static, ()> {
-    lock_recovering_poison(&GLOBAL_DB_ENV_LOCK)
-}
-
-/// Proof that the holder owns [`PROCESS_ENV_LOCK`], the one lock every
-/// fixture in a binary uses to pin process-wide env vars.
-///
-/// The field is private, so [`lock_process_env`] and
-/// [`lock_process_env_blocking`] are the only ways to obtain one. A fixture
-/// that pins `HOME` takes this by reference, which is what makes "every
-/// `HOME` writer holds the same lock" a compile error to break rather than a
-/// convention: a suite that reached for a lock of its own interleaved with
-/// [`IsolatedEnv`] and read another fixture's home out of `$HOME`.
-pub struct ProcessEnvGuard {
-    root_holder: bool,
-    _guard: tokio::sync::MutexGuard<'static, ()>,
-}
-
-/// Thread whose test body, rather than a task it spawned, holds
-/// [`PROCESS_ENV_LOCK`]. A test body runs as its thread's only root future
-/// (no tokio task id), so that root asking again can never be woken: its
-/// own guard would have to drop first.
-static PROCESS_ENV_ROOT_HOLDER: std::sync::Mutex<Option<std::thread::ThreadId>> =
-    std::sync::Mutex::new(None);
-
-impl ProcessEnvGuard {
-    fn refuse_root_reentry() -> bool {
-        if tokio::task::try_id().is_some() {
-            return false;
-        }
-        let current = std::thread::current().id();
-        assert_ne!(
-            *lock_recovering_poison(&PROCESS_ENV_ROOT_HOLDER),
-            Some(current),
-            "this test already holds PROCESS_ENV_LOCK (an IsolatedEnv or fixture that owns \
-             one is still alive); acquiring it again would deadlock"
-        );
-        true
-    }
-
-    fn held(guard: tokio::sync::MutexGuard<'static, ()>, root_holder: bool) -> Self {
-        if root_holder {
-            *lock_recovering_poison(&PROCESS_ENV_ROOT_HOLDER) = Some(std::thread::current().id());
-        }
-        pin_toolchain_environment();
-        Self {
-            root_holder,
-            _guard: guard,
-        }
-    }
-}
-
-impl Drop for ProcessEnvGuard {
-    fn drop(&mut self) {
-        if self.root_holder {
-            *lock_recovering_poison(&PROCESS_ENV_ROOT_HOLDER) = None;
-        }
-    }
-}
-
-/// Acquires [`PROCESS_ENV_LOCK`] for an async test.
-pub async fn lock_process_env() -> ProcessEnvGuard {
-    let root_holder = ProcessEnvGuard::refuse_root_reentry();
-    ProcessEnvGuard::held(PROCESS_ENV_LOCK.lock().await, root_holder)
-}
-
-/// Sync counterpart of [`lock_process_env`]; panics inside an async context.
-pub fn lock_process_env_blocking() -> ProcessEnvGuard {
-    let root_holder = ProcessEnvGuard::refuse_root_reentry();
-    ProcessEnvGuard::held(PROCESS_ENV_LOCK.blocking_lock(), root_holder)
-}
-
-/// Resolves `RUSTUP_HOME` and `CARGO_HOME` to absolute paths before the first
-/// fixture in this binary swaps `$HOME`.
-///
-/// The rustup shims choose a toolchain through `RUSTUP_HOME`, falling back to
-/// `$HOME/.rustup`. A fixture that swaps `$HOME` therefore breaks `rustc` and
-/// `cargo` for every *other* test running at that moment, including ones that
-/// hold no lock and never touch the environment: five `mcp_suite` tests that
-/// shell out to the toolchain failed with "rustup could not choose a version
-/// of rustc to run" whenever a sibling held a swapped home. Resolving these
-/// once, here, takes `$HOME` out of that lookup for the rest of the run.
-fn pin_toolchain_environment() {
-    static PINNED: std::sync::Once = std::sync::Once::new();
-    PINNED.call_once(|| {
-        let home =
-            std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
-        for (key, directory) in [("RUSTUP_HOME", ".rustup"), ("CARGO_HOME", ".cargo")] {
-            if std::env::var_os(key).is_some() {
-                continue;
-            }
-            let Some(resolved) = home.as_ref().map(|home| home.join(directory)) else {
-                continue;
-            };
-            if !resolved.is_dir() {
-                continue;
-            }
-            // SAFETY: the process env lock is held, this runs once, and it
-            // runs before any fixture in this binary has swapped `$HOME`.
-            unsafe {
-                std::env::set_var(key, resolved);
-            }
-        }
-    });
-}
-
-/// The canonical way to isolate env-mutating tests: serializes tests within
-/// one binary and keeps every test's project registration, store manifests,
-/// and branch-meta writes inside a throwaway home instead of the developer's
-/// real `~/.tracedecay` profile store.
-///
-/// Construct via [`IsolatedEnv::acquire`] (async tests) or
-/// [`IsolatedEnv::acquire_blocking`] (sync tests); both return the guard plus
-/// a ready-made `project` directory inside the temp home.
-pub struct IsolatedEnv {
+/// Nothing here touches the process environment: the profile travels as a
+/// [`ProfileRoot`] (or its data directory / open options), so concurrently
+/// running tests in one binary never observe each other's home, and no test
+/// can reach the developer's or operator's real `~/.tracedecay`. A spawned
+/// child is a process boundary; [`apply_tracedecay_home_env`] and
+/// [`IsolatedHome::apply_toolchain_env`] set its environment on the
+/// `Command`.
+pub struct IsolatedHome {
     toolchain_environment: [(&'static str, Option<OsString>); 3],
-    // Field order matters: fields drop in declaration order, so the locks must
-    // be declared last. Dropping them first would let the next waiting test
-    // install its own isolated env, only for `storage`'s restore to clobber it.
-    storage: TraceDecayStorageEnvGuard,
+    profile: ProfileRoot,
     dir: TempDir,
-    // Tests that swap the same process env by hand serialize on
-    // [`GLOBAL_DB_ENV_LOCK`] instead of this fixture. Holding both keeps one
-    // binary's `IsolatedEnv` journeys from interleaving with them: an
-    // `EnvVarGuard` restored mid-journey pointed a live daemon handshake at the
-    // cargo `target/test-profile` socket, and a swapped `HOME` emptied the
-    // Claude transcript root under a running provider fixture.
-    _global_db_env_lock: std::sync::MutexGuard<'static, ()>,
-    _env_lock: ProcessEnvGuard,
 }
 
-impl IsolatedEnv {
-    fn build(env_lock: ProcessEnvGuard) -> (Self, PathBuf) {
-        let global_db_env_lock = lock_global_db_env();
-        // Every fixture built on top of this guard eventually asks the shipped
-        // daemon for a handshake, which reads the registered product runtime.
-        // Registering here, the single choke point both `acquire` paths share,
-        // keeps that out of every individual suite fixture. The runtime
-        // ports follow for the same reason: a standalone project open in this
-        // environment needs them registered first.
+impl IsolatedHome {
+    /// Creates the isolated home plus a ready-made `project` directory inside
+    /// the same throwaway tree.
+    pub fn new() -> (Self, PathBuf) {
+        // Every fixture built on top of this home eventually asks the shipped
+        // daemon for a handshake, which reads the registered product runtime,
+        // and a standalone project open needs the runtime ports registered.
         register_process_product_runtime();
         register_process_runtime_ports();
         let dir = tempdir_or_panic();
-        let original_home =
-            std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
-        let toolchain_environment = [
-            (
-                "RUSTUP_HOME",
-                std::env::var_os("RUSTUP_HOME").or_else(|| {
-                    original_home
-                        .as_ref()
-                        .map(|home| home.join(".rustup").into_os_string())
-                }),
-            ),
-            (
-                "CARGO_HOME",
-                std::env::var_os("CARGO_HOME").or_else(|| {
-                    original_home
-                        .as_ref()
-                        .map(|home| home.join(".cargo").into_os_string())
-                }),
-            ),
-            (
-                "RUSTUP_TOOLCHAIN",
-                std::env::var_os("RUSTUP_TOOLCHAIN")
-                    .or_else(|| option_env!("RUSTUP_TOOLCHAIN").map(OsString::from)),
-            ),
-        ];
-        let storage = TraceDecayStorageEnvGuard::for_tempdir(&dir);
+        let profile = isolated_profile_under_home(&dir.path().join("home"));
         let project = dir.path().join("project");
         fs::create_dir_all(&project).unwrap_or_else(|err| {
             panic!(
@@ -341,35 +183,41 @@ impl IsolatedEnv {
         });
         (
             Self {
-                toolchain_environment,
-                storage,
+                toolchain_environment: toolchain_environment(),
+                profile,
                 dir,
-                _global_db_env_lock: global_db_env_lock,
-                _env_lock: env_lock,
             },
             project,
         )
     }
 
-    pub async fn acquire() -> (Self, PathBuf) {
-        Self::build(lock_process_env().await)
-    }
-
-    /// Sync counterpart of [`IsolatedEnv::acquire`] for plain `#[test]` fns.
-    ///
-    /// Warning: this uses `blocking_lock`, which panics if called from within
-    /// an async context, use [`IsolatedEnv::acquire`] there instead.
-    pub fn acquire_blocking() -> (Self, PathBuf) {
-        Self::build(lock_process_env_blocking())
-    }
-
     pub fn home(&self) -> &Path {
-        self.storage.home()
+        self.profile
+            .home()
+            .unwrap_or_else(|| panic!("isolated profile always names its home"))
     }
 
-    /// Reuses the installed toolchain while retaining the fixture's isolated
-    /// product home. Values are captured under the environment lock before
-    /// HOME changes, so parallel tests cannot borrow another fixture's home.
+    pub fn profile(&self) -> &ProfileRoot {
+        &self.profile
+    }
+
+    /// This home's profile data directory (`<home>/.tracedecay`).
+    pub fn profile_root(&self) -> &Path {
+        self.profile.data_dir()
+    }
+
+    pub fn global_db_path(&self) -> PathBuf {
+        self.profile.global_db_path()
+    }
+
+    /// Open options that keep every store of a fixture inside this profile.
+    pub fn open_options(&self) -> TraceDecayOpenOptions {
+        TraceDecayOpenOptions::for_profile(&self.profile)
+    }
+
+    /// Reuses the installed toolchain in a child whose `HOME` is this
+    /// isolated home: rustup and cargo would otherwise resolve their state
+    /// under the empty throwaway home.
     pub fn apply_toolchain_env(&self, command: &mut Command) {
         for (key, value) in &self.toolchain_environment {
             match value {
@@ -391,159 +239,102 @@ impl IsolatedEnv {
     }
 }
 
-/// Sets [`GLOBAL_DB_ENV`] to a test DB path for the guard's lifetime.
-pub struct GlobalDbEnvGuard {
-    _env_guard: EnvVarGuard,
+/// Marks a child test process started by [`rerun_test_in_child`].
+const CHILD_TEST_ENV: &str = "TRACEDECAY_TEST_CHILD_PROCESS";
+
+/// True inside the child process [`rerun_test_in_child`] started.
+pub fn in_child_test() -> bool {
+    std::env::var_os(CHILD_TEST_ENV).is_some()
 }
 
-impl GlobalDbEnvGuard {
-    pub fn set(db_path: impl AsRef<Path>) -> Self {
-        let db_path = canonicalize_test_db_path(db_path.as_ref());
-        Self {
-            _env_guard: EnvVarGuard::set(GLOBAL_DB_ENV, db_path),
-        }
-    }
-}
-
-/// Isolates TraceDecay user/profile storage and the global DB under one test home.
+/// Runs the test at `test_path` (its full module path in this binary) again
+/// in a child test process with `env` applied (`None` removes the variable),
+/// and asserts the child ran and passed exactly that test.
 ///
-/// Callers that may run concurrently with other env-mutating tests should hold
-/// [`GLOBAL_DB_ENV_LOCK`] while this guard is alive.
-pub struct TraceDecayStorageEnvGuard {
-    home: PathBuf,
-    profile_root: PathBuf,
-    global_db_path: PathBuf,
-    _home_guard: EnvVarGuard,
-    _userprofile_guard: EnvVarGuard,
-    _config_home_guard: EnvVarGuard,
-    _runtime_dir_guard: EnvVarGuard,
-    _data_dir_guard: EnvVarGuard,
-    _global_db_guard: GlobalDbEnvGuard,
-    _holder_scan_guard: EnvVarGuard,
-    _daemon_socket_guard: EnvVarGuard,
+/// For a test whose subject must observe a process environment variable: the
+/// child is a process boundary running only that test, so the variable never
+/// reaches a sibling test running in this process.
+pub fn rerun_test_in_child(test_path: &str, env: &[(&str, Option<&OsStr>)]) {
+    let mut command = Command::new(
+        std::env::current_exe().unwrap_or_else(|err| panic!("test binary path: {err}")),
+    );
+    command
+        .args(["--exact", test_path, "--test-threads=1"])
+        .env(CHILD_TEST_ENV, "1");
+    for (key, value) in env {
+        match value {
+            Some(value) => command.env(key, value),
+            None => command.env_remove(key),
+        };
+    }
+    let output = command
+        .output()
+        .unwrap_or_else(|err| panic!("failed to re-run {test_path} in a child: {err}"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed"),
+        "child run of {test_path} did not pass exactly one test ({})\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status
+    );
 }
 
-impl TraceDecayStorageEnvGuard {
-    pub fn set(home: impl AsRef<Path>) -> Self {
-        let home = canonicalize_test_dir(home.as_ref());
-        let profile_root = canonicalize_test_dir(&home.join(".tracedecay"));
-        // The profile identity authority fail-closes on any profile root that
-        // is not 0700, and this guard pre-creates the directory under the
-        // process umask (production creates it 0700 itself).
-        #[cfg(unix)]
-        {
-            fs::set_permissions(&profile_root, fs::Permissions::from_mode(0o700)).unwrap_or_else(
-                |err| {
-                    panic!(
-                        "failed to restrict test profile root '{}': {err}",
-                        profile_root.display()
-                    )
-                },
-            );
-        }
-        let global_db_path = canonicalize_test_db_path(&profile_root.join("global.db"));
-        // Service-manager isolation, not storage isolation. The installed
-        // daemon's unit path is `$XDG_CONFIG_HOME/systemd/user/tracedecay.service`
-        // (`tracedecay-daemon-control::service::unit_file`), and any in-process
-        // lifecycle path that finds that file quiesces the unit it names with
-        // `systemctl --user stop`. `$HOME` alone does not decide it: the XDG
-        // variable wins when the ambient environment exports one, so a fixture
-        // that pinned only `HOME` would stop the developer's or operator's real
-        // `tracedecay.service`. Pin the config home inside the throwaway home so
-        // no unit file is ever found, and pin the runtime dir alongside it so a
-        // stray `systemctl --user` cannot reach the real user manager's socket
-        // either. `apply_tracedecay_home_env` pins the same pair for spawned
-        // child processes.
-        let config_home = home.join(".config");
-        let runtime_dir = home.join("run");
-        for directory in [&config_home, &runtime_dir] {
-            fs::create_dir_all(directory).unwrap_or_else(|err| {
-                panic!(
-                    "failed to create isolated directory '{}': {err}",
-                    directory.display()
-                )
-            });
-        }
-        #[cfg(unix)]
-        {
-            let owner_only = fs::Permissions::from_mode(0o700);
-            fs::set_permissions(&runtime_dir, owner_only).unwrap_or_else(|err| {
-                panic!(
-                    "failed to restrict isolated runtime directory '{}': {err}",
-                    runtime_dir.display()
-                )
-            });
-        }
-
-        Self {
-            home: home.clone(),
-            profile_root: profile_root.clone(),
-            global_db_path: global_db_path.clone(),
-            _home_guard: EnvVarGuard::set("HOME", &home),
-            _userprofile_guard: EnvVarGuard::set("USERPROFILE", &home),
-            _config_home_guard: EnvVarGuard::set("XDG_CONFIG_HOME", &config_home),
-            _runtime_dir_guard: EnvVarGuard::set("XDG_RUNTIME_DIR", &runtime_dir),
-            _data_dir_guard: EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root),
-            _global_db_guard: GlobalDbEnvGuard::set(&global_db_path),
-            _holder_scan_guard: EnvVarGuard::set(
-                "TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN",
-                "1",
-            ),
-            // Storage isolation is only as good as the daemon the client
-            // reaches. An ambient `TRACEDECAY_DAEMON_SOCKET` (an operator's
-            // shell, another lane's private daemon) would route this fixture's
-            // requests to a daemon running under a *different* profile, which
-            // then materializes the fixture's project, hook configs, session
-            // and graph databases, a manifest naming /tmp roots, under its own
-            // home. One operator profile accumulated 111 such stores. Pin the
-            // socket inside the isolated profile so a fixture can only ever
-            // talk to a daemon it started itself.
-            _daemon_socket_guard: EnvVarGuard::set(
-                tracedecay_daemon_protocol::SOCKET_ENV,
-                profile_root.join("daemon.sock"),
-            ),
-        }
-    }
-
-    pub fn for_tempdir(tmp: &TempDir) -> Self {
-        Self::set(tmp.path().join("home"))
-    }
-
-    pub fn home(&self) -> &Path {
-        &self.home
-    }
-
-    pub fn profile_root(&self) -> &Path {
-        &self.profile_root
-    }
-
-    pub fn global_db_path(&self) -> &Path {
-        &self.global_db_path
-    }
+fn toolchain_environment() -> [(&'static str, Option<OsString>); 3] {
+    let real_home =
+        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
+    [
+        (
+            "RUSTUP_HOME",
+            std::env::var_os("RUSTUP_HOME").or_else(|| {
+                real_home
+                    .as_ref()
+                    .map(|home| home.join(".rustup").into_os_string())
+            }),
+        ),
+        (
+            "CARGO_HOME",
+            std::env::var_os("CARGO_HOME").or_else(|| {
+                real_home
+                    .as_ref()
+                    .map(|home| home.join(".cargo").into_os_string())
+            }),
+        ),
+        (
+            "RUSTUP_TOOLCHAIN",
+            std::env::var_os("RUSTUP_TOOLCHAIN")
+                .or_else(|| option_env!("RUSTUP_TOOLCHAIN").map(OsString::from)),
+        ),
+    ]
 }
 
-/// Serializes in-process agent install/uninstall tests and pins
-/// [`USER_DATA_DIR_ENV`] to that test's home.
+/// Creates `<home>/.tracedecay` owner-private and returns the profile that
+/// names it, with the per-user configuration directory pinned inside `home`.
 ///
-/// Without this, concurrent `cargo test` cases can point each other at the same
-/// managed-skill target file and race during atomic rewrites. Field order keeps
-/// the env pin alive until just before the lock is released.
-pub struct AgentEnvLock {
-    _pin: EnvVarGuard,
-    _lock: ProcessEnvGuard,
-}
-
-impl AgentEnvLock {
-    /// Pins [`USER_DATA_DIR_ENV`] to `<home>/.tracedecay` while holding
-    /// [`PROCESS_ENV_LOCK`].
-    pub fn pin(home: impl AsRef<Path>) -> Self {
-        let lock = lock_process_env_blocking();
-        let pin = EnvVarGuard::set(USER_DATA_DIR_ENV, home.as_ref().join(".tracedecay"));
-        Self {
-            _pin: pin,
-            _lock: lock,
-        }
-    }
+/// The profile identity authority fail-closes on a profile root that is not
+/// 0700, and a fixture creating it first would otherwise leave it under the
+/// process umask. The configuration home is pinned so an installed-service
+/// lookup (`<config home>/systemd/user/tracedecay.service`) can never find
+/// the developer's or operator's real unit and stop it.
+pub fn isolated_profile_under_home(home: &Path) -> ProfileRoot {
+    let home = canonicalize_test_dir(home);
+    let data_dir = canonicalize_test_dir(&home.join(".tracedecay"));
+    #[cfg(unix)]
+    fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700)).unwrap_or_else(|err| {
+        panic!(
+            "failed to restrict test profile root '{}': {err}",
+            data_dir.display()
+        )
+    });
+    let config_home = home.join(".config");
+    fs::create_dir_all(&config_home).unwrap_or_else(|err| {
+        panic!(
+            "failed to create isolated directory '{}': {err}",
+            config_home.display()
+        )
+    });
+    ProfileRoot::new(data_dir)
+        .with_home(&home)
+        .with_xdg_config_home(config_home)
 }
 
 pub fn canonicalize_test_dir(path: &Path) -> PathBuf {
@@ -887,12 +678,15 @@ impl TestChildProcess {
         status
     }
 
-    fn drain_stderr(&mut self) {
+    /// Streams the child's stderr to `log` (else a developer's
+    /// `TRACEDECAY_TEST_DAEMON_LOG`), or discards it.
+    fn drain_stderr(&mut self, log: Option<PathBuf>) {
         let Some(mut stderr) = self.child.stderr.take() else {
             return;
         };
         std::thread::spawn(move || {
-            if let Some(path) = std::env::var_os("TRACEDECAY_TEST_DAEMON_LOG")
+            if let Some(path) =
+                log.or_else(|| std::env::var_os("TRACEDECAY_TEST_DAEMON_LOG").map(PathBuf::from))
                 && let Ok(mut file) = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
@@ -1014,9 +808,10 @@ fn bind_to_test_process(command: &mut Command) {
 
 pub fn apply_tracedecay_home_env(command: &mut Command, home: &Path) {
     let home = canonical_existing_path(home);
-    // `XDG_RUNTIME_DIR` joins `XDG_CONFIG_HOME` here for the same reason the
-    // in-process guard pins both: a child that resolves an installed unit file
-    // would otherwise reach the real `systemctl --user` manager.
+    // A child resolves its installed unit file under `XDG_CONFIG_HOME` and
+    // reaches the user service manager through `XDG_RUNTIME_DIR`; both stay
+    // inside the isolated home so it can never stop the real
+    // `tracedecay.service`.
     let runtime_dir = home.join("run");
     let _ = fs::create_dir_all(&runtime_dir);
     command
@@ -1025,9 +820,9 @@ pub fn apply_tracedecay_home_env(command: &mut Command, home: &Path) {
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_RUNTIME_DIR", &runtime_dir)
         .env(USER_DATA_DIR_ENV, home.join(".tracedecay"))
-        .env(GLOBAL_DB_ENV, home.join(".tracedecay/global.db"))
-        // Same hermeticity as the in-process guard: a child must never inherit
-        // a socket that reaches a daemon running under another profile.
+        .env(GLOBAL_DB_PATH_ENV, home.join(".tracedecay/global.db"))
+        // A child must never inherit a socket that reaches a daemon running
+        // under another profile.
         .env(
             tracedecay_daemon_protocol::SOCKET_ENV,
             home.join(".tracedecay/daemon.sock"),
@@ -1216,7 +1011,7 @@ pub fn ensure_tracedecay_daemon(home: &Path) {
         daemons.retain(|existing_home, daemon| existing_home == &home && daemon.is_running());
         daemons.entry(home.clone()).or_insert_with(|| {
             let binary = tracedecay_bin();
-            spawn_tracedecay_daemon_process(&home, &binary, |_| {})
+            spawn_tracedecay_daemon_process(&home, &binary, None, |_| {})
         });
     });
 }
@@ -1259,7 +1054,7 @@ pub fn spawn_tracedecay_daemon(home: &Path) -> DaemonProcess {
         return daemon;
     }
     let binary = tracedecay_bin();
-    spawn_tracedecay_daemon_process(&home, &binary, |_| {})
+    spawn_tracedecay_daemon_process(&home, &binary, None, |_| {})
 }
 
 /// Starts the explicitly selected shipped binary under the canonical bounded
@@ -1267,7 +1062,7 @@ pub fn spawn_tracedecay_daemon(home: &Path) -> DaemonProcess {
 pub fn spawn_tracedecay_daemon_from(home: &Path, binary: &Path) -> DaemonProcess {
     let home = canonical_existing_path(home);
     drop(take_managed_daemon(&home));
-    spawn_tracedecay_daemon_process(&home, binary, |_| {})
+    spawn_tracedecay_daemon_process(&home, binary, None, |_| {})
 }
 
 /// Spawns a test daemon after applying caller-supplied command customization.
@@ -1284,7 +1079,20 @@ pub fn spawn_tracedecay_daemon_with(
     let home = canonical_existing_path(home);
     drop(take_managed_daemon(&home));
     let binary = tracedecay_bin();
-    spawn_tracedecay_daemon_process(&home, &binary, configure)
+    spawn_tracedecay_daemon_process(&home, &binary, None, configure)
+}
+
+/// [`spawn_tracedecay_daemon_with`], streaming the daemon's stderr to `log`
+/// for assertions over its diagnostic events.
+pub fn spawn_tracedecay_daemon_logged(
+    home: &Path,
+    log: &Path,
+    configure: impl FnOnce(&mut Command),
+) -> DaemonProcess {
+    let home = canonical_existing_path(home);
+    drop(take_managed_daemon(&home));
+    let binary = tracedecay_bin();
+    spawn_tracedecay_daemon_process(&home, &binary, Some(log.to_path_buf()), configure)
 }
 
 /// How long a replacement daemon waits for a stopped predecessor's endpoint to
@@ -1297,6 +1105,7 @@ const PREDECESSOR_DAEMON_VACATE_TIMEOUT: Duration = Duration::from_secs(10);
 fn spawn_tracedecay_daemon_process(
     home: &Path,
     binary: &Path,
+    log: Option<PathBuf>,
     configure: impl FnOnce(&mut Command),
 ) -> DaemonProcess {
     let profile_root = canonical_existing_path(home).join(".tracedecay");
@@ -1406,7 +1215,7 @@ fn spawn_tracedecay_daemon_process(
             )
         },
     );
-    daemon.drain_stderr();
+    daemon.drain_stderr(log);
     daemon
 }
 
@@ -1758,7 +1567,7 @@ pub async fn write_empty_global_db_schema(db_path: &Path) {
     // a root it created itself, so pre-seeding silently skips the 0700
     // restriction and `validate_private_profile_root` then fail-closes with
     // "profile identity root ... must have permissions 0700". This is the same
-    // compensation `TraceDecayStorageEnvGuard::set` already applies for the
+    // compensation `isolated_profile_under_home` already applies for the
     // same reason; the seeding path needs it too.
     #[cfg(unix)]
     if let Some(profile_root) = db_path.parent() {
@@ -2134,11 +1943,3 @@ pub fn global_message(
     .with_metadata(Some(r#"{"finish_reason":"stop"}"#))
     .build()
 }
-
-/// Serializes tests that mutate process-wide environment variables (HOME,
-/// USER_DATA_DIR_ENV, HERMES_HOME, ...) across every module of a consolidated
-/// test binary. Only matters for in-process runners like `cargo test`;
-/// nextest runs one process per test. A tokio mutex so async tests can hold
-/// the guard across `.await` (sync tests use `blocking_lock`), and unlike a
-/// std mutex it cannot poison when a failing test panics while holding it.
-pub static PROCESS_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());

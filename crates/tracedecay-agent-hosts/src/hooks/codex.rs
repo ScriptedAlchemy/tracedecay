@@ -9,6 +9,7 @@ use std::time::Instant;
 use serde_json::Value;
 
 use crate::ports::hook_runtime::HookRuntimeV1;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use super::claude::is_code_research_prompt;
 use super::steering::{HookWorkspaceStatus, index_status_line};
@@ -67,6 +68,7 @@ pub async fn hook_codex_session_start(runtime: &HookRuntimeV1) -> i32 {
         |guidance| additional_context_json("SessionStart", &guidance),
     );
     if !super::write_hook_output(
+        &runtime.profile,
         root.as_deref(),
         tracedecay_domain::NativeHostIdentityV1::Codex,
         &event,
@@ -89,15 +91,17 @@ pub async fn hook_codex_user_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
     let root = event_project_root_with_identity(runtime, &parsed).await;
     // A compatibility prompt callback can run before TraceDecay is installed
     // for this profile. Only an existing profile can own projectless ingest.
-    let profile = tracedecay_runtime_core::storage::default_profile_root().and_then(|root| {
-        tracedecay_runtime_core::storage::read_existing_profile_identity_record(
-            &root.join(tracedecay_runtime_core::storage::PROFILE_IDENTITY_FILENAME),
-        )
-    });
+    let profile = tracedecay_runtime_core::storage::read_existing_profile_identity_record(
+        &runtime
+            .profile
+            .data_dir()
+            .join(tracedecay_runtime_core::storage::PROFILE_IDENTITY_FILENAME),
+    );
     match profile {
         Ok(None) => {
             return i32::from(
                 !super::write_hook_output(
+                    &runtime.profile,
                     None,
                     tracedecay_domain::NativeHostIdentityV1::Codex,
                     &event,
@@ -132,6 +136,7 @@ pub async fn hook_codex_user_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
             super::ingest_user_session(runtime, "Codex", session_id, Some(&hook_telemetry)).await;
     }
     let context = Box::pin(codex_user_prompt_submit_context_with_root(
+        &runtime.profile,
         &parsed,
         root.as_deref(),
     ))
@@ -146,6 +151,7 @@ pub async fn hook_codex_user_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
         additional_context_json("UserPromptSubmit", &context)
     };
     if !super::write_hook_output(
+        &runtime.profile,
         root.as_deref(),
         tracedecay_domain::NativeHostIdentityV1::Codex,
         &event,
@@ -164,24 +170,28 @@ pub async fn codex_user_prompt_submit_context_for_event(
 ) -> String {
     let parsed = serde_json::from_str::<Value>(event).unwrap_or(Value::Null);
     let root = event_project_root_with_identity(runtime, &parsed).await;
-    codex_user_prompt_submit_context_with_root(&parsed, root.as_deref()).await
+    codex_user_prompt_submit_context_with_root(&runtime.profile, &parsed, root.as_deref()).await
 }
 
 /// [`codex_user_prompt_submit_context_for_event`] for handlers that already
 /// resolved the identity-aware project root, so the registry probe runs once
 /// per event.
-async fn codex_user_prompt_submit_context_with_root(parsed: &Value, root: Option<&Path>) -> String {
+async fn codex_user_prompt_submit_context_with_root(
+    profile: &ProfileRoot,
+    parsed: &Value,
+    root: Option<&Path>,
+) -> String {
     let cwd = event_cwd_from_parsed(parsed);
     let session_id = event_session_id(parsed);
     let status = codex_workspace_status(root, cwd.as_deref());
-    record_workspace_status_analytics(root, status, session_id.as_deref());
+    record_workspace_status_analytics(profile.data_dir(), root, status, session_id.as_deref());
     let mut context = if matches!(status, HookWorkspaceStatus::UnindexedProject) {
         index_status_line(false, None)
     } else {
         String::new()
     };
     if !matches!(status, HookWorkspaceStatus::Generic)
-        && let Some(hint) = codex_prompt_hint(parsed)
+        && let Some(hint) = codex_prompt_hint(profile, parsed)
     {
         append_tool_hint(&mut context, &hint);
     }
@@ -221,6 +231,7 @@ pub async fn hook_codex_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
     .flatten();
     if let Some(guidance) = guidance
         && !super::write_hook_output(
+            &runtime.profile,
             root.as_deref(),
             tracedecay_domain::NativeHostIdentityV1::Codex,
             &event,
@@ -260,6 +271,7 @@ pub async fn hook_codex_post_compact(runtime: &HookRuntimeV1) -> i32 {
         codex_post_compact(runtime, &event, Some(&hook_telemetry)).await;
     }
     if !super::write_hook_output(
+        &runtime.profile,
         root.as_deref(),
         tracedecay_domain::NativeHostIdentityV1::Codex,
         &event,
@@ -273,7 +285,7 @@ pub async fn hook_codex_post_compact(runtime: &HookRuntimeV1) -> i32 {
 }
 
 /// Pure decision logic for Codex `SubagentStart` events.
-pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
+pub fn evaluate_codex_subagent_start(profile: &ProfileRoot, event_json: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
     let agent_type = parsed
         .get("agent_type")
@@ -302,9 +314,10 @@ pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
             context: CODEX_SUBAGENT_START_CONTEXT.to_string(),
             nonblocking: true,
         };
-        let root = event_project_root(&parsed);
+        let root = event_project_root(profile, &parsed);
         let hint_id = mint_hint_id();
         record_hint_analytics(
+            profile.data_dir(),
             root.as_deref(),
             "hint_candidate",
             HostIntegrationIdV1::Codex,
@@ -312,7 +325,7 @@ pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
             &hint_id,
             &hint,
         );
-        let _ = deduped_codex_hint(&parsed, &hint_id, hint.clone())?;
+        let _ = deduped_codex_hint(profile, &parsed, &hint_id, hint.clone())?;
         let context = codex_subagent_start_context(Some(hint), needs_context);
         return Some(additional_context_json("SubagentStart", &context));
     }
@@ -324,7 +337,9 @@ pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
 pub async fn record_codex_subagent_start(runtime: &HookRuntimeV1, event_json: &str) -> Option<u64> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
     let root = event_project_root_with_identity(runtime, &parsed).await?;
-    let layout = (runtime.store_layout_resolver)(&root).await.ok()?;
+    let layout = (runtime.store_layout_resolver)(&runtime.profile, &root)
+        .await
+        .ok()?;
     let path = layout.data_root.join("codex_subagent_starts.json");
     let analytics_session_id = event_session_id(&parsed);
     let session_id = analytics_session_id
@@ -347,6 +362,7 @@ pub async fn record_codex_subagent_start(runtime: &HookRuntimeV1, event_json: &s
         .filter(|value| !value.is_empty())
         .unwrap_or("unknown");
     record_hook_analytics(
+        runtime.profile.data_dir(),
         Some(&root),
         "codex_subagent_start",
         serde_json::json!({
@@ -458,8 +474,8 @@ fn matches_no_history_marker(value: &str) -> bool {
 ///
 /// Kept as the published Codex-named entry point; the resolution itself is the
 /// host-neutral `super::event_project_root` every `cwd`-carrying host shares.
-pub fn codex_project_root_from_event(event_json: &str) -> Option<PathBuf> {
-    event_project_root_from_json(event_json)
+pub fn codex_project_root_from_event(profile: &ProfileRoot, event_json: &str) -> Option<PathBuf> {
+    event_project_root_from_json(profile, event_json)
 }
 
 fn codex_workspace_status(root: Option<&Path>, cwd: Option<&Path>) -> HookWorkspaceStatus {
@@ -473,9 +489,12 @@ fn codex_workspace_status(root: Option<&Path>, cwd: Option<&Path>) -> HookWorksp
     }
 }
 
-pub fn codex_workspace_status_from_event(event_json: &str) -> HookWorkspaceStatus {
+pub fn codex_workspace_status_from_event(
+    profile: &ProfileRoot,
+    event_json: &str,
+) -> HookWorkspaceStatus {
     let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
-    let root = event_project_root(&parsed);
+    let root = event_project_root(profile, &parsed);
     let cwd = event_cwd_from_parsed(&parsed);
     codex_workspace_status(root.as_deref(), cwd.as_deref())
 }
@@ -539,9 +558,15 @@ async fn codex_post_compact(
     }
 }
 
-fn deduped_codex_hint(parsed: &Value, hint_id: &str, hint: ToolHint) -> Option<ToolHint> {
+fn deduped_codex_hint(
+    profile: &ProfileRoot,
+    parsed: &Value,
+    hint_id: &str,
+    hint: ToolHint,
+) -> Option<ToolHint> {
     deduped_project_hint_with_id(
-        event_project_root(parsed).as_deref(),
+        profile,
+        event_project_root(profile, parsed).as_deref(),
         HostIntegrationIdV1::Codex,
         event_session_id(parsed),
         hint_id,
@@ -549,7 +574,7 @@ fn deduped_codex_hint(parsed: &Value, hint_id: &str, hint: ToolHint) -> Option<T
     )
 }
 
-fn codex_prompt_hint(parsed: &Value) -> Option<ToolHint> {
+fn codex_prompt_hint(profile: &ProfileRoot, parsed: &Value) -> Option<ToolHint> {
     let hint = decide_hint(&ToolHintInput {
         agent: HostIntegrationIdV1::Codex,
         session_id: event_session_id(parsed),
@@ -563,9 +588,10 @@ fn codex_prompt_hint(parsed: &Value) -> Option<ToolHint> {
         edit_text: None,
         hints_enabled: true,
     })?;
-    let root = event_project_root(parsed);
+    let root = event_project_root(profile, parsed);
     let hint_id = mint_hint_id();
     record_hint_analytics(
+        profile.data_dir(),
         root.as_deref(),
         "hint_candidate",
         HostIntegrationIdV1::Codex,
@@ -573,31 +599,28 @@ fn codex_prompt_hint(parsed: &Value) -> Option<ToolHint> {
         &hint_id,
         &hint,
     );
-    deduped_codex_hint(parsed, &hint_id, hint)
+    deduped_codex_hint(profile, parsed, &hint_id, hint)
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
 
     #[test]
     fn codex_prompt_hints_dedupe_by_session_and_category() {
-        let _lock = crate::hooks::lock_test_env();
         let project = tempfile::tempdir().unwrap();
-        let profile = tempfile::tempdir().unwrap();
+        let profile_dir = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();
-        let profile_root = profile.path().canonicalize().unwrap();
-        let _profile_env = crate::hooks::EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
+        let profile_root = profile_dir.path().canonicalize().unwrap();
+        let profile = ProfileRoot::new(&profile_root);
         tracedecay_runtime_core::storage::pin_fixture_repository_identity(
             &project_root,
             "proj_hook_codex_prompt",
         )
         .unwrap();
         let layout =
-            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(&project_root)
-                .unwrap();
+            tracedecay_runtime_core::storage::resolve_layout(&project_root, &profile_root).unwrap();
         std::fs::create_dir_all(&layout.data_root).unwrap();
         let event = serde_json::json!({
             "session_id": "codex-session-1",
@@ -605,11 +628,11 @@ mod tests {
             "prompt": "Please explain the impact of changing parse_user"
         });
 
-        let first = codex_prompt_hint(&event).unwrap();
+        let first = codex_prompt_hint(&profile, &event).unwrap();
         assert_eq!(first.category, HintCategory::Impact);
 
         assert!(
-            codex_prompt_hint(&event).is_none(),
+            codex_prompt_hint(&profile, &event).is_none(),
             "Codex should use shared per-session hint dedupe for prompt hints"
         );
     }

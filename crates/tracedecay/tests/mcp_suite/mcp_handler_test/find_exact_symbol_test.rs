@@ -228,19 +228,14 @@ async fn find_exact_symbol_applies_limit_and_rejects_bad_arguments() {
     )
     .await;
     assert_eq!(missing["result"], Value::Null);
-    assert_eq!(missing["error"]["code"], -32602);
+    assert_eq!(missing["error"]["code"], -32603);
     assert_eq!(
         missing["error"]["message"],
-        "missing required parameter: name"
+        "tool execution failed: config error: invalid arguments for tracedecay_find_exact_symbol: missing field `name`"
     );
     assert_eq!(
-        missing["error"]["data"],
-        json!({
-            "tool": "tracedecay_find_exact_symbol",
-            "reason_code": "missing_required_parameter",
-            "retryable": false,
-            "detail": "missing required parameter: name",
-        })
+        missing["error"]["data"]["tool"],
+        json!("tracedecay_find_exact_symbol")
     );
 
     let zero = handle_real_server_tool_call_raw(

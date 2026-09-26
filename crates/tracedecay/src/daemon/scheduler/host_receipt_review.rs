@@ -153,7 +153,13 @@ async fn run_one_host_receipt_review(
     }
     let configuration = effective_automation_config_for_project(cg).await?;
     let config = &configuration.settings;
-    let automation_context = cg.automation_project_context()?;
+    let automation_context = cg.automation_project_context(
+        engine
+            .invocation
+            .invocation_service()
+            .owner_home()
+            .map(Path::to_path_buf),
+    )?;
     let session_id = pending
         .route
         .as_ref()

@@ -355,11 +355,9 @@ impl ProjectRootMatcher {
     }
 
     fn contains_uncached(&self, path: &Path) -> ProjectMembership {
-        self.contains_uncached_with(
-            path,
-            self.identity_resolver,
-            tracedecay_runtime_core::config::discover_project_root,
-        )
+        self.contains_uncached_with(path, self.identity_resolver, |path: &Path| {
+            crate::runtime::transcript_source_profile()?.discover_project_root(path)
+        })
     }
 
     #[hotpath::measure(label = "sessions.shared.membership_resolve")]

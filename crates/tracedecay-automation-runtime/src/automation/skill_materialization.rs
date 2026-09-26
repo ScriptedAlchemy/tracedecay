@@ -36,12 +36,13 @@ use tracedecay_domain::canonical_text::{encode_tagged_lowercase_hex, sha256_hex}
 
 use super::artifact_refs::sha256_bytes;
 use super::config_error;
-use super::host_io::{HostIo, home_dir, uses_default_user_profile};
+use super::host_io::{HostIo, uses_default_user_profile};
 pub use crate::automation::managed_skills::managed_skill_root;
 use crate::automation::managed_skills::{ManagedSkill, ManagedSkillState};
 use tracedecay_automation::skill_frontmatter::{SkillFrontmatterValue, parse_skill_frontmatter};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_private_fs::FileLease;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 /// Typed reset authority for a host-side materialized skill package; its reset
 /// deletes the refused package directory.
@@ -1497,21 +1498,24 @@ pub fn reconcile_detected_scopes(
 /// materializes and reconciles against the repo root rather than the subdir.
 /// Prefers the tracedecay-registered project root, then the git worktree/repo
 /// checkout root, then falls back to the starting directory.
-pub fn resolve_project_root(start: &Path) -> PathBuf {
-    tracedecay_runtime_core::config::discover_project_root(start)
+pub fn resolve_project_root(profile: &ProfileRoot, start: &Path) -> PathBuf {
+    profile
+        .discover_project_root(start)
         .or_else(|| tracedecay_runtime_core::worktree::git_worktree_root(start))
         .unwrap_or_else(|| start.to_path_buf())
 }
 
 /// Non-fatal reconcile for lifecycle call sites (activate, install,
-/// update): resolves the profile root from the process environment, reconciles
-/// every detected host+scope, and logs (rather than propagates) failures so a
-/// materialization problem never breaks an activation or install.
-pub fn reconcile_after_activation(host_io: &HostIo, profile_root: &Path, project_root: &Path) {
-    let Some(home) = home_dir() else {
-        return;
-    };
-    let (_results, errors) = reconcile_detected_scopes(host_io, profile_root, &home, project_root);
+/// update): reconciles every detected host+scope under `home`, and logs
+/// (rather than propagates) failures so a materialization problem never
+/// breaks an activation or install.
+pub fn reconcile_after_activation(
+    host_io: &HostIo,
+    profile_root: &Path,
+    home: &Path,
+    project_root: &Path,
+) {
+    let (_results, errors) = reconcile_detected_scopes(host_io, profile_root, home, project_root);
     for error in errors {
         tracing::warn!(%error, "managed skill materialization failed");
     }

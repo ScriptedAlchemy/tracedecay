@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_automation_runtime::automation::config::{
     AutomationBackend, AutomationConfigPatch, AutomationHostMode, AutomationTaskPatch,
@@ -41,6 +42,7 @@ pub(super) fn validate_codex_automation_project_path() -> tracedecay_domain::err
 }
 
 pub(super) async fn install_codex_daemon_automation(
+    profile: &ProfileRoot,
     project_path: &Path,
     _home: &Path,
     _options: CodexAutomationInstall,
@@ -58,11 +60,12 @@ pub(super) async fn install_codex_daemon_automation(
         ..AutomationConfigPatch::default()
     };
 
-    initialize_codex_daemon_automation_project(project_path).await?;
+    initialize_codex_daemon_automation_project(profile, project_path).await?;
     // This performs a read-CAS-write through the daemon's configuration
     // application boundary. It also leaves an unchanged setting as a no-op,
     // so rerunning install neither creates a sidecar nor advances a revision.
-    crate::automation_cli::config::apply_project_automation_patch(project_path, patch).await?;
+    crate::automation_cli::config::apply_project_automation_patch(profile, project_path, patch)
+        .await?;
     eprintln!(
         "\x1b[32m✔\x1b[0m TraceDecay daemon automation is enabled in the daemon-managed project configuration."
     );
@@ -73,9 +76,11 @@ pub(super) async fn install_codex_daemon_automation(
 }
 
 async fn initialize_codex_daemon_automation_project(
+    profile: &ProfileRoot,
     project_path: &Path,
 ) -> tracedecay_domain::errors::Result<()> {
     broker_codex_daemon_automation_project(
+        profile,
         project_path,
         |handshake| async move {
             tracedecay::daemon::call_default_tool(
@@ -92,6 +97,7 @@ async fn initialize_codex_daemon_automation_project(
 }
 
 pub(super) async fn broker_codex_daemon_automation_project<I, IFut, R, T>(
+    profile: &ProfileRoot,
     project_path: &Path,
     initialize: I,
     complete: R,
@@ -102,6 +108,7 @@ where
     R: FnOnce(&Path) -> tracedecay_domain::errors::Result<T>,
 {
     let handshake = tracedecay::daemon::handshake_for_current_client(
+        profile,
         Some(project_path.to_path_buf()),
         None,
         false,

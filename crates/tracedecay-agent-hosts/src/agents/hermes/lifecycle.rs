@@ -10,17 +10,14 @@ use tracedecay_domain::errors::Result;
 
 pub(super) fn activate_deployed_plugin_registration(ctx: &InstallContext) -> Result<()> {
     let deployed_plugin_dir = ctx.home.join(".hermes/plugins/tracedecay");
-    let profile_root =
-        tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(
-            &ctx.home,
-        );
+    let profile_root = ctx.profile.data_dir();
     for profile_plugin_dir in super::profile_plugin_dirs(&ctx.home) {
         super::activate_deployed_plugin_profile(
             &deployed_plugin_dir,
             &profile_plugin_dir,
             &ctx.tracedecay_bin,
             ctx.dashboard,
-            &profile_root,
+            profile_root,
         )?;
     }
     Ok(())
@@ -49,6 +46,7 @@ mod tests {
 
     fn ctx(home: &Path, tracedecay_bin: &str, dashboard: bool) -> InstallContext {
         InstallContext {
+            profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home),
             home: home.to_path_buf(),
             tracedecay_bin: tracedecay_bin.to_string(),
             project_root: None,
@@ -147,7 +145,11 @@ mod tests {
         assert!(named_config.contains("provider: tracedecay"));
         assert!(named_config.contains("engine: tracedecay"));
         assert_eq!(
-            super::super::hermes_registration_state(home.path(), Some(true)),
+            super::super::hermes_registration_state(
+                home.path(),
+                &home.path().join(".tracedecay"),
+                Some(true),
+            ),
             crate::agents::host_bundle::HostBundleRegistrationStateV1::Current,
             "the state used by transaction verification must accept the activated profile set"
         );

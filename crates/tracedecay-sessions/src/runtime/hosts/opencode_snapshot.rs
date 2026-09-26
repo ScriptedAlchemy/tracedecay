@@ -185,7 +185,6 @@ fn sqlite_sidecar(path: &Path, suffix: &str) -> PathBuf {
 }
 
 pub(super) fn snapshot_scratch_root() -> Option<PathBuf> {
-    tracedecay_runtime_core::storage::default_profile_root()
-        .ok()
-        .map(|root| root.join("scratch/sqlite-read/opencode"))
+    crate::runtime::transcript_source_profile()
+        .map(|profile| profile.data_dir().join("scratch/sqlite-read/opencode"))
 }

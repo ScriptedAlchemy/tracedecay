@@ -574,6 +574,7 @@ pub fn retained_surface_execution_problem(
                 },
                 retry: RetryDirective::AfterDelay,
                 legal_actions: vec![LegalAction::Retry],
+                detail: None,
             }
         }
         RetainedSurfaceExecutionErrorV1::ProfileResetRequired => {
@@ -607,6 +608,7 @@ fn unavailable_problem(code: &'static str, message: &'static str) -> Application
         diagnostic: diagnostic(code, message),
         retry: RetryDirective::AfterDelay,
         legal_actions: vec![LegalAction::Retry],
+        detail: None,
     }
 }
 
@@ -660,6 +662,7 @@ impl RetainedSurfaceExecutionErrorV1 {
             ),
             retry: RetryDirective::Never,
             legal_actions: vec![LegalAction::RestartWithoutCursor],
+            detail: None,
         })
     }
 

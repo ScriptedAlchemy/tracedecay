@@ -459,14 +459,15 @@ fn validate_response_handle_path(path: &Path) -> Result<()> {
 }
 
 fn with_exclusive_lock<T>(root: &Path, operation: impl FnOnce() -> Result<T>) -> Result<T> {
-    with_exclusive_lock_until(root, Instant::now() + WRITER_LOCK_DEADLINE, operation)
+    with_exclusive_lock_within(root, WRITER_LOCK_DEADLINE, operation)
 }
 
-fn with_exclusive_lock_until<T>(
+fn with_exclusive_lock_within<T>(
     root: &Path,
-    deadline: Instant,
+    budget: Duration,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
+    let deadline = Instant::now() + budget;
     validate_response_handle_path(root)?;
     let parent = root.parent().ok_or_else(|| TraceDecayError::File {
         message: "response-handle root has no stable lock parent".to_string(),
@@ -489,11 +490,9 @@ fn with_exclusive_lock_until<T>(
         .open(&path)
         .map_err(|error| file_error(&path, "open response-handle lock", error))?;
     lock_until(&lock, deadline).map_err(|error| match error {
-        LockAdmissionError::TimedOut => TraceDecayError::SyncLock {
-            message: format!(
-                "response-handle writer lock at {} stayed contended past its admission deadline; retry the operation",
-                path.display()
-            ),
+        LockAdmissionError::TimedOut => TraceDecayError::LockDeadline {
+            resource: "response-handle writer lock",
+            deadline_ms: u64::try_from(budget.as_millis()).unwrap_or(u64::MAX),
         },
         LockAdmissionError::Io(error) => file_error(&path, "acquire response-handle lock", error),
     })?;
@@ -673,21 +672,19 @@ mod tests {
         held.lock().unwrap();
 
         let mut ran = false;
-        let result = with_exclusive_lock_until(
-            root.path(),
-            Instant::now() + Duration::from_millis(20),
-            || {
-                ran = true;
-                Ok(())
-            },
-        );
+        let result = with_exclusive_lock_within(root.path(), Duration::from_millis(20), || {
+            ran = true;
+            Ok(())
+        });
         held.unlock().unwrap();
 
         assert!(!ran, "a writer admitted past the deadline must not run");
         assert!(matches!(
             result,
-            Err(TraceDecayError::SyncLock { message })
-                if message.contains("response-handle writer lock")
+            Err(TraceDecayError::LockDeadline {
+                resource: "response-handle writer lock",
+                deadline_ms: 20,
+            })
         ));
         inventory_response_handles(root.path())
             .expect("the lock is admissible again once its holder releases it");

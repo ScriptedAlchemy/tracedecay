@@ -61,7 +61,7 @@ struct ProductionFixture {
     _daemon: common::DaemonProcess,
     client: DaemonInvocationClient,
     project: std::path::PathBuf,
-    _environment: common::IsolatedEnv,
+    _environment: common::IsolatedHome,
 }
 
 impl ProductionFixture {
@@ -77,7 +77,7 @@ impl ProductionFixture {
 /// opened by the daemon's own project-open path, and the client is the same
 /// invocation client the hosts use.
 async fn production_fixture() -> ProductionFixture {
-    let (environment, project) = common::IsolatedEnv::acquire().await;
+    let (environment, project) = common::IsolatedHome::new();
     copy_dir(
         &common::repository_path("tests/fixtures/context_eval_project"),
         &project,
@@ -106,9 +106,14 @@ async fn production_fixture() -> ProductionFixture {
         .output()
         .expect("run tracedecay init");
     assert_command_success("tracedecay init", &initialized);
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(Some(project.clone()), None, false, false)
-            .expect("daemon handshake");
+    let handshake = tracedecay::daemon::handshake_for_current_client(
+        environment.profile(),
+        Some(project.clone()),
+        None,
+        false,
+        false,
+    )
+    .expect("daemon handshake");
     let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)
         .expect("daemon client");
     // `run_affected_tests` needs the verified code graph; honour the same
@@ -762,6 +767,7 @@ async fn immediate_concurrent_and_repeated_opens_publish_one_callable_owner() {
 
     let fresh_client = || {
         let handshake = tracedecay::daemon::handshake_for_current_client(
+            fixture._environment.profile(),
             Some(fixture.project.clone()),
             None,
             false,

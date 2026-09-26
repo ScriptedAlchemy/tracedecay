@@ -7,6 +7,7 @@
 //! dashboard, and the generated SDKs already use.
 
 use std::path::PathBuf;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::Value;
 use tracedecay_api::WorkOperation;
@@ -347,6 +348,7 @@ fn work_outcome_matches(operation: WorkOperation, outcome: &WorkApplicationOutco
 /// layer explicitly acknowledges the terminal output boundary.
 #[hotpath::measure(label = "work_cli.invoke", future = true)]
 pub async fn invoke_work_cli_with_delivery(
+    profile: &ProfileRoot,
     project_root: PathBuf,
     operation: WorkOperation,
     body: Value,
@@ -383,7 +385,7 @@ pub async fn invoke_work_cli_with_delivery(
         deadline.clone(),
         cancellation.context(),
     );
-    let handshake = crate::commands::client_handshake(Some(&project_root))?;
+    let handshake = crate::commands::client_handshake(profile, Some(&project_root))?;
     let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
     let result = match client
         .invoke_controlled_with_delivery(

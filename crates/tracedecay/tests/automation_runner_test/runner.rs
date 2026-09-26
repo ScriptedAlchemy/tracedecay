@@ -147,6 +147,7 @@ async fn scheduler_skill_writer_respects_idle_window_after_recent_session_activi
         &backend,
         SkillWriterAutomationOptions {
             trigger: AutomationTrigger::Scheduler,
+            profile_root: Some(cg.profile_root().unwrap()),
             ..SkillWriterAutomationOptions::default()
         },
     )
@@ -192,6 +193,7 @@ async fn scheduler_skill_writer_skips_without_new_session_activity_since_last_su
         &backend,
         SkillWriterAutomationOptions {
             trigger: AutomationTrigger::Scheduler,
+            profile_root: Some(cg.profile_root().unwrap()),
             ..SkillWriterAutomationOptions::default()
         },
     )
@@ -213,6 +215,7 @@ async fn scheduler_skill_writer_skips_without_new_session_activity_since_last_su
         &backend,
         SkillWriterAutomationOptions {
             trigger: AutomationTrigger::Scheduler,
+            profile_root: Some(cg.profile_root().unwrap()),
             ..SkillWriterAutomationOptions::default()
         },
     )

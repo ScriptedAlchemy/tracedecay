@@ -844,7 +844,9 @@ fn map_graph_error(error: GraphDbError) -> SessionRelationError {
         GraphDbError::BudgetExhausted { .. } => SessionRelationError::BudgetExhausted,
         GraphDbError::Conflict { .. } => SessionRelationError::Conflict,
         GraphDbError::InvalidRequest { .. } => SessionRelationError::Invalid,
-        GraphDbError::ResetRequired { .. } => SessionRelationError::ResetRequired,
+        GraphDbError::ResetRequired { .. } | GraphDbError::FormatSuperseded { .. } => {
+            SessionRelationError::ResetRequired
+        }
         GraphDbError::DurabilityUncertain { .. } => SessionRelationError::DurabilityUncertain,
         GraphDbError::Corrupt { .. } => SessionRelationError::Corrupt,
         GraphDbError::ProjectionMismatch { .. } | GraphDbError::GenerationMismatch { .. } => {

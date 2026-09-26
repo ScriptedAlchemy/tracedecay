@@ -70,12 +70,12 @@ fn product_task(
 
 #[tokio::test]
 async fn registered_work_services_dispatch_the_core_lifecycle() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let profile = tempfile::tempdir().expect("profile root");
     let project = tempfile::tempdir().expect("project root");
     let project_id = ProjectId::new("project.work.core-invocation").expect("project id");
     let host =
         tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
-            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+            profile.path(),
             project.path(),
             project_id.clone(),
         )
@@ -676,7 +676,6 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
 /// dispatcher's read arms never reach the effect path that publishes.
 #[tokio::test]
 async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let fixture = RegisteredWorkFixture::start("task-activity").await;
     let (database, project_id, scope) = (
         fixture.database.clone(),
@@ -809,7 +808,6 @@ async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
 /// caller is not scoped to is still the concealed denial.
 #[tokio::test]
 async fn a_views_read_before_any_task_is_absent_and_a_foreign_selection_stays_denied() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let fixture = RegisteredWorkFixture::start("absent-view").await;
 
     let absent = fixture
@@ -884,6 +882,7 @@ async fn a_views_read_before_any_task_is_absent_and_a_foreign_selection_stays_de
 /// route table, invoked through the production daemon invocation service.
 struct RegisteredWorkFixture {
     _host: tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1,
+    _profile: tempfile::TempDir,
     project: tempfile::TempDir,
     database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     scope: ResolvedScope,
@@ -893,11 +892,12 @@ struct RegisteredWorkFixture {
 
 impl RegisteredWorkFixture {
     async fn start(name: &str) -> Self {
+        let profile = tempfile::tempdir().expect("profile root");
         let project = tempfile::tempdir().expect("project root");
         let project_id = ProjectId::new(format!("project.work.{name}")).expect("project id");
         let host =
             tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
-                tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+                profile.path(),
                 project.path(),
                 project_id.clone(),
             )
@@ -973,6 +973,7 @@ impl RegisteredWorkFixture {
             .expect("registered Work runtime");
         Self {
             _host: host,
+            _profile: profile,
             project,
             database,
             scope,

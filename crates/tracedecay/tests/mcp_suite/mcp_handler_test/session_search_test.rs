@@ -504,11 +504,8 @@ async fn message_search_limit_one_hydrates_a_bounded_multi_session_corpus() {
 #[cfg(feature = "test-transport")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn production_codex_hook_ingest_survives_message_search_reopen() {
-    let env_lock = lock_process_env().await;
     let root = test_temp_dir();
     let isolation = root.path().join("composition");
-    let home = root.path().join("home");
-    let _home_guard = HomeEnvGuard::set(&env_lock, &home);
     let transcripts = composed_transcript_home(&isolation);
     let project = isolation.join("project");
     std::fs::create_dir_all(&project).expect("production composition project");
@@ -715,11 +712,26 @@ async fn production_codex_hook_ingest_survives_message_search_reopen() {
 #[cfg(feature = "test-transport")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn production_hook_ingest_reads_only_the_pinned_transcript_home() {
-    let env_lock = lock_process_env().await;
-    let root = test_temp_dir();
-    let isolation = root.path().join("composition");
-    let home = root.path().join("home");
-    let _home_guard = HomeEnvGuard::set(&env_lock, &home);
+    // The rollout lives under the process `$HOME`, so the journey runs in a
+    // child test process whose environment names that home.
+    if !common::in_child_test() {
+        let root = test_temp_dir();
+        let home = root.path().join("home");
+        std::fs::create_dir_all(&home).expect("process home");
+        common::rerun_test_in_child(
+            "mcp_handler_test::session_search_test::production_hook_ingest_reads_only_the_pinned_transcript_home",
+            &[
+                ("HOME", Some(home.as_os_str())),
+                ("USERPROFILE", Some(home.as_os_str())),
+            ],
+        );
+        return;
+    }
+    let home = PathBuf::from(std::env::var_os("HOME").expect("child process home"));
+    let isolation = home
+        .parent()
+        .expect("process home has a fixture root")
+        .join("composition");
     let transcripts = composed_transcript_home(&isolation);
     let project = isolation.join("project");
     std::fs::create_dir_all(&project).expect("production composition project");
@@ -766,11 +778,8 @@ async fn production_hook_ingest_reads_only_the_pinned_transcript_home() {
 #[cfg(feature = "test-transport")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn completed_session_import_immediately_searches_canonical_message() {
-    let env_lock = lock_process_env().await;
     let root = test_temp_dir();
     let isolation = root.path().join("composition");
-    let home = root.path().join("home");
-    let _home_guard = HomeEnvGuard::set(&env_lock, &home);
     // `sessions_import` is the composition's own pass, so it reads the
     // isolated transcript layout rather than the process home.
     let transcripts = composed_transcript_home(&isolation);

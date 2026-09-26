@@ -1,4 +1,5 @@
 use std::path::Path;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_contracts::now_micros;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
@@ -94,6 +95,7 @@ fn configuration_deadline(
 }
 
 async fn invoke_configuration_surface(
+    profile: &ProfileRoot,
     project_path: &Path,
     operation: ApplicationSurfaceOperation,
     request: ConfigurationWireRequestV1,
@@ -105,7 +107,7 @@ async fn invoke_configuration_surface(
     let cancellation =
         CancellationSignal::active(format!("cancellation.cli.{}", request_id.as_str()))
             .map_err(|error| configuration_error(error.to_string()))?;
-    let handshake = super::daemon::client_handshake(Some(project_path))?;
+    let handshake = super::daemon::client_handshake(profile, Some(project_path))?;
     let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
     loop {
         let result = crate::cli::dispatch::resolve_cli_application_surface(
@@ -139,9 +141,11 @@ async fn invoke_configuration_surface(
 }
 
 pub(crate) async fn current_configuration_revision(
+    profile: &ProfileRoot,
     project_path: &Path,
 ) -> tracedecay_domain::errors::Result<ConfigurationRevisionId> {
     let envelope = invoke_configuration_surface(
+        profile,
         project_path,
         ApplicationSurfaceOperation::ConfigurationObservedState,
         ConfigurationWireRequestV1::ObservedState(ConfigurationObservedStateRequestV1 {}),
@@ -174,11 +178,13 @@ pub(crate) async fn current_configuration_revision(
 }
 
 pub(crate) async fn current_project_setting(
+    profile: &ProfileRoot,
     project_path: &Path,
     key: &str,
 ) -> tracedecay_domain::errors::Result<ConfigurationValueV1> {
     let key = SettingKey::new(key).map_err(|error| configuration_error(error.to_string()))?;
     let envelope = invoke_configuration_surface(
+        profile,
         project_path,
         ApplicationSurfaceOperation::ConfigurationGet,
         ConfigurationWireRequestV1::Get(ConfigurationGetRequestV1 { key }),
@@ -199,9 +205,10 @@ pub(crate) async fn current_project_setting(
 }
 
 pub(crate) async fn canonical_upload_enabled(
+    profile: &ProfileRoot,
     project_path: &Path,
 ) -> tracedecay_domain::errors::Result<bool> {
-    match current_project_setting(project_path, USER_UPLOAD_ENABLED_SETTING_KEY).await? {
+    match current_project_setting(profile, project_path, USER_UPLOAD_ENABLED_SETTING_KEY).await? {
         ConfigurationValueV1::Boolean(enabled) => Ok(enabled),
         _ => Err(configuration_error(
             "worldwide counter upload setting is not boolean",
@@ -210,6 +217,7 @@ pub(crate) async fn canonical_upload_enabled(
 }
 
 pub(crate) async fn mutate_project_configuration(
+    profile: &ProfileRoot,
     project_path: &Path,
     project_id: &ProjectId,
     expected_revision: ConfigurationRevisionId,
@@ -249,11 +257,12 @@ pub(crate) async fn mutate_project_configuration(
             }),
         ),
     };
-    let envelope = invoke_configuration_surface(project_path, operation, request).await?;
+    let envelope = invoke_configuration_surface(profile, project_path, operation, request).await?;
     configuration_effect_receipt(envelope, &idempotency_key).map(Some)
 }
 
 async fn mutate_user_configuration(
+    profile: &ProfileRoot,
     project_path: &Path,
     profile_id: &UserProfileId,
     expected_revision: ConfigurationRevisionId,
@@ -265,6 +274,7 @@ async fn mutate_user_configuration(
     let idempotency_key =
         cli_user_configuration_idempotency_key(profile_id, &expected_revision, &mutations)?;
     let envelope = invoke_configuration_surface(
+        profile,
         project_path,
         ApplicationSurfaceOperation::ConfigurationBatch,
         ConfigurationWireRequestV1::Batch(ConfigurationBatchRequestV1 {
@@ -321,13 +331,17 @@ pub(crate) fn report_configuration_receipt(receipt: Option<&EffectReceipt>) {
 }
 
 #[hotpath::measure(label = "cli.settings.upload_counter", future = true)]
-pub(crate) async fn handle_upload_counter(enable: bool) -> tracedecay_domain::errors::Result<()> {
+pub(crate) async fn handle_upload_counter(
+    profile: &ProfileRoot,
+    enable: bool,
+) -> tracedecay_domain::errors::Result<()> {
     let resolved = super::scope::resolve_project_scope(
-        tracedecay_configuration::resolve_path_with_discovery(None),
+        profile,
+        tracedecay_configuration::resolve_path_with_discovery(profile, None),
     )
     .await?;
-    let expected_revision = current_configuration_revision(&resolved.project_path).await?;
-    let current = canonical_upload_enabled(&resolved.project_path).await?;
+    let expected_revision = current_configuration_revision(profile, &resolved.project_path).await?;
+    let current = canonical_upload_enabled(profile, &resolved.project_path).await?;
     let mutations = if current != enable {
         vec![ConfigurationDirectMutationRequestV1::Set {
             layer: ConfigurationLayerIdV1::UserProfile {
@@ -341,6 +355,7 @@ pub(crate) async fn handle_upload_counter(enable: bool) -> tracedecay_domain::er
         Vec::new()
     };
     let receipt = mutate_user_configuration(
+        profile,
         &resolved.project_path,
         &resolved.profile_id,
         expected_revision,
@@ -360,13 +375,15 @@ pub(crate) async fn handle_upload_counter(enable: bool) -> tracedecay_domain::er
 
 #[hotpath::measure(label = "cli.settings.gitignore", future = true)]
 pub(crate) async fn handle_gitignore(
+    profile: &ProfileRoot,
     path: Option<String>,
     action: Option<String>,
 ) -> tracedecay_domain::errors::Result<()> {
-    handle_gitignore_inner(path, action).await
+    handle_gitignore_inner(profile, path, action).await
 }
 
 fn handle_gitignore_inner(
+    profile: &ProfileRoot,
     path: Option<String>,
     action: Option<String>,
 ) -> std::pin::Pin<
@@ -374,14 +391,17 @@ fn handle_gitignore_inner(
 > {
     // Erase the deeply nested gitignore-settings future before it reaches the
     // measured wrapper so every profiling feature can compute its layout.
+    let profile = profile.clone();
     Box::pin(async move {
+        let profile = &profile;
         let project_path = tracedecay_configuration::resolve_path(path);
         match action.as_deref() {
             Some("on") => {
-                let resolved = super::scope::resolve_project_scope(project_path).await?;
+                let resolved = super::scope::resolve_project_scope(profile, project_path).await?;
                 let expected_revision =
-                    current_configuration_revision(&resolved.project_path).await?;
+                    current_configuration_revision(profile, &resolved.project_path).await?;
                 let current = current_project_setting(
+                    profile,
                     &resolved.project_path,
                     tracedecay_domain::configuration::INDEX_GIT_IGNORE_SETTING_KEY,
                 )
@@ -398,6 +418,7 @@ fn handle_gitignore_inner(
                     .into_iter()
                     .collect();
                 let receipt = mutate_project_configuration(
+                    profile,
                     &resolved.project_path,
                     &resolved.project_id,
                     expected_revision,
@@ -409,10 +430,11 @@ fn handle_gitignore_inner(
                 report_configuration_receipt(receipt.as_ref());
             }
             Some("off") => {
-                let resolved = super::scope::resolve_project_scope(project_path).await?;
+                let resolved = super::scope::resolve_project_scope(profile, project_path).await?;
                 let expected_revision =
-                    current_configuration_revision(&resolved.project_path).await?;
+                    current_configuration_revision(profile, &resolved.project_path).await?;
                 let current = current_project_setting(
+                    profile,
                     &resolved.project_path,
                     tracedecay_domain::configuration::INDEX_GIT_IGNORE_SETTING_KEY,
                 )
@@ -429,6 +451,7 @@ fn handle_gitignore_inner(
                     .into_iter()
                     .collect();
                 let receipt = mutate_project_configuration(
+                    profile,
                     &resolved.project_path,
                     &resolved.project_id,
                     expected_revision,
@@ -445,8 +468,9 @@ fn handle_gitignore_inner(
                 });
             }
             None => {
-                let resolved = super::scope::resolve_project_scope(project_path).await?;
+                let resolved = super::scope::resolve_project_scope(profile, project_path).await?;
                 let response = daemon_tool_json(
+                    profile,
                     Some(&resolved.project_path),
                     "tracedecay_admin_project",
                     serde_json::json!({ "action": "gitignore_status" }),

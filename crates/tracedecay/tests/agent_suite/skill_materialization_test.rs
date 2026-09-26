@@ -652,8 +652,9 @@ async fn resolve_project_root_finds_enclosing_repo_root() {
     tracedecay_runtime_core::storage::pin_fixture_repository_identity(&repo, "proj_skill_root")
         .unwrap();
 
-    assert_eq!(resolve_project_root(&subdir), repo);
-    assert_eq!(resolve_project_root(&repo), repo);
+    let profile = tracedecay_runtime_core::config::ProfileRoot::new(root.join("profile"));
+    assert_eq!(resolve_project_root(&profile, &subdir), repo);
+    assert_eq!(resolve_project_root(&profile, &repo), repo);
 }
 
 /// #4 Project-scope orphan cleanup must never delete a committed package another

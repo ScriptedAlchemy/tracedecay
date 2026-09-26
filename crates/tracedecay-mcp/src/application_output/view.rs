@@ -299,6 +299,11 @@ impl CanonicalHumanView {
         self.code("Request", problem.request_id.as_str());
         self.code("Trace", problem.trace_id.as_str());
         self.text("Message", problem.message.clone());
+        if let Some(detail) = &problem.detail {
+            for (label, value) in detail.labelled_fields() {
+                self.text(label, value);
+            }
+        }
         self.code("Retryable", problem.retryable.to_string());
         self.code("Retry", scalar(&problem.retry)?);
         self.code(

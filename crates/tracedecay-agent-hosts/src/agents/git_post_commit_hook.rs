@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::host_config_io::{home_dir, quote_posix_command_arg};
+use super::host_config_io::quote_posix_command_arg;
 
 /// The marker comment used to identify tracedecay's section in a hook script.
 ///
@@ -47,11 +47,8 @@ pub enum GitPostCommitHookInstall {
 /// Setting `core.hooksPath` redirects repositories away from `.git/hooks`, so
 /// that step stays behind `--git-hook`. Supervision is the printed receipt, not a prompt.
 #[hotpath::measure(label = "agent_hosts.agents.git.report_post_commit")]
-pub fn report_git_post_commit_hook_status() {
-    let Some(home) = home_dir() else {
-        return;
-    };
-    match git_post_commit_hook_status(&home) {
+pub fn report_git_post_commit_hook_status(home: &Path) {
+    match git_post_commit_hook_status(home) {
         GitPostCommitHookStatus::Present => {
             eprintln!("  Global git post-commit hook already contains tracedecay");
         }
@@ -67,9 +64,11 @@ pub fn report_git_post_commit_hook_status() {
 
 /// Install the reversible sync hook. Never reads stdin.
 #[hotpath::measure(label = "agent_hosts.agents.git.install_post_commit")]
-pub fn install_git_post_commit_hook(tracedecay_bin: &str) -> std::result::Result<(), String> {
-    let home = home_dir().ok_or_else(|| "could not determine home directory".to_string())?;
-    match install_git_post_commit_hook_at(&home, tracedecay_bin)? {
+pub fn install_git_post_commit_hook(
+    home: &Path,
+    tracedecay_bin: &str,
+) -> std::result::Result<(), String> {
+    match install_git_post_commit_hook_at(home, tracedecay_bin)? {
         GitPostCommitHookInstall::AlreadyPresent => {
             eprintln!("  Global git post-commit hook already contains tracedecay, skipping");
         }

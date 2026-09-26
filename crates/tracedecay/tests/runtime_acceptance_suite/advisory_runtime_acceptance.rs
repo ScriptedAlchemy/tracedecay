@@ -557,7 +557,7 @@ fn github_context(scope: &FeedbackScopeV1, project_id: ProjectId) -> RequestCont
 
 #[tokio::test]
 async fn retained_review_body_expansion_rechecks_exact_scope_and_source_access() {
-    let (_environment, project) = common::IsolatedEnv::acquire().await;
+    let (_environment, project) = common::IsolatedHome::new();
     std::fs::create_dir_all(project.join("src")).unwrap();
     let source = "pub fn reviewed() {}\npub fn batched() {}\n";
     std::fs::write(project.join("src/lib.rs"), source).unwrap();
@@ -764,7 +764,7 @@ async fn unauthorized_ci_request_is_denied_before_provider_read() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn ci_localization_resolves_generation_symbol_callers_and_tests_from_canonical_graph() {
-    let (_environment, project) = common::IsolatedEnv::acquire().await;
+    let (_environment, project) = common::IsolatedHome::new();
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(
         project.join("src/lib.rs"),
@@ -939,7 +939,7 @@ async fn unauthorized_github_refresh_is_denied_before_port_or_store_access() {
 /// must then return a non-vacuous typed four-pillar terminal cycle.
 #[tokio::test]
 async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
-    let (environment, project) = common::IsolatedEnv::acquire().await;
+    let (environment, project) = common::IsolatedHome::new();
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(project.join("src/lib.rs"), "pub fn shared_edit() {}\n").unwrap();
     // The advisory surface is scoped to a branch and head commit, so an
@@ -1616,7 +1616,7 @@ fn recorded_peer_observation(session: &SessionId, ordinal: u64) -> CanonicalObse
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
-    let (_environment, project) = common::IsolatedEnv::acquire().await;
+    let (_environment, project) = common::IsolatedHome::new();
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(
         project.join("src/lib.rs"),

@@ -8,6 +8,7 @@ use crate::repository_provenance::RepositoryProvenanceAdmissionContext;
 use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::{SessionProvider, hosts::claude_observation};
 use tracedecay_domain::{BrainId, ObservationScopeV1, ProjectId, UserProfileId};
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_store::StoreShardScopeV1;
 
 use super::failure::{
@@ -25,27 +26,27 @@ use super::startup::TranscriptIngestOutcome;
 use super::user::provider_selected;
 
 tokio::task_local! {
-    static TRANSCRIPT_SOURCE_HOME: PathBuf;
+    static TRANSCRIPT_SOURCE_PROFILE: ProfileRoot;
 }
 
-pub async fn with_transcript_source_home<F>(home: PathBuf, future: F) -> F::Output
+/// Runs `future` with `profile` as the owner whose agent-host transcripts and
+/// scratch space every source inside it reads. Ingestion never consults the
+/// process environment: outside a scope there is no transcript home.
+pub async fn with_transcript_source_profile<F>(profile: ProfileRoot, future: F) -> F::Output
 where
     F: Future,
 {
-    TRANSCRIPT_SOURCE_HOME.scope(home, future).await
+    TRANSCRIPT_SOURCE_PROFILE.scope(profile, future).await
 }
 
+/// The profile of the enclosing [`with_transcript_source_profile`] scope.
+pub fn transcript_source_profile() -> Option<ProfileRoot> {
+    TRANSCRIPT_SOURCE_PROFILE.try_with(Clone::clone).ok()
+}
+
+/// The user home of the enclosing transcript source profile.
 pub fn home_dir() -> Option<PathBuf> {
-    TRANSCRIPT_SOURCE_HOME
-        .try_with(Clone::clone)
-        .ok()
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .filter(|value| !value.is_empty())
-                .or_else(|| std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()))
-                .map(PathBuf::from)
-                .or_else(dirs::home_dir)
-        })
+    transcript_source_profile().and_then(|profile| profile.home().map(Path::to_path_buf))
 }
 
 /// Project-store half of catch-up. Cross-project search runs user ingestion

@@ -33,7 +33,6 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
         )
         .await
         .unwrap();
-    let _env_guard = GlobalDbEnvGuard::set(&registry_path);
 
     let list = handle_tool_call_with_runtime(
         &cg,
@@ -237,10 +236,6 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
 #[tokio::test]
 async fn project_registry_tools_missing_registry_carries_stable_shape() {
     let (cg, _env, _dir) = setup_empty_project().await;
-    let registry_dir = test_temp_dir();
-    // Point at a path with no file on disk so the registry resolves to "missing".
-    let registry_path = registry_dir.path().join("does-not-exist.db");
-    let _env_guard = GlobalDbEnvGuard::set(&registry_path);
 
     let list = handle_tool_call(
         &cg,
@@ -330,9 +325,12 @@ async fn project_context_surfaces_registry_read_failure_as_tool_error() {
         .execute_batch("DROP TABLE project_aliases")
         .unwrap();
     let server = tracedecay::mcp::McpServer::new_with_host_admission_test_runtime_for_test(
-        tracedecay_project::project::TraceDecay::open(cg.project_root())
-            .await
-            .unwrap(),
+        tracedecay_project::project::TraceDecay::open_with_options(
+            cg.project_root(),
+            crate::support::graph_open_options(&cg),
+        )
+        .await
+        .unwrap(),
         None,
         runtime,
     )
@@ -387,9 +385,12 @@ async fn project_search_surfaces_registry_read_failure_as_tool_error() {
         .execute_batch("DROP TABLE project_aliases")
         .unwrap();
     let server = tracedecay::mcp::McpServer::new_with_host_admission_test_runtime_for_test(
-        tracedecay_project::project::TraceDecay::open(cg.project_root())
-            .await
-            .unwrap(),
+        tracedecay_project::project::TraceDecay::open_with_options(
+            cg.project_root(),
+            crate::support::graph_open_options(&cg),
+        )
+        .await
+        .unwrap(),
         None,
         runtime,
     )
@@ -417,10 +418,8 @@ async fn project_search_surfaces_registry_read_failure_as_tool_error() {
 async fn project_registry_tools_prefer_injected_registry_over_process_default() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let process_registry_dir = test_temp_dir();
-    let process_registry_path = process_registry_dir.path().join("global.db");
     let client_registry_dir = test_temp_dir();
     let client_registry_path = client_registry_dir.path().join("global.db");
-    let _env_guard = GlobalDbEnvGuard::set(&process_registry_path);
 
     let process_db = HostAdmissionTestRuntimeV1::profile(process_registry_dir.path())
         .await
@@ -468,9 +467,12 @@ async fn project_registry_tools_prefer_injected_registry_over_process_default() 
         .await
         .unwrap();
     let server = tracedecay::mcp::McpServer::new_with_host_admission_test_runtime_for_test(
-        tracedecay_project::project::TraceDecay::open(cg.project_root())
-            .await
-            .unwrap(),
+        tracedecay_project::project::TraceDecay::open_with_options(
+            cg.project_root(),
+            crate::support::graph_open_options(&cg),
+        )
+        .await
+        .unwrap(),
         None,
         client_runtime,
     )

@@ -155,7 +155,6 @@ mod work_dispatch_tests;
 )]
 mod workflow_dispatch_tests;
 
-use std::path::Path;
 use std::sync::Arc;
 pub(crate) use tool_call_support::resolve_registered_project_route_for_tool;
 pub(super) use tool_call_support::text_tool_result;
@@ -167,8 +166,8 @@ use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
 use super::LegacyToolCompatibilityOwner;
 use dispatch_groups::{
-    dispatch_admin_tools, dispatch_application_surface_tools, dispatch_git_tools,
-    dispatch_graph_tools, dispatch_health_tools, dispatch_info_tools, dispatch_memory_tools,
+    dispatch_admin_tools, dispatch_application_surface_tools, dispatch_graph_tools,
+    dispatch_health_tools, dispatch_info_tools, dispatch_memory_tools,
     dispatch_session_workflow_tools,
 };
 use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
@@ -306,7 +305,8 @@ pub struct ToolCallRegistryOptions<'a> {
     /// that authority mounts behind the core project-open publication and is
     /// absent on the core server that answers the first tool calls.
     pub(crate) daemon_user_profile_id: Option<tracedecay_domain::configuration::UserProfileId>,
-    pub profile_root: Option<&'a Path>,
+    /// The daemon owner profile the tool call runs for, when daemon-owned.
+    pub profile: Option<&'a tracedecay_runtime_core::config::ProfileRoot>,
     pub(crate) resolved_project_route: Option<&'a crate::mcp::project_route::ResolvedProjectRoute>,
     pub automation_scheduler_reconciler:
         Option<tracedecay_dashboard_api::AutomationSchedulerReconciler>,
@@ -394,7 +394,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             dashboard_session_retrieval_service: None,
             dashboard_session_retrieval_identity: None,
             daemon_user_profile_id: None,
-            profile_root: None,
+            profile: None,
             resolved_project_route: None,
             automation_scheduler_reconciler: None,
             automation_writer: tracedecay_dashboard_api::standalone_dashboard_automation_writer(),
@@ -641,9 +641,6 @@ pub fn handle_tool_call_with_registry_options<'a>(
                 Some(McpToolDispatchGroup::Admin) => {
                     boxed_send(dispatch_admin_tools(tool_name, cg, args, options)).await
                 }
-                Some(McpToolDispatchGroup::Git) => {
-                    boxed_send(dispatch_git_tools(tool_name, cg, args, options)).await
-                }
                 Some(McpToolDispatchGroup::Health) => {
                     boxed_send(dispatch_health_tools(tool_name, cg, args, options)).await
                 }
@@ -656,10 +653,12 @@ pub fn handle_tool_call_with_registry_options<'a>(
                     ))
                     .await
                 }
-                // Typed daemon surface tools already returned above; reaching here means
-                // the name resolves to no reachable dispatch entry.
+                // Typed daemon surface tools already returned above, and the daemon
+                // serves the internal branch-add tool before MCP dispatch; reaching
+                // here means the name resolves to no reachable dispatch entry.
                 Some(
                     McpToolDispatchGroup::ApplicationSurface
+                    | McpToolDispatchGroup::Git
                     | McpToolDispatchGroup::MultiRoot
                     | McpToolDispatchGroup::Work
                     | McpToolDispatchGroup::Workflow,
@@ -811,12 +810,12 @@ fn classify_mcp_tool_dispatch_group(tool_name: &str) -> Option<McpToolDispatchGr
     dispatch_group_for_tool(tool_name)
 }
 
-/// Whether a tool's dispatch resolves to the git handler family.
+/// Whether a tool is bound to the git dispatch family: the internal
+/// branch-add tool, which walks git while building its branch index.
 ///
-/// The MCP server uses this to give every git-walking read the same bounded
-/// deadline the catalog-owned git reads already carry. Asking the canonical
-/// binding table keeps that horizon from drifting into a separate name list
-/// that a newly added git tool would silently miss.
+/// The MCP server uses this to give it the same bounded deadline the
+/// catalog-owned git reads carry. Asking the canonical binding table keeps
+/// that horizon from drifting into a separate name list.
 pub(crate) fn tool_dispatches_git_reads(tool_name: &str) -> bool {
     dispatch_group_for_tool(tool_name) == Some(McpToolDispatchGroup::Git)
 }

@@ -24,6 +24,7 @@ use tracedecay_graph_query::{
 use tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority;
 use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_project::test_support::host_admission::ensure_process_background_cpu_authority;
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_session_memory::context::RegisteredScopeResolver;
 use tracedecay_session_memory::transcript::GlobalDbTranscriptStore;
 use tracedecay_sessions::admission::HostAdmissionScope;
@@ -132,7 +133,7 @@ impl CodeGraphReadAdmissionPort for DashboardTestCodeGraphAdmissionV1 {
 /// This wrapper owns the production registry-backed storage, graph, and HTTP
 /// authority wiring needed by root tests.
 pub(crate) struct DashboardTestRuntimeV1 {
-    profile_root: std::path::PathBuf,
+    profile: ProfileRoot,
     profile_database: RegisteredGlobalDbLeaseV1,
     profile_sessions_database: RegisteredGlobalDbLeaseV1,
     project_database: RegisteredGlobalDbLeaseV1,
@@ -142,12 +143,12 @@ pub(crate) struct DashboardTestRuntimeV1 {
 
 impl DashboardTestRuntimeV1 {
     pub(crate) async fn project(
-        profile_root: impl AsRef<Path>,
+        profile: &ProfileRoot,
         project_root: impl AsRef<Path>,
         project_id: ProjectId,
     ) -> Result<Self> {
         dashboard::register_test_schema_installer();
-        let profile_root = profile_root.as_ref();
+        let profile_root = profile.data_dir();
         let project_root = project_root.as_ref();
         std::fs::create_dir_all(project_root)?;
         // Production projects gain a repository identity marker at
@@ -171,13 +172,12 @@ impl DashboardTestRuntimeV1 {
             .project_sessions(project_root, project_id.clone())
             .await?;
         // Graph databases stay isolated under `dashboard-test-graphs`, but the
-        // profile root handed to the automation/skills authority must be the
-        // real resolved user profile root: production gates managed-skill
-        // exports on `uses_default_user_profile`, and the outcomes/skills
-        // endpoints read the same root fixtures write through
-        // `default_profile_root()`.
+        // profile handed to the automation/skills authority and the dashboard
+        // server is the fixture's own profile: the outcomes/skills endpoints
+        // read the same root fixtures write, and managed-skill exports land
+        // under its home.
         Ok(Self {
-            profile_root: profile_root.to_path_buf(),
+            profile: profile.clone(),
             profile_database,
             profile_sessions_database,
             project_database,
@@ -187,7 +187,11 @@ impl DashboardTestRuntimeV1 {
     }
 
     pub(crate) fn profile_root(&self) -> &Path {
-        &self.profile_root
+        self.profile.data_dir()
+    }
+
+    pub(crate) fn profile(&self) -> &ProfileRoot {
+        &self.profile
     }
 
     pub(crate) async fn initialize_project_graph_for_test(
@@ -276,7 +280,7 @@ impl DashboardTestRuntimeV1 {
     ) -> Result<tracedecay_dashboard_api::DashboardHostAdmissionTestAuthorityV1> {
         let authority = self.dashboard_test_authority()?;
         let (automation_authority, automation_writer) =
-            dashboard::dashboard_automation_authority_for_test(Arc::clone(cg), &self.profile_root)
+            dashboard::dashboard_automation_authority_for_test(Arc::clone(cg), &self.profile)
                 .await?;
         let lcm_read_authority = dashboard::dashboard_lcm_read_authority_for_test(
             cg.as_ref(),
@@ -348,7 +352,8 @@ impl DashboardTestRuntimeV1 {
         provider: tracedecay_sessions::runtime::SessionProvider,
     ) -> Result<tracedecay_sessions::runtime::shared::TranscriptIngestStats> {
         let graph_profile_root = self
-            .profile_root
+            .profile
+            .data_dir()
             .join("dashboard-test-graphs")
             .join(self.project_id.as_str());
         let identity =
@@ -356,14 +361,17 @@ impl DashboardTestRuntimeV1 {
         let authority = GlobalDbSessionIngestAuthority::new(self.project_database.as_ref())
             .with_background_cpu(ensure_process_background_cpu_authority()?);
         Ok(
-            tracedecay_sessions::runtime::ingest_project_sources_for_provider(
-                identity.brain_id(),
-                identity.profile_id(),
-                &authority,
-                project_root,
-                Some(self.project_id.clone()),
-                Some(provider),
-                false,
+            tracedecay_sessions::runtime::ingest::with_transcript_source_profile(
+                self.profile.clone(),
+                tracedecay_sessions::runtime::ingest_project_sources_for_provider(
+                    identity.brain_id(),
+                    identity.profile_id(),
+                    &authority,
+                    project_root,
+                    Some(self.project_id.clone()),
+                    Some(provider),
+                    false,
+                ),
             )
             .await
             .stats,

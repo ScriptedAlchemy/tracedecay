@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 use crate::service::DaemonServiceMemoryLimitsV1;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 const TEST_SID: &str = "S-1-5-21-111-222-333-1001";
 
@@ -363,10 +364,12 @@ impl DaemonControlApi for FakeDaemonControl {
 }
 
 fn spec(executable: impl Into<PathBuf>, profile_root: impl Into<PathBuf>) -> DaemonServiceSpec {
+    let profile_root = profile_root.into();
     DaemonServiceSpec {
         tracedecay_bin: executable.into(),
         socket_path: PathBuf::from("ignored-by-windows-task"),
-        data_dir_override: Some(profile_root.into()),
+        profile: ProfileRoot::new(&profile_root),
+        data_dir_override: Some(profile_root),
         remote_tls: None,
         memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
     }

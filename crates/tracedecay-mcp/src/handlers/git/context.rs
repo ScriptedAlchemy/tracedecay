@@ -11,9 +11,21 @@ use super::shell::{
     git_pr_comparison_controlled, git_recent_commits,
 };
 use super::*;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
+use tracedecay_contracts::retrieval::{
+    ChangelogCompleteV1, ChangelogPartialV1, ChangelogSurfaceRequestV1, CommitCategoryV1,
+    CommitContextSummaryV1, CommitContextSurfaceRequestV1, CommitFileRoleV1, CommitSymbolEntryV1,
+    CommitSymbolV1, ConfigSummaryKindV1, ConfigSummaryV1, DiffContextResultV1,
+    DiffContextSurfaceRequestV1, GitComparedSymbolV1, GitContextSymbolV1, GitReadCompleteV1,
+    GitReadPartialV1, GitReadUnavailableV1, PrAnalysisCoverageV1, PrContextCompleteV1,
+    PrContextGraphPendingV1, PrContextSurfaceRequestV1, PrContextSymbolsUnavailableV1,
+    PrCoverageSelectionV1, PrSelectionCoverageV1, PrSymbolChangesCompleteV1, PrSymbolEntryV1,
+    PrSymbolPageV1, PrSymbolSelectionV1, SymbolChangesCompleteV1, SymbolChangesUnavailableV1,
+};
+use tracedecay_contracts::{InvocationAnalyticsV1, PrContextAnalyticsV1, PrContextStageTimingsV1};
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_query::VerifiedGraphQuery;
 
@@ -31,6 +43,16 @@ struct SemanticSymbolDiff {
 struct SemanticSymbolDiffUnavailable {
     reason: &'static str,
     retryable: bool,
+}
+
+impl SemanticSymbolDiffUnavailable {
+    fn coverage(&self) -> SymbolChangesUnavailableV1 {
+        SymbolChangesUnavailableV1 {
+            status: GitReadUnavailableV1::Unavailable,
+            reason: self.reason.to_owned(),
+            retryable: self.retryable,
+        }
+    }
 }
 
 fn exact_local_branch(reference: &str, active_branch: Option<&str>) -> Option<String> {
@@ -71,15 +93,17 @@ fn local_branch_read_reason(
     SemanticSymbolDiffUnavailable { reason, retryable }
 }
 
-fn branch_symbol_value(symbol: &tracedecay_query::code_search::CodeIndexBranchSymbolV1) -> Value {
-    json!({
-        "id": symbol.symbol_occurrence_id,
-        "name": symbol.name,
-        "qualified_name": symbol.qualified_name,
-        "kind": symbol.kind,
-        "file": symbol.file,
-        "content_digest": symbol.content_digest,
-    })
+fn compared_symbol(
+    symbol: &tracedecay_query::code_search::CodeIndexBranchSymbolV1,
+) -> GitComparedSymbolV1 {
+    GitComparedSymbolV1 {
+        id: symbol.symbol_occurrence_id.as_str().to_owned(),
+        name: symbol.name.clone(),
+        qualified_name: symbol.qualified_name.clone(),
+        kind: symbol.kind.clone(),
+        file: symbol.file.clone(),
+        content_digest: symbol.content_digest.clone(),
+    }
 }
 
 async fn exact_semantic_symbol_diff(
@@ -264,20 +288,15 @@ fn symbol_metadata(
     })
 }
 
-fn symbol_value(symbol: &CodeGraphSymbolSummaryV1, include_signature: bool) -> Result<Value> {
+fn context_symbol(symbol: &CodeGraphSymbolSummaryV1) -> Result<GitContextSymbolV1> {
     let metadata = symbol_metadata(symbol)?;
-    let path = symbol_path(symbol)?;
-    let mut value = json!({
-        "id": symbol.occurrence.as_str(),
-        "name": metadata.simple_name.as_str(),
-        "kind": metadata.kind.as_str(),
-        "file": path,
-        "line": metadata.start_line,
-    });
-    if include_signature {
-        value["signature"] = json!(metadata.signature.as_deref());
-    }
-    Ok(value)
+    Ok(GitContextSymbolV1 {
+        id: symbol.occurrence.as_str().to_owned(),
+        name: metadata.simple_name.as_str().to_owned(),
+        kind: metadata.kind.as_str().to_owned(),
+        file: symbol_path(symbol)?.to_owned(),
+        line: metadata.start_line,
+    })
 }
 
 fn all_symbols_in_files(
@@ -312,7 +331,7 @@ fn all_symbols_in_files(
 /// unenforceable: `tokio::time::timeout` can only preempt at an await point, so
 /// an inline blocking call runs to completion regardless. Awaiting the
 /// `spawn_blocking` join handle restores exactly that composition, which
-/// `handle_pr_context` already relied on.
+/// `compute_pr_context` already relied on.
 async fn blocking_git_span<T, F>(label: &str, work: F) -> Result<T>
 where
     F: FnOnce() -> T + Send + 'static,
@@ -434,19 +453,23 @@ where
 }
 
 #[hotpath::measure(future = true, label = "mcp.git.diff_context.total")]
-pub async fn handle_diff_context(
+pub async fn compute_diff_context<F>(
     ctx: &McpToolContext<'_>,
-    graph: &VerifiedGraphQuery,
+    graph: F,
     args: Value,
-) -> Result<ToolResult> {
-    require_object_args(&args, "tracedecay_diff_context")?;
-    ctx.verify_graph_scope(graph)?;
-    let files = require_string_array_arg(&args, "files")?;
-    let depth = clamped_depth_arg(&args, "depth", 2, 10);
+) -> Result<GraphToolCompletionV1>
+where
+    F: Future<Output = Result<VerifiedGraphQuery>>,
+{
+    let request: DiffContextSurfaceRequestV1 =
+        decode_primitive_request(&args, "tracedecay_diff_context")?;
+    let depth = clamped_depth(request.depth, 2, 10);
+    let graph = graph.await?;
+    ctx.verify_graph_scope(&graph)?;
 
-    let mut modified_symbols: Vec<Value> = Vec::new();
+    let mut modified_symbols: Vec<GitContextSymbolV1> = Vec::new();
     let mut modified_seen: HashSet<String> = HashSet::new();
-    let mut impacted_symbols: Vec<Value> = Vec::new();
+    let mut impacted_symbols: Vec<GitContextSymbolV1> = Vec::new();
     let mut impacted_seen: HashSet<String> = HashSet::new();
     let mut affected_tests: HashSet<String> = HashSet::new();
     let mut all_touched_files: Vec<String> = Vec::new();
@@ -454,12 +477,12 @@ pub async fn handle_diff_context(
     // synthesising the list from a directory walk that double-counts symlinked
     // or canonicalised entries. Dedup early so downstream loops don't emit
     // the same node N times for the same path.
-    let files = unique_file_paths(files.iter().map(std::string::String::as_str));
+    let files = unique_file_paths(request.files.iter().map(String::as_str));
 
     let requested_paths = files.iter().cloned().collect::<HashSet<_>>();
     let requested_symbols = hotpath::measure_block!(
         "mcp.git.diff_context.symbols",
-        all_symbols_in_files(graph, &requested_paths)?
+        all_symbols_in_files(&graph, &requested_paths)?
     );
 
     // First pass: gather all modified symbols.
@@ -471,7 +494,7 @@ pub async fn handle_diff_context(
         if !modified_seen.insert(symbol.occurrence.as_str().to_owned()) {
             continue;
         }
-        modified_symbols.push(symbol_value(symbol, false)?);
+        modified_symbols.push(context_symbol(symbol)?);
         modified_ids.push(symbol.occurrence.clone());
     }
 
@@ -528,7 +551,7 @@ pub async fn handle_diff_context(
         if !impacted_seen.insert(impacted_node.occurrence.as_str().to_owned()) {
             continue;
         }
-        impacted_symbols.push(symbol_value(impacted_node, false)?);
+        impacted_symbols.push(context_symbol(impacted_node)?);
         let path = symbol_path(impacted_node)?;
         if has_tests(path) {
             affected_tests.insert(path.to_owned());
@@ -536,7 +559,7 @@ pub async fn handle_diff_context(
     }
 
     let traversal = hotpath::future!(
-        collect_verified_affected_test_files(graph, &files, depth, None),
+        collect_verified_affected_test_files(&graph, &files, depth, None),
         label = "mcp.git.diff_context.affected"
     )
     .await?;
@@ -548,58 +571,43 @@ pub async fn handle_diff_context(
     let touched_files = unique_file_paths(
         all_touched_files
             .iter()
-            .map(std::string::String::as_str)
-            .chain(files.iter().map(std::string::String::as_str)),
+            .map(String::as_str)
+            .chain(files.iter().map(String::as_str)),
     );
 
-    let output = hotpath::measure_block!(
-        "mcp.git.diff_context.assemble",
-        json!({
-            "changed_files": files,
-            "modified_symbols": modified_symbols,
-            "impacted_symbols_count": impacted_symbols.len(),
-            "impacted_symbols": impacted_symbols,
-            "impact_complete": impacted.complete,
-            "affected_tests": tests_sorted,
-        })
-    );
-
-    Ok(generic_tool_result(
-        Some(&ctx.store_layout().response_handle_root),
-        &args,
-        &output,
+    let result = DiffContextResultV1 {
+        changed_files: files,
+        modified_symbols,
+        impacted_symbols_count: impacted_symbols.len(),
+        impacted_symbols,
+        impact_complete: impacted.complete,
+        affected_tests: tests_sorted,
+    };
+    Ok(graph_tool_completion(
+        GraphToolResultV1::DiffContext(result),
         touched_files,
     ))
 }
 
 /// Changelog is git-first: the tree diff is the answer, and symbol enrichment
 /// comes from `exact_semantic_symbol_diff`, which reports its own typed
-/// coverage when the code index is unavailable. The handler therefore takes no
-/// verified graph query at all, a repository that git itself refuses must
-/// report its typed git error rather than whatever state the graph projection
-/// mount is in.
+/// coverage when the code index is unavailable. The computation therefore
+/// takes no verified graph query at all, a repository that git itself refuses
+/// must report its typed git error rather than whatever state the graph
+/// projection mount is in.
 #[hotpath::measure(future = true, label = "mcp.git.changelog.total")]
-pub async fn handle_changelog(ctx: &McpToolContext<'_>, args: Value) -> Result<ToolResult> {
-    require_object_args(&args, "tracedecay_changelog")?;
-    let from_ref = args
-        .get("from_ref")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "missing required parameter: from_ref".to_string(),
-        })?;
-
-    let to_ref =
-        args.get("to_ref")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "missing required parameter: to_ref".to_string(),
-            })?;
+pub async fn compute_changelog(
+    ctx: &McpToolContext<'_>,
+    args: Value,
+) -> Result<GraphToolCompletionV1> {
+    let ChangelogSurfaceRequestV1 { from_ref, to_ref } =
+        decode_primitive_request(&args, "tracedecay_changelog")?;
 
     // Use gix to diff the two trees, off the request runtime's workers.
     let changes = {
         let project_root = ctx.project_root().to_path_buf();
-        let from_ref = from_ref.to_owned();
-        let to_ref = to_ref.to_owned();
+        let from_ref = from_ref.clone();
+        let to_ref = to_ref.clone();
         match hotpath::future!(
             blocking_git_span("tree diff", move || {
                 git_diff_file_changes(&project_root, &from_ref, &to_ref)
@@ -609,8 +617,14 @@ pub async fn handle_changelog(ctx: &McpToolContext<'_>, args: Value) -> Result<T
         .await?
         {
             Ok(files) => files,
-            Err(e) => {
-                return Ok(git_error_result(ctx, &args, "diff", &e));
+            Err(message) => {
+                return Ok(graph_tool_completion(
+                    GraphToolResultV1::Changelog(ChangelogResultV1::GitFailure(git_failure(
+                        GitToolOperationV1::Diff,
+                        message,
+                    ))),
+                    Vec::new(),
+                ));
             }
         }
     };
@@ -618,90 +632,66 @@ pub async fn handle_changelog(ctx: &McpToolContext<'_>, args: Value) -> Result<T
     let touched_files: Vec<String> = changed_files.clone();
 
     let symbol_diff = hotpath::future!(
-        exact_semantic_symbol_diff(ctx, from_ref, to_ref, None, None),
+        exact_semantic_symbol_diff(ctx, &from_ref, &to_ref, None, None),
         label = "mcp.git.changelog.symbol_diff"
     )
     .await;
-    let symbol_diff = match symbol_diff {
-        Ok(diff) => diff,
-        Err(unavailable) => {
-            let result = json!({
-                "status": "partial",
-                "from_ref": from_ref,
-                "to_ref": to_ref,
-                "changed_file_count": changed_files.len(),
-                "changed_files": changed_files,
-                "symbols_added": [],
-                "symbols_removed": [],
-                "symbols_modified": [],
-                "symbol_changes_coverage": {
-                    "status": "unavailable",
-                    "reason": unavailable.reason,
-                    "retryable": unavailable.retryable,
-                },
-            });
-            return Ok(generic_tool_result(
-                Some(&ctx.store_layout().response_handle_root),
-                &args,
-                &result,
-                touched_files,
-            ));
-        }
-    };
-    let symbols_added = symbol_diff
-        .added
-        .iter()
-        .map(branch_symbol_value)
-        .collect::<Vec<_>>();
-    let symbols_removed = symbol_diff
-        .removed
-        .iter()
-        .map(branch_symbol_value)
-        .collect::<Vec<_>>();
-    let symbols_modified = symbol_diff
-        .modified
-        .iter()
-        .map(branch_symbol_value)
-        .collect::<Vec<_>>();
-
-    let result = hotpath::measure_block!(
-        "mcp.git.changelog.assemble",
-        json!({
-            "status": "complete",
-            "from_ref": from_ref,
-            "to_ref": to_ref,
-            "changed_file_count": changed_files.len(),
-            "changed_files": changed_files,
-            "base_generation": symbol_diff.base_generation,
-            "head_generation": symbol_diff.head_generation,
-            "symbols_added": symbols_added,
-            "symbols_removed": symbols_removed,
-            "symbols_modified": symbols_modified,
-            "symbol_changes_coverage": {
-                "status": "complete",
+    let result = match symbol_diff {
+        Ok(diff) => ChangelogResultV1::Complete(ChangelogCompleteV1 {
+            status: GitReadCompleteV1::Complete,
+            from_ref,
+            to_ref,
+            changed_file_count: changed_files.len(),
+            changed_files,
+            base_generation: diff.base_generation,
+            head_generation: diff.head_generation,
+            symbols_added: diff.added.iter().map(compared_symbol).collect(),
+            symbols_removed: diff.removed.iter().map(compared_symbol).collect(),
+            symbols_modified: diff.modified.iter().map(compared_symbol).collect(),
+            symbol_changes_coverage: SymbolChangesCompleteV1 {
+                status: GitReadCompleteV1::Complete,
             },
-        })
-    );
-
-    Ok(generic_tool_result(
-        Some(&ctx.store_layout().response_handle_root),
-        &args,
-        &result,
+        }),
+        Err(unavailable) => ChangelogResultV1::Partial(ChangelogPartialV1 {
+            status: GitReadPartialV1::Partial,
+            from_ref,
+            to_ref,
+            changed_file_count: changed_files.len(),
+            changed_files,
+            symbols_added: Vec::new(),
+            symbols_removed: Vec::new(),
+            symbols_modified: Vec::new(),
+            symbol_changes_coverage: unavailable.coverage(),
+        }),
+    };
+    Ok(graph_tool_completion(
+        GraphToolResultV1::Changelog(result),
         touched_files,
     ))
 }
 
 #[hotpath::measure(future = true, label = "mcp.git.commit_context.total")]
-pub async fn handle_commit_context(
+pub async fn compute_commit_context<F>(
     ctx: &McpToolContext<'_>,
-    graph: &VerifiedGraphQuery,
+    graph: F,
     args: Value,
-) -> Result<ToolResult> {
-    ctx.verify_graph_scope(graph)?;
-    let staged_only = args
-        .get("staged_only")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
+) -> Result<GraphToolCompletionV1>
+where
+    F: Future<Output = Result<VerifiedGraphQuery>>,
+{
+    let request: CommitContextSurfaceRequestV1 =
+        decode_primitive_request(&args, "tracedecay_commit_context")?;
+    let staged_only = request.staged_only.unwrap_or(false);
+    let graph = graph.await?;
+    ctx.verify_graph_scope(&graph)?;
+    let git_failure_completion = |operation, message| {
+        graph_tool_completion(
+            GraphToolResultV1::CommitContext(CommitContextResultV1::GitFailure(git_failure(
+                operation, message,
+            ))),
+            Vec::new(),
+        )
+    };
 
     // gix status classification walks the whole worktree; keep it off the
     // request runtime's workers so the carried dispatch deadline can preempt it.
@@ -716,40 +706,37 @@ pub async fn handle_commit_context(
         .await?
         {
             Ok(files) => files,
-            Err(e) => {
-                return Ok(git_error_result(ctx, &args, "status", &e));
+            Err(message) => {
+                return Ok(git_failure_completion(GitToolOperationV1::Status, message));
             }
         }
     };
 
-    if changed_files.is_empty() {
+    let recent_commits = {
         let project_root = ctx.project_root().to_path_buf();
-        let recent_commits = match hotpath::future!(
+        hotpath::future!(
             blocking_git_span("rev-walk", move || git_recent_commits(&project_root, 5)),
             label = "mcp.git.commit_context.recent_commits"
         )
-        .await?
-        {
+    };
+
+    if changed_files.is_empty() {
+        let recent_commits = match recent_commits.await? {
             Ok(commits) => commits,
-            Err(e) => {
-                return Ok(git_error_result(ctx, &args, "log", &e));
+            Err(message) => {
+                return Ok(git_failure_completion(GitToolOperationV1::Log, message));
             }
         };
-        let output = hotpath::measure_block!(
-            "mcp.git.commit_context.assemble",
-            json!({
-                "changed_files": [],
-                "symbols_by_role": {},
-                "suggested_category": Value::Null,
-                "recent_commits": recent_commits,
-                "summary": "No changes detected.",
-            })
-        );
-        return Ok(generic_tool_result(
-            Some(&ctx.store_layout().response_handle_root),
-            &args,
-            &output,
-            vec![],
+        let summary = CommitContextSummaryV1 {
+            changed_files: Vec::new(),
+            symbols_by_role: BTreeMap::new(),
+            suggested_category: None,
+            recent_commits,
+            summary: "No changes detected.".to_owned(),
+        };
+        return Ok(graph_tool_completion(
+            GraphToolResultV1::CommitContext(CommitContextResultV1::Summary(summary)),
+            Vec::new(),
         ));
     }
 
@@ -764,7 +751,7 @@ pub async fn handle_commit_context(
     );
     let graph_symbols = hotpath::measure_block!(
         "mcp.git.commit_context.symbols",
-        all_symbols_in_files(graph, &changed_paths)?
+        all_symbols_in_files(&graph, &changed_paths)?
     );
     let mut symbols_by_file: HashMap<String, Vec<&CodeGraphSymbolSummaryV1>> = HashMap::new();
     for symbol in &graph_symbols {
@@ -774,77 +761,77 @@ pub async fn handle_commit_context(
             .push(symbol);
     }
 
-    let mut file_roles: Vec<Value> = Vec::new();
-    let mut symbols_by_role: HashMap<&str, Vec<Value>> = HashMap::new();
+    let mut file_roles: Vec<CommitFileRoleV1> = Vec::new();
+    let mut symbols_by_role: BTreeMap<GitFileRoleV1, Vec<CommitSymbolEntryV1>> = BTreeMap::new();
 
     for file in &changed_files {
         let role = classify_file_role(file, &files_with_inline_tests);
         let symbols = symbols_by_file.get(file).map_or(&[][..], Vec::as_slice);
-        file_roles.push(json!({"file": file, "role": role, "symbols": symbols.len()}));
+        file_roles.push(CommitFileRoleV1 {
+            file: file.clone(),
+            role,
+            symbols: symbols.len(),
+        });
 
         // Config files (Cargo.toml, *.yaml, package.json, ...) explode into
         // one node per key. Surface a single summary entry per file instead.
         // Agents only need to know "Cargo.toml changed, N keys touched",
         // not the name of every dependency listed.
-        if role == "config" {
-            symbols_by_role.entry(role).or_default().push(json!({
-                "file": file,
-                "kind": "config_summary",
-                "config_keys": symbols.len(),
-            }));
+        if role == GitFileRoleV1::Config {
+            symbols_by_role
+                .entry(role)
+                .or_default()
+                .push(CommitSymbolEntryV1::ConfigSummary(ConfigSummaryV1 {
+                    file: file.clone(),
+                    kind: ConfigSummaryKindV1::ConfigSummary,
+                    config_keys: symbols.len(),
+                }));
             continue;
         }
         for symbol in symbols {
             let metadata = symbol_metadata(symbol)?;
-            symbols_by_role.entry(role).or_default().push(json!({
-                "name": metadata.simple_name.as_str(),
-                "kind": metadata.kind.as_str(),
-                "file": symbol_path(symbol)?,
-                "line": metadata.start_line,
-            }));
+            symbols_by_role
+                .entry(role)
+                .or_default()
+                .push(CommitSymbolEntryV1::Symbol(CommitSymbolV1 {
+                    name: metadata.simple_name.as_str().to_owned(),
+                    kind: metadata.kind.as_str().to_owned(),
+                    file: symbol_path(symbol)?.to_owned(),
+                    line: metadata.start_line,
+                }));
         }
     }
 
-    let has_tests = file_roles.iter().any(|f| f["role"] == "test");
-    let has_source = file_roles.iter().any(|f| f["role"] == "source");
+    let has_tests = file_roles.iter().any(|f| f.role == GitFileRoleV1::Test);
+    let has_source = file_roles.iter().any(|f| f.role == GitFileRoleV1::Source);
     let category = match (has_source, has_tests) {
-        (true, true) => "feature/fix (source + tests)",
-        (true, false) => "feature/fix/refactor",
-        (false, true) => "test",
-        (false, false) => "chore/docs/config",
+        (true, true) => CommitCategoryV1::SourceAndTests,
+        (true, false) => CommitCategoryV1::Source,
+        (false, true) => CommitCategoryV1::Test,
+        (false, false) => CommitCategoryV1::Chore,
     };
 
-    let recent_commits = {
-        let project_root = ctx.project_root().to_path_buf();
-        match hotpath::future!(
-            blocking_git_span("rev-walk", move || git_recent_commits(&project_root, 5)),
-            label = "mcp.git.commit_context.recent_commits"
-        )
-        .await?
-        {
-            Ok(commits) => commits,
-            Err(e) => {
-                return Ok(git_error_result(ctx, &args, "log", &e));
-            }
+    let recent_commits = match recent_commits.await? {
+        Ok(commits) => commits,
+        Err(message) => {
+            return Ok(git_failure_completion(GitToolOperationV1::Log, message));
         }
     };
 
-    let total_symbols: usize = symbols_by_role.values().map(std::vec::Vec::len).sum();
-    let output = hotpath::measure_block!(
-        "mcp.git.commit_context.assemble",
-        json!({
-            "changed_files": file_roles,
-            "symbols_by_role": symbols_by_role,
-            "suggested_category": category,
-            "recent_commits": recent_commits,
-            "summary": format!("{} file(s) changed, {} symbol(s) affected", changed_files.len(), total_symbols),
-        })
-    );
-
-    Ok(generic_tool_result(
-        Some(&ctx.store_layout().response_handle_root),
-        &args,
-        &output,
+    let total_symbols: usize = symbols_by_role.values().map(Vec::len).sum();
+    let summary = CommitContextSummaryV1 {
+        changed_files: file_roles,
+        symbols_by_role,
+        suggested_category: Some(category),
+        recent_commits,
+        summary: format!(
+            "{} file(s) changed, {} symbol(s) affected",
+            changed_files.len(),
+            total_symbols
+        ),
+    };
+    Ok(graph_tool_completion(
+        GraphToolResultV1::CommitContext(CommitContextResultV1::Summary(summary)),
         changed_files,
     ))
 }
@@ -1025,37 +1012,82 @@ fn graph_enrichment_is_transient(error: &TraceDecayError) -> bool {
     )
 }
 
+const PR_CONTEXT_GRAPH_PENDING_MESSAGE: &str = "Verified graph results pending while the generation warms; Git comparison results are available.";
+const PR_CONTEXT_HEAD_GENERATION_MISMATCH_MESSAGE: &str =
+    "Git comparison is available, but the verified graph is not the compared head generation.";
+const PR_CONTEXT_SYMBOLS_UNAVAILABLE_MESSAGE: &str =
+    "Git comparison is available, but exact base/head symbol comparison is unavailable.";
+
+/// The git comparison every PR-context outcome reports.
+struct PrContextGitEvidence {
+    base: String,
+    head: String,
+    base_oid: String,
+    head_oid: String,
+    merge_base: String,
+    commits: Vec<GitCommitSubjectV1>,
+    changes: Vec<GitFileChangeV1>,
+}
+
+impl PrContextGitEvidence {
+    fn symbols_unavailable(
+        self,
+        message: &str,
+        graph_generation: String,
+        coverage: SymbolChangesUnavailableV1,
+    ) -> PrContextResultV1 {
+        PrContextResultV1::SymbolsUnavailable(Box::new(PrContextSymbolsUnavailableV1 {
+            status: GitReadPartialV1::Partial,
+            message: message.to_owned(),
+            base: self.base,
+            head: self.head,
+            base_oid: self.base_oid,
+            head_oid: self.head_oid,
+            merge_base: self.merge_base,
+            graph_generation,
+            commits: self.commits,
+            files_changed: self.changes.len(),
+            changes: self.changes,
+            symbols_added: 0,
+            symbols_removed: 0,
+            symbols_modified: 0,
+            added: Vec::new(),
+            removed: Vec::new(),
+            modified: Vec::new(),
+            symbol_changes_coverage: coverage,
+            next_cursor: None,
+        }))
+    }
+}
+
 #[hotpath::measure(future = true, label = "mcp.pr_context.total")]
-pub async fn handle_pr_context<F>(
+pub async fn compute_pr_context<F>(
     ctx: &McpToolContext<'_>,
     graph: F,
     args: Value,
-) -> Result<ToolResult>
+) -> Result<GraphToolCompletionV1>
 where
     F: Future<Output = Result<VerifiedGraphQuery>>,
 {
-    require_object_args(&args, "tracedecay_pr_context")?;
+    let request: PrContextSurfaceRequestV1 =
+        decode_primitive_request(&args, "tracedecay_pr_context")?;
     let controls = PrContextControls {
         deadline: ctx.deadline().cloned(),
         cancellation: ctx.cancellation().cloned(),
     };
     controls.checkpoint()?;
     let total_started = std::time::Instant::now();
-    let mut stage_timings = serde_json::Map::new();
-    let base = args
-        .get("base_ref")
-        .and_then(|v| v.as_str())
-        .map_or_else(|| default_pr_base_ref(ctx.project_root()), str::to_owned);
-    let head = args
-        .get("head_ref")
-        .and_then(|v| v.as_str())
-        .unwrap_or("HEAD");
+    let mut timings = PrContextStageTimingsV1::default();
+    let base = request
+        .base_ref
+        .unwrap_or_else(|| default_pr_base_ref(ctx.project_root()));
+    let head = request.head_ref.unwrap_or_else(|| "HEAD".to_owned());
 
     let stage_started = std::time::Instant::now();
     let comparison = {
         let project_root = ctx.project_root().to_path_buf();
         let base_ref = base.clone();
-        let head_ref = head.to_owned();
+        let head_ref = head.clone();
         match hotpath::future!(
             blocking_git_span_controlled(
                 "PR comparison",
@@ -1070,14 +1102,20 @@ where
         .await?
         {
             Ok(comparison) => comparison,
-            Err(e) => {
+            Err(message) => {
                 controls.checkpoint()?;
-                return Ok(git_error_result(ctx, &args, "diff", &e));
+                return Ok(graph_tool_completion(
+                    GraphToolResultV1::PrContext(PrContextResultV1::GitFailure(git_failure(
+                        GitToolOperationV1::Diff,
+                        message,
+                    ))),
+                    Vec::new(),
+                ));
             }
         }
     };
     controls.checkpoint()?;
-    stage_timings.insert("git".to_owned(), json!(elapsed_micros(stage_started)));
+    timings.git = elapsed_micros(stage_started);
     let GitPrComparison {
         base_oid,
         head_oid,
@@ -1088,25 +1126,25 @@ where
     changes.sort_by(|left, right| {
         left.path
             .cmp(&right.path)
-            .then_with(|| left.status.cmp(right.status))
+            .then_with(|| left.status.cmp(&right.status))
     });
     let changed_files: Vec<String> = changes.iter().map(|change| change.path.clone()).collect();
     let changed_paths = changed_files.iter().cloned().collect::<HashSet<_>>();
 
-    let maximum_symbols = args
-        .get("maximum_symbols")
-        .and_then(Value::as_u64)
+    let maximum_symbols = request
+        .maximum_symbols
         .and_then(|value| usize::try_from(value).ok())
         .unwrap_or(PR_CONTEXT_DEFAULT_SYMBOLS)
         .clamp(1, PR_CONTEXT_MAX_SYMBOLS);
-    let encoded_cursor = match args.get("cursor") {
-        Some(Value::String(cursor)) => Some(cursor.as_str()),
-        Some(_) => {
-            return Err(TraceDecayError::Config {
-                message: "PR context cursor must be a string".to_owned(),
-            });
-        }
-        None => None,
+    let encoded_cursor = request.cursor.as_deref();
+    let evidence = PrContextGitEvidence {
+        base,
+        head,
+        base_oid,
+        head_oid,
+        merge_base,
+        commits,
+        changes,
     };
 
     let stage_started = std::time::Instant::now();
@@ -1119,95 +1157,87 @@ where
             return Err(error);
         }
         Err(error) => {
-            stage_timings.insert("graph".to_owned(), json!(elapsed_micros(stage_started)));
-            let test_files_changed = changes
+            timings.graph = elapsed_micros(stage_started);
+            let test_files_changed = evidence
+                .changes
                 .iter()
                 .filter(|change| tracedecay_code_index::is_test_file(&change.path))
                 .map(|change| change.path.clone())
                 .collect::<Vec<_>>();
-            let output = hotpath::measure_block!(
-                "mcp.pr_context.partial_response",
-                json!({
-                    "status": "partial",
-                    "message": "Verified graph results pending while the generation warms; Git comparison results are available.",
-                    "base": base,
-                    "head": head,
-                    "base_oid": base_oid,
-                    "head_oid": head_oid,
-                    "merge_base": merge_base,
-                    "graph_generation": null,
-                    "commits": commits,
-                    "files_changed": changed_files.len(),
-                    "changes": changes,
-                    "symbols_added": 0,
-                    "symbols_modified": 0,
-                    "added": [],
-                    "modified": [],
-                    "next_cursor": null,
-                    "symbol_page": {
-                        "limit": maximum_symbols,
-                        "returned": 0,
-                        "has_more": false,
-                        "complete": false,
-                        "selection": "unavailable",
-                        "continuation_available": false,
-                    },
-                    "analysis_coverage": {
-                        "seed_symbols_analyzed": 0,
-                        "symbols_returned": 0,
-                        "symbols_complete": false,
-                        "impact_nodes_admitted": 0,
-                        "impact_nodes_returned": 0,
-                        "direct_call_edges_admitted": 0,
-                        "impact_bytes_admitted": 0,
-                        "impact_partial": true,
-                        "complete": false,
-                    },
-                    "test_files_changed": test_files_changed,
-                    "affected_tests": [],
-                    "affected_tests_coverage": {
-                        "complete": false,
-                        "selection": "unavailable",
-                    },
-                    "impacted_modules": [],
-                    "impacted_modules_coverage": {
-                        "complete": false,
-                        "selection": "unavailable",
-                    },
-                    "verified_graph_evidence": dependency_hints::unavailable_evidence(&error),
-                })
-            );
-            stage_timings.insert("total".to_owned(), json!(elapsed_micros(total_started)));
-            let timing_value = Value::Object(stage_timings.clone());
+            let symbol_page = PrSymbolPageV1 {
+                limit: maximum_symbols,
+                returned: 0,
+                has_more: false,
+                complete: false,
+                selection: PrSymbolSelectionV1::Unavailable,
+                continuation_available: false,
+            };
+            let unavailable_coverage = PrSelectionCoverageV1 {
+                complete: false,
+                selection: PrCoverageSelectionV1::Unavailable,
+            };
+            let result = PrContextGraphPendingV1 {
+                status: GitReadPartialV1::Partial,
+                message: PR_CONTEXT_GRAPH_PENDING_MESSAGE.to_owned(),
+                base: evidence.base,
+                head: evidence.head,
+                base_oid: evidence.base_oid,
+                head_oid: evidence.head_oid,
+                merge_base: evidence.merge_base,
+                graph_generation: None,
+                commits: evidence.commits,
+                files_changed: evidence.changes.len(),
+                changes: evidence.changes,
+                symbols_added: 0,
+                symbols_modified: 0,
+                added: Vec::new(),
+                modified: Vec::new(),
+                next_cursor: None,
+                symbol_page: symbol_page.clone(),
+                analysis_coverage: PrAnalysisCoverageV1 {
+                    seed_symbols_analyzed: 0,
+                    symbols_returned: 0,
+                    symbols_complete: false,
+                    impact_nodes_admitted: 0,
+                    impact_nodes_returned: 0,
+                    direct_call_edges_admitted: 0,
+                    impact_bytes_admitted: 0,
+                    impact_partial: true,
+                    complete: false,
+                },
+                test_files_changed,
+                affected_tests: Vec::new(),
+                affected_tests_coverage: unavailable_coverage.clone(),
+                impacted_modules: Vec::new(),
+                impacted_modules_coverage: unavailable_coverage,
+                verified_graph_evidence: dependency_hints::unavailable_evidence(&error),
+            };
+            timings.total = elapsed_micros(total_started);
             tracing::info!(
                 tool = "tracedecay_pr_context",
                 files = changed_files.len(),
                 symbols = 0,
-                timings = %timing_value,
+                timings = ?timings,
                 "PR context returned Git evidence while graph enrichment was unavailable"
             );
-            return Ok(generic_tool_result(
-                Some(&ctx.store_layout().response_handle_root),
-                &args,
-                &output,
+            return Ok(pr_context_completion(
+                PrContextResultV1::GraphPending(Box::new(result)),
                 changed_files,
-            )
-            .with_internal_analytics(json!({
-                "stage_timings_us": stage_timings,
-                "symbol_coverage": output["symbol_page"],
-            })));
+                timings,
+                symbol_page,
+            ));
         }
     };
-    stage_timings.insert("graph".to_owned(), json!(elapsed_micros(stage_started)));
+    timings.graph = elapsed_micros(stage_started);
 
     let stage_started = std::time::Instant::now();
     let symbol_diff = match hotpath::future!(
         exact_semantic_symbol_diff(
             ctx,
-            &base,
-            head,
-            Some(merge_base.as_str()),
-            Some(head_oid.as_str()),
+            &evidence.base,
+            &evidence.head,
+            Some(evidence.merge_base.as_str()),
+            Some(evidence.head_oid.as_str()),
         ),
         label = "mcp.pr_context.symbol_diff"
     )
@@ -1215,75 +1245,34 @@ where
     {
         Ok(diff) if diff.head_generation == graph.generation().as_str() => diff,
         Ok(_) => {
-            return Ok(generic_tool_result(
-                Some(&ctx.store_layout().response_handle_root),
-                &args,
-                &json!({
-                    "status": "partial",
-                    "message": "Git comparison is available, but the verified graph is not the compared head generation.",
-                    "base": base,
-                    "head": head,
-                    "base_oid": base_oid,
-                    "head_oid": head_oid,
-                    "merge_base": merge_base,
-                    "graph_generation": graph.generation().as_str(),
-                    "commits": commits,
-                    "files_changed": changed_files.len(),
-                    "changes": changes,
-                    "symbols_added": 0,
-                    "symbols_removed": 0,
-                    "symbols_modified": 0,
-                    "added": [],
-                    "removed": [],
-                    "modified": [],
-                    "symbol_changes_coverage": {
-                        "status": "unavailable",
-                        "reason": "head_generation_mismatch",
-                        "retryable": true,
-                    },
-                    "next_cursor": null,
-                }),
+            let result = evidence.symbols_unavailable(
+                PR_CONTEXT_HEAD_GENERATION_MISMATCH_MESSAGE,
+                graph.generation().as_str().to_owned(),
+                SymbolChangesUnavailableV1 {
+                    status: GitReadUnavailableV1::Unavailable,
+                    reason: "head_generation_mismatch".to_owned(),
+                    retryable: true,
+                },
+            );
+            return Ok(graph_tool_completion(
+                GraphToolResultV1::PrContext(result),
                 changed_files,
             ));
         }
         Err(unavailable) => {
-            return Ok(generic_tool_result(
-                Some(&ctx.store_layout().response_handle_root),
-                &args,
-                &json!({
-                    "status": "partial",
-                    "message": "Git comparison is available, but exact base/head symbol comparison is unavailable.",
-                    "base": base,
-                    "head": head,
-                    "base_oid": base_oid,
-                    "head_oid": head_oid,
-                    "merge_base": merge_base,
-                    "graph_generation": graph.generation().as_str(),
-                    "commits": commits,
-                    "files_changed": changed_files.len(),
-                    "changes": changes,
-                    "symbols_added": 0,
-                    "symbols_removed": 0,
-                    "symbols_modified": 0,
-                    "added": [],
-                    "removed": [],
-                    "modified": [],
-                    "symbol_changes_coverage": {
-                        "status": "unavailable",
-                        "reason": unavailable.reason,
-                        "retryable": unavailable.retryable,
-                    },
-                    "next_cursor": null,
-                }),
+            let result = evidence.symbols_unavailable(
+                PR_CONTEXT_SYMBOLS_UNAVAILABLE_MESSAGE,
+                graph.generation().as_str().to_owned(),
+                unavailable.coverage(),
+            );
+            return Ok(graph_tool_completion(
+                GraphToolResultV1::PrContext(result),
                 changed_files,
             ));
         }
     };
     controls.checkpoint()?;
-    stage_timings.insert(
-        "symbol_diff".to_owned(),
-        json!(elapsed_micros(stage_started)),
-    );
+    timings.symbol_diff = Some(elapsed_micros(stage_started));
 
     let graph_generation = graph.generation().as_str().to_owned();
     // Byte-exact worktree identity: a lossy string would let two distinct
@@ -1294,12 +1283,12 @@ where
         ctx,
         &project_root,
         PrContextCursorComparison {
-            base_oid: &base_oid,
-            head_oid: &head_oid,
-            merge_base: &merge_base,
+            base_oid: &evidence.base_oid,
+            head_oid: &evidence.head_oid,
+            merge_base: &evidence.merge_base,
             graph_generation: &graph_generation,
             maximum_symbols,
-            changes: &changes,
+            changes: &evidence.changes,
         },
     );
     let cursor_authority = match ctx.authorized_project_session_db() {
@@ -1348,10 +1337,7 @@ where
         )?
     );
     controls.checkpoint()?;
-    stage_timings.insert(
-        "test_annotations".to_owned(),
-        json!(elapsed_micros(stage_started)),
-    );
+    timings.test_annotations = Some(elapsed_micros(stage_started));
     let added_ids = symbol_diff
         .added
         .iter()
@@ -1362,7 +1348,7 @@ where
         .iter()
         .map(|symbol| symbol.symbol_occurrence_id.as_str())
         .collect::<HashSet<_>>();
-    for change in &changes {
+    for change in &evidence.changes {
         if tracedecay_code_index::is_test_file(&change.path)
             || files_with_inline_tests.contains(&change.path)
         {
@@ -1383,10 +1369,7 @@ where
         )?
     );
     controls.checkpoint()?;
-    stage_timings.insert(
-        "symbol_page".to_owned(),
-        json!(elapsed_micros(stage_started)),
-    );
+    timings.symbol_page = Some(elapsed_micros(stage_started));
     let symbol_has_more = symbol_page.has_more;
     let next_page_key = symbol_page
         .symbols
@@ -1395,7 +1378,7 @@ where
     let mut added = Vec::new();
     let mut modified = Vec::new();
     let mut nodes = Vec::with_capacity(symbol_page.symbols.len());
-    let mut config_key_counts = HashMap::<String, usize>::new();
+    let mut config_key_counts = HashMap::<(bool, String), usize>::new();
     for symbol in symbol_page.symbols {
         controls.checkpoint()?;
         let path = symbol_path(&symbol)?;
@@ -1404,33 +1387,30 @@ where
         if !is_added && !is_modified {
             continue;
         }
-        if classify_file_role(path, &files_with_inline_tests) == "config" {
-            let key = format!("{}\0{}", if is_added { "added" } else { "modified" }, path);
-            *config_key_counts.entry(key).or_default() += 1;
+        if classify_file_role(path, &files_with_inline_tests) == GitFileRoleV1::Config {
+            *config_key_counts
+                .entry((is_added, path.to_owned()))
+                .or_default() += 1;
             continue;
         }
-        let value = symbol_value(&symbol, false)?;
+        let entry = PrSymbolEntryV1::Symbol(context_symbol(&symbol)?);
         if is_added {
-            added.push(value);
+            added.push(entry);
         } else {
-            modified.push(value);
+            modified.push(entry);
         }
         nodes.push(symbol);
     }
     let mut config_summaries = config_key_counts.into_iter().collect::<Vec<_>>();
-    config_summaries.sort_by(|left, right| left.0.cmp(&right.0));
-    for (key, config_keys) in config_summaries {
-        let (change, path) = key
-            .split_once('\0')
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "invalid config symbol change key".to_owned(),
-            })?;
-        let summary = json!({
-            "file": path,
-            "kind": "config_summary",
-            "config_keys": config_keys,
+    // Added summaries sort before modified ones, then by path.
+    config_summaries.sort_by(|left, right| (!left.0.0, &left.0.1).cmp(&(!right.0.0, &right.0.1)));
+    for ((is_added, path), config_keys) in config_summaries {
+        let summary = PrSymbolEntryV1::ConfigSummary(ConfigSummaryV1 {
+            file: path,
+            kind: ConfigSummaryKindV1::ConfigSummary,
+            config_keys,
         });
-        if change == "added" {
+        if is_added {
             added.push(summary);
         } else {
             modified.push(summary);
@@ -1439,12 +1419,9 @@ where
     let removed = symbol_diff
         .removed
         .iter()
-        .map(branch_symbol_value)
+        .map(compared_symbol)
         .collect::<Vec<_>>();
     let returned_symbols = added.len().saturating_add(modified.len());
-    let symbols_added = added.len();
-    let symbols_removed = removed.len();
-    let symbols_modified = modified.len();
 
     // Find transitively affected test files
     let stage_started = std::time::Instant::now();
@@ -1492,7 +1469,7 @@ where
             affected_tests.insert(path.to_owned());
         }
     }
-    stage_timings.insert("impact".to_owned(), json!(elapsed_micros(stage_started)));
+    timings.impact = Some(elapsed_micros(stage_started));
 
     let mut impacted_sorted: Vec<String> = impacted_modules.into_iter().collect();
     impacted_sorted.sort();
@@ -1525,84 +1502,92 @@ where
             authenticator,
         )?)
     };
-    let output = hotpath::measure_block!(
-        "mcp.pr_context.assemble",
-        json!({
-            "status": "complete",
-            "base": base,
-            "head": head,
-            "base_oid": base_oid,
-            "head_oid": head_oid,
-            "merge_base": merge_base,
-            "graph_generation": graph_generation,
-            "commits": commits,
-            "files_changed": changed_files.len(),
-            "changes": changes,
-            "symbols_added": symbols_added,
-            "symbols_removed": symbols_removed,
-            "symbols_modified": symbols_modified,
-            "added": added,
-            "removed": removed,
-            "modified": modified,
-            "symbol_changes_coverage": {
-                "status": "complete",
-                "base_generation": symbol_diff.base_generation,
-                "head_generation": symbol_diff.head_generation,
-            },
-            "next_cursor": next_cursor,
-            "symbol_page": {
-                "limit": maximum_symbols,
-                "returned": returned_symbols,
-                "has_more": symbol_has_more,
-                "complete": symbol_complete,
-                "selection": "stable_prefix",
-                "continuation_available": symbol_has_more,
-            },
-            "analysis_coverage": {
-                "seed_symbols_analyzed": nodes.len(),
-                "symbols_returned": returned_symbols,
-                "symbols_complete": symbol_complete,
-                "impact_nodes_admitted": impact.nodes_admitted,
-                "impact_nodes_returned": impact.nodes.len(),
-                "direct_call_edges_admitted": impact.direct_call_edges_admitted,
-                "impact_bytes_admitted": impact.bytes_admitted,
-                "impact_partial": impact.partial,
-                "complete": impact_complete,
-            },
-            "test_files_changed": test_files_changed,
-            "affected_tests": affected_sorted,
-            "affected_tests_coverage": {
-                "complete": impact_complete,
-                "selection": "deterministic_bounded_prefix",
-            },
-            "impacted_modules": impacted_sorted,
-            "impacted_modules_coverage": {
-                "complete": impact_complete,
-                "selection": "deterministic_bounded_prefix",
-            },
-        })
-    );
-    stage_timings.insert("assemble".to_owned(), json!(elapsed_micros(stage_started)));
-    stage_timings.insert("total".to_owned(), json!(elapsed_micros(total_started)));
-    let timing_value = Value::Object(stage_timings.clone());
+    let symbol_page = PrSymbolPageV1 {
+        limit: maximum_symbols,
+        returned: returned_symbols,
+        has_more: symbol_has_more,
+        complete: symbol_complete,
+        selection: PrSymbolSelectionV1::StablePrefix,
+        continuation_available: symbol_has_more,
+    };
+    let bounded_coverage = PrSelectionCoverageV1 {
+        complete: impact_complete,
+        selection: PrCoverageSelectionV1::DeterministicBoundedPrefix,
+    };
+    let result = PrContextCompleteV1 {
+        status: GitReadCompleteV1::Complete,
+        base: evidence.base,
+        head: evidence.head,
+        base_oid: evidence.base_oid,
+        head_oid: evidence.head_oid,
+        merge_base: evidence.merge_base,
+        graph_generation,
+        commits: evidence.commits,
+        files_changed: evidence.changes.len(),
+        changes: evidence.changes,
+        symbols_added: added.len(),
+        symbols_removed: removed.len(),
+        symbols_modified: modified.len(),
+        added,
+        removed,
+        modified,
+        symbol_changes_coverage: PrSymbolChangesCompleteV1 {
+            status: GitReadCompleteV1::Complete,
+            base_generation: symbol_diff.base_generation,
+            head_generation: symbol_diff.head_generation,
+        },
+        next_cursor,
+        symbol_page: symbol_page.clone(),
+        analysis_coverage: PrAnalysisCoverageV1 {
+            seed_symbols_analyzed: nodes.len(),
+            symbols_returned: returned_symbols,
+            symbols_complete: symbol_complete,
+            impact_nodes_admitted: impact.nodes_admitted,
+            impact_nodes_returned: impact.nodes.len(),
+            direct_call_edges_admitted: impact.direct_call_edges_admitted,
+            impact_bytes_admitted: impact.bytes_admitted,
+            impact_partial: impact.partial,
+            complete: impact_complete,
+        },
+        test_files_changed,
+        affected_tests: affected_sorted,
+        affected_tests_coverage: bounded_coverage.clone(),
+        impacted_modules: impacted_sorted,
+        impacted_modules_coverage: bounded_coverage,
+    };
+    timings.assemble = Some(elapsed_micros(stage_started));
+    timings.total = elapsed_micros(total_started);
     tracing::info!(
         tool = "tracedecay_pr_context",
         files = changed_files.len(),
         symbols = returned_symbols,
-        timings = %timing_value,
+        timings = ?timings,
         "PR context stage timings"
     );
 
-    Ok(generic_tool_result(
-        Some(&ctx.store_layout().response_handle_root),
-        &args,
-        &output,
+    Ok(pr_context_completion(
+        PrContextResultV1::Complete(Box::new(result)),
         changed_files,
-    )
-    .with_internal_analytics(json!({
-        "stage_timings_us": stage_timings,
-        "symbol_coverage": output["symbol_page"],
-    })))
+        timings,
+        symbol_page,
+    ))
+}
+
+fn pr_context_completion(
+    result: PrContextResultV1,
+    touched_files: Vec<String>,
+    stage_timings_us: PrContextStageTimingsV1,
+    symbol_coverage: PrSymbolPageV1,
+) -> GraphToolCompletionV1 {
+    let mut completion = graph_tool_completion(GraphToolResultV1::PrContext(result), touched_files);
+    completion.analytics = Some(InvocationAnalyticsV1 {
+        pr_context: Some(PrContextAnalyticsV1 {
+            stage_timings_us,
+            symbol_coverage,
+        }),
+        ..InvocationAnalyticsV1::default()
+    });
+    completion
 }
 
 #[cfg(test)]

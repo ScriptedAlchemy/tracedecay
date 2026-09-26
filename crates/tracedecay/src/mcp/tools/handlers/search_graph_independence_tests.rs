@@ -11,10 +11,9 @@ use tracedecay_domain::{
 };
 
 use super::dispatch_test_support::{
-    SelectorEnv, dispatch_on_graph_authority, verified_graph_options,
+    SelectorProfile, dispatch_on_graph_authority, verified_graph_options,
 };
 use super::*;
-use tracedecay_project::config::lock_user_data_dir_test_env;
 
 const LEXICAL_SYMBOL_ID: &str =
     "symbol.v1.sha256:4ddd636456fccc2962006c7803bd94b2d7d732c6830993a429535e0b0ff0b688";
@@ -131,14 +130,14 @@ fn lexical_search_options(cg: &TraceDecay) -> ToolCallRegistryOptions<'_> {
 
 #[tokio::test]
 async fn tracedecay_search_preserves_lexical_results_when_graph_admission_is_missing() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("search degradation isolation");
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("search-graph-independence");
     fs::create_dir_all(project.join("src")).expect("create fixture sources");
     fs::write(project.join("src/lib.rs"), "pub fn LexicalWidget() {}\n")
         .expect("write lexical fixture");
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.search-graph-independence",
     )
@@ -197,14 +196,14 @@ async fn tracedecay_search_preserves_lexical_results_when_graph_admission_is_mis
 
 #[tokio::test]
 async fn tracedecay_search_refuses_foreign_generation_graph_evidence_without_erasing_results() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("graph generation mismatch isolation");
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("search-graph-generation-mismatch");
     fs::create_dir_all(project.join("src")).expect("create mismatch fixture sources");
     fs::write(project.join("src/lib.rs"), "pub fn LexicalWidget() {}\n")
         .expect("write mismatch fixture");
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.search-graph-generation-mismatch",
     )
@@ -255,14 +254,14 @@ async fn tracedecay_search_refuses_foreign_generation_graph_evidence_without_era
 
 #[tokio::test]
 async fn tracedecay_search_does_not_wait_for_slow_graph_admission() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("slow graph isolation");
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("slow-search-graph-admission");
     fs::create_dir_all(project.join("src")).expect("create slow graph fixture sources");
     fs::write(project.join("src/lib.rs"), "pub fn LexicalWidget() {}\n")
         .expect("write slow graph fixture");
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.slow-search-graph-admission",
     )
@@ -346,14 +345,14 @@ async fn tracedecay_search_does_not_wait_for_slow_graph_admission() {
 
 #[tokio::test]
 async fn tracedecay_context_preserves_fallback_results_while_graph_warms() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("context degradation isolation");
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("context-graph-independence");
     fs::create_dir_all(project.join("src")).expect("create fixture sources");
     fs::write(project.join("src/lib.rs"), "pub fn LexicalWidget() {}\n")
         .expect("write lexical fixture");
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.context-graph-independence",
     )
@@ -421,14 +420,14 @@ async fn tracedecay_context_preserves_fallback_results_while_graph_warms() {
 
 #[tokio::test]
 async fn tracedecay_context_waits_for_requested_code_graph_admission() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("requested context code isolation");
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("context-requested-code-graph");
     fs::create_dir_all(project.join("src")).expect("create fixture sources");
     fs::write(project.join("src/lib.rs"), "pub fn LexicalWidget() {}\n")
         .expect("write lexical fixture");
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.context-requested-code-graph",
     )
@@ -467,15 +466,17 @@ async fn tracedecay_context_waits_for_requested_code_graph_admission() {
 
 #[tokio::test]
 async fn tracedecay_context_returns_typed_pending_coverage_when_every_code_lane_warms() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("cold context isolation");
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("cold-context");
     fs::create_dir_all(&project).expect("create cold context fixture");
-    let (cg, _runtime) =
-        TraceDecay::init_test_fixture_with_registered_runtime(&project, "project.cold-context")
-            .await
-            .expect("registered cold context fixture");
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
+        &project,
+        "project.cold-context",
+    )
+    .await
+    .expect("registered cold context fixture");
 
     let executor: tracedecay_query::code_search::CodeIndexSearchExecutor = Arc::new(|_| {
         Box::pin(async {
@@ -539,14 +540,14 @@ fn stale_lexical_search() -> tracedecay_query::code_search::CodeIndexSearchOutco
 
 #[tokio::test]
 async fn tracedecay_context_preserves_stale_lane_coverage_markers() {
-    let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("stale context isolation");
-    let _env = SelectorEnv::new(dir.path());
+    let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("stale-context-coverage");
     fs::create_dir_all(project.join("src")).expect("create stale context sources");
     fs::write(project.join("src/lib.rs"), "pub fn LexicalWidget() {}\n")
         .expect("write stale context fixture");
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
         &project,
         "project.stale-context-coverage",
     )

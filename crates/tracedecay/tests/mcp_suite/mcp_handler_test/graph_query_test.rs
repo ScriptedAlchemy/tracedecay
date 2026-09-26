@@ -2160,22 +2160,24 @@ async fn tracedecay_by_qualified_name_returns_the_symbol_at_that_exact_name() {
         .harness
         .server(fixture.project_root())
         .expect("production graph-query server");
-    for arguments in [json!({}), json!({"qualified_name": 4})] {
+    for (arguments, refusal) in [
+        (json!({}), "missing field `qualified_name`"),
+        (
+            json!({"qualified_name": 4}),
+            "invalid type: integer `4`, expected a string",
+        ),
+    ] {
         let response =
             handle_real_server_tool_call_raw(&server, "tracedecay_by_qualified_name", arguments)
                 .await;
         assert_eq!(
-            response["error"],
-            json!({
-                "code": -32602,
-                "message": "missing required parameter: qualified_name",
-                "data": {
-                    "detail": "missing required parameter: qualified_name",
-                    "reason_code": "missing_required_parameter",
-                    "retryable": false,
-                    "tool": "tracedecay_by_qualified_name"
-                }
-            }),
+            (&response["error"]["code"], &response["error"]["message"]),
+            (
+                &json!(-32603),
+                &json!(format!(
+                    "tool execution failed: config error: invalid arguments for tracedecay_by_qualified_name: {refusal}"
+                )),
+            ),
             "rejection: {response}"
         );
     }

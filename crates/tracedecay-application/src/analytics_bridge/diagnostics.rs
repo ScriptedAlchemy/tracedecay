@@ -44,6 +44,7 @@ async fn registered_diagnostics_message_count(
 #[hotpath::measure(label = "analytics.diagnostics")]
 pub async fn analytics_diagnostics_with_db(
     gdb: &RegisteredGlobalDb,
+    profile_root: &Path,
     project_sessions: Option<&RegisteredGlobalDb>,
     user_sessions: Option<&RegisteredGlobalDb>,
     project_root: Option<&Path>,
@@ -55,7 +56,7 @@ pub async fn analytics_diagnostics_with_db(
     let import = if no_sync {
         Value::Null
     } else {
-        analytics_sync_with_db(gdb, project_root).await
+        analytics_sync_with_db(gdb, profile_root, project_root).await?
     };
 
     let project_filter = if all_projects {
@@ -109,15 +110,14 @@ pub async fn analytics_diagnostics_with_db(
     });
     let event_rows: Vec<Value> = events.iter().map(durable_analytics_event_row).collect();
 
-    let store_root = project_root.and_then(|root| {
-        tracedecay_runtime_core::storage::resolve_layout_for_current_profile(root)
-            .ok()
-            .map(|layout| layout.data_root)
-    });
+    let store_root = project_root
+        .map(|root| tracedecay_runtime_core::storage::resolve_layout(root, profile_root))
+        .transpose()?
+        .map(|layout| layout.data_root);
     let hook_filter_root = if all_projects { None } else { project_root };
     let hook_analytics = hotpath::measure_block!(
         "analytics.hooks",
-        read_hook_analytics_rows_at(store_root.as_deref(), hook_filter_root)
+        read_hook_analytics_rows_at(profile_root, store_root.as_deref(), hook_filter_root)
     );
 
     let message_count =
@@ -163,10 +163,18 @@ mod tests {
             "analytics-cli-observability-parity",
         )
         .await;
-        let output =
-            analytics_diagnostics_with_db(&harness.registered, None, None, None, true, true)
-                .await
-                .expect("CLI diagnostics");
+        let profile = tempfile::tempdir().expect("profile");
+        let output = analytics_diagnostics_with_db(
+            &harness.registered,
+            profile.path(),
+            None,
+            None,
+            None,
+            true,
+            true,
+        )
+        .await
+        .expect("CLI diagnostics");
 
         assert!(
             output["observatory"]["metrics"]

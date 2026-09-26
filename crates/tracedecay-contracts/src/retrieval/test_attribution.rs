@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::UtcMicros;
 
@@ -89,7 +90,7 @@ pub struct TestMapPrimitiveResultV1 {
     pub next_cursor: Option<OpaqueCursor>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RankedAffectedTestV1 {
     pub path: String,

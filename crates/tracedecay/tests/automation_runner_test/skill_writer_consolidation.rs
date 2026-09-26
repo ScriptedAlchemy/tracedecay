@@ -6,12 +6,10 @@ use tracedecay_automation::run_labels::SKILL_OVERLAP_REMOVAL_TOMBSTONE;
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_runner_auto_applies_safe_consolidations() {
-    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let _global_db = isolate_global_db(&cg);
     let automation_provenance = || ManagedSkillProvenance {
         source: ManagedSkillSource::AutomationRun,
         actor: "skill_writer".to_string(),

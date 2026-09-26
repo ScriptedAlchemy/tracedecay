@@ -138,22 +138,23 @@ async fn runtime() -> (
     tempfile::TempDir,
     tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime,
 ) {
-    let project = tempfile::tempdir().expect("project");
+    let root = tempfile::tempdir().expect("test root");
+    let project = root.path().join("project");
+    std::fs::create_dir_all(&project).expect("project");
     let project_id = tracedecay_domain::ProjectId::new("project.observability.shutdown")
         .expect("project identifier");
     let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
-        project.path(),
+        root.path().join("profile"),
+        &project,
         project_id,
     )
     .await
     .expect("registered runtime");
-    (project, runtime)
+    (root, runtime)
 }
 
 #[tokio::test]
 async fn clean_shutdown_persists_zero_drop_terminal_without_relabeling_cancel() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, runtime) = runtime().await;
     let db = runtime.project_database_arc().expect("project database");
     let scope = "project.observability.shutdown";
@@ -294,7 +295,6 @@ async fn clean_shutdown_persists_zero_drop_terminal_without_relabeling_cancel() 
 
 #[tokio::test]
 async fn persistence_failure_cannot_be_rewritten_as_a_clean_terminal() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, runtime) = runtime().await;
     let db = runtime.project_database_arc().expect("project database");
     let scope = "project.observability.shutdown";
@@ -423,7 +423,6 @@ async fn persistence_failure_cannot_be_rewritten_as_a_clean_terminal() {
 
 #[tokio::test]
 async fn carried_positive_drop_then_clean_terminal_remains_partial() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, runtime) = runtime().await;
     let db = runtime.project_database_arc().expect("project database");
     let scope = "project.observability.shutdown";
@@ -465,7 +464,6 @@ async fn carried_positive_drop_then_clean_terminal_remains_partial() {
 
 #[tokio::test]
 async fn unclean_zero_terminal_degrades_aggregate_without_fabricating_a_drop_cell() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, runtime) = runtime().await;
     let db = runtime.project_database_arc().expect("project database");
     let scope = "project.observability.shutdown";
@@ -517,7 +515,6 @@ async fn unclean_zero_terminal_degrades_aggregate_without_fabricating_a_drop_cel
 
 #[tokio::test]
 async fn shutdown_waits_for_durable_owner_admission_before_terminal() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, runtime) = runtime().await;
     let db = runtime.project_database_arc().expect("project database");
     let scope = "project.observability.shutdown";
@@ -588,7 +585,6 @@ async fn shutdown_waits_for_durable_owner_admission_before_terminal() {
 
 #[tokio::test]
 async fn clean_shutdown_with_pending_drop_remains_partial() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, runtime) = runtime().await;
     let db = runtime.project_database_arc().expect("project database");
     let scope = "project.observability.shutdown";
@@ -645,7 +641,6 @@ async fn clean_shutdown_with_pending_drop_remains_partial() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_terminal_linearizes_after_concurrent_admission() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, runtime) = runtime().await;
     let db = runtime.project_database_arc().expect("project database");
     let scope = "project.observability.shutdown";

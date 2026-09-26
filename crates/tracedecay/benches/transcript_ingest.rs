@@ -114,8 +114,9 @@ fn timestamp(index: usize) -> String {
 
 struct Sandbox {
     _tmp: tempfile::TempDir,
-    /// The process-wide sandbox `HOME`; provider fixture roots (`.claude`,
-    /// `.codex`, Kiro's data dir) are namespaced so providers cannot cross.
+    /// The sandbox user home the ingest pass's transcript source profile
+    /// names; provider fixture roots (`.claude`, `.codex`, Kiro's data dir)
+    /// live under it.
     home: PathBuf,
     project: PathBuf,
     profile: PathBuf,
@@ -126,9 +127,8 @@ fn sandbox(label: &str) -> Sandbox {
         .prefix(&format!("tracedecay-ingest-bench-{label}-"))
         .tempdir()
         .expect("create sandbox tempdir");
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .expect("bench main installed a sandbox HOME");
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).expect("create sandbox home");
     let project = tmp.path().join("project");
     let profile = tmp.path().join("profile");
     std::fs::create_dir_all(&project).unwrap();
@@ -439,8 +439,8 @@ async fn run_provider_bench(
         // Boxed so the ingest pass's future layout stays out of this loop
         // body: with the hotpath wrappers compiled in, the inlined chain
         // overflows rustc's query depth for this bench.
-        let stats = tracedecay_sessions::runtime::ingest::with_transcript_source_home(
-            home.clone(),
+        let stats = tracedecay_sessions::runtime::ingest::with_transcript_source_profile(
+            tracedecay_runtime_core::config::ProfileRoot::new(&sandbox.profile).with_home(&home),
             runtime.ingest_project_provider_for_test(&sandbox.project, Some(provider)),
         )
         .boxed_local()
@@ -502,20 +502,6 @@ fn parse_usize(arguments: &[String], flag: &str, default: usize) -> usize {
 }
 
 fn main() {
-    // Process-wide sandbox home: every provider source resolves transcripts
-    // under `HOME`, and spawned blocking scans do not inherit the task-local
-    // override, so the env var is the reliable process boundary here. This is
-    // a single-purpose bench process; nothing else reads the real home.
-    let sandbox_home = tempfile::Builder::new()
-        .prefix("tracedecay-ingest-bench-home-")
-        .tempdir()
-        .expect("create bench home");
-    // SAFETY: single-threaded startup, before the tokio runtime exists.
-    unsafe {
-        std::env::set_var("HOME", sandbox_home.path());
-        std::env::set_var("USERPROFILE", sandbox_home.path());
-    }
-
     let arguments = std::env::args()
         .skip(1)
         .filter(|argument| argument != "--bench")

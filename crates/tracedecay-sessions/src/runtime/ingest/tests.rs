@@ -20,13 +20,14 @@ use super::failure::{
     classify_claude_observation_failure, classify_transcript_ingest_failure,
     plan_round_robin_admission, scheduling_write_required,
 };
-use super::project::{home_dir, with_transcript_source_home};
+use super::project::{home_dir, with_transcript_source_profile};
 use super::scheduler::{
     finish_user_provider_coverage, merge_project_provider_backpressure,
     plan_provider_rotation_admission,
 };
 use super::startup::{StartupUserIngestClaim, StartupUserIngestGuard, TranscriptIngestOutcome};
 use super::user::provider_selected;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 const TEST_INGEST_BOUNDS: IngestPassBounds = IngestPassBounds {
     discovered_units: 16,
@@ -37,16 +38,23 @@ const TEST_INGEST_BOUNDS: IngestPassBounds = IngestPassBounds {
     bytes_per_pass: 4096,
     retries: 0,
 };
+/// Two owners ingest in one process at once; each source reads only its own
+/// profile's home, and outside a scope there is no transcript home at all.
 #[tokio::test]
-async fn scoped_transcript_source_home_overrides_ambient_home_without_mutating_it() {
-    let isolated_home = tempfile::tempdir().unwrap();
-    let ambient_home = std::env::var_os("HOME");
+async fn concurrent_transcript_source_profiles_each_read_their_own_home() {
+    let homes = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+    let [first, second] = homes.each_ref().map(|home| {
+        with_transcript_source_profile(ProfileRoot::under_home(home.path()), async {
+            tokio::task::yield_now().await;
+            home_dir()
+        })
+    });
 
-    let resolved =
-        with_transcript_source_home(isolated_home.path().to_path_buf(), async { home_dir() }).await;
+    let (first, second) = tokio::join!(first, second);
 
-    assert_eq!(resolved.as_deref(), Some(isolated_home.path()));
-    assert_eq!(std::env::var_os("HOME"), ambient_home);
+    assert_eq!(first.as_deref(), Some(homes[0].path()));
+    assert_eq!(second.as_deref(), Some(homes[1].path()));
+    assert_eq!(home_dir(), None);
 }
 
 #[tokio::test]

@@ -1,23 +1,24 @@
 //! Dependency-clean graph-navigation handlers over [`VerifiedGraphQuery`].
 
-use std::path::Path;
-
-use serde_json::{Value, json};
+use serde_json::Value;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
-    ImpactNodeV1, ImpactResultV1, NodeDepthSurfaceRequestV1, NodeDetailsV1, NodeExpansionCostV1,
-    NodeResultV1, NodeSurfaceRequestV1,
+    ByQualifiedNameResultV1, ByQualifiedNameSurfaceRequestV1, DeriveAnnotationV1,
+    DeriveEvidenceClassV1, DerivesResultV1, DerivesSymbolV1, ImpactNodeV1, ImpactResultV1,
+    NodeDepthSurfaceRequestV1, NodeDetailsV1, NodeExpansionCostV1, NodeResultV1,
+    NodeSurfaceRequestV1, SignatureResultV1, SymbolSelectorSurfaceRequestV1, SymbolSignatureV1,
 };
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::Result;
 use tracedecay_graph_query::VerifiedGraphQuery;
 
-use crate::{ToolResult, decode_primitive_request, generic_tool_result, text_tool_result};
+use crate::decode_primitive_request;
 
+use super::primitive_surface::symbol_location;
 use super::{
     GRAPH_RELATION_READ_LIMIT, cost_to_expand_verified, graph_occurrence_id, graph_symbol_corrupt,
-    graph_symbol_end_line, graph_symbol_location_value, graph_symbol_paths, graph_tool_completion,
-    node_not_found_result, nodes_addressed_by_args, require_positive_depth,
-    required_graph_file_path, required_graph_metadata, user_line,
+    graph_symbol_end_line, graph_symbol_paths, graph_tool_completion, node_not_found_result,
+    nodes_addressed_by_selector, require_positive_depth, required_graph_file_path,
+    required_graph_metadata, user_line,
 };
 
 #[hotpath::measure(label = "mcp.graph.impact.total")]
@@ -158,33 +159,23 @@ pub async fn compute_node(
 
 /// Cross-run node lookup by name.
 #[hotpath::measure(label = "mcp.graph.by_qualified_name.total")]
-pub async fn handle_by_qualified_name(
-    response_handle_root: &Path,
+pub async fn compute_by_qualified_name(
     graph: &VerifiedGraphQuery,
     args: Value,
-) -> Result<ToolResult> {
-    let qname = args
-        .get("qualified_name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "missing required parameter: qualified_name".to_string(),
-        })?;
-
+) -> Result<GraphToolCompletionV1> {
+    let request: ByQualifiedNameSurfaceRequestV1 =
+        decode_primitive_request(&args, "tracedecay_by_qualified_name")?;
     let nodes = hotpath::measure_block!(
         "mcp.graph.by_qualified_name.graph",
-        graph.resolve_qualified_name(qname, None, 1_000)?
+        graph.resolve_qualified_name(&request.qualified_name, None, 1_000)?
     );
     let touched_files = graph_symbol_paths(&nodes)?;
     let items = nodes
         .iter()
-        .map(graph_symbol_location_value)
+        .map(symbol_location)
         .collect::<Result<Vec<_>>>()?;
-
-    let value = hotpath::measure_block!("mcp.graph.by_qualified_name.serialize", json!(items));
-    Ok(generic_tool_result(
-        Some(response_handle_root),
-        &args,
-        &value,
+    Ok(graph_tool_completion(
+        GraphToolResultV1::ByQualifiedName(ByQualifiedNameResultV1(items)),
         touched_files,
     ))
 }
@@ -193,45 +184,42 @@ pub async fn handle_by_qualified_name(
 /// the public-API surface of a symbol so callers can avoid reading the
 /// source file just to inspect the signature.
 #[hotpath::measure(label = "mcp.graph.signature.total")]
-pub async fn handle_signature(
-    response_handle_root: &Path,
+pub async fn compute_signature(
     graph: &VerifiedGraphQuery,
     args: Value,
-) -> Result<ToolResult> {
+) -> Result<GraphToolCompletionV1> {
+    let request: SymbolSelectorSurfaceRequestV1 =
+        decode_primitive_request(&args, "tracedecay_signature")?;
     let nodes = hotpath::measure_block!(
         "mcp.graph.signature.graph",
-        nodes_addressed_by_args(graph, &args)?
+        nodes_addressed_by_selector(graph, &request)?
     );
     let touched_files = graph_symbol_paths(&nodes)?;
 
-    let mut items: Vec<Value> = Vec::with_capacity(nodes.len());
+    let mut items = Vec::with_capacity(nodes.len());
     for n in &nodes {
         let metadata = required_graph_metadata(n)?;
         let file_path = required_graph_file_path(n)?;
         let file_size_bytes = bound_source_file_len(graph, file_path)?;
         let end_line = graph_symbol_end_line(metadata)?;
-        items.push(json!({
-            "node_id": n.occurrence.as_str(),
-            "name": metadata.simple_name,
-            "qualified_name": metadata.qualified_name,
-            "kind": metadata.kind,
-            "visibility": metadata.visibility,
-            "signature": metadata.signature,
-            "docstring": metadata.docstring,
-            "is_async": metadata.is_async,
-            "file": file_path,
-            "start_line": user_line(metadata.start_line),
-            "end_line": user_line(end_line),
-            "cost_to_expand": cost_to_expand_verified(metadata, file_size_bytes)?,
-            "unavailable_fields": ["attrs_start_line"],
-        }));
+        items.push(SymbolSignatureV1 {
+            node_id: n.occurrence.as_str().to_owned(),
+            name: metadata.simple_name.clone(),
+            qualified_name: metadata.qualified_name.clone(),
+            kind: metadata.kind.clone(),
+            visibility: metadata.visibility.clone(),
+            signature: metadata.signature.clone(),
+            docstring: metadata.docstring.clone(),
+            is_async: metadata.is_async,
+            file: file_path.to_owned(),
+            start_line: user_line(metadata.start_line),
+            end_line: user_line(end_line),
+            cost_to_expand: cost_to_expand_verified(metadata, file_size_bytes)?,
+            unavailable_fields: vec!["attrs_start_line".to_owned()],
+        });
     }
-
-    let value = hotpath::measure_block!("mcp.graph.signature.serialize", json!(items));
-    Ok(generic_tool_result(
-        Some(response_handle_root),
-        &args,
-        &value,
+    Ok(graph_tool_completion(
+        GraphToolResultV1::Signature(SignatureResultV1(items)),
         touched_files,
     ))
 }
@@ -239,19 +227,16 @@ pub async fn handle_signature(
 /// Derive annotations attached to a symbol. Accepts `node_id` or
 /// `qualified_name`. Macro expansion is outside the retained syntax evidence.
 #[hotpath::measure(label = "mcp.graph.derives.total")]
-pub async fn handle_derives(
-    response_handle_root: &Path,
+pub async fn compute_derives(
     graph: &VerifiedGraphQuery,
     args: Value,
-) -> Result<ToolResult> {
+) -> Result<GraphToolCompletionV1> {
+    let request: SymbolSelectorSurfaceRequestV1 =
+        decode_primitive_request(&args, "tracedecay_derives")?;
     let nodes = hotpath::measure_block!(
         "mcp.graph.derives.graph",
-        nodes_addressed_by_args(graph, &args)?
+        nodes_addressed_by_selector(graph, &request)?
     );
-    if nodes.is_empty() {
-        return Ok(text_tool_result("No matching symbol found.", Vec::new()));
-    }
-
     let touched_files = graph_symbol_paths(&nodes)?;
     let mut items = Vec::with_capacity(nodes.len());
     for node in &nodes {
@@ -260,30 +245,27 @@ pub async fn handle_derives(
         let derives = metadata
             .derives
             .iter()
-            .map(|name| {
-                json!({
-                    "name": name,
-                    "evidence_class": "syntax_exact",
-                    "unavailable_fields": ["generated_trait_impl", "generated_methods"],
-                })
+            .map(|name| DeriveAnnotationV1 {
+                name: name.clone(),
+                evidence_class: DeriveEvidenceClassV1::SyntaxExact,
+                unavailable_fields: vec![
+                    "generated_trait_impl".to_owned(),
+                    "generated_methods".to_owned(),
+                ],
             })
-            .collect::<Vec<_>>();
-        items.push(json!({
-            "node_id": node.occurrence.as_str(),
-            "name": metadata.simple_name,
-            "qualified_name": metadata.qualified_name,
-            "kind": metadata.kind,
-            "file": file_path,
-            "line": user_line(metadata.start_line),
-            "derives": derives,
-        }));
+            .collect();
+        items.push(DerivesSymbolV1 {
+            node_id: node.occurrence.as_str().to_owned(),
+            name: metadata.simple_name.clone(),
+            qualified_name: metadata.qualified_name.clone(),
+            kind: metadata.kind.clone(),
+            file: file_path.to_owned(),
+            line: user_line(metadata.start_line),
+            derives,
+        });
     }
-
-    let output = hotpath::measure_block!("mcp.graph.derives.serialize", json!(items));
-    Ok(generic_tool_result(
-        Some(response_handle_root),
-        &args,
-        &output,
+    Ok(graph_tool_completion(
+        GraphToolResultV1::Derives(DerivesResultV1(items)),
         touched_files,
     ))
 }

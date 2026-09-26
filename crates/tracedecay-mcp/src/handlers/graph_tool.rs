@@ -1,4 +1,5 @@
-//! Graph-backed reads and reports served by the project's graph-tool owner.
+//! Graph- and git-backed reads and reports served by the project's graph-tool
+//! owner.
 //!
 //! The owner computes each operation's typed catalog result; every surface
 //! renders it here, so MCP and the CLI print the same tool result.
@@ -6,22 +7,35 @@
 use std::path::Path;
 
 use serde_json::Value;
+use tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
-use tracedecay_contracts::retrieval::{NodeResultV1, RenamePreviewPrimitiveOutcomeV1};
+use tracedecay_contracts::retrieval::{
+    DerivesResultV1, NodeResultV1, RenamePreviewPrimitiveOutcomeV1,
+};
 use tracedecay_domain::errors::Result;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use crate::handlers::analysis::{compute_analysis_report, render_circular_md};
+use crate::handlers::ast_grep::{compute_ast_grep_search, render_ast_grep_search};
+use crate::handlers::git::{
+    compute_affected, compute_branch_diff, compute_branch_list, compute_branch_search,
+    compute_changelog, compute_commit_context, compute_diff_context, compute_pr_context,
+    git_tool_failure_message,
+};
 use crate::handlers::graph::{
-    compute_context, compute_impact, compute_node, compute_redundancy, compute_rename_preview,
+    compute_by_qualified_name, compute_context, compute_derives, compute_find_exact_symbol,
+    compute_impact, compute_node, compute_redundancy, compute_rename_preview, compute_signature,
     compute_similar, not_found_tool_result, render_context,
 };
+use crate::handlers::grep::{compute_grep, render_grep};
 use crate::handlers::health::{
     compute_dependency_depth, compute_dsm, compute_gini, compute_health, compute_test_map,
     compute_test_risk, render_dsm_md,
 };
 use crate::handlers::info::{compute_port_order, compute_port_status, compute_todos};
-use crate::handlers::support::{generic_tool_result, rendered_tool_result, unknown_tool_error};
+use crate::handlers::support::{
+    generic_tool_result, rendered_tool_result, text_tool_result, unknown_tool_error,
+};
 use crate::handlers::verified_read::{VerifiedGraphOpen, verified_read_operation as read};
 use crate::tools::render;
 use crate::tools::response_trailers::ResponseTrailer;
@@ -37,6 +51,7 @@ pub async fn compute_graph_tool(
     operation: ApplicationSurfaceOperation,
     args: Value,
     scope_prefix: Option<&str>,
+    ignored_dependency_admission: Option<&dyn CodeIndexIgnoredDependencyAdmissionPortV1>,
 ) -> Result<GraphToolCompletionV1> {
     match operation {
         ApplicationSurfaceOperation::Context => {
@@ -86,6 +101,68 @@ pub async fn compute_graph_tool(
         | ApplicationSurfaceOperation::FieldSites => {
             compute_analysis_report(ctx.project_root(), open, operation, args, scope_prefix).await
         }
+        ApplicationSurfaceOperation::FindExactSymbol => {
+            compute_find_exact_symbol(
+                ctx,
+                &open(read("qualified_name")?).await?,
+                args,
+                scope_prefix,
+                ignored_dependency_admission,
+            )
+            .await
+        }
+        ApplicationSurfaceOperation::ByQualifiedName => {
+            compute_by_qualified_name(&open(read("qualified_name")?).await?, args).await
+        }
+        ApplicationSurfaceOperation::Signature => {
+            compute_signature(&open(read("qualified_name")?).await?, args).await
+        }
+        ApplicationSurfaceOperation::Derives => {
+            compute_derives(&open(read("code_type_hierarchy")?).await?, args).await
+        }
+        ApplicationSurfaceOperation::Grep => {
+            // Grep degrades to a lexical answer when the graph is unavailable,
+            // so the open outcome travels to the handler instead of failing here.
+            let graph = match read("source_lines") {
+                Ok(operation) => open(operation).await,
+                Err(error) => Err(error),
+            };
+            compute_grep(
+                ctx.project_root(),
+                graph.as_ref(),
+                args,
+                scope_prefix,
+                ctx.deadline().cloned(),
+                ctx.cancellation().cloned(),
+            )
+            .await
+        }
+        ApplicationSurfaceOperation::AstGrepSearch => {
+            compute_ast_grep_search(
+                ctx.project_root(),
+                args,
+                scope_prefix,
+                ctx.deadline().cloned(),
+                ctx.cancellation().cloned(),
+            )
+            .await
+        }
+        ApplicationSurfaceOperation::Affected => {
+            compute_affected(ctx, open(read("file_dependents")?), args).await
+        }
+        ApplicationSurfaceOperation::DiffContext => {
+            compute_diff_context(ctx, open(read("file_dependents")?), args).await
+        }
+        ApplicationSurfaceOperation::Changelog => compute_changelog(ctx, args).await,
+        ApplicationSurfaceOperation::CommitContext => {
+            compute_commit_context(ctx, open(read("file_dependents")?), args).await
+        }
+        ApplicationSurfaceOperation::PrContext => {
+            compute_pr_context(ctx, open(read("file_dependents")?), args).await
+        }
+        ApplicationSurfaceOperation::BranchSearch => compute_branch_search(ctx, args).await,
+        ApplicationSurfaceOperation::BranchDiff => compute_branch_diff(ctx, args).await,
+        ApplicationSurfaceOperation::BranchList => compute_branch_list(ctx, args).await,
         operation => Err(unknown_tool_error(operation.mcp_tool_name())),
     }
 }
@@ -176,6 +253,13 @@ pub fn render_graph_tool(
                 render::risky_patterns_md(&value)
             })
         }
+        GraphToolResultV1::Derives(DerivesResultV1(symbols)) if symbols.is_empty() => {
+            text_tool_result("No matching symbol found.", Vec::new())
+        }
+        GraphToolResultV1::Grep(grep) => render_grep(response_handle_root, args, grep)?,
+        GraphToolResultV1::AstGrepSearch(search) => {
+            render_ast_grep_search(response_handle_root, args, search)?
+        }
         _ => generic_tool_result(
             response_handle_root,
             args,
@@ -183,6 +267,11 @@ pub fn render_graph_tool(
             Vec::new(),
         ),
     };
+    if let Some(message) = git_tool_failure_message(&result) {
+        rendered = rendered
+            .with_semantic_error(true)
+            .with_failure_message(message);
+    }
     ResponseTrailer {
         touched_files: &touched_files,
         code_graph: code_graph.as_ref(),
@@ -345,6 +434,7 @@ mod tests {
                 fact_ids: vec!["fact.one".to_owned()],
                 error: None,
             }),
+            pr_context: None,
         };
         let completion = |analytics| GraphToolCompletionV1 {
             result: GraphToolResultV1::Context(Box::new(plan_context())),

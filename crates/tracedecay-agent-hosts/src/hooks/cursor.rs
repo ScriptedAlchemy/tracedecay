@@ -10,6 +10,7 @@ use std::time::Instant;
 use serde_json::Value;
 
 use crate::ports::hook_runtime::HookRuntimeV1;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use super::post_tool_use::{captured_tool_output, trusted_tool_failure};
 use super::tool_hints::{ToolHint, ToolHintInput, decide_hint};
@@ -67,6 +68,7 @@ pub async fn hook_cursor_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
     );
     if let Some(decision) = cursor_post_tool_use_decision(runtime, &event)
         && !super::write_hook_output(
+            &runtime.profile,
             root.as_deref(),
             tracedecay_domain::NativeHostIdentityV1::CursorDesktop,
             &event,
@@ -85,6 +87,7 @@ pub async fn hook_cursor_session_start(runtime: &HookRuntimeV1) -> i32 {
     let event = read_hook_event!();
     let (root, output) = cursor_session_start_response(runtime, &event, started).await;
     if !super::write_hook_output(
+        &runtime.profile,
         root.as_deref(),
         tracedecay_domain::NativeHostIdentityV1::CursorDesktop,
         &event,
@@ -150,12 +153,16 @@ fn format_cursor_post_tool_use_decision(hint: &ToolHint) -> String {
     .to_string()
 }
 
-fn prepare_cursor_post_tool_use_hint(event_json: &str) -> Option<(String, ToolHint)> {
+fn prepare_cursor_post_tool_use_hint(
+    profile: &ProfileRoot,
+    event_json: &str,
+) -> Option<(String, ToolHint)> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
     let hint = decide_hint(&cursor_tool_hint_input(&parsed))?;
-    let root = cursor_project_root_candidate_from_parsed_event(&parsed);
+    let root = cursor_project_root_candidate_from_parsed_event(profile, &parsed);
     let hint_id = mint_hint_id();
     record_hint_analytics(
+        profile.data_dir(),
         root.as_deref(),
         "hint_candidate",
         HostIntegrationIdV1::Cursor,
@@ -169,7 +176,7 @@ fn prepare_cursor_post_tool_use_hint(event_json: &str) -> Option<(String, ToolHi
 /// Cursor `postToolUse` hint decision with per-session dedupe persisted under
 /// the project's `.tracedecay/` dir.
 pub fn cursor_post_tool_use_decision(runtime: &HookRuntimeV1, event_json: &str) -> Option<String> {
-    let (hint_id, hint) = prepare_cursor_post_tool_use_hint(event_json)?;
+    let (hint_id, hint) = prepare_cursor_post_tool_use_hint(&runtime.profile, event_json)?;
     let hint = deduped_cursor_hint(runtime, event_json, &hint_id, hint)?;
     Some(format_cursor_post_tool_use_decision(&hint))
 }
@@ -184,12 +191,14 @@ pub fn cursor_post_tool_use_decision(runtime: &HookRuntimeV1, event_json: &str) 
 /// the hint is emitted as-is, dedupe is impossible but the hint is still
 /// useful (fail-open).
 fn cursor_hint_root(
+    profile: &ProfileRoot,
     event_json: &str,
     hint_id: &str,
     hint: &ToolHint,
 ) -> Option<(PathBuf, Option<String>)> {
     let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
         record_hint_analytics(
+            profile.data_dir(),
             None,
             "dropped_no_root",
             HostIntegrationIdV1::Cursor,
@@ -200,8 +209,9 @@ fn cursor_hint_root(
         return None;
     };
     let session_id = event_session_id(&parsed);
-    let Some(root) = cursor_project_root_candidate_from_parsed_event(&parsed) else {
+    let Some(root) = cursor_project_root_candidate_from_parsed_event(profile, &parsed) else {
         record_hint_analytics(
+            profile.data_dir(),
             None,
             "dropped_no_root",
             HostIntegrationIdV1::Cursor,
@@ -220,9 +230,10 @@ fn deduped_cursor_hint(
     hint_id: &str,
     hint: ToolHint,
 ) -> Option<ToolHint> {
-    let (root, session_id) = cursor_hint_root(event_json, hint_id, &hint)?;
-    if !(runtime.project_initialization_gate)(&root) {
+    let (root, session_id) = cursor_hint_root(&runtime.profile, event_json, hint_id, &hint)?;
+    if !(runtime.project_initialization_gate)(&runtime.profile, &root) {
         record_hint_analytics(
+            runtime.profile.data_dir(),
             Some(&root),
             "suppressed_uninitialized",
             HostIntegrationIdV1::Cursor,
@@ -233,6 +244,7 @@ fn deduped_cursor_hint(
         return None;
     }
     deduped_project_hint_with_id(
+        &runtime.profile,
         Some(&root),
         HostIntegrationIdV1::Cursor,
         session_id,
@@ -241,26 +253,32 @@ fn deduped_cursor_hint(
     )
 }
 
-pub fn cursor_project_root_from_event(event_json: &str) -> Option<PathBuf> {
+pub fn cursor_project_root_from_event(profile: &ProfileRoot, event_json: &str) -> Option<PathBuf> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
-    cursor_project_root_from_parsed_event(&parsed)
+    cursor_project_root_from_parsed_event(profile, &parsed)
 }
 
-fn cursor_project_root_candidate_from_parsed_event(parsed: &Value) -> Option<PathBuf> {
-    cursor_project_root_from_parsed_event(parsed).or_else(|| {
+fn cursor_project_root_candidate_from_parsed_event(
+    profile: &ProfileRoot,
+    parsed: &Value,
+) -> Option<PathBuf> {
+    cursor_project_root_from_parsed_event(profile, parsed).or_else(|| {
         cursor_hook_root_candidates(parsed)
             .into_iter()
             .find_map(|candidate| nearest_project_like_root(&candidate))
     })
 }
 
-pub(super) fn cursor_project_root_from_parsed_event(parsed: &Value) -> Option<PathBuf> {
+pub(super) fn cursor_project_root_from_parsed_event(
+    profile: &ProfileRoot,
+    parsed: &Value,
+) -> Option<PathBuf> {
     let resolved = cursor_hook_root_candidates(parsed)
         .into_iter()
-        .find_map(|candidate| tracedecay_runtime_core::config::discover_project_root(&candidate));
+        .find_map(|candidate| profile.discover_project_root(&candidate));
     let cwd_root = cursor_hook_cwd(parsed)
         .as_deref()
-        .and_then(tracedecay_runtime_core::config::discover_project_root);
+        .and_then(|cwd| profile.discover_project_root(cwd));
     match (cwd_root, resolved) {
         // Prefer the root derived from cwd when available; this avoids routing
         // a root-B event into root A just because workspace_roots listed A first.
@@ -277,13 +295,13 @@ async fn cursor_project_root_from_parsed_event_with_identity(
 ) -> Option<PathBuf> {
     let mut resolved = None;
     for candidate in cursor_hook_root_candidates(parsed) {
-        if let Some(root) = (runtime.project_root_resolver)(&candidate).await {
+        if let Some(root) = (runtime.project_root_resolver)(&runtime.profile, &candidate).await {
             resolved = Some(root);
             break;
         }
     }
     let cwd_root = match cursor_hook_cwd(parsed) {
-        Some(cwd) => (runtime.project_root_resolver)(&cwd).await,
+        Some(cwd) => (runtime.project_root_resolver)(&runtime.profile, &cwd).await,
         None => None,
     };
     match (cwd_root, resolved) {
@@ -401,16 +419,19 @@ fn cursor_tool_hint_input(parsed: &Value) -> ToolHintInput {
 mod tests {
     use std::time::Duration;
 
+    use tracedecay_runtime_core::config::ProfileRoot;
+
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn transcript_ingest_forwards_its_budget_to_the_daemon() {
-        let _lock = crate::hooks::lock_test_env();
         let daemon = crate::hooks::TestDaemonHookActionGuard::install([
             serde_json::json!({ "user_scope": true, "messages_upserted": 2 }),
         ]);
         let event = serde_json::json!({ "session_id": "cursor-budget" }).to_string();
 
-        let runtime = crate::ports::hook_runtime::crate_test_runtime();
+        let profile_home = tempfile::tempdir().unwrap();
+        let runtime = crate::ports::hook_runtime::crate_test_runtime(ProfileRoot::under_home(
+            profile_home.path(),
+        ));
         let outcome = crate::hooks::ingest_transcript_for_event(
             &runtime,
             "cursor",
@@ -438,13 +459,14 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn transcript_ingest_types_daemon_failure() {
-        let _lock = crate::hooks::lock_test_env();
         let _daemon = crate::hooks::TestDaemonHookActionGuard::install([]);
         let event = serde_json::json!({ "session_id": "cursor-fail" }).to_string();
 
-        let runtime = crate::ports::hook_runtime::crate_test_runtime();
+        let profile_home = tempfile::tempdir().unwrap();
+        let runtime = crate::ports::hook_runtime::crate_test_runtime(ProfileRoot::under_home(
+            profile_home.path(),
+        ));
         let outcome = crate::hooks::ingest_transcript_for_event(
             &runtime,
             "cursor",

@@ -655,7 +655,7 @@ fn prepare_bound_hook(
     project_root: &Path,
     decoded: tracedecay_hooks::DecodedNativeHookEventV1,
 ) -> Option<PreparedBoundHook> {
-    let layout = super::store_layout::layout(project_root)?;
+    let layout = super::store_layout::layout(runtime.profile.data_dir(), project_root)?;
     let worktree_id = worktree_id_for_layout(runtime, &layout).ok()?;
     let config_path =
         tracedecay_hooks::hook_configuration_path(&layout.data_root, worktree_id, host);

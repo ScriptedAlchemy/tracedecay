@@ -222,9 +222,10 @@ impl ProjectStorageStatus {
 }
 
 pub fn classify_project_storage(
+    profile_root: &Path,
     project_root: &Path,
 ) -> tracedecay_domain::errors::Result<ProjectStorageLocation> {
-    resolve_layout_for_current_profile(project_root)
+    resolve_layout(project_root, profile_root)
         .map(|layout| classify_layout_storage(project_root, layout))
 }
 
@@ -504,11 +505,9 @@ pub use identity::{
 };
 pub(crate) use layout::has_path_local_profile_store;
 pub use layout::{
-    default_profile_project_id, default_profile_root, default_profile_sharded_layout,
-    enrolled_project_roots, path_local_profile_project_id, profile_sharded_data_root,
-    profile_sharded_layout, registered_project_id, resolve_enrolled_layout_for_current_profile,
-    resolve_layout, resolve_layout_for_current_profile, resolve_lcm_payload_root,
-    resolve_persisted_layout, resolve_project_session_db_path,
+    default_profile_project_id, default_profile_sharded_layout, enrolled_project_roots,
+    path_local_profile_project_id, profile_sharded_data_root, profile_sharded_layout,
+    registered_project_id, resolve_layout, resolve_persisted_layout,
 };
 pub use manifest::{read_store_manifest, write_store_manifest, write_store_manifest_to_path};
 pub use paths_and_io::{

@@ -13,7 +13,6 @@ use tracedecay_sessions::runtime::SessionProvider;
 use tracedecay_sessions::runtime::hosts::codex::CodexSource;
 
 use crate::codex::write_codex_rollout_with_structured_events;
-use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::{
     ProjectSessionTestRuntime, ingest_global_sources_for_provider, mark_test_project,
     open_project_session_db, try_ingest_source,
@@ -121,14 +120,9 @@ async fn codex_model_tracks_turn_context_not_model_provider() {
 /// typed-absent (never zero-filled), and reasoning stays a separate counter
 /// instead of being folded into output.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn codex_usage_preserves_cache_only_total_only_and_reasoning_counters() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
     let dir = home.join(".codex/sessions/2026/01/01");
@@ -193,7 +187,7 @@ async fn codex_usage_preserves_cache_only_total_only_and_reasoning_counters() {
     .unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Codex)).await;
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Codex)).await;
 
     // Conversational rows never carry usage metadata: token accounting moved
     // to the immutable provider-usage observation family.
@@ -256,7 +250,7 @@ async fn codex_usage_preserves_cache_only_total_only_and_reasoning_counters() {
     );
 
     assert_eq!(
-        ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Codex))
+        ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Codex))
             .await
             .messages_upserted,
         0,
@@ -271,9 +265,14 @@ async fn codex_usage_preserves_cache_only_total_only_and_reasoning_counters() {
 
     let reopened = open_project_session_db(&project).await.unwrap();
     assert_eq!(
-        ingest_global_sources_for_provider(&reopened, &project, Some(SessionProvider::Codex))
-            .await
-            .messages_upserted,
+        ingest_global_sources_for_provider(
+            &home,
+            &reopened,
+            &project,
+            Some(SessionProvider::Codex)
+        )
+        .await
+        .messages_upserted,
         0,
         "restart replay must not emit conversational rows"
     );
@@ -291,14 +290,9 @@ async fn codex_usage_preserves_cache_only_total_only_and_reasoning_counters() {
 /// cumulative checkpoint is what lets read-time derivation skip it, instead
 /// of summing a turn ledger onto the reply message.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn codex_tool_loop_usage_retains_native_reports_and_duplicate_evidence() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
     let dir = home.join(".codex/sessions/2026/01/01");
@@ -363,7 +357,7 @@ async fn codex_tool_loop_usage_retains_native_reports_and_duplicate_evidence() {
     std::fs::write(&path, contents).unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Codex)).await;
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Codex)).await;
 
     // Replies stay conversational rows without usage metadata.
     let hits = db.search_session_messages("codex", None, "reply", 10).await;

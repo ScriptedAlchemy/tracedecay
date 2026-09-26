@@ -58,6 +58,7 @@ async fn workflow_get_definition_returns_the_stored_definition_and_conceals_a_mi
                 "code": "workflow.invalid_request",
                 "message": "The Workflow application request is invalid"
             },
+            "detail": null,
             "committed_receipt": null,
             "owning_layer": "adapter",
             "terminality": "pre_admission",
@@ -223,6 +224,7 @@ async fn concealed_miss(server: &tracedecay::mcp::McpServer, arguments: Value) -
         "code": "not_found_or_not_authorized",
         "message": "The requested resource was not found or is not authorized",
         "diagnostic": null,
+        "detail": null,
         "committed_receipt": null,
         "owning_layer": "runtime",
         "terminality": "pre_admission",

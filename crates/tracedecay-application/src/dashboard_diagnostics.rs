@@ -118,6 +118,7 @@ pub fn diagnostic_broker(
 /// dashboard.
 #[hotpath::measure(label = "usecases.diagnostics.open_broker", future = true)]
 pub async fn open_diagnostic_broker(
+    profile: Option<&tracedecay_runtime_core::config::ProfileRoot>,
     project_root: PathBuf,
     dashboard_root: &std::path::Path,
 ) -> Arc<Mutex<DiagnosticBroker>> {
@@ -143,7 +144,10 @@ pub async fn open_diagnostic_broker(
     // the home level. Construction reads the project file; the home-level
     // declaration is adopted here so a host that was only registered in
     // `~/.config/opencode/opencode.json` still keeps its retained analyzers.
-    let home_ownership = HostAnalyzerOwnership::from_opencode_process_home();
+    // A server without an owning profile has no home level to adopt.
+    let home_ownership = profile.map_or_else(HostAnalyzerOwnership::default, |profile| {
+        HostAnalyzerOwnership::from_opencode_profile_home(profile)
+    });
     if home_ownership.is_engaged() {
         let merged = broker.host_analyzer_ownership().union(&home_ownership);
         broker.adopt_host_analyzer_ownership(merged);
@@ -576,66 +580,10 @@ fn byte_line(source: &[u8], offset: u64) -> Option<u32> {
 mod tests {
     use super::*;
 
-    /// Isolates `HOME`/`XDG_CONFIG_HOME` for tests that open a broker.
-    ///
-    /// `open_diagnostic_broker` reads the process user's home-level OpenCode
-    /// registration, and a test must never read the operator's real host
-    /// configuration. It takes the process-wide profile-environment lock so
-    /// `PinnedUserDataDir` guards in other modules cannot restore `HOME`
-    /// underneath it.
-    struct HomeGuard {
-        previous_home: Option<std::ffi::OsString>,
-        previous_userprofile: Option<std::ffi::OsString>,
-        previous_xdg: Option<std::ffi::OsString>,
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl HomeGuard {
-        fn isolate(home: &std::path::Path) -> Self {
-            let lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
-            let previous_home = std::env::var_os("HOME");
-            let previous_userprofile = std::env::var_os("USERPROFILE");
-            let previous_xdg = std::env::var_os("XDG_CONFIG_HOME");
-            // SAFETY: the process-wide profile-environment lock is held for
-            // the guard's lifetime, so no other test observes the override.
-            unsafe {
-                std::env::set_var("HOME", home);
-                std::env::set_var("USERPROFILE", home);
-                std::env::remove_var("XDG_CONFIG_HOME");
-            }
-            Self {
-                previous_home,
-                previous_userprofile,
-                previous_xdg,
-                _lock: lock,
-            }
-        }
-    }
-
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            // SAFETY: see `HomeGuard::isolate`; the lock is still held.
-            unsafe {
-                match self.previous_home.take() {
-                    Some(previous) => std::env::set_var("HOME", previous),
-                    None => std::env::remove_var("HOME"),
-                }
-                match self.previous_userprofile.take() {
-                    Some(previous) => std::env::set_var("USERPROFILE", previous),
-                    None => std::env::remove_var("USERPROFILE"),
-                }
-                match self.previous_xdg.take() {
-                    Some(previous) => std::env::set_var("XDG_CONFIG_HOME", previous),
-                    None => std::env::remove_var("XDG_CONFIG_HOME"),
-                }
-            }
-        }
-    }
-
     #[tokio::test]
     async fn unreadable_settings_mount_a_broker_that_reports_itself_degraded() {
         let home = tempfile::tempdir().expect("isolated home");
-        let _env = HomeGuard::isolate(home.path());
+        let profile = tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let dashboard_root = tempfile::tempdir().expect("dashboard root");
         tokio::fs::write(
             tracedecay_lsp::analyzer::settings::settings_path(dashboard_root.path()),
@@ -644,9 +592,12 @@ mod tests {
         .await
         .expect("unparseable settings file");
 
-        let broker =
-            open_diagnostic_broker(dashboard_root.path().to_path_buf(), dashboard_root.path())
-                .await;
+        let broker = open_diagnostic_broker(
+            Some(&profile),
+            dashboard_root.path().to_path_buf(),
+            dashboard_root.path(),
+        )
+        .await;
         let snapshot = broker.lock().await.snapshot();
 
         let reason = snapshot
@@ -667,12 +618,15 @@ mod tests {
     #[tokio::test]
     async fn absent_settings_mount_a_healthy_broker_on_the_defaults() {
         let home = tempfile::tempdir().expect("isolated home");
-        let _env = HomeGuard::isolate(home.path());
+        let profile = tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let dashboard_root = tempfile::tempdir().expect("dashboard root");
 
-        let broker =
-            open_diagnostic_broker(dashboard_root.path().to_path_buf(), dashboard_root.path())
-                .await;
+        let broker = open_diagnostic_broker(
+            Some(&profile),
+            dashboard_root.path().to_path_buf(),
+            dashboard_root.path(),
+        )
+        .await;
 
         assert_eq!(
             broker.lock().await.snapshot().settings_unavailable,
@@ -684,7 +638,7 @@ mod tests {
     #[tokio::test]
     async fn a_home_level_registration_does_not_revoke_the_project_level_one() {
         let home = tempfile::tempdir().expect("isolated home");
-        let _env = HomeGuard::isolate(home.path());
+        let profile = tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let opencode_dir = home.path().join(".config").join("opencode");
         tokio::fs::create_dir_all(&opencode_dir)
             .await
@@ -731,8 +685,12 @@ mod tests {
         .await
         .expect("write project opencode.json");
 
-        let broker =
-            open_diagnostic_broker(project_root.path().to_path_buf(), project_root.path()).await;
+        let broker = open_diagnostic_broker(
+            Some(&profile),
+            project_root.path().to_path_buf(),
+            project_root.path(),
+        )
+        .await;
 
         let broker = broker.lock().await;
         assert_eq!(

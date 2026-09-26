@@ -249,7 +249,11 @@ fn test_store_administration_for_profile(profile_root: &std::path::Path) -> Stor
     let profile_identity =
         tracedecay_daemon_identity::profile_identity::load_or_create(profile_root)
             .expect("load test profile identity");
-    StoreAdministration::default().with_profile_identity(profile_identity)
+    StoreAdministration::default()
+        .with_owner_profile(tracedecay_runtime_core::config::ProfileRoot::new(
+            profile_root,
+        ))
+        .with_profile_identity(profile_identity)
 }
 
 async fn prewarm_test_profile_runtime(store_administration: &StoreAdministration) {
@@ -271,7 +275,11 @@ fn test_daemon_engine_for_profile(profile_root: &std::path::Path) -> DaemonEngin
     let profile_identity =
         tracedecay_daemon_identity::profile_identity::load_or_create(profile_root)
             .expect("load test profile identity");
-    let engine = DaemonEngine::default().with_profile_identity(profile_identity);
+    let engine = DaemonEngine::default()
+        .with_owner_profile(tracedecay_runtime_core::config::ProfileRoot::new(
+            profile_root,
+        ))
+        .with_profile_identity(profile_identity);
     // Daemon bootstrap installs the profile worker plan before it publishes any
     // transport endpoint (`bootstrap::install_profile_worker_plan`), and project
     // open refuses outright without it. A freshly created test profile always

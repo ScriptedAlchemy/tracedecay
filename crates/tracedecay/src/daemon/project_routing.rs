@@ -72,15 +72,20 @@ pub(super) fn prefer_recorded_open_failure<T>(
 
 pub(super) fn project_route_for_handshake(
     handshake: &DaemonHandshake,
+    owner_home: Option<&Path>,
 ) -> Result<(PathBuf, ProjectRouteKey)> {
     let Some(project_path) = handshake.project_path.as_ref() else {
-        return Err(TraceDecayError::Config {
-            message: "project server requested without project_path".to_string(),
-        });
+        return Err(TraceDecayError::project_route(
+            PROJECT_REQUIRED_REASON_CODE,
+            false,
+            "this operation needs a TraceDecay project, and the request named none; \
+             run it inside an initialized project or pass --project <path>",
+        ));
     };
     let canonical_project_path =
         tracedecay_runtime_core::path_safety::canonical_root_identity(project_path);
-    if tracedecay_runtime_core::config::is_ambient_project_root(&canonical_project_path) {
+    if tracedecay_runtime_core::config::is_ambient_project_root(owner_home, &canonical_project_path)
+    {
         return Err(TraceDecayError::Config {
             message: format!(
                 "'{}' is an ambient user/filesystem root, not an active TraceDecay code project",

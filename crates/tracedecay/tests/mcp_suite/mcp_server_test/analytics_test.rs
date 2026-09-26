@@ -8,8 +8,18 @@ use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn search_call_writes_mcp_runtime_analytics_event() {
-    let _env_guard = SAVINGS_ENV_LOCK.lock().await;
-    let _enable = EnvVarGuard::set("TRACEDECAY_ENABLE_GLOBAL_DB", "1");
+    // Global accounting is a process-environment switch the cargo test
+    // profile turns off, so the journey runs in a child that enables it.
+    if !crate::common::in_child_test() {
+        crate::common::rerun_test_in_child(
+            "mcp_server_test::analytics_test::search_call_writes_mcp_runtime_analytics_event",
+            &[(
+                "TRACEDECAY_ENABLE_GLOBAL_DB",
+                Some(std::ffi::OsStr::new("1")),
+            )],
+        );
+        return;
+    }
     let fixture = crate::support::production_composition_fixture_with_sources(|root| {
         std::fs::create_dir_all(root.join("src")).expect("savings project src");
         std::fs::write(root.join("src/main.rs"), savings_project_source())
@@ -379,11 +389,19 @@ async fn structural_edit_failure_writes_real_failure_reason_to_analytics() {
 /// through the ungated CLI paths).
 #[tokio::test]
 async fn ledger_records_by_default_without_env_opt_in() {
-    let _env_guard = SAVINGS_ENV_LOCK.lock().await;
-    // Simulate a real (non-cargo) launch: neither the opt-in nor the
-    // cargo-test opt-out is present, so the default-on path is exercised.
-    let _enable = EnvVarGuard::unset("TRACEDECAY_ENABLE_GLOBAL_DB");
-    let _disable = EnvVarGuard::unset("TRACEDECAY_DISABLE_GLOBAL_DB");
+    // Simulate a real (non-cargo) launch in a child process: neither the
+    // opt-in nor the cargo-test opt-out is present, so the default-on path is
+    // exercised.
+    if !crate::common::in_child_test() {
+        crate::common::rerun_test_in_child(
+            "mcp_server_test::analytics_test::ledger_records_by_default_without_env_opt_in",
+            &[
+                ("TRACEDECAY_ENABLE_GLOBAL_DB", None),
+                ("TRACEDECAY_DISABLE_GLOBAL_DB", None),
+            ],
+        );
+        return;
+    }
     assert!(tracedecay_global_db::global_accounting_enabled());
 
     let fixture = crate::support::production_composition_fixture().await;
@@ -438,11 +456,20 @@ async fn ledger_records_by_default_without_env_opt_in() {
 /// disables global accounting.
 #[tokio::test]
 async fn global_accounting_env_overrides() {
-    let _env_guard = SAVINGS_ENV_LOCK.lock().await;
     use tracedecay_global_db::{AccountingMode, global_accounting_mode};
 
-    let _clear_enable = EnvVarGuard::unset("TRACEDECAY_ENABLE_GLOBAL_DB");
-    let _clear_disable = EnvVarGuard::unset("TRACEDECAY_DISABLE_GLOBAL_DB");
+    // The child runs this test alone, so it may switch the accounting
+    // variables in-process without reaching a sibling test.
+    if !crate::common::in_child_test() {
+        crate::common::rerun_test_in_child(
+            "mcp_server_test::analytics_test::global_accounting_env_overrides",
+            &[
+                ("TRACEDECAY_ENABLE_GLOBAL_DB", None),
+                ("TRACEDECAY_DISABLE_GLOBAL_DB", None),
+            ],
+        );
+        return;
+    }
     assert_eq!(global_accounting_mode(), AccountingMode::Default);
     assert!(global_accounting_mode().enabled());
 
@@ -465,8 +492,18 @@ async fn global_accounting_env_overrides() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lifetime_counter_matches_ledger_net_savings() {
-    let _env_guard = SAVINGS_ENV_LOCK.lock().await;
-    let _enable = EnvVarGuard::set("TRACEDECAY_ENABLE_GLOBAL_DB", "1");
+    // Global accounting is a process-environment switch the cargo test
+    // profile turns off, so the journey runs in a child that enables it.
+    if !crate::common::in_child_test() {
+        crate::common::rerun_test_in_child(
+            "mcp_server_test::analytics_test::lifetime_counter_matches_ledger_net_savings",
+            &[(
+                "TRACEDECAY_ENABLE_GLOBAL_DB",
+                Some(std::ffi::OsStr::new("1")),
+            )],
+        );
+        return;
+    }
     let fixture = crate::support::production_composition_fixture_with_sources(|root| {
         std::fs::create_dir_all(root.join("src")).expect("savings project src");
         std::fs::write(root.join("src/main.rs"), savings_project_source())

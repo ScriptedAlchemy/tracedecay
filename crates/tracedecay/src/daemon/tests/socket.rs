@@ -1044,8 +1044,14 @@ async fn socket_client_routes_multiple_closed_invocations_without_falling_back_t
         let response: serde_json::Value = serde_json::from_str(&line).expect("response json");
         assert_eq!(response["protocol"], "tracedecay.daemon.invocation");
         assert_eq!(response["request_id"], request_id);
-        assert_eq!(response["status"], "problem");
-        assert_eq!(response["problem"], "unavailable");
+        // The handshake names no project, so the project-scoped read is a
+        // terminal refusal the client must correct, not a retryable outage.
+        assert_eq!(response["status"], "application_problem", "{response:#}");
+        assert_eq!(response["problem"]["kind"], "invalid_request");
+        assert_eq!(
+            response["problem"]["diagnostic"]["code"],
+            "project_required"
+        );
         assert!(response.get("jsonrpc").is_none());
     }
 
@@ -1468,8 +1474,14 @@ async fn portable_broker_routes_multiple_closed_invocations_without_falling_back
         let response: serde_json::Value = serde_json::from_str(&line).expect("response json");
         assert_eq!(response["protocol"], "tracedecay.daemon.invocation");
         assert_eq!(response["request_id"], request_id);
-        assert_eq!(response["status"], "problem");
-        assert_eq!(response["problem"], "unavailable");
+        // The handshake names no project, so the project-scoped read is a
+        // terminal refusal the client must correct, not a retryable outage.
+        assert_eq!(response["status"], "application_problem", "{response:#}");
+        assert_eq!(response["problem"]["kind"], "invalid_request");
+        assert_eq!(
+            response["problem"]["diagnostic"]["code"],
+            "project_required"
+        );
         assert!(response.get("jsonrpc").is_none());
     }
     writer.shutdown().await.expect("shutdown writer");

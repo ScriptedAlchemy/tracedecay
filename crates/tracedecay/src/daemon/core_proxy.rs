@@ -46,11 +46,15 @@ use tracedecay_runtime_core::logging::log_daemon_event;
 /// grace before falling back. This probe never starts or changes the service;
 /// an intentionally stopped service remains stopped.
 #[cfg(unix)]
-pub async fn should_proxy_serve_to_daemon(socket_path: &Path) -> bool {
-    let installed_socket = tracedecay_daemon_control::installed_service_socket_path()
+pub async fn should_proxy_serve_to_daemon(
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
+    socket_path: &Path,
+) -> bool {
+    let installed_socket = tracedecay_daemon_control::installed_service_socket_path(profile)
         .ok()
         .flatten();
     should_proxy_serve_to_daemon_with(
+        profile.data_dir(),
         socket_path,
         installed_socket.as_deref(),
         super::DAEMON_RESTART_GRACE,
@@ -68,7 +72,10 @@ pub(crate) fn proxy_required_by_platform(transport_supported: bool, endpoint_exi
 /// in-process `SQLite` fallback.
 #[cfg(not(unix))]
 #[allow(clippy::unused_async)] // Preserve parity with the Unix async routing probe.
-pub async fn should_proxy_serve_to_daemon(socket_path: &Path) -> bool {
+pub async fn should_proxy_serve_to_daemon(
+    _profile: &tracedecay_runtime_core::config::ProfileRoot,
+    socket_path: &Path,
+) -> bool {
     proxy_required_by_platform(false, socket_path.exists())
 }
 
@@ -117,6 +124,7 @@ pub(crate) struct InitializeRouteMetadata {
 
 #[cfg(unix)]
 pub(crate) async fn should_proxy_serve_to_daemon_with(
+    profile_root: &Path,
     socket_path: &Path,
     installed_service_socket: Option<&Path>,
     grace: Duration,
@@ -130,7 +138,7 @@ pub(crate) async fn should_proxy_serve_to_daemon_with(
     if installed_service_socket != Some(socket_path) {
         return false;
     }
-    connect_with_restart_grace(socket_path, grace, poll_interval)
+    connect_with_restart_grace(profile_root, socket_path, grace, poll_interval)
         .await
         .is_ok()
 }
@@ -458,6 +466,7 @@ fn reset_proxy_handshake_for_initialize_request(
 
 #[hotpath::measure(label = "daemon.engine.proxy.initialize_route", future = true)]
 pub(crate) async fn resolve_daemon_initialize_route(
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
     params: Option<&serde_json::Value>,
     registry: Option<&tracedecay_global_db::RegisteredGlobalDb>,
 ) -> tracedecay_domain::errors::Result<Option<InitializeRouteMetadata>> {
@@ -518,7 +527,7 @@ pub(crate) async fn resolve_daemon_initialize_route(
             // to discover_project_root / Resolved admission.
             return Err(repository_discovery_deferred(&root, *reason));
         }
-        if let Some(project_path) = tracedecay_runtime_core::config::discover_project_root(&root) {
+        if let Some(project_path) = profile.discover_project_root(&root) {
             return Ok(Some(InitializeRouteMetadata {
                 project_path,
                 allow_init: false,
@@ -779,15 +788,17 @@ async fn send_daemon_request_with_liveness_poll(
         .as_ref()
         .map_or("daemon request", |request| request.method.as_str())
         .to_string();
+    let profile_root = &handshake.client_identity.profile_root;
     let (connection, stream) = match client_deadline {
         Some(deadline) => {
             deadline
                 .run("connect", &request_label, async {
-                    connect_to_current_daemon_within(socket_path, Some(deadline)).await
+                    connect_to_current_daemon_within(profile_root, socket_path, Some(deadline))
+                        .await
                 })
                 .await?
         }
-        None => connect_to_current_daemon_within(socket_path, None).await?,
+        None => connect_to_current_daemon_within(profile_root, socket_path, None).await?,
     };
     let (reader, mut writer) = stream.into_owned_split();
 

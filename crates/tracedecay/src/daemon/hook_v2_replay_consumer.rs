@@ -143,11 +143,18 @@ async fn drain_all_hosts(
     let _sweep = HookReplaySweepObservation::begin();
     let project_id =
         tracedecay_agent_hosts::hooks::hook_project_id_for_layout(graph.hook_store_layout());
-    let worktree_id = tracedecay_agent_hosts::hooks::hook_worktree_id_for_layout(
-        &crate::hook_runtime(),
-        graph.hook_store_layout(),
-    )
-    .ok();
+    // Worktree identity needs only the hook runtime's scope resolver; the
+    // profile is the graph's own.
+    let worktree_id = graph
+        .profile_root()
+        .map(tracedecay_runtime_core::config::ProfileRoot::new)
+        .and_then(|profile| {
+            tracedecay_agent_hosts::hooks::hook_worktree_id_for_layout(
+                &crate::hook_runtime(profile),
+                graph.hook_store_layout(),
+            )
+        })
+        .ok();
     for host in tracedecay_agent_hosts::hooks::NATIVE_HOOK_HOSTS {
         let now = hook_replay_now();
         drain_hook_delivery_receipts(data_root, *host, delivery_settlements).await;

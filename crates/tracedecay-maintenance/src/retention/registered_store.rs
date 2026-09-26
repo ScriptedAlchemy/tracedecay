@@ -124,7 +124,6 @@ mod tests {
 
     #[tokio::test]
     async fn registered_retention_always_prunes_observability_analytics() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
             "maintenance-registered-observability-retention",
         )
@@ -190,7 +189,6 @@ mod tests {
     #[tokio::test]
     async fn registered_retention_reaps_stale_orphan_payloads_in_place() {
         const NOW: i64 = 40 * 86_400;
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
             "maintenance-registered-payload-gc",
         )
@@ -238,7 +236,6 @@ mod tests {
     #[tokio::test]
     async fn lcm_status_reports_the_payload_gc_the_retention_tick_recorded() {
         const NOW: i64 = 40 * 86_400;
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
             "maintenance-registered-payload-gc-status",
         )
@@ -294,7 +291,6 @@ mod tests {
 
     #[tokio::test]
     async fn observability_retention_failure_preserves_typed_owner_diagnostic() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
             "maintenance-registered-observability-retention-error",
         )

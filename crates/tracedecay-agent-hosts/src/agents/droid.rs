@@ -24,6 +24,7 @@
 //! entries are preserved byte-for-byte on install, refresh, and uninstall.
 
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::{Value, json};
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -323,11 +324,11 @@ impl AgentIntegration for DroidIntegration {
         droid_config_dir(home).is_dir()
     }
 
-    fn primary_config_path(&self, home: &Path) -> Option<PathBuf> {
+    fn primary_config_path(&self, home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         Some(droid_mcp_config_path(home))
     }
 
-    fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
+    fn host_registration_paths(&self, home: &Path, _profile: &ProfileRoot) -> Vec<PathBuf> {
         vec![droid_mcp_config_path(home), droid_hooks_path(home)]
     }
 
@@ -368,12 +369,12 @@ impl AgentIntegration for DroidIntegration {
         Ok(())
     }
 
-    fn has_tracedecay(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
         super::mcp_config_has_tracedecay(&droid_mcp_config_path(home), "mcpServers", load_json_file)
             || droid_hooks_registration_state(home) != HostBundleRegistrationStateV1::Missing
     }
 
-    fn detected_host_surface(&self, home: &Path) -> Option<PathBuf> {
+    fn detected_host_surface(&self, home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         droid_config_dir(home)
             .is_dir()
             .then(|| droid_config_dir(home))
@@ -571,6 +572,7 @@ mod tests {
             DroidIntegration.host_component_registration(
                 HostComponentV1::Core,
                 &HealthcheckContext {
+                    profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
                     home: home.path().to_path_buf(),
                     project_path: home.path().to_path_buf(),
                 }
@@ -647,6 +649,7 @@ mod tests {
     fn registration_state_reads_the_host_owned_document() {
         let home = tempfile::tempdir().unwrap();
         let health = HealthcheckContext {
+            profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             home: home.path().to_path_buf(),
             project_path: home.path().to_path_buf(),
         };
@@ -675,7 +678,10 @@ mod tests {
             integration.host_component_registration(HostComponentV1::ContextMcp, &health),
             HostBundleRegistrationStateV1::Current
         );
-        assert!(integration.has_tracedecay(home.path()));
+        assert!(integration.has_tracedecay(
+            home.path(),
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path())
+        ));
 
         // A foreign entry at the deploy key that lost the launch surface is
         // repairable, never claimed current.
@@ -708,16 +714,25 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let integration = DroidIntegration;
         assert!(!integration.is_detected(home.path()));
-        assert!(!integration.has_tracedecay(home.path()));
+        assert!(!integration.has_tracedecay(
+            home.path(),
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path())
+        ));
 
         std::fs::create_dir_all(droid_config_dir(home.path())).unwrap();
         assert!(integration.is_detected(home.path()));
         assert_eq!(
-            integration.primary_config_path(home.path()),
+            integration.primary_config_path(
+                home.path(),
+                &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path())
+            ),
             Some(droid_mcp_config_path(home.path()))
         );
         assert_eq!(
-            integration.host_registration_paths(home.path()),
+            integration.host_registration_paths(
+                home.path(),
+                &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path())
+            ),
             vec![
                 droid_mcp_config_path(home.path()),
                 droid_hooks_path(home.path())

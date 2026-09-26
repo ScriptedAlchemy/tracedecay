@@ -39,11 +39,6 @@ pub const MMAP_FILENAME: &str = "monitor.mmap";
 /// File name of the single-instance TUI lock inside the user data dir.
 pub const LOCK_FILENAME: &str = "monitor.lock";
 
-/// Resolve the user-level data directory (`~/.tracedecay/` by default).
-fn global_tracedecay_dir() -> Option<PathBuf> {
-    tracedecay_runtime_core::config::user_data_dir()
-}
-
 /// A single ring-buffer entry read from the mmap.
 #[derive(Debug, Clone)]
 pub struct MonitorEntry {
@@ -64,25 +59,12 @@ impl MonitorEntry {
 
 // ── Writer (called by MCP server) ───────────────────────────────────
 
-/// Write a tool-call entry to the global monitor mmap.
+/// Write a tool-call entry to the monitor mmap in the profile data directory
+/// `dir`.
 ///
 /// `project_root` is used to derive the folder name. `prefix` identifies
 /// the tool suite (e.g. "tracedecay"). Best-effort: silently returns on
 /// any failure.
-pub fn write_entry(project_root: &Path, prefix: &str, tool_name: &str, delta: u64, before: u64) {
-    let Some(dir) = global_tracedecay_dir() else {
-        return;
-    };
-    let _ = std::fs::create_dir_all(&dir);
-    let mmap_path = dir.join(MMAP_FILENAME);
-    let project = project_root
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let _ = write_entry_inner(&mmap_path, prefix, &project, tool_name, delta, before);
-}
-
-/// Write a tool-call entry to a specific mmap directory (for testing).
 pub fn write_entry_to(
     dir: &Path,
     project_root: &Path,
@@ -172,18 +154,7 @@ fn read_str(mmap: &memmap2::Mmap, offset: usize) -> String {
 }
 
 impl MmapReader {
-    /// Open the global monitor mmap for reading.
-    pub fn open() -> std::io::Result<Self> {
-        let dir = global_tracedecay_dir().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "cannot resolve home directory",
-            )
-        })?;
-        Self::open_at(&dir)
-    }
-
-    /// Open a monitor mmap at an explicit directory (for testing).
+    /// Open the monitor mmap in the profile data directory `dir`.
     #[hotpath::measure(label = "runtime_core.monitor_ring.open")]
     pub fn open_at(dir: &Path) -> std::io::Result<Self> {
         let mmap_path = dir.join(MMAP_FILENAME);

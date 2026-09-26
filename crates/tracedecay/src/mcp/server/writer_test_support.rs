@@ -5,7 +5,6 @@ use tempfile::TempDir;
 use tracedecay_runtime_core::path_safety::{plain_git_args, plain_host_path};
 
 use crate::mcp::server::McpServerConstructionContext;
-use tracedecay_project::config::PinnedUserDataDir;
 use tracedecay_project::project::TraceDecay;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 
@@ -26,7 +25,7 @@ pub(super) fn git(root: &Path, args: &[&str]) {
 }
 
 pub(crate) struct WriterTestFixtureAuthority {
-    _pin: PinnedUserDataDir,
+    profile: TempDir,
     runtime: Arc<HostAdmissionTestRuntimeV1>,
 }
 
@@ -44,11 +43,16 @@ impl WriterTestFixtureAuthority {
             .expect("reopen registered project graph")
     }
 
+    /// The fixture's isolated profile data directory.
+    pub(super) fn profile_root(&self) -> &Path {
+        self.profile.path()
+    }
+
     /// Releases the retained runtime, the profile's only session-relation
-    /// writer, while keeping the profile pin alive, so a test can reopen the
-    /// profile the way a fresh process would.
-    pub(super) fn release_runtime_for_reopen(self) -> PinnedUserDataDir {
-        self._pin
+    /// writer, while keeping the profile directory alive, so a test can
+    /// reopen the profile the way a fresh process would.
+    pub(super) fn release_runtime_for_reopen(self) -> TempDir {
+        self.profile
     }
 }
 
@@ -88,7 +92,7 @@ pub(super) fn registered_context(
 }
 
 pub(crate) async fn init_indexed_repo() -> (TraceDecay, TempDir, WriterTestFixtureAuthority) {
-    let pin = PinnedUserDataDir::new();
+    let profile = TempDir::new().expect("isolated profile");
     let temporary_root = std::env::temp_dir()
         .canonicalize()
         .expect("canonical temporary root");
@@ -102,9 +106,12 @@ pub(crate) async fn init_indexed_repo() -> (TraceDecay, TempDir, WriterTestFixtu
     std::fs::write(root.join("src/a.rs"), "pub fn a() {}\n").expect("write source");
     git(root, &["add", "."]);
     git(root, &["commit", "-q", "-m", "initial"]);
-    let (cg, runtime) =
-        TraceDecay::init_test_fixture_with_registered_runtime(root, "project.mcp-writer")
-            .await
-            .expect("init");
-    (cg, dir, WriterTestFixtureAuthority { _pin: pin, runtime })
+    let (cg, runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.path(),
+        root,
+        "project.mcp-writer",
+    )
+    .await
+    .expect("init");
+    (cg, dir, WriterTestFixtureAuthority { profile, runtime })
 }

@@ -2,12 +2,11 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
 
-use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
 use crate::projection::check_cancelled;
 use crate::schema::{
-    ENTITY_ID_PROPERTY, ENTITY_LABEL, RELATION_ID_PROPERTY, RELATION_LABEL,
+    ENTITY_ID_PROPERTY, ENTITY_LABEL, RELATION_ID_PROPERTY, RELATION_LABEL, decode_identity,
     entity_projection_label, relation_projection_label,
 };
 use crate::state::{labeled_projection_nodes, latest_projection, load_entity, load_relation};
@@ -411,25 +410,17 @@ fn streaming_identity_page(
         let Some(record) = store.get_node(node) else {
             continue;
         };
-        let identity = record
-            .get_property(identity_property)
-            .and_then(Value::as_str)
-            .ok_or_else(|| GraphDbError::Corrupt {
-                message: format!("projection query returned a non-string `{identity_property}`"),
-            })?;
-        if after.is_some_and(|after| identity <= after) {
+        let identity = decode_identity(record.get_property(identity_property), identity_property)?;
+        if after.is_some_and(|after| identity.as_str() <= after) {
             continue;
         }
         if page.len() == limit {
-            if page
-                .last()
-                .is_some_and(|widest| identity >= widest.as_str())
-            {
+            if page.last().is_some_and(|widest| identity >= *widest) {
                 continue;
             }
             page.pop_last();
         }
-        page.insert(identity.to_owned());
+        page.insert(identity);
     }
     Ok(page.into_iter().collect())
 }

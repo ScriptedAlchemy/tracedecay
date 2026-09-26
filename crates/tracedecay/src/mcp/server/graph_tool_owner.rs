@@ -7,7 +7,8 @@ use std::sync::{Arc, Weak};
 
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_daemon_service::{
-    GraphToolFuture, GraphToolInvocationV1, ProjectGraphToolPortV1, RegisteredGraphToolOwnerV1,
+    DaemonInvocationService, GraphToolFuture, GraphToolInvocationV1, ProjectGraphToolPortV1,
+    RegisteredGraphToolOwnerV1,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
@@ -58,6 +59,9 @@ impl McpServer {
             verified_graph_query_port: self.verified_graph_query_port.clone(),
             code_index_freshness_reader: self.dashboard_code_index_freshness_reader.clone(),
             code_index_publication_identity: self.code_index_publication_identity.clone(),
+            code_index_ignored_dependency_admission: self
+                .code_index_ignored_dependency_admission
+                .clone(),
             ..ToolCallRegistryOptions::default()
         };
         compute_graph_tool_for_owner(
@@ -82,6 +86,18 @@ impl McpServer {
                 message: "the graph-tool owner requires the daemon invocation service".to_owned(),
             });
         };
+        self.register_graph_tool_owner_on(service, project_root, scope)
+            .await
+    }
+
+    /// Registers this server as the graph-tool owner on `service`, the
+    /// invocation service that routes this project's graph reads.
+    pub(crate) async fn register_graph_tool_owner_on(
+        &self,
+        service: &DaemonInvocationService,
+        project_root: &Path,
+        scope: ResolvedScope,
+    ) -> Result<()> {
         let port: Arc<dyn ProjectGraphToolPortV1> = Arc::new(McpGraphToolPort {
             server: self.dispatch_authority.server(),
         });

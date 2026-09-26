@@ -8,7 +8,7 @@ use tracedecay_domain::{EphemeralSanitizedQueryViewV1, UtcMicros};
 use crate::context::RequestContext;
 use crate::error::ApplicationContractError;
 use crate::handlers::ApplicationOperation;
-use crate::result::{OpaqueCursor, OperationBudgetUsage};
+use crate::result::{OmissionReason, OpaqueCursor, OperationBudgetUsage};
 
 use super::{CodeQueryRow, RetrievalRequestMeta};
 
@@ -157,7 +157,27 @@ impl PrimitiveFailure {
     }
 }
 
+const MACRO_BODY_UNPARSED: &str = "macro_body_unparsed";
+
 impl PrimitiveSupportGap {
+    /// A caller that is an item-position macro invocation whose body was not
+    /// expanded; `invocation` is its `name!` spelling.
+    pub fn macro_body_unparsed(invocation: &str) -> Self {
+        Self {
+            provider: Some("code_index".to_owned()),
+            language: None,
+            reason: format!("{MACRO_BODY_UNPARSED}: {invocation}"),
+        }
+    }
+
+    /// The typed omission this gap discloses in an evidence packet.
+    pub fn omission_reason(&self) -> OmissionReason {
+        match self.reason.split_once(':') {
+            Some((MACRO_BODY_UNPARSED, _)) => OmissionReason::MacroBodyUnparsed,
+            _ => OmissionReason::Unsupported,
+        }
+    }
+
     pub fn unsupported(
         provider: Option<String>,
         language: Option<String>,

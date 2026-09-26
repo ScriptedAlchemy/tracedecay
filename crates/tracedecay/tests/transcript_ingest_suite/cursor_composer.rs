@@ -20,7 +20,6 @@ use tracedecay_sessions::runtime::hosts::cursor::{CursorSweepSource, cursor_proj
 use tracedecay_sessions::runtime::hosts::cursor_composer::CursorComposerSource;
 use tracedecay_store::ObservationReplayRequest;
 
-use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::{
     ProjectSessionTestRuntime, durable_table_count, ingest_global_sources_for_provider,
     mark_test_project, observation_source_cursor, open_project_session_db, set_projection_failure,
@@ -651,17 +650,10 @@ async fn composer_watermark_skips_unchanged_and_reingests_growth() {
 }
 
 #[tokio::test]
-// This test mutates process-wide HOME while asynchronous storage work runs;
-// it must hold the shared environment lock for the full test.
-#[allow(clippy::await_holding_lock)]
 async fn composer_projection_failure_commits_frontier_and_replays_once() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
     let home = tmp.path().join("home");
-    let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
 
@@ -677,7 +669,8 @@ async fn composer_projection_failure_commits_frontier_and_replays_once() {
     .await;
     let db = open_project_session_db(&project).await.unwrap();
     let first =
-        ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
+        ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cursor))
+            .await;
     assert!(first.messages_upserted >= 1);
     assert!(db.get_session("cursor", "comp-crash").await.is_some());
     let prefix_cursor = observation_source_cursor(&db, "cursor", "comp-crash", &project)
@@ -700,7 +693,8 @@ async fn composer_projection_failure_commits_frontier_and_replays_once() {
     .await;
 
     set_projection_failure(&db, true).await;
-    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
+    let _ = ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cursor))
+        .await;
     let committed_cursor = observation_source_cursor(&db, "cursor", "comp-crash", &project)
         .await
         .expect("committed Cursor composer observation cursor");
@@ -721,8 +715,13 @@ async fn composer_projection_failure_commits_frontier_and_replays_once() {
     drop(db);
 
     let recovered = open_project_session_db(&project).await.unwrap();
-    let _ = ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Cursor))
-        .await;
+    let _ = ingest_global_sources_for_provider(
+        &home,
+        &recovered,
+        &project,
+        Some(SessionProvider::Cursor),
+    )
+    .await;
     assert_eq!(
         recovered
             .search_session_messages("cursor", None, "projection retry suffix", 10)
@@ -744,9 +743,14 @@ async fn composer_projection_failure_commits_frontier_and_replays_once() {
     );
     assert_eq!(durable_table_count(&recovered, "projection_queue").await, 0);
     assert_eq!(
-        ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Cursor))
-            .await
-            .messages_upserted,
+        ingest_global_sources_for_provider(
+            &home,
+            &recovered,
+            &project,
+            Some(SessionProvider::Cursor)
+        )
+        .await
+        .messages_upserted,
         0
     );
     assert_eq!(
@@ -1134,15 +1138,10 @@ async fn write_store_db(path: &Path) {
 /// Production path: checked-in envelope todos admit as WorkflowLifecycle facts
 /// with stable list/item refs and native array order.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn composer_envelope_todos_admit_workflow_lifecycle_facts() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
     let home = tmp.path().join("home");
-    let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
 
@@ -1166,7 +1165,8 @@ async fn composer_envelope_todos_admit_workflow_lifecycle_facts() {
     )
     .await;
     let db = open_project_session_db(&project).await.unwrap();
-    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
+    let _ = ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cursor))
+        .await;
     assert_eq!(
         durable_table_count(&db, "projection_queue").await,
         0,
@@ -1214,15 +1214,10 @@ async fn composer_envelope_todos_admit_workflow_lifecycle_facts() {
 
 /// Exact redelivery of the same envelope todos is idempotent.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn composer_envelope_todos_exact_duplicate_is_idempotent() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
     let home = tmp.path().join("home");
-    let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
 
@@ -1242,10 +1237,12 @@ async fn composer_envelope_todos_exact_duplicate_is_idempotent() {
     )
     .await;
     let db = open_project_session_db(&project).await.unwrap();
-    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
+    let _ = ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cursor))
+        .await;
     let observations_before = durable_table_count(&db, "observations").await;
     let workflow_before = composer_workflow_fact_count(&db).await;
-    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
+    let _ = ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cursor))
+        .await;
     assert_eq!(
         durable_table_count(&db, "observations").await,
         observations_before,
@@ -1298,15 +1295,10 @@ async fn composer_envelope_todo_secret_is_sanitized_before_persistence() {
 /// Same todo checkpoint with divergent envelope evidence (createdAt) after a
 /// generation change is an identity collision, first durable facts remain.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn composer_envelope_todos_conflict_does_not_overwrite() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
     let home = tmp.path().join("home");
-    let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
 
@@ -1327,7 +1319,8 @@ async fn composer_envelope_todos_conflict_does_not_overwrite() {
     .await;
 
     let db = open_project_session_db(&project).await.unwrap();
-    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
+    let _ = ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cursor))
+        .await;
     let workflow_before = composer_workflow_fact_count(&db).await;
     assert_eq!(workflow_before, 3);
 
@@ -1350,7 +1343,8 @@ async fn composer_envelope_todos_conflict_does_not_overwrite() {
     )
     .await;
 
-    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
+    let _ = ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cursor))
+        .await;
 
     assert_eq!(
         composer_workflow_fact_count(&db).await,
@@ -1369,15 +1363,10 @@ async fn composer_envelope_todos_conflict_does_not_overwrite() {
 /// Fixture-backed pending→completed status update after restart admits a new
 /// content-fingerprint checkpoint without inventing revision fields.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn composer_envelope_todo_status_update_after_restart_admits_new_checkpoint() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
     let home = tmp.path().join("home");
-    let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
 
@@ -1399,7 +1388,8 @@ async fn composer_envelope_todo_status_update_after_restart_admits_new_checkpoin
     .await;
 
     let db = open_project_session_db(&project).await.unwrap();
-    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
+    let _ = ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cursor))
+        .await;
     let pending = db
         .search_session_messages("cursor", None, "Second todo", 10)
         .await;
@@ -1425,7 +1415,8 @@ async fn composer_envelope_todo_status_update_after_restart_admits_new_checkpoin
     )
     .await;
     let db = open_project_session_db(&project).await.unwrap();
-    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
+    let _ = ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cursor))
+        .await;
     assert_eq!(
         composer_workflow_fact_count(&db).await,
         6,

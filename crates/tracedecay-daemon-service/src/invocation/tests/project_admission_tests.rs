@@ -533,11 +533,10 @@ impl tracedecay_graph_query::CodeGraphProjectionReadPort for UnavailableCodeGrap
 /// neither replaces what is registered.
 #[tokio::test]
 async fn same_authority_source_edit_owners_alias_one_incumbent() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let profile = tempfile::TempDir::new().expect("profile directory");
     let directory = tempfile::TempDir::new().expect("project directory");
     let project_root = directory.path().to_path_buf();
-    let profile_root =
-        tracedecay_runtime_core::storage::default_profile_root().expect("profile root");
+    let profile_root = profile.path().to_path_buf();
     let project_id = ProjectId::new("project.source-edit.alias").expect("project id");
     let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
         &profile_root,
@@ -567,6 +566,7 @@ async fn same_authority_source_edit_owners_alias_one_incumbent() {
             pinned,
             runtime.project_database_arc().expect("project database"),
         ),
+        &profile_root,
     )
     .expect("configuration runtime");
     let configuration = Arc::new(configuration);

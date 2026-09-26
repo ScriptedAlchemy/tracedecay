@@ -855,7 +855,7 @@ fn retained_stale_rust_extractor_generation_is_refused_and_rebuilt() {
             .iter()
             .find(|(language, _)| language.as_str() == "rust")
             .map(|(_, revision)| revision.as_str()),
-        Some("extractor.rust.v13")
+        Some("extractor.rust.v15")
     );
 }
 
@@ -1414,16 +1414,57 @@ fn occurrence_graph_store_is_available_before_catalog_warm() {
         tracedecay_graph_db::GraphNamespace::new("code-graph").expect("graph namespace"),
     )
     .expect("projection identity");
-    let manifest =
-        crate::code_index::graph_projection::build_published_code_graph_manifest_checked(
+    // Build the graph the way publication does: from the sealed segments on
+    // disk, one window of files at a time.
+    let binding = scheduler
+        .code_graph_replay_binding(&generation_id)
+        .expect("sealed replay binding");
+    let digest = tracedecay_domain::sha256_hex_suffix(binding.sealed_state_digest.as_str())
+        .expect("sha256 sealed digest");
+    let sealed_manifest = std::fs::read(
+        binding
+            .generations_root
+            .join(format!("generation-{digest}.json")),
+    )
+    .expect("sealed manifest");
+    let segments_root =
+        tracedecay_code_index_retention::code_index_generations::code_generation_segments_root(
+            binding.generations_root.parent().expect("store root"),
+        );
+    let source =
+        crate::code_index::production::SealedGenerationFileWindowsV1::open(&sealed_manifest)
+            .expect("sealed manifest opens");
+    let scratch = TempDir::new().expect("graph row scratch");
+    let manifest = crate::code_index::graph_projection::build_sealed_code_graph_rows(
+        projection.clone(),
+        &source,
+        &mut |request, buffer| {
+            let crate::code_index::production::SealedGenerationSegmentReadV1::Whole {
+                digest, ..
+            } = request
+            else {
+                panic!("the graph build reads whole file segments");
+            };
+            *buffer = std::fs::read(segments_root.join(format!(
+                "segment-{}.json",
+                tracedecay_domain::sha256_hex_suffix(digest.as_str()).expect("segment digest")
+            )))
+            .expect("sealed segment");
+            Ok(())
+        },
+        &projector_revision,
+        tracedecay_graph_db::GraphGenerationRowSpill::create(
+            scratch.path().join("rows"),
             projection,
-            latest.generation(),
-            &projector_revision,
-            &|| Ok(()),
         )
-        .expect("code graph manifest");
+        .expect("row spill"),
+        &|| Ok(()),
+    )
+    .expect("code graph rows")
+    .materialize(&|| Ok(()))
+    .expect("code graph manifest");
     let snapshot = tracedecay_graph_db::VerifiedGraphSnapshot::memory(
-        manifest.as_ref().clone(),
+        manifest,
         Arc::new(tracedecay_graph_db::NeverCancelled),
     )
     .expect("verified graph snapshot");
@@ -10547,12 +10588,12 @@ async fn busy_admission_schedules_follow_up_cadence_wake() {
 /// observability store is busy.
 #[tokio::test]
 async fn blocked_observability_store_does_not_hold_reconcile_readiness() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let profile_dir = tempfile::tempdir().expect("profile");
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let store = TempDir::new().expect("store root");
     let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
     let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+        profile_dir.path().to_path_buf(),
         fixture.path(),
         scope.project_id.clone(),
     )
@@ -10643,7 +10684,7 @@ async fn blocked_observability_store_does_not_hold_reconcile_readiness() {
 /// one project observation store.
 #[tokio::test]
 async fn installed_observability_lane_records_index_and_retrieval_observations() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let profile_dir = tempfile::tempdir().expect("profile");
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
@@ -10678,7 +10719,7 @@ async fn installed_observability_lane_records_index_and_retrieval_observations()
         .expect("mount core query authority");
 
     let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+        profile_dir.path().to_path_buf(),
         fixture.path(),
         scope.project_id.clone(),
     )

@@ -97,6 +97,7 @@ struct HookTimingState {
 }
 
 pub(crate) struct HookTimingSpan {
+    profile_root: PathBuf,
     root: Option<PathBuf>,
     agent: &'static str,
     hook_name: String,
@@ -148,6 +149,7 @@ impl HookTimingSpan {
             .and_then(|root| (runtime.timing_gate)(root))
             .unwrap_or(true);
         Self {
+            profile_root: runtime.profile.data_dir().to_path_buf(),
             root: root.map(Path::to_path_buf),
             agent,
             hook_name: bounded_identifier(hook_name),
@@ -254,6 +256,7 @@ impl Drop for HookTimingSpan {
             .disposition
             .unwrap_or_else(|| HookDispositionTelemetry::unknown("disposition_absent"));
         record_hook_analytics(
+            &self.profile_root,
             self.root.as_deref(),
             "hook_completed",
             serde_json::json!({
@@ -498,6 +501,7 @@ fn record_hook_invoked_named(
     let payload_bytes = measure_host_event_payload_bytes(event_json);
     let prompt_category = inferred_prompt_category(parsed);
     record_hook_analytics(
+        runtime.profile.data_dir(),
         root,
         "hook_invoked",
         serde_json::json!({
@@ -574,6 +578,7 @@ pub(super) fn mint_hint_id() -> String {
 }
 
 pub(super) fn record_hint_analytics(
+    profile_root: &Path,
     root: Option<&Path>,
     event: &str,
     agent: HostIntegrationIdV1,
@@ -582,6 +587,7 @@ pub(super) fn record_hint_analytics(
     hint: &ToolHint,
 ) {
     record_hook_analytics(
+        profile_root,
         root,
         event,
         serde_json::json!({
@@ -594,11 +600,13 @@ pub(super) fn record_hint_analytics(
 }
 
 pub(super) fn record_workspace_status_analytics(
+    profile_root: &Path,
     root: Option<&Path>,
     status: HookWorkspaceStatus,
     session_id: Option<&str>,
 ) {
     record_hook_analytics(
+        profile_root,
         root,
         "workspace_status",
         serde_json::json!({
@@ -610,6 +618,7 @@ pub(super) fn record_workspace_status_analytics(
 }
 
 pub(super) fn record_hint_emitted(
+    profile_root: &Path,
     root: Option<&Path>,
     agent: HostIntegrationIdV1,
     session_id: Option<&str>,
@@ -621,7 +630,7 @@ pub(super) fn record_hint_emitted(
     } else {
         "hint_emitted"
     };
-    record_hint_analytics(root, event, agent, session_id, hint_id, hint);
+    record_hint_analytics(profile_root, root, event, agent, session_id, hint_id, hint);
 }
 
 fn inferred_prompt_category(parsed: &Value) -> Option<&'static str> {
@@ -645,11 +654,12 @@ fn inferred_prompt_category(parsed: &Value) -> Option<&'static str> {
 }
 
 pub(super) fn record_hook_analytics(
+    profile_root: &Path,
     root: Option<&Path>,
     event: &str,
     mut fields: serde_json::Value,
 ) {
-    let Some(path) = hook_analytics_path(root) else {
+    let Some(path) = hook_analytics_path(profile_root, root) else {
         return;
     };
     let Some(fields) = fields.as_object_mut() else {
@@ -681,16 +691,15 @@ pub(super) fn record_hook_analytics(
 /// The profile-wide fallback is observer-only: if the operator has no
 /// `TraceDecay` profile yet, skip the write instead of creating
 /// `$HOME/.tracedecay` from a fail-open hook.
-fn hook_analytics_path(root: Option<&Path>) -> Option<PathBuf> {
+fn hook_analytics_path(profile_root: &Path, root: Option<&Path>) -> Option<PathBuf> {
     let enrolled_data_root = root
-        .and_then(super::store_layout::enrolled_layout)
+        .and_then(|root| super::store_layout::enrolled_layout(profile_root, root))
         .map(|layout| layout.data_root);
     match enrolled_data_root {
         Some(data_root) => Some(data_root.join(HOOK_ANALYTICS_FILENAME)),
-        None => tracedecay_runtime_core::storage::default_profile_root()
-            .ok()
-            .filter(|profile_root| profile_root.is_dir())
-            .map(|profile_root| profile_root.join(HOOK_ANALYTICS_FILENAME)),
+        None => profile_root
+            .is_dir()
+            .then(|| profile_root.join(HOOK_ANALYTICS_FILENAME)),
     }
 }
 

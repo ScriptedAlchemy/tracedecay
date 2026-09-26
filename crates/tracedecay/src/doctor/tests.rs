@@ -10,7 +10,13 @@ fn supported_optional_host_absences_reach_doctor_without_host_directories() {
     let home = tempfile::tempdir().expect("isolated home");
     let reported = agents::all_integrations()
         .into_iter()
-        .filter(|agent| should_run_host_healthcheck(agent.as_ref(), home.path()))
+        .filter(|agent| {
+            should_run_host_healthcheck(
+                agent.as_ref(),
+                home.path(),
+                &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
+            )
+        })
         .map(|agent| agent.id())
         .collect::<std::collections::BTreeSet<_>>();
 
@@ -24,14 +30,18 @@ fn supported_optional_host_absences_reach_doctor_without_host_directories() {
     );
 
     let context = HealthcheckContext {
+        profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
         home: home.path().to_path_buf(),
         project_path: home.path().to_path_buf(),
     };
     let mut counters = DoctorCounters::new();
-    for agent in agents::all_integrations()
-        .into_iter()
-        .filter(|agent| should_run_host_healthcheck(agent.as_ref(), home.path()))
-    {
+    for agent in agents::all_integrations().into_iter().filter(|agent| {
+        should_run_host_healthcheck(
+            agent.as_ref(),
+            home.path(),
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
+        )
+    }) {
         agent.healthcheck(&mut counters, &context);
     }
     assert_eq!(
@@ -58,7 +68,11 @@ fn detected_kiro_without_a_tracedecay_registration_is_optional_absence() {
 
     let kiro = agents::KiroIntegration;
     assert!(
-        should_run_host_healthcheck(&kiro, home.path()),
+        should_run_host_healthcheck(
+            &kiro,
+            home.path(),
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
+        ),
         "Kiro remains a visible optional host"
     );
 
@@ -66,6 +80,7 @@ fn detected_kiro_without_a_tracedecay_registration_is_optional_absence() {
     kiro.healthcheck(
         &mut counters,
         &HealthcheckContext {
+            profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             home: home.path().to_path_buf(),
             project_path: home.path().to_path_buf(),
         },
@@ -441,7 +456,12 @@ fn doctor_reports_a_discovery_blocked_daemon_without_recovery_guidance() {
             && !message.contains("WAL:"),
         "{message}"
     );
-    let health = super::classify_daemon_status_error(&mut DoctorCounters::new(), path, &blocked);
+    let health = super::classify_daemon_status_error(
+        &mut DoctorCounters::new(),
+        std::path::Path::new("/Volumes/external/profile"),
+        path,
+        &blocked,
+    );
     assert!(
         matches!(health, super::DatabaseHealth::Unknown { reason } if reason == "daemon_warming"),
         "discovery-blocked warming must stay unknown health, not a store failure"

@@ -679,8 +679,13 @@ fn enroll_native_capture_project(home: &Path, project: &Path, project_id: &str) 
     tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
         .expect("install fixture profile identity");
     let layout = profile_sharded_layout(project, &profile_root, project_id).unwrap();
-    tracedecay_agent_hosts::hooks::publish_hook_bindings(&tracedecay::hook_runtime(), &layout)
-        .unwrap();
+    tracedecay_agent_hosts::hooks::publish_hook_bindings(
+        &tracedecay::hook_runtime(tracedecay_runtime_core::config::ProfileRoot::under_home(
+            home,
+        )),
+        &layout,
+    )
+    .unwrap();
     layout.data_root
 }
 

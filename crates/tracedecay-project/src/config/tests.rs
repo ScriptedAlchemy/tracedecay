@@ -1,11 +1,13 @@
 use std::fs;
 use std::process::Command;
 use tempfile::TempDir;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 #[tokio::test]
 async fn discover_project_root_with_identity_does_not_open_registry_only_store() {
-    let _profile = super::PinnedUserDataDir::new();
-    let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
+    let profile_dir = TempDir::new().unwrap();
+    let profile = ProfileRoot::new(profile_dir.path());
+    let profile_root = profile.data_dir().to_path_buf();
 
     let gdb =
         crate::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
@@ -49,12 +51,12 @@ async fn discover_project_root_with_identity_does_not_open_registry_only_store()
     assert!(status.success(), "git init failed");
 
     assert!(
-        tracedecay_runtime_core::config::discover_project_root(&project_root).is_none(),
+        profile.discover_project_root(&project_root).is_none(),
         "sync discover_project_root must not see a global-only store"
     );
 
     assert!(
-        super::discover_project_root_with_identity(&project_root)
+        super::discover_project_root_with_identity(&profile, &project_root)
             .await
             .is_none(),
         "process-local discovery must leave registry-only aliases to the daemon"
@@ -62,7 +64,7 @@ async fn discover_project_root_with_identity_does_not_open_registry_only_store()
     let nested = project_root.join("crates/inner");
     fs::create_dir_all(&nested).unwrap();
     assert!(
-        super::discover_project_root_with_identity(&nested)
+        super::discover_project_root_with_identity(&profile, &nested)
             .await
             .is_none(),
         "nested discovery must not open the global registry"
@@ -71,7 +73,7 @@ async fn discover_project_root_with_identity_does_not_open_registry_only_store()
     let bare = TempDir::new().unwrap();
     let bare_root = bare.path().canonicalize().unwrap();
     assert!(
-        super::discover_project_root_with_identity(&bare_root)
+        super::discover_project_root_with_identity(&profile, &bare_root)
             .await
             .is_none(),
         "a directory with no store must not resolve"
@@ -80,8 +82,9 @@ async fn discover_project_root_with_identity_does_not_open_registry_only_store()
 
 #[tokio::test]
 async fn store_layout_for_identity_does_not_open_registry_without_enrollment() {
-    let _profile = super::PinnedUserDataDir::new();
-    let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
+    let profile_dir = TempDir::new().unwrap();
+    let profile = ProfileRoot::new(profile_dir.path());
+    let profile_root = profile.data_dir().to_path_buf();
     let gdb =
         crate::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
             .await
@@ -127,7 +130,11 @@ async fn store_layout_for_identity_does_not_open_registry_without_enrollment() {
     .unwrap();
 
     if let Ok(selected) =
-        crate::project::TraceDecay::resolve_store_layout_for_identity(&project_root).await
+        crate::project::TraceDecay::resolve_store_layout_for_identity_with_options(
+            &project_root,
+            &crate::project::TraceDecayOpenOptions::for_profile(&profile),
+        )
+        .await
     {
         assert_ne!(selected.data_root, identity_layout.data_root);
     }
@@ -135,8 +142,9 @@ async fn store_layout_for_identity_does_not_open_registry_without_enrollment() {
 
 #[tokio::test]
 async fn discover_project_root_with_identity_does_not_bind_non_git_child_to_parent_store() {
-    let _profile = super::PinnedUserDataDir::new();
-    let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
+    let profile_dir = TempDir::new().unwrap();
+    let profile = ProfileRoot::new(profile_dir.path());
+    let profile_root = profile.data_dir().to_path_buf();
     let gdb =
         crate::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
             .await
@@ -173,7 +181,7 @@ async fn discover_project_root_with_identity_does_not_bind_non_git_child_to_pare
     fs::create_dir_all(&child).unwrap();
 
     assert_eq!(
-        super::discover_project_root_with_identity(&child).await,
+        super::discover_project_root_with_identity(&profile, &child).await,
         None,
         "non-git scratch directories must not inherit initialized parent stores"
     );
@@ -181,25 +189,26 @@ async fn discover_project_root_with_identity_does_not_bind_non_git_child_to_pare
 
 #[tokio::test]
 async fn discover_project_root_with_identity_preserves_sync_fast_path() {
-    let _profile = super::PinnedUserDataDir::new();
+    let profile_dir = TempDir::new().unwrap();
+    let profile = ProfileRoot::new(profile_dir.path());
     let project_dir = TempDir::new().unwrap();
     let project_root = project_dir.path().canonicalize().unwrap();
 
     let store = tracedecay_runtime_core::storage::default_profile_sharded_layout(
         &project_root,
-        &tracedecay_runtime_core::config::user_data_dir().unwrap(),
+        profile.data_dir(),
     )
     .unwrap();
     fs::create_dir_all(&store.data_root).unwrap();
     fs::write(&store.graph_db_path, b"").unwrap();
 
     assert_eq!(
-        tracedecay_runtime_core::config::discover_project_root(&project_root),
+        profile.discover_project_root(&project_root),
         Some(project_root.clone()),
         "sync resolver must see the path-local store"
     );
     assert_eq!(
-        super::discover_project_root_with_identity(&project_root).await,
+        super::discover_project_root_with_identity(&profile, &project_root).await,
         Some(project_root),
         "identity wrapper fast path must equal the sync result"
     );
@@ -359,7 +368,7 @@ mod runtime_configuration_cutover {
 
     #[tokio::test]
     async fn runtime_current_reads_the_store_after_startup_snapshot_drifts() {
-        let _profile = crate::config::PinnedUserDataDir::new();
+        let profile = TempDir::new().expect("temporary profile root");
         let root = TempDir::new().expect("temporary project root");
         let project_id = project_id("project.configuration-runtime-drift");
         tracedecay_runtime_core::storage::pin_fixture_repository_identity(
@@ -367,17 +376,13 @@ mod runtime_configuration_cutover {
             project_id.as_str(),
         )
         .expect("write enrollment marker");
-        let layout =
-            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(root.path())
-                .expect("resolve store layout");
+        let layout = tracedecay_runtime_core::storage::resolve_layout(root.path(), profile.path())
+            .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
-        let host_runtime = HostAdmissionTestRuntimeV1::project(
-            tracedecay_runtime_core::storage::default_profile_root().unwrap(),
-            root.path(),
-            project_id.clone(),
-        )
-        .await
-        .expect("open retained project runtime");
+        let host_runtime =
+            HostAdmissionTestRuntimeV1::project(profile.path(), root.path(), project_id.clone())
+                .await
+                .expect("open retained project runtime");
         let database = host_runtime
             .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
             .expect("bind registered project database");
@@ -391,8 +396,8 @@ mod runtime_configuration_cutover {
         .await
         .expect("open runtime configuration")
         .into_parts();
-        let (runtime, startup) =
-            ProjectConfigurationRuntime::open(opened).expect("open project configuration runtime");
+        let (runtime, startup) = ProjectConfigurationRuntime::open(opened, profile.path())
+            .expect("open project configuration runtime");
         let mutation = DirectConfigurationMutation::Set {
             layer: ConfigurationLayerIdV1::Project {
                 project_id: project_id.clone(),
@@ -452,7 +457,7 @@ mod runtime_configuration_cutover {
         let _hotpath = hotpath::HotpathGuardBuilder::new("configuration-runtime-pin-journey")
             .sections(vec![hotpath::Section::FunctionsTiming])
             .build();
-        let _profile = crate::config::PinnedUserDataDir::new();
+        let profile = TempDir::new().expect("temporary profile root");
         let root = TempDir::new().expect("temporary project root");
         let project_id = project_id("project.configuration-shared-pin-journey");
         tracedecay_runtime_core::storage::pin_fixture_repository_identity(
@@ -460,17 +465,13 @@ mod runtime_configuration_cutover {
             project_id.as_str(),
         )
         .expect("write enrollment marker");
-        let layout =
-            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(root.path())
-                .expect("resolve store layout");
+        let layout = tracedecay_runtime_core::storage::resolve_layout(root.path(), profile.path())
+            .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
-        let host_runtime = HostAdmissionTestRuntimeV1::project(
-            tracedecay_runtime_core::storage::default_profile_root().unwrap(),
-            root.path(),
-            project_id.clone(),
-        )
-        .await
-        .expect("open retained project runtime");
+        let host_runtime =
+            HostAdmissionTestRuntimeV1::project(profile.path(), root.path(), project_id.clone())
+                .await
+                .expect("open retained project runtime");
         let database = host_runtime
             .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
             .expect("bind registered project database");
@@ -485,8 +486,8 @@ mod runtime_configuration_cutover {
         .await
         .expect("open runtime configuration")
         .into_parts();
-        let (runtime, startup) =
-            ProjectConfigurationRuntime::open(opened).expect("open project configuration runtime");
+        let (runtime, startup) = ProjectConfigurationRuntime::open(opened, profile.path())
+            .expect("open project configuration runtime");
         assert!(!config.diagnostics_prewarm);
         assert_eq!(config.max_file_size, startup.config().max_file_size);
 
@@ -581,16 +582,15 @@ mod runtime_configuration_cutover {
 
     #[tokio::test]
     async fn ensure_runtime_configuration_persists_initial_resolution_when_cache_is_empty() {
-        let _profile = crate::config::PinnedUserDataDir::new();
+        let profile = TempDir::new().expect("temporary profile root");
         let root = TempDir::new().expect("temporary project root");
         tracedecay_runtime_core::storage::pin_fixture_repository_identity(
             root.path(),
             "proj_ensure_runtime_bootstrap",
         )
         .expect("write enrollment marker");
-        let layout =
-            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(root.path())
-                .expect("resolve store layout");
+        let layout = tracedecay_runtime_core::storage::resolve_layout(root.path(), profile.path())
+            .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
         // Write the opposite of the typed registry default so the stale input
         // stays distinguishable from the canonical resolution regardless of
@@ -608,7 +608,7 @@ mod runtime_configuration_cutover {
         );
 
         let runtime = HostAdmissionTestRuntimeV1::project(
-            tracedecay_runtime_core::storage::default_profile_root().unwrap(),
+            profile.path(),
             root.path(),
             project_id("proj_ensure_runtime_bootstrap"),
         )
@@ -658,7 +658,7 @@ mod runtime_configuration_cutover {
     async fn existing_snapshot_converges_new_native_graph_default_before_materialization() {
         use tracedecay_runtime_core::db::engine::params;
 
-        let _profile = crate::config::PinnedUserDataDir::new();
+        let profile = TempDir::new().expect("temporary profile root");
         let root = TempDir::new().expect("temporary project root");
         let project_id = project_id("proj_configuration_native_graph_default_upgrade");
         tracedecay_runtime_core::storage::pin_fixture_repository_identity(
@@ -666,17 +666,12 @@ mod runtime_configuration_cutover {
             project_id.as_str(),
         )
         .expect("write enrollment marker");
-        let layout =
-            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(root.path())
-                .expect("resolve store layout");
+        let layout = tracedecay_runtime_core::storage::resolve_layout(root.path(), profile.path())
+            .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
-        let runtime = HostAdmissionTestRuntimeV1::project(
-            tracedecay_runtime_core::storage::default_profile_root().unwrap(),
-            root.path(),
-            project_id,
-        )
-        .await
-        .expect("open retained project runtime");
+        let runtime = HostAdmissionTestRuntimeV1::project(profile.path(), root.path(), project_id)
+            .await
+            .expect("open retained project runtime");
         let initial = runtime
             .ensure_runtime_configuration_for_test(root.path(), &layout)
             .await
@@ -768,7 +763,7 @@ mod runtime_configuration_cutover {
 
     #[tokio::test]
     async fn ensure_runtime_configuration_rejects_a_revision_without_the_registered_binding() {
-        let _profile = crate::config::PinnedUserDataDir::new();
+        let profile = TempDir::new().expect("temporary profile root");
         let root = TempDir::new().expect("temporary project root");
         let project_id = project_id("proj_runtime_binding_required");
         tracedecay_runtime_core::storage::pin_fixture_repository_identity(
@@ -776,17 +771,12 @@ mod runtime_configuration_cutover {
             project_id.as_str(),
         )
         .expect("write enrollment marker");
-        let layout =
-            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(root.path())
-                .expect("resolve store layout");
+        let layout = tracedecay_runtime_core::storage::resolve_layout(root.path(), profile.path())
+            .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
-        let runtime = HostAdmissionTestRuntimeV1::project(
-            tracedecay_runtime_core::storage::default_profile_root().unwrap(),
-            root.path(),
-            project_id,
-        )
-        .await
-        .expect("open retained project runtime");
+        let runtime = HostAdmissionTestRuntimeV1::project(profile.path(), root.path(), project_id)
+            .await
+            .expect("open retained project runtime");
         let database = runtime
             .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
             .expect("bind registered project database");
@@ -819,7 +809,7 @@ mod runtime_configuration_cutover {
     #[cfg(unix)]
     #[tokio::test]
     async fn ensure_runtime_configuration_keeps_binding_revision_across_linked_worktrees() {
-        let _profile = crate::config::PinnedUserDataDir::new();
+        let profile = TempDir::new().expect("temporary profile root");
         let root = TempDir::new().expect("temporary root");
         let primary = root.path().join("primary");
         let linked = root.path().join("linked");
@@ -862,16 +852,13 @@ mod runtime_configuration_cutover {
             project_id.as_str(),
         )
         .expect("write enrollment marker");
-        let layout = tracedecay_runtime_core::storage::resolve_layout_for_current_profile(&primary)
+        let layout = tracedecay_runtime_core::storage::resolve_layout(&primary, profile.path())
             .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
-        let runtime = HostAdmissionTestRuntimeV1::project(
-            tracedecay_runtime_core::storage::default_profile_root().unwrap(),
-            &primary,
-            project_id.clone(),
-        )
-        .await
-        .expect("open retained project runtime");
+        let runtime =
+            HostAdmissionTestRuntimeV1::project(profile.path(), &primary, project_id.clone())
+                .await
+                .expect("open retained project runtime");
 
         let primary_configuration = runtime
             .ensure_runtime_configuration_for_test(&primary, &layout)
@@ -936,7 +923,7 @@ mod runtime_configuration_cutover {
     #[cfg(unix)]
     #[tokio::test]
     async fn fresh_open_binds_the_github_origin_as_the_project_github_source() {
-        let _profile = crate::config::PinnedUserDataDir::new();
+        let profile = TempDir::new().expect("temporary profile root");
         let root = TempDir::new().expect("temporary root");
         let checkout = root.path().join("anyhow");
         std::fs::create_dir_all(&checkout).expect("create checkout");
@@ -961,17 +948,13 @@ mod runtime_configuration_cutover {
             project_id.as_str(),
         )
         .expect("write enrollment marker");
-        let layout =
-            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(&checkout)
-                .expect("resolve store layout");
+        let layout = tracedecay_runtime_core::storage::resolve_layout(&checkout, profile.path())
+            .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
-        let runtime = HostAdmissionTestRuntimeV1::project(
-            tracedecay_runtime_core::storage::default_profile_root().unwrap(),
-            &checkout,
-            project_id.clone(),
-        )
-        .await
-        .expect("open retained project runtime");
+        let runtime =
+            HostAdmissionTestRuntimeV1::project(profile.path(), &checkout, project_id.clone())
+                .await
+                .expect("open retained project runtime");
         let expected = |owner: &str, repository: &str| {
             let binding = daemon_owned_github_source_binding_v1(&project_id, owner, repository)
                 .expect("GitHub origin binding");
@@ -1019,7 +1002,7 @@ mod runtime_configuration_cutover {
     /// durable revision instead of demanding a reset.
     #[tokio::test]
     async fn ensure_runtime_configuration_rebinds_locator_digest_for_a_renamed_checkout() {
-        let _profile = crate::config::PinnedUserDataDir::new();
+        let profile = TempDir::new().expect("temporary profile root");
         let root = TempDir::new().expect("temporary root");
         let original = root.path().join("checkout");
         let renamed = root.path().join("checkout-renamed");
@@ -1030,17 +1013,13 @@ mod runtime_configuration_cutover {
             project_id.as_str(),
         )
         .expect("write enrollment marker");
-        let layout =
-            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(&original)
-                .expect("resolve store layout");
+        let layout = tracedecay_runtime_core::storage::resolve_layout(&original, profile.path())
+            .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
-        let runtime = HostAdmissionTestRuntimeV1::project(
-            tracedecay_runtime_core::storage::default_profile_root().unwrap(),
-            &original,
-            project_id.clone(),
-        )
-        .await
-        .expect("open retained project runtime");
+        let runtime =
+            HostAdmissionTestRuntimeV1::project(profile.path(), &original, project_id.clone())
+                .await
+                .expect("open retained project runtime");
         let initial = runtime
             .ensure_runtime_configuration_for_test(&original, &layout)
             .await
@@ -1076,7 +1055,7 @@ mod runtime_configuration_cutover {
     /// must stay a typed reset, never a silent rebind.
     #[tokio::test]
     async fn ensure_runtime_configuration_rejects_locator_drift_without_the_daemon_binding() {
-        let _profile = crate::config::PinnedUserDataDir::new();
+        let profile = TempDir::new().expect("temporary profile root");
         let root = TempDir::new().expect("temporary root");
         let checkout = root.path().join("checkout");
         let elsewhere = root.path().join("elsewhere");
@@ -1089,17 +1068,13 @@ mod runtime_configuration_cutover {
             project_id.as_str(),
         )
         .expect("write enrollment marker");
-        let layout =
-            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(&checkout)
-                .expect("resolve store layout");
+        let layout = tracedecay_runtime_core::storage::resolve_layout(&checkout, profile.path())
+            .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
-        let runtime = HostAdmissionTestRuntimeV1::project(
-            tracedecay_runtime_core::storage::default_profile_root().unwrap(),
-            &checkout,
-            project_id.clone(),
-        )
-        .await
-        .expect("open retained project runtime");
+        let runtime =
+            HostAdmissionTestRuntimeV1::project(profile.path(), &checkout, project_id.clone())
+                .await
+                .expect("open retained project runtime");
         let database = runtime
             .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
             .expect("bind registered project database");
@@ -1166,16 +1141,15 @@ mod runtime_configuration_cutover {
 
     #[tokio::test]
     async fn resolve_runtime_configuration_pins_registered_project_when_cache_is_cold() {
-        let _profile = crate::config::PinnedUserDataDir::new();
+        let profile = TempDir::new().expect("temporary profile root");
         let root = TempDir::new().expect("temporary project root");
         tracedecay_runtime_core::storage::pin_fixture_repository_identity(
             root.path(),
             "proj_resolve_cold_cache",
         )
         .expect("write enrollment marker");
-        let layout =
-            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(root.path())
-                .expect("resolve store layout");
+        let layout = tracedecay_runtime_core::storage::resolve_layout(root.path(), profile.path())
+            .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
 
         // A freshly registered project has no pinned snapshot in this process's
@@ -1190,7 +1164,7 @@ mod runtime_configuration_cutover {
         // The daemon authority path resolves and pins on demand instead of
         // erroring, so branch administration and other daemon operations run.
         let runtime = HostAdmissionTestRuntimeV1::project(
-            tracedecay_runtime_core::storage::default_profile_root().unwrap(),
+            profile.path(),
             root.path(),
             project_id("proj_resolve_cold_cache"),
         )
@@ -1223,7 +1197,7 @@ mod runtime_configuration_cutover {
 
     #[tokio::test]
     async fn resolve_runtime_configuration_errors_typed_when_authority_is_unresolvable() {
-        let _profile = crate::config::PinnedUserDataDir::new();
+        let profile = TempDir::new().expect("temporary profile root");
         let root = TempDir::new().expect("temporary project root");
         tracedecay_runtime_core::storage::pin_fixture_repository_identity(
             root.path(),
@@ -1231,12 +1205,12 @@ mod runtime_configuration_cutover {
         )
         .expect("write enrollment marker");
         let mut layout =
-            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(root.path())
+            tracedecay_runtime_core::storage::resolve_layout(root.path(), profile.path())
                 .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
 
         let runtime = HostAdmissionTestRuntimeV1::project(
-            tracedecay_runtime_core::storage::default_profile_root().unwrap(),
+            profile.path(),
             root.path(),
             project_id("proj_resolve_unresolvable"),
         )
@@ -1262,16 +1236,15 @@ mod runtime_configuration_cutover {
 
     #[tokio::test]
     async fn read_only_open_rejects_an_uninitialized_store_without_fabricated_defaults() {
-        let _profile = crate::config::PinnedUserDataDir::new();
+        let profile = TempDir::new().expect("temporary profile root");
         let root = TempDir::new().expect("temporary project root");
         tracedecay_runtime_core::storage::pin_fixture_repository_identity(
             root.path(),
             "proj_read_only_uninitialized",
         )
         .expect("write enrollment marker");
-        let layout =
-            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(root.path())
-                .expect("resolve store layout");
+        let layout = tracedecay_runtime_core::storage::resolve_layout(root.path(), profile.path())
+            .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
         if let Some(parent) = layout.sessions_db_path.parent() {
             std::fs::create_dir_all(parent).expect("create sessions db parent");
@@ -1282,7 +1255,7 @@ mod runtime_configuration_cutover {
         // left in after a repository move, when its configuration authority was
         // never migrated in.
         let runtime = HostAdmissionTestRuntimeV1::project(
-            tracedecay_runtime_core::storage::default_profile_root().unwrap(),
+            profile.path(),
             root.path(),
             project_id("proj_read_only_uninitialized"),
         )

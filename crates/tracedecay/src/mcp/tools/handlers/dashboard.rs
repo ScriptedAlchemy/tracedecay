@@ -168,12 +168,14 @@ struct DashboardInvocationExecutorAdapter {
     executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
     configuration_batch_contract: tracedecay_contracts::ResultContractRef,
     user_profile_id: Option<UserProfileId>,
+    daemon_profile: Option<tracedecay_runtime_core::config::ProfileRoot>,
 }
 
 impl DashboardInvocationExecutorAdapter {
     fn new(
         executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
         user_profile_id: Option<UserProfileId>,
+        daemon_profile: Option<tracedecay_runtime_core::config::ProfileRoot>,
     ) -> Result<Self> {
         let operation =
             tracedecay_contracts::configuration_surface_operation("configuration_batch")
@@ -191,6 +193,7 @@ impl DashboardInvocationExecutorAdapter {
             executor,
             configuration_batch_contract: operation.result_contract().clone(),
             user_profile_id,
+            daemon_profile,
         })
     }
 }
@@ -204,7 +207,12 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
         &self,
         project_root: &std::path::Path,
     ) -> std::result::Result<Arc<dyn DashboardApplicationRuntime>, String> {
+        let profile = self
+            .daemon_profile
+            .as_ref()
+            .ok_or_else(|| "dashboard application runtime has no daemon profile".to_owned())?;
         let handshake = crate::daemon::handshake_for_current_client(
+            profile,
             Some(project_root.to_path_buf()),
             None,
             false,
@@ -215,9 +223,13 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
             tracedecay_daemon_identity::invocation_client_for_current(handshake)
                 .map_err(|error| error.to_string())?,
         );
-        Self::new(executor, self.user_profile_id.clone())
-            .map(|runtime| Arc::new(runtime) as Arc<dyn DashboardApplicationRuntime>)
-            .map_err(|error| error.to_string())
+        Self::new(
+            executor,
+            self.user_profile_id.clone(),
+            self.daemon_profile.clone(),
+        )
+        .map(|runtime| Arc::new(runtime) as Arc<dyn DashboardApplicationRuntime>)
+        .map_err(|error| error.to_string())
     }
 
     fn routers(
@@ -736,7 +748,7 @@ pub(super) async fn handle_dashboard(
     registered_project_session_db: Option<RegisteredGlobalDbLeaseV1>,
     registered_profile_session_db: Option<RegisteredGlobalDbLeaseV1>,
     daemon_user_profile_id: Option<UserProfileId>,
-    daemon_profile_root: Option<PathBuf>,
+    daemon_profile: Option<tracedecay_runtime_core::config::ProfileRoot>,
     session_retrieval: Option<
         Arc<dyn tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalPortV1>,
     >,
@@ -902,8 +914,10 @@ pub(super) async fn handle_dashboard(
                     "retained dashboard project server resolved a different root",
                 ));
             }
-            let retained_cg =
-                Arc::new(crate::dashboard::dashboard_project_context(&retained_graph));
+            let retained_cg = Arc::new(crate::dashboard::dashboard_project_context(
+                &retained_graph,
+                daemon_profile.as_ref(),
+            )?);
             let dashboard_project_graph_resolver = retained_project_server_resolver
                 .clone()
                 .zip(daemon_user_profile_id.clone())
@@ -916,7 +930,9 @@ pub(super) async fn handle_dashboard(
                 .clone()
                 .map(crate::daemon::dashboard_automation::dashboard_automation_observation_port);
             let automation_authority = match (
-                daemon_profile_root,
+                daemon_profile
+                    .as_ref()
+                    .map(|profile| profile.data_dir().to_path_buf()),
                 daemon_user_profile_id.clone(),
                 retained_project_server_resolver.clone(),
                 daemon_invocation_service.clone(),
@@ -961,8 +977,12 @@ pub(super) async fn handle_dashboard(
             // that answers tool calls before the session authorities mount.
             let application_invocation_executor = application_invocation_executor
                 .map(|executor| {
-                    DashboardInvocationExecutorAdapter::new(executor, daemon_user_profile_id)
-                        .map(|adapter| Arc::new(adapter) as Arc<dyn DashboardApplicationRuntime>)
+                    DashboardInvocationExecutorAdapter::new(
+                        executor,
+                        daemon_user_profile_id,
+                        daemon_profile.clone(),
+                    )
+                    .map(|adapter| Arc::new(adapter) as Arc<dyn DashboardApplicationRuntime>)
                 })
                 .transpose()?;
             // A request answered by the core server of a project that is still

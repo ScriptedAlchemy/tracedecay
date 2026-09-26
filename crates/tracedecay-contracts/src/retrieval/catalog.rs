@@ -32,6 +32,19 @@ use crate::retrieval::analysis_report_surface::{
     UnmountedFilesSurfaceRequestV1, UnsafePatternsResultV1, UnsafePatternsSurfaceRequestV1,
 };
 use crate::retrieval::callable_code_catalog::CALLABLE_CODE_DEFAULT_PAGE_SIZE;
+use crate::retrieval::git_context_surface::{
+    AffectedResultV1, AffectedSurfaceRequestV1, BranchDiffResultV1, BranchDiffSurfaceRequestV1,
+    BranchListResultV1, BranchListSurfaceRequestV1, BranchSearchResultV1,
+    BranchSearchSurfaceRequestV1, ChangelogResultV1, ChangelogSurfaceRequestV1,
+    CommitContextResultV1, CommitContextSurfaceRequestV1, DiffContextResultV1,
+    DiffContextSurfaceRequestV1, PrContextResultV1, PrContextSurfaceRequestV1,
+};
+use crate::retrieval::graph_lookup_surface::{
+    AstGrepSearchResultV1, AstGrepSearchSurfaceRequestV1, ByQualifiedNameResultV1,
+    ByQualifiedNameSurfaceRequestV1, DerivesResultV1, FindExactSymbolResultV1,
+    FindExactSymbolSurfaceRequestV1, GrepSearchResultV1, GrepSurfaceRequestV1, SignatureResultV1,
+    SymbolSelectorSurfaceRequestV1,
+};
 use crate::retrieval::graph_report_surface::{
     DependencyDepthSurfaceRequestV1, DiagnoseResultV1, DiagnoseSurfaceRequestV1, DsmResultV1,
     DsmSurfaceRequestV1, GiniResultV1, GiniSurfaceRequestV1, HealthResultV1,
@@ -212,6 +225,20 @@ const PRIMITIVE_READ_SPECS: &[PrimitiveReadSpec] = &[
     graph_report_spec("unsafe_patterns"),
     graph_report_spec("constructors"),
     graph_report_spec("field_sites"),
+    graph_report_spec("find_exact_symbol"),
+    graph_report_spec("by_qualified_name"),
+    graph_report_spec("signature"),
+    graph_report_spec("derives"),
+    graph_report_spec("grep"),
+    graph_report_spec("ast_grep_search"),
+    git_context_spec("affected"),
+    git_context_spec("diff_context"),
+    git_context_spec("changelog"),
+    git_context_spec("commit_context"),
+    git_context_spec("pr_context"),
+    git_context_spec("branch_search"),
+    git_context_spec("branch_diff"),
+    git_context_spec("branch_list"),
     primitive_spec("session_lookup"),
     primitive_spec("qualified_name"),
     primitive_spec("call_chain"),
@@ -250,7 +277,10 @@ fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface
         | "dependency_depth" | "health" | "dsm" | "diagnose" | "dead_code" | "circular"
         | "hotspots" | "unmounted_files" | "rank" | "largest" | "coupling"
         | "inheritance_depth" | "distribution" | "recursion" | "complexity" | "doc_coverage"
-        | "god_class" | "unsafe_patterns" | "constructors" | "field_sites" => {
+        | "god_class" | "unsafe_patterns" | "constructors" | "field_sites"
+        | "find_exact_symbol" | "by_qualified_name" | "signature" | "derives" | "grep"
+        | "ast_grep_search" | "affected" | "diff_context" | "changelog" | "commit_context"
+        | "pr_context" | "branch_search" | "branch_diff" | "branch_list" => {
             &CLI_MCP_PRIMITIVE_SURFACES
         }
         "health_read" | "storage_status" | "diagnostics_read" => &DASHBOARD_PRIMITIVE_SURFACES,
@@ -399,6 +429,48 @@ fn primitive_read_description(operation: &str) -> &'static str {
         "field_sites" => {
             "Find read and write sites of a named field, optionally narrowed to one owner's field."
         }
+        "find_exact_symbol" => {
+            "Return every indexed symbol whose bare name equals the given identifier, without ranking or fuzzy matching."
+        }
+        "by_qualified_name" => {
+            "Look up every indexed symbol sharing one exact qualified name, such as overloads, generics, or separate impl blocks."
+        }
+        "signature" => {
+            "Return the signature-level metadata of symbols addressed by node ID or qualified name: visibility, signature, docstring, async flag, and kind, without bodies."
+        }
+        "derives" => {
+            "List the exact derive macro names attached to a type addressed by node ID or qualified name. Generated implementations are reported unavailable."
+        }
+        "grep" => {
+            "Literal or regex content search over UTF-8 text sources in the working tree, each hit enriched with its enclosing graph symbol. Bounded omissions are reported as partial coverage."
+        }
+        "ast_grep_search" => {
+            "Structural (AST) pattern search over the working tree with the bundled tree-sitter grammars."
+        }
+        "affected" => {
+            "Find the test files that depend on changed files, ranked by file-dependency distance, with the nearest ones recommended to run."
+        }
+        "diff_context" => {
+            "Report the symbols in changed files, the callers within the impact depth, and the tests they reach."
+        }
+        "changelog" => {
+            "Diff two git refs and, for exact local branches with sealed generations, name the symbols added, removed, and modified."
+        }
+        "commit_context" => {
+            "Summarize uncommitted or staged changes by file role and symbol, with a suggested commit category and recent commit subjects."
+        }
+        "pr_context" => {
+            "Summarize the commits, file changes, symbol changes, affected tests, and impacted modules between a base and head ref, one authenticated symbol page at a time."
+        }
+        "branch_search" => {
+            "Search the code-index generation sealed for one local branch's exact current commit."
+        }
+        "branch_diff" => {
+            "Compare the code-index generations sealed for two local branches' exact commits, symbol by symbol."
+        }
+        "branch_list" => {
+            "List a bounded page of exact local branch refs and their current commit and tree identities."
+        }
         _ => "Read bounded data from the admitted project's current retained state.",
     }
 }
@@ -421,9 +493,18 @@ const fn primitive_spec_with_default_page_size(
     }
 }
 
-/// A whole-project graph report. It keeps the two-minute interactive ceiling
-/// these reports have always dispatched under: a report over every file in a
-/// large repository is not a ten-second primitive read.
+/// A git-context read. It keeps the two-minute interactive ceiling these reads
+/// have always dispatched under. The ones that page continue through their own
+/// authenticated `cursor` argument, not `meta.cursor`, so none advertises the
+/// primitive pagination contract.
+const fn git_context_spec(operation: &'static str) -> PrimitiveReadSpec {
+    graph_report_spec(operation)
+}
+
+/// A whole-project graph report or tree scan. It keeps the two-minute
+/// interactive ceiling these tools have always dispatched under: a report over
+/// every file, or a scan of every source, in a large repository is not a
+/// ten-second primitive read.
 const fn graph_report_spec(operation: &'static str) -> PrimitiveReadSpec {
     PrimitiveReadSpec {
         operation,
@@ -778,6 +859,56 @@ fn primitive_executable_schemas(
         "field_sites",
         FieldSitesSurfaceRequestV1,
         FieldSitesResultV1
+    );
+    add!(
+        "find_exact_symbol",
+        FindExactSymbolSurfaceRequestV1,
+        FindExactSymbolResultV1
+    );
+    add!(
+        "by_qualified_name",
+        ByQualifiedNameSurfaceRequestV1,
+        ByQualifiedNameResultV1
+    );
+    add!(
+        "signature",
+        SymbolSelectorSurfaceRequestV1,
+        SignatureResultV1
+    );
+    add!("derives", SymbolSelectorSurfaceRequestV1, DerivesResultV1);
+    add!("grep", GrepSurfaceRequestV1, GrepSearchResultV1);
+    add!(
+        "ast_grep_search",
+        AstGrepSearchSurfaceRequestV1,
+        AstGrepSearchResultV1
+    );
+    add!("affected", AffectedSurfaceRequestV1, AffectedResultV1);
+    add!(
+        "diff_context",
+        DiffContextSurfaceRequestV1,
+        DiffContextResultV1
+    );
+    add!("changelog", ChangelogSurfaceRequestV1, ChangelogResultV1);
+    add!(
+        "commit_context",
+        CommitContextSurfaceRequestV1,
+        CommitContextResultV1
+    );
+    add!("pr_context", PrContextSurfaceRequestV1, PrContextResultV1);
+    add!(
+        "branch_search",
+        BranchSearchSurfaceRequestV1,
+        BranchSearchResultV1
+    );
+    add!(
+        "branch_diff",
+        BranchDiffSurfaceRequestV1,
+        BranchDiffResultV1
+    );
+    add!(
+        "branch_list",
+        BranchListSurfaceRequestV1,
+        BranchListResultV1
     );
     Ok(schemas)
 }

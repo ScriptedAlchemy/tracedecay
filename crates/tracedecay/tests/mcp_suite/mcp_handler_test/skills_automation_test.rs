@@ -20,6 +20,7 @@ use tracedecay_automation_runtime::automation::skill_usage::{
     SkillUsageAction, load_skill_usage_record, record_skill_usage,
 };
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_project::project::TraceDecayOpenOptions;
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
@@ -143,16 +144,20 @@ async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn managed_skill_mcp_tools_list_and_view_profile_store() {
-    let env_lock = lock_process_env().await;
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("repo");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
-    let home = dir.path().join("home");
-    let _home_guard = HomeEnvGuard::set(&env_lock, &home);
-    let _global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
-    let cg = TestTraceDecay::new(fixture::init_project_from_template(&project).await.unwrap());
-    let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
+    let profile = crate::common::isolated_profile_under_home(&dir.path().join("home"));
+    let cg = TestTraceDecay::new(
+        fixture::init_project_from_template_with_options(
+            &project,
+            TraceDecayOpenOptions::for_profile(&profile),
+        )
+        .await
+        .unwrap(),
+    );
+    let profile_root = profile.data_dir().to_path_buf();
     let runtime = open_active_project_scoped_runtime(&cg).await;
     let project_id = RegisteredGlobalDb::canonical_project_key(cg.project_root());
 
@@ -364,7 +369,6 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
     assert_eq!(payload["skills"][0]["usage_summary"]["view_count"], 3);
 
     drop(server);
-    drop(env_lock);
 }
 
 #[cfg(feature = "test-transport")]

@@ -75,6 +75,9 @@ pub const PROJECT_SERVER_CAPACITY_REASON_CODE: &str = "project_server_capacity_r
 /// still answer, and every `tools/call` re-derives this refusal until
 /// enrollment succeeds.
 pub const PROJECT_NOT_ENROLLED_REASON_CODE: &str = "project_not_enrolled";
+/// Typed reason a project-scoped request arrived on a handshake that names no
+/// project at all (no `--project`, and no enrolled project above the cwd).
+pub const PROJECT_REQUIRED_REASON_CODE: &str = "project_required";
 #[cfg(unix)]
 const TOOL_LIST_CHANGED_METHOD: &str = "notifications/tools/list_changed";
 #[cfg(unix)]
@@ -358,7 +361,7 @@ use projectless::projectless_tools_call_response;
 use projectless::{projectless_first_request, projectless_tool_call, serve_projectless_client};
 mod project_composition;
 mod project_delivery_mount;
-pub(crate) use project_composition::daemon_transcript_source_home;
+pub(crate) use project_composition::daemon_transcript_source_profile;
 use project_composition::{ProductionProjectCompositionRuntime, production_project_server};
 mod project_open_admission;
 #[cfg(test)]

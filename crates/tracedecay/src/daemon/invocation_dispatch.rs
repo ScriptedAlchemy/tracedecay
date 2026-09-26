@@ -399,7 +399,9 @@ pub(super) async fn execute_portable_daemon_invocation(
                 git_operation,
             );
         }
-        let project_route = project_route_for_handshake(handshake);
+        let project_route = store_administration
+            .owner_home()
+            .and_then(|owner_home| project_route_for_handshake(handshake, owner_home));
         let (mut resolved_project_path, route) = match project_route {
             Ok(route) => route,
             Err(error) => {
@@ -462,7 +464,10 @@ pub(super) async fn execute_portable_daemon_invocation(
                     git_operation,
                 );
             }
-            let Ok((canonical_project_path, _)) = project_route_for_handshake(handshake) else {
+            let Ok((canonical_project_path, _)) = store_administration
+                .owner_home()
+                .and_then(|owner_home| project_route_for_handshake(handshake, owner_home))
+            else {
                 return DaemonInvocationResponse::problem(
                     request_id,
                     DaemonInvocationProblem::NotFoundOrNotAuthorized,
@@ -750,7 +755,7 @@ pub(super) async fn execute_daemon_invocation(
                 git_operation,
             );
         }
-        let project_route = DaemonEngine::project_route(handshake);
+        let project_route = engine.project_route(handshake);
         let (mut resolved_project_path, route) = match project_route {
             Ok(route) => route,
             Err(error) => {
@@ -803,7 +808,7 @@ pub(super) async fn execute_daemon_invocation(
                     git_operation,
                 );
             }
-            let Ok((canonical_project_path, _)) = DaemonEngine::project_route(handshake) else {
+            let Ok((canonical_project_path, _)) = engine.project_route(handshake) else {
                 return DaemonInvocationResponse::problem(
                     request_id,
                     DaemonInvocationProblem::NotFoundOrNotAuthorized,
@@ -886,6 +891,19 @@ fn project_open_refusal_response(
         return DaemonInvocationResponse::application_problem(
             request_id,
             tracedecay_contracts::ApplicationProblem::runtime_mounting(),
+        );
+    }
+    // No route names an enrolled project: the caller must pick one, so a
+    // retryable `unavailable` would only be retried until its deadline.
+    if let Some((
+        reason_code @ (PROJECT_NOT_ENROLLED_REASON_CODE | PROJECT_REQUIRED_REASON_CODE),
+        false,
+        detail,
+    )) = error.project_route_context()
+    {
+        return DaemonInvocationResponse::application_problem(
+            request_id,
+            tracedecay_contracts::ApplicationProblem::invalid_request(reason_code, detail),
         );
     }
     DaemonInvocationResponse::problem(

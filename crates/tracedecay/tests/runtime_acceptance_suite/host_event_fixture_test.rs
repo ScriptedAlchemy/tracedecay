@@ -31,10 +31,7 @@ use tracedecay_sessions::runtime::{hosts::claude, hosts::codex, hosts::cursor, h
 use tracedecay_store::ObservationReplayRequest;
 use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
 
-use crate::common::{
-    EnvVarGuard, GLOBAL_DB_ENV_LOCK, git_program, spawn_tracedecay_daemon,
-    tracedecay_command_with_home,
-};
+use crate::common::{git_program, spawn_tracedecay_daemon, tracedecay_command_with_home};
 
 const FIXTURES: [(&str, &str); 6] = [
     (
@@ -68,11 +65,7 @@ const HOST_ADMISSION_PROVIDERS: &[&str] = &[
 ];
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn native_host_event_fixtures_execute_provider_admission_paths() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let host = TempDir::new().unwrap();
     let home = host.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
@@ -83,12 +76,6 @@ async fn native_host_event_fixtures_execute_provider_admission_paths() {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&data_root, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let _home = EnvVarGuard::set("HOME", &home);
-    let _userprofile = EnvVarGuard::set("USERPROFILE", &home);
-    let _data_dir = EnvVarGuard::set(
-        tracedecay_runtime_core::config::USER_DATA_DIR_ENV,
-        &data_root,
-    );
     let boundary_project = initialize_boundary_project(&home);
     let _daemon = spawn_tracedecay_daemon(&home);
     crate::common::initialize_tracedecay_cli_project(&home, &boundary_project);
@@ -181,7 +168,7 @@ async fn native_host_event_fixtures_execute_provider_admission_paths() {
 
 fn hook_completed_rows(project: &Path, home: &Path, provider: &str) -> Vec<Value> {
     let mut paths = vec![
-        tracedecay_runtime_core::storage::resolve_layout_for_current_profile(project)
+        tracedecay_runtime_core::storage::resolve_layout(project, &home.join(".tracedecay"))
             .expect("resolve host fixture storage")
             .data_root
             .join("hook_analytics.jsonl"),
@@ -617,11 +604,14 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
             .unwrap();
             let profile_root = home.join(".tracedecay");
             std::fs::create_dir_all(&profile_root).unwrap();
-            let stats = claude::ingest_user_sessions_with_admission(
-                &profile_root,
-                None,
-                Vec::new(),
-                &facade,
+            let stats = tracedecay_sessions::runtime::with_transcript_source_profile(
+                tracedecay_runtime_core::config::ProfileRoot::under_home(home),
+                claude::ingest_user_sessions_with_admission(
+                    &profile_root,
+                    None,
+                    Vec::new(),
+                    &facade,
+                ),
             )
             .await;
             assert!(stats.messages_upserted > 0, "Claude native fixture");

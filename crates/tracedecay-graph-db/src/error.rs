@@ -115,6 +115,12 @@ pub enum GraphDbError {
     },
     #[error("graph database reset required: {message}")]
     ResetRequired { message: String },
+    /// The store carries an earlier TraceDecay graph format marker. Every
+    /// namespace in a registry-owned container is a derived index, so its
+    /// owner deletes the container family and the canonical replay
+    /// authorities re-project into a fresh store; nothing is converted.
+    #[error("graph database format {found} is superseded by format {expected}")]
+    FormatSuperseded { found: u32, expected: u32 },
     #[error("graph database is corrupt: {message}")]
     Corrupt { message: String },
     #[error(
@@ -178,6 +184,9 @@ pub fn classify_graph_store_error(
         | GraphDbError::ProjectionMismatch { message, .. }
         | GraphDbError::GenerationMismatch { message, .. } => {
             GraphStoreFailureClass::Corrupt(message)
+        }
+        error @ GraphDbError::FormatSuperseded { .. } => {
+            GraphStoreFailureClass::Corrupt(error.to_string())
         }
         GraphDbError::Conflict { .. } => {
             GraphStoreFailureClass::Unavailable(conflict_unavailable.to_owned())

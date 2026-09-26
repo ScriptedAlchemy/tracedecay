@@ -65,38 +65,19 @@ static PI_DISCOVERY_FAILURE_GATE: StateChangeLogGate<
     (PiDiscoveryFailureKind, io::ErrorKind),
 > = StateChangeLogGate::new();
 
-/// The agent directory Pi loads for `home`. `PI_CODING_AGENT_DIR` names only
-/// the running process user's directory, so it answers only for that home,
-/// and only an absolute value relocates it: a sandbox or tempdir home never
-/// resolves outside itself, and a relative value cannot point at whatever the
-/// working directory happens to be.
+/// The agent directory Pi loads for `home`. `PI_CODING_AGENT_DIR` relocates
+/// it only to an absolute directory inside `home`: a sandbox or tempdir home
+/// never resolves outside itself, and a relative value cannot point at
+/// whatever the working directory happens to be.
 pub fn pi_agent_dir(home: &Path) -> PathBuf {
-    let ambient = is_process_home(home)
-        .then(|| std::env::var_os(PI_AGENT_DIR_ENV))
-        .flatten();
-    pi_agent_dir_for(home, ambient.as_deref())
+    pi_agent_dir_for(home, std::env::var_os(PI_AGENT_DIR_ENV).as_deref())
 }
 
 fn pi_agent_dir_for(home: &Path, ambient: Option<&OsStr>) -> PathBuf {
     ambient
         .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
+        .filter(|path| path.is_absolute() && path.starts_with(home))
         .unwrap_or_else(|| home.join(PI_AGENT_RELATIVE))
-}
-
-fn is_process_home(home: &Path) -> bool {
-    let Some(own) = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-    else {
-        return false;
-    };
-    own == home
-        || matches!(
-            (std::fs::canonicalize(&own), std::fs::canonicalize(home)),
-            (Ok(own), Ok(home)) if own == home
-        )
 }
 
 /// Pi's per-cwd session directory name: the leading separator dropped and

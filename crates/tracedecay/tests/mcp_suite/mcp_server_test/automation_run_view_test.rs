@@ -139,7 +139,7 @@ async fn automation_run_view_returns_the_exact_active_project_record() {
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
-    let cg = crate::fixture::init_project_from_template(project)
+    let cg = Box::pin(tracedecay_project::project::TraceDecay::init(project))
         .await
         .unwrap();
     let dashboard_root = cg.store_layout().dashboard_root.clone();

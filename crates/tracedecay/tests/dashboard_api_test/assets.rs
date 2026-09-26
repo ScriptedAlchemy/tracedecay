@@ -11,9 +11,6 @@ fn entry_script(html: &str) -> String {
 
 #[test]
 fn dashboard_root_serves_the_embedded_single_app_bundle() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture_without_memory().await;
@@ -103,9 +100,6 @@ fn dashboard_root_serves_the_embedded_single_app_bundle() {
 
 #[test]
 fn dashboard_http_admission_rejects_rebinding_and_cross_origin_shapes() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture_without_memory().await;

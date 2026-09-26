@@ -225,6 +225,30 @@ function isDiagnostic(value: unknown): boolean {
   );
 }
 
+function isProblemDetail(value: unknown): boolean {
+  if (!isRecord(value)) {
+    return false;
+  }
+  switch (value.kind) {
+    case "parked":
+      return (
+        typeof value.cause === "string" &&
+        typeof value.remedy === "string" &&
+        typeof value.retries_on_wake === "boolean"
+      );
+    case "stale_refresh_frontier":
+      return (
+        isSafeUnsignedInteger(value.requested) &&
+        isSafeUnsignedInteger(value.committed) &&
+        isSafeUnsignedInteger(value.active)
+      );
+    case "lock_deadline":
+      return typeof value.resource === "string" && isSafeUnsignedInteger(value.deadline_ms);
+    default:
+      return false;
+  }
+}
+
 function isReceipt(value: unknown): value is OperationReceipt {
   if (
     !isRecord(value) ||
@@ -294,6 +318,7 @@ function isProblemEnvelope(value: unknown): value is HttpProblemEnvelope {
   const legalActions = Array.isArray(problem.legal_actions)
     ? problem.legal_actions
     : null;
+  const detailKinds = ["stale", "unavailable", "saturated"];
   const diagnosticKinds = [
     "invalid_request", "conflict", "partial_effect", "stale", "unsupported",
     "unavailable", "execution_failed", "reset_required", "saturated",
@@ -314,6 +339,8 @@ function isProblemEnvelope(value: unknown): value is HttpProblemEnvelope {
     typeof problem.code === "string" &&
     typeof problem.message === "string" &&
     (problem.diagnostic === null || isDiagnostic(problem.diagnostic)) &&
+    "detail" in problem &&
+    (problem.detail === null || isProblemDetail(problem.detail)) &&
     "committed_receipt" in problem &&
     typeof problem.owning_layer === "string" &&
     typeof problem.terminality === "string" &&
@@ -367,6 +394,8 @@ function isProblemEnvelope(value: unknown): value is HttpProblemEnvelope {
       (problem.cancellation_stage !== null) ||
     (problem.diagnostic !== null) !==
       (typeof problem.kind === "string" && diagnosticKinds.includes(problem.kind)) ||
+    (problem.detail !== null &&
+      !(typeof problem.kind === "string" && detailKinds.includes(problem.kind))) ||
     problem.retryable !== (problem.retry !== "never") ||
     expectedRetryScope === undefined ||
     problem.retry_scope !== expectedRetryScope ||

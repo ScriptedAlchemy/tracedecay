@@ -275,6 +275,7 @@ async fn service_with_canonical_application(
         }
     });
     let handshake = crate::daemon::handshake_for_current_client(
+        &tracedecay_runtime_core::config::ProfileRoot::new(project.path().join("profile")),
         Some(project.path().to_path_buf()),
         None,
         false,

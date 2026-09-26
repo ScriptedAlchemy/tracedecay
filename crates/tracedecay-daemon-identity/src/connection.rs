@@ -132,30 +132,27 @@ fn ensure_record_current(
     Ok(())
 }
 
-/// Authenticated invocation client for this process's current daemon authority.
+/// Authenticated invocation client for the daemon authority of the profile
+/// the handshake names.
 pub fn invocation_client_for_current(
     handshake: tracedecay_daemon_protocol::DaemonHandshake,
 ) -> Result<tracedecay_daemon_protocol::DaemonInvocationClient> {
     Ok(tracedecay_daemon_protocol::DaemonInvocationClient::new(
-        current_daemon_connection()?.into_protocol(),
+        current_daemon_connection(&handshake.client_identity.profile_root)?.into_protocol(),
         handshake,
     ))
 }
 
-pub fn current_daemon_connection() -> Result<ResolvedDaemonConnection> {
-    let profile_root = tracedecay_runtime_core::config::user_data_dir().ok_or_else(|| {
-        TraceDecayError::Config {
-            message: "could not determine TraceDecay user data directory".to_string(),
-        }
-    })?;
-    match authority::current_record(&profile_root)? {
+/// The connection for the daemon authority recorded in `profile_root`.
+pub fn current_daemon_connection(profile_root: &Path) -> Result<ResolvedDaemonConnection> {
+    match authority::current_record(profile_root)? {
         Some(record) => Ok(ResolvedDaemonConnection { record }),
         None => Err(TraceDecayError::project_route(
             DAEMON_AUTHORITY_UNAVAILABLE,
             true,
             format!(
                 "TraceDecay daemon is not available: no authority record at '{}'. Start or restart the daemon.",
-                authority::record_path(&profile_root)?.display()
+                authority::record_path(profile_root)?.display()
             ),
         )),
     }
@@ -165,19 +162,13 @@ pub fn current_daemon_connection() -> Result<ResolvedDaemonConnection> {
 /// that names it: the user profile's record, else the record beside the socket
 /// (a daemon whose profile root holds its socket).
 #[cfg(unix)]
-fn connection_for_socket_path(socket_path: &Path) -> Result<ResolvedDaemonConnection> {
-    let user_profile = tracedecay_runtime_core::config::user_data_dir();
-    connection_for_socket_in(user_profile.as_deref(), socket_path)
-}
-
-#[cfg(unix)]
 fn connection_for_socket_in(
-    user_profile: Option<&Path>,
+    user_profile: &Path,
     socket_path: &Path,
 ) -> Result<ResolvedDaemonConnection> {
     let mut checked: Vec<PathBuf> = Vec::new();
     let mut named_elsewhere = Vec::new();
-    for profile_root in user_profile.into_iter().chain(socket_path.parent()) {
+    for profile_root in std::iter::once(user_profile).chain(socket_path.parent()) {
         let record_path = authority::record_path(profile_root)?;
         if checked.contains(&record_path) {
             continue;
@@ -217,15 +208,20 @@ fn connection_for_socket_in(
     })
 }
 
-pub fn client_connection(socket_path: &Path) -> Result<ResolvedDaemonConnection> {
+/// The connection for the daemon serving `socket_path` for the profile whose
+/// data directory is `profile_root`.
+pub fn client_connection(
+    profile_root: &Path,
+    socket_path: &Path,
+) -> Result<ResolvedDaemonConnection> {
     #[cfg(unix)]
     {
-        connection_for_socket_path(socket_path)
+        connection_for_socket_in(profile_root, socket_path)
     }
     #[cfg(not(unix))]
     {
         let _ = socket_path;
-        current_daemon_connection()
+        current_daemon_connection(profile_root)
     }
 }
 
@@ -246,7 +242,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let socket = temp.path().join("daemon.sock");
 
-        let error = connection_for_socket_in(None, &socket)
+        let error = connection_for_socket_in(temp.path(), &socket)
             .expect_err("a socket no record names has no credential");
 
         assert_eq!(route(&error), Some((DAEMON_AUTHORITY_UNAVAILABLE, true)));
@@ -269,11 +265,11 @@ mod tests {
         )
         .unwrap();
 
-        let connection = connection_for_socket_in(None, &socket).unwrap();
+        let connection = connection_for_socket_in(temp.path(), &socket).unwrap();
         assert_eq!(connection.auth_token(), authority.auth_token());
 
         let other = temp.path().join("other.sock");
-        let error = connection_for_socket_in(None, &other)
+        let error = connection_for_socket_in(temp.path(), &other)
             .expect_err("a record naming another socket is not this daemon's credential");
         assert_eq!(route(&error), Some((DAEMON_AUTHORITY_UNAVAILABLE, false)));
         assert!(
@@ -283,7 +279,7 @@ mod tests {
 
         let record = authority::record_path(temp.path()).unwrap();
         std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let error = connection_for_socket_in(None, &socket)
+        let error = connection_for_socket_in(temp.path(), &socket)
             .expect_err("an unreadable record must not be skipped");
         assert_eq!(route(&error), None);
         assert!(error.to_string().contains("not private"), "{error}");

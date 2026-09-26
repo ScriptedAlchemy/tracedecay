@@ -470,11 +470,11 @@ mod tests {
 
     #[tokio::test]
     async fn registered_activity_replays_without_retaining_project_paths() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let profile = tempfile::tempdir().expect("profile");
         let project = tempfile::tempdir().expect("project");
         let project_id = tracedecay_domain::ProjectId::new("project.activity").expect("project id");
         let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+            profile.path().to_path_buf(),
             project.path(),
             project_id.clone(),
         )
@@ -513,22 +513,17 @@ mod tests {
             .expect("caught-up replay present");
         assert!(caught_up.records.is_empty());
         assert!(!caught_up.resume_gap);
-        assert!(
-            !tracedecay_runtime_core::storage::default_profile_root()
-                .expect("profile root")
-                .join("dashboard-events-v1.jsonl")
-                .exists()
-        );
+        assert!(!profile.path().join("dashboard-events-v1.jsonl").exists());
     }
 
     #[tokio::test]
     async fn mcp_dispatch_receipt_uses_the_bound_project_observability_authority() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let profile = tempfile::tempdir().expect("profile");
         let project = tempfile::tempdir().expect("project");
         let project_id =
             tracedecay_domain::ProjectId::new("project.mcp.dispatch").expect("project id");
         let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+            profile.path().to_path_buf(),
             project.path(),
             project_id.clone(),
         )

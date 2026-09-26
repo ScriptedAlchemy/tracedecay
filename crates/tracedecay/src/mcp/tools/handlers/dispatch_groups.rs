@@ -1,6 +1,7 @@
 use serde_json::Value;
 use tracedecay_contracts::{ApplicationOperation, RetainedSurfaceOperation};
 use tracedecay_graph_query::VerifiedGraphQueryRequest;
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -11,7 +12,6 @@ use tracedecay_contracts::code_index_freshness::{
     CodeIndexFreshnessReader, CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitV1,
 };
 use tracedecay_dashboard_api::AdmittedDoctorReportV1;
-use tracedecay_mcp::handlers::git;
 use tracedecay_mcp::handlers::graph as portable_graph;
 use tracedecay_mcp::handlers::info as portable_info;
 use tracedecay_mcp::handlers::{
@@ -308,7 +308,7 @@ fn dispatch_admin_tools_inner<'a>(
                     args,
                     options.global_db,
                     options.accounting_db,
-                    options.profile_root,
+                    options.profile.map(ProfileRoot::data_dir),
                     options.session_authorities,
                     options.session_sync_service,
                     options.application_request_id.clone(),
@@ -505,6 +505,7 @@ pub(crate) fn compute_graph_tool_for_owner<'a>(
                 operation,
                 args,
                 scope_prefix,
+                options.code_index_ignored_dependency_admission.as_deref(),
             )
             .await
         };
@@ -514,34 +515,6 @@ pub(crate) fn compute_graph_tool_for_owner<'a>(
         };
         completion.code_graph = options.served_code_graph.served();
         Ok(completion)
-    })
-}
-
-/// Dispatch git-aware tools (`tracedecay_affected`, `tracedecay_changelog`,
-/// branch and PR context helpers).
-#[hotpath::measure(future = true, label = "mcp.dispatch.git")]
-pub(super) async fn dispatch_git_tools(
-    tool_name: &str,
-    cg: &TraceDecay,
-    args: Value,
-    options: ToolCallRegistryOptions<'_>,
-) -> Result<ToolResult> {
-    dispatch_git_tools_inner(tool_name, cg, args, options).await
-}
-
-fn dispatch_git_tools_inner<'a>(
-    tool_name: &'a str,
-    cg: &'a TraceDecay,
-    args: Value,
-    options: ToolCallRegistryOptions<'a>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
-    // Erase the portable dispatch future before it reaches the measured
-    // wrapper so every profiling feature can compute its layout.
-    Box::pin(async move {
-        let project = admitted_project_authorities(cg, &options)?;
-        let snapshots = AdmittedRequestSnapshotsV1::default();
-        let ctx = admitted_tool_context(&options, &project, &snapshots, None)?;
-        git::dispatch_tool(&ctx, &verified_graph_open(&options), tool_name, args).await
     })
 }
 
@@ -818,12 +791,28 @@ fn dispatch_memory_tools_inner<'a>(
                 dispatch_controls::dispatch_analytics(cg, args, options).await
             }
             "tracedecay_skill_list" => {
-                skills::handle_skill_list(cg, args, options.accounting_db).await
+                skills::handle_skill_list(
+                    cg,
+                    args,
+                    options.accounting_db,
+                    options.profile.map(ProfileRoot::data_dir),
+                )
+                .await
             }
             "tracedecay_skill_view" => {
-                skills::handle_skill_view(cg, args, options.accounting_db).await
+                skills::handle_skill_view(
+                    cg,
+                    args,
+                    options.accounting_db,
+                    options.profile.map(ProfileRoot::data_dir),
+                )
+                .await
             }
-            "tracedecay_hermes_skill_bridge" => skills::handle_hermes_skill_bridge(cg, &args),
+            "tracedecay_hermes_skill_bridge" => skills::handle_hermes_skill_bridge(
+                cg,
+                &args,
+                options.profile.and_then(ProfileRoot::home),
+            ),
             _ => Err(unknown_tool_error(tool_name)),
         }
     })
@@ -870,7 +859,7 @@ fn dispatch_session_workflow_tools_inner<'a>(
                     options.registered_project_session_db.clone(),
                     options.registered_profile_session_db.clone(),
                     options.daemon_user_profile_id.clone(),
-                    options.profile_root.map(std::path::Path::to_path_buf),
+                    options.profile.cloned(),
                     options.dashboard_session_retrieval_service.clone(),
                     options.dashboard_session_retrieval_identity.clone(),
                     options.registered_savings_db.clone(),

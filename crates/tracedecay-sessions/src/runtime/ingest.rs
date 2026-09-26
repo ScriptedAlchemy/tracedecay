@@ -17,7 +17,7 @@ pub use project::{
     home_dir, ingest_project_sources_for_provider,
     ingest_project_sources_for_provider_with_cancellation,
     ingest_project_sources_for_provider_with_cancellation_and_codex_state,
-    with_transcript_source_home,
+    transcript_source_profile, with_transcript_source_profile,
 };
 pub use startup::{
     TranscriptIngestOutcome, ingest_user_global_sources_for_startup_with_db,

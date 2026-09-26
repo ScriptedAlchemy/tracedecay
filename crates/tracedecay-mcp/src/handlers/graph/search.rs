@@ -7,17 +7,18 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
-use tracedecay_contracts::InvocationAnalyticsV1;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
     ContextCodeBlockV1, ContextLexicalAnchorV1, ContextModeV1, ContextResultV1,
     ContextRetrievalPlanV1, ContextSearchMatchV1, ContextStageV1, ContextSurfaceRequestV1,
+    FindExactSymbolMatchV1, FindExactSymbolResultV1, FindExactSymbolSurfaceRequestV1,
     LexicalAnchorDropReasonV1, RedundancyScopeV1, RedundancySurfaceRequestV1, RenamePreviewNodeV1,
     RenamePreviewPrimitiveOutcomeV1, RenamePreviewPrimitiveRequestV1,
     RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1, RenamePreviewTextOnlyMatchV1,
     SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1, SimilarOccurrenceV1, SimilarResultV1,
     SimilarSurfaceRequestV1, SimilarTargetV1,
 };
+use tracedecay_contracts::{ApplicationProblemDetailV1, InvocationAnalyticsV1};
 use tracedecay_domain::ExactClass;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_query::retrieval::lexical::LexicalAnchorOutcomeV1;
@@ -28,8 +29,8 @@ use tracedecay_query::retrieval::lexical::LexicalRoutingV1;
 use crate::context_headings::CONTEXT_SEEN_NODE_IDS_LABEL;
 use crate::handlers::dependency_hints;
 use crate::handlers::support::{
-    decode_primitive_request, generic_tool_result as support_generic,
-    rendered_tool_result as support_rendered, retrieval_cursor, unique_file_paths,
+    decode_primitive_request, rendered_tool_result as support_rendered, retrieval_cursor,
+    unique_file_paths,
 };
 use crate::tools::render::{self, Md};
 use crate::{McpToolContext, ToolResult};
@@ -149,21 +150,6 @@ where
         value,
         touched_files,
         md,
-    )
-}
-
-/// [`rendered_tool_result`] with the default [`render::generic_md`] body.
-fn generic_tool_result(
-    ctx: &McpToolContext<'_>,
-    args: &Value,
-    value: &Value,
-    touched_files: Vec<String>,
-) -> ToolResult {
-    support_generic(
-        Some(&ctx.store_layout().response_handle_root),
-        args,
-        value,
-        touched_files,
     )
 }
 
@@ -393,17 +379,22 @@ where
             if let Some(unavailable_graph) = graph_evidence.unavailable() {
                 output["verified_graph_evidence"] = unavailable_graph.clone();
             }
-            let failure = match freshness
+            let parked = freshness
                 .indexing
                 .as_ref()
                 .and_then(|indexing| indexing.parked.as_ref())
-            {
-                Some(parked) => format!(
-                    "code-index search unavailable: parked: {}; remedy: {}",
-                    parked.reason, parked.remediation
-                ),
+                .map(|parked| ApplicationProblemDetailV1::Parked {
+                    cause: parked.reason.clone(),
+                    remedy: parked.remediation.clone(),
+                    retries_on_wake: parked.retries_on_wake,
+                });
+            let failure = match &parked {
+                Some(detail) => detail.message(),
                 None => format!("code-index search unavailable: {reason}"),
             };
+            if let Some(detail) = parked {
+                output["detail"] = serde_json::to_value(detail)?;
+            }
             Ok(rendered_tool_result(ctx, &args, &output, Vec::new(), || {
                 format!(
                     "{}{}",
@@ -973,6 +964,7 @@ where
             &memory_matches,
             memory_matches_error.as_deref(),
         )),
+        pr_context: None,
     };
     let retrieval = ContextRetrievalPlanV1 {
         memory: context_memory_stage(
@@ -1015,7 +1007,7 @@ where
 /// and want the apples-to-apples cost of an index hit instead of
 /// `tracedecay_search`'s ranked query.
 #[hotpath::measure(label = "mcp.graph.find_exact_symbol.total")]
-pub async fn handle_find_exact_symbol(
+pub async fn compute_find_exact_symbol(
     ctx: &McpToolContext<'_>,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
@@ -1023,23 +1015,17 @@ pub async fn handle_find_exact_symbol(
     ignored_dependency_admission: Option<
         &dyn tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV1,
     >,
-) -> Result<ToolResult> {
-    let name =
-        args.get("name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "missing required parameter: name".to_string(),
-            })?;
-    let limit = args
-        .get("limit")
-        .and_then(serde_json::Value::as_u64)
-        .map_or(20, |v| v.min(200) as usize);
+) -> Result<GraphToolCompletionV1> {
+    let request: FindExactSymbolSurfaceRequestV1 =
+        decode_primitive_request(&args, "tracedecay_find_exact_symbol")?;
+    let name = request.name.as_str();
+    let limit = request.limit.map_or(20, |v| v.min(200) as usize);
 
     let mut nodes = hotpath::measure_block!("mcp.graph.find_exact_symbol.graph", {
         let nodes = graph.resolve_simple_name(name, None, limit.saturating_mul(4))?;
         graph_symbols_in_scope(nodes, scope_prefix)?
     });
-    if nodes.is_empty() && dependency_hints::lazy_indexing_requested(&args) {
+    if nodes.is_empty() && request.lazy_index_ignored_dependencies.unwrap_or(false) {
         hotpath::future!(
             dependency_hints::admit_verified_ignored_dependency(
                 ctx,
@@ -1057,32 +1043,30 @@ pub async fn handle_find_exact_symbol(
     }
 
     let touched_files = graph_symbol_paths(&nodes)?;
-    let items = nodes
+    let matches = nodes
         .iter()
         .map(|node| {
             let metadata = required_graph_metadata(node)?;
             let file_path = required_graph_file_path(node)?;
-            Ok(json!({
-                "id": node.occurrence.as_str(),
-                "name": metadata.simple_name,
-                "qualified_name": metadata.qualified_name,
-                "kind": metadata.kind,
-                "file": file_path,
-                "line": user_line(metadata.start_line),
-                "signature": metadata.signature,
-            }))
+            Ok(FindExactSymbolMatchV1 {
+                id: node.occurrence.as_str().to_owned(),
+                name: metadata.simple_name.clone(),
+                qualified_name: metadata.qualified_name.clone(),
+                kind: metadata.kind.clone(),
+                file: file_path.to_owned(),
+                line: user_line(metadata.start_line),
+                signature: metadata.signature.clone(),
+            })
         })
         .collect::<Result<Vec<_>>>()?;
-
-    let body = hotpath::measure_block!(
-        "mcp.graph.find_exact_symbol.serialize",
-        json!({
-            "name": name,
-            "count": items.len(),
-            "matches": items,
-        })
-    );
-    Ok(generic_tool_result(ctx, &args, &body, touched_files))
+    Ok(graph_tool_completion(
+        GraphToolResultV1::FindExactSymbol(FindExactSymbolResultV1 {
+            name: request.name.clone(),
+            count: matches.len() as u64,
+            matches,
+        }),
+        touched_files,
+    ))
 }
 
 #[hotpath::measure(label = "mcp.graph.similar.total")]

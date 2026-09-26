@@ -11,7 +11,7 @@ use tracedecay_code_index::{
     chunks::content_digest,
     graph_projection::{
         CODE_GRAPH_PROJECTOR_REVISION, CodeGraphInteractiveReader, CodeGraphProjectionStore,
-        build_published_code_graph_manifest_checked, code_graph_projection_identity,
+        code_graph_projection_identity,
     },
     production::{
         CodeIndexCapturedFileV1, CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1,
@@ -177,20 +177,16 @@ fn callers_with_authority(
 }
 
 fn reader(generation: &CodeIndexPublishedGenerationV1) -> CodeGraphInteractiveReader {
-    let manifest = build_published_code_graph_manifest_checked(
+    let manifest = PartitionedSealV1::of(generation).graph_manifest(
         code_graph_projection_identity(
             GraphNamespace::new("code-graph-ts-monorepo").expect("graph namespace"),
         )
         .expect("projection identity"),
-        generation,
         &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())
             .expect("projector revision"),
-        &|| Ok(()),
-    )
-    .expect("published generation projects");
-    let snapshot =
-        VerifiedGraphSnapshot::memory(Arc::unwrap_or_clone(manifest), Arc::new(NeverCancelled))
-            .expect("verified graph snapshot");
+    );
+    let snapshot = VerifiedGraphSnapshot::memory(manifest, Arc::new(NeverCancelled))
+        .expect("verified graph snapshot");
     CodeGraphProjectionStore::from_verified_snapshot(
         snapshot,
         generation.manifest().generation_id.clone(),

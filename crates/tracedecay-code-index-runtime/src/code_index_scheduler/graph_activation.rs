@@ -392,7 +392,6 @@ impl CodeGraphActivationAuthorityV1 {
                         generation_id,
                         Arc::clone(project_database),
                         replay_binding,
-                        None,
                     ),
                     label = "code_graph.activation.recover_head.retain_runtime"
                 )
@@ -421,6 +420,64 @@ impl CodeGraphActivationAuthorityV1 {
                         }
                     }));
                 }
+                Ok(true)
+            }
+            #[cfg(any(test, feature = "test-helpers"))]
+            Self::Memory { .. } => Ok(false),
+        }
+    }
+
+    /// Publishes a sealed generation's graph head straight from its segments
+    /// on disk, without decoding the generation.
+    ///
+    /// Graph prepare runs this before the serving decode so the corpus-sized
+    /// graph build and the decoded generation are never resident together;
+    /// the activation that follows recovers the head this published instead
+    /// of building it. `Ok(false)` abstains for a refused policy or a
+    /// non-persistent authority.
+    #[hotpath::measure(future = true, label = "code_graph.activation.publish_sealed")]
+    pub async fn publish_sealed_graph(
+        &self,
+        project_id: &ProjectId,
+        repository_id: &RepositoryId,
+        worktree_id: &WorktreeId,
+        latest: &LatestCodeTextGenerationV1,
+        replay_binding: CodeGraphReplayBindingV1,
+        cancellation: Arc<AtomicBool>,
+    ) -> Result<bool, CodeIndexSchedulerErrorV1> {
+        if self.policy() == CodeGraphActivationPolicyV1::RefusedByConfiguration {
+            return Ok(false);
+        }
+        match self {
+            Self::Persistent {
+                runtime,
+                project_database,
+                ..
+            } => {
+                let retained = hotpath::future!(
+                    runtime.retain_code_graph_runtime(
+                        project_id.clone(),
+                        repository_id.clone(),
+                        worktree_id.clone(),
+                        latest.metadata().snapshot().reference.clone(),
+                        latest.metadata().manifest().generation_id.clone(),
+                        Arc::clone(project_database),
+                        replay_binding,
+                    ),
+                    label = "code_graph.activation.publish_sealed.retain_runtime"
+                )
+                .await
+                .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
+                tokio::task::spawn_blocking(move || {
+                    retained.publish_verified_snapshot(cancellation).map(drop)
+                })
+                .await
+                .map_err(|error| {
+                    CodeIndexSchedulerErrorV1::GraphActivation(format!(
+                        "sealed graph publication task failed: {error}"
+                    ))
+                })?
+                .map_err(CodeGraphProjectionError::from)?;
                 Ok(true)
             }
             #[cfg(any(test, feature = "test-helpers"))]
@@ -464,7 +521,6 @@ impl CodeGraphActivationAuthorityV1 {
                         generation_id,
                         Arc::clone(project_database),
                         replay_binding,
-                        Some(latest.generation_handle()),
                     ),
                     label = "code_graph.activation.retain_runtime"
                 )
@@ -660,7 +716,7 @@ impl LatestCompleteCodeIndexV1 {
         let snapshot = hotpath::measure_block!(
             "code_graph.activation.publish_verified_snapshot",
             retained
-                .publish_verified_snapshot(&self.generation, Arc::clone(&cancellation))
+                .publish_verified_snapshot(Arc::clone(&cancellation))
                 .map_err(CodeGraphProjectionError::from)
                 .inspect_err(|error| {
                     // The publication stopped at the measured-RSS watermark.

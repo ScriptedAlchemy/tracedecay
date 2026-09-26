@@ -11,6 +11,7 @@ use tracedecay_daemon_identity::authority;
 #[cfg(unix)]
 use tracedecay_daemon_identity::client_connection;
 use tracedecay_domain::errors::{Result, StoreResetRequiredV1, TraceDecayError};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use super::default_socket_path;
 
@@ -81,9 +82,10 @@ impl DaemonProcessProofV1 {
 /// A listening socket is not enough: installers and `tracedecay init` use this
 /// to decide that a daemon can admit work. Version mismatch still counts,
 /// an older process is running and still owns the profile.
-pub fn daemon_reachable() -> bool {
-    default_socket_path().is_ok_and(|path| {
+pub fn daemon_reachable(profile: &ProfileRoot) -> bool {
+    default_socket_path(profile.data_dir()).is_ok_and(|path| {
         probe_daemon_process_with_timeout(
+            profile,
             &path,
             env!("CARGO_PKG_VERSION"),
             DAEMON_REACHABILITY_PROBE_TIMEOUT,
@@ -100,10 +102,11 @@ pub fn daemon_reachable() -> bool {
 /// and a caller that owns its own deadline must not read that miss as "no
 /// daemon is running": the socket is connectable only because a process is
 /// accepting on it.
-pub fn daemon_socket_connectable() -> bool {
-    default_socket_path().is_ok_and(|path| {
+pub fn daemon_socket_connectable(profile: &ProfileRoot) -> bool {
+    default_socket_path(profile.data_dir()).is_ok_and(|path| {
         matches!(
             daemon_readiness_probe(
+                profile,
                 &path,
                 env!("CARGO_PKG_VERSION"),
                 DAEMON_REACHABILITY_PROBE_TIMEOUT,
@@ -117,35 +120,45 @@ pub fn daemon_socket_connectable() -> bool {
 /// Probe `socket_path` once and return both the socket observation and the
 /// initialize proof. Callers must not connect again to classify liveness.
 pub(super) fn observe_daemon_process(
+    profile: &ProfileRoot,
     socket_path: &Path,
     expected_version: &str,
 ) -> (DaemonSocketState, DaemonProcessProofV1) {
-    observe_daemon_process_with_timeout(socket_path, expected_version, Duration::from_secs(1))
+    observe_daemon_process_with_timeout(
+        profile,
+        socket_path,
+        expected_version,
+        Duration::from_secs(1),
+    )
 }
 
 pub(super) fn observe_daemon_process_with_timeout(
+    profile: &ProfileRoot,
     socket_path: &Path,
     expected_version: &str,
     timeout: Duration,
 ) -> (DaemonSocketState, DaemonProcessProofV1) {
-    let (socket, protocol) = daemon_readiness_probe(socket_path, expected_version, timeout);
+    let (socket, protocol) =
+        daemon_readiness_probe(profile, socket_path, expected_version, timeout);
     (socket, proof_from_protocol(protocol))
 }
 
 /// Probe `socket_path` with the operator timeout used by daemon status.
 pub(super) fn probe_daemon_process(
+    profile: &ProfileRoot,
     socket_path: &Path,
     expected_version: &str,
 ) -> DaemonProcessProofV1 {
-    observe_daemon_process(socket_path, expected_version).1
+    observe_daemon_process(profile, socket_path, expected_version).1
 }
 
 pub(super) fn probe_daemon_process_with_timeout(
+    profile: &ProfileRoot,
     socket_path: &Path,
     expected_version: &str,
     timeout: Duration,
 ) -> DaemonProcessProofV1 {
-    observe_daemon_process_with_timeout(socket_path, expected_version, timeout).1
+    observe_daemon_process_with_timeout(profile, socket_path, expected_version, timeout).1
 }
 
 fn proof_from_protocol(protocol: DaemonProtocolState) -> DaemonProcessProofV1 {
@@ -237,11 +250,12 @@ impl std::fmt::Display for DaemonProtocolState {
 // explicit timeout since readiness unified on one authenticated connection.
 #[cfg(any(test, windows))]
 pub(super) fn daemon_protocol_state_with_timeout(
+    profile: &ProfileRoot,
     transport_hint: &Path,
     expected_version: &str,
     timeout: std::time::Duration,
 ) -> DaemonProtocolState {
-    daemon_readiness_probe(transport_hint, expected_version, timeout).1
+    daemon_readiness_probe(profile, transport_hint, expected_version, timeout).1
 }
 
 fn classify_daemon_protocol_identity(
@@ -276,6 +290,7 @@ fn classify_daemon_protocol_identity(
 #[cfg(unix)]
 #[hotpath::measure(label = "daemon.service.probe.readiness")]
 pub(super) fn daemon_readiness_probe(
+    profile: &ProfileRoot,
     socket_path: &Path,
     expected_version: &str,
     timeout: std::time::Duration,
@@ -289,7 +304,7 @@ pub(super) fn daemon_readiness_probe(
             )),
         );
     }
-    let connection = match client_connection(socket_path) {
+    let connection = match client_connection(profile.data_dir(), socket_path) {
         Ok(connection) => connection,
         Err(error) => {
             // The client identity could not be resolved, so nothing has been
@@ -316,8 +331,13 @@ pub(super) fn daemon_readiness_probe(
         }
     };
     let deadline = std::time::Instant::now() + timeout;
-    let identity =
-        query_daemon_identity_stream(stream, connection.auth_token(), expected_version, deadline);
+    let identity = query_daemon_identity_stream(
+        profile,
+        stream,
+        connection.auth_token(),
+        expected_version,
+        deadline,
+    );
     (
         DaemonSocketState::Connectable,
         classify_daemon_protocol_identity(identity, expected_version),
@@ -327,11 +347,12 @@ pub(super) fn daemon_readiness_probe(
 #[cfg(not(unix))]
 #[hotpath::measure(label = "daemon.service.probe.readiness")]
 pub(super) fn daemon_readiness_probe(
+    profile: &ProfileRoot,
     transport_hint: &Path,
     expected_version: &str,
     timeout: std::time::Duration,
 ) -> (DaemonSocketState, DaemonProtocolState) {
-    let (address, auth_token, _) = match current_loopback_authority(transport_hint) {
+    let (address, auth_token, _) = match current_loopback_authority(profile, transport_hint) {
         Ok(Some(authority)) => authority,
         Ok(None) => {
             return (
@@ -372,7 +393,8 @@ pub(super) fn daemon_readiness_probe(
             );
         }
     };
-    let identity = query_daemon_identity_stream(stream, &auth_token, expected_version, deadline);
+    let identity =
+        query_daemon_identity_stream(profile, stream, &auth_token, expected_version, deadline);
     (
         DaemonSocketState::Connectable,
         classify_daemon_protocol_identity(identity, expected_version),
@@ -388,13 +410,15 @@ pub(super) struct DaemonInitializeIdentity {
 }
 
 fn query_daemon_identity_stream(
+    profile: &ProfileRoot,
     mut stream: impl ProbeStream,
     auth_token: &str,
     client_version: &str,
     deadline: std::time::Instant,
 ) -> Result<DaemonInitializeIdentity> {
     const REQUEST_ID: i64 = 1;
-    let handshake = crate::handshake_for_current_client(client_version, None, None, false, false)?;
+    let handshake =
+        crate::handshake_for_current_client(profile, client_version, None, None, false, false)?;
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": REQUEST_ID,
@@ -461,10 +485,20 @@ fn query_daemon_identity_stream(
 /// reset-required state, each naming the command that resets it. A daemon
 /// that does not complete initialize as this build is an error, never an
 /// empty list.
-pub fn daemon_reset_required_stores(expected_version: &str) -> Result<Vec<StoreResetRequiredV1>> {
+pub fn daemon_reset_required_stores(
+    profile: &ProfileRoot,
+    expected_version: &str,
+) -> Result<Vec<StoreResetRequiredV1>> {
     const RESET_REQUIRED_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
-    let socket_path = default_socket_path()?;
-    match daemon_readiness_probe(&socket_path, expected_version, RESET_REQUIRED_PROBE_TIMEOUT).1 {
+    let socket_path = default_socket_path(profile.data_dir())?;
+    match daemon_readiness_probe(
+        profile,
+        &socket_path,
+        expected_version,
+        RESET_REQUIRED_PROBE_TIMEOUT,
+    )
+    .1
+    {
         DaemonProtocolState::Ready {
             reset_required_stores,
         } => Ok(reset_required_stores),
@@ -484,27 +518,30 @@ pub(super) enum DaemonShutdownRequest {
 
 #[cfg(not(unix))]
 pub(super) fn request_daemon_shutdown(
+    profile: &ProfileRoot,
     transport_hint: &Path,
     client_version: &str,
 ) -> Result<DaemonShutdownRequest> {
     const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
     let deadline = std::time::Instant::now() + SHUTDOWN_TIMEOUT;
-    let (address, auth_token, _) =
-        current_loopback_authority(transport_hint)?.ok_or_else(missing_loopback_authority)?;
+    let (address, auth_token, _) = current_loopback_authority(profile, transport_hint)?
+        .ok_or_else(missing_loopback_authority)?;
     let remaining = remaining_probe_time(deadline, "daemon shutdown request")?;
     let stream = StdTcpStream::connect_timeout(&address, remaining)?;
-    request_daemon_shutdown_stream(stream, &auth_token, client_version, deadline)
+    request_daemon_shutdown_stream(profile, stream, &auth_token, client_version, deadline)
 }
 
 #[cfg(not(unix))]
 fn request_daemon_shutdown_stream(
+    profile: &ProfileRoot,
     mut stream: impl ProbeStream,
     auth_token: &str,
     client_version: &str,
     deadline: std::time::Instant,
 ) -> Result<DaemonShutdownRequest> {
     const REQUEST_ID: i64 = 2;
-    let handshake = crate::handshake_for_current_client(client_version, None, None, false, false)?;
+    let handshake =
+        crate::handshake_for_current_client(profile, client_version, None, None, false, false)?;
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": REQUEST_ID,
@@ -678,16 +715,14 @@ pub(super) fn daemon_transport_display(transport_hint: &Path) -> String {
 
 #[cfg(not(unix))]
 fn current_loopback_authority(
+    profile: &ProfileRoot,
     transport_hint: &Path,
 ) -> Result<Option<(std::net::SocketAddr, String, String)>> {
     let profile_root = transport_hint
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-        .map(Path::to_path_buf)
-        .or_else(tracedecay_runtime_core::config::user_data_dir)
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "could not determine TraceDecay user data directory".to_string(),
-        })?;
+        .unwrap_or(profile.data_dir())
+        .to_path_buf();
     let profile_root = authority::canonical_identity_path(&profile_root)?;
     let Some(record) = authority::current_record(&profile_root)? else {
         return Ok(None);
@@ -774,7 +809,7 @@ mod timeout_classification_tests {
     use std::io::{self, Cursor, Read, Write};
     use std::time::{Duration, Instant};
 
-    use tracedecay_runtime_core::config::PinnedUserDataDir;
+    use tracedecay_runtime_core::config::ProfileRoot;
 
     use super::{
         ProbeStream, arm_probe_timeout, query_daemon_identity_stream, remaining_probe_time,
@@ -840,7 +875,8 @@ mod timeout_classification_tests {
 
     #[test]
     fn readiness_probe_classifies_denial_after_read_timeout_einval() {
-        let _profile = PinnedUserDataDir::new();
+        let profile_dir = tempfile::tempdir().expect("profile dir");
+        let profile = ProfileRoot::under_home(profile_dir.path());
         let response = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -850,6 +886,7 @@ mod timeout_classification_tests {
             reply: Cursor::new(format!("{response}\n").into_bytes()),
         };
         let error = query_daemon_identity_stream(
+            &profile,
             stream,
             "token",
             "0.1.0-test+service-probe",
@@ -864,8 +901,10 @@ mod timeout_classification_tests {
 
     #[test]
     fn spent_readiness_probe_budget_is_typed_deadline() {
-        let _profile = PinnedUserDataDir::new();
+        let profile_dir = tempfile::tempdir().expect("profile dir");
+        let profile = ProfileRoot::under_home(profile_dir.path());
         let error = query_daemon_identity_stream(
+            &profile,
             UnusedStream,
             "token",
             "0.1.0-test+service-probe",

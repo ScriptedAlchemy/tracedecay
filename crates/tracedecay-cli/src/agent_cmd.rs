@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_agent_hosts::agents::host_component_registration::CatalogHostComponentRegistrationAuthority;
 use tracedecay_session_memory::user_config::UserConfig;
@@ -7,9 +8,6 @@ use tracedecay_session_memory::user_config::UserConfig;
 mod automation;
 #[cfg(test)]
 mod host_cli_fixture;
-#[cfg(test)]
-#[path = "../../../tests/support/isolated_profile.rs"]
-mod isolated_profile;
 pub(crate) use automation::CodexAutomationInstall;
 #[cfg(test)]
 use automation::broker_codex_daemon_automation_project;
@@ -318,6 +316,7 @@ impl HostLifecycleSummary {
 /// `reinstall`, and `uninstall`. Without `--component` it runs every
 /// component of each host's canonical set; with it, only the named one.
 pub(crate) async fn handle_host_lifecycle_command(
+    profile: &ProfileRoot,
     agent: Option<String>,
     operation: HostBundleCliOperation,
     options: crate::cli::HostBundleCliOptions,
@@ -338,13 +337,14 @@ pub(crate) async fn handle_host_lifecycle_command(
                 .to_string(),
         });
     }
-    let home = tracedecay_agent_hosts::agents::home_dir().ok_or_else(|| {
-        tracedecay_domain::errors::TraceDecayError::Config {
+    let home = profile
+        .home()
+        .map(std::path::Path::to_path_buf)
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
             message: "could not determine home directory".to_string(),
-        }
-    })?;
-    let lifecycle_root = resolved_lifecycle_root()?;
-    let mut user_config = load_host_lifecycle_user_config()?;
+        })?;
+    let lifecycle_root = resolved_lifecycle_root(profile);
+    let mut user_config = load_host_lifecycle_user_config(profile)?;
     let explicitly_scoped = agent.is_some();
     let agent_ids = match agent {
         Some(agent) => vec![agent],
@@ -374,11 +374,11 @@ pub(crate) async fn handle_host_lifecycle_command(
                 .installed_agents
                 .retain(|id| tracedecay_agent_hosts::agents::get_integration(id).is_ok());
             if user_config.installed_agents.len() != before
-                && let Err(err) = user_config.save()
+                && let Err(err) = user_config.save(profile.data_dir())
             {
                 eprintln!("warning: could not save tracedecay config: {err}");
             }
-            let agent_ids = maintenance_sweep_agents(&user_config.installed_agents, &home);
+            let agent_ids = maintenance_sweep_agents(profile, &user_config.installed_agents, &home);
             if agent_ids.is_empty() {
                 let next_step = match operation {
                     HostBundleCliOperation::Uninstall => "",
@@ -438,6 +438,7 @@ pub(crate) async fn handle_host_lifecycle_command(
             }
         };
         let mut result = run_host_component_lifecycle(
+            profile,
             agent_id,
             operation,
             &options,
@@ -453,7 +454,7 @@ pub(crate) async fn handle_host_lifecycle_command(
             let automation_result = match validate_codex_automation_project_path() {
                 Ok(project_path) => {
                     hotpath::future!(
-                        install_codex_daemon_automation(&project_path, &home, automation),
+                        install_codex_daemon_automation(profile, &project_path, &home, automation),
                         label = "cli.agent.automation"
                     )
                     .await
@@ -517,11 +518,11 @@ pub(crate) async fn handle_host_lifecycle_command(
         }
     }
     if !options.dry_run {
-        user_config
-            .save()
-            .map_err(|err| tracedecay_domain::errors::TraceDecayError::Config {
+        user_config.save(profile.data_dir()).map_err(|err| {
+            tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("failed to save user config: {err}"),
-            })?;
+            }
+        })?;
     }
     let completion = summary.finish()?;
     if options.dry_run {
@@ -541,10 +542,10 @@ pub(crate) async fn handle_host_lifecycle_command(
             &user_config.installed_agents,
             &refreshed,
         ) {
-            crate::update_cmd::record_completed_reinstall_pass(&mut user_config)?;
+            crate::update_cmd::record_completed_reinstall_pass(profile, &mut user_config)?;
         } else if operation == HostBundleCliOperation::Install {
             user_config.last_installed_version = env!("CARGO_PKG_VERSION").to_string();
-            user_config.save().map_err(|err| {
+            user_config.save(profile.data_dir()).map_err(|err| {
                 tracedecay_domain::errors::TraceDecayError::Config {
                     message: format!("failed to save user config: {err}"),
                 }
@@ -554,7 +555,7 @@ pub(crate) async fn handle_host_lifecycle_command(
     // An install pass converges the managed-skill exports against the store,
     // so a host never keeps advertising a skill the store no longer holds.
     if operation == HostBundleCliOperation::Install {
-        crate::update_cmd::deploy_managed_skills_after_lifecycle();
+        crate::update_cmd::deploy_managed_skills_after_lifecycle(profile);
     }
     Ok(completion)
 }
@@ -564,11 +565,17 @@ pub(crate) async fn handle_host_lifecycle_command(
 /// carries tracedecay, the same test `doctor` uses to report a host. A
 /// profile config that predates tracking (or lost it) must not turn the sweep
 /// into a no-op while doctor keeps reporting stale rendered versions.
-pub(crate) fn maintenance_sweep_agents(tracked: &[String], home: &Path) -> Vec<String> {
+pub(crate) fn maintenance_sweep_agents(
+    profile: &ProfileRoot,
+    tracked: &[String],
+    home: &Path,
+) -> Vec<String> {
     let mut agent_ids = tracked.to_vec();
     for integration in tracedecay_agent_hosts::agents::all_integrations() {
         let id = integration.id();
-        if !agent_ids.iter().any(|tracked| tracked == id) && integration.has_tracedecay(home) {
+        if !agent_ids.iter().any(|tracked| tracked == id)
+            && integration.has_tracedecay(home, profile)
+        {
             agent_ids.push(id.to_string());
         }
     }
@@ -584,17 +591,16 @@ fn operation_verb(operation: HostBundleCliOperation) -> &'static str {
     }
 }
 
-fn resolved_lifecycle_root() -> tracedecay_domain::errors::Result<PathBuf> {
-    tracedecay_agent_hosts::agents::host_bundle::resolved_host_bundle_lifecycle_root().map_err(
-        |error| tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("could not resolve host lifecycle root: {error}"),
-        },
+fn resolved_lifecycle_root(profile: &ProfileRoot) -> PathBuf {
+    tracedecay_agent_hosts::agents::host_bundle::resolved_host_bundle_lifecycle_root(
+        profile.data_dir(),
     )
 }
 
 /// Runs one agent's canonical component set, or the single `--component`
 /// the options name, as one receipt-backed transaction (or its dry run).
 fn run_host_component_lifecycle(
+    profile: &ProfileRoot,
     agent_id: &str,
     operation: HostBundleCliOperation,
     options: &crate::cli::HostBundleCliOptions,
@@ -619,6 +625,7 @@ fn run_host_component_lifecycle(
     })?;
     if options.dry_run {
         dry_run_canonical_component_set(
+            profile,
             agent_id,
             operation,
             &component_set,
@@ -630,6 +637,7 @@ fn run_host_component_lifecycle(
         Ok(HostLifecycleResult::Applied)
     } else {
         apply_canonical_component_set(
+            profile,
             agent_id,
             operation,
             &component_set,
@@ -791,6 +799,7 @@ fn component_set_request(
 }
 
 fn dry_run_canonical_component_set(
+    profile: &ProfileRoot,
     agent_id: &str,
     operation: HostBundleCliOperation,
     component_set: &tracedecay_agent_hosts::agents::host_bundle_registry::VerifiedEmbeddedHostComponentSetV1,
@@ -800,6 +809,7 @@ fn dry_run_canonical_component_set(
     context: &ComponentSetApplyContext,
 ) -> tracedecay_domain::errors::Result<()> {
     let preview = preview_canonical_component_set(
+        profile,
         agent_id,
         operation,
         component_set,
@@ -896,6 +906,7 @@ fn artifact_disposition(
 }
 
 fn preview_canonical_component_set(
+    profile: &ProfileRoot,
     agent_id: &str,
     operation: HostBundleCliOperation,
     component_set: &tracedecay_agent_hosts::agents::host_bundle_registry::VerifiedEmbeddedHostComponentSetV1,
@@ -910,6 +921,7 @@ fn preview_canonical_component_set(
     let mut registration = match context {
         Some(context) => {
             CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin_and_dashboard(
+                profile,
                 agent_id,
                 home,
                 request.lifecycle.operation,
@@ -918,6 +930,7 @@ fn preview_canonical_component_set(
             )?
         }
         None => CatalogHostComponentRegistrationAuthority::new(
+            profile,
             agent_id,
             home,
             request.lifecycle.operation,
@@ -973,6 +986,7 @@ impl ComponentSetApplyContext {
 
 #[hotpath::measure(label = "cli.agent.component.apply")]
 fn apply_canonical_component_set(
+    profile: &ProfileRoot,
     agent_id: &str,
     operation: HostBundleCliOperation,
     component_set: &tracedecay_agent_hosts::agents::host_bundle_registry::VerifiedEmbeddedHostComponentSetV1,
@@ -1004,6 +1018,7 @@ fn apply_canonical_component_set(
         );
     let mut registration =
         CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin_and_dashboard(
+            profile,
             agent_id,
             home,
             request.lifecycle.operation,
@@ -1082,24 +1097,30 @@ fn apply_canonical_component_set(
     Ok(HostLifecycleResult::Applied)
 }
 
-fn load_host_lifecycle_user_config() -> tracedecay_domain::errors::Result<UserConfig> {
-    UserConfig::load_strict().map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
-        message: format!("failed to load host lifecycle policy: {error}"),
+fn load_host_lifecycle_user_config(
+    profile: &ProfileRoot,
+) -> tracedecay_domain::errors::Result<UserConfig> {
+    UserConfig::load_strict(profile.data_dir()).map_err(|error| {
+        tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("failed to load host lifecycle policy: {error}"),
+        }
     })
 }
 
 pub(crate) async fn handle_project_local_lifecycle_command(
+    profile: &ProfileRoot,
     agent_id: String,
     operation: HostBundleCliOperation,
 ) -> tracedecay_domain::errors::Result<()> {
     if !matches!(agent_id.as_str(), "devin" | "zed" | "vibe") {
         return Err(project_local_host_lifecycle_unavailable());
     }
-    let home = tracedecay_agent_hosts::agents::home_dir().ok_or_else(|| {
-        tracedecay_domain::errors::TraceDecayError::Config {
+    let home = profile
+        .home()
+        .map(std::path::Path::to_path_buf)
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
             message: "could not determine home directory".to_string(),
-        }
-    })?;
+        })?;
     let tracedecay_bin = tracedecay_agent_hosts::agents::which_tracedecay().ok_or_else(|| {
         tracedecay_domain::errors::TraceDecayError::Config {
             message: "tracedecay not found on PATH. Install the checksummed GitHub release:\n  \
@@ -1118,6 +1139,7 @@ pub(crate) async fn handle_project_local_lifecycle_command(
     }
     let context = tracedecay_agent_hosts::agents::InstallContext {
         home: home.clone(),
+        profile: profile.clone(),
         tracedecay_bin,
         project_root: Some(project_path.clone()),
         dashboard: false,
@@ -1128,8 +1150,12 @@ pub(crate) async fn handle_project_local_lifecycle_command(
     let components = tracedecay_agent_hosts::agents::host_bundle_registry::default_components(
         host_kind_for_agent(&agent_id)?,
     );
-    let _registration_paths =
-        integration.project_host_component_registration_paths(&components, &home, &project_path)?;
+    let _registration_paths = integration.project_host_component_registration_paths(
+        &components,
+        &home,
+        profile.data_dir(),
+        &project_path,
+    )?;
     match operation {
         HostBundleCliOperation::Install
         | HostBundleCliOperation::Update
@@ -1264,19 +1290,23 @@ fn host_bundle_error_for_agent(
     host_bundle_error(error)
 }
 
-pub(crate) fn install_requested_git_hook() -> tracedecay_domain::errors::Result<()> {
+pub(crate) fn install_requested_git_hook(
+    profile: &ProfileRoot,
+) -> tracedecay_domain::errors::Result<()> {
     let tracedecay_bin = tracedecay_agent_hosts::agents::which_tracedecay().ok_or_else(|| {
         tracedecay_domain::errors::TraceDecayError::Config {
             message: "tracedecay not found on PATH".to_string(),
         }
     })?;
-    tracedecay_agent_hosts::agents::install_git_post_commit_hook(&tracedecay_bin)
+    let home = profile.require_home("git post-commit hook install")?;
+    tracedecay_agent_hosts::agents::install_git_post_commit_hook(home, &tracedecay_bin)
         .map_err(|message| tracedecay_domain::errors::TraceDecayError::Config { message })
 }
 
 /// Reinstalls tracked integrations while reusing lifecycle authority already
 /// held by post-update maintenance.
 pub(crate) async fn reinstall_agent_integrations_under_lease(
+    profile: &ProfileRoot,
     agent_ids: &[String],
     tracked: &[String],
     home: &Path,
@@ -1285,6 +1315,7 @@ pub(crate) async fn reinstall_agent_integrations_under_lease(
 ) -> tracedecay_domain::errors::Result<HostLifecycleSummary> {
     let _ = lifecycle;
     reinstall_agent_integrations_with_persisted_dashboard_policies(
+        profile,
         agent_ids,
         tracked,
         home,
@@ -1297,13 +1328,14 @@ pub(crate) async fn reinstall_agent_integrations_under_lease(
 /// agent so maintenance can continue past a failing host. `tracked` names
 /// the hosts the profile config tracks; any other id was only detected.
 async fn reinstall_agent_integrations_with_persisted_dashboard_policies(
+    profile: &ProfileRoot,
     agent_ids: &[String],
     tracked: &[String],
     home: &Path,
     tracedecay_bin: &str,
 ) -> tracedecay_domain::errors::Result<HostLifecycleSummary> {
-    let user_config = load_host_lifecycle_user_config()?;
-    let lifecycle_root = resolved_lifecycle_root()?;
+    let user_config = load_host_lifecycle_user_config(profile)?;
+    let lifecycle_root = resolved_lifecycle_root(profile);
     let options = crate::cli::HostBundleCliOptions {
         component: None,
         dry_run: false,
@@ -1324,6 +1356,7 @@ async fn reinstall_agent_integrations_with_persisted_dashboard_policies(
             dashboard: user_config.dashboard_enabled_for_agent(id),
         };
         let result = run_host_component_lifecycle(
+            profile,
             id,
             HostBundleCliOperation::Repair,
             &options,
@@ -1402,20 +1435,6 @@ mod tests {
 "#;
     const OPENCODE_CONTEXT_CONFIG: &[u8] = br#"{"mcp":{"tracedecay":{"type":"local","command":["tracedecay","serve"]},"other":{"type":"local","command":["other"]}},"unrelated":{"keep":true}}
 "#;
-    /// [`PinnedUserDataDir`] gives each test its own profile root (and its own
-    /// `HOME`) for the duration of the guard, and holds the crate-wide
-    /// user-data-dir lock while the override is installed, the same lock every
-    /// other profile-mutating test takes, so the mutation cannot be observed
-    /// half-applied. Hold it for as long as any `home` fixture is alive.
-    ///
-    /// This is also the serialization point for the other process-global
-    /// variables these tests set (`PATH`, `KIMI_CODE_HOME`, and the host
-    /// registration fault injectors): one lock for all of them keeps their
-    /// windows from overlapping each other or a profile pin.
-    fn pinned_host_profile() -> tracedecay_runtime_core::config::PinnedUserDataDir {
-        tracedecay_runtime_core::config::PinnedUserDataDir::new()
-    }
-
     /// One agent's whole canonical component set, as `install --agent <id>`
     /// (with `--yes --adopt` when `adopt`) runs it.
     fn run_default_component_set(
@@ -1424,7 +1443,9 @@ mod tests {
         home: &Path,
         adopt: bool,
     ) -> tracedecay_domain::errors::Result<()> {
+        let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home);
         match super::run_host_component_lifecycle(
+            profile,
             agent_id,
             operation,
             &crate::cli::HostBundleCliOptions {
@@ -1434,7 +1455,9 @@ mod tests {
                 adopt,
             },
             home,
-            &super::resolved_lifecycle_root()?,
+            &super::resolved_lifecycle_root(
+                &tracedecay_runtime_core::config::ProfileRoot::under_home(home),
+            ),
             &ComponentSetApplyContext::resolved_with_dashboard(true),
         ) {
             Ok(HostLifecycleResult::Applied) => Ok(()),
@@ -1670,8 +1693,8 @@ mod tests {
     /// contested path plus the explicit adoption remedy.
     #[tokio::test]
     async fn explicit_component_repair_refuses_adoption_without_the_adopt_flag() {
-        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
+        let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let lifecycle = tempfile::tempdir().unwrap();
         let component_set = canonical_host_component_set(
             "cursor",
@@ -1695,6 +1718,7 @@ mod tests {
         };
 
         let error = super::preview_canonical_component_set(
+            profile,
             "cursor",
             HostBundleCliOperation::Repair,
             &component_set,
@@ -1719,6 +1743,7 @@ mod tests {
             ..options
         };
         super::preview_canonical_component_set(
+            profile,
             "cursor",
             HostBundleCliOperation::Repair,
             &component_set,
@@ -1737,8 +1762,8 @@ mod tests {
 
     #[test]
     fn component_apply_refuses_receiptless_bytes_without_adoption_authority() {
-        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
+        let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let lifecycle = tempfile::tempdir().unwrap();
         let component_set = canonical_host_component_set_with_tracedecay_bin(
             "cursor",
@@ -1755,6 +1780,7 @@ mod tests {
         std::fs::write(&deployed, b"operator-owned").unwrap();
 
         let error = super::apply_canonical_component_set(
+            profile,
             "cursor",
             HostBundleCliOperation::Install,
             &component_set,
@@ -1778,7 +1804,6 @@ mod tests {
 
     #[test]
     fn default_component_apply_honors_explicit_adoption_authority() {
-        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let component_set = canonical_host_component_set("cursor", None, 0)
             .unwrap()
@@ -1906,8 +1931,6 @@ mod tests {
     /// mid-test.
     const KIRO_FIXTURE_BIN: &str = "/usr/local/bin/tracedecay";
 
-    use super::isolated_profile::EnvVarGuard;
-
     /// Keep Kiro lifecycle tests on the native `kiro-cli` route. The compiled
     /// fixture is a real executable so Windows runners do not rename a shell
     /// script to `.exe` or depend on an ambient Kiro install.
@@ -1987,12 +2010,16 @@ mod tests {
 
     #[tokio::test]
     async fn codex_automation_project_initializes_through_daemon() {
+        let profile_home = tempfile::tempdir().unwrap();
+        let profile =
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(profile_home.path());
         crate::product_runtime::register_for_tests();
         let project = tempfile::tempdir().unwrap();
         let project_path = project.path().to_path_buf();
         let expected_project_path = project_path.clone();
         let expected_dashboard = project_path.join("dashboard");
         let actual = broker_codex_daemon_automation_project(
+            profile,
             &project_path,
             move |handshake| async move {
                 assert_eq!(
@@ -2012,6 +2039,9 @@ mod tests {
 
     #[tokio::test]
     async fn unavailable_daemon_does_not_resolve_or_open_local_project() {
+        let profile_home = tempfile::tempdir().unwrap();
+        let profile =
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(profile_home.path());
         // Without a registered provider the handshake fails first, and this
         // test's injected `daemon unavailable` failure never runs.
         crate::product_runtime::register_for_tests();
@@ -2019,6 +2049,7 @@ mod tests {
         let resolved = Arc::new(AtomicBool::new(false));
         let resolver_called = Arc::clone(&resolved);
         let error = broker_codex_daemon_automation_project(
+            profile,
             project.path(),
             |_| async {
                 Err(tracedecay_domain::errors::TraceDecayError::Config {
@@ -2106,8 +2137,8 @@ mod tests {
 
     #[test]
     fn explicit_context_component_lifecycle_preserves_other_opencode_state() {
-        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
+        let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let lifecycle = tempfile::tempdir().unwrap();
         let preserved = seed_opencode_non_context_state(home.path());
         let component_set = canonical_host_component_set(
@@ -2125,6 +2156,7 @@ mod tests {
         };
 
         apply_canonical_component_set(
+            profile,
             "opencode",
             HostBundleCliOperation::Install,
             &component_set,
@@ -2137,6 +2169,7 @@ mod tests {
         assert_opencode_non_context_state(&preserved);
 
         apply_canonical_component_set(
+            profile,
             "opencode",
             HostBundleCliOperation::Uninstall,
             &component_set,
@@ -2155,7 +2188,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn kiro_context_mcp_component_set_applies_non_interactively_and_repeats() {
-        let _profile = pinned_host_profile();
         #[cfg(unix)]
         let kiro_cli_dir = tempfile::tempdir().unwrap();
         #[cfg(unix)]
@@ -2166,6 +2198,7 @@ mod tests {
         let _kiro_path =
             tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(kiro_cli_dir.path());
         let home = tempfile::tempdir().unwrap();
+        let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let lifecycle = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".kiro")).unwrap();
         let component_set =
@@ -2188,6 +2221,7 @@ mod tests {
             HostBundleCliOperation::Repair,
         ] {
             apply_canonical_component_set(
+                profile,
                 "kiro",
                 operation,
                 &component_set,
@@ -2215,12 +2249,12 @@ mod tests {
             AgentIntegration, DoctorCounters, HealthcheckContext, KiroIntegration,
         };
 
-        let _profile = pinned_host_profile();
         let kiro_cli_dir = tempfile::tempdir().unwrap();
         write_fake_kiro_cli(&kiro_cli_dir.path().join("kiro-cli"));
         let _kiro_path =
             tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(kiro_cli_dir.path());
         let home = tempfile::tempdir().unwrap();
+        let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let project = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".kiro")).unwrap();
@@ -2230,6 +2264,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
         apply_canonical_component_set(
+            profile,
             "kiro",
             HostBundleCliOperation::Install,
             &component_set,
@@ -2261,6 +2296,7 @@ mod tests {
         KiroIntegration.healthcheck(
             &mut counters,
             &HealthcheckContext {
+                profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
                 home: home.path().to_path_buf(),
                 project_path: project.path().to_path_buf(),
             },
@@ -2277,13 +2313,13 @@ mod tests {
     fn confirmed_apply_reports_an_ownership_conflict_as_itself() {
         use tracedecay_agent_hosts::agents::host_bundle::HostBundleError;
 
-        let _profile = pinned_host_profile();
         let kiro_cli_dir = tempfile::tempdir().unwrap();
         let kiro_cli_path = kiro_cli_dir.path().join("kiro-cli");
         write_fake_kiro_cli(&kiro_cli_path);
         let _kiro_path =
             tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(kiro_cli_dir.path());
         let home = tempfile::tempdir().unwrap();
+        let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let lifecycle = tempfile::tempdir().unwrap();
         let component_set =
             canonical_host_component_set_with_tracedecay_bin("kiro", None, 0, KIRO_FIXTURE_BIN)
@@ -2300,6 +2336,7 @@ mod tests {
         // receipt makes a later foreign edit a standing conflict rather than
         // an adoptable pre-receipt deployment.
         apply_canonical_component_set(
+            profile,
             "kiro",
             HostBundleCliOperation::Install,
             &component_set,
@@ -2324,6 +2361,7 @@ mod tests {
                 &mut writer,
             );
         let mut registration = CatalogHostComponentRegistrationAuthority::new(
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             "kiro",
             home.path(),
             request.lifecycle.operation,
@@ -2364,11 +2402,11 @@ mod tests {
 
     #[test]
     fn absent_kiro_cli_is_typed_unavailability_not_an_ownership_conflict() {
-        let _profile = pinned_host_profile();
         let empty_path = tempfile::tempdir().unwrap();
         let _path =
             tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(empty_path.path());
         let home = tempfile::tempdir().unwrap();
+        let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let lifecycle = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".kiro")).unwrap();
         let component_set =
@@ -2382,6 +2420,7 @@ mod tests {
             adopt: false,
         };
         let error = apply_canonical_component_set(
+            profile,
             "kiro",
             HostBundleCliOperation::Install,
             &component_set,
@@ -2404,12 +2443,12 @@ mod tests {
 
     #[test]
     fn malformed_kiro_fixture_output_is_not_unavailability_or_ownership_conflict() {
-        let _profile = pinned_host_profile();
         let kiro_cli_dir = tempfile::tempdir().unwrap();
         write_fake_kiro_cli(&kiro_cli_dir.path().join("kiro-cli"));
         let _kiro_path =
             tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(kiro_cli_dir.path());
         let home = tempfile::tempdir().unwrap();
+        let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         std::fs::create_dir_all(home.path().join(".tracedecay-host-cli-fixture")).unwrap();
         std::fs::write(
             home.path().join(".tracedecay-host-cli-fixture/malformed"),
@@ -2429,6 +2468,7 @@ mod tests {
             adopt: false,
         };
         let error = apply_canonical_component_set(
+            profile,
             "kiro",
             HostBundleCliOperation::Install,
             &component_set,
@@ -2458,7 +2498,6 @@ mod tests {
             HostBundleError, HostComponentSetLifecyclePreviewV1, HostComponentSetRegistrationV1,
         };
 
-        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let component_set = canonical_host_component_set("opencode", None, 0)
             .unwrap()
@@ -2467,6 +2506,7 @@ mod tests {
             component_set_request(&component_set, HostBundleCliOperation::Install, true, false)
                 .unwrap();
         let mut registration = CatalogHostComponentRegistrationAuthority::new(
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             "opencode",
             home.path(),
             request.lifecycle.operation,
@@ -2532,7 +2572,6 @@ mod tests {
         // other input is identical, and each run gets its own home so the two
         // outcomes cannot influence each other.
         let drive = |declare_the_write: bool| {
-            let _profile = pinned_host_profile();
             let home = tempfile::tempdir().unwrap();
             let registration_path = home.path().join(".config/opencode/opencode.json");
             // Create the directory up front: a registration directory that is
@@ -2543,6 +2582,7 @@ mod tests {
                 component_set_request(&component_set, HostBundleCliOperation::Install, true, false)
                     .unwrap();
             let mut registration = CatalogHostComponentRegistrationAuthority::new(
+                &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
                 "opencode",
                 home.path(),
                 request.lifecycle.operation,
@@ -2597,7 +2637,6 @@ mod tests {
     fn explicit_context_component_rollback_preserves_other_opencode_state() {
         use tracedecay_agent_hosts::agents::host_bundle::HostComponentSetRegistrationV1;
 
-        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let preserved = seed_opencode_non_context_state(home.path());
         let component_set = canonical_host_component_set(
@@ -2611,6 +2650,7 @@ mod tests {
             component_set_request(&component_set, HostBundleCliOperation::Install, true, false)
                 .unwrap();
         let mut registration = CatalogHostComponentRegistrationAuthority::new(
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             "opencode",
             home.path(),
             request.lifecycle.operation,
@@ -2641,13 +2681,13 @@ mod tests {
 
     #[test]
     fn opencode_non_owner_component_cannot_remove_context_registration() {
-        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let config_path = home.path().join(".config/opencode/opencode.json");
         std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
         std::fs::write(&config_path, OPENCODE_CONTEXT_CONFIG).unwrap();
         let integration = tracedecay_agent_hosts::agents::get_integration("opencode").unwrap();
         let context = tracedecay_agent_hosts::agents::InstallContext {
+            profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             home: home.path().to_path_buf(),
             tracedecay_bin: "tracedecay".to_string(),
             project_root: None,
@@ -2677,7 +2717,6 @@ mod tests {
     fn current_opencode_context_install_is_byte_preserving() {
         use tracedecay_agent_hosts::agents::host_bundle::HostComponentSetRegistrationV1;
 
-        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let config_path = home.path().join(".config/opencode/opencode.json");
         std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
@@ -2693,6 +2732,7 @@ mod tests {
             component_set_request(&component_set, HostBundleCliOperation::Install, true, false)
                 .unwrap();
         let mut registration = CatalogHostComponentRegistrationAuthority::new(
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             "opencode",
             home.path(),
             request.lifecycle.operation,
@@ -2722,7 +2762,6 @@ mod tests {
     fn opencode_core_rollback_restores_every_registration_side_effect() {
         use tracedecay_agent_hosts::agents::host_bundle::HostComponentSetRegistrationV1;
 
-        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let config_path = home.path().join(".config/opencode/opencode.json");
         let prompt_path = home.path().join(".config/opencode/AGENTS.md");
@@ -2744,6 +2783,7 @@ mod tests {
             component_set_request(&component_set, HostBundleCliOperation::Repair, true, false)
                 .unwrap();
         let mut registration = CatalogHostComponentRegistrationAuthority::new(
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             "opencode",
             home.path(),
             request.lifecycle.operation,
@@ -2773,7 +2813,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn codex_canonical_rollback_restores_generated_agent_exports_byte_for_byte() {
-        let _profile = pinned_host_profile();
         // Core `apply` drives Codex's own `codex plugin add`, which is a hard
         // requirement of that path. Supply the host CLI rather than depending
         // on whatever the machine happens to have installed.
@@ -2816,6 +2855,7 @@ mod tests {
                 .unwrap();
         let mut registration = VerifyFailureRegistration {
             inner: CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
+                &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
                 "codex",
                 home.path(),
                 request.lifecycle.operation,
@@ -2894,8 +2934,8 @@ mod tests {
 
     #[test]
     fn explicit_core_component_lifecycle_preserves_opencode_companions() {
-        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
+        let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let lifecycle = tempfile::tempdir().unwrap();
         let tracedecay_bin = std::env::current_exe()
             .unwrap()
@@ -2952,6 +2992,7 @@ mod tests {
             HostBundleCliOperation::Uninstall,
         ] {
             apply_canonical_component_set(
+                profile,
                 "opencode",
                 operation,
                 &core_set,
@@ -2997,7 +3038,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn kiro_context_mcp_apply_converges_without_rollback() {
-        let _profile = pinned_host_profile();
         #[cfg(unix)]
         let kiro_cli_dir = tempfile::tempdir().unwrap();
         #[cfg(unix)]
@@ -3023,6 +3063,7 @@ mod tests {
             Some(br#"{"mcpServers":{"other":{"command":"other","args":[]}}}"#.to_vec()),
         ] {
             let home = tempfile::tempdir().unwrap();
+            let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
             let lifecycle = tempfile::tempdir().unwrap();
             let mcp_path = home.path().join(".kiro/settings/mcp.json");
             std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
@@ -3040,6 +3081,7 @@ mod tests {
                 HostBundleCliOperation::Repair,
             ] {
                 apply_canonical_component_set(
+                    profile,
                     "kiro",
                     operation,
                     &component_set,
@@ -3067,6 +3109,7 @@ mod tests {
             }
 
             apply_canonical_component_set(
+                profile,
                 "kiro",
                 HostBundleCliOperation::Uninstall,
                 &component_set,
@@ -3108,7 +3151,6 @@ mod tests {
         for agent in [
             "claude", "codex", "cursor", "hermes", "kimi", "kiro", "opencode", "pi",
         ] {
-            let _profile = pinned_host_profile();
             let home = tempfile::tempdir().unwrap();
             let component_set = canonical_host_component_set(agent, None, 0)
                 .unwrap()
@@ -3117,6 +3159,7 @@ mod tests {
                 component_set_request(&component_set, HostBundleCliOperation::Install, true, false)
                     .unwrap();
             let registration = CatalogHostComponentRegistrationAuthority::new(
+                &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
                 agent,
                 home.path(),
                 request.lifecycle.operation,
@@ -3152,8 +3195,8 @@ mod tests {
 
     #[test]
     fn opencode_core_refuses_a_competing_analyzer_without_mutation() {
-        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
+        let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let lifecycle = tempfile::tempdir().unwrap();
         let config_path = home.path().join(".config/opencode/opencode.json");
         std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
@@ -3173,6 +3216,7 @@ mod tests {
         };
 
         let error = apply_canonical_component_set(
+            profile,
             "opencode",
             HostBundleCliOperation::Install,
             &component_set,
@@ -3209,13 +3253,9 @@ mod tests {
             resolved_host_bundle_lifecycle_root,
         };
 
-        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
+        let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let code_home = home.path().join(".kimi-code");
-        let _kimi_home = EnvVarGuard::set(
-            tracedecay_agent_hosts::agents::kimi::KIMI_CODE_HOME_ENV,
-            &code_home,
-        );
         let installed_path = code_home.join("plugins/installed.json");
         std::fs::create_dir_all(installed_path.parent().unwrap()).unwrap();
         let original = br#"{"version":1,"plugins":[{"id":"tracedecay","enabled":false}]}
@@ -3223,6 +3263,7 @@ mod tests {
         std::fs::write(&installed_path, original).unwrap();
 
         let results = reinstall_agent_integrations_with_persisted_dashboard_policies(
+            profile,
             &["kimi".to_string()],
             &["kimi".to_string()],
             home.path(),
@@ -3246,7 +3287,7 @@ mod tests {
         assert!(staged.join(".kimi-plugin/plugin.json").is_file());
         assert!(
             latest_host_component_receipt_at(
-                &resolved_host_bundle_lifecycle_root().unwrap(),
+                &resolved_host_bundle_lifecycle_root(profile.data_dir()),
                 HostKindV1::KimiCode,
                 HostComponentV1::Core,
             )
@@ -3263,16 +3304,13 @@ mod tests {
             resolved_host_bundle_lifecycle_root,
         };
 
-        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
+        let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let code_home = home.path().join(".kimi-code");
-        let _kimi_home = EnvVarGuard::set(
-            tracedecay_agent_hosts::agents::kimi::KIMI_CODE_HOME_ENV,
-            &code_home,
-        );
         let tracedecay_bin = tracedecay_agent_hosts::agents::which_tracedecay()
             .unwrap_or_else(|| "tracedecay".to_string());
         let deferred = reinstall_agent_integrations_with_persisted_dashboard_policies(
+            profile,
             &["kimi".to_string()],
             &["kimi".to_string()],
             home.path(),
@@ -3314,6 +3352,7 @@ mod tests {
         .unwrap();
 
         let results = reinstall_agent_integrations_with_persisted_dashboard_policies(
+            profile,
             &["kimi".to_string()],
             &["kimi".to_string()],
             home.path(),
@@ -3326,7 +3365,7 @@ mod tests {
             results.as_slice(),
             [(id, HostLifecycleResult::Applied)] if id == "kimi"
         ));
-        let lifecycle_root = resolved_host_bundle_lifecycle_root().unwrap();
+        let lifecycle_root = resolved_host_bundle_lifecycle_root(profile.data_dir());
         assert!(
             latest_host_component_receipt_at(
                 &lifecycle_root,
@@ -3346,7 +3385,6 @@ mod tests {
             resolved_host_bundle_lifecycle_root,
         };
 
-        let _profile = pinned_host_profile();
         // The stale-cache leg below is exactly the leg that has to re-drive
         // `codex plugin add`, so the host CLI is a precondition of the
         // behaviour under test, not an ambient machine detail.
@@ -3355,11 +3393,10 @@ mod tests {
         let home = host_cli_tempdir();
         // Keep the lifecycle root on the same filesystem as `home`: receipt
         // transactions back up staged artifacts with an atomic rename.
-        let data_dir = home.path().join(".tracedecay-data");
-        let _data_dir_guard = EnvVarGuard::set(
-            tracedecay_runtime_core::config::USER_DATA_DIR_ENV,
-            &data_dir,
-        );
+        let profile = &tracedecay_runtime_core::config::ProfileRoot::new(
+            home.path().join(".tracedecay-data"),
+        )
+        .with_home(home.path());
         let tracedecay_bin = tracedecay_agent_hosts::agents::which_tracedecay()
             .unwrap_or_else(|| "tracedecay".to_string());
         let cache_manifest = home
@@ -3371,6 +3408,7 @@ mod tests {
         // A fresh home: the transaction deploys the source, registers the
         // personal marketplace, and drives `codex plugin add` in one pass.
         let results = reinstall_agent_integrations_with_persisted_dashboard_policies(
+            profile,
             &["codex".to_string()],
             &["codex".to_string()],
             home.path(),
@@ -3386,7 +3424,7 @@ mod tests {
             ),
             "{results:?}"
         );
-        let lifecycle_root = resolved_host_bundle_lifecycle_root().unwrap();
+        let lifecycle_root = resolved_host_bundle_lifecycle_root(profile.data_dir());
         assert!(
             latest_host_component_receipt_at(
                 &lifecycle_root,
@@ -3403,6 +3441,7 @@ mod tests {
         )
         .unwrap();
         let stale = reinstall_agent_integrations_with_persisted_dashboard_policies(
+            profile,
             &["codex".to_string()],
             &["codex".to_string()],
             home.path(),
@@ -3425,6 +3464,7 @@ mod tests {
         )
         .unwrap();
         let recovered = reinstall_agent_integrations_with_persisted_dashboard_policies(
+            profile,
             &["codex".to_string()],
             &["codex".to_string()],
             home.path(),
@@ -3444,8 +3484,8 @@ mod tests {
 
     #[tokio::test]
     async fn codex_native_removed_retry_cleans_receipt_owned_source() {
-        let _profile = pinned_host_profile();
         let home = host_cli_tempdir();
+        let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         // Same filesystem as `home`: receipt rollback moves artifacts into
         // `lifecycle` and requires an atomic rename.
         let lifecycle = host_cli_tempdir();
@@ -3510,6 +3550,7 @@ mod tests {
             adopt: false,
         };
         apply_canonical_component_set(
+            profile,
             "codex",
             HostBundleCliOperation::Install,
             &component_set,
@@ -3524,6 +3565,7 @@ mod tests {
         std::fs::remove_file(config_path).unwrap();
         std::fs::remove_dir_all(cache_root).unwrap();
         apply_canonical_component_set(
+            profile,
             "codex",
             HostBundleCliOperation::Uninstall,
             &component_set,
@@ -3546,15 +3588,11 @@ mod tests {
     /// untouched.
     #[tokio::test]
     async fn kimi_canonical_component_set_defers_activation_without_touching_host_registry() {
-        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
+        let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let lifecycle = tempfile::tempdir().unwrap();
         let empty_path = tempfile::tempdir().unwrap();
         let code_home = home.path().join(".kimi-code");
-        let _kimi_home = EnvVarGuard::set(
-            tracedecay_agent_hosts::agents::kimi::KIMI_CODE_HOME_ENV,
-            &code_home,
-        );
         let _path =
             tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(empty_path.path());
         let installed_path = code_home.join("plugins/installed.json");
@@ -3582,6 +3620,7 @@ mod tests {
             HostBundleCliOperation::Repair,
         ] {
             let result = apply_canonical_component_set(
+                profile,
                 "kimi",
                 operation,
                 &component_set,
@@ -3623,14 +3662,9 @@ mod tests {
     async fn kimi_registration_preflight_defers_activation_for_unavailable_api() {
         use tracedecay_agent_hosts::agents::host_bundle::HostComponentSetRegistrationV1;
 
-        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let empty_path = tempfile::tempdir().unwrap();
         let code_home = home.path().join(".kimi-code");
-        let _kimi_home = EnvVarGuard::set(
-            tracedecay_agent_hosts::agents::kimi::KIMI_CODE_HOME_ENV,
-            &code_home,
-        );
         let _path =
             tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(empty_path.path());
         let installed_path = code_home.join("plugins/installed.json");
@@ -3646,6 +3680,7 @@ mod tests {
             component_set_request(&component_set, HostBundleCliOperation::Install, true, false)
                 .unwrap();
         let mut registration = CatalogHostComponentRegistrationAuthority::new(
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             "kimi",
             home.path(),
             request.lifecycle.operation,
@@ -3701,7 +3736,6 @@ mod tests {
             HostBundleError, HostComponentSetLifecyclePreviewV1, HostComponentSetRegistrationV1,
         };
 
-        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let component_set = canonical_host_component_set("opencode", None, 0)
             .unwrap()
@@ -3710,6 +3744,7 @@ mod tests {
             component_set_request(&component_set, HostBundleCliOperation::Install, true, false)
                 .unwrap();
         let mut registration = CatalogHostComponentRegistrationAuthority::new(
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             "opencode",
             home.path(),
             request.lifecycle.operation,
@@ -3753,13 +3788,8 @@ mod tests {
 
     #[test]
     fn hermes_receiptless_beta_plugin_is_adopted_and_refreshed() {
-        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
-        let data_dir = home.path().join(".tracedecay-data");
-        let _data_dir_guard = EnvVarGuard::set(
-            tracedecay_runtime_core::config::USER_DATA_DIR_ENV,
-            &data_dir,
-        );
+        let data_dir = home.path().join(".tracedecay");
         std::fs::create_dir_all(home.path().join(".hermes/profiles/work")).unwrap();
 
         run_default_component_set(

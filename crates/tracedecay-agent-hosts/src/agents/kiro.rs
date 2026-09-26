@@ -18,11 +18,12 @@
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::json;
 
 use tracedecay_automation_runtime::automation::skill_targets::{
-    SkillInstallTarget, install_managed_skills, profile_root_for_agent_home,
+    SkillInstallTarget, install_managed_skills,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
@@ -283,7 +284,7 @@ impl AgentIntegration for KiroIntegration {
             &agent_path,
             &ctx.tracedecay_bin,
             &steering,
-            &ctx.home,
+            ctx.profile.data_dir(),
             Some(&skill_index_path),
         )?;
         Ok(())
@@ -293,6 +294,7 @@ impl AgentIntegration for KiroIntegration {
         &self,
         _components: &[super::host_bundle::HostComponentV1],
         _home: &Path,
+        _profile_root: &Path,
         project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
         Ok(vec![
@@ -364,7 +366,7 @@ impl AgentIntegration for KiroIntegration {
         );
         super::doctor_check_managed_skill_prompt_indexes(
             dc,
-            &ctx.home,
+            ctx.profile.data_dir(),
             &[
                 managed_skill_index_path(&ctx.home),
                 ctx.project_path
@@ -395,11 +397,11 @@ impl AgentIntegration for KiroIntegration {
         kiro_home(home).is_dir()
     }
 
-    fn primary_config_path(&self, home: &Path) -> Option<PathBuf> {
+    fn primary_config_path(&self, home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         Some(mcp_config_path(home))
     }
 
-    fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
+    fn host_registration_paths(&self, home: &Path, _profile: &ProfileRoot) -> Vec<PathBuf> {
         vec![mcp_config_path(home), managed_skill_index_path(home)]
     }
 
@@ -407,11 +409,12 @@ impl AgentIntegration for KiroIntegration {
         &self,
         components: &[super::host_bundle::HostComponentV1],
         home: &Path,
+        profile: &ProfileRoot,
     ) -> Vec<PathBuf> {
         if components == [super::host_bundle::HostComponentV1::ContextMcp] {
             vec![mcp_config_path(home)]
         } else {
-            self.host_registration_paths(home)
+            self.host_registration_paths(home, profile)
         }
     }
 
@@ -439,17 +442,18 @@ impl AgentIntegration for KiroIntegration {
         Ok(())
     }
 
-    fn has_tracedecay(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
         mcp_registry_has_tracedecay(&mcp_config_path(home))
     }
 
     fn export_managed_skills(
         &self,
         home: &Path,
-        profile_root: &Path,
+        profile: &ProfileRoot,
     ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
     {
-        if !self.has_tracedecay(home) {
+        let profile_root = profile.data_dir();
+        if !self.has_tracedecay(home, profile) {
             return Ok(Vec::new());
         }
         Ok(vec![install_managed_skills(
@@ -610,7 +614,7 @@ fn install_managed_agent(
     path: &Path,
     tracedecay_bin: &str,
     steering_path: &Path,
-    profile_home: &Path,
+    profile_root: &Path,
     managed_skill_index_path: Option<&Path>,
 ) -> Result<bool> {
     if path.exists() && !is_owned_agent_file(path) {
@@ -622,7 +626,7 @@ fn install_managed_agent(
     }
 
     let managed_skill_index_path = match managed_skill_index_path {
-        Some(index_path) => install_kiro_managed_skill_index(profile_home, index_path)?,
+        Some(index_path) => install_kiro_managed_skill_index(profile_root, index_path)?,
         None => None,
     };
     let config = managed_agent_config(tracedecay_bin, steering_path, managed_skill_index_path);
@@ -635,13 +639,12 @@ fn install_managed_agent(
 }
 
 fn install_kiro_managed_skill_index<'a>(
-    home: &Path,
+    profile_root: &Path,
     index_path: &'a Path,
 ) -> Result<Option<&'a Path>> {
-    let profile_root = profile_root_for_agent_home(home);
     let summary = install_managed_skills(
         &crate::host_io(),
-        &profile_root,
+        profile_root,
         SkillInstallTarget::Kiro,
         index_path,
     )?;

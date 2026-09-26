@@ -19,6 +19,7 @@
 //! <https://docs.mistral.ai/vibe/code/cli/mcp-servers>.
 
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::config::ProfileRoot;
 
 use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, value};
 use tracedecay_automation_runtime::automation::skill_targets::{
@@ -93,7 +94,7 @@ impl AgentIntegration for VibeIntegration {
         }
         super::doctor_check_managed_skill_prompt_indexes(
             dc,
-            &ctx.home,
+            ctx.profile.data_dir(),
             &[
                 vibe_prompt_path(&ctx.home),
                 project_home.join("prompts/cli.md"),
@@ -133,11 +134,11 @@ impl AgentIntegration for VibeIntegration {
         vibe_home(home).is_dir()
     }
 
-    fn has_tracedecay(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
         vibe_home_has_tracedecay(&vibe_home(home))
     }
 
-    fn primary_config_path(&self, home: &Path) -> Option<PathBuf> {
+    fn primary_config_path(&self, home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
         Some(vibe_config_path(home))
     }
 
@@ -145,6 +146,7 @@ impl AgentIntegration for VibeIntegration {
         &self,
         components: &[HostComponentV1],
         home: &Path,
+        _profile: &ProfileRoot,
     ) -> Vec<PathBuf> {
         registration_paths(components, &vibe_config_path(home), &vibe_prompt_path(home))
     }
@@ -153,6 +155,7 @@ impl AgentIntegration for VibeIntegration {
         &self,
         components: &[HostComponentV1],
         _home: &Path,
+        _profile_root: &Path,
         project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
         let root = project_vibe_home(project_path);
@@ -222,10 +225,11 @@ impl AgentIntegration for VibeIntegration {
     fn export_managed_skills(
         &self,
         home: &Path,
-        profile_root: &Path,
+        profile: &ProfileRoot,
     ) -> Result<Vec<SkillInstallSummary>> {
+        let profile_root = profile.data_dir();
         let prompt_path = vibe_prompt_path(home);
-        if !prompt_path.exists() || !self.has_tracedecay(home) {
+        if !prompt_path.exists() || !self.has_tracedecay(home, profile) {
             return Ok(Vec::new());
         }
         Ok(vec![install_managed_skills(
@@ -438,7 +442,7 @@ fn uninstall_mcp(config: &Path) -> Result<()> {
     })
 }
 
-fn install_prompt(prompt: &Path, profile_home: &Path) -> Result<()> {
+fn install_prompt(prompt: &Path, profile_root: &Path) -> Result<()> {
     let block = super::prompt_rules::standard_prompt_rules(
         PROMPT_RULE_MARKER,
         &PromptRulesOptions {
@@ -446,7 +450,7 @@ fn install_prompt(prompt: &Path, profile_home: &Path) -> Result<()> {
         },
     );
     super::prompt_rules::reconcile_prompt_rules(prompt, PROMPT_RULE_MARKER, &block)?;
-    super::install_managed_skill_prompt_index(profile_home, prompt, SkillInstallTarget::Agents)
+    super::install_managed_skill_prompt_index(profile_root, prompt, SkillInstallTarget::Agents)
 }
 
 fn uninstall_prompt(prompt: &Path) -> Result<()> {
@@ -464,7 +468,7 @@ fn activate_components(
         install_mcp(config, &ctx.tracedecay_bin)?;
     }
     if components.contains(&HostComponentV1::Core) {
-        install_prompt(prompt, &ctx.home)?;
+        install_prompt(prompt, ctx.profile.data_dir())?;
     }
     Ok(())
 }
@@ -489,6 +493,7 @@ mod tests {
 
     fn install_context(home: &Path, binary: &str) -> InstallContext {
         InstallContext {
+            profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home),
             home: home.to_path_buf(),
             tracedecay_bin: binary.to_string(),
             project_root: None,

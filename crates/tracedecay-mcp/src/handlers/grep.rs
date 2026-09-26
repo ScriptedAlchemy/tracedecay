@@ -9,11 +9,16 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_code_index::grep_search::{
     GrepScanOmissionsV1, GrepSearchHit, GrepSearchQuery, MAX_INTERACTIVE_SOURCE_BYTES,
     MAX_LINE_BYTES, search_tree_with_cancel,
+};
+use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
+use tracedecay_contracts::retrieval::{
+    GrepGraphEnrichmentV1, GrepMatchV1, GrepScanOmissionsV1 as GrepScanOmissionCountsV1,
+    GrepSearchResultV1, GrepSurfaceRequestV1,
 };
 use tracedecay_contracts::{
     CoverageCompleteness, CoverageDomainState, EvidenceCoverage, EvidenceDomain, Omission,
@@ -23,7 +28,9 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::VerifiedGraphQuery;
 
 use crate::ToolResult;
+use crate::handlers::graph::graph_tool_completion;
 use crate::handlers::run_bounded_search;
+use crate::handlers::support::{decode_primitive_request, text_tool_result};
 use crate::tools::render::{self, Md};
 use crate::unique_file_paths;
 
@@ -35,88 +42,56 @@ const DEFAULT_MAX_RESULTS: usize = 50;
 const MAX_CONTEXT_LINES: usize = 3;
 /// Maximum graph symbols inspected while enriching one bounded grep response.
 const MAX_ENRICHMENT_SYMBOLS: usize = 500_000;
-/// A single bounded content-search hit.
-struct GrepHit {
-    file: String,
-    line: u32,
-    text: String,
-    before: Vec<String>,
-    after: Vec<String>,
-    symbol: Option<String>,
-    node_id: Option<String>,
-}
 
-impl From<GrepSearchHit> for GrepHit {
-    fn from(hit: GrepSearchHit) -> Self {
-        Self {
-            file: hit.file.to_string(),
-            line: hit.line,
-            text: hit.text,
-            before: hit.before,
-            after: hit.after,
-            symbol: None,
-            node_id: None,
-        }
+fn grep_match(hit: GrepSearchHit) -> GrepMatchV1 {
+    GrepMatchV1 {
+        file: hit.file.to_string(),
+        line: hit.line,
+        text: hit.text,
+        before: hit.before,
+        after: hit.after,
+        symbol: None,
+        node_id: None,
     }
 }
 
 #[hotpath::measure(future = true, label = "mcp.search.grep.total")]
-pub async fn handle_grep(
+pub async fn compute_grep(
     project_root: &Path,
-    response_handle_root: &Path,
     graph: std::result::Result<&VerifiedGraphQuery, &TraceDecayError>,
     args: Value,
     scope_prefix: Option<&str>,
     deadline: Option<tracedecay_contracts::Deadline>,
     cancellation: Option<tracedecay_contracts::CancellationSignal>,
-) -> Result<ToolResult> {
-    let pattern =
-        args.get("pattern")
-            .and_then(Value::as_str)
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "missing required parameter: pattern".to_string(),
-            })?;
-    if pattern.is_empty() {
+) -> Result<GraphToolCompletionV1> {
+    let request: GrepSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_grep")?;
+    if request.pattern.is_empty() {
         return Err(TraceDecayError::Config {
             message: "pattern must not be empty".to_string(),
         });
     }
-
-    let fixed_strings = args
-        .get("fixed_strings")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let case_sensitive = args
-        .get("case_sensitive")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let path_glob = args
-        .get("path_glob")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    let max_results = args
-        .get("max_results")
-        .and_then(Value::as_u64)
+    let max_results = request
+        .max_results
         .map_or(DEFAULT_MAX_RESULTS, |v| (v as usize).min(MAX_RESULTS_CAP))
         .max(1);
-    let context_lines = args
-        .get("context_lines")
-        .and_then(Value::as_u64)
+    let context_lines = request
+        .context_lines
         .map_or(0, |v| (v as usize).min(MAX_CONTEXT_LINES));
 
     let project_root_buf = project_root.to_path_buf();
+    let pattern = request.pattern.clone();
     let query = GrepSearchQuery {
-        pattern: pattern.to_owned(),
-        fixed_strings,
-        case_sensitive,
-        path_glob,
+        pattern: request.pattern,
+        fixed_strings: request.fixed_strings.unwrap_or(false),
+        case_sensitive: request.case_sensitive.unwrap_or(false),
+        path_glob: request.path_glob,
         context_lines,
         max_results,
     };
     let scan = hotpath::future!(
         run_bounded_search(
             "tracedecay_grep",
-            pattern.to_owned(),
+            pattern,
             deadline,
             cancellation,
             move |cancelled, transport_cancellation| {
@@ -137,7 +112,7 @@ pub async fn handle_grep(
     let mut hits = scan
         .hits
         .into_iter()
-        .map(GrepHit::from)
+        .map(grep_match)
         .filter(|hit| tracedecay_domain::path_matches_scope(hit.file.as_str(), scope_prefix))
         .collect::<Vec<_>>();
     let truncated = scan.truncated || hits.len() > max_results;
@@ -153,32 +128,42 @@ pub async fn handle_grep(
     };
     let graph_error = enrichment_error.as_ref().or_else(|| graph.err());
     let touched_files = unique_file_paths(hits.iter().map(|hit| hit.file.as_str()));
-    let mut output_value = build_output_value(
-        &hits,
+    let graph_enrichment = graph_enrichment(&hits, graph_error);
+    let result = grep_result(
+        hits,
         truncated,
         scan.files_scanned,
         scan.lines_examined,
         scan.omissions,
+        graph_enrichment,
     );
-    output_value["graph_enrichment"] = graph_enrichment_value(&hits, graph_error);
-
-    let text = hotpath::measure_block!(
-        "mcp.search.grep.render",
-        render::finalize(Some(response_handle_root), &args, &output_value, || {
-            render_grep_md(&hits, truncated, scan.files_scanned, scan.omissions)
-        })
-    );
-    // Grep aggregates more raw content than any other search tool; the encoded
-    // payload size explains transport pressure that timing alone cannot.
-    hotpath::gauge!("mcp.search.grep.response_bytes").set(text.len());
-    Ok(ToolResult::new(
-        json!({ "content": [{ "type": "text", "text": text }] }),
+    Ok(graph_tool_completion(
+        GraphToolResultV1::Grep(result),
         touched_files,
     ))
 }
 
+/// Renders a grep result as its tool text.
+pub fn render_grep(
+    response_handle_root: Option<&Path>,
+    args: &Value,
+    result: &GrepSearchResultV1,
+) -> Result<ToolResult> {
+    let value = serde_json::to_value(result)?;
+    let text = hotpath::measure_block!(
+        "mcp.search.grep.render",
+        render::finalize(response_handle_root, args, &value, || render_grep_md(
+            result
+        ))
+    );
+    // Grep aggregates more raw content than any other search tool; the encoded
+    // payload size explains transport pressure that timing alone cannot.
+    hotpath::gauge!("mcp.search.grep.response_bytes").set(text.len());
+    Ok(text_tool_result(&text, Vec::new()))
+}
+
 #[hotpath::measure]
-fn enrich_hits_from_graph(graph: &VerifiedGraphQuery, hits: &mut [GrepHit]) -> Result<()> {
+fn enrich_hits_from_graph(graph: &VerifiedGraphQuery, hits: &mut [GrepMatchV1]) -> Result<()> {
     let paths = hits
         .iter()
         .map(|hit| hit.file.clone())
@@ -237,28 +222,28 @@ fn enrich_hits_from_graph(graph: &VerifiedGraphQuery, hits: &mut [GrepHit]) -> R
 }
 
 #[hotpath::measure]
-fn graph_enrichment_value(hits: &[GrepHit], error: Option<&TraceDecayError>) -> Value {
+fn graph_enrichment(
+    hits: &[GrepMatchV1],
+    error: Option<&TraceDecayError>,
+) -> GrepGraphEnrichmentV1 {
     if let Some(error) = error {
         return match error.project_route_context() {
-            Some((reason_code, retryable, detail)) => json!({
-                "status": "unavailable",
-                "reason_code": reason_code,
-                "retryable": retryable,
-                "detail": detail,
-            }),
-            None => json!({
-                "status": "unavailable",
-                "reason_code": "verified-code-graph-read-unavailable",
-                "retryable": false,
-                "detail": error.to_string(),
-            }),
+            Some((reason_code, retryable, detail)) => GrepGraphEnrichmentV1::Unavailable {
+                reason_code: reason_code.to_owned(),
+                retryable,
+                detail: detail.to_owned(),
+            },
+            None => GrepGraphEnrichmentV1::Unavailable {
+                reason_code: "verified-code-graph-read-unavailable".to_owned(),
+                retryable: false,
+                detail: error.to_string(),
+            },
         };
     }
-    json!({
-        "status": "complete",
-        "enriched": hits.iter().filter(|hit| hit.node_id.is_some()).count(),
-        "returned": hits.len(),
-    })
+    GrepGraphEnrichmentV1::Complete {
+        enriched: hits.iter().filter(|hit| hit.node_id.is_some()).count() as u64,
+        returned: hits.len() as u64,
+    }
 }
 
 #[hotpath::measure]
@@ -308,61 +293,41 @@ fn grep_metadata(
     (coverage, omissions)
 }
 
-fn build_output_value(
-    hits: &[GrepHit],
+fn grep_result(
+    hits: Vec<GrepMatchV1>,
     truncated: bool,
     files_scanned: usize,
     lines_examined: usize,
     omission_counts: GrepScanOmissionsV1,
-) -> Value {
-    let items: Vec<Value> = hits
-        .iter()
-        .map(|hit| {
-            let mut item = json!({
-                "file": hit.file,
-                "line": hit.line,
-                "text": hit.text,
-            });
-            if !hit.before.is_empty() {
-                item["before"] = json!(hit.before);
-            }
-            if !hit.after.is_empty() {
-                item["after"] = json!(hit.after);
-            }
-            if let Some(symbol) = &hit.symbol {
-                item["symbol"] = json!(symbol);
-            }
-            if let Some(node_id) = &hit.node_id {
-                item["node_id"] = json!(node_id);
-            }
-            item
-        })
-        .collect();
+    graph_enrichment: GrepGraphEnrichmentV1,
+) -> GrepSearchResultV1 {
     let (coverage, omissions) =
         grep_metadata(lines_examined, hits.len(), truncated, omission_counts);
-
-    json!({
-        "results": items,
-        "match_count": hits.len(),
-        "files_scanned": files_scanned,
-        "truncated": truncated,
-        "coverage": coverage,
-        "omissions": omissions,
-    })
+    GrepSearchResultV1 {
+        match_count: hits.len() as u64,
+        results: hits,
+        files_scanned: files_scanned as u64,
+        truncated,
+        coverage,
+        omissions,
+        scan_omissions: GrepScanOmissionCountsV1 {
+            oversized_files: omission_counts.oversized_files as u64,
+            oversized_lines: omission_counts.oversized_lines as u64,
+            unavailable_sources: omission_counts.unavailable_sources as u64,
+        },
+        graph_enrichment,
+    }
 }
 
-fn render_grep_md(
-    hits: &[GrepHit],
-    truncated: bool,
-    files_scanned: usize,
-    omission_counts: GrepScanOmissionsV1,
-) -> String {
+fn render_grep_md(result: &GrepSearchResultV1) -> String {
+    let hits = &result.results;
+    let files_scanned = result.files_scanned;
     let mut md = Md::new();
     md.heading(2, "Grep Results");
     if hits.is_empty() {
         md.empty_note("No matching lines.");
         md.line(&format!("_Scanned {files_scanned} files._"));
-        append_partial_coverage_md(&mut md, omission_counts);
+        append_partial_coverage_md(&mut md, result.scan_omissions);
         return md.render();
     }
 
@@ -389,18 +354,18 @@ fn render_grep_md(
 
     md.blank();
     let mut summary = format!("_{} matches across {files_scanned} files._", hits.len());
-    if truncated {
+    if result.truncated {
         let _ = write!(
             summary,
             " Results capped. Narrow with `path_glob` or a more specific pattern."
         );
     }
     md.line(&summary);
-    append_partial_coverage_md(&mut md, omission_counts);
+    append_partial_coverage_md(&mut md, result.scan_omissions);
     md.render()
 }
 
-fn append_partial_coverage_md(md: &mut Md, omissions: GrepScanOmissionsV1) {
+fn append_partial_coverage_md(md: &mut Md, omissions: GrepScanOmissionCountsV1) {
     if omissions.oversized_files > 0 {
         let noun = if omissions.oversized_files == 1 {
             "file"
@@ -443,6 +408,7 @@ fn append_partial_coverage_md(md: &mut Md, omissions: GrepScanOmissionsV1) {
 mod tests {
     use std::path::Path;
 
+    use serde_json::json;
     use tracedecay_code_index::grep_search::GrepSearchResult;
 
     use super::*;
@@ -649,32 +615,32 @@ mod tests {
         assert_eq!(&output["omissions"], omissions);
     }
 
-    fn scan_output(project: &Path, pattern: &str) -> (GrepSearchResult, Value) {
-        let scan = scan(project, pattern, None, 10, || false);
+    fn scan_result(scan: &GrepSearchResult) -> GrepSearchResultV1 {
         let hits = scan
             .hits
             .iter()
             .cloned()
-            .map(GrepHit::from)
+            .map(grep_match)
             .collect::<Vec<_>>();
-        let output = build_output_value(
-            &hits,
+        let enrichment = graph_enrichment(&hits, None);
+        grep_result(
+            hits,
             scan.truncated,
             scan.files_scanned,
             scan.lines_examined,
             scan.omissions,
-        );
+            enrichment,
+        )
+    }
+
+    fn scan_output(project: &Path, pattern: &str) -> (GrepSearchResult, Value) {
+        let scan = scan(project, pattern, None, 10, || false);
+        let output = serde_json::to_value(scan_result(&scan)).expect("grep result JSON");
         (scan, output)
     }
 
     fn rendered_scan(scan: &GrepSearchResult) -> String {
-        let hits = scan
-            .hits
-            .iter()
-            .cloned()
-            .map(GrepHit::from)
-            .collect::<Vec<_>>();
-        render_grep_md(&hits, scan.truncated, scan.files_scanned, scan.omissions)
+        render_grep_md(&scan_result(scan))
     }
 
     fn one_budget_omission() -> Value {
@@ -767,7 +733,15 @@ mod tests {
             unavailable_sources: 2,
             ..GrepScanOmissionsV1::default()
         };
-        let output = build_output_value(&[], false, 0, 0, omission_counts);
+        let result = grep_result(
+            Vec::new(),
+            false,
+            0,
+            0,
+            omission_counts,
+            graph_enrichment(&[], None),
+        );
+        let output = serde_json::to_value(&result).expect("grep result JSON");
 
         assert_partial_output(
             &output,
@@ -787,7 +761,7 @@ mod tests {
             ]),
         );
 
-        let markdown = render_grep_md(&[], false, 0, omission_counts);
+        let markdown = render_grep_md(&result);
         assert!(
             markdown.contains(&format!(
                 "skipped 1 line longer than the {MAX_LINE_BYTES}-byte scan limit"
@@ -986,9 +960,8 @@ mod tests {
         project: &Path,
         graph: &tracedecay_graph_query::VerifiedGraphQuery,
     ) -> Value {
-        let result = handle_grep(
+        let completion = compute_grep(
             project,
-            &project.join("response-handles"),
             Ok(graph),
             json!({"pattern": ENRICHMENT_TOKEN, "fixed_strings": true, "format": "json"}),
             None,
@@ -997,10 +970,7 @@ mod tests {
         )
         .await
         .expect("grep answers lexically whatever the graph says");
-        let text = result.value["content"][0]["text"]
-            .as_str()
-            .expect("grep json text");
-        serde_json::from_str(text).expect("grep payload is JSON")
+        completion.result.result_value().expect("grep result JSON")
     }
 
     #[tokio::test]
