@@ -507,7 +507,7 @@ function ProjectRow({
   const selectProject = useScope((s) => s.selectProject);
   const selected =
     scope.kind === 'project' && scope.projectId === project.project_id;
-  const branch = project.default_branch ?? project.branches[0];
+  const branch = project.head_branch ?? project.branches[0];
   return (
     <button
       type="button"

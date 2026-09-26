@@ -7,7 +7,14 @@ import { buildGraphScene, buildRegistryScene, strikeFor, traversalOrder } from '
 const NOW = 1_800_000_000;
 const DAY = 86_400;
 
-function project(id: string, ageDays: number, stores: number, artifacts: number, branch: string | null = 'main'): ProjectRegistryEntry {
+function project(
+  id: string,
+  ageDays: number,
+  stores: number,
+  artifacts: number,
+  branch: string | null = 'main',
+  head: string | null = branch,
+): ProjectRegistryEntry {
   return {
     project_id: id,
     label: id,
@@ -15,7 +22,8 @@ function project(id: string, ageDays: number, stores: number, artifacts: number,
     canonical_root: `/repos/${id}`,
     kind: 'primary',
     default_branch: branch,
-    branches: branch ? [branch] : [],
+    head_branch: head,
+    branches: head ? [head] : [],
     store_count: stores,
     artifact_count: artifacts,
     alias_count: 1,
@@ -29,7 +37,7 @@ const GROUPS: ProjectRepoGroup[] = [
     git_common_dir: '/repos/core/.git',
     project_count: 2,
     branches: ['main'],
-    projects: [project('core', 0.1, 3, 7), project('core-wt', 3, 1, 4)],
+    projects: [project('core', 0.1, 3, 7), project('core-wt', 3, 1, 4, 'main', 'served-head')],
   },
   { label: 'notes', git_common_dir: null, project_count: 1, branches: [], projects: [project('notes', 40, 1, 1, null)] },
 ];
@@ -82,10 +90,24 @@ describe('buildRegistryScene', () => {
       'artifacts 1',
       'mass 2',
       'seen 1mo ago',
-      'branch absent',
+      'head absent',
+      'default absent',
       'repository absent',
     ]);
     expect(notes?.group).toBeNull();
+  });
+
+  it('names the checkout HEAD and the repository default as separate readings', () => {
+    const worktree = scene().bodies.find((body) => body.id === 'core-wt');
+    expect(worktree?.detail).toEqual([
+      'stores 1',
+      'artifacts 4',
+      'mass 5',
+      'seen 3d ago',
+      'head served-head',
+      'default main',
+      'repo core',
+    ]);
   });
 });
 

@@ -19,8 +19,8 @@ pub fn public_code_project_from_record(
     public_code_project_for_checkout(project, &[], active_project_id, None)
 }
 
-/// Public project row whose branch is the live HEAD of `preferred` when that
-/// path is one of this project's checkouts.
+/// Public project row whose `head_branch` is the live HEAD of `preferred` when
+/// that path is one of this project's checkouts.
 ///
 /// `preferred` is the checkout the caller is asking about: the active
 /// worktree, or the path a context read resolved. A linked worktree does not
@@ -31,7 +31,7 @@ pub fn public_code_project_for_checkout(
     active_project_id: Option<&str>,
     preferred: Option<&Path>,
 ) -> PublicCodeProject {
-    let mut public = PublicCodeProject {
+    PublicCodeProject {
         project_id: project.project_id.clone(),
         label: path_label(&project.display_root),
         project_root: project.display_root.clone(),
@@ -39,14 +39,12 @@ pub fn public_code_project_for_checkout(
         canonical_root: project.canonical_root.clone(),
         git_common_dir: project.git_common_dir.clone(),
         default_branch: project.default_branch.clone(),
+        head_branch: observe_checkouts(project, aliases, preferred)
+            .and_then(|observed| observed.head_branch),
         created_at: project.created_at,
         last_seen_at: project.last_seen_at,
         is_active: active_project_id.map(|id| id == project.project_id),
-    };
-    if let Some(observed) = observe_checkouts(project, aliases, preferred) {
-        public.default_branch = observed.default_branch;
     }
-    public
 }
 
 /// Serialized project-registry context for one project: the public project
@@ -141,7 +139,7 @@ pub fn build_project_registry_view(
     }
 }
 
-/// Copies each registry row's live checkout branch onto the matching public
+/// Copies each registry row's live `head_branch` onto the matching public
 /// project. Listing payloads carry both shapes, and they have to name the
 /// same HEAD.
 pub fn align_public_checkout_branches(
@@ -155,7 +153,7 @@ pub fn align_public_checkout_branches(
             .flat_map(|group| group.projects.iter())
             .find(|entry| entry.project_id == project.project_id)
         {
-            project.default_branch.clone_from(&entry.default_branch);
+            project.head_branch.clone_from(&entry.head_branch);
         }
     }
 }
@@ -169,9 +167,9 @@ fn project_entry(
     let preferred = is_active.then_some(active_checkout).flatten();
     let observed = observe_checkouts(&context.project, &context.aliases, preferred);
     let mut branches = BTreeSet::new();
-    let default_branch = if let Some(observed) = observed {
+    let head_branch = if let Some(observed) = observed {
         branches = observed.branches;
-        observed.default_branch
+        observed.head_branch
     } else {
         // No checkout could be read. Keep the enrolled branch names so a
         // non-git project, or a root that is not on disk in this process,
@@ -184,7 +182,7 @@ fn project_entry(
                 branches.insert(scope.branch_name.clone());
             }
         }
-        context.project.default_branch.clone()
+        None
     };
     let mut artifact_count = 0usize;
     for store in &context.stores {
@@ -197,7 +195,8 @@ fn project_entry(
         project_root: context.project.display_root.clone(),
         canonical_root: context.project.canonical_root.clone(),
         kind: project_kind(&context.project),
-        default_branch,
+        default_branch: context.project.default_branch.clone(),
+        head_branch,
         branches: branches.into_iter().collect(),
         store_count: context.stores.len(),
         artifact_count,
@@ -208,7 +207,7 @@ fn project_entry(
 }
 
 struct ObservedCheckouts {
-    default_branch: Option<String>,
+    head_branch: Option<String>,
     branches: BTreeSet<String>,
 }
 
@@ -261,12 +260,12 @@ fn observe_checkouts(
                 .map(|(_, head)| head)
         })
         .or_else(|| observations.first().map(|(_, head)| head));
-    let default_branch = match chosen {
+    let head_branch = match chosen {
         Some(CheckoutHead::Branch(branch)) => Some(branch.clone()),
         Some(CheckoutHead::Detached) | None => None,
     };
     Some(ObservedCheckouts {
-        default_branch,
+        head_branch,
         branches,
     })
 }
@@ -451,10 +450,10 @@ mod tests {
         assert_eq!(branch.as_deref(), Some("switched-head"));
         assert!(branches.iter().any(|name| name == "switched-head"));
         assert!(branches.iter().all(|name| {
-            name != "stale-enrollment" && name != "indexed-master" && name != "main"
+            name != "recorded-default" && name != "indexed-master" && name != "main"
         }));
         assert!(rendered.contains("switched-head"));
-        assert!(!rendered.contains("stale-enrollment"));
+        assert!(!rendered.contains("recorded-default"));
         assert!(!rendered.contains("indexed-master"));
 
         git(&repo, &["checkout", "-q", "--detach"]);
@@ -462,7 +461,7 @@ mod tests {
         assert_eq!(branch, None);
         assert!(branches.iter().all(|name| name != "switched-head"));
         assert!(!rendered.contains("switched-head"));
-        assert!(!rendered.contains("stale-enrollment"));
+        assert!(!rendered.contains("recorded-default"));
 
         let worktree = tmp.path().join("linked");
         git(
@@ -486,7 +485,7 @@ mod tests {
         assert_eq!(branch.as_deref(), Some("worktree-switched"));
         assert!(branches.iter().any(|name| name == "worktree-switched"));
         assert!(branches.iter().all(|name| {
-            name != "linked-feature" && name != "stale-enrollment" && name != "main"
+            name != "linked-feature" && name != "recorded-default" && name != "main"
         }));
         assert!(rendered.contains("worktree-switched"));
         assert!(!rendered.contains("linked-feature"));
@@ -494,7 +493,7 @@ mod tests {
         let (branch, branches, _) = reported(&context, None);
         assert_eq!(branch, None);
         assert!(branches.iter().any(|name| name == "worktree-switched"));
-        assert!(branches.iter().all(|name| name != "stale-enrollment"));
+        assert!(branches.iter().all(|name| name != "recorded-default"));
     }
 
     fn enrolled_checkout(root: &Path, git_common_dir: &Path) -> ProjectRegistryContext {
@@ -503,7 +502,7 @@ mod tests {
             root.to_string_lossy().as_ref(),
             Some(git_common_dir.to_string_lossy().as_ref()),
         );
-        project.default_branch = Some("stale-enrollment".to_owned());
+        project.default_branch = Some("recorded-default".to_owned());
         ProjectRegistryContext {
             project,
             aliases: Vec::new(),
@@ -534,7 +533,8 @@ mod tests {
         }
     }
 
-    /// Tree row, aligned listing row, and path context all name the same HEAD.
+    /// Tree row, aligned listing row, and path context all name the same HEAD
+    /// and keep the recorded repository default as the default branch.
     fn reported(
         context: &ProjectRegistryContext,
         checkout: Option<&Path>,
@@ -554,11 +554,18 @@ mod tests {
             .iter()
             .find(|project| project.project_id == context.project.project_id)
             .expect("listed project");
-        assert_eq!(listed.default_branch, entry.default_branch);
         let context_row = PublicProjectRegistryContext::at_checkout(context, active_id, checkout);
-        assert_eq!(context_row.project.default_branch, entry.default_branch);
+        for default_branch in [
+            &entry.default_branch,
+            &listed.default_branch,
+            &context_row.project.default_branch,
+        ] {
+            assert_eq!(default_branch.as_deref(), Some("recorded-default"));
+        }
+        assert_eq!(listed.head_branch, entry.head_branch);
+        assert_eq!(context_row.project.head_branch, entry.head_branch);
         (
-            entry.default_branch.clone(),
+            entry.head_branch.clone(),
             entry.branches.clone(),
             render_project_registry_view("projects", &view),
         )

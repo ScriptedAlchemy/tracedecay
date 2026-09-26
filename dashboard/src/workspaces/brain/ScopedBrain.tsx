@@ -424,10 +424,10 @@ function ProjectHoldings({ data }: { data: ProjectContextPayloadV1 }) {
               {project.project_root}
             </span>
             <span className="flex items-baseline gap-2">
-              {project.default_branch ? (
+              {project.head_branch ? (
                 <span className="inline-flex min-w-0 items-center gap-1 text-2xs text-text-secondary">
                   <GitBranch aria-hidden size={11} className="shrink-0" />
-                  <span className="truncate">{project.default_branch}</span>
+                  <span className="truncate">{project.head_branch}</span>
                 </span>
               ) : null}
               <span aria-hidden className="td-rule" />

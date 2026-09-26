@@ -3,9 +3,10 @@
 //!
 //! Timestamps are pinned after registration so the page order and the
 //! expected clock fields are inputs, not a wall-clock reading. Git checkouts
-//! are created on an explicit HEAD other than their enrolled branch: the
-//! listing reports each checkout's live HEAD, not the enrollment record or
-//! the host's `init.defaultBranch`.
+//! are created on an explicit HEAD other than their registered default
+//! branch: the listing reports the registered default and each checkout's
+//! live HEAD in separate fields, independent of the host's
+//! `init.defaultBranch`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -36,7 +37,8 @@ struct RegisteredProject {
     label: String,
     root: String,
     git_common_dir: Option<String>,
-    branch: &'static str,
+    default_branch: &'static str,
+    head_branch: Option<&'static str>,
     branches: &'static [&'static str],
     kind: &'static str,
     created_at: i64,
@@ -160,7 +162,8 @@ async fn project_list_returns_the_registry_page_the_caller_asked_for() {
         "proj_alpha",
         &alpha_root,
         Some(alpha_root.join(".git")),
-        ALPHA_HEAD,
+        "main",
+        Some(ALPHA_HEAD),
         &[ALPHA_HEAD],
         "primary",
         ALPHA_CREATED_AT,
@@ -175,6 +178,7 @@ async fn project_list_returns_the_registry_page_the_caller_asked_for() {
         &beta_root,
         None,
         "dev",
+        None,
         &["dev"],
         "project",
         BETA_CREATED_AT,
@@ -188,7 +192,8 @@ async fn project_list_returns_the_registry_page_the_caller_asked_for() {
         &active_id,
         cg.project_root(),
         Some(active_git),
-        ACTIVE_HEAD,
+        "main",
+        Some(ACTIVE_HEAD),
         &[ACTIVE_HEAD],
         "primary",
         ACTIVE_CREATED_AT,
@@ -380,7 +385,8 @@ fn registered(
     id: &str,
     root: &Path,
     git_common_dir: Option<PathBuf>,
-    branch: &'static str,
+    default_branch: &'static str,
+    head_branch: Option<&'static str>,
     branches: &'static [&'static str],
     kind: &'static str,
     created_at: i64,
@@ -400,7 +406,8 @@ fn registered(
             .to_string(),
         root,
         git_common_dir: git_common_dir.map(|path| path.display().to_string()),
-        branch,
+        default_branch,
+        head_branch,
         branches,
         kind,
         created_at,
@@ -447,7 +454,8 @@ fn tree_group(project: &RegisteredProject) -> Value {
             "project_root": project.root,
             "canonical_root": project.root,
             "kind": project.kind,
-            "default_branch": project.branch,
+            "default_branch": project.default_branch,
+            "head_branch": project.head_branch,
             "branches": project.branches,
             "store_count": project.stores,
             "artifact_count": project.artifacts,
@@ -466,7 +474,8 @@ fn project_row(project: &RegisteredProject) -> Value {
         "display_root": project.root,
         "canonical_root": project.root,
         "git_common_dir": project.git_common_dir,
-        "default_branch": project.branch,
+        "default_branch": project.default_branch,
+        "head_branch": project.head_branch,
         "created_at": project.created_at,
         "last_seen_at": project.seen_at,
         "is_active": project.active,

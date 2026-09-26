@@ -269,6 +269,9 @@ fn render_project_context_payload(payload: &Value) -> String {
     if let Some(branch) = project["default_branch"].as_str() {
         let _ = writeln!(out, "default branch: {branch}");
     }
+    if let Some(branch) = project["head_branch"].as_str() {
+        let _ = writeln!(out, "head branch: {branch}");
+    }
     if let Some(git_common_dir) = project["git_common_dir"].as_str() {
         let _ = writeln!(out, "git common dir: {git_common_dir}");
     }
@@ -545,5 +548,25 @@ mod tests {
         assert!(text.contains("scope store:test:branch:main branch=main"));
         assert!(text.contains("artifact graph_db path=projects/proj_test/branches/main.db"));
         assert!(!text.contains("sekret-token"));
+    }
+
+    #[test]
+    fn daemon_context_payload_names_default_and_head_branches_apart() {
+        let payload = serde_json::json!({
+            "project": {
+                "project_id": "proj_test",
+                "display_root": "/repo",
+                "default_branch": "main",
+                "head_branch": "served-head",
+                "last_seen_at": 200,
+            },
+        });
+
+        let text = render_project_context_payload(&payload);
+
+        assert!(
+            text.contains("default branch: main\nhead branch: served-head\n"),
+            "{text}"
+        );
     }
 }

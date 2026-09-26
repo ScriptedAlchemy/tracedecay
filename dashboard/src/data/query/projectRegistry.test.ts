@@ -231,6 +231,7 @@ function project(label: string) {
     canonical_root: '/repo',
     created_at: 1,
     default_branch: 'main',
+    head_branch: 'main',
     display_root: '/repo',
     git_common_dir: null,
     label,

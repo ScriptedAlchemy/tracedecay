@@ -32,9 +32,9 @@ async fn project_context_returns_the_project_the_caller_named() {
         )
         .await
         .expect("registered runtime");
-    // The served checkout's live HEAD differs from its enrolled `main`, so the
-    // context must name the checkout's branch; the non-git alpha keeps its
-    // enrolled one.
+    // The served checkout's live HEAD differs from its registered default
+    // `main`: the context names each fact in its own field. The non-git alpha
+    // has a registered default and no readable HEAD.
     crate::common::fixture::git_run(
         cg.project_root(),
         &["symbolic-ref", "HEAD", "refs/heads/served-head"],
@@ -133,6 +133,7 @@ async fn project_context_returns_the_project_the_caller_named() {
             "canonical_root": alpha.canonical_root,
             "git_common_dir": null,
             "default_branch": "main",
+            "head_branch": null,
             "created_at": alpha.created_at,
             "last_seen_at": alpha.last_seen_at,
             "is_active": false,
@@ -223,7 +224,8 @@ async fn project_context_returns_the_project_the_caller_named() {
             "display_root": active.display_root,
             "canonical_root": active.canonical_root,
             "git_common_dir": null,
-            "default_branch": "served-head",
+            "default_branch": "main",
+            "head_branch": "served-head",
             "created_at": active.created_at,
             "last_seen_at": active.last_seen_at,
             "is_active": true,

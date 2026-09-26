@@ -5,7 +5,7 @@ import { ProjectInspector } from './ProjectInspector.tsx';
 const project = {
   project_id: 'exact-project-id', label: 'project', project_root: '/alias',
   canonical_root: '/canonical/root', kind: 'worktree', store_count: 2,
-  artifact_count: 5, alias_count: 1, branches: [], default_branch: null,
+  artifact_count: 5, alias_count: 1, branches: [], default_branch: null, head_branch: null,
   last_seen_at: 1234567890,
 };
 

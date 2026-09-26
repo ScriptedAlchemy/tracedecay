@@ -27,6 +27,7 @@ function project(
     canonical_root: `/repos/${id}`,
     kind: 'primary',
     default_branch: 'main',
+    head_branch: 'main',
     branches: ['main'],
     store_count: mass.stores,
     artifact_count: mass.artifacts,
