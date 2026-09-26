@@ -235,6 +235,7 @@ async fn dispatch_profile_refresh(
             touched_files: Vec::new(),
             code_graph: None,
             analytics: None,
+            cost: None,
         }),
         Err(problem) => serde_json::to_value(
             ApplicationProblemEnvelope::new(contract, request_id, problem)

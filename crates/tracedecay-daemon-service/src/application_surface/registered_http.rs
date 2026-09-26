@@ -424,6 +424,7 @@ where
                             touched_files: Vec::new(),
                             code_graph: None,
                             analytics: None,
+                            cost: None,
                         }),
                     )
                     .into_http_response();

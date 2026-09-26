@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
+use tracedecay_code_index::graph_projection::{CodeGraphInteractiveReader, CodeGraphReadCostMeter};
 use tracedecay_contracts::retrieval::{
     CodeFacetDimension, CodeFacetRecord, CodeFacetRequest, CodeLexicalField, CodeNavigationRequest,
     CodeTimelineRecord, CodeTimelineRequest, SymbolPrimitiveRecord, SymbolRelationRecord,
@@ -29,8 +29,8 @@ use tracedecay_contracts::{
     ExactOccurrenceRecord, ExactOccurrenceRequest, FreshnessState, LexicalOccurrenceRecord,
     ModuleApiRequest, Omission, OmissionReason, OpaqueCursor, OperationBudgetUsage, PageCursor,
     PageState, PhraseSearchRequest, QualifiedNameRequest, RequestAdmission, RequestContext,
-    RetrievalEvidence, RetrievalPortContext, RetrievalPortOutcome, SourceMetadataRecord,
-    SourceMetadataRequest, TemporalState,
+    RequestCostReceiptV1, RetrievalEvidence, RetrievalPortContext, RetrievalPortOutcome,
+    SourceMetadataRecord, SourceMetadataRequest, TemporalState,
 };
 use tracedecay_domain::{
     AuthorizationRevision, CodeGenerationId, CodeSearchChunkId, ComponentRevision,
@@ -689,6 +689,7 @@ fn unavailable<T>(finished_at: tracedecay_domain::UtcMicros) -> RetrievalPortOut
         finished_at,
         budget: OperationBudgetUsage::default(),
         cancellation: None,
+        cost: None,
     })
 }
 
@@ -807,6 +808,7 @@ fn bounded_result<T>(
         finished_at,
         budget: OperationBudgetUsage::default(),
         cancellation: None,
+        cost: None,
     };
     if is_partial {
         RetrievalPortOutcome::Partial(evidence)
@@ -1504,6 +1506,15 @@ fn relation_read_stop<T>(
     stop: DispatchExpansionStop,
     control: &Arc<dyn RetrievalExecutionControl>,
 ) -> RetrievalPortOutcome<CodeQueryPage<T>> {
+    let outcome = relation_read_stop_unmetered(prepared, stop, control);
+    metered(prepared, outcome)
+}
+
+fn relation_read_stop_unmetered<T>(
+    prepared: &impl PreparedCallableQueryStateV1,
+    stop: DispatchExpansionStop,
+    control: &Arc<dyn RetrievalExecutionControl>,
+) -> RetrievalPortOutcome<CodeQueryPage<T>> {
     let finished_at = query_finished_at();
     let generation = prepared.generation().clone();
     match stop {
@@ -1601,7 +1612,9 @@ struct PreparedTextCallableQueryV1 {
 
 struct PreparedGraphCallableQueryV1 {
     latest: LatestCodeTextGenerationV1,
+    /// Counts every store read on [`Self::cost`].
     reader: CodeGraphInteractiveReader,
+    cost: CodeGraphReadCostMeter,
     query: PreparedQueryV1,
     /// Absent only when the scope unmounted between resolving `latest` and
     /// preparing the query; the page still serves, and no cursor it mints
@@ -1615,6 +1628,21 @@ trait PreparedCallableQueryStateV1 {
     /// A cursor pinned to this generation was minted and stays valid until
     /// `expires_at`. Graph queries bind replay retention to that lifetime.
     fn retain_cursor_generation(&self, _expires_at: UtcMicros, _now: UtcMicros) {}
+    /// What the query has cost its stores, when its reads are metered.
+    fn read_cost(&self) -> Option<RequestCostReceiptV1> {
+        None
+    }
+}
+
+/// `outcome` with the prepared query's read cost recorded on its evidence.
+fn metered<T>(
+    prepared: &impl PreparedCallableQueryStateV1,
+    outcome: RetrievalPortOutcome<T>,
+) -> RetrievalPortOutcome<T> {
+    match prepared.read_cost() {
+        Some(cost) => outcome.with_cost(cost),
+        None => outcome,
+    }
 }
 
 impl PreparedCallableQueryStateV1 for PreparedCallableQueryV1 {
@@ -1650,6 +1678,10 @@ impl PreparedCallableQueryStateV1 for PreparedGraphCallableQueryV1 {
         if let Some(retention) = &self.cursor_retention {
             retention.retain(&self.latest, expires_at, now);
         }
+    }
+
+    fn read_cost(&self) -> Option<RequestCostReceiptV1> {
+        Some(self.cost.receipt())
     }
 }
 
@@ -1875,18 +1907,21 @@ impl CodeIndexSchedulerRegistryV1 {
         let store = latest
             .interactive_graph_store()
             .map_err(|_| CallableCodeCursorError::Unavailable)?;
+        let cost = CodeGraphReadCostMeter::start();
         let reader = store
             .interactive_reader_with_cancellation(
                 &latest.metadata().manifest().generation_id,
                 Arc::new(tracedecay_graph_db::NeverCancelled),
             )
-            .map_err(|_| CallableCodeCursorError::Unavailable)?;
+            .map_err(|_| CallableCodeCursorError::Unavailable)?
+            .metered(&cost);
         let cursor_retention = self
             .graph_cursor_retention_for_scope(context.request.scope())
             .await;
         Ok(PreparedGraphCallableQueryV1 {
             latest,
             reader,
+            cost,
             query,
             cursor_retention,
         })
@@ -1979,6 +2014,58 @@ where
     K: Serialize,
     T: Serialize,
 {
+    let outcome = finish_generation_candidate_page_unmetered(
+        prepared,
+        context,
+        operation,
+        query_binding_digest,
+        keys,
+        hydrate,
+        requested_page,
+        page_label,
+        complete,
+    );
+    metered(prepared, outcome)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_query_with_coverage<T: serde::Serialize>(
+    prepared: &impl PreparedCallableQueryStateV1,
+    context: &RetrievalPortContext<'_>,
+    operation: &'static str,
+    query_binding_digest: ManifestDigest,
+    page: CodeQueryPage<T>,
+    requested_page: &tracedecay_contracts::PageRequest,
+    coverage: tracedecay_domain::RetrieverCoverage,
+) -> RetrievalPortOutcome<CodeQueryPage<T>> {
+    let outcome = finish_query_with_coverage_unmetered(
+        prepared,
+        context,
+        operation,
+        query_binding_digest,
+        page,
+        requested_page,
+        coverage,
+    );
+    metered(prepared, outcome)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_generation_candidate_page_unmetered<K, T>(
+    prepared: &impl PreparedCallableQueryStateV1,
+    context: &RetrievalPortContext<'_>,
+    operation: &'static str,
+    query_binding_digest: ManifestDigest,
+    keys: Vec<K>,
+    hydrate: impl FnOnce(&[K]) -> Result<Vec<T>, PreparedQueryErrorV1>,
+    requested_page: &tracedecay_contracts::PageRequest,
+    page_label: &'static str,
+    complete: bool,
+) -> RetrievalPortOutcome<CodeQueryPage<T>>
+where
+    K: Serialize,
+    T: Serialize,
+{
     let eligible = keys.len() as u64;
     let finished_at = query_finished_at();
     let generation = prepared.generation().clone();
@@ -2053,7 +2140,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn finish_query_with_coverage<T: serde::Serialize>(
+fn finish_query_with_coverage_unmetered<T: serde::Serialize>(
     prepared: &impl PreparedCallableQueryStateV1,
     context: &RetrievalPortContext<'_>,
     operation: &'static str,

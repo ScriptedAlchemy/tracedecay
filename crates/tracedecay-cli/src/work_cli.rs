@@ -426,6 +426,7 @@ pub async fn invoke_work_cli_with_delivery(
                 touched_files: Vec::new(),
                 code_graph: None,
                 analytics: None,
+                cost: None,
             })
         }
         DaemonInvocationOutcome::ApplicationProblem { problem } => Err(

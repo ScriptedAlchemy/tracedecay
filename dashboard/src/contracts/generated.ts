@@ -267,6 +267,7 @@ export const AnalyticsPromptCategoryCountV1Schema = z.object({
 export type AnalyticsPromptCategoryCountV1 = z.infer<typeof AnalyticsPromptCategoryCountV1Schema>;
 
 export const AnalyticsRecentEventV1Schema = z.object({
+  cost: z.union([z.lazy(() => RequestCostReceiptV1Schema), z.null()]).optional(),
   event_kind: z.string(),
   hook_name: z.string(),
   outcome: z.string(),
@@ -5031,6 +5032,17 @@ export const RepositoryPlacementScopeV1Schema = z.discriminatedUnion("kind", [z.
 })]);
 export type RepositoryPlacementScopeV1 = z.infer<typeof RepositoryPlacementScopeV1Schema>;
 
+/** What one request cost the stores that answered it, counted on its read
+lease, so an operator can see why a call was slow. */
+export const RequestCostReceiptV1Schema = z.object({
+  adjacency_queries: z.number().int().safe().min(0),
+  adjacency_rows: z.number().int().safe().min(0),
+  bytes_hydrated: z.number().int().safe().min(0),
+  point_reads: z.lazy(() => StorePointReadsV1Schema),
+  wall_micros: z.number().int().safe().min(0),
+}).strict();
+export type RequestCostReceiptV1 = z.infer<typeof RequestCostReceiptV1Schema>;
+
 export const RequiredCheckExpectationV1Schema = z.literal("successful_terminal");
 export type RequiredCheckExpectationV1 = z.infer<typeof RequiredCheckExpectationV1Schema>;
 
@@ -5896,6 +5908,13 @@ export type StoreGrowthDimensionV1 = z.infer<typeof StoreGrowthDimensionV1Schema
 `graph.db`, or `projects/proj_x`). Never an absolute on-disk path. */
 export const StoreKeyV1Schema = z.string();
 export type StoreKeyV1 = z.infer<typeof StoreKeyV1Schema>;
+
+/** Point reads per graph store kind. */
+export const StorePointReadsV1Schema = z.object({
+  graph_sealed: z.number().int().safe().min(0),
+  graph_staging: z.number().int().safe().min(0),
+}).strict();
+export type StorePointReadsV1 = z.infer<typeof StorePointReadsV1Schema>;
 
 /** One cheap size sample for a single store, derived from page-count pragmas.
 

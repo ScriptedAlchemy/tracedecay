@@ -183,6 +183,20 @@ describe('AgentsPage read coverage', () => {
             event_kind: 'post_tool_use',
             hook_name: 'post_tool_use',
           },
+          {
+            timestamp: 1_699_999_990,
+            tool_name: 'tracedecay_callees',
+            outcome: 'success',
+            event_kind: 'mcp_tool_call',
+            hook_name: '',
+            cost: {
+              wall_micros: 12_345,
+              point_reads: { graph_sealed: 21, graph_staging: 2 },
+              adjacency_queries: 1,
+              adjacency_rows: 107,
+              bytes_hydrated: 40_960,
+            },
+          },
         ],
       }),
       underused: underusedPayload(),
@@ -203,6 +217,14 @@ describe('AgentsPage read coverage', () => {
 
     // The failure accounting off the same read.
     expect(screen.getByText(/5\.00%/)).toBeTruthy();
+
+    // A metered call's row carries its cost receipt; an unmetered one does not.
+    const costs = document.querySelectorAll('[data-request-cost]');
+    expect(costs.length).toBe(1);
+    expect(costs[0]?.textContent).toBe('23 reads · 107 rows · 12.3 ms');
+    expect(costs[0]?.getAttribute('title')).toBe(
+      '21 sealed-store and 2 staging-store point reads, 1 adjacency queries returning 107 rows, 40960 bytes hydrated, 12345 µs wall',
+    );
 
     // Both graph-fed surfaces refuse rather than report a zero.
     expect(document.querySelector('[data-agent-handoffs="refused"]')).toBeTruthy();

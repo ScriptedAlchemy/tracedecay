@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tracedecay_contracts::{
     AuthorityReceipt, EvidenceAuthority, EvidenceCoverage, EvidencePacket, EvidenceScore, Omission,
-    OperationReceipt, PageState, RetrieverContribution, TemporalState,
+    OperationReceipt, PageState, RequestCostReceiptV1, RetrieverContribution, TemporalState,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -20,6 +20,9 @@ pub struct DaemonFeedbackResult {
     /// onto the application envelope.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     touched_files: Vec<String>,
+    /// What the read cost its stores, carried onto the envelope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cost: Option<RequestCostReceiptV1>,
 }
 
 impl DaemonFeedbackResult {
@@ -48,6 +51,7 @@ impl DaemonFeedbackResult {
             execution: packet.execution,
             payload: packet.payload,
             touched_files: Vec::new(),
+            cost: None,
         }
     }
 
@@ -57,8 +61,20 @@ impl DaemonFeedbackResult {
         self
     }
 
-    /// The evidence packet and the files the read touched.
-    pub fn into_application(self) -> (EvidencePacket<serde_json::Value>, Vec<String>) {
+    #[must_use]
+    pub fn with_cost(mut self, cost: Option<RequestCostReceiptV1>) -> Self {
+        self.cost = cost;
+        self
+    }
+
+    /// The evidence packet, the files the read touched, and what it cost.
+    pub fn into_application(
+        self,
+    ) -> (
+        EvidencePacket<serde_json::Value>,
+        Vec<String>,
+        Option<RequestCostReceiptV1>,
+    ) {
         let packet = EvidencePacket {
             temporal: self.temporal,
             authority: self.authority,
@@ -71,6 +87,6 @@ impl DaemonFeedbackResult {
             execution: self.execution,
             payload: self.payload,
         };
-        (packet, self.touched_files)
+        (packet, self.touched_files, self.cost)
     }
 }

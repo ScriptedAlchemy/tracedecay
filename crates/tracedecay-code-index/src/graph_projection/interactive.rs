@@ -19,14 +19,16 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Mutex, RwLock, TryLockError};
+use std::time::Instant;
 
+use tracedecay_contracts::{RequestCostReceiptV1, StorePointReadsV1};
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, FileOccurrenceId, RelationEdgeKindV1,
     SanitizedCodeFileV1, SymbolOccurrenceId, repository_path_matches_scope,
 };
 use tracedecay_graph_db::{
-    GraphCancellation, GraphEntity, GraphEntityId, GraphProjectionIdentity, GraphRelation,
-    GraphRelationKind, MAX_VERIFIED_GENERATION_RELATIONS, RelationFanoutOverflow,
+    GraphCancellation, GraphEntity, GraphEntityId, GraphProjectionIdentity, GraphReadMeter,
+    GraphRelation, GraphRelationKind, MAX_VERIFIED_GENERATION_RELATIONS, RelationFanoutOverflow,
     VerifiedGraphSnapshot,
 };
 
@@ -165,6 +167,40 @@ impl fmt::Debug for CodeGraphInteractiveReader {
     }
 }
 
+/// One request's store accounting: the lease meter its reader counts on, and
+/// when the request opened it.
+#[derive(Clone, Debug)]
+pub struct CodeGraphReadCostMeter {
+    meter: Arc<GraphReadMeter>,
+    started: Instant,
+}
+
+impl CodeGraphReadCostMeter {
+    #[must_use]
+    pub fn start() -> Self {
+        Self {
+            meter: Arc::new(GraphReadMeter::default()),
+            started: Instant::now(),
+        }
+    }
+
+    /// What the request has cost its stores so far.
+    #[must_use]
+    pub fn receipt(&self) -> RequestCostReceiptV1 {
+        let cost = self.meter.cost();
+        RequestCostReceiptV1 {
+            wall_micros: u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX),
+            point_reads: StorePointReadsV1 {
+                graph_sealed: cost.sealed_point_reads,
+                graph_staging: cost.staging_point_reads,
+            },
+            adjacency_queries: cost.adjacency_queries,
+            adjacency_rows: cost.adjacency_rows,
+            bytes_hydrated: cost.bytes_hydrated,
+        }
+    }
+}
+
 impl CodeGraphProjectionStore {
     /// Builds and validates the generation-pinned interactive catalog before
     /// serving latency-bounded reads. Only a fully built immutable catalog is
@@ -244,6 +280,15 @@ impl CodeGraphInteractiveReader {
     #[hotpath::skip]
     pub fn generation(&self) -> &CodeGenerationId {
         &self.generation
+    }
+
+    /// This reader with every store read it serves counted on `cost`.
+    #[must_use]
+    pub fn metered(&self, cost: &CodeGraphReadCostMeter) -> Self {
+        Self {
+            snapshot: Arc::new(self.snapshot.metered(Arc::clone(&cost.meter))),
+            ..self.clone()
+        }
     }
 
     /// Resolves symbols by exact qualified name, optionally narrowed to one

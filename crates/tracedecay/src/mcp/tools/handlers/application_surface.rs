@@ -253,6 +253,7 @@ fn render_result_parts(
         Ok(envelope) => ResponseTrailer {
             touched_files: &envelope.touched_files,
             code_graph: envelope.code_graph.as_ref(),
+            cost: envelope.cost.as_ref(),
         }
         .attach(&mut rendered),
         // Keep the typed problem machine-readable in every presentation
@@ -601,6 +602,7 @@ pub async fn execute_graph_tool_surface(
         touched_files: envelope.touched_files,
         code_graph: envelope.code_graph,
         analytics: envelope.analytics,
+        cost: envelope.cost,
     })
 }
 
@@ -853,6 +855,7 @@ mod tests {
                 },
             }),
             analytics: None,
+            cost: None,
         };
         let binding = BindingId::new("binding.mcp.code-callers.v1").unwrap();
         for format in [RequestedOutputFormat::Markdown, RequestedOutputFormat::Json] {

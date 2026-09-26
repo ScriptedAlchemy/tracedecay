@@ -43,6 +43,8 @@ pub struct McpToolAnalyticsEvent<'a> {
     /// marker so pre-existing callers that have not been migrated to supply
     /// a real reason keep working.
     pub failure_reason: Option<&'a str>,
+    /// What the call cost its stores, when its read was metered.
+    pub cost: Option<&'a tracedecay_contracts::RequestCostReceiptV1>,
 }
 
 /// Failure reasons are capped well below the metadata column's practical
@@ -145,6 +147,9 @@ pub fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> AnalyticsEv
         metadata["action"] = json!(action);
     }
 
+    if let Some(cost) = input.cost {
+        metadata["cost"] = json!(cost);
+    }
     append_tool_response_analytics(
         input.tool_name,
         input.arguments,
@@ -404,6 +409,7 @@ mod tests {
             client_name: None,
             mcp_instance_id: None,
             failure_reason: Some("old_str not found in src/main.rs"),
+            cost: None,
         });
         let metadata: serde_json::Value =
             serde_json::from_str(event.metadata_json.as_deref().unwrap_or("{}")).unwrap();
@@ -433,6 +439,7 @@ mod tests {
             client_name: None,
             mcp_instance_id: None,
             failure_reason: None,
+            cost: None,
         });
         let metadata: serde_json::Value =
             serde_json::from_str(event.metadata_json.as_deref().unwrap_or("{}")).unwrap();
@@ -459,6 +466,7 @@ mod tests {
             client_name: None,
             mcp_instance_id: None,
             failure_reason: Some("should be ignored on success"),
+            cost: None,
         });
         let metadata: serde_json::Value =
             serde_json::from_str(event.metadata_json.as_deref().unwrap_or("{}")).unwrap();
@@ -485,6 +493,7 @@ mod tests {
             client_name: Some("claude-code"),
             mcp_instance_id: Some("mcp-instance-test"),
             failure_reason: None,
+            cost: None,
         });
 
         let metadata: serde_json::Value =
@@ -522,6 +531,7 @@ mod tests {
             client_name: None,
             mcp_instance_id: None,
             failure_reason: None,
+            cost: None,
         });
 
         let metadata: serde_json::Value =
@@ -552,6 +562,7 @@ mod tests {
             client_name: Some("codex"),
             mcp_instance_id: Some("mcp-instance-test"),
             failure_reason: None,
+            cost: None,
         });
 
         let metadata: serde_json::Value =

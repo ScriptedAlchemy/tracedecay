@@ -101,4 +101,7 @@ pub struct GraphToolCompletionV1 {
     pub code_graph: Option<crate::retrieval::ServedCodeGraphGenerationV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub analytics: Option<InvocationAnalyticsV1>,
+    /// What a metered read cost the stores that served it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<crate::RequestCostReceiptV1>,
 }

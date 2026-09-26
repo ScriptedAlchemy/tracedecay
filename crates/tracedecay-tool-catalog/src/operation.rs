@@ -245,7 +245,7 @@ application_surface_operations! {
 impl ApplicationSurfaceOperation {
     /// Graph-backed reads and reports answered by the project's graph-tool
     /// owner with their typed catalog result in `ApplicationOutcome::Result`.
-    pub const GRAPH_TOOL_OPERATIONS: [Self; 16] = [
+    pub const GRAPH_TOOL_OPERATIONS: &[Self] = &[
         Self::Context,
         Self::Node,
         Self::Impact,

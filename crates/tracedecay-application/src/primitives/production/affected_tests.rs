@@ -386,5 +386,6 @@ pub(super) fn affected_tests_evidence(
         finished_at,
         budget: OperationBudgetUsage::default(),
         cancellation: None,
+        cost: None,
     }
 }

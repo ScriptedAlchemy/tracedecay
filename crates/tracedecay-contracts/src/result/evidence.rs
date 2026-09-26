@@ -494,6 +494,10 @@ pub struct RetrievalEvidence<T> {
     pub finished_at: UtcMicros,
     pub budget: OperationBudgetUsage,
     pub cancellation: Option<CancellationObservation>,
+    /// What producing this evidence cost its stores, when the port metered
+    /// its reads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<super::RequestCostReceiptV1>,
 }
 
 /// Immutable evidence packet consumed by adapters and later planner work.

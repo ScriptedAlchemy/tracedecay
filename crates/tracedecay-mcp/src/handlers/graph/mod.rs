@@ -76,5 +76,6 @@ pub(crate) fn graph_tool_completion(
         touched_files,
         code_graph: None,
         analytics: None,
+        cost: None,
     }
 }

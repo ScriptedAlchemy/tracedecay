@@ -61,7 +61,8 @@ use tracedecay_daemon_service::application_surface::observe_surface_argument_rej
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::tools::response_trailers::{
-    CODE_GRAPH_FRESHNESS_TRAILER_PREFIX, TOKEN_ACCOUNTING_FOOTER_PREFIX, account_tool_result,
+    CODE_GRAPH_FRESHNESS_TRAILER_PREFIX, REQUEST_COST_TRAILER_PREFIX,
+    TOKEN_ACCOUNTING_FOOTER_PREFIX, account_tool_result,
 };
 use tracedecay_mcp::{
     RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions, internal_daemon_tool_definition,
@@ -1054,8 +1055,8 @@ fn rendered_tool_output(result_value: &Value, raw_json: bool) -> String {
 /// Joins every payload `content[*].text` block in an MCP tool result,
 /// separated by a blank line. Handlers sometimes prepend a warning/notice block
 /// ahead of the real payload; printing only `content[0].text` would silently
-/// drop the payload. The beside-result stale-graph trailer and token-accounting
-/// footer blocks are excluded (see [`beside_result_blocks`]): with
+/// drop the payload. The beside-result stale-graph and cost trailers and the
+/// token-accounting footer blocks are excluded (see [`beside_result_blocks`]): with
 /// `--format json` the payload block is the whole stdout document and a
 /// trailing block would make it unparseable. Falls back to the empty string
 /// when no text blocks exist.
@@ -1066,7 +1067,7 @@ fn join_content_text(result_value: &Value) -> String {
         .join("\n\n")
 }
 
-/// The stale-graph trailer and token-accounting footer blocks, printed to
+/// The stale-graph and cost trailers and token-accounting footer blocks, printed to
 /// stderr.
 fn beside_result_blocks(result_value: &Value) -> Vec<String> {
     content_text_blocks(result_value)
@@ -1089,6 +1090,7 @@ fn is_beside_result_block(text: &str) -> bool {
     let text = text.trim_start();
     text.starts_with(TOKEN_ACCOUNTING_FOOTER_PREFIX)
         || text.starts_with(CODE_GRAPH_FRESHNESS_TRAILER_PREFIX)
+        || text.starts_with(REQUEST_COST_TRAILER_PREFIX)
 }
 
 /// Print a grouped list of every available tool. Tools annotated as
