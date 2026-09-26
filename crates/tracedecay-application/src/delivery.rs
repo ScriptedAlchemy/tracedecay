@@ -113,6 +113,7 @@ pub struct ProjectDeliveryPullRequestOperationV1 {
 /// for this pull request.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct ProjectDeliveryPullRequestIdentityV1 {
+    pub number: u64,
     pub title: String,
     pub state: ProjectDeliveryPullRequestStateV1,
     pub draft: bool,
@@ -2100,6 +2101,7 @@ fn delivery_pull_request_identity(
     snapshot: &GitHubPullRequestSnapshotV1,
 ) -> ProjectDeliveryPullRequestIdentityV1 {
     ProjectDeliveryPullRequestIdentityV1 {
+        number: snapshot.number,
         title: snapshot.title.clone(),
         state: match snapshot.state {
             GitHubPullRequestStateV1::Open => ProjectDeliveryPullRequestStateV1::Open,
@@ -2375,6 +2377,7 @@ mod tests {
             provider: ProviderId::new("github").unwrap(),
             pull_request_id: GitHubPullRequestIdV1::new(id).unwrap(),
             identity: Some(ProjectDeliveryPullRequestIdentityV1 {
+                number: 42,
                 title: format!("Pull request {id}"),
                 state: ProjectDeliveryPullRequestStateV1::Open,
                 draft: false,
@@ -2491,6 +2494,7 @@ mod tests {
             crate::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1().unwrap();
         let scope = test_scope(&fixture);
         let snapshot = |title: &str| GitHubPullRequestSnapshotV1 {
+            number: 42,
             title: title.to_owned(),
             state: tracedecay_domain::feedback::GitHubPullRequestStateV1::Open,
             draft: true,

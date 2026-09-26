@@ -6,6 +6,7 @@ import type { DeliveryContext } from './deliveryContext.ts';
 import { GradeMark, ProviderStateChip, ReadOnlyProviderBadge } from './deliveryChrome.tsx';
 import { DELIVERY_LAYOUTS } from './deliveryLocation.ts';
 import { gradeLabel, type EvidenceGrade } from './evidence.ts';
+import { pullRequestNumberLabel } from './deliveryReading.ts';
 import { activeAttention, projectFor } from './inboxFilter.ts';
 import { pullRequestStateKind } from './PullRequestInspector.tsx';
 import type { Umbrella, UmbrellaMember } from './umbrella.ts';
@@ -255,7 +256,7 @@ function MemberRow({ context, member }: { context: DeliveryContext; member: Umbr
           </span>
           <span className="mt-0.5 block truncate font-mono text-3xs text-text-muted">
             {projectFor(inbox, member.projectId)?.label ?? member.projectId} · #
-            {row.pull_request.pull_request_id} · {activeAttention(row)} active
+            {pullRequestNumberLabel(row.pull_request)} · {activeAttention(row)} active
           </span>
         </span>
         <StateChip kind={pullRequestStateKind(row.state)} />
@@ -357,7 +358,7 @@ function MembershipRow({
           className="text-left text-text-primary hover:underline"
           onClick={() => navigate({ pullRequest: member.id })}
         >
-          #{row.pull_request.pull_request_id} {row.pull_request.identity?.title ?? row.pull_request.label}
+          {pullRequestNumberLabel(row.pull_request)} {row.pull_request.identity?.title ?? row.pull_request.label}
         </button>
       </td>
       <td className={cn(cell, 'font-mono text-3xs text-text-secondary')}>

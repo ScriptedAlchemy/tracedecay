@@ -17,6 +17,7 @@ import {
   providerServes,
   providerStateSentence,
 } from './evidence.ts';
+import { pullRequestNumberLabel } from './deliveryReading.ts';
 import { activeAttention, edgesFor, projectFor } from './inboxFilter.ts';
 import {
   attentionSourceLabel,
@@ -332,7 +333,7 @@ function PullRequestQueue({
                     </span>
                     <span className="mt-1 block truncate font-mono text-3xs text-text-muted">
                       {project?.label ?? row.project_id} · {row.pull_request.provider} #
-                      {row.pull_request.pull_request_id} · {active} active
+                      {pullRequestNumberLabel(row.pull_request)} · {active} active
                       {grouped > 0 ? ` · ${grouped} umbrella${grouped === 1 ? '' : 's'}` : ''}
                     </span>
                   </span>
@@ -382,7 +383,7 @@ function RelatedRail({
                 <span className="flex flex-wrap items-center justify-between gap-2 font-mono text-3xs text-text-muted">
                   <span>
                     {projectFor(inbox, member.projectId)?.label ?? member.projectId} · #
-                    {member.pullRequest.pull_request.pull_request_id}
+                    {pullRequestNumberLabel(member.pullRequest.pull_request)}
                   </span>
                   <GradeMark grade={umbrella.grade} source={umbrella.source} />
                 </span>
@@ -436,7 +437,7 @@ function InboxTable({
                     className="text-left text-text-primary hover:underline"
                     onClick={() => navigate({ pullRequest: row.id })}
                   >
-                    #{row.pull_request.pull_request_id} {row.pull_request.identity?.title ?? row.pull_request.label}
+                    {pullRequestNumberLabel(row.pull_request)} {row.pull_request.identity?.title ?? row.pull_request.label}
                   </button>
                 </td>
                 <td className="px-3 py-2 font-mono text-3xs text-text-secondary">{project?.label ?? row.project_id}</td>

@@ -42,6 +42,7 @@ import {
   type CheckRow,
   type ReviewThread,
 } from './review.ts';
+import { pullRequestNumberLabel } from './deliveryReading.ts';
 
 /**
  * The exact review workspace: review threads by lifecycle and path, the check
@@ -148,7 +149,7 @@ function ReviewHeader({ context, row }: { context: DeliveryContext; row: Deliver
       <div className="flex min-w-0 flex-wrap items-center gap-x-2 text-xs">
         <span className="text-text-muted">{project?.label ?? row.project_id}</span>
         <span aria-hidden className="text-text-muted">·</span>
-        <span className="font-mono text-text-secondary">Pull request #{row.pull_request.pull_request_id}</span>
+        <span className="font-mono text-text-secondary">Pull request {pullRequestNumberLabel(row.pull_request)}</span>
         <span aria-hidden className="text-text-muted">·</span>
         <span className="font-medium text-text-primary">
           {row.pull_request.identity?.title ?? row.pull_request.label}

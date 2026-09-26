@@ -81,6 +81,8 @@ pub const MAX_GITHUB_PULL_REQUEST_TITLE_BYTES_V1: usize = 400;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GitHubPullRequestSnapshotV1 {
+    /// The pull request's number in its repository, as discovery admitted it.
+    pub number: u64,
     pub title: String,
     pub state: GitHubPullRequestStateV1,
     pub draft: bool,
@@ -91,6 +93,11 @@ pub struct GitHubPullRequestSnapshotV1 {
 
 impl GitHubPullRequestSnapshotV1 {
     pub fn validate(&self) -> Result<(), DomainError> {
+        if self.number == 0 {
+            return Err(DomainError::NonCanonical {
+                field: "github pull request number",
+            });
+        }
         if self.title.is_empty()
             || self.title.len() > MAX_GITHUB_PULL_REQUEST_TITLE_BYTES_V1
             || self.title.chars().any(char::is_control)

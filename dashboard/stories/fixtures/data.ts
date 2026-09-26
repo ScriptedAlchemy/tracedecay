@@ -4230,6 +4230,7 @@ function inboxPullRequest(
       provider: 'github',
       pull_request_id: number,
       identity: {
+        number: Number(number),
         title,
         state: options.prState ?? 'open',
         draft: options.draft ?? false,

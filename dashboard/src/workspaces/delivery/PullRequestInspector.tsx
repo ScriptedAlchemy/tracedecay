@@ -29,6 +29,7 @@ import {
   providerOutcomeKind,
   providerStateSentence,
 } from './evidence.ts';
+import { pullRequestNumberLabel } from './deliveryReading.ts';
 import { edgesFor, projectFor } from './inboxFilter.ts';
 import { compareHref } from './review.ts';
 import { umbrellasFor } from './umbrella.ts';
@@ -67,7 +68,7 @@ export function PullRequestInspector({
           <div className="min-w-0 flex-1">
             <h2 className="text-sm font-semibold leading-snug text-text-primary">{title}</h2>
             <p className="mt-1 font-mono text-3xs text-text-muted">
-              {row.pull_request.provider} #{row.pull_request.pull_request_id}
+              {row.pull_request.provider} {pullRequestNumberLabel(row.pull_request)}
               {identity === null
                 ? ' · identity not served'
                 : ` · ${identity.draft ? 'draft · ' : ''}${identity.state} · +${identity.additions} −${identity.deletions} · ${identity.changed_files} files`}

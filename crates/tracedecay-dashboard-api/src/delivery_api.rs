@@ -280,6 +280,8 @@ pub struct DeliveryPullRequestV1 {
     pub id: String,
     pub label: String,
     pub provider: String,
+    /// The provider's internal id. Display names a pull request by its
+    /// identity `number`.
     pub pull_request_id: String,
     /// Retained PR identity from the allowlisted `RestGetPullRequest` read;
     /// absent when no identity generation is retained yet.
@@ -289,6 +291,8 @@ pub struct DeliveryPullRequestV1 {
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct DeliveryPullRequestIdentityV1 {
+    /// The pull request's number in its repository (`#741`).
+    pub number: u64,
     pub title: String,
     pub state: DeliveryPullRequestStateV1,
     pub draft: bool,
@@ -1834,8 +1838,8 @@ fn map_pull_request(item: ProjectDeliveryPullRequestV1) -> DeliveryPullRequestV1
     DeliveryPullRequestV1 {
         id: format!("{provider}:{pull_request_id}"),
         label: match item.identity.as_ref() {
-            Some(identity) => format!("Pull request #{pull_request_id}, {}", identity.title),
-            None => format!("Pull request #{pull_request_id}"),
+            Some(identity) => format!("Pull request #{}, {}", identity.number, identity.title),
+            None => "Pull request, number not served".to_owned(),
         },
         provider,
         pull_request_id,
@@ -1852,6 +1856,7 @@ fn map_pull_request_identity(
     identity: ProjectDeliveryPullRequestIdentityV1,
 ) -> DeliveryPullRequestIdentityV1 {
     DeliveryPullRequestIdentityV1 {
+        number: identity.number,
         title: identity.title,
         state: match identity.state {
             ProjectDeliveryPullRequestStateV1::Open => DeliveryPullRequestStateV1::Open,
@@ -2383,7 +2388,8 @@ fn generation_projection(
 mod tests {
     use crate::read_model::{DashboardCoverageCompletenessV1, DashboardFreshnessStateV1};
     use tracedecay_domain::feedback::FeedbackScopeV1;
-    use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
+    use tracedecay_domain::feedback::github_review::GitHubPullRequestIdV1;
+    use tracedecay_domain::{ProjectId, ProviderId, RepositoryId, WorktreeId};
 
     use super::*;
 
@@ -2413,6 +2419,36 @@ mod tests {
             "/code?view=compare&head=feature%2Fdelivery&head_revision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
         assert_ne!(compare.href, "/code?view=compare");
+    }
+
+    #[test]
+    fn pull_request_label_names_the_repository_number_not_the_provider_id() {
+        let pull_request = |identity| ProjectDeliveryPullRequestV1 {
+            provider: ProviderId::new("github").unwrap(),
+            pull_request_id: GitHubPullRequestIdV1::new("4596824491").unwrap(),
+            identity,
+            operations: Vec::new(),
+        };
+        let identified =
+            map_pull_request(pull_request(Some(ProjectDeliveryPullRequestIdentityV1 {
+                number: 741,
+                title: "Fix kv docs".to_owned(),
+                state: ProjectDeliveryPullRequestStateV1::Open,
+                draft: false,
+                additions: 1,
+                deletions: 1,
+                changed_files: 1,
+            })));
+        assert_eq!(identified.label, "Pull request #741, Fix kv docs");
+        assert_eq!(
+            identified.identity.map(|identity| identity.number),
+            Some(741)
+        );
+        assert_eq!(identified.pull_request_id, "4596824491");
+        assert_eq!(
+            map_pull_request(pull_request(None)).label,
+            "Pull request, number not served"
+        );
     }
 
     fn snapshot(retained_head: &str, expected_head: &str) -> ProjectDeliverySnapshotV1 {

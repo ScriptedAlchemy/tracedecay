@@ -3,6 +3,7 @@ import type { DeliveryInboxV1 } from '../../contracts/generated.ts';
 import { cn } from '../../ui/cn.ts';
 import { GradeMark, microsToIso } from './deliveryChrome.tsx';
 import { gradeDash, gradeLabel } from './evidence.ts';
+import { pullRequestNumberLabel } from './deliveryReading.ts';
 import { projectFor } from './inboxFilter.ts';
 import { AttentionLegend, GradeLegend, HATCH_STYLE, useMeasuredSize } from './rendererMarks.tsx';
 import { attentionCode } from './rendererModel.ts';
@@ -308,7 +309,7 @@ export function CompactRail({
               >
                 {row.id === selectedId ? <span aria-hidden className="absolute inset-y-0 left-0 w-[2px] bg-accent" /> : null}
                 <span className="truncate font-mono text-3xs text-text-secondary">
-                  {projectFor(inbox, row.project_id)?.label ?? row.project_id} #{row.pull_request.pull_request_id}
+                  {projectFor(inbox, row.project_id)?.label ?? row.project_id} {pullRequestNumberLabel(row.pull_request)}
                 </span>
                 <span className="flex items-center gap-2 truncate text-3xs text-text-muted">
                   {row.state}

@@ -164,7 +164,13 @@ impl ProjectGitHubReviewStoreV1 {
     ) -> Option<Option<GitHubReviewRefreshStateV1>> {
         let key = self.key(request)?;
         match self.database.get_metadata(&key).await.ok()? {
-            Some(encoded) => Some(Some(Self::decode(request, &encoded)?)),
+            Some(encoded) => match Self::decode(request, &encoded) {
+                Some(state) => Some(Some(state)),
+                None => {
+                    log_state_reset(request);
+                    Some(None)
+                }
+            },
             None => Some(None),
         }
     }
@@ -450,15 +456,18 @@ impl GitHubReviewAtomicRefreshStoreV1 for ProjectGitHubReviewStoreV1 {
                     let _ = transaction.rollback().await;
                     return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
                 };
-                let current = match encoded {
-                    Some(encoded) => {
-                        let Some(state) = Self::decode(request, &encoded) else {
+                // A record that no longer decodes is a provider cache in a
+                // retired shape: a refresh that read it as empty rebuilds it.
+                let (current, reset) = match encoded {
+                    Some(encoded) => match Self::decode(request, &encoded) {
+                        Some(state) => (Some(state), false),
+                        None if expected_revision.is_none() => (None, true),
+                        None => {
                             let _ = transaction.rollback().await;
-                            return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
-                        };
-                        Some(state)
-                    }
-                    None => None,
+                            return GitHubReviewRefreshStoreCommitOutcomeV1::Conflict;
+                        }
+                    },
+                    None => (None, false),
                 };
                 let Some(manifest_key) = self.manifest_key() else {
                     let _ = transaction.rollback().await;
@@ -493,6 +502,9 @@ impl GitHubReviewAtomicRefreshStoreV1 for ProjectGitHubReviewStoreV1 {
                         return GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable;
                     }
                 };
+                if reset {
+                    manifest.entries.retain(|entry| entry.request != *request);
+                }
                 let manifest_entry = manifest
                     .entries
                     .iter()
@@ -557,6 +569,14 @@ impl GitHubReviewAtomicRefreshStoreV1 for ProjectGitHubReviewStoreV1 {
     }
 }
 
+fn log_state_reset(request: &GitHubReviewReadRequestV1) {
+    tracing::warn!(
+        event = "github_review_state_reset",
+        operation = ?request.operation,
+        "a retained GitHub review record no longer decodes; the next refresh rebuilds it"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -567,8 +587,9 @@ mod tests {
         RequestId, ResolvedScope,
     };
     use tracedecay_domain::feedback::{
-        GitHubPullRequestIdV1, GitHubReviewCoverageV1, GitHubReviewIngressProviderOutcomeV1,
-        GitHubReviewIngressResultV1, GitHubReviewReadCheckpointV1, GitHubReviewReadOperationV1,
+        GitHubPullRequestIdV1, GitHubPullRequestSnapshotV1, GitHubPullRequestStateV1,
+        GitHubReviewCoverageV1, GitHubReviewIngressProviderOutcomeV1, GitHubReviewIngressResultV1,
+        GitHubReviewReadCheckpointV1, GitHubReviewReadOperationV1,
     };
     use tracedecay_domain::{
         ActorId, CommitId, ProjectId, ProviderId, RefId, RepositoryId, UtcMicros, WorktreeId,
@@ -824,6 +845,85 @@ mod tests {
             GitHubReviewStoreManifestLoadOutcomeV1::Unavailable
         );
         assert_eq!(store.load_bounded_entry(&cancelled, &entry, 1).await, None);
+    }
+
+    /// A pull-request identity record written before the snapshot carried
+    /// its number no longer decodes; a refresh rebuilds it instead of staying
+    /// unavailable for the life of the store.
+    #[tokio::test]
+    async fn a_retired_record_shape_is_rebuilt_by_the_next_refresh() {
+        let (context, mut request) = context_and_request();
+        request.operation = GitHubReviewReadOperationV1::RestGetPullRequest;
+        let mut response = complete_response(&request);
+        response.ingress.pull_request = Some(GitHubPullRequestSnapshotV1 {
+            number: 741,
+            title: "Split MSRV used to build from MSRV used to test".to_owned(),
+            state: GitHubPullRequestStateV1::Open,
+            draft: false,
+            additions: 17,
+            deletions: 8,
+            changed_files: 1,
+        });
+        let digest = github_review_scan_digest(&request, &response).unwrap();
+        let next = GitHubReviewRefreshStateV1::transition_with_receipt(
+            &request,
+            None,
+            response.clone(),
+            Some(GitHubReviewRefreshAttemptReceiptV1 {
+                disposition: GitHubReviewRefreshAttemptDispositionV1::Agreed,
+                scan_digests: vec![digest.clone(), digest],
+                observed_at: response.ingress.fetched_at,
+            }),
+        )
+        .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("github-review-retired-shape.db");
+        crate::register_test_schema_installer();
+        let authority =
+            DatabaseAuthority::acquire_test(&path, "github-source-retired-shape").unwrap();
+        let (database, _) =
+            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+                .await
+                .unwrap();
+        let store = ProjectGitHubReviewStoreV1::new(database, request.scope.clone()).unwrap();
+        assert_eq!(
+            store
+                .compare_and_record(&context, &request, None, &next)
+                .await,
+            GitHubReviewRefreshStoreCommitOutcomeV1::Recorded
+        );
+        let mut retired = serde_json::to_value(&next).unwrap();
+        retired["latest_attempt"]["ingress"]["pull_request"]
+            .as_object_mut()
+            .unwrap()
+            .remove("number");
+        store
+            .database
+            .set_metadata(&store.key(&request).unwrap(), &retired.to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.load(&context, &request).await,
+            GitHubReviewRefreshStoreReadOutcomeV1::Empty
+        );
+        assert_eq!(
+            store
+                .compare_and_record(&context, &request, Some(&next.revision), &next)
+                .await,
+            GitHubReviewRefreshStoreCommitOutcomeV1::Conflict,
+            "a writer that expected a live revision must not overwrite a retired one"
+        );
+        assert_eq!(
+            store
+                .compare_and_record(&context, &request, None, &next)
+                .await,
+            GitHubReviewRefreshStoreCommitOutcomeV1::Recorded
+        );
+        assert_eq!(
+            store.load(&context, &request).await,
+            GitHubReviewRefreshStoreReadOutcomeV1::State(Box::new(next))
+        );
     }
 
     #[tokio::test]
