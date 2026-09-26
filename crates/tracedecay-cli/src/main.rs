@@ -1820,7 +1820,10 @@ async fn dispatch_diagnostics_command(command: Commands) -> tracedecay_domain::e
     match command {
         Commands::Doctor => {
             hotpath::future!(
-                tracedecay::doctor::run_doctor(crate::cloud::doctor_network_probes()),
+                tracedecay::doctor::run_doctor(
+                    &tracedecay_runtime_core::storage::default_profile_root()?,
+                    crate::cloud::doctor_network_probes(),
+                ),
                 label = "cli.doctor.run"
             )
             .await?;

@@ -137,18 +137,19 @@ impl Drop for LifecycleLease {
     }
 }
 
-pub fn acquire_exclusive(operation: &str) -> Result<LifecycleLease> {
-    acquire_exclusive_at(&lifecycle_lock_path()?, operation)
-}
-
-/// Waits up to `timeout` for existing lifecycle readers or writers to release
-/// before acquiring exclusive ownership. Non-contention errors still fail
-/// immediately.
+/// Waits up to `timeout` for existing lifecycle readers or writers of
+/// `profile_root` to release before acquiring exclusive ownership.
+/// Non-contention errors still fail immediately.
 pub fn acquire_exclusive_with_timeout(
+    profile_root: &Path,
     operation: &str,
     timeout: Duration,
 ) -> Result<LifecycleLease> {
-    acquire_exclusive_at_with_timeout(&lifecycle_lock_path()?, operation, timeout)
+    acquire_exclusive_at_with_timeout(
+        &lifecycle_lock_path_for_profile(profile_root)?,
+        operation,
+        timeout,
+    )
 }
 
 /// Acquires the lifecycle lease rooted in an explicit profile. Migration
@@ -184,8 +185,8 @@ pub fn try_acquire_exclusive_for_profile(
 /// Waits for the current exclusive owner to finish, then acquires a shared
 /// lease. Reserved for restoring a daemon that was stopped before a losing
 /// exclusive-acquisition race.
-pub fn acquire_shared_blocking(operation: &str) -> Result<LifecycleLease> {
-    let path = lifecycle_lock_path()?;
+pub fn acquire_shared_blocking(profile_root: &Path, operation: &str) -> Result<LifecycleLease> {
+    let path = lifecycle_lock_path_for_profile(profile_root)?;
     let file = open_lock_file(&path)?;
     file.lock_shared()
         .map_err(|error| lock_error(&path, operation, &error))?;
@@ -213,8 +214,8 @@ pub fn try_acquire_shared_for_profile(
 
 /// Acquires a shared diagnostic lease, or joins the exclusive lease held by
 /// this process's post-update parent.
-pub fn acquire_shared_or_inherited(operation: &str) -> Result<LifecycleLease> {
-    let path = lifecycle_lock_path()?;
+pub fn acquire_shared_or_inherited(profile_root: &Path, operation: &str) -> Result<LifecycleLease> {
+    let path = lifecycle_lock_path_for_profile(profile_root)?;
     acquire_shared_or_inherited_at(&path, operation)
 }
 
@@ -248,11 +249,12 @@ fn acquire_shared_or_inherited_at(path: &Path, operation: &str) -> Result<Lifecy
 /// Acquires the lifecycle lease, or proves that this process is the
 /// post-update child of the process that still owns it.
 pub fn acquire_exclusive_or_inherited(
+    profile_root: &Path,
     operation: &str,
     inherited_token: Option<&str>,
 ) -> Result<LifecycleLease> {
     acquire_exclusive_or_inherited_at(
-        &lifecycle_lock_path()?,
+        &lifecycle_lock_path_for_profile(profile_root)?,
         operation,
         inherited_token.map(str::to_string),
     )
@@ -301,31 +303,6 @@ fn acquire_exclusive_or_inherited_at(
         }
         Err(error) => Err(lock_error(path, operation, &error)),
     }
-}
-
-fn lifecycle_lock_path() -> Result<PathBuf> {
-    let root = crate::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
-        message: "could not determine TraceDecay user data directory for lifecycle lease"
-            .to_string(),
-    })?;
-    let root_existed = root.exists();
-    std::fs::create_dir_all(&root).map_err(|error| TraceDecayError::Config {
-        message: format!(
-            "failed to create TraceDecay user data directory '{}': {error}",
-            root.display()
-        ),
-    })?;
-    if !root_existed {
-        crate::storage::set_private_dir_permissions(&root).map_err(|error| {
-            TraceDecayError::Config {
-                message: format!(
-                    "failed to secure TraceDecay user data directory '{}': {error}",
-                    root.display()
-                ),
-            }
-        })?;
-    }
-    Ok(root.join(LIFECYCLE_LOCK_FILENAME))
 }
 
 fn lifecycle_lock_path_for_profile(profile_root: &Path) -> Result<PathBuf> {
@@ -620,10 +597,41 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        ExclusiveLeaseAttempt, SharedLeaseAttempt, acquire_exclusive_at,
-        acquire_exclusive_at_with_timeout, acquire_exclusive_or_inherited_at, acquire_shared_at,
-        try_acquire_exclusive_for_profile, try_acquire_shared_at, try_acquire_shared_for_profile,
+        ExclusiveLeaseAttempt, LIFECYCLE_LOCK_FILENAME, SharedLeaseAttempt, acquire_exclusive_at,
+        acquire_exclusive_at_with_timeout, acquire_exclusive_or_inherited_at,
+        acquire_exclusive_with_timeout, acquire_shared_at, try_acquire_exclusive_for_profile,
+        try_acquire_shared_at, try_acquire_shared_for_profile,
     };
+
+    /// Two owners with their own profiles hold exclusive leases at once;
+    /// each lease lives in its owner's profile and neither is busy.
+    #[test]
+    fn two_profiles_hold_exclusive_leases_concurrently() {
+        let profiles = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+        let both_held = std::sync::Barrier::new(2);
+        let held = std::thread::scope(|scope| {
+            profiles
+                .each_ref()
+                .map(|profile| {
+                    let both_held = &both_held;
+                    scope.spawn(move || {
+                        let lease = acquire_exclusive_with_timeout(
+                            profile.path(),
+                            "service install",
+                            Duration::from_millis(200),
+                        );
+                        both_held.wait();
+                        lease.map(|lease| lease.is_exclusive())
+                    })
+                })
+                .map(|owner| owner.join().unwrap().unwrap())
+        });
+
+        assert_eq!(held, [true, true]);
+        for profile in &profiles {
+            assert!(profile.path().join(LIFECYCLE_LOCK_FILENAME).is_file());
+        }
+    }
 
     #[test]
     fn exclusive_lease_rejects_a_concurrent_mutator() {

@@ -238,11 +238,9 @@ const RETIRED_CHECKOUT_LAYOUT_FILES: [&str; 3] =
 /// The checkout-local `.tracedecay/` directory when it still carries the
 /// retired layout. The profile root is never a checkout layout, even when a
 /// project root is the directory that hosts it.
-pub fn retired_checkout_layout_dir(project_root: &Path) -> Option<PathBuf> {
+pub fn retired_checkout_layout_dir(profile_root: &Path, project_root: &Path) -> Option<PathBuf> {
     let dir = config::get_tracedecay_dir(project_root);
-    if config::user_data_dir()
-        .is_some_and(|profile| profile == dir || dir.canonicalize().is_ok_and(|dir| dir == profile))
-    {
+    if profile_root == dir || dir.canonicalize().is_ok_and(|dir| dir == profile_root) {
         return None;
     }
     RETIRED_CHECKOUT_LAYOUT_FILES
@@ -255,9 +253,10 @@ pub fn retired_checkout_layout_dir(project_root: &Path) -> Option<PathBuf> {
 /// checkout-local layout. It is never read or migrated; the scoped project
 /// store reset deletes the directory.
 pub fn refuse_retired_checkout_layout(
+    profile_root: &Path,
     project_root: &Path,
 ) -> tracedecay_domain::errors::Result<()> {
-    match retired_checkout_layout_dir(project_root) {
+    match retired_checkout_layout_dir(profile_root, project_root) {
         None => Ok(()),
         Some(dir) => Err(tracedecay_domain::errors::TraceDecayError::reset_required(
             "project store",

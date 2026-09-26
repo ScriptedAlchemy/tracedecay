@@ -7,36 +7,45 @@ mod tests {
 
     #[test]
     fn every_retired_checkout_layout_file_is_a_typed_project_store_reset() {
-        let _profile = crate::config::PinnedUserDataDir::new();
+        let profile = tempfile::tempdir().unwrap();
+        let profile_root = profile.path().join(crate::config::TRACEDECAY_DIR);
         for name in ["enrollment.json", "config.json", "tracedecay.db"] {
             let dir = tempfile::tempdir().unwrap();
             let checkout_dir = dir.path().join(".tracedecay");
-            refuse_retired_checkout_layout(dir.path()).unwrap();
+            refuse_retired_checkout_layout(&profile_root, dir.path()).unwrap();
             fs::create_dir_all(&checkout_dir).unwrap();
             fs::write(checkout_dir.join("domain-symbols.toml"), "").unwrap();
-            refuse_retired_checkout_layout(dir.path()).unwrap();
+            refuse_retired_checkout_layout(&profile_root, dir.path()).unwrap();
 
             fs::write(checkout_dir.join(name), "{}").unwrap();
-            let error = refuse_retired_checkout_layout(dir.path()).unwrap_err();
+            let error = refuse_retired_checkout_layout(&profile_root, dir.path()).unwrap_err();
 
             let (authority, reason) = error.reset_required_context().unwrap();
             assert_eq!(authority, "project store", "{name}");
-            assert!(reason.contains(&checkout_dir.display().to_string()), "{reason}");
-            assert_eq!(retired_checkout_layout_dir(dir.path()), Some(checkout_dir));
+            assert!(
+                reason.contains(&checkout_dir.display().to_string()),
+                "{reason}"
+            );
+            assert_eq!(
+                retired_checkout_layout_dir(&profile_root, dir.path()),
+                Some(checkout_dir)
+            );
         }
     }
 
     #[test]
     fn the_profile_root_is_never_a_retired_checkout_layout() {
-        let _profile = crate::config::PinnedUserDataDir::new();
-        let profile_root = crate::config::user_data_dir().unwrap();
-        assert_eq!(
-            profile_root.file_name(),
-            Some(std::ffi::OsStr::new(crate::config::TRACEDECAY_DIR))
-        );
+        let home = tempfile::tempdir().unwrap();
+        let profile_root = home.path().join(crate::config::TRACEDECAY_DIR);
+        fs::create_dir_all(&profile_root).unwrap();
         fs::write(profile_root.join("enrollment.json"), "{}").unwrap();
+        let other_profile = tempfile::tempdir().unwrap();
 
-        refuse_retired_checkout_layout(profile_root.parent().unwrap()).unwrap();
+        refuse_retired_checkout_layout(&profile_root, home.path()).unwrap();
+        assert_eq!(
+            retired_checkout_layout_dir(other_profile.path(), home.path()),
+            Some(profile_root)
+        );
     }
 
     #[test]
