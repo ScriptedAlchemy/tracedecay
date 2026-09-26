@@ -347,6 +347,24 @@ fn feedback_sources_share_one_cycle_result_and_canonical_anchors() {
             .and_then(|projection| projection.code_description_uri.as_deref()),
         Some("https://github.com/ScriptedAlchemy/tracedecay/pull/13#discussion_r1")
     );
+    let mut ingested_this_cycle = github.clone();
+    ingested_this_cycle.items[0].observed_at = UtcMicros(50);
+    ingested_this_cycle.fetched_at = UtcMicros(50);
+    assert_eq!(
+        ingested_this_cycle
+            .advisory_findings(validity)
+            .map(|batch| batch.provider_state)
+            .ok(),
+        Some(ProviderEvaluationStateV1::SupportedCompletedComplete),
+        "a review read the cycle itself ran is evidence of that cycle"
+    );
+    let mut after_expiry = github.clone();
+    after_expiry.items[0].observed_at = UtcMicros(99);
+    after_expiry.fetched_at = UtcMicros(99);
+    assert!(
+        after_expiry.advisory_findings(validity).is_err(),
+        "evidence observed at expiry belongs to a later cycle"
+    );
     let ci_finding = ci
         .advisory_findings(validity)
         .unwrap()
