@@ -2,7 +2,10 @@
 //! real server connection, then the text the caller observes.
 //!
 //! Timestamps are pinned after registration so the page order and the
-//! expected clock fields are inputs, not a wall-clock reading.
+//! expected clock fields are inputs, not a wall-clock reading. Git checkouts
+//! are created on an explicit HEAD other than their enrolled branch: the
+//! listing reports each checkout's live HEAD, not the enrollment record or
+//! the host's `init.defaultBranch`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -24,6 +27,8 @@ const BETA_CREATED_AT: i64 = 1_700_000_002;
 const BETA_SEEN_AT: i64 = 1_700_000_030;
 const ACTIVE_CREATED_AT: i64 = 1_700_000_003;
 const ACTIVE_SEEN_AT: i64 = 1_700_000_010;
+const ALPHA_HEAD: &str = "alpha-head";
+const ACTIVE_HEAD: &str = "served-head";
 
 struct RegisteredProject {
     id: String,
@@ -46,7 +51,7 @@ async fn project_list_returns_the_registry_page_the_caller_asked_for() {
     let (cg, _env, _project_dir) = support::setup_empty_project().await;
     let profile_dir = support::test_temp_dir();
     let profile_root = fs::canonicalize(profile_dir.path()).expect("profile root");
-    let alpha_root = git_repository(&profile_root.join("listed-alpha"));
+    let alpha_root = git_repository(&profile_root.join("listed-alpha"), ALPHA_HEAD);
     let beta_root = directory(&profile_root.join("listed-beta"));
 
     {
@@ -125,6 +130,10 @@ async fn project_list_returns_the_registry_page_the_caller_asked_for() {
     )
     .await
     .expect("project-scoped registry");
+    crate::common::fixture::git_run(
+        cg.project_root(),
+        &["symbolic-ref", "HEAD", &format!("refs/heads/{ACTIVE_HEAD}")],
+    );
     let active_git = fs::canonicalize(cg.project_root().join(".git")).expect("active .git");
     assert_eq!(
         cg.project_root().join(".git"),
@@ -149,8 +158,8 @@ async fn project_list_returns_the_registry_page_the_caller_asked_for() {
         "proj_alpha",
         &alpha_root,
         Some(alpha_root.join(".git")),
-        "main",
-        &["main", "release"],
+        ALPHA_HEAD,
+        &[ALPHA_HEAD],
         "primary",
         ALPHA_CREATED_AT,
         ALPHA_SEEN_AT,
@@ -177,8 +186,8 @@ async fn project_list_returns_the_registry_page_the_caller_asked_for() {
         &active_id,
         cg.project_root(),
         Some(active_git),
-        "main",
-        &["main"],
+        ACTIVE_HEAD,
+        &[ACTIVE_HEAD],
         "primary",
         ACTIVE_CREATED_AT,
         ACTIVE_SEEN_AT,
@@ -469,10 +478,10 @@ fn full_markdown(
 ) -> String {
     format!(
         "Found 3 registered projects across 3 repositories.\n\nRepositories:\n\
-         - {active_label} (branches: main)\n  \
-         - `{active_id}` * [primary] branches: main; stores: 0; path: {active_root}\n\
-         - listed-alpha (branches: main, release)\n  \
-         - `proj_alpha` [primary] branches: main, release; stores: 1; path: {alpha_root}\n\
+         - {active_label} (branches: served-head)\n  \
+         - `{active_id}` * [primary] branches: served-head; stores: 0; path: {active_root}\n\
+         - listed-alpha (branches: alpha-head)\n  \
+         - `proj_alpha` [primary] branches: alpha-head; stores: 1; path: {alpha_root}\n\
          - listed-beta (branches: dev)\n  \
          - `proj_beta` [project] branches: dev; stores: 0; path: {beta_root}\n",
         active_label = active.label,
@@ -578,8 +587,8 @@ fn directory(path: &Path) -> PathBuf {
     fs::canonicalize(path).expect("canonicalize project directory")
 }
 
-fn git_repository(path: &Path) -> PathBuf {
+fn git_repository(path: &Path, head: &str) -> PathBuf {
     let root = directory(path);
-    crate::common::fixture::git_run(&root, &["init", "--quiet"]);
+    crate::common::fixture::git_run(&root, &["init", "--quiet", "-b", head]);
     root
 }
