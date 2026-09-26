@@ -60,11 +60,11 @@ async fn blocked_repository_discovery_lets_other_projects_reach_ready() {
     let profile_root = home.path().join("profile");
     let blocked = home.path().join("blocked");
     let responsive = home.path().join("responsive");
+    committed_repository(&blocked);
+    committed_repository(&responsive);
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&blocked, &client_identity).await;
     initialize_test_project(&responsive, &client_identity).await;
-    committed_repository(&blocked);
-    committed_repository(&responsive);
     let _database_scope =
         enter_test_daemon_database_scope(&profile_root, "blocked repository discovery");
     let engine = test_daemon_engine_for_profile(&profile_root);
@@ -92,10 +92,12 @@ async fn blocked_repository_discovery_lets_other_projects_reach_ready() {
         "blocked discovery must stay typed-retryable, got: {blocked_error}"
     );
     let message = blocked_error.to_string();
-    let canonical_blocked = std::fs::canonicalize(&blocked).expect("canonical blocked checkout");
+    let blocked_identity = tracedecay_runtime_core::path_safety::canonical_root_identity(&blocked);
     assert!(
-        message.contains("repository discovery blocked on")
-            && message.contains(&canonical_blocked.display().to_string()),
+        message.contains(&format!(
+            "repository discovery blocked on {}",
+            blocked_identity.display()
+        )),
         "blocked discovery must name the path, got: {message}"
     );
 
