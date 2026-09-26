@@ -129,12 +129,17 @@ impl WorkGraphReadPortV1 for TestStore {
         context: &WorkProductPortContextV1,
         request: &WorkGraphReadRequestV1,
     ) -> Result<WorkGraphReadV1, WorkGraphReadPortErrorV1> {
-        let graph = self
+        let Some(graph) = self
             .graph
             .lock()
             .map_err(|_| WorkGraphReadPortErrorV1::Unavailable)?
             .clone()
-            .ok_or(WorkGraphReadPortErrorV1::NotFoundOrNotAuthorized)?;
+        else {
+            return Ok(WorkGraphReadV1::Absent {
+                authorized_scope: context.authorized_scope().clone(),
+                selection_coverage: WorkGraphSelectionCoverageV1::Complete { covered_events: 0 },
+            });
+        };
         let source_watermark = WorkProductSourceWatermarkV1::new(BTreeMap::new())
             .map_err(|_| WorkGraphReadPortErrorV1::Unavailable)?;
         let verified = VerifiedWorkGraphVersionV1::new(

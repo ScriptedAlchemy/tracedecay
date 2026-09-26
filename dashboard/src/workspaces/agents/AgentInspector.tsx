@@ -295,6 +295,8 @@ export function AgentInspector({
           <StateChip kind="loading" detail="reading the work-product graph" />
         ) : handoffs.state === 'refused' ? (
           <StateChip kind={handoffs.chip} detail={handoffs.detail} />
+        ) : handoffs.state === 'absent' ? (
+          <StateChip kind="complete_zero_findings" detail="no Work graph yet" />
         ) : (
           <StateChip
             kind={handoffs.handoffs.length === 0 ? 'complete_zero_findings' : 'ready'}
@@ -312,6 +314,8 @@ export function AgentInspector({
           <StateChip kind="loading" detail="reading runtime attempts" />
         ) : failures.state === 'refused' ? (
           <StateChip kind={failures.chip} detail={failures.detail} />
+        ) : failures.state === 'absent' ? (
+          <StateChip kind="complete_zero_findings" detail="no Work graph yet" />
         ) : failures.coverage === 'unavailable' ? (
           <StateChip kind="unavailable" detail="the daemon could observe no attempt" />
         ) : (

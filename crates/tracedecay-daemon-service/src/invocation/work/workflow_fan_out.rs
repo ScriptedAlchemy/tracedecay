@@ -750,11 +750,8 @@ fn current_workflow_product_graph(
         Ok(tracedecay_contracts::WorkGraphReadV1::Current { snapshot, .. }) => {
             Ok(Some(snapshot.graph().clone()))
         }
-        Ok(_) => Err(DaemonInvocationProblem::Unavailable),
-        Err(tracedecay_contracts::WorkProductApplicationErrorV1::NotFoundOrNotAuthorized) => {
-            Ok(None)
-        }
-        Err(_) => Err(DaemonInvocationProblem::Unavailable),
+        Ok(tracedecay_contracts::WorkGraphReadV1::Absent { .. }) => Ok(None),
+        Ok(_) | Err(_) => Err(DaemonInvocationProblem::Unavailable),
     }
 }
 
