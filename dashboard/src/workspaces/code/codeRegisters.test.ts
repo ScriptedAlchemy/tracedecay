@@ -40,7 +40,6 @@ describe('the graph register', () => {
     const overview = {
       totals: { nodes: 48_612, edges: 1, files: 1 },
       nodes_by_kind: [],
-      edges_by_kind: [],
       files_by_language: [],
       largest_files: [],
       path: '',

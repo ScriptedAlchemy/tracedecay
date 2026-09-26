@@ -22,8 +22,8 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use super::{DashboardHttpRequestControlV1, DashboardState};
 
-const MAX_GRAPH_SYMBOLS: usize = 50_000;
-const MAX_GRAPH_FILES: usize = 50_000;
+const TOP_CONNECTED_SYMBOLS: usize = 12;
+const LARGEST_FILES: usize = 20;
 const MAX_GRAPH_RELATIONS: usize = tracedecay_graph_db::MAX_VERIFIED_GENERATION_RELATIONS;
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -109,7 +109,6 @@ struct GraphTotalsV1 {
 pub(super) struct GraphOverviewPayloadV1 {
     totals: GraphTotalsV1,
     nodes_by_kind: Vec<GraphKindCountV1>,
-    edges_by_kind: Vec<GraphKindCountV1>,
     files_by_language: Vec<GraphLanguageCountV1>,
     largest_files: Vec<GraphLargestFileV1>,
     path: String,
@@ -121,7 +120,9 @@ pub(super) struct GraphSearchPayloadV1 {
     query: String,
     limit: i64,
     offset: i64,
-    pub(super) total: i64,
+    /// Exact match count, or `None` when the search stopped past this page.
+    pub(super) total: Option<u64>,
+    pub(super) has_more: bool,
     count: usize,
     pub(super) results: Vec<GraphNodeV1>,
 }
@@ -295,93 +296,50 @@ pub async fn overview_payload(
     control: &DashboardHttpRequestControlV1,
 ) -> Result<GraphServiceReadV1<GraphOverviewPayloadV1>, CodeGraphReadError> {
     let graph = admitted_graph(state, control, CallableCodeOperationKind::Facets).await?;
-    let symbols = all_symbols(&graph)?;
-    let occurrences: Vec<_> = symbols
-        .iter()
-        .map(|symbol| symbol.occurrence.clone())
-        .collect();
-    let edges = graph
+    let census = graph
         .reader
-        .edges_among(
-            &occurrences,
-            &[],
-            MAX_GRAPH_RELATIONS,
-            Arc::clone(&graph.cancellation),
-        )
+        .census(LARGEST_FILES, Arc::clone(&graph.cancellation))
         .map_err(map_projection_error)?;
-    let files = graph
-        .reader
-        .files(MAX_GRAPH_FILES, Arc::clone(&graph.cancellation))
-        .map_err(map_projection_error)?;
-
-    let mut nodes_by_kind = BTreeMap::<String, i64>::new();
-    let mut nodes_by_file = BTreeMap::<String, i64>::new();
-    for symbol in &symbols {
-        if let Some(metadata) = &symbol.metadata {
-            *nodes_by_kind.entry(metadata.kind.clone()).or_default() += 1;
-        }
-        if let Some(path) = symbol
-            .binding
-            .as_ref()
-            .and_then(|binding| binding.logical_path.clone())
-        {
-            *nodes_by_file.entry(path).or_default() += 1;
-        }
-    }
-    let mut edges_by_kind = BTreeMap::<String, i64>::new();
-    for edge in &edges {
-        *edges_by_kind
-            .entry(edge.kind.as_str().to_owned())
-            .or_default() += 1;
-    }
-    let mut files_by_language = BTreeMap::<String, i64>::new();
-    for file in &files {
-        if let Some(language) = &file.language {
-            *files_by_language
-                .entry(language.as_str().to_owned())
-                .or_default() += 1;
-        }
-    }
     let top_connected = graph
         .reader
-        .degree_ranking(12, Arc::clone(&graph.cancellation))
+        .degree_ranking(TOP_CONNECTED_SYMBOLS, Arc::clone(&graph.cancellation))
         .map_err(map_projection_error)?
         .ranked
         .iter()
         .map(ranked_node)
         .collect::<Result<Vec<_>, _>>()?;
-    let mut largest_files: Vec<_> = nodes_by_file
-        .into_iter()
-        .map(|(path, node_count)| GraphLargestFileV1 { path, node_count })
-        .collect();
-    largest_files.sort_by(|left, right| {
-        right
-            .node_count
-            .cmp(&left.node_count)
-            .then_with(|| left.path.cmp(&right.path))
-    });
-    largest_files.truncate(20);
     let generation = graph.reader.generation().as_str().to_owned();
     Ok(GraphServiceReadV1 {
         payload: GraphOverviewPayloadV1 {
             totals: GraphTotalsV1 {
-                nodes: symbols.len() as u64,
-                edges: edges.len() as u64,
-                files: files.len() as u64,
+                nodes: census.symbols,
+                edges: census.semantic_edges,
+                files: census.files,
             },
-            nodes_by_kind: nodes_by_kind
+            nodes_by_kind: census
+                .symbols_by_kind
                 .into_iter()
-                .map(|(kind, count)| GraphKindCountV1 { kind, count })
+                .map(|(kind, count)| GraphKindCountV1 {
+                    kind,
+                    count: count as i64,
+                })
                 .collect(),
-            edges_by_kind: edges_by_kind
+            files_by_language: census
+                .files_by_language
                 .into_iter()
-                .map(|(kind, count)| GraphKindCountV1 { kind, count })
+                .map(|(language, count)| GraphLanguageCountV1 {
+                    language,
+                    count: count as i64,
+                })
                 .collect(),
-            files_by_language: files_by_language
+            largest_files: census
+                .largest_files
                 .into_iter()
-                .map(|(language, count)| GraphLanguageCountV1 { language, count })
+                .map(|file| GraphLargestFileV1 {
+                    path: file.logical_path,
+                    node_count: file.symbols as i64,
+                })
                 .collect(),
-            largest_files,
             path: generation.clone(),
             top_connected,
         },
@@ -403,22 +361,24 @@ pub async fn search_payload(
         ApplicationSurfaceOperation::CodeSymbolSearch,
     )
     .await?;
-    let matched: Vec<_> = all_symbols(&graph)?
-        .into_iter()
-        .filter(|symbol| query.is_empty() || symbol_matches(symbol, query))
-        .collect();
-    let total = matched.len() as i64;
-    let start = non_negative_usize(offset, "graph search offset")?.min(matched.len());
-    let end = start
-        .saturating_add(non_negative_usize(limit, "graph search limit")?)
-        .min(matched.len());
-    let selected = &matched[start..end];
-    let occurrences: Vec<_> = selected
+    let page = graph
+        .reader
+        .search_symbols(
+            query,
+            None,
+            non_negative_usize(offset, "graph search offset")?,
+            non_negative_usize(limit, "graph search limit")?,
+            Arc::clone(&graph.cancellation),
+        )
+        .map_err(map_projection_error)?;
+    let occurrences: Vec<_> = page
+        .symbols
         .iter()
         .map(|symbol| symbol.occurrence.clone())
         .collect();
     let degree_by_id = degree_map(&graph, &occurrences)?;
-    let results = selected
+    let results = page
+        .symbols
         .iter()
         .map(|symbol| node_from_summary(symbol, degree_by_id.get(&symbol.occurrence).copied()))
         .collect::<Result<Vec<_>, _>>()?;
@@ -427,7 +387,8 @@ pub async fn search_payload(
             query: query.to_owned(),
             limit,
             offset,
-            total,
+            total: page.total,
+            has_more: page.has_more,
             count: results.len(),
             results,
         },
@@ -583,9 +544,13 @@ pub async fn subgraph_payload(
     } else if query.is_empty() {
         None
     } else {
-        all_symbols(&graph)?
+        graph
+            .reader
+            .search_symbols(query, None, 0, 1, Arc::clone(&graph.cancellation))
+            .map_err(map_projection_error)?
+            .symbols
             .into_iter()
-            .find(|symbol| symbol_matches(symbol, query))
+            .next()
             .map(|symbol| symbol.occurrence)
     };
     let (mode, seed_id, nodes, nodes_capped) = if let Some(seed) = seed {
@@ -767,21 +732,6 @@ pub async fn path_payload(
     })
 }
 
-fn all_symbols(
-    graph: &AdmittedGraphReadV1,
-) -> Result<Vec<CodeGraphSymbolSummaryV1>, CodeGraphReadError> {
-    let page = graph
-        .reader
-        .symbols_page(None, MAX_GRAPH_SYMBOLS, Arc::clone(&graph.cancellation))
-        .map_err(map_projection_error)?;
-    if page.has_more {
-        return Err(CodeGraphReadError::BudgetExhausted {
-            detail: format!("dashboard graph exceeds the {MAX_GRAPH_SYMBOLS}-symbol census budget"),
-        });
-    }
-    Ok(page.symbols)
-}
-
 fn parse_occurrence(value: &str) -> Result<SymbolOccurrenceId, CodeGraphReadError> {
     SymbolOccurrenceId::new(value.to_owned()).map_err(|error| CodeGraphReadError::InvalidRequest {
         detail: error.to_string(),
@@ -841,24 +791,6 @@ fn degree_map(
             )
         })
         .collect())
-}
-
-/// ASCII case-insensitive substring test without allocating lowercased copies
-/// of either side. Non-ASCII bytes must match exactly, which is the right
-/// behavior for code identifiers.
-fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
-    needle.is_empty()
-        || haystack
-            .as_bytes()
-            .windows(needle.len())
-            .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
-}
-
-fn symbol_matches(symbol: &CodeGraphSymbolSummaryV1, query: &str) -> bool {
-    symbol.metadata.as_ref().is_some_and(|metadata| {
-        contains_ascii_case_insensitive(&metadata.qualified_name, query)
-            || contains_ascii_case_insensitive(&metadata.simple_name, query)
-    })
 }
 
 fn node_from_summary(

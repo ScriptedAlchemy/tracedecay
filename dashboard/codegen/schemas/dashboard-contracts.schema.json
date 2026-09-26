@@ -14157,12 +14157,6 @@
     },
     "GraphOverviewPayloadV1": {
       "properties": {
-        "edges_by_kind": {
-          "items": {
-            "$ref": "#/$defs/GraphKindCountV1"
-          },
-          "type": "array"
-        },
         "files_by_language": {
           "items": {
             "$ref": "#/$defs/GraphLanguageCountV1"
@@ -14197,7 +14191,6 @@
       "required": [
         "totals",
         "nodes_by_kind",
-        "edges_by_kind",
         "files_by_language",
         "largest_files",
         "path",
@@ -14257,6 +14250,9 @@
           "minimum": 0,
           "type": "integer"
         },
+        "has_more": {
+          "type": "boolean"
+        },
         "limit": {
           "format": "int64",
           "type": "integer"
@@ -14275,8 +14271,13 @@
           "type": "array"
         },
         "total": {
-          "format": "int64",
-          "type": "integer"
+          "description": "Exact match count, or `None` when the search stopped past this page.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
@@ -14284,6 +14285,7 @@
         "limit",
         "offset",
         "total",
+        "has_more",
         "count",
         "results"
       ],

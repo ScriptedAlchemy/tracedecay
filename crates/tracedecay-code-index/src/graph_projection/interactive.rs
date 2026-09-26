@@ -47,9 +47,10 @@ pub use self::artifact::{INTERACTIVE_CATALOG_ARTIFACT_NAME, write_interactive_ca
 use self::models::CatalogSymbol;
 pub(super) use self::models::InteractiveCatalog;
 pub use self::models::{
-    CodeGraphDegreeRankingV1, CodeGraphEdgeKindCountsV1, CodeGraphImpactBatchV1,
-    CodeGraphImpactedSymbolV1, CodeGraphPathSearchV1, CodeGraphRankedSymbolV1,
-    CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1,
+    CodeGraphCensusV1, CodeGraphDegreeRankingV1, CodeGraphEdgeKindCountsV1,
+    CodeGraphFileSymbolCountV1, CodeGraphImpactBatchV1, CodeGraphImpactedSymbolV1,
+    CodeGraphPathSearchV1, CodeGraphRankedSymbolV1, CodeGraphSemanticEdgeV1,
+    CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1, CodeGraphSymbolSearchPageV1,
     CodeGraphSymbolSummaryV1,
 };
 
@@ -718,6 +719,126 @@ impl CodeGraphInteractiveReader {
         })
     }
 
+    /// Generation-wide counts with the `largest_files` most symbol-dense
+    /// files, read from aggregates the catalog derived when it was built.
+    pub fn census(
+        &self,
+        largest_files: usize,
+        request_cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<CodeGraphCensusV1, CodeGraphProjectionError> {
+        let cancellation = self.read_cancellation(request_cancellation)?;
+        let catalog = self.catalog(cancellation)?;
+        Ok(CodeGraphCensusV1 {
+            symbols: catalog.symbols.len() as u64,
+            semantic_edges: catalog.semantic_edges,
+            files: catalog.files.len() as u64,
+            symbols_by_kind: catalog.symbols_by_kind.clone(),
+            files_by_language: catalog.files_by_language.clone(),
+            largest_files: catalog
+                .largest_files
+                .iter()
+                .take(largest_files)
+                .cloned()
+                .collect(),
+        })
+    }
+
+    /// Canonical symbol name search: exact simple-name hits from the
+    /// simple-name index first (occurrence order), then every other symbol
+    /// whose simple or qualified name contains `query` (ASCII
+    /// case-insensitive) in canonical occurrence order. Returns the
+    /// `[offset, offset + limit)` window of the symbols `admit` accepts (all
+    /// when `None`); the scan stops one match past the window.
+    ///
+    /// ponytail: a query with fewer matches than the window scans every
+    /// catalog name (~150 ms on a 200k-symbol generation); a name n-gram
+    /// index built with the catalog is the upgrade when that bites.
+    pub fn search_symbols(
+        &self,
+        query: &str,
+        admit: Option<&CodeGraphSymbolPredicate<'_>>,
+        offset: usize,
+        limit: usize,
+        request_cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<CodeGraphSymbolSearchPageV1, CodeGraphProjectionError> {
+        const CANCELLATION_INTERVAL: usize = 4_096;
+
+        let cancellation = self.read_cancellation(request_cancellation)?;
+        require_positive(limit, "code graph symbol search limit")?;
+        let catalog = self.catalog(Arc::clone(&cancellation))?;
+        let admitted = |occurrence: &SymbolOccurrenceId, symbol: &CatalogSymbol| {
+            admit.is_none_or(|admit| {
+                admit(
+                    occurrence,
+                    symbol.binding.as_ref(),
+                    symbol.metadata.as_ref(),
+                )
+            })
+        };
+        let exact: BTreeSet<&SymbolOccurrenceId> = catalog
+            .by_simple_name
+            .get(&query.to_lowercase())
+            .into_iter()
+            .flatten()
+            .filter(|occurrence| {
+                catalog
+                    .symbols
+                    .get(*occurrence)
+                    .is_some_and(|symbol| admitted(occurrence, symbol))
+            })
+            .collect();
+
+        let mut symbols = Vec::new();
+        let mut matched = 0_usize;
+        let mut has_more = false;
+        let mut accept = |occurrence: &SymbolOccurrenceId| -> bool {
+            if matched >= offset {
+                if symbols.len() == limit {
+                    has_more = true;
+                    return true;
+                }
+                if let Some(summary) = catalog.summary(occurrence) {
+                    symbols.push(summary);
+                }
+            }
+            matched += 1;
+            false
+        };
+        'scan: {
+            for occurrence in &exact {
+                if accept(occurrence) {
+                    break 'scan;
+                }
+            }
+            for (index, (occurrence, symbol)) in catalog.symbols.iter().enumerate() {
+                if index.is_multiple_of(CANCELLATION_INTERVAL) && cancellation.is_cancelled() {
+                    return Err(CodeGraphProjectionError::Cancelled);
+                }
+                let named = symbol.metadata.as_ref().is_some_and(|metadata| {
+                    contains_ignore_ascii_case(&metadata.simple_name, query)
+                        || contains_ignore_ascii_case(&metadata.qualified_name, query)
+                });
+                if named
+                    && !exact.contains(occurrence)
+                    && admitted(occurrence, symbol)
+                    && accept(occurrence)
+                {
+                    break 'scan;
+                }
+            }
+        }
+        let total = if query.is_empty() && admit.is_none() {
+            Some(catalog.symbols.len() as u64)
+        } else {
+            (!has_more).then_some(matched as u64)
+        };
+        Ok(CodeGraphSymbolSearchPageV1 {
+            symbols,
+            has_more,
+            total,
+        })
+    }
+
     /// Semantic edges induced among a symbol set: edges whose endpoints are
     /// both members. `max_relations` bounds the batch-wide fan-out examined.
     ///
@@ -1291,6 +1412,14 @@ fn source_relation_kinds() -> Result<BTreeSet<GraphRelationKind>, CodeGraphProje
 
 fn target_relation_kinds() -> Result<BTreeSet<GraphRelationKind>, CodeGraphProjectionError> {
     Ok(BTreeSet::from([GraphRelationKind::new(TARGET_EDGE_KIND)?]))
+}
+
+fn contains_ignore_ascii_case(value: &str, query: &str) -> bool {
+    query.is_empty()
+        || value
+            .as_bytes()
+            .windows(query.len())
+            .any(|window| window.eq_ignore_ascii_case(query.as_bytes()))
 }
 
 fn require_positive(value: usize, what: &str) -> Result<(), CodeGraphProjectionError> {

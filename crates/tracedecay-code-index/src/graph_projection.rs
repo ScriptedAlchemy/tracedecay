@@ -35,10 +35,11 @@ pub use self::builder::build_published_code_graph_manifest_checked;
 use self::builder::{ProductionCodeGraphInputs, build_projection};
 use self::interactive::InteractiveCatalogCache;
 pub use self::interactive::{
-    CodeGraphDegreeRankingV1, CodeGraphEdgeKindCountsV1, CodeGraphImpactBatchV1,
-    CodeGraphImpactedSymbolV1, CodeGraphInteractiveReader, CodeGraphPathSearchV1,
-    CodeGraphRankedSymbolV1, CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1,
-    CodeGraphSymbolPageV1, CodeGraphSymbolPredicate, CodeGraphSymbolSummaryV1,
+    CodeGraphCensusV1, CodeGraphDegreeRankingV1, CodeGraphEdgeKindCountsV1,
+    CodeGraphFileSymbolCountV1, CodeGraphImpactBatchV1, CodeGraphImpactedSymbolV1,
+    CodeGraphInteractiveReader, CodeGraphPathSearchV1, CodeGraphRankedSymbolV1,
+    CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1,
+    CodeGraphSymbolPredicate, CodeGraphSymbolSearchPageV1, CodeGraphSymbolSummaryV1,
     INTERACTIVE_CATALOG_ARTIFACT_NAME, write_interactive_catalog_artifact,
 };
 use self::schema::{
