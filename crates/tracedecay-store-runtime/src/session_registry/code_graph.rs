@@ -711,8 +711,8 @@ pub(crate) struct RetainedCodeGraphRuntimeV1 {
     /// `DaemonSessionRuntimeRegistryV1::code_graph_publication_gates`.
     publication_locks: Arc<CodeGraphShardPublicationLocksV1>,
     /// The measured-RSS admission cell sealed publication answers to. Bound
-    /// from the manifest provider so the decoded offers and the corpus-sized
-    /// build obey one authority; tests substitute an isolated cell.
+    /// from the manifest provider so every corpus-sized graph build obeys one
+    /// authority; tests substitute an isolated cell.
     resident_memory_pressure:
         Arc<tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1>,
 }

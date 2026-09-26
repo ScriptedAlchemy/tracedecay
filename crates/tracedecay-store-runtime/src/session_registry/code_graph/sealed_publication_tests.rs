@@ -123,6 +123,47 @@ fn test_row_spill(
     .expect("test row spill")
 }
 
+/// The relational key this runtime's sealed generation publishes under,
+/// derived from its identity alone.
+fn publication_key(
+    runtime: &RetainedCodeGraphRuntimeV1,
+) -> (GraphProjectionIdentityV1, GraphPublicationKeyV1) {
+    let projector_revision = GraphProjectorRevision::try_from(
+        tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
+    )
+    .expect("projector revision");
+    let projection = tracedecay_code_index::graph_projection::code_graph_projection_identity(
+        runtime.authority.namespace().clone(),
+    )
+    .expect("code graph projection");
+    let relational_projection = GraphProjectionIdentityV1 {
+        shard_id: runtime.authority.binding().shard_id.clone(),
+        namespace: tracedecay_store::GraphNamespaceV1::new(runtime.authority.namespace().as_str())
+            .expect("relational namespace"),
+        projection: GraphProjectionIdV1::new(projection.projection.as_str())
+            .expect("relational projection"),
+    };
+    let generation = tracedecay_code_index::graph_projection::code_graph_generation_id(
+        &runtime.generation_id,
+        &projector_revision,
+    )
+    .expect("code graph generation");
+    let idempotency_key = tracedecay_code_index::graph_projection::code_graph_idempotency_key(
+        &runtime.generation_id,
+        &projector_revision,
+    )
+    .expect("publication idempotency key");
+    let publication_key = GraphPublicationKeyV1::new(
+        relational_projection.clone(),
+        GraphGenerationIdV1::new(generation.as_str()).expect("relational generation"),
+        GraphPublicationIdempotencyKeyV1::new(idempotency_key.as_str())
+            .expect("relational idempotency key"),
+    );
+    (relational_projection, publication_key)
+}
+
+/// The journaled replay this runtime's publication appends, built from the
+/// sealed segments on disk the way the publisher builds it.
 fn publication_replay(
     runtime: &RetainedCodeGraphRuntimeV1,
 ) -> (
@@ -146,30 +187,18 @@ fn publication_replay(
             &runtime.generation_id,
             projection.clone(),
             &projector_revision,
-            test_row_spill(projection.clone()),
+            test_row_spill(projection),
             &|| Ok(()),
         )
         .expect("sealed graph rows"),
     );
     let identity = rows.identity();
-    let relational_projection = GraphProjectionIdentityV1 {
-        shard_id: runtime.authority.binding().shard_id.clone(),
-        namespace: tracedecay_store::GraphNamespaceV1::new(runtime.authority.namespace().as_str())
-            .expect("relational namespace"),
-        projection: GraphProjectionIdV1::new(projection.projection.as_str())
-            .expect("relational projection"),
-    };
+    let (relational_projection, publication_key) = publication_key(runtime);
     let idempotency_key = tracedecay_code_index::graph_projection::code_graph_idempotency_key(
         &runtime.generation_id,
         &projector_revision,
     )
     .expect("publication idempotency key");
-    let publication_key = GraphPublicationKeyV1::new(
-        relational_projection.clone(),
-        GraphGenerationIdV1::new(identity.generation.as_str()).expect("relational generation"),
-        GraphPublicationIdempotencyKeyV1::new(idempotency_key.as_str())
-            .expect("relational idempotency key"),
-    );
     let source = SealedCodeGenerationReplay {
         repository: runtime.repository_id.clone(),
         generation: runtime.generation_id.clone(),
@@ -201,7 +230,7 @@ fn assert_unverified_publication_state(
     runtime: &RetainedCodeGraphRuntimeV1,
     expected_replay: bool,
 ) {
-    let (projection, key, _) = publication_replay(runtime);
+    let (projection, key) = publication_key(runtime);
     with_publication_context("inspect-sealed-publication", |context| {
         let mut storage = runtime
             .project_database
@@ -896,7 +925,6 @@ struct SealedGenerationFixture {
     project_database: Arc<tracedecay_runtime_core::db::Database>,
     registry: DaemonSessionRuntimeRegistryV1,
     project_id: ProjectId,
-    latest: tracedecay_code_index_runtime::code_index_scheduler::LatestCompleteCodeIndexV1,
     generation_id: CodeGenerationId,
     scoped_store: PathBuf,
     generations_root: PathBuf,
@@ -997,7 +1025,6 @@ async fn sealed_generation_fixture(project: &str, source: &str) -> SealedGenerat
         project_database,
         registry,
         project_id,
-        latest,
         generation_id,
         scoped_store,
         generations_root,
@@ -1135,6 +1162,7 @@ async fn graph_reads_during_engine_warm_up_are_typed_pending_and_warmed_reads_su
                 fixture.project_id.clone(),
                 &fixture.project_database,
                 &tracedecay_runtime_core::cancellation::CancellationToken::new(),
+                None,
             )
             .await
             .expect("staging release sweep");
@@ -1603,7 +1631,7 @@ async fn concurrent_sealed_publishers_share_one_gate_and_converge_on_one_head() 
     // The verified head advanced exactly once and the journal retains exactly
     // the winner's active replay: the loser recovered the published head
     // rather than appending a duplicate or double-advancing the head.
-    let (projection, key, _) = publication_replay(&seat);
+    let (projection, key) = publication_key(&seat);
     with_publication_context("inspect-converged-publication", |context| {
         let mut storage = seat
             .project_database
@@ -1830,7 +1858,7 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
         expected_generation.as_str(),
         "the refused generation publishes unchanged once memory is nominal"
     );
-    let (projection, key, _) = publication_replay(&runtime);
+    let (projection, key) = publication_key(&runtime);
     with_publication_context("inspect-refused-then-published", |context| {
         let mut storage = runtime
             .project_database
@@ -2024,7 +2052,6 @@ async fn worktree_scopes_share_one_project_publication_build_permit() {
 
 struct PublicationMeasurementScopeV1 {
     canonical_root: PathBuf,
-    generation: Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>,
     generation_id: CodeGenerationId,
     repository_id: RepositoryId,
     reference: Option<RefId>,
@@ -2218,11 +2245,11 @@ async fn concurrent_worktree_scopes_publish_with_one_corpus_build_and_bounded_rs
         let latest = scheduler
             .latest_complete()
             .expect("complete publication scope generation");
-        let generation = latest.generation_handle();
-        let generation_id = generation.manifest().generation_id.clone();
-        let repository_id = generation.snapshot().repository.clone();
-        let reference = generation.snapshot().reference.clone();
+        let generation_id = latest.generation().manifest().generation_id.clone();
+        let repository_id = latest.generation().snapshot().repository.clone();
+        let reference = latest.generation().snapshot().reference.clone();
         let worktree_id = scheduler.identity().worktree_id().clone();
+        drop(latest);
         drop(scheduler);
         let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
             &std::fs::read(scoped_store.join("active-code-generation-v1.json"))
@@ -2234,7 +2261,6 @@ async fn concurrent_worktree_scopes_publish_with_one_corpus_build_and_bounded_rs
             sha256_hex_suffix(&pointer.state_digest).expect("sha256 publication scope digest");
         measurement_scopes.push(PublicationMeasurementScopeV1 {
             canonical_root,
-            generation,
             generation_id,
             repository_id,
             reference,
@@ -2338,7 +2364,6 @@ async fn concurrent_worktree_scopes_publish_with_one_corpus_build_and_bounded_rs
                         generations_root: publication_generations_root.clone(),
                         sealed_state_digest: scope.sealed_state_digest.clone(),
                     },
-                    Some(Arc::clone(&scope.generation)),
                 )
                 .await
                 .expect("retain publication scope runtime"),
@@ -2379,9 +2404,7 @@ async fn concurrent_worktree_scopes_publish_with_one_corpus_build_and_bounded_rs
     let wall_started = Instant::now();
     let outcomes = std::thread::scope(|thread_scope| {
         let mut workers = Vec::with_capacity(scope_count);
-        for (scope_index, (runtime, measurement_scope)) in
-            runtimes.iter().zip(&measurement_scopes).enumerate()
-        {
+        for (scope_index, runtime) in runtimes.iter().enumerate() {
             let worker_barrier = &barrier;
             workers.push(thread_scope.spawn(move || {
                 worker_barrier.wait();

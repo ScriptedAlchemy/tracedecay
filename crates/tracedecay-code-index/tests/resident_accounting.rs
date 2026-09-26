@@ -276,9 +276,9 @@ fn decode(manifest: &[u8], segments: &BTreeMap<String, Vec<u8>>) -> CodeIndexPub
 
 /// Publishing a sealed generation's code graph reads its segments one window
 /// at a time: the most the build ever holds above the sealed input stays
-/// within a fixed budget, less than decoding the generation alone leaves
-/// live. Graph publication used to decode the whole generation and project
-/// it in one piece, 17,968,317 bytes at peak for this fixture.
+/// within a fixed budget, below the 22.3 MB decoding this generation alone
+/// leaves live. Decoding the whole generation and projecting it in one piece
+/// peaked at 38,827,295 bytes for the same 4,201 entities and 5,100 relations.
 #[test]
 fn a_sealed_graph_build_holds_windows_not_the_decoded_generation() {
     const PEAK_BUDGET_BYTES: usize = 19_000_000;

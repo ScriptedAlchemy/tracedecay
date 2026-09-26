@@ -1163,7 +1163,6 @@ fn classify_sealed_projection_build_error(error: CodeGraphProjectionError) -> Gr
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
     use std::fmt::Write as _;
     use std::io::{Seek, SeekFrom, Write};
     use std::path::Path;
@@ -1174,13 +1173,10 @@ mod tests {
     use sha2::{Digest, Sha256};
     use tempfile::TempDir;
     use tracedecay_code_index_retention::code_index_generations::{
-        CodeGenerationRetentionModeV1, DurablePublicationPointerV1,
-        acquire_code_generation_store_lock, code_generation_segments_root,
-        run_code_generation_retention,
+        DurablePublicationPointerV1, acquire_code_generation_store_lock,
+        code_generation_segments_root,
     };
-    use tracedecay_domain::{
-        CodeGenerationId, ProjectId, RepositoryId, UtcMicros, sha256_hex_suffix,
-    };
+    use tracedecay_domain::{CodeGenerationId, ProjectId, RepositoryId, sha256_hex_suffix};
     use tracedecay_graph_db::{
         GraphDbError, GraphGenerationManifestProvider, GraphGenerationRowSpill, GraphNamespace,
         GraphProjectionId, GraphProjectionIdentity, GraphProjectorRevision,

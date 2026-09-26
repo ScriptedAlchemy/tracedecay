@@ -727,6 +727,7 @@ impl GraphGenerationRows {
 }
 
 impl GraphGenerationManifestIdentity {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn relational_replay_with_payload(
         &self,
         shard_id: StoreShardIdV1,

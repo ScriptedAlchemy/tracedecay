@@ -1695,19 +1695,40 @@ impl CodeIndexSchedulerRegistryV1 {
                             let binding_scheduler = Arc::clone(&worker_scheduler);
                             let shutting_down = Arc::clone(&worker_shutting_down);
                             let binding_passes = Arc::clone(&worker_reconcile_in_progress);
-                            let replay_binding = tokio::task::spawn_blocking(move || {
-                                Self::lock_scheduler_for_graph_step(
+                            // The build is admitted like the decode it
+                            // replaces: charged before it runs, parked when it
+                            // does not fit, and holding its reservation until
+                            // the head is published.
+                            let admitted_binding = tokio::task::spawn_blocking(move || {
+                                let (_step, scheduler) = Self::lock_scheduler_for_graph_step(
                                     &binding_scheduler,
                                     &shutting_down,
                                     &binding_passes,
-                                )?
-                                .1
-                                .code_graph_replay_binding(&generation_id)
+                                )?;
+                                let binding =
+                                    scheduler.code_graph_replay_binding(&generation_id)?;
+                                let admission = scheduler
+                                    .active_generation_decoder()
+                                    .map(|decoder| decoder.admit_sealed_graph_build())
+                                    .transpose();
+                                Ok::<_, CodeIndexSchedulerErrorV1>((binding, admission))
                             })
                             .await;
-                            match replay_binding {
-                                Ok(Ok(replay_binding)) => {
-                                    match worker_graph_activation
+                            match admitted_binding {
+                                Ok(Ok((
+                                    _,
+                                    Err(CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(
+                                        detail,
+                                    )),
+                                ))) => graph_publish_refusal = Some(detail),
+                                Ok(Ok((_, Err(error)))) => tracing::warn!(
+                                    event = "code_index_graph_publish_admission_failed",
+                                    error = %error,
+                                    "sealed graph build admission failed; activation publishes \
+                                     the graph after the serving decode"
+                                ),
+                                Ok(Ok((replay_binding, Ok(reservation)))) => {
+                                    let published = worker_graph_activation
                                         .publish_sealed_graph(
                                             &worker_project_id,
                                             &worker_repository_id,
@@ -1716,8 +1737,9 @@ impl CodeIndexSchedulerRegistryV1 {
                                             replay_binding,
                                             Arc::clone(&worker_shutting_down),
                                         )
-                                        .await
-                                    {
+                                        .await;
+                                    drop(reservation);
+                                    match published {
                                         Ok(_) => {}
                                         Err(error) if error.is_resident_memory_graph_refusal() => {
                                             graph_publish_refusal = Some(error.to_string());
