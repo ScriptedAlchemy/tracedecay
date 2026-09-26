@@ -47,6 +47,14 @@ never replaced wholesale.
   session/user `mcp.json` so the host launches from the workspace. Hook
   commands submit bounded native events to the daemon. Capture, sync, and
   session work happen after daemon admission, never in the host adapter.
+- **Factory Droid:** `droid mcp add|remove` owns `mcpServers.tracedecay` in
+  `~/.factory/mcp.json`, so the ContextMcp component drives that CLI and
+  never writes the file; without a `droid` binary the lifecycle refuses. The
+  Core component merges `SessionStart` and `Stop` groups calling
+  `tracedecay hook-droid-event` into `~/.factory/hooks.json` through the
+  shared in-place JSON editor, and uninstall removes only those groups.
+  Prompt, tool, and edit events stay typed unavailable until a fixture
+  captures them.
 - **OpenCode:** a typed `@opencode-ai/plugin` module under
   `~/.config/opencode/plugins/` (or `.opencode/plugins/` locally) consumes
   `file.edited`, `tool.execute.after`, and `session.idle`, schedules a bounded

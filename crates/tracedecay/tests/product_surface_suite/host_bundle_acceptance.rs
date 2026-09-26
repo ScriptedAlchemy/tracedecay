@@ -438,6 +438,7 @@ fn native_host_evidence_is_embedded_and_covers_every_advertised_native_route() {
         HostKindV1::KimiCode,
         HostKindV1::OpenCode,
         HostKindV1::Pi,
+        HostKindV1::FactoryDroid,
     ] {
         let record = evidence
             .iter()
@@ -466,6 +467,13 @@ fn native_host_evidence_is_embedded_and_covers_every_advertised_native_route() {
         .expect("Cursor native evidence");
     assert_eq!(cursor.edit, HostCapabilityStateV1::Supported);
     assert!(matches!(cursor.stop, HostCapabilityStateV1::Unavailable(_)));
+
+    let droid = evidence
+        .iter()
+        .find(|record| record.host == HostKindV1::FactoryDroid)
+        .expect("Factory Droid native evidence");
+    assert!(matches!(droid.edit, HostCapabilityStateV1::Unavailable(_)));
+    assert_eq!(droid.stop, HostCapabilityStateV1::Supported);
 }
 
 #[test]

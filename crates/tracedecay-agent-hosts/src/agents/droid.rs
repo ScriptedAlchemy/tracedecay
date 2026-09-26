@@ -126,12 +126,13 @@ fn install_droid_hooks(hooks_path: &Path, tracedecay_bin: &str) -> Result<bool> 
                         hooks_path.display()
                     ),
                 })?;
+            let before = groups.clone();
             groups.retain(|group| !hook_group_is_tracedecay(group));
             groups.push(json!({
                 "matcher": "*",
                 "hooks": [tracedecay_hook_entry(tracedecay_bin)],
             }));
-            changed = true;
+            changed |= *groups != before;
         }
         if changed {
             Ok((true, JsonConfigMutation::Write(config)))
@@ -577,11 +578,11 @@ mod tests {
             HostBundleRegistrationStateV1::Current
         );
 
-        // A refresh replaces the managed group instead of appending a twin.
+        // A refresh with the same binary is a no-op, never a twin group.
         let changed =
             install_droid_hooks(&droid_hooks_path(home.path()), "/usr/local/bin/tracedecay")
                 .unwrap();
-        assert!(changed);
+        assert!(!changed);
         let refreshed: Value =
             serde_json::from_slice(&std::fs::read(droid_hooks_path(home.path())).unwrap()).unwrap();
         assert_eq!(refreshed["SessionStart"].as_array().unwrap().len(), 2);
@@ -723,5 +724,225 @@ mod tests {
             ]
         );
         assert!(droid_mcp_config_path(home.path()).starts_with(home.path()));
+    }
+
+    const OPERATOR_HOOKS: &str = r#"{
+    "SessionStart": [
+        {
+            "matcher": "startup",
+            "hooks": [
+                { "type": "command", "command": "/usr/local/bin/operator-hook.sh", "timeout": 10 }
+            ]
+        }
+    ]
+}
+"#;
+
+    #[test]
+    fn hook_install_and_uninstall_edit_the_operator_document_in_place() {
+        let home = tempfile::tempdir().unwrap();
+        let hooks_path = droid_hooks_path(home.path());
+        std::fs::create_dir_all(droid_config_dir(home.path())).unwrap();
+        std::fs::write(&hooks_path, OPERATOR_HOOKS).unwrap();
+
+        assert!(install_droid_hooks(&hooks_path, "/usr/local/bin/tracedecay").unwrap());
+        let installed = std::fs::read_to_string(&hooks_path).unwrap();
+        assert_eq!(
+            installed,
+            r#"{
+    "SessionStart": [
+        {
+            "matcher": "startup",
+            "hooks": [
+                { "type": "command", "command": "/usr/local/bin/operator-hook.sh", "timeout": 10 }
+            ]
+        },
+        {
+            "hooks": [
+                {
+                    "command": "'/usr/local/bin/tracedecay' hook-droid-event",
+                    "timeout": 30,
+                    "type": "command"
+                }
+            ],
+            "matcher": "*"
+        }
+    ],
+    "Stop": [
+        {
+            "hooks": [
+                {
+                    "command": "'/usr/local/bin/tracedecay' hook-droid-event",
+                    "timeout": 30,
+                    "type": "command"
+                }
+            ],
+            "matcher": "*"
+        }
+    ]
+}
+"#
+        );
+
+        assert!(remove_droid_hooks(&hooks_path).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&hooks_path).unwrap(),
+            OPERATOR_HOOKS
+        );
+    }
+
+    /// Install a fake `droid` that appends each invocation's argv to `log` and
+    /// then performs `body`. The child runs with no `PATH`, so bodies spell
+    /// absolute tool paths.
+    #[cfg(unix)]
+    fn fake_droid_cli(bin: &Path, log: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\n{body}\n",
+            log = log.display(),
+        );
+        std::fs::write(bin, script).unwrap();
+        let mut permissions = std::fs::metadata(bin).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(bin, permissions).unwrap();
+    }
+
+    #[cfg(unix)]
+    const PEER_ONLY: &str =
+        r#"{"mcpServers":{"peer":{"type":"http","url":"https://example.invalid/mcp"}}}"#;
+
+    /// Emulates Droid's registry: `mcp add` splits the one-word launch command
+    /// into `command` + `args` beside the operator's peer, `mcp remove` drops
+    /// only the tracedecay entry.
+    #[cfg(unix)]
+    const FAKE_REGISTRY_BODY: &str = r#"case "$1 $2" in
+  "mcp add")
+    [ "$5 $6" = "--type stdio" ] || { echo 'missing --type stdio' >&2; exit 64; }
+    command=$(printf '%s' "$4" | /usr/bin/sed 's/ serve$//')
+    /bin/mkdir -p "$HOME/.factory"
+    printf '{"mcpServers":{"peer":{"type":"http","url":"https://example.invalid/mcp"},"tracedecay":{"type":"stdio","command":"%s","args":["serve"]}}}\n' "$command" > "$HOME/.factory/mcp.json"
+    ;;
+  "mcp remove")
+    printf '%s\n' '{"mcpServers":{"peer":{"type":"http","url":"https://example.invalid/mcp"}}}' > "$HOME/.factory/mcp.json"
+    ;;
+esac
+exit 0"#;
+
+    #[cfg(unix)]
+    fn invocations(log: &Path) -> Vec<String> {
+        std::fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_add_and_remove_go_through_the_droid_cli_and_keep_the_peer() {
+        let home = tempfile::tempdir().unwrap();
+        let bin_dir = tempfile::tempdir().unwrap();
+        let log = bin_dir.path().join("invocations.log");
+        let droid_cli = bin_dir.path().join("droid");
+        fake_droid_cli(&droid_cli, &log, FAKE_REGISTRY_BODY);
+        let mcp_path = droid_mcp_config_path(home.path());
+        std::fs::create_dir_all(droid_config_dir(home.path())).unwrap();
+        std::fs::write(&mcp_path, format!("{PEER_ONLY}\n")).unwrap();
+
+        droid_mcp_add_with(&droid_cli, home.path(), "/bin/tracedecay").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&mcp_path).unwrap(),
+            "{\"mcpServers\":{\"peer\":{\"type\":\"http\",\"url\":\"https://example.invalid/mcp\"},\"tracedecay\":{\"type\":\"stdio\",\"command\":\"/bin/tracedecay\",\"args\":[\"serve\"]}}}\n"
+        );
+        assert_eq!(
+            droid_context_mcp_registration_state(home.path()),
+            HostBundleRegistrationStateV1::Current
+        );
+
+        droid_mcp_remove_with(&droid_cli, home.path()).unwrap();
+        assert_eq!(
+            invocations(&log),
+            [
+                "mcp add tracedecay /bin/tracedecay serve --type stdio",
+                "mcp remove tracedecay",
+            ]
+        );
+        assert_eq!(
+            std::fs::read_to_string(&mcp_path).unwrap(),
+            format!("{PEER_ONLY}\n")
+        );
+        assert_eq!(
+            droid_context_mcp_registration_state(home.path()),
+            HostBundleRegistrationStateV1::Missing
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refresh_removes_the_old_registration_before_adding_the_new_binary() {
+        let home = tempfile::tempdir().unwrap();
+        let bin_dir = tempfile::tempdir().unwrap();
+        let log = bin_dir.path().join("invocations.log");
+        let droid_cli = bin_dir.path().join("droid");
+        fake_droid_cli(&droid_cli, &log, FAKE_REGISTRY_BODY);
+        let mcp_path = droid_mcp_config_path(home.path());
+        std::fs::create_dir_all(droid_config_dir(home.path())).unwrap();
+        std::fs::write(
+            &mcp_path,
+            r#"{"mcpServers":{"peer":{"type":"http","url":"https://example.invalid/mcp"},"tracedecay":{"type":"stdio","command":"/old/tracedecay","args":["serve"]}}}"#,
+        )
+        .unwrap();
+
+        droid_mcp_add_with(&droid_cli, home.path(), "/new/tracedecay").unwrap();
+
+        assert_eq!(
+            invocations(&log),
+            [
+                "mcp remove tracedecay",
+                "mcp add tracedecay /new/tracedecay serve --type stdio",
+            ]
+        );
+        let config: Value = serde_json::from_slice(&std::fs::read(&mcp_path).unwrap()).unwrap();
+        assert_eq!(
+            config["mcpServers"]["tracedecay"]["command"],
+            "/new/tracedecay"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_refresh_restores_the_exact_previous_registration() {
+        let home = tempfile::tempdir().unwrap();
+        let bin_dir = tempfile::tempdir().unwrap();
+        let log = bin_dir.path().join("invocations.log");
+        let droid_cli = bin_dir.path().join("droid");
+        fake_droid_cli(
+            &droid_cli,
+            &log,
+            r#"case "$1 $2" in
+  "mcp remove")
+    printf '%s\n' '{"mcpServers":{"peer":{"type":"http","url":"https://example.invalid/mcp"}}}' > "$HOME/.factory/mcp.json"
+    ;;
+  "mcp add")
+    echo 'replacement registration rejected' >&2
+    exit 17
+    ;;
+esac
+exit 0"#,
+        );
+        let mcp_path = droid_mcp_config_path(home.path());
+        std::fs::create_dir_all(droid_config_dir(home.path())).unwrap();
+        let original = r#"{"mcpServers":{"peer":{"type":"http","url":"https://example.invalid/mcp"},"tracedecay":{"type":"stdio","command":"/old/tracedecay","args":["serve"]}}}"#;
+        std::fs::write(&mcp_path, original).unwrap();
+
+        let error = droid_mcp_add_with(&droid_cli, home.path(), "/new/tracedecay").unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("replacement registration rejected"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_to_string(&mcp_path).unwrap(), original);
     }
 }
