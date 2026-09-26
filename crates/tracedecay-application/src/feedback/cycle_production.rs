@@ -87,6 +87,9 @@ pub struct ProductionFeedbackCycleOpenV1 {
     pub project_runtime_db: RegisteredGlobalDbLeaseV1,
     pub runtime_state: Arc<dyn FeedbackRuntimeStatePort + Send + Sync>,
     pub provider_seed: ProductionFeedbackDocumentIdentityV1,
+    /// A Rust document of the same generation; `None` leaves the compiler
+    /// publication provider unmounted because nothing compiles with cargo.
+    pub compiler_seed: Option<ProductionFeedbackDocumentIdentityV1>,
     pub document_identity: Arc<dyn ProductionFeedbackDocumentIdentityPort + Send + Sync>,
     pub code_index_identity:
         Arc<dyn crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1>,
@@ -292,8 +295,7 @@ fn require_current_saved_identity(
         .validate()
         .map_err(|_| LspRuntimeFailure::new("feedback-cycle-proximity-input"))?;
     let FeedbackContentIdentityV1::SavedContent {
-        generation_digest,
-        file_digest,
+        generation_digest, ..
     } = &input.request.content
     else {
         return Err(LspRuntimeFailure::new("feedback-cycle-proximity-overlay"));
@@ -303,11 +305,10 @@ fn require_current_saved_identity(
             "feedback-cycle-proximity-generation",
         ));
     };
-    if generation_id != &current.generation_id
-        || generation_digest != &current.generation_digest
-        || input.target.file != current.file
-        || file_digest != &current.file_digest()?
-    {
+    // The saved document was minted from its generation, and a generation is
+    // immutable, so an unchanged generation also pins that document's file and
+    // content identity; `current` is any document of the live generation.
+    if generation_id != &current.generation_id || generation_digest != &current.generation_digest {
         return Err(LspRuntimeFailure::new(
             "feedback-cycle-proximity-generation-drift",
         ));
@@ -451,14 +452,14 @@ pub async fn resolve_production_feedback_cycle_parts(
     )?;
     let provider_seed = input.provider_seed;
     let mut provider_candidates = Vec::new();
-    if provider_seed.language.as_str() == "rust" {
+    if let Some(compiler_seed) = &input.compiler_seed {
         provider_candidates.push(ProductionDiagnosticProviderCandidateV1::StoredPublication(
             compiler_diagnostic_candidate(
                 &input.scope,
                 &access_configuration_digest,
                 &policy_digest,
                 evaluated_at,
-                &provider_seed,
+                compiler_seed,
             )?,
         ));
     }

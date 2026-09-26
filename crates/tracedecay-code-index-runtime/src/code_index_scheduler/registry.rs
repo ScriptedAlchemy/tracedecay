@@ -27,7 +27,8 @@ use tracedecay_contracts::code_index_freshness::{
     CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexConvergenceParkedV1,
 };
 use tracedecay_domain::{
-    CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, WorktreeId, host_cpu_target,
+    CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, SanitizedCodeFileV1, WorktreeId,
+    host_cpu_target,
 };
 use tracedecay_lsp::LspRuntimeFailure;
 
@@ -3479,19 +3480,51 @@ pub fn feedback_document_identity_from_generation(
                 .find(|file| file.logical_path == logical_path)
                 .ok_or_else(|| LspRuntimeFailure::new("feedback-code-index-document-unavailable"))?
         }
+        // The seed only carries generation identity into provider identities
+        // that are re-keyed per saved document, so any indexed language serves.
         None => snapshot
             .files
             .iter()
-            .find(|file| {
-                Path::new(&file.logical_path)
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    == Some("rs")
-            })
+            .find(|file| file.language.is_some())
             .ok_or_else(|| {
-                LspRuntimeFailure::new("feedback-code-index-rust-document-unavailable")
+                LspRuntimeFailure::new("feedback-code-index-generation-has-no-documents")
             })?,
     };
+    feedback_document_identity_for_file(&generation, file)
+}
+
+/// The first indexed document of `language` in an already-selected
+/// generation; `Ok(None)` when the generation indexes none.
+pub fn feedback_language_document_identity_from_generation(
+    generation: &LatestCodeTextGenerationV1,
+    language: &str,
+) -> Result<
+    Option<
+        tracedecay_application::feedback::cycle_production::ProductionFeedbackDocumentIdentityV1,
+    >,
+    LspRuntimeFailure,
+> {
+    generation
+        .metadata()
+        .snapshot()
+        .files
+        .iter()
+        .find(|file| {
+            file.language
+                .as_ref()
+                .is_some_and(|id| id.as_str() == language)
+        })
+        .map(|file| feedback_document_identity_for_file(generation, file))
+        .transpose()
+}
+
+fn feedback_document_identity_for_file(
+    generation: &LatestCodeTextGenerationV1,
+    file: &SanitizedCodeFileV1,
+) -> Result<
+    tracedecay_application::feedback::cycle_production::ProductionFeedbackDocumentIdentityV1,
+    LspRuntimeFailure,
+> {
     let manifest = generation.metadata().manifest();
     let generation_digest = ManifestDigest::new(manifest.snapshot_digest.as_str().to_owned())
         .map_err(|_| LspRuntimeFailure::new("feedback-code-index-generation-invalid"))?;

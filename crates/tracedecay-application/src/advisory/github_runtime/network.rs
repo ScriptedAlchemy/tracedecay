@@ -31,7 +31,7 @@ use super::{
 
 mod stack_network;
 #[cfg(test)]
-mod test_support;
+pub(super) mod test_support;
 
 pub const GITHUB_REVIEW_THREADS_QUERY_V1: &str = r"
 query TraceDecayGitHubReviewThreads(
